@@ -10,6 +10,9 @@
 //! [`EppStandaloneConfig::from_env`] reads envs, applies defaults, and calls
 //! [`EppStandaloneConfig::validate_config`] for field and cross-field checks.
 
+use std::num::NonZeroUsize;
+
+use dynamo_runtime::config::environment_names::router::DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES;
 use validator::Validate;
 use validator::ValidationError;
 
@@ -189,6 +192,10 @@ pub struct EppStandaloneConfig {
         message = "DYN_EPP_SESSION_AFFINITY_TTL_SECS must be between 1 and 31536000 seconds"
     ))]
     pub session_affinity_ttl_secs: Option<f64>,
+    /// Most live sessions the affinity table holds
+    /// (`DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES`, shared with the frontend).
+    /// `None` keeps the selection service default of 65,536.
+    pub session_affinity_max_entries: Option<NonZeroUsize>,
 }
 
 impl EppStandaloneConfig {
@@ -253,6 +260,10 @@ impl EppStandaloneConfig {
             max_inflight_requests: opt_parse::<usize>(get, "DYN_EPP_MAX_INFLIGHT_REQUESTS")?
                 .unwrap_or(DEFAULT_MAX_INFLIGHT_REQUESTS),
             session_affinity_ttl_secs: opt_parse::<f64>(get, "DYN_EPP_SESSION_AFFINITY_TTL_SECS")?,
+            session_affinity_max_entries: opt_parse::<NonZeroUsize>(
+                get,
+                DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES,
+            )?,
         })
     }
 
@@ -804,5 +815,38 @@ mod tests {
         ])
         .expect("trtllm-render protocol should be accepted");
         assert_eq!(cfg.renderer_protocol, RendererProtocol::TrtllmRender);
+    }
+
+    #[test]
+    fn session_affinity_max_entries_comes_from_the_environment() {
+        let required = [
+            ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
+            ("POD_NAMESPACE", "inference"),
+            ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+            ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
+            ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
+            ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+        ];
+        let with_limit = |value| {
+            let mut pairs = required.to_vec();
+            pairs.push((DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES, value));
+            parse_cfg(&pairs)
+        };
+
+        assert_eq!(
+            parse_cfg(&required).unwrap().session_affinity_max_entries,
+            None
+        );
+        assert_eq!(
+            with_limit("2").unwrap().session_affinity_max_entries,
+            NonZeroUsize::new(2)
+        );
+        for value in ["0", "-1", "abc"] {
+            let error = with_limit(value).unwrap_err().to_string();
+            assert!(
+                error.contains(DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES),
+                "{value:?} must be rejected naming the variable, got {error:?}"
+            );
+        }
     }
 }

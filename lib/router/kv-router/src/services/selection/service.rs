@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,6 +54,7 @@ pub struct SelectionServiceBuilder {
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
     session_affinity_ttl: Option<Duration>,
     session_affinity_mode: SessionAffinityMode,
+    session_affinity_max_entries: Option<NonZeroUsize>,
     session_replication_writer_id: Option<u64>,
     host_manages_request_lifecycle: bool,
 }
@@ -111,6 +113,7 @@ impl SelectionServiceBuilder {
             worker_selection_policy_factory: None,
             session_affinity_ttl: None,
             session_affinity_mode: SessionAffinityMode::default(),
+            session_affinity_max_entries: None,
             session_replication_writer_id: None,
             host_manages_request_lifecycle: false,
         }
@@ -161,6 +164,13 @@ impl SelectionServiceBuilder {
     /// Choose whether a live binding must be honored or may follow a new dispatch.
     pub fn session_affinity_mode(mut self, mode: SessionAffinityMode) -> Self {
         self.session_affinity_mode = mode;
+        self
+    }
+
+    /// Cap how many live sessions the affinity table holds. Takes effect only
+    /// with [`Self::session_affinity`]; unset keeps the default of 65,536.
+    pub fn session_affinity_max_entries(mut self, max_entries: NonZeroUsize) -> Self {
+        self.session_affinity_max_entries = Some(max_entries);
         self
     }
 
@@ -273,8 +283,14 @@ impl SelectionServiceBuilder {
             self.selection_cache,
             tracking_hash,
             indexer_policy,
-            self.session_affinity_ttl
-                .map(|ttl| SessionAffinityConfig::new(ttl).with_mode(self.session_affinity_mode)),
+            self.session_affinity_ttl.map(|ttl| {
+                let mut config =
+                    SessionAffinityConfig::new(ttl).with_mode(self.session_affinity_mode);
+                if let Some(max_entries) = self.session_affinity_max_entries {
+                    config.max_entries = max_entries.get();
+                }
+                config
+            }),
         );
         let (core, session_binding_rx) = match self.session_replication_writer_id {
             Some(writer_id) => {
