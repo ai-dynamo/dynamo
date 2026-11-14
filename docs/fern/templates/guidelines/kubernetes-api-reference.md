@@ -242,5 +242,7 @@ fern check
 fern docs broken-links
 ```
 
-Review the diff for both generated files and every affected curated page. Confirm that no generated
-page was hand-edited and that the curated reference still matches the current `v1beta1` surface.
+The operator reviewer owns the curated-page alignment check for CRD API changes, even when only
+the generated references changed and no Docs review was requested. Review the diff for both
+generated files and every affected curated page. Confirm that no generated page was hand-edited
+and that each curated reference still matches its declared API scope.
