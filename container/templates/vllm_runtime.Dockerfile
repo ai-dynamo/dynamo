@@ -489,6 +489,11 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
 # requirements file on purpose; a test asserts the two agree.
 RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
     PYTHONPATH=/tmp/compliance python3 -m compliance.check_pynvvideocodec --pinned 2.2.4
+
+# LMCache silently falls back to torch ops when its CUDA extension does not
+# load, for example when the wheel targets another torch ABI. Fail the build
+# instead. The import resolves libc10_cuda and needs no GPU.
+RUN python3 -c "import lmcache.cuda_ops"
 {% else %}
 # PyNvVideoCodec decodes on NVDEC through libnvcuvid, so it is inert on a
 # non-NVIDIA device. Drop it from the shared requirements rather than ship an
