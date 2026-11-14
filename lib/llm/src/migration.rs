@@ -875,6 +875,9 @@ where
             from_worker_id,
             attempt: self.failed_attempt(route_trace.as_deref()),
         });
+        if let Some(tracker) = self.request.tracker.as_ref() {
+            tracker.record_migration();
+        }
         tracing::info!(
             target: "request_span",
             {
@@ -2436,6 +2439,49 @@ mod tests {
             ),
             1
         );
+    }
+
+    /// A migrated request must be recorded on its RequestTracker so the post-migration
+    /// worker change is logged at debug instead of error.
+    #[tokio::test]
+    async fn test_retry_manager_records_migration_on_tracker() {
+        dynamo_runtime::logging::init();
+
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let tracker = Arc::new(RequestTracker::new());
+        let mut request = create_mock_request(10);
+        request.tracker = Some(tracker.clone());
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::MidStreamFail { fail_after: 5 },
+            10,
+            100,
+            context_id.clone(),
+        ));
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            mock_engine;
+
+        let ctx = Arc::new(Controller::new(context_id.clone()));
+        let mut retry_manager = RetryManager::build(
+            ctx,
+            BTreeMap::new(),
+            request,
+            next_generate,
+            3,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        .expect("Failed to build RetryManager");
+
+        assert_eq!(tracker.migrations(), 0);
+        let mut responses = 0;
+        while retry_manager.next().await.is_some() {
+            responses += 1;
+        }
+        assert_eq!(responses, 10);
+        assert_eq!(tracker.migrations(), 1);
     }
 
     #[tokio::test]
