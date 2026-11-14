@@ -2390,6 +2390,29 @@ mod tests {
     }
 
     #[test]
+    fn responses_logprobs_conversion_passes_chat_validation() {
+        for include_logprobs in [false, true] {
+            for top_logprobs in [Some(15), Some(0), None] {
+                let mut resp = make_response_with_input("hi there");
+                resp.inner.top_logprobs = top_logprobs;
+                resp.inner.include =
+                    include_logprobs.then(|| vec![IncludeEnum::MessageOutputTextLogprobs]);
+                let nv_req: NvCreateChatCompletionRequest = resp.try_into().unwrap();
+                assert_eq!(nv_req.inner.logprobs, include_logprobs.then_some(true));
+                assert_eq!(
+                    nv_req.inner.top_logprobs,
+                    include_logprobs.then_some(top_logprobs.unwrap_or(0))
+                );
+                crate::engines::ValidateRequest::validate(&nv_req).unwrap_or_else(|e| {
+                    panic!(
+                        "include_logprobs={include_logprobs}, top_logprobs={top_logprobs:?}: {e}"
+                    )
+                });
+            }
+        }
+    }
+
+    #[test]
     fn chat_template_args_survive_the_conversion() {
         // The repro from the issue: a Responses request carrying template args
         // must not lose them on the way to the chat request, or template-driven
