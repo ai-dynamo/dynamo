@@ -505,7 +505,7 @@ class HandlerBase(BaseGenerativeHandler):
         self,
         generation_result: _Abortable,
         context: Context,
-    ):
+    ) -> bool:
         """
         Background task to trigger cancellation if request is cancelled or shutdown
         event is set.
@@ -515,8 +515,13 @@ class HandlerBase(BaseGenerativeHandler):
         transfer complete).
 
         Raise EngineShutdown if shutdown event is triggered.
+
+        Returns:
+            True if the abort path ran, even when this task was then cancelled
+            while draining its triggers.
         """
         cancellation_triggers: list[asyncio.Future[Any]] = []
+        aborted = False
         try:
             cancellation_triggers = [
                 context.async_killed_or_stopped(),  # Request cancellation
@@ -534,6 +539,7 @@ class HandlerBase(BaseGenerativeHandler):
             )
 
             _abort_unless_finished(generation_result, context.id())
+            aborted = True
 
             # Clean up any remaining background task
             for task in pending:
@@ -558,6 +564,7 @@ class HandlerBase(BaseGenerativeHandler):
                     to_drain.append(task)
             if to_drain:
                 await asyncio.gather(*to_drain, return_exceptions=True)
+        return aborted
 
     @asynccontextmanager
     async def _cancellation_monitor(
@@ -587,10 +594,27 @@ class HandlerBase(BaseGenerativeHandler):
             if not monitor_task.done():
                 # Cancellation not triggered - clean up the background monitoring task
                 monitor_task.cancel()
+                aborted = False
                 try:
-                    await monitor_task
+                    aborted = await monitor_task
                 except asyncio.CancelledError:
                     pass
+                # The stop flag is set before the monitor's future resolves, so stream
+                # teardown can cancel the monitor before it aborts; recheck here.
+                if not aborted and (context.is_stopped() or context.is_killed()):
+                    logging.debug(
+                        "Cancellation observed on stream cleanup for Request ID: %s",
+                        context.id(),
+                    )
+                    # This finally may be propagating a typed exception; don't replace it.
+                    try:
+                        _abort_unless_finished(generation_result, context.id())
+                    except Exception:
+                        logging.warning(
+                            "Abort on stream cleanup failed for Request ID: %s",
+                            context.id(),
+                            exc_info=True,
+                        )
             else:
                 # Cancellation triggered - propagate any exceptions
                 monitor_task.result()
