@@ -29,7 +29,6 @@ from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 from .responses_history import responses_tools_request
 from .sglang_deepseek import create_recipe_output_parser, resolve_deepseek_spec
 from .sglang_prepost import (
-    JsonArrayParser,
     ReasoningParser,
     SglangStreamingPostProcessor,
     ToolCallParserType,
@@ -708,9 +707,7 @@ class SglangProcessor:
         main process; they are not picklable.
         """
         recipe_parser = None
-        if self.deepseek_spec is not None and not isinstance(
-            tool_call_parser, JsonArrayParser
-        ):
+        if self.deepseek_spec is not None:
             recipe_request = _with_thinking_template_kwargs(
                 request, self.default_thinking_mode
             )
@@ -723,8 +720,11 @@ class SglangProcessor:
                 spec=self.deepseek_spec,
                 reasoning_parser_name=self.reasoning_parser_name,
                 tool_call_parser_name=self.tool_call_parser_name,
-                parse_tool_calls=tool_call_parser is not None,
+                parse_tool_calls=bool(self.tool_call_parser_name)
+                and tool_call_parser is not None,
             )
+            if recipe_parser is not None and not self.tool_call_parser_name:
+                tool_call_parser = None
         return SglangStreamingPostProcessor(
             tokenizer=self.tokenizer,
             tool_call_parser=tool_call_parser,

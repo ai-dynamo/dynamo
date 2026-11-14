@@ -30,8 +30,9 @@ from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
 from .responses_history import responses_history_recipients, responses_tools_request
-from .sglang_deepseek import DeepSeekRecipeOutputParser
+from .sglang_deepseek import DeepSeekRecipeOutputParser, supports_recipe_output
 from .sglang_prompt_renderer import (
+    DeepSeekPromptRenderer,
     KimiK3PromptRenderer,
     PromptRenderer,
     build_prompt_renderer,
@@ -558,6 +559,8 @@ def build_tool_call_guided_decoding(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    native_recipe: bool = False,
+    reasoning_parser_name: str | None = None,
 ) -> dict[str, Any] | None:
     """Build native-SGLang-like tool call constraints for guided decoding."""
     if not sglang_tools:
@@ -597,6 +600,47 @@ def build_tool_call_guided_decoding(
         else "other"
     )
     raw_tools = request.get("tools") or []
+    if native_recipe and is_forced_choice and tool_call_parser_name:
+        # Native recipe output consumes DSML, so a JSON-array fallback would
+        # generate a different format than the output parser expects.
+        native_tools = sglang_tools
+        if is_named_choice:
+            native_tools = [
+                tool
+                for tool in sglang_tools
+                if tool.function.name == sglang_tool_choice.function.name
+            ]
+        try:
+            parser = FunctionCallParser(
+                tools=native_tools,
+                tool_call_parser=tool_call_parser_name,
+                **_parser_tokenizer_kwargs(FunctionCallParser, tokenizer),
+            )
+            constraint = _call_structure_constraint(
+                parser.get_structure_constraint,
+                sglang_tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
+                thinking_mode=reasoning_parser_name is None
+                and bool(
+                    (
+                        request.get("chat_template_kwargs")
+                        or request.get("chat_template_args")
+                        or {}
+                    ).get("thinking")
+                ),
+            )
+        except (AttributeError, NotImplementedError, TypeError, ValueError) as exc:
+            raise PreprocessError(
+                "DeepSeek recipe tool choice requires a native tool constraint"
+            ) from exc
+        guidance = _serialize_tool_constraint(
+            constraint, stop_after_first=parallel_tool_calls is False
+        )
+        if guidance is None or "structural_tag" not in guidance:
+            raise PreprocessError(
+                "DeepSeek recipe tool choice requires a native structural tag"
+            )
+        return guidance
     attempt_structural_tag = should_attempt_structural_tag(
         mode=structural_tag_mode,
         scope=structural_tag_scope,
@@ -893,6 +937,13 @@ def preprocess_chat_request(
         structural_tag_scope=structural_tag_scope,
         structural_tag_schema=structural_tag_schema,
         tokenizer=tokenizer,
+        native_recipe=isinstance(prompt_renderer, DeepSeekPromptRenderer)
+        and supports_recipe_output(
+            spec=prompt_renderer.recipe_spec,
+            reasoning_parser_name=reasoning_parser_name,
+            tool_call_parser_name=tool_call_parser_name,
+        ),
+        reasoning_parser_name=reasoning_parser_name,
     )
     # This path also never reads the legacy guided_json / guided_regex /
     # guided_grammar / guided_choice fields at all, so those are dropped silently

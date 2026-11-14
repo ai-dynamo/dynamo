@@ -47,6 +47,34 @@ def _encoder(tokenizer: Any, spec: str):
     return recipe_renderer.DeepSeekRecipe.from_hf_tokenizer(spec, tokenizer)
 
 
+def supports_recipe_output(
+    *,
+    spec: str | None,
+    reasoning_parser_name: str | None,
+    tool_call_parser_name: str | None,
+) -> bool:
+    """Use native token parsing only for the checkpoint's configured family."""
+    if DeepSeekRecipeOutputParser is None or spec is None:
+        return False
+    reasoning_name, tool_name = {
+        "dsv4": ("deepseek-v4", "deepseekv4"),
+        "dsv41": ("deepseek-v41", "deepseekv41"),
+    }[spec]
+    if not (
+        reasoning_parser_name == reasoning_name or tool_call_parser_name == tool_name
+    ):
+        return False
+    if reasoning_parser_name not in (
+        None,
+        reasoning_name,
+    ) or tool_call_parser_name not in (
+        None,
+        tool_name,
+    ):
+        return False
+    return True
+
+
 def create_recipe_output_parser(
     request: dict[str, Any],
     *,
@@ -56,23 +84,10 @@ def create_recipe_output_parser(
     tool_call_parser_name: str | None,
     parse_tool_calls: bool,
 ):
-    """Use native token parsing only for the checkpoint's configured family."""
-    if DeepSeekRecipeOutputParser is None or spec is None:
-        return None
-    reasoning_name, tool_name = {
-        "dsv4": ("deepseek-v4", "deepseekv4"),
-        "dsv41": ("deepseek-v41", "deepseekv41"),
-    }[spec]
-    if not (
-        reasoning_parser_name == reasoning_name or tool_call_parser_name == tool_name
-    ):
-        return None
-    if reasoning_parser_name not in (
-        None,
-        reasoning_name,
-    ) or tool_call_parser_name not in (
-        None,
-        tool_name,
+    if not supports_recipe_output(
+        spec=spec,
+        reasoning_parser_name=reasoning_parser_name,
+        tool_call_parser_name=tool_call_parser_name,
     ):
         return None
     kwargs = (

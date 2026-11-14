@@ -256,6 +256,10 @@ class KimiK3PromptRenderer:
 
 
 class DeepSeekPromptRenderer:
+    @property
+    def recipe_spec(self) -> str | None:
+        return self._spec
+
     def __init__(
         self,
         tokenizer: Any,

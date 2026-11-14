@@ -17,9 +17,14 @@ from _routed_engine_fakes import FakeRoutedEngine  # noqa: E402
 
 from dynamo.frontend import sglang_deepseek  # noqa: E402 -- optional SGLang guard
 from dynamo.frontend import sglang_processor as module  # noqa: E402
-from dynamo.frontend.sglang_prepost import create_parsers  # noqa: E402
+from dynamo.frontend.sglang_prepost import (  # noqa: E402
+    build_tool_call_guided_decoding,
+    convert_tools,
+    create_parsers,
+)
 from dynamo.frontend.sglang_processor import SglangProcessor  # noqa: E402
 from dynamo.frontend.sglang_prompt_renderer import DeepSeekPromptRenderer  # noqa: E402
+from dynamo.frontend.utils import PreprocessError  # noqa: E402
 
 pytestmark = [
     pytest.mark.unit,
@@ -74,14 +79,31 @@ def render(request, tokenizer, *, spec="dsv4", images=None):
     )
 
 
-def output_processor(tokenizer, request, spec="dsv4", default_thinking_mode=None):
+def output_processor(
+    tokenizer,
+    request,
+    spec="dsv4",
+    default_thinking_mode=None,
+    tool_parser_enabled=True,
+):
     suffix = "v41" if spec == "dsv41" else "v4"
     tool_name, reasoning_name = f"deepseek{suffix}", f"deepseek-{suffix}"
+    if not tool_parser_enabled:
+        tool_name = None
+    guided = build_tool_call_guided_decoding(
+        request,
+        tool_call_parser_name=tool_name,
+        tokenizer=tokenizer,
+        sglang_tools=convert_tools(request.get("tools")),
+        native_recipe=True,
+        reasoning_parser_name=reasoning_name,
+    )
     tool_parser, reasoning_parser = create_parsers(
         request,
         tool_call_parser_name=tool_name,
         reasoning_parser_name=reasoning_name,
         tokenizer=tokenizer,
+        guided_decoding=guided,
     )
     processor = SglangProcessor(
         tokenizer,
@@ -94,7 +116,7 @@ def output_processor(tokenizer, request, spec="dsv4", default_thinking_mode=None
     )
     return processor._build_postprocessor(
         request,
-        {"sampling_options": {"guided_decoding": None}, "require_reasoning": False},
+        {"sampling_options": {"guided_decoding": guided}, "require_reasoning": False},
         tool_call_parser=tool_parser,
         reasoning_parser=reasoning_parser,
         named_zero_arg_tool=None,
@@ -174,13 +196,14 @@ def test_recipe_output_local_stop_and_logprobs(tokenizer, chunk_size):
 
 @pytest.mark.parametrize("stop_field", ["stop", "stop_token_ids"])
 def test_recipe_output_token_stop(tokenizer, stop_field):
-    ids = tokenizer.backend_tokenizer.encode("answer!ignored").ids
+    ids = tokenizer.backend_tokenizer.encode("answer!").ids
     stop_id = tokenizer.backend_tokenizer.encode("!").ids[0]
     post = output_processor(tokenizer, {stop_field: [stop_id]})
-    output = post.process_output({"token_ids": ids})
+    output = post.process_output(
+        {"token_ids": ids, "finish_reason": "stop", "stop_reason": stop_id}
+    )
     assert output["delta"]["content"] == "answer"
     assert output["finish_reason"] == "stop"
-    assert post.local_stop_reason == stop_id
 
 
 def test_recipe_output_waits_for_utf8_before_local_stop(tokenizer):
@@ -211,7 +234,32 @@ def test_recipe_output_json_and_eos_without_tool_parsing(tokenizer):
 
 
 @pytest.mark.parametrize("use_pool", [False, True])
-def test_recipe_output_generator_inline_and_pool(tokenizer, monkeypatch, use_pool):
+@pytest.mark.parametrize("tool_choice", [None, "required", "named_zero_args"])
+def test_recipe_output_generator_inline_and_pool(
+    tokenizer, monkeypatch, use_pool, tool_choice
+):
+    request = {"model": "deepseek", "messages": [{"role": "user", "content": "Hello"}]}
+    answer = "answer"
+    if tool_choice:
+        request["tools"] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "echo",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ]
+        request["tool_choice"] = (
+            {"type": "function", "function": {"name": "echo"}}
+            if tool_choice == "named_zero_args"
+            else tool_choice
+        )
+        answer = '<｜DSML｜tool_calls><｜DSML｜invoke name="echo"></｜DSML｜invoke></｜DSML｜tool_calls>'
     renderer = DeepSeekPromptRenderer(
         tokenizer,
         "dsv4",
@@ -230,7 +278,7 @@ def test_recipe_output_generator_inline_and_pool(tokenizer, monkeypatch, use_poo
         items=[
             {
                 "token_ids": tokenizer.backend_tokenizer.encode(
-                    "check</think>answer"
+                    "check</think>" + answer
                 ).ids,
                 "finish_reason": "stop",
             }
@@ -251,15 +299,7 @@ def test_recipe_output_generator_inline_and_pool(tokenizer, monkeypatch, use_poo
         )
 
         async def collect():
-            return [
-                item
-                async for item in processor.generator(
-                    {
-                        "model": "deepseek",
-                        "messages": [{"role": "user", "content": "Hello"}],
-                    }
-                )
-            ]
+            return [item async for item in processor.generator(request)]
 
         choices = [
             choice
@@ -267,8 +307,24 @@ def test_recipe_output_generator_inline_and_pool(tokenizer, monkeypatch, use_poo
             for choice in item["data"]["choices"]
         ]
     assert "".join(c["delta"].get("reasoning_content", "") for c in choices) == "check"
-    assert "".join(c["delta"].get("content", "") for c in choices) == "answer"
-    assert choices[-1]["finish_reason"] == "stop"
+    if tool_choice:
+        calls = [call for c in choices for call in c["delta"].get("tool_calls", [])]
+        assert (
+            next(
+                call["function"]["name"]
+                for call in calls
+                if call["function"].get("name")
+            )
+            == "echo"
+        )
+        assert "".join(call["function"]["arguments"] for call in calls) == "{}"
+        assert choices[-1]["finish_reason"] == "tool_calls"
+        guidance = engine.requests[0]["sampling_options"]["guided_decoding"]
+        assert "structural_tag" in guidance
+        assert "DSML" in json.dumps(guidance)
+    else:
+        assert "".join(c["delta"].get("content", "") for c in choices) == "answer"
+        assert choices[-1]["finish_reason"] == "stop"
 
 
 @pytest.mark.parametrize(
@@ -303,7 +359,11 @@ def test_recipe_output_uses_deployment_thinking_and_reasoning_controls(
         assert first is None or "reasoning_content" not in first["delta"]
 
 
-def test_recipe_output_keeps_forced_json_array_parser(tokenizer):
+@pytest.mark.parametrize(
+    "choice", ["required", {"type": "function", "function": {"name": "echo"}}]
+)
+@pytest.mark.parametrize("wire_format", ["native", "json_array"])
+def test_recipe_output_forced_tools_use_native_parser(tokenizer, choice, wire_format):
     post = output_processor(
         tokenizer,
         {
@@ -319,17 +379,72 @@ def test_recipe_output_keeps_forced_json_array_parser(tokenizer):
                     },
                 }
             ],
-            "tool_choice": "required",
+            "tool_choice": choice,
         },
     )
-    ids = tokenizer.backend_tokenizer.encode(
-        '[{"name":"echo","parameters":{"value":"ok"}}]'
-    ).ids
+    text = (
+        '<｜DSML｜tool_calls><｜DSML｜invoke name="echo">'
+        '<｜DSML｜parameter name="value" string="true">ok</｜DSML｜parameter>'
+        "</｜DSML｜invoke></｜DSML｜tool_calls>"
+        if wire_format == "native"
+        else '[{"name":"echo","parameters":{"value":"ok"}}]'
+    )
+    ids = tokenizer.backend_tokenizer.encode(text).ids
     output = post.process_output({"token_ids": ids, "finish_reason": "stop"})
-    assert output["delta"]["tool_calls"][0]["function"] == {
-        "name": "echo",
-        "arguments": '{"value": "ok"}',
-    }
+    if wire_format == "native":
+        calls = output["delta"]["tool_calls"]
+        assert (
+            next(
+                call["function"]["name"]
+                for call in calls
+                if call["function"].get("name")
+            )
+            == "echo"
+        )
+        assert (
+            "".join(call["function"]["arguments"] for call in calls)
+            == '{"value": "ok"}'
+        )
+        assert output["finish_reason"] == "tool_calls"
+    else:
+        assert output["delta"]["content"] == text
+        assert "tool_calls" not in output["delta"]
+        assert output["finish_reason"] == "stop"
+
+
+def test_recipe_output_reasoning_only_forced_choice(tokenizer):
+    post = output_processor(
+        tokenizer,
+        {
+            "tools": [{"type": "function", "function": {"name": "echo"}}],
+            "tool_choice": "required",
+        },
+        tool_parser_enabled=False,
+    )
+    text = '[{"name":"echo","parameters":{}}]'
+    output = post.process_output(
+        {
+            "token_ids": tokenizer.backend_tokenizer.encode(text).ids,
+            "finish_reason": "stop",
+        }
+    )
+    assert output["delta"]["content"] == text
+    assert "tool_calls" not in output["delta"]
+
+
+def test_recipe_forced_choice_rejects_missing_native_constraint(tokenizer, monkeypatch):
+    monkeypatch.setattr(
+        "sglang.srt.function_call.function_call_parser.FunctionCallParser.get_structure_constraint",
+        lambda *args, **kwargs: None,
+    )
+    with pytest.raises(PreprocessError, match="native structural tag"):
+        output_processor(
+            tokenizer,
+            {
+                "tools": [{"type": "function", "function": {"name": "echo"}}],
+                "tool_choice": "required",
+            },
+        )
 
 
 @pytest.mark.parametrize("spec,effort", [("dsv4", "max"), ("dsv41", 37)])
