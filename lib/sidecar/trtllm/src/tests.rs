@@ -13,7 +13,7 @@ use dynamo_backend_common::{
     DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine, OutputOptions,
     PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
 };
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
+use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, TEST_STARTUP_TIMEOUT};
 use futures::{Stream, StreamExt};
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -1017,7 +1017,7 @@ async fn start_waits_for_a_server_that_is_not_serving_yet() {
         let engine = engine_with(
             &server.endpoint,
             GrpcTransportConfig {
-                startup_deadline: Duration::from_secs(5),
+                startup_deadline: TEST_STARTUP_TIMEOUT,
                 ..impatient_transport()
             },
             configured_length,

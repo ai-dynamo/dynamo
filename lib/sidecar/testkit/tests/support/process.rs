@@ -19,6 +19,7 @@ use dynamo_runtime::pipeline::{AsyncEngine, Context, ManyOut, PushRouter, Router
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::storage::kv::Selector;
 use dynamo_runtime::{DistributedRuntime, Runtime};
+use dynamo_sidecar_common::TEST_STARTUP_TIMEOUT;
 use dynamo_sidecar_testkit::{bounded, fixtures};
 use futures::StreamExt;
 use tempfile::TempDir;
@@ -176,7 +177,14 @@ impl Environment {
         mode: DisaggregationMode,
         grace_secs: u64,
     ) -> Process {
-        Process::spawn::<F>(self, endpoint, mode, 5, false, grace_secs)
+        Process::spawn::<F>(
+            self,
+            endpoint,
+            mode,
+            TEST_STARTUP_TIMEOUT.as_secs(),
+            false,
+            grace_secs,
+        )
     }
 
     pub fn spawn_env<F: ProcessFixture>(

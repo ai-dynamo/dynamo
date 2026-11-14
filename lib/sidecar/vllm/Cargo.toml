@@ -49,6 +49,7 @@ tonic-health-v14 = { workspace = true }
 vllm-proto = { workspace = true }
 
 [dev-dependencies]
+dynamo-sidecar-common = { workspace = true, features = ["testing"] }
 dynamo-vllm-generate = { workspace = true }
 reqwest = { workspace = true }
 dynamo-backend-common = { workspace = true, features = ["testing"] }

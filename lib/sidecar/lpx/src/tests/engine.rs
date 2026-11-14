@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use dynamo_backend_common::FinishReason;
+use dynamo_sidecar_common::TEST_STARTUP_TIMEOUT;
 use dynamo_sidecar_common::startup_deadline;
 use tracing::Instrument;
 use tracing_subscriber::{Layer, layer::SubscriberExt};
@@ -39,10 +40,17 @@ async fn next_within(
 /// A client for `server`, as the engine opens one.
 async fn client(server: &FakeServer) -> OpenEngineClient {
     let endpoint = GrpcEndpoint::parse(&server.endpoint, "--grpc-endpoint").unwrap();
-    let deadline = startup_deadline(Duration::from_secs(5)).unwrap();
+    let started = tokio::time::Instant::now();
+    let deadline = startup_deadline(TEST_STARTUP_TIMEOUT).unwrap();
     OpenEngineClient::connect("lpx-test", &endpoint, transport(), deadline)
         .await
-        .expect("connect")
+        .unwrap_or_else(|error| {
+            panic!(
+                "LPX test connection failed after {:?} with a {:?} budget: {error:?}",
+                started.elapsed(),
+                TEST_STARTUP_TIMEOUT
+            )
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -58,7 +66,8 @@ async fn a_stalled_or_unavailable_model_info_call_is_retried() {
         *fake.0.model_info_stalls.lock().unwrap() = stalls;
         *fake.0.model_info_status.lock().unwrap() = status;
         let server = FakeServer::start(fake).await;
-        let deadline = startup_deadline(Duration::from_secs(5)).unwrap();
+        let started = tokio::time::Instant::now();
+        let deadline = startup_deadline(TEST_STARTUP_TIMEOUT).unwrap();
         let info = client(&server)
             .await
             .wait_for_model_info(
@@ -67,7 +76,13 @@ async fn a_stalled_or_unavailable_model_info_call_is_retried() {
                 Duration::from_millis(200),
             )
             .await
-            .expect("the second call answers before the deadline");
+            .unwrap_or_else(|error| {
+                panic!(
+                    "LPX test model discovery failed after {:?} with a {:?} budget: {error:?}",
+                    started.elapsed(),
+                    TEST_STARTUP_TIMEOUT
+                )
+            });
         assert_eq!(info.served_model_name, SERVED);
         assert_eq!(server.fake.0.model_info_calls.load(Ordering::SeqCst), 2);
     }

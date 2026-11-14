@@ -10,6 +10,7 @@ use dynamo_backend_common::{
     PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions,
 };
 use dynamo_mocker::common::protocols::{EngineType, MockerConfig};
+use dynamo_sidecar_common::TEST_STARTUP_TIMEOUT;
 use dynamo_trtllm_mocker::{MockerServerConfig, ServerMode, TrtllmMockerService};
 use dynamo_trtllm_sidecar::TrtllmSidecarEngine;
 use dynamo_trtllm_sidecar::proto::control_server::ControlServer;
@@ -111,7 +112,7 @@ async fn sidecar(endpoint: &str, mode: DisaggregationMode) -> TrtllmSidecarEngin
         "--grpc-connections".to_string(),
         "1".to_string(),
         "--grpc-startup-deadline-secs".to_string(),
-        "5".to_string(),
+        TEST_STARTUP_TIMEOUT.as_secs().to_string(),
         "--grpc-connect-attempt-timeout-secs".to_string(),
         "1".to_string(),
     ];

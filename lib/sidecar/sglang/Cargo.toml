@@ -56,6 +56,7 @@ tonic = { workspace = true }
 tonic-build = { workspace = true }
 
 [dev-dependencies]
+dynamo-sidecar-common = { workspace = true, features = ["testing"] }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 dynamo-kv-events = { workspace = true }
 rmp-serde = { workspace = true }
