@@ -48,6 +48,25 @@ def _context_prefix(context: str) -> str:
     return f"{context}: " if context else ""
 
 
+def completed_utf8_log_prefix(data: bytes, *, label: str) -> str:
+    """Return strict UTF-8 text for the completed line prefix of ``data``.
+
+    Keeps bytes through the final newline and discards an incomplete trailing
+    line. Empty input or no newline returns an empty string. A completed line
+    that is not valid UTF-8 raises AssertionError chained from
+    UnicodeDecodeError; decoding never uses replacement or ignore.
+    """
+
+    last_nl = data.rfind(b"\n")
+    if last_nl < 0:
+        return ""
+    completed = data[: last_nl + 1]
+    try:
+        return completed.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AssertionError(f"{label} completed bytes are not UTF-8") from exc
+
+
 def _block_count(value: str) -> int:
     return int(float(value.strip('"')) + 0.5)
 
