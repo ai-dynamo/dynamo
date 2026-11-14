@@ -1070,6 +1070,41 @@ async fn reasoning_gate_reaches_only_servers_reporting_proto_0_6() {
     }
 }
 
+// Regression: vLLM downloads URL media itself, so DYN_MM_ALLOW_REMOTE_URLS=0
+// must block remote sources before dispatch; inline data: media still passes.
+#[tokio::test]
+async fn remote_media_urls_are_rejected_before_dispatch_when_disabled() {
+    let image = |source: &str| {
+        epd_request(vec![(
+            "image_url",
+            vec![MultimodalData::RawUrl(source.to_string())],
+        )])
+    };
+    let remote = image("https://example.com/image.png");
+    let inline = image("data:image/png;base64,iVBORw0KGgo=");
+    let (fake, mut engine) = started_engine(multimodal_model_info(), server_info()).await;
+
+    // Enabled by default: the URL reaches vLLM unchanged.
+    collect_result(&engine, remote.clone())
+        .await
+        .expect("remote media with the default policy");
+    assert_eq!(fake.service.requests.lock().await.len(), 1);
+
+    engine.allow_remote_media_urls = false;
+    let error = collect_result(&engine, remote).await.unwrap_err();
+    assert!(
+        error.to_string().contains("DYN_MM_ALLOW_REMOTE_URLS=0"),
+        "{error}"
+    );
+    assert_eq!(fake.service.requests.lock().await.len(), 1);
+
+    collect_result(&engine, inline)
+        .await
+        .expect("inline media with remote URLs disabled");
+    assert_eq!(fake.service.requests.lock().await.len(), 2);
+    engine.cleanup().await.expect("cleanup");
+}
+
 // Regression: vLLM enforces thinking budgets only with a reasoning parser,
 // and its native gRPC path ignores them silently otherwise.
 #[tokio::test]
