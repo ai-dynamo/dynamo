@@ -907,7 +907,8 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 	require.Equal(t, string(reasonWaitingForCheckpoint), meta.FindStatusCondition(result.Status.Conditions, "Ready").Reason)
 	require.Equal(t, v1beta1.ComponentCheckpointStatus{CheckpointName: friendlyCheckpointName}, result.Status.Checkpoints["prefill"])
 	require.NoError(t, kube.Get(t.Context(), key, pcs))
-	require.Zero(t, pcs.Spec.Template.Cliques[0].Spec.Replicas)
+	// The template keeps a positive seed; the scaler gates the live PodClique.
+	require.Equal(t, int32(1), pcs.Spec.Template.Cliques[0].Spec.Replicas)
 	adapters := &v1alpha1.DynamoGraphDeploymentScalingAdapterList{}
 	require.NoError(t, kube.List(t.Context(), adapters))
 	require.Empty(t, adapters.Items)

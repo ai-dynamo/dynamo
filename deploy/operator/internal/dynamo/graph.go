@@ -2736,16 +2736,11 @@ func buildCliqueFromTemplate(p cliqueParams, template corev1.PodTemplateSpec) (*
 		minAvailable = p.r.Replicas
 	}
 	replicas := p.r.Replicas
-	// if checkpoint is enabled and not ready, set replicas to 0
-	// to prevent the engine clique from being scheduled
-	if p.r.Role != RoleGMS &&
-		p.checkpointInfo != nil &&
-		p.checkpointInfo.Enabled &&
-		p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
-		!p.checkpointInfo.Ready {
-		replicas = 0
+	// Pending WaitForCheckpoint: seed at minAvailable (Grove needs minAvailable <= replicas);
+	// the scaler holds the live PodClique at zero. Grouped cliques, GMS included, keep their role count.
+	if !p.usesPCSG && isWaitingForCheckpoint(p.checkpointInfo) {
+		replicas = minAvailable
 	}
-
 	clique := &grovev1alpha1.PodCliqueTemplateSpec{
 		Name: strings.ToLower(p.r.Name),
 		Spec: grovev1alpha1.PodCliqueSpec{
@@ -3137,15 +3132,17 @@ func buildGroveScalingGroupConfig(
 	isInterPodGMS bool,
 ) grovev1alpha1.PodCliqueScalingGroupConfig {
 	replicas := component.Replicas
-	minAvailable := new(provideroverride.EffectiveGroveMinAvailable(component))
-	if shouldGateGroveScalingGroupReplicas(checkpointInfo) {
-		replicas = new(int32(0))
+	minAvailable := provideroverride.EffectiveGroveMinAvailable(component)
+	// Pending WaitForCheckpoint: seed at minAvailable (Grove rejects replicas <= 0);
+	// the scaler holds the live PodCliqueScalingGroup at zero.
+	if isWaitingForCheckpoint(checkpointInfo) {
+		replicas = new(minAvailable)
 	}
 	pcsg := grovev1alpha1.PodCliqueScalingGroupConfig{
 		Name:               strings.ToLower(componentName),
 		CliqueNames:        cliqueNames,
 		Replicas:           replicas,
-		MinAvailable:       minAvailable,
+		MinAvailable:       new(minAvailable),
 		TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint, deploymentTopologyConstraint),
 	}
 	if isInterPodGMS {
@@ -3154,7 +3151,7 @@ func buildGroveScalingGroupConfig(
 	return pcsg
 }
 
-func shouldGateGroveScalingGroupReplicas(checkpointInfo *checkpoint.CheckpointInfo) bool {
+func isWaitingForCheckpoint(checkpointInfo *checkpoint.CheckpointInfo) bool {
 	return checkpointInfo != nil &&
 		checkpointInfo.Enabled &&
 		checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
