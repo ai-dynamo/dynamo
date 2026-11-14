@@ -2430,6 +2430,7 @@ dependencies = [
  "dynamo-session-affinity",
  "dynamo-slot-tracker",
  "dynamo-tokens",
+ "dynamo-truthy",
  "dynamo-worker-selection",
  "fastrand",
  "flate2",
