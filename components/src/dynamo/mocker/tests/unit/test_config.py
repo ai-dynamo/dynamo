@@ -188,6 +188,17 @@ def test_canonical_validation_rejects_bad_input(bad):
         normalize_mocker_config(bad)
 
 
+def test_dp_load_balance_method_reaches_runtime_options():
+    default = CONFIG.build_mocker_engine_args(parse_args([]))
+    assert default["dynamo"]["dp_load_balance_method"] == "auto"
+    config = CONFIG.build_mocker_engine_args(
+        parse_args(["--dp-load-balance-method", "round_robin"])
+    )
+    assert config["dynamo"]["dp_load_balance_method"] == "round_robin"
+    with pytest.raises(ValueError):
+        normalize_mocker_config({"dynamo": {"dp_load_balance_method": "minimum"}})
+
+
 def test_sglang_generate_capability_is_opt_in():
     assert parse_args([]).sglang_generate is False
     assert parse_args(["--sglang-generate"]).sglang_generate is True

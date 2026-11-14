@@ -177,6 +177,8 @@ def build_mocker_engine_args(args: argparse.Namespace) -> dict:
     runtime: dict[str, Any] = {"enable_local_indexer": True}
     if getattr(args, "reasoning", None):
         runtime["reasoning"] = json.loads(args.reasoning)
+    if getattr(args, "dp_load_balance_method", None):
+        runtime["dp_load_balance_method"] = args.dp_load_balance_method
     if getattr(args, "response_replay_trace_path", None):
         runtime["response_replay_trace_path"] = str(args.response_replay_trace_path)
     return normalize_mocker_config({**config, "engine": rank, "dynamo": runtime})
