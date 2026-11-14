@@ -1318,7 +1318,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.fpm_relays: list | None = None
         self.generate_endpoint = generate_endpoint
         self.config = config
-        self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
+        self.engine_monitor = VllmEngineMonitor(
+            runtime,
+            engine,
+            shutdown_event,
+            generate_endpoint=generate_endpoint,
+            is_busy=self._engine_health_check_is_busy,
+        )
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
         self.model_config = model_config
@@ -1468,10 +1474,25 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             type(adapter).__name__,
         )
 
+    def _engine_health_check_is_busy(self) -> bool:
+        return (
+            self._pause_lock.locked()
+            or self._paused
+            or self._pause_controller.is_paused
+            or self._pause_controller.needs_resume_recovery
+        )
+
     def _shutdown_worker(self) -> NoReturn:
-        logger.warning("Initiating Dynamo Runtime shutdown.")
-        self.runtime.shutdown()
-        os._exit(1)
+        self.engine_monitor.request_shutdown()
+        raise EngineDeadError()
+
+    async def _register_healthy_endpoint(self) -> None:
+        if self.engine_monitor.failed:
+            raise EngineDeadError()
+        await self.generate_endpoint.register_endpoint_instance()
+        if self.engine_monitor.failed:
+            await self.generate_endpoint.unregister_endpoint_instance()
+            raise EngineDeadError()
 
     def _shutdown_on_engine_dead(self, e: EngineDeadError) -> NoReturn:
         logger.error(f"vLLM EngineDeadError: {e}")
@@ -1593,7 +1614,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     and self.generate_endpoint is not None
                 ):
                     try:
-                        await self.generate_endpoint.register_endpoint_instance()
+                        await self._register_healthy_endpoint()
                         logger.info(
                             "[Sleep] Re-registered endpoint after failed sleep rollback"
                         )
@@ -1970,7 +1991,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 # Step 1: Wake engine first - must be ready before accepting requests
                 await self._pause_controller.resume(tags)
                 if self.generate_endpoint is not None:
-                    await self.generate_endpoint.register_endpoint_instance()
+                    await self._register_healthy_endpoint()
                     logger.info(
                         "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
                     )
@@ -4761,6 +4782,7 @@ class EmbeddingWorkerHandler:
         engine: Any,
         config: Config,
         shutdown_event: Optional[asyncio.Event] = None,
+        generate_endpoint=None,
     ) -> None:
         self.runtime = runtime
         self.engine_client = engine
@@ -4770,7 +4792,9 @@ class EmbeddingWorkerHandler:
         # shutdown_event + process exit on EngineDeadError. Without this, a
         # crashed pooling engine leaves the endpoint registered and serves
         # failures.
-        self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
+        self.engine_monitor = VllmEngineMonitor(
+            runtime, engine, shutdown_event, generate_endpoint=generate_endpoint
+        )
         logger.info("Embedding worker handler initialized")
 
     def cleanup(self) -> None:
