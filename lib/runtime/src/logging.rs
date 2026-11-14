@@ -143,9 +143,63 @@ impl Default for LoggingConfig {
     }
 }
 
-/// Check if OTLP trace exporting is enabled (accepts: "1", "true", "on", "yes" - case insensitive)
-fn otlp_exporter_enabled() -> bool {
-    env_is_truthy(env_logging::otlp::OTEL_EXPORT_ENABLED)
+/// Resolve one telemetry signal's OTLP export switch.
+///
+/// A non-blank `OTEL_<SIGNAL>_EXPORTER` wins: `otlp` enables export and any other
+/// value (e.g. `none`) disables it. When it is unset
+/// or blank, the legacy `OTEL_EXPORT_ENABLED` switch decides, so deployments that only
+/// set that keep exporting both traces and logs.
+fn resolve_telemetry_signal_export(signal_exporter: Option<&str>, legacy_enabled: bool) -> bool {
+    match signal_exporter
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => value.eq_ignore_ascii_case("otlp"),
+        None => legacy_enabled,
+    }
+}
+
+/// Read one signal's exporter variable and the legacy switch from the environment and
+/// resolve them with [`resolve_telemetry_signal_export`].
+fn telemetry_signal_export_enabled(signal_exporter_env: &str) -> bool {
+    resolve_telemetry_signal_export(
+        std::env::var(signal_exporter_env).ok().as_deref(),
+        env_is_truthy(env_logging::otlp::OTEL_EXPORT_ENABLED),
+    )
+}
+
+/// Whether spans are exported over OTLP (`OTEL_TRACES_EXPORTER`, falling back to
+/// `OTEL_EXPORT_ENABLED`).
+pub fn otlp_traces_export_enabled() -> bool {
+    telemetry_signal_export_enabled(env_logging::otlp::OTEL_TRACES_EXPORTER)
+}
+
+/// Whether log records are exported over OTLP (`OTEL_LOGS_EXPORTER`, falling back to
+/// `OTEL_EXPORT_ENABLED`).
+pub fn otlp_logs_export_enabled() -> bool {
+    telemetry_signal_export_enabled(env_logging::otlp::OTEL_LOGS_EXPORTER)
+}
+
+/// Whether traces or logs are exported over OTLP.
+pub fn otlp_export_enabled() -> bool {
+    otlp_traces_export_enabled() || otlp_logs_export_enabled()
+}
+
+/// Warn once at startup about exporter values Dynamo does not implement, since they
+/// silently disable the signal.
+fn warn_unsupported_signal_exporter(signal_exporter_env: &str) {
+    let Ok(raw) = std::env::var(signal_exporter_env) else {
+        return;
+    };
+    let value = raw.trim();
+    if !value.is_empty()
+        && !value.eq_ignore_ascii_case("otlp")
+        && !value.eq_ignore_ascii_case("none")
+    {
+        eprintln!(
+            "WARNING: unsupported {signal_exporter_env} '{raw}'; only 'otlp' and 'none' are supported, export disabled"
+        );
+    }
 }
 
 /// Get the service name from environment or use default
@@ -352,18 +406,30 @@ fn span_events_for_logging() -> FmtSpan {
     }
 }
 
+/// Log which OTLP signals are exported and where, or that export is disabled.
 fn log_otel_init_status(
     service_name: &str,
-    endpoint_opt: Option<(OtlpProtocol, String)>,
+    traces_endpoint: Option<(OtlpProtocol, String)>,
+    logs_endpoint: Option<(OtlpProtocol, String)>,
     console_format: ConsoleLogFormat,
 ) {
-    if let Some((protocol, endpoint)) = endpoint_opt {
+    let signals = match (&traces_endpoint, &logs_endpoint) {
+        (Some(_), Some(_)) => "traces and logs",
+        (Some(_), None) => "traces only",
+        (None, Some(_)) => "logs only",
+        (None, None) => "",
+    };
+    if !signals.is_empty() {
+        let describe = |endpoint: Option<(OtlpProtocol, String)>| match endpoint {
+            Some((protocol, endpoint)) => format!("{endpoint} ({})", protocol.as_str()),
+            None => "disabled".to_string(),
+        };
         tracing::info!(
-            endpoint = %endpoint,
-            protocol = %protocol.as_str(),
+            traces = %describe(traces_endpoint),
+            logs = %describe(logs_endpoint),
             service = %service_name,
             console_format = console_format.as_str(),
-            "OpenTelemetry OTLP export enabled (traces and logs)"
+            "OpenTelemetry OTLP export enabled ({signals})"
         );
     } else {
         tracing::info!(
@@ -1243,7 +1309,11 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let otel_logs_filter_layer = filters(load_config());
     let console_format = console_log_format();
     let legacy_jsonl_enabled = legacy_jsonl_logging_enabled();
-    let otlp_enabled = otlp_exporter_enabled();
+    warn_unsupported_signal_exporter(env_logging::otlp::OTEL_TRACES_EXPORTER);
+    warn_unsupported_signal_exporter(env_logging::otlp::OTEL_LOGS_EXPORTER);
+    let traces_export = otlp_traces_export_enabled();
+    let logs_export = otlp_logs_export_enabled();
+    let otlp_enabled = traces_export || logs_export;
     // Keep the legacy JSONL switch as a trace-context signal even when the new
     // setting overrides console presentation. Older deployments rely on it for
     // downstream trace propagation without OTLP export.
@@ -1259,8 +1329,9 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         let service_name = get_service_name();
         let sample_ratio = trace_sample_ratio_from_env();
 
-        // Build tracer and logger providers - with or without OTLP export
-        let (tracer_provider, logger_provider_opt, endpoint_opt) = if otlp_enabled {
+        // Build tracer and logger providers. Each signal gets an OTLP exporter only when
+        // its own switch is on; a tracer without an exporter still mints trace IDs for logs.
+        let (tracer_provider, logger_provider_opt, traces_status, logs_status) = if otlp_enabled {
             // Building the OTLP exporters spawns a background flush task, so it needs a
             // live, persistent reactor
             let otel_handle = otel_runtime_handle()?;
@@ -1303,12 +1374,14 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
                 .with_service_name(service_name.clone())
                 .build();
 
-            let span_exporter = build_span_exporter(traces_protocol, &traces_endpoint)?;
-
             let mut tracer_provider_builder =
                 opentelemetry_sdk::trace::SdkTracerProvider::builder()
-                    .with_batch_exporter(span_exporter)
                     .with_resource(resource.clone());
+            if traces_export {
+                let span_exporter = build_span_exporter(traces_protocol, &traces_endpoint)?;
+                tracer_provider_builder =
+                    tracer_provider_builder.with_batch_exporter(span_exporter);
+            }
             if let Some(sample_ratio) = sample_ratio {
                 tracer_provider_builder = tracer_provider_builder.with_sampler(
                     Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(sample_ratio))),
@@ -1316,17 +1389,23 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             }
             let tracer_provider = tracer_provider_builder.build();
 
-            let log_exporter = build_log_exporter(logs_protocol, &logs_endpoint)?;
-
-            let logger_provider = SdkLoggerProvider::builder()
-                .with_batch_exporter(log_exporter)
-                .with_resource(resource)
-                .build();
+            let logger_provider = if logs_export {
+                let log_exporter = build_log_exporter(logs_protocol, &logs_endpoint)?;
+                Some(
+                    SdkLoggerProvider::builder()
+                        .with_batch_exporter(log_exporter)
+                        .with_resource(resource)
+                        .build(),
+                )
+            } else {
+                None
+            };
 
             (
                 tracer_provider,
-                Some(logger_provider),
-                Some((traces_protocol, traces_endpoint)),
+                logger_provider,
+                traces_export.then_some((traces_protocol, traces_endpoint)),
+                logs_export.then_some((logs_protocol, logs_endpoint)),
             )
         } else {
             // No export - traces generated locally only (for logging/trace IDs)
@@ -1343,7 +1422,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             }
             let provider = provider_builder.build();
 
-            (provider, None, None)
+            (provider, None, None, None)
         };
 
         // Register the provider globally so direct OTel API users
@@ -1375,7 +1454,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             .with(l)
             .init();
 
-        log_otel_init_status(&service_name, endpoint_opt, console_format);
+        log_otel_init_status(&service_name, traces_status, logs_status, console_format);
     } else {
         let l = console_layer(console_format, span_events, fmt_filter_layer);
 
@@ -2247,6 +2326,22 @@ pub mod tests {
         );
     }
 
+    /// A non-blank per-signal exporter overrides `OTEL_EXPORT_ENABLED`; unset or blank
+    /// defers to it.
+    #[test]
+    fn signal_exporter_overrides_legacy_switch() {
+        // Unset or blank defers to OTEL_EXPORT_ENABLED.
+        assert!(!resolve_telemetry_signal_export(None, false));
+        assert!(resolve_telemetry_signal_export(None, true));
+        assert!(resolve_telemetry_signal_export(Some(""), true));
+        assert!(resolve_telemetry_signal_export(Some("  "), true));
+        // A non-blank value wins in both directions.
+        assert!(resolve_telemetry_signal_export(Some("otlp"), false));
+        assert!(resolve_telemetry_signal_export(Some(" OTLP "), false));
+        assert!(!resolve_telemetry_signal_export(Some("none"), true));
+        assert!(!resolve_telemetry_signal_export(Some("console"), true));
+    }
+
     #[test]
     fn trace_sample_ratio_is_optional_and_bounded() {
         assert_eq!(parse_trace_sample_ratio(None), None);
@@ -2894,6 +2989,89 @@ pub mod tests {
 
         init();
         tracing::info!("readable log with OTLP export");
+    }
+
+    /// Each combination of `OTEL_EXPORT_ENABLED`, `OTEL_TRACES_EXPORTER`, and
+    /// `OTEL_LOGS_EXPORTER` selects the expected signals, checked through the startup
+    /// status line of a fresh subprocess (logging init is process-global).
+    #[test]
+    fn otlp_signal_exporters_select_traces_and_logs_independently() {
+        use std::process::Command;
+
+        // (OTEL_EXPORT_ENABLED, OTEL_TRACES_EXPORTER, OTEL_LOGS_EXPORTER, expected status)
+        let cases = [
+            (Some("1"), None, None, "export enabled (traces and logs)"),
+            (
+                Some("1"),
+                None,
+                Some("none"),
+                "export enabled (traces only)",
+            ),
+            (Some("1"), Some("none"), None, "export enabled (logs only)"),
+            (None, Some("otlp"), None, "export enabled (traces only)"),
+            (None, None, Some("otlp"), "export enabled (logs only)"),
+            (Some("1"), Some("none"), Some("none"), "export disabled"),
+        ];
+
+        for (legacy, traces, logs, expected) in cases {
+            let mut command = Command::new("cargo");
+            command
+                .args([
+                    "test",
+                    "-p",
+                    "dynamo-runtime",
+                    "logging::tests::otlp_signal_exporters_subprocess",
+                    "--",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env("DYN_TEST_OTLP_SIGNAL_CHILD", "1")
+                // JSONL keeps trace context on when every exporter is off, so the
+                // status line is still logged.
+                .env("DYN_LOGGING_CONSOLE_FORMAT", "jsonl")
+                .env_remove("DYN_LOGGING_JSONL")
+                // Don't let host-inherited endpoint or protocol settings change how the
+                // child builds its exporters; only the signal switches vary per case.
+                .env_remove("OTEL_EXPORTER_OTLP_PROTOCOL")
+                .env_remove("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL")
+                .env_remove("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL")
+                .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+                .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+                .env_remove("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT");
+            for (name, value) in [
+                ("OTEL_EXPORT_ENABLED", legacy),
+                ("OTEL_TRACES_EXPORTER", traces),
+                ("OTEL_LOGS_EXPORTER", logs),
+            ] {
+                match value {
+                    Some(value) => command.env(name, value),
+                    None => command.env_remove(name),
+                };
+            }
+            let output = command.output().expect("failed to run subprocess");
+
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success(),
+                "subprocess failed for {legacy:?}/{traces:?}/{logs:?}:\n{stderr}"
+            );
+            assert!(
+                stderr.contains(&format!("OpenTelemetry OTLP {expected}")),
+                "expected `{expected}` for {legacy:?}/{traces:?}/{logs:?}:\n{stderr}"
+            );
+        }
+    }
+
+    /// Child half of `otlp_signal_exporters_select_traces_and_logs_independently`;
+    /// a no-op unless launched by that test.
+    #[test]
+    fn otlp_signal_exporters_subprocess() {
+        if std::env::var("DYN_TEST_OTLP_SIGNAL_CHILD").is_err() {
+            return;
+        }
+
+        init();
+        tracing::info!("otlp signal selection smoke log");
     }
 
     #[test]
