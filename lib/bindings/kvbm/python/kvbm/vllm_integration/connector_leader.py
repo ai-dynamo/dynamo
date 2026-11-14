@@ -65,6 +65,11 @@ class KvConnectorLeader:
 
         self.drt = drt
         self.vllm_config = vllm_config
+        # Preempted requests whose slot may still hold blocks from before preemption;
+        # see build_connector_meta.
+        self._preempted_req_ids: set[str] = set()
+        # Requests that _create_slot gave a new slot since the last build_connector_meta.
+        self._new_slot_req_ids: set[str] = set()
         world_size = vllm_config.parallel_config.world_size
 
         leader = KvbmLeader(world_size, drt=self.drt)
@@ -164,7 +169,28 @@ class KvConnectorLeader:
         """
         output = RustSchedulerOutput()
 
+        # Under Model Runner V2 (the default in vLLM 0.33.0), vLLM schedules a
+        # preempted request again in scheduled_new_reqs with its full block table,
+        # not as a resumed cached request. If its slot survived the preemption,
+        # update_state_after_alloc has appended that table to the old blocks, so
+        # hand the request to the resumed path, which resets the slot first and
+        # keeps the worker's slot. A request whose slot was created again (after
+        # reset_cache) keeps the new path, as before.
+        self._preempted_req_ids.update(scheduler_output.preempted_req_ids or ())
+        self._preempted_req_ids -= self._new_slot_req_ids
+        self._preempted_req_ids -= scheduler_output.finished_req_ids
+        self._new_slot_req_ids.clear()
         for req in scheduler_output.scheduled_new_reqs:
+            if req.req_id in self._preempted_req_ids:
+                self._preempted_req_ids.discard(req.req_id)
+                output.add_cached_request(
+                    request_id=req.req_id,
+                    resumed_from_preemption=True,
+                    new_token_ids=[],
+                    new_block_ids=req.block_ids[0],
+                    num_computed_tokens=req.num_computed_tokens,
+                )
+                continue
             output.add_new_request(
                 req.req_id,
                 req.prompt_token_ids,
@@ -174,6 +200,7 @@ class KvConnectorLeader:
 
         # In vLLM 0.14.0+, resumed_from_preemption was changed to resumed_req_ids (a set)
         resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
+        self._preempted_req_ids.difference_update(resumed_req_ids)
 
         # If A == B, and A == C, then B == C
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -266,6 +293,7 @@ class KvConnectorLeader:
             raise ValueError("Unsupported request - requires mm extra keys")
 
         all_token_ids = request.all_token_ids
+        self._new_slot_req_ids.add(request.request_id)
 
         # extract the critial aspects of the request that effect how the tokens are hashed
         request = KvbmRequest(
