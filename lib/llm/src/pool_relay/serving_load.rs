@@ -43,7 +43,7 @@ use self::roster::{RosterEvent, Rosters};
 use super::load::{Coverage, PoolDeployment, PoolSchedulerLoad, SCHEDULER_FRESHNESS};
 use super::pool_registry::PoolRegistry;
 use super::topology::TopologyPublisher;
-use crate::frontend_load::{FRONTEND_LOAD_TOPIC, RequestGauges, RequestTotals};
+use crate::frontend_load::{FRONTEND_LOAD_TOPIC, RequestGauges, RequestTotals, SessionObservation};
 use crate::kv_router::SCHEDULER_LOAD_SUBJECT;
 
 /// A source's report counts for this many of its publish intervals, so one or
@@ -94,6 +94,7 @@ pub(super) struct ModelServingLoad {
     pub(super) observed_frontends: u64,
     pub(super) ready_frontends: u64,
     pub(super) serving_pools: Vec<PoolId>,
+    pub(super) sessions: Vec<SessionObservation>,
 }
 
 /// Builds [`ServingLoadSnapshot`]s from the pool registry and frontend frames.

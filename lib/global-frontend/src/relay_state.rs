@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use dynamo_global_common::PoolId;
@@ -10,7 +10,7 @@ use dynamo_llm::pool_relay::wan::grpc::protocol::{
     KvPoolCatalogUpdate, KvPoolLoadUpdate, ProducerKey, ServingLoadUpdate, ServingReadinessState,
     ServingReadinessUpdate, validate_protocol_envelope,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// State from one Relay used by readiness and load selection.
 pub(crate) struct RelayPoolState {
@@ -21,6 +21,7 @@ pub(crate) struct RelayPoolState {
     source: RelaySource,
     serving_sequence: Option<u64>,
     kv_sequence: Option<u64>,
+    sessions: HashMap<String, HashMap<String, u64>>,
 }
 
 impl RelayPoolState {
@@ -133,6 +134,32 @@ impl RelayPoolState {
             runtime_id: identity.drt_instance_id,
             incarnation: identity.relay_incarnation,
         };
+        let mut sessions = HashMap::<String, HashMap<String, u64>>::new();
+        for entry in serving_load.iter().flat_map(|load| &load.models) {
+            if entry.sessions.is_empty()
+                || dynamo_llm::pool_relay::wan::grpc::protocol::validate_model_serving_load(entry)
+                    .is_err()
+                || !producers.iter().any(|pool| {
+                    pool.serving_endpoint
+                        .as_ref()
+                        .is_some_and(|endpoint| endpoint.namespace == entry.namespace)
+                        && pool.registrations.iter().any(|registration| {
+                            registration.canonical_model_id == entry.canonical_model_id
+                        })
+                })
+            {
+                continue;
+            }
+            let model = sessions
+                .entry(entry.canonical_model_id.clone())
+                .or_default();
+            for observation in &entry.sessions {
+                model
+                    .entry(observation.session_id.clone())
+                    .and_modify(|seen| *seen = (*seen).max(observation.last_seen_ms))
+                    .or_insert(observation.last_seen_ms);
+            }
+        }
         Ok(Self {
             catalog,
             serving_load,
@@ -141,6 +168,7 @@ impl RelayPoolState {
             source,
             serving_sequence,
             kv_sequence,
+            sessions,
         })
     }
 
@@ -181,6 +209,37 @@ impl RelayPoolState {
 
     pub(crate) fn window_sequences(&self) -> (Option<u64>, Option<u64>) {
         (self.serving_sequence, self.kv_sequence)
+    }
+
+    pub(crate) fn session_last_seen(
+        &self,
+        model: &str,
+        session: &str,
+        received: Instant,
+    ) -> Option<u64> {
+        if !self.ready_for(model) {
+            return None;
+        }
+        let update = self.serving_load.as_ref()?;
+        if received.elapsed() > report_window(update.window_ms).saturating_mul(3) {
+            return None;
+        }
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_millis();
+        let last_seen = *self
+            .sessions
+            .get(self.canonical_model(model))?
+            .get(session)?;
+        now_ms
+            .checked_sub(u128::from(last_seen))
+            .filter(|age| {
+                *age < u128::from(
+                    dynamo_llm::pool_relay::wan::grpc::protocol::SESSION_HINT_RETENTION_MS,
+                )
+            })
+            .map(|_| last_seen)
     }
 
     pub(crate) fn project(

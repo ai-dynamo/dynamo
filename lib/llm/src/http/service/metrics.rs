@@ -790,6 +790,7 @@ impl SystemOneMetrics {
 pub struct Metrics {
     load_incarnation: u64,
     load_sequence: AtomicU64,
+    sessions: Arc<crate::frontend_load::FrontendSessions>,
     awaiting_first_token_requests: IntGaugeVec,
     inflight_input_tokens: IntGaugeVec,
     input_tokens_counter: IntCounterVec,
@@ -877,6 +878,7 @@ pub(crate) struct RequestMetrics {
     // is one atomic shared by every in-flight request, and adding to it on every
     // token bounces its cache line between cores.
     pending_output_tokens: AtomicU64,
+    sessions: Option<(Arc<crate::frontend_load::FrontendSessions>, String)>,
     awaiting_first_token_requests: prometheus::IntGauge,
     awaiting_first_token_input_tokens: prometheus::IntGauge,
     generating_input_tokens: prometheus::IntGauge,
@@ -902,6 +904,10 @@ impl RequestMetrics {
         Self {
             state: AtomicU64::new(0),
             pending_output_tokens: AtomicU64::new(0),
+            sessions: metrics
+                .sessions
+                .is_enabled()
+                .then(|| (metrics.sessions.clone(), model.to_owned())),
             awaiting_first_token_requests,
             awaiting_first_token_input_tokens: metrics
                 .inflight_input_tokens
@@ -914,7 +920,21 @@ impl RequestMetrics {
         }
     }
 
+    pub(crate) fn observe_session<T: Data>(&self, context: &Context<T>) {
+        if let Some((sessions, model)) = &self.sessions
+            && let Some(agent) = context
+                .get_optional::<crate::protocols::common::extensions::AgentContext>(
+                    crate::protocols::common::extensions::AGENT_CONTEXT_CONTEXT_KEY,
+                )
+                .ok()
+                .flatten()
+        {
+            sessions.observe(model, &agent.session_id);
+        }
+    }
+
     pub(crate) fn attach_to<T: Data>(self: &Arc<Self>, context: &mut Context<T>) {
+        self.observe_session(context);
         context.insert_arc(REQUEST_METRICS_KEY, self.clone());
     }
 
@@ -1721,6 +1741,7 @@ impl Metrics {
         let metrics = Metrics {
             load_incarnation: rand::random(),
             load_sequence: AtomicU64::new(0),
+            sessions: Arc::default(),
             awaiting_first_token_requests,
             inflight_input_tokens,
             input_tokens_counter,
@@ -2159,6 +2180,10 @@ impl Metrics {
         )
     }
 
+    pub(crate) fn enable_session_observation(&self) {
+        self.sessions.enable();
+    }
+
     /// Snapshot existing metric handles; counters are never reset by publication.
     pub(crate) fn frontend_load(
         &self,
@@ -2235,6 +2260,7 @@ impl Metrics {
                 }
             }
         }
+        let mut sessions = self.sessions.snapshot();
         let models = models
             .into_iter()
             .map(|view| {
@@ -2250,7 +2276,16 @@ impl Metrics {
                     if let Some(total) = totals.get(name) {
                         load.totals.add(total);
                     }
+                    if let Some(observed) = sessions.remove(name) {
+                        load.sessions.extend(observed);
+                    }
                 }
+                load.sessions.sort_unstable_by(|a, b| {
+                    a.session_id
+                        .cmp(&b.session_id)
+                        .then_with(|| b.last_seen_ms.cmp(&a.last_seen_ms))
+                });
+                load.sessions.dedup_by(|a, b| a.session_id == b.session_id);
                 load
             })
             .collect();
@@ -3822,6 +3857,49 @@ mod tests {
         assert_eq!(global.get(), LOCAL_FLUSH_TOKENS);
         drop(collector);
         assert_eq!(global.get(), 71, "drop must publish the remaining tokens");
+    }
+
+    #[test]
+    fn frontend_load_without_session_opt_in_keeps_load_and_omits_sessions() {
+        use crate::protocols::common::extensions::{
+            AGENT_CONTEXT_CONTEXT_KEY, agent_context_from_headers,
+        };
+
+        let metrics = Arc::new(Metrics::new());
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-dynamo-session-id",
+            "unpublished-session".parse().unwrap(),
+        );
+        let mut request = Context::new(());
+        request.insert(
+            AGENT_CONTEXT_CONTEXT_KEY,
+            agent_context_from_headers(&headers).unwrap(),
+        );
+        let guard = metrics.clone().create_inflight_guard(
+            "model",
+            Endpoint::ChatCompletions,
+            false,
+            "request",
+        );
+        assert!(guard.request_metrics().sessions.is_none());
+        guard.request_metrics().attach_to(&mut request);
+        guard.request_metrics().add_input_tokens(7);
+        let view = crate::discovery::CommittedModelView {
+            name: "model".into(),
+            is_ready: true,
+            aliases: Vec::new(),
+        };
+        let frame = metrics.frontend_load(1, true, vec![view]);
+        assert_eq!(frame.models[0].gauges.requests_awaiting_first_token, 1);
+        assert_eq!(frame.models[0].totals.requests_started, 1);
+        assert_eq!(frame.models[0].totals.input_tokens, 7);
+        assert!(frame.models[0].sessions.is_empty());
+        assert!(
+            serde_json::to_value(&frame).unwrap()["models"][0]
+                .get("sessions")
+                .is_none()
+        );
     }
 
     #[test]

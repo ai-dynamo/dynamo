@@ -414,6 +414,15 @@ message ModelDeploymentStatus
   repeated KvPoolId serving_pools = 4;
 }
 
+// A recently observed request session. A routing hint, not a KV residency guarantee.
+message SessionObservation
+{
+  string session_id = 1;
+  // Unix milliseconds of the last request observation, unchanged by heartbeats.
+  // Hints expire after ten minutes; they do not assert an active request.
+  uint64 last_seen_ms = 2;
+}
+
 // Frontend load of one model. Key: (namespace, canonical_model_id), as in
 // TopologyEntry; alias traffic is counted under the canonical model.
 // COMPLETE when frontend discovery succeeded and every expected frontend
@@ -425,6 +434,9 @@ message ModelServingLoad
   string canonical_model_id = 2;
   LoadView load = 3;
   ModelDeploymentStatus deployment = 4;
+  // Replacement set of at most 4096 hints from fresh, ready frontends.
+  // Omission withdraws a hint; older senders provide no hints.
+  repeated SessionObservation sessions = 5;
 }
 
 // Complete window: a pool or model absent from the next window is gone.

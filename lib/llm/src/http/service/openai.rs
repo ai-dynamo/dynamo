@@ -7481,6 +7481,35 @@ mod tests {
     }
 
     #[test]
+    fn session_observation_uses_resolved_agent_context_and_model_aliases() {
+        let metrics = Arc::new(super::super::metrics::Metrics::new());
+        metrics.enable_session_observation();
+        let mut headers = HeaderMap::new();
+        headers.insert("thread-id", "session-from-header".parse().unwrap());
+        let mut context = context_from_headers((), "request-1".to_string(), &headers).unwrap();
+        let guard = metrics.clone().create_inflight_guard(
+            "alias",
+            Endpoint::ChatCompletions,
+            false,
+            "request-1",
+        );
+        guard.request_metrics().attach_to(&mut context);
+        let view = crate::discovery::CommittedModelView {
+            name: "primary".into(),
+            is_ready: true,
+            aliases: vec!["alias".into()],
+        };
+        let frame = metrics.frontend_load(1, true, vec![view]);
+        assert_eq!(frame.models[0].model, "primary");
+        assert_eq!(frame.models[0].sessions.len(), 1);
+        assert_eq!(
+            frame.models[0].sessions[0].session_id,
+            "session-from-header"
+        );
+        assert!(frame.models[0].sessions[0].last_seen_ms > 0);
+    }
+
+    #[test]
     fn test_context_from_headers_preserves_codex_compaction() {
         let mut headers = HeaderMap::new();
         headers.insert("thread-id", "codex-thread".parse().unwrap());

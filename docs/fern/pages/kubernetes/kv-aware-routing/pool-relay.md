@@ -80,7 +80,7 @@ kubectl -n inference get dynamopoolrelay green -o jsonpath='{.status.endpoint}{"
 or KV pools are ready. The endpoint is cluster-local and is empty after withdrawal or a failed
 reconciliation. If `Ready` is False, inspect the condition reason with
 `kubectl -n inference describe dynamopoolrelay green` and check the Relay Pod logs. To publish
-serving load, set `DYN_SERVING_LOAD_PUBLISH=1` on the DGD's frontend Pods.
+serving load, set `DYN_SERVING_LOAD_PUBLISH=1` on the DGD's frontend Pods. Session hints require a separate opt-in; see [Recent-Session Hints](../../reference/components/pool-relay-configuration.md#recent-session-hints).
 
 The `podTemplate` follows DGD's Pod configuration shape. Put the image and transport environment
 on its `main` container. You can also set image pull secrets, resources, and sidecars there. The
