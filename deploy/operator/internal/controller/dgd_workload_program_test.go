@@ -600,6 +600,42 @@ func TestComponentProgram_ReconcileReturnsPartialRolloutStatusOnLaterError(t *te
 	assert.Nil(t, dgd.Status.RollingUpdate)
 }
 
+func TestComponentProgram_CappedGraphProgressesRolloutOnLaterError(t *testing.T) {
+	for _, scenario := range []string{"pending-rollout", "first-generation", "v1-migration"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Log("Build a capped component graph whose shared input reconciliation will fail")
+			dgd := powerCapTestDGD(t, "component")
+			switch scenario {
+			case "pending-rollout":
+				dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2] = "old-worker-hash"
+				dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{Phase: nvidiacomv1beta1.RollingUpdatePhasePending}
+			case "v1-migration":
+				dgd.Annotations[commonconsts.AnnotationCurrentWorkerHash] = "opaque-v1"
+			}
+			wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+			reconciler := createTestDGDReconcilerWithStatus(dgd)
+			program := reconciler.newComponentProgram()
+
+			result, err := program.Reconcile(context.Background(), workloadProgramRequest{DGD: dgd})
+
+			t.Log("Verify rollout progress and hash bookkeeping that cannot change a preservation decision still happen")
+			require.ErrorContains(t, err, "planner ClusterRole name is required")
+			assert.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
+			switch scenario {
+			case "pending-rollout":
+				require.NotNil(t, result.Status.RollingUpdate)
+				assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, result.Status.RollingUpdate.Phase)
+			case "first-generation":
+				assert.Equal(t, wantHash, dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
+			case "v1-migration":
+				assert.Equal(t, "opaque-v1", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHash])
+				assert.Equal(t, wantHash, dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
+			}
+		})
+	}
+}
+
 func TestUnsupportedWorkerRolloutEmitsWarningOnlyAfterHashUpdate(t *testing.T) {
 	updateErr := errors.New("update failed")
 	tests := []struct {
@@ -1158,7 +1194,7 @@ func TestComponentWorkloadsReconciler_FirstGenMultinodeStampsWorkerHash(t *testi
 	assert.Empty(t, dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
 
 	t.Log("Reconcile: every generated worker DCD must carry the computed hash in its label and name")
-	_, err := workloads.Reconcile(context.Background(), dgd, nil, nil)
+	_, err := workloads.Reconcile(context.Background(), dgd, nil, nil, nil)
 	require.NoError(t, err)
 
 	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
@@ -1243,7 +1279,7 @@ func TestComponentWorkloadsReconciler_RemovedWorkerComponentDrainedToZero(t *tes
 	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout)
 
 	t.Log("Reconcile: the removed decode component must be targeted at zero replicas")
-	_, err := workloads.Reconcile(context.Background(), reducedDGD, nil, nil)
+	_, err := workloads.Reconcile(context.Background(), reducedDGD, nil, nil, nil)
 	require.NoError(t, err)
 
 	t.Log("Verify the decode old DCD has been patched to zero replicas so the rollout can drain and complete")

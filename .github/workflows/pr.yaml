@@ -176,6 +176,7 @@ jobs:
     needs:
       - changed-files
       - deploy-operator
+      - power-cap-smoke
       - deploy-test-vllm
       - deploy-test-sglang
       - deploy-test-trtllm
@@ -1351,6 +1352,61 @@ jobs:
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
+  power-cap-smoke:
+    name: Live Worker Power Cap Smoke
+    needs: [changed-files, deploy-operator]
+    if: |
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
+      !cancelled() &&
+      needs.deploy-operator.result == 'success' &&
+      (needs.changed-files.outputs.operator == 'true' || needs.changed-files.outputs.deploy == 'true')
+    runs-on: prod-deploy-tester-v1
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Check vCluster availability
+        id: vcluster-check
+        uses: $/.github/actions/check-vcluster-exists
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Recover vCluster on job rerun
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: $/.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
+      - name: Connect to vCluster
+        uses: $/.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Set up Go for CPU power-cap smoke
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+        with:
+          go-version-file: deploy/operator/go.mod
+          cache-dependency-path: deploy/operator/go.sum
+      - name: Compile CPU power-cap smoke
+        working-directory: deploy/operator
+        run: go test -c -tags=clustertest ./internal/testing/powercap -o "$RUNNER_TEMP/powercap-smoke.test"
+      - name: Verify live cap propagation with real Deployment and Grove controllers
+        timeout-minutes: 6
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kubeconfig-vcluster
+          DYNAMO_POWERCAP_TEST_NAMESPACE: default
+        run: '"$RUNNER_TEMP/powercap-smoke.test" -test.v -test.timeout=5m30s'
+
   deploy-test-vllm:
     name: vllm Deploy Test
     needs: [changed-files, deploy-operator, vllm-copy-to-acr, frontend-copy-to-acr]
@@ -1954,7 +2010,7 @@ jobs:
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always()
-    needs: [changed-files, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-dgdr]
+    needs: [changed-files, deploy-operator, power-cap-smoke, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-dgdr]
     runs-on: prod-deploy-tester-v1
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

@@ -134,7 +134,7 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 			t.Log("Render ordinary components independently from their explicit selection")
 			normal, err := dynamo.GenerateGrovePodCliqueSet(
 				t.Context(), &dynamoDeployment, (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController, controllerConfig, runtimeConfig,
-				kubeClient, nil, nil, nil, true, nil,
+				kubeClient, nil, nil, nil, true, nil, nil,
 			)
 			require.NoError(t, err)
 			require.NotEqual(t, normal.Name, got.Name)

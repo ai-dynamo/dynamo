@@ -52,16 +52,36 @@ func (r *componentRestartProgressResolver) Resolve(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	inProgress []string,
 ) []string {
+	return r.resolve(ctx, dgd, inProgress, nil)
+}
+
+// retainedResolver pins restart observations to the retained worker generation.
+func (r *componentRestartProgressResolver) retainedResolver(workerHash string) restartProgressResolver {
+	return func(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
+		return r.resolve(ctx, dgd, inProgress, []string{workerHash})
+	}
+}
+
+// resolve filters unfinished components; nil hashes select the ordinary worker generation.
+func (r *componentRestartProgressResolver) resolve(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment, inProgress, hashes []string) []string {
 	logger := log.FromContext(ctx)
-	updatedInProgress := make([]string, 0, len(inProgress))
-	for _, componentName := range inProgress {
-		isFullyUpdated, reason := r.checkComponentFullyUpdated(ctx, dgd, componentName)
-		if !isFullyUpdated {
-			logger.V(1).Info("component not fully updated", "componentName", componentName, "reason", reason)
-			updatedInProgress = append(updatedInProgress, componentName)
+	remaining := make([]string, 0, len(inProgress))
+
+	// Use the same readiness filter for ordinary and retained worker generations.
+	for _, name := range inProgress {
+		var ready bool
+		var reason string
+		if hashes == nil {
+			ready, reason = r.checkComponentFullyUpdated(ctx, dgd, name)
+		} else {
+			ready, reason = r.checkComponentReadyAtWorkerHashes(ctx, dgd, name, hashes)
+		}
+		if !ready {
+			logger.V(1).Info("component not fully updated", "componentName", name, "reason", reason)
+			remaining = append(remaining, name)
 		}
 	}
-	return updatedInProgress
+	return remaining
 }
 
 func (r *componentRestartProgressResolver) checkComponentFullyUpdated(
@@ -82,8 +102,19 @@ func (r *componentRestartProgressResolver) checkComponentFullyUpdated(
 		return false, err.Error()
 	}
 
+	return r.checkComponentReadyAtWorkerHashes(ctx, dgd, componentName, activeWorkerHashCandidates(dgd, hashes))
+}
+
+// checkComponentReadyAtWorkerHashes reports readiness of the first existing worker DCD among workerHashes.
+// dgd must be non-nil.
+func (r *componentRestartProgressResolver) checkComponentReadyAtWorkerHashes(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	componentName string,
+	workerHashes []string,
+) (bool, string) {
 	var lastReason string
-	for _, hash := range activeWorkerHashCandidates(dgd, hashes) {
+	for _, hash := range workerHashes {
 		resourceName := dynamo.GetDCDResourceName(dgd, componentName, hash)
 		ready, reason := checkDCDReady(ctx, r.reader, resourceName, dgd.Namespace, restartID)
 		if ready || reason != dcdNotFoundReason {

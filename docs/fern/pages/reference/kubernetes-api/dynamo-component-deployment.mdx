@@ -39,6 +39,48 @@ spec:
 
 The DCD spec is `backendFramework` plus the [shared component spec](#shared-component-spec) inlined at the same level.
 
+For workers managed by a DGD, `podTemplate.metadata.annotations` can include
+`dynamo.nvidia.com/gpu-power-limit`, a positive decimal per-GPU cap in watts.
+A DGD using Grove or the single-node component pathway can change an existing
+worker cap value without restarting workers. The cap must be set on the worker's
+own `podTemplate`. Live cap changes are not supported, and the cap stays
+immutable, for graphs with a `type: planner` component, graphs with `type: lpx`
+components, graphs whose `spec.annotations` sets the cap, graphs stored through
+`v1alpha1` with the cap in a service's `annotations`, and graphs with a worker that
+uses automatic checkpoints (`experimental.checkpoint.enabled` without
+`checkpointRef`). Admission names the
+reason when it rejects a change. Adding or removing the annotation remains
+forbidden. GPU allocation remains immutable.
+
+Admission also rejects a cap change while the operator-managed rollout of the
+component pathway is pending, in progress, or failed, and until the operator has
+recorded a non-empty `nvidia.com/current-worker-hash-v2` annotation on the DGD.
+The operator records it when it first reconciles a new graph's workers, and when it
+migrates a graph created before that annotation existed; a shared-resource error can
+delay this on Grove. Creating a graph with a cap is unaffected. Retry a rejected cap
+change once the annotation is present. Grove rollouts are not visible to
+admission. A cap-only edit made while Grove has not yet acknowledged or finished a
+`PodCliqueSet` update waits: the operator keeps the current worker templates and
+patches no Pods until Grove finishes the update.
+
+For a cap-only DGD edit, the operator retains worker creation templates and identities
+at their previous cap. A separate power-cap controller patches the annotations of
+the live worker Pods labeled for the graph component, independently of DGD workload
+reconciliation. Replacement and scale-up
+Pods can briefly carry the retained cap until that controller observes them. On the
+component pathway, a restart requested with `spec.restart` restarts the retained
+workers in place. Under Grove, a restart during a retained cap edit rolls the
+workers to the latest desired cap. A change to
+Grove rollout policy, such as `nvidia.com/grove-update-strategy`, keeps the
+retained templates. An unrelated worker template edit uses normal rollout behavior
+with the latest desired cap. The DGD's component `gpuPowerLimitWatts` status reports
+the desired cap, while a retained DCD's own template-derived status keeps the old
+value; use the DGD's `PowerCapPropagationReady` condition for Pod annotation
+convergence. Propagation problems appear only in that
+condition and never change the DGD's `Ready` condition or state. This does not
+establish hardware enforcement or budget admission. Standalone DCD updates do not
+gain this DGD-specific propagation behavior.
+
 <ParamField path="backendFramework" type="string">
   Inference backend framework for this component. Drives backend-specific defaults the operator injects into the `spec.podTemplate.spec.containers[name=main]` container.
 
