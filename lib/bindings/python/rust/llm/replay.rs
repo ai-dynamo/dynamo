@@ -242,7 +242,7 @@ fn replay_paths_equal(left: &Path, right: &Path) -> bool {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None, execution_model=None, weka_nested_timestamp_basis=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None, kv_event_lag_ms=None, agentic_snapshot=None, agentic_warmup=false, agentic_profile=None, deterministic=false, conversation_affinity=None))]
+#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None, execution_model=None, weka_nested_timestamp_basis=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None, kv_event_lag_ms=None, agentic_snapshot=None, agentic_warmup=false, agentic_profile=None, deterministic=false, conversation_affinity=None, agentic_warmup_policy=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -285,6 +285,7 @@ pub fn run_mocker_trace_replay(
     agentic_profile: Option<&Bound<'_, PyAny>>,
     deterministic: bool,
     conversation_affinity: Option<&Bound<'_, PyAny>>,
+    agentic_warmup_policy: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyObject> {
     let conversation_affinity = conversation_affinity
         .map(pythonize::depythonize::<dynamo_mocker::replay::ConversationAffinityConfig>)
@@ -337,6 +338,10 @@ pub fn run_mocker_trace_replay(
     let agentic_options = AgenticReplayOptions {
         snapshot: agentic_snapshot.map(pythonize::depythonize).transpose()?,
         warmup: agentic_warmup,
+        warmup_policy: agentic_warmup_policy
+            .map(pythonize::depythonize)
+            .transpose()?
+            .unwrap_or_default(),
         profile: agentic_profile.map(pythonize::depythonize).transpose()?,
         arrival_speedup_ratio,
     };
