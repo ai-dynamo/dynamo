@@ -168,13 +168,16 @@ KV_TRANSFER_CASES = [
         "completion",
         True,
         "tcp",
+        # Non-strict: the defect is intermittent and the case passes on some
+        # nightlies. raises= keeps any other failure visible.
         marks=pytest.mark.xfail(
             reason=(
-                "Known TensorRT-LLM 1.3.0rc25 KV-migration output-continuity "
-                "failure; tracked in https://github.com/ai-dynamo/dynamo/pull/14609"
+                "Intermittent TensorRT-LLM KV-migration output-continuity failure "
+                "(seen with 1.4.0rc0 to 1.4.0rc2); tracked in "
+                "https://github.com/ai-dynamo/dynamo/issues/16406"
             ),
             raises=OutputContinuityError,
-            strict=True,
+            strict=False,
         ),
         id="worker-failure-completion-stream-tcp",
     ),
