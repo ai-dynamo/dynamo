@@ -42,6 +42,23 @@ impl ZmqDirectIngress {
             .get()
             .expect("ZmqDirectIngress used before the selection core attached it")
     }
+
+    /// Release listeners created by this ingress from their buffering phase.
+    pub(crate) fn start_listeners(&self) {
+        self.registry().start_listeners();
+    }
+
+    pub(crate) fn listeners_started(&self) -> bool {
+        self.registry().listeners_started()
+    }
+
+    pub(crate) async fn wait_for_listeners_buffering(&self) -> anyhow::Result<()> {
+        self.registry().wait_for_listeners_buffering().await
+    }
+
+    pub(crate) async fn wait_for_listeners_active(&self) -> anyhow::Result<()> {
+        self.registry().wait_for_listeners_active().await
+    }
 }
 
 #[async_trait]
@@ -55,6 +72,10 @@ impl KvEventIngress for ZmqDirectIngress {
 
     fn open(&self, index: &IndexRegistry, key: &RoutingPartitionId, block_size: u32) -> Indexer {
         index.get_or_create_indexer(key.clone(), block_size)
+    }
+
+    fn signal_ready(&self) {
+        self.start_listeners();
     }
 
     fn missing_metadata(&self, record: &WorkerCatalogRecord) -> Vec<String> {

@@ -182,7 +182,11 @@ async fn run_common(
         .unwrap_or_default();
 
     if !peers.is_empty() {
-        match recovery::recover_from_peers(&peers, registry.index()).await {
+        // Give peer HTTP servers a brief head start during standalone-indexer
+        // co-launches. EPP recovery has its own readiness and retry protocol and
+        // must not inherit this unconditional delay.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        match recovery::recover_from_peers_with_listeners(&peers, registry).await {
             Ok(true) => tracing::info!("P2P recovery completed"),
             Ok(false) => tracing::warn!("no reachable peers, starting with empty state"),
             Err(e) => tracing::warn!(error = %e, "P2P recovery failed, starting with empty state"),
