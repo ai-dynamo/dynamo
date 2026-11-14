@@ -606,8 +606,8 @@ export const FEATURES: Feature[] = [
   {
     name: "LoRA",
     sglang: {
-      status: "wip",
-      note: "Dynamic loading, discovery, and aggregated inference validated; unloading is implemented but not end-to-end tested; disaggregated serving not end-to-end validated",
+      status: "yes",
+      note: "Dynamic load/unload and KV-aware routing with adapter affinity for aggregated workers; disaggregated serving not end-to-end validated",
     },
     trtllm: { status: "no" },
     vllm: { status: "yes", note: "Dynamic load/unload; KV-aware routing supports adapter affinity" },
@@ -1268,7 +1268,7 @@ export const FEATURE_INTERACTIONS: BackendInteractions[] = [
       // Request Cancellation
       [{ status: "wip", label: "Remote-prefill limitation", note: "Cancellation during remote prefill is not supported in disaggregated mode.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "wip" }, { status: "yes" }, { status: "na" }],
       // LoRA
-      [{ status: "wip", label: "Disaggregated LoRA not end-to-end validated", note: "Prefill/decode lifecycle registration has unit coverage, but no SGLang disaggregated LoRA end-to-end test.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "wip", label: "Adapter-aware routing not end-to-end validated", note: "Aggregated LoRA inference is validated without the KV router; the combined path remains experimental.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }, { status: "wip", label: "Experimental combination", note: "This LoRA feature pairing is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }, { status: "wip", label: "Experimental combination", note: "This LoRA feature pairing is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "wip", label: "Experimental combination", note: "This LoRA feature pairing is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }],
+      [{ status: "wip", label: "Disaggregated LoRA not end-to-end validated", note: "Prefill/decode lifecycle registration has unit coverage, but no SGLang disaggregated LoRA end-to-end test.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "yes", label: "Adapter-aware routing", note: "Aggregated workers; requires SGLang 0.5.22+ KV events in the dynamo format, which dynamo.sglang sets by default.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }, { status: "wip", label: "Experimental combination", note: "This LoRA feature pairing is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }, { status: "wip", label: "Experimental combination", note: "This LoRA feature pairing is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "wip", label: "Experimental combination", note: "This LoRA feature pairing is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }],
       // Tool Calling
       [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip", label: "Experimental combination", note: "Tool calling with SGLang LoRA is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }],
       // Speculative Decoding
