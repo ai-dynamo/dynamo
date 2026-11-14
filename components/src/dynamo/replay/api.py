@@ -88,9 +88,12 @@ class _TraceReplayOptions(_CommonReplayOptions, total=False):
     agentic_lanes: int | None
     agentic_snapshot: dict[str, Any] | None
     agentic_warmup: bool
+    agentic_warmup_policy: Literal["repeated_prefixes", "live_trajectory_v1"] | None
     agentic_profile: dict[str, Any] | None
     execution_model: str | None
     weka_nested_timestamp_basis: Literal["auto", "absolute", "relative"] | None
+    weka_client: Literal["recorded", "agentx"] | None
+    weka_chat_template: dict[str, int] | None
     trace_block_size: int | None
     trace_format: str
     trace_shared_prefix_ratio: float
@@ -402,6 +405,7 @@ def run_trace_replay(
     agentic_lanes=None,
     agentic_snapshot=None,
     agentic_warmup=False,
+    agentic_warmup_policy=None,
     agentic_profile=None,
     conversation_affinity=None,
     replay_mode="offline",
@@ -424,6 +428,8 @@ def run_trace_replay(
     capture_planner_details=True,
     execution_model=None,
     weka_nested_timestamp_basis=None,
+    weka_client=None,
+    weka_chat_template=None,
     telemetry_options=None,
     kv_event_lag_ms=None,
     # Internal: a retune sweep's inner planner is warmed with the history it
@@ -439,7 +445,8 @@ def run_trace_replay(
     ``wall_time_ms`` and derived throughput measure Rust runtime construction
     and execution. Planner creation and bootstrap happen before that boundary.
     ``weka_nested_timestamp_basis`` overrides Weka nested timestamp interpretation;
-    omitting it retains AISimulate's automatic selection.
+    omitting it retains AISimulate's automatic selection. ``weka_client`` and
+    ``weka_chat_template`` are AISimulate's Weka import options.
 
     ``kv_event_lag_ms`` delays the KV cache events (blocks stored and removed)
     the router's indexer observes by that much simulated time. Prefill and
@@ -447,9 +454,9 @@ def run_trace_replay(
     on the response path. ``None`` or ``0`` keeps synchronous updates. Offline
     KV-router replay only.
 
-    ``agentic_snapshot``, ``agentic_warmup`` and ``agentic_profile`` use AISimulate
-    workload controls on the existing offline trace path. Native validation owns
-    their schemas and lifecycle constraints.
+    ``agentic_snapshot``, ``agentic_warmup``, ``agentic_warmup_policy`` and
+    ``agentic_profile`` use AISimulate workload controls on the existing offline
+    trace path. Native validation owns their schemas and lifecycle constraints.
 
     ``conversation_affinity`` enables native hard binding for AgentX conversations:
     ``{"mode": "session" | "sibling_group", "ttl_seconds": 300}``. It requires
@@ -492,6 +499,7 @@ def run_trace_replay(
         "agentic_lanes": agentic_lanes,
         "agentic_snapshot": agentic_snapshot,
         "agentic_warmup": agentic_warmup,
+        "agentic_warmup_policy": agentic_warmup_policy,
         "agentic_profile": agentic_profile,
         "conversation_affinity": conversation_affinity,
         "replay_mode": replay_mode,
@@ -506,6 +514,8 @@ def run_trace_replay(
         "model_name": model_name,
         "execution_model": execution_model,
         "weka_nested_timestamp_basis": weka_nested_timestamp_basis,
+        "weka_client": weka_client,
+        "weka_chat_template": weka_chat_template,
         "sla_ttft_ms": sla_ttft_ms,
         "sla_itl_ms": sla_itl_ms,
         "sla_e2e_ms": sla_e2e_ms,

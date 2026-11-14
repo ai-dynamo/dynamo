@@ -852,7 +852,11 @@ def test_agentic_capabilities_follow_engine_support_in_offline_mode(
         supports_agentic_host_offload=supported,
         supports_agentic_snapshots=supported,
         supports_agentic_warmup=supported,
+        supports_agentic_live_warmup=supported,
         supports_agentic_profile=supported,
+        supports_state_cache=supported,
+        supports_weka_client=supported,
+        supports_weka_chat_template=supported,
     )
     monkeypatch.setattr(
         simulation.EngineReplayRunnerFactory, "capabilities", lambda self: native
@@ -862,7 +866,11 @@ def test_agentic_capabilities_follow_engine_support_in_offline_mode(
     assert capabilities.supports_agentic_host_offload is supported
     assert capabilities.supports_agentic_snapshots is supported
     assert capabilities.supports_agentic_warmup is supported
+    assert capabilities.supports_agentic_live_warmup is supported
     assert capabilities.supports_agentic_profile is supported
+    assert capabilities.supports_state_cache is supported
+    assert capabilities.supports_weka_client is supported
+    assert capabilities.supports_weka_chat_template is supported
     # Dynamo's composed runtime retains its pre-existing HBM speculation support.
     assert capabilities.supports_agentic_speculative_decoding
 
@@ -956,6 +964,123 @@ def test_hbm_agentic_speculation_runs_through_native_replay(tmp_path, speculatio
     assert accelerated.metrics["completed_requests"] == 1
     assert accelerated.metrics["total_output_tokens"] == 7
     assert accelerated.metrics["duration_ms"] < baseline.metrics["duration_ms"]
+
+
+def _write_weka_trace(path, block_size):
+    """Three short plays; the first spawns a subagent that its next turn joins."""
+
+    def request(t, hashes, out=2):
+        return {
+            "t": t,
+            "type": "s",
+            "model": "source-model",
+            "in": block_size * len(hashes),
+            "out": out,
+            "api_time": 0.5,
+            "hash_ids": hashes,
+        }
+
+    subagent = {
+        "t": 3.0,
+        "type": "subagent",
+        "agent_id": "worker",
+        "subagent_type": "Explore",
+        "duration_ms": 2000,
+        "status": "completed",
+        "requests": [request(3.5, [10, 11]), request(4.5, [10, 11, 12])],
+    }
+    plays = {
+        "alpha": [request(0.0, [1, 2]), request(2.0, [1, 2, 3]), subagent],
+        "beta": [request(0.0, [20, 21, 22], 3), request(1.5, [20, 21, 22, 23], 3)],
+        "gamma": [request(0.0, [30]), request(0.8, [30, 31])],
+    }
+    path.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "id": play,
+                    "block_size": block_size,
+                    "hash_id_scope": "local",
+                    "requests": requests,
+                }
+            )
+            + "\n"
+            for play, requests in plays.items()
+        )
+    )
+
+
+@pytest.mark.timeout(30)
+def test_agentic_replay_matches_the_engine_stack(tmp_path):
+    """An AgentX workload on a state-cache engine replays as on the engine stack."""
+
+    block_size = 64
+    trace = tmp_path / "agentic.jsonl"
+    _write_weka_trace(trace, block_size)
+    engine_args = {
+        "engine_type": "vllm",
+        "block_size": block_size,
+        "num_gpu_blocks": 64,
+        "kv_cache_bytes_per_token": 128,
+        "prefix_match_unit": block_size,
+        "state_cache": {"bytes_per_request": 196608},
+        "max_num_batched_tokens": 512,
+        "max_num_seqs": 8,
+        "timing_model": {"type": "fixed", "prefill_ms": 2, "decode_ms": 8},
+    }
+    spec = ReplaySpec(
+        backend_deployment=replace(
+            _agg_deployment(), num_workers=1, agg_engine_args=engine_args
+        ),
+        workload={
+            "source_type": "trace",
+            "load_type": "trace_timestamps",
+            "trace_format": "weka",
+            "trace_path": str(trace),
+            "weka_client": "agentx",
+            "weka_chat_template": {
+                "request_tokens": 5,
+                "user_tokens": 7,
+                "assistant_tokens": 6,
+                "tail_tokens": 2,
+                "append_tail_tokens": 1,
+            },
+            "agentic_lanes": 8,
+            "agentic_snapshot": {"seed": 42},
+            "agentic_warmup": True,
+            "agentic_warmup_policy": "live_trajectory_v1",
+            "agentic_profile": {
+                "duration_seconds": 20.0,
+                "tree_idle_cap_seconds": 5.0,
+                "global_idle_cap_seconds": 5.0,
+            },
+        },
+        goal={"target": "throughput"},
+    )
+    requirements = ReplayOutputRequirements(capture_per_request=True)
+    dynamo, engine = (
+        factory().create(0).run(spec, output_requirements=requirements)
+        for factory in (
+            simulation.DynamoReplayRunnerFactory,
+            simulation.EngineReplayRunnerFactory,
+        )
+    )
+
+    records = dynamo.metadata["native_report"]["per_request"]
+    assert records == engine.metadata["native_report"]["per_request"]
+    assert len(records) > 100
+    assert dynamo.metadata["agentic_phases"] == engine.metadata["agentic_phases"]
+    assert dynamo.metadata["agentic_phases"]["warmup_policy"] == "live_trajectory_v1"
+    # Wall-clock rates differ between the runs.
+    shared = dynamo.metrics.keys() & engine.metrics.keys()
+    shared -= {
+        "wall_time_ms",
+        "processed_tokens_per_s",
+        "processed_output_tokens_per_s",
+    }
+    assert {k: dynamo.metrics[k] for k in shared} == {
+        k: engine.metrics[k] for k in shared
+    }
 
 
 def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None:
