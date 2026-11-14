@@ -100,13 +100,18 @@ def _video_frames_to_uint8(video: VideoData) -> VideoData:
     uint8 ``(N, H, W, 3)`` array, TRT-LLM's ``format="np"`` video form.
 
     Both decode paths scale uint8 frames by 1/255, so rounding back recovers
-    the decoded pixels exactly. Other fields are kept.
+    the decoded pixels exactly. Frames go into the output one at a time, so
+    the conversion needs one float frame of scratch space, not float copies
+    of the whole clip. Other fields are kept.
     """
-    stacked = torch.stack(list(video.frames))
-    frames_u8 = stacked.mul(255.0).round_().clamp_(0, 255).to(torch.uint8)
-    return dataclasses.replace(
-        video, frames=frames_u8.permute(0, 2, 3, 1).contiguous().numpy()
-    )
+    frames = list(video.frames)
+    channels, height, width = frames[0].shape
+    frames_u8 = torch.empty((len(frames), height, width, channels), dtype=torch.uint8)
+    scaled = torch.empty_like(frames[0])
+    for out, frame in zip(frames_u8, frames):
+        torch.mul(frame, 255.0, out=scaled).round_().clamp_(0, 255)
+        out.copy_(scaled.permute(1, 2, 0))
+    return dataclasses.replace(video, frames=frames_u8.numpy())
 
 
 def _mm_item_order(
@@ -662,22 +667,23 @@ class MultimodalRequestProcessor:
                 raise HttpStatusError(
                     400, "Malformed video_url field: expected a list", str(video_items)
                 )
-            # Images reach the model as PIL (not rescaled) and both video
-            # decode paths give float [0,1] tensors (rescaled). A processor that
-            # takes one rescale flag for both modalities cannot take that mix:
-            # Qwen3-VL's rejects it, and Qwen2/2.5-VL's would leave the image
-            # unscaled. Next to an image, videos therefore go over as uint8
-            # when the model asks for that format, as Qwen3-VL does. For the
-            # models in _SHARED_RESCALE_FLAG_MODEL_TYPES, which do not, the
-            # request is refused before any video is fetched; other models get
-            # the media as decoded. Video-only requests are unchanged.
+            # Videos go over as uint8 when the model asks for that format, as
+            # Qwen3-VL does, with or without an image: trtllm-serve sends them
+            # that way, and the same clip then gets the same multimodal hash
+            # in both kinds of request. Images reach the model as PIL (not
+            # rescaled) and both video decode paths give float [0,1] tensors
+            # (rescaled). A processor that takes one rescale flag for both
+            # modalities cannot take that mix: Qwen3-VL's rejects it, and
+            # Qwen2/2.5-VL's would leave the image unscaled. For the models in
+            # _SHARED_RESCALE_FLAG_MODEL_TYPES, which ask for no format, image +
+            # video requests are refused before any video is fetched; other
+            # models get the media as decoded.
             image_and_video = bool(video_items) and "image" in processed_mm_data
             if image_and_video and self.model_type in _SHARED_RESCALE_FLAG_MODEL_TYPES:
                 raise InvalidArgument(
                     "This model cannot take an image and a video in the same "
                     "request yet; send them in separate requests"
                 )
-            uint8_videos = image_and_video and self._prefers_np_video()
             videos = []
             for item in video_items:
                 url = item.get("Url") if isinstance(item, dict) else item
@@ -793,7 +799,7 @@ class MultimodalRequestProcessor:
                         source,
                     ) from e
             if videos:
-                if uint8_videos:
+                if self._prefers_np_video():
                     # CPU work that grows with the frame count: run it off the
                     # event loop, as the decode is.
                     videos = [
