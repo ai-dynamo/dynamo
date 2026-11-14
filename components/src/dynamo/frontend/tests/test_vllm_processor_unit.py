@@ -9,6 +9,7 @@ tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 
 import importlib.util
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -1215,6 +1216,184 @@ def vllm_processor_module(monkeypatch, real_vllm_processor_module):
     monkeypatch.setattr(module._nvtx, "start_range", lambda *args, **kwargs: object())
     monkeypatch.setattr(module._nvtx, "end_range", lambda rng: None)
     return module
+
+
+@pytest.fixture
+def cache_salt_processor(vllm_processor_module, monkeypatch):
+    """Keep the real request-to-engine path, with model work replaced by fakes."""
+    module = vllm_processor_module
+
+    async def preprocess(request, **kwargs):
+        return SimpleNamespace(
+            request_for_sampling=prepost_module.ChatCompletionRequest.model_construct(
+                **request
+            ),
+            tool_parser=None,
+            chat_template_kwargs={},
+            engine_prompt={"prompt": "Hello"},
+            prompt_token_ids=[1, 2, 3],
+            guided_decoding=None,
+            uses_dynamo_json_tool_call_fallback=False,
+        )
+
+    monkeypatch.setattr(module, "preprocess_chat_request", preprocess)
+    monkeypatch.setattr(
+        module.InputProcessor, "assign_request_id", lambda request: None
+    )
+    monkeypatch.setattr(
+        module, "StreamingPostProcessor", lambda **kwargs: _FakePostProcessor()
+    )
+
+    def make_processor(mm_features=None):
+        def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+            return SimpleNamespace(
+                request_id=request_id,
+                external_req_id=None,
+                sampling_params=sampling_params,
+                prompt_token_ids=engine_inputs["prompt_token_ids"],
+                mm_features=mm_features,
+            )
+
+        routed_engine = _FakeRoutedEngine([])
+        processor = module.VllmProcessor(
+            tokenizer=SimpleNamespace(eos_token_id=2, all_special_tokens=[]),
+            input_processor=SimpleNamespace(
+                generation_config_fields={},
+                renderer=SimpleNamespace(
+                    process_for_engine_async=AsyncMock(
+                        side_effect=lambda prompt, arrival_time: prompt
+                    )
+                ),
+                process_inputs=process_inputs,
+                model_config=None,
+            ),
+            output_processor=_FakeOutputProcessor(),
+            tool_parser_class=None,
+            reasoning_parser_class=None,
+            routed_engine=routed_engine,
+        )
+        processor.nixl_mm_enabled = False
+        return processor, routed_engine
+
+    return make_processor
+
+
+@pytest.mark.asyncio
+@pytest.mark.router
+@pytest.mark.parametrize(
+    "fields,expected",
+    [
+        pytest.param({}, None, id="absent"),
+        pytest.param(
+            {"routing": {"backend_instance_id": 7, "cache_salt": "internal"}},
+            None,
+            id="internal-hint-is-not-public-salt",
+        ),
+        pytest.param({"cache_salt": ""}, None, id="empty-legacy"),
+        pytest.param({"nvext": {"cache_salt": ""}}, None, id="empty-canonical"),
+        pytest.param({"cache_salt": "legacy"}, "legacy", id="legacy"),
+        pytest.param(
+            {"nvext": {"cache_salt": None}, "cache_salt": "legacy"},
+            "legacy",
+            id="null-canonical-fallback",
+        ),
+        pytest.param(
+            {"nvext": {"cache_salt": ""}, "cache_salt": "legacy"},
+            "legacy",
+            id="empty-canonical-fallback",
+        ),
+        pytest.param(
+            {"nvext": {"cache_salt": "canonical"}, "cache_salt": "legacy"},
+            "canonical",
+            id="canonical-precedence",
+        ),
+        pytest.param(
+            {"nvext": {"cache_salt": "canonical"}, "routing": None},
+            "canonical",
+            id="no-routing-hints",
+        ),
+        pytest.param(
+            {"nvext": {"cache_salt": "dynamo-cache-salt:租户"}},
+            "dynamo-cache-salt:租户",
+            id="public-value-preserved",
+        ),
+    ],
+)
+async def test_generator_preserves_cache_salt(cache_salt_processor, fields, expected):
+    """Preserve public salt precedence across local, router, and worker inputs."""
+    processor, routed_engine = cache_salt_processor()
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_completion_tokens": 1,
+        "routing": {"backend_instance_id": 7, "priority": 2},
+        **fields,
+    }
+    original = deepcopy(request)
+    assert [chunk async for chunk in processor._generator_inner(request)] == []
+
+    assert request == original
+    assert len(routed_engine.requests) == 1
+    preprocessed = routed_engine.requests[0]
+    renderer = processor.input_processor.renderer.process_for_engine_async
+    local_prompt = renderer.await_args.args[0]
+    if expected is None:
+        assert preprocessed["routing"] == original["routing"]
+        assert "extra_args" not in preprocessed
+        assert "cache_salt" not in local_prompt
+    else:
+        assert preprocessed["routing"] == {
+            **(original["routing"] or {}),
+            "cache_salt": expected,
+        }
+        assert preprocessed["extra_args"] == {"nvext": {"cache_salt": expected}}
+        assert local_prompt["cache_salt"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.multimodal
+async def test_generator_cache_salt_survives_multimodal_metadata(
+    cache_salt_processor, vllm_processor_module, monkeypatch
+):
+    """Keep salt and multimodal metadata together without mutating the request."""
+    feature = SimpleNamespace(
+        modality="image",
+        mm_hash="a" * 64,
+        data=object(),
+        mm_position=SimpleNamespace(offset=0, length=3),
+    )
+    mm_routing_info = {"block_mm_infos": [None]}
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "build_mm_routing_info_from_features",
+        lambda *args, **kwargs: mm_routing_info,
+    )
+    processor, routed_engine = cache_salt_processor([feature])
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_completion_tokens": 1,
+        "nvext": {"cache_salt": "canonical"},
+        "routing": {"backend_instance_id": 7, "cache_salt": "stale"},
+    }
+    original = deepcopy(request)
+    assert [chunk async for chunk in processor._generator_inner(request)] == []
+
+    assert request == original
+    preprocessed = routed_engine.requests[0]
+    assert preprocessed["routing"] == {
+        "backend_instance_id": 7,
+        "cache_salt": "canonical",
+    }
+    assert preprocessed["extra_args"] == {
+        "nvext": {"cache_salt": "canonical"},
+        "mm_hashes": [feature.mm_hash],
+        "mm_hashes_by_modality": {"image": [feature.mm_hash]},
+        "mm_placeholders": [(0, 3)],
+        "mm_placeholders_by_modality": {"image": [(0, 3)]},
+        "expanded_token_ids": [1, 2, 3],
+    }
+    assert preprocessed["mm_routing_info"] == mm_routing_info
 
 
 @pytest.mark.asyncio
