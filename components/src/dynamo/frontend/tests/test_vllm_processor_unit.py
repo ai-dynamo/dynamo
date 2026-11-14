@@ -1372,6 +1372,51 @@ async def test_generator_rejects_top_logprobs_without_logprobs(
 
 
 @pytest.mark.asyncio
+async def test_generator_vllm_validation_error_keeps_reason_for_client(
+    vllm_processor_module,
+):
+    from vllm.exceptions import VLLMValidationError
+
+    message = "The decoder prompt is longer than the maximum model length."
+
+    async def _inner(request, context=None):
+        raise VLLMValidationError(message)
+        yield  # pragma: no cover
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor._generator_inner = _inner
+
+    with pytest.raises(InvalidArgument, match="longer than the maximum model length"):
+        await anext(processor.generator({"model": "test"}))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_type", "expected_status"),
+    [("VLLMNotFoundError", 404), ("VLLMUnprocessableEntityError", 422)],
+)
+async def test_generator_vllm_non_400_client_error_keeps_status(
+    vllm_processor_module, error_type, expected_status
+):
+    from vllm import exceptions as vllm_exceptions
+
+    async def _inner(request, context=None):
+        raise getattr(vllm_exceptions, error_type)("rejected")
+        yield  # pragma: no cover
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor._generator_inner = _inner
+
+    with pytest.raises(HttpError) as excinfo:
+        await anext(processor.generator({"model": "test"}))
+    assert excinfo.value.code == expected_status
+
+
+@pytest.mark.asyncio
 async def test_generator_rejects_integer_chat_logprobs_before_preprocess(
     vllm_processor_module,
     monkeypatch,

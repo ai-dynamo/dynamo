@@ -241,7 +241,7 @@ addopts = [
     "--strict-markers",
     "--strict-config",
     "-p", "no:schemathesis",
-    "--ignore-glob=*model.py",
+    "--ignore-glob=*/model.py",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*trtllm_integration*",
     "--ignore-glob=*kvbm/python/kvbm*",
@@ -498,6 +498,11 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["sglang", "sglang.*"]
 follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# XGrammar comes with the backend extras and is absent from the Dynamo runtime.
+module = ["xgrammar", "xgrammar.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

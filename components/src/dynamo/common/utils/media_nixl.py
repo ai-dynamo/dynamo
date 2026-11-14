@@ -105,7 +105,6 @@ async def read_decoded_media_via_nixl(
     )
 
     array = tensor.numpy()  # zero-copy
-    array = array[..., :3]  # ignore alpha
     if return_metadata:
         return array, decoded_meta.get("metadata")
     else:

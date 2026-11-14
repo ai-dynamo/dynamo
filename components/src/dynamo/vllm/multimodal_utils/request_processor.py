@@ -17,9 +17,11 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
+from PIL import Image
 from vllm.config import ModelConfig
 from vllm.inputs import TokensPrompt
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import convert_image_mode, normalize_image
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 
 from dynamo.common.constants import DisaggregationMode
@@ -121,6 +123,11 @@ def _build_forwarded_mm_uuids(
         return {modality_key: marked_hashes}
 
     return None
+
+
+def _vllm_rgb(image: Image.Image) -> Image.Image:
+    """Apply EXIF orientation, then composite transparency, as vLLM's loader does."""
+    return convert_image_mode(normalize_image(image), "RGB")
 
 
 def _video_media_io_kwargs(request: dict) -> dict:
@@ -366,7 +373,7 @@ class VllmMultimodalRequestProcessor:
         self.trust_remote_code = trust_remote_code
         self.embedding_loader = embedding_loader
         self.image_loader = image_loader or ImageLoader(
-            enable_frontend_decoding=enable_frontend_decoding
+            enable_frontend_decoding=enable_frontend_decoding, to_rgb=_vllm_rgb
         )
         self.video_loader = video_loader or VideoLoader(
             enable_frontend_decoding=enable_frontend_decoding
