@@ -10,6 +10,12 @@ import json
 import logging
 import os
 
+# Prefix synthesis is optional in CPU benchmark environments.
+try:
+    from prefix_data_generator.synthesizer import Synthesizer
+except ImportError:
+    Synthesizer = None
+
 # Default values
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 DEFAULT_URL = "http://localhost:8000"
@@ -301,6 +307,11 @@ def prepare_trace_dataset(args, output_dir, logger):
         logger.info(f"Modified trace data saved to: {trace_dataset_path}")
         return requests, trace_dataset_path
 
+    if Synthesizer is None:
+        raise ModuleNotFoundError(
+            "Trace dataset synthesis requires the prefix data generator dependencies"
+        )
+
     # Generate synthetic data based on input dataset
     logger.info("Generating synthetic trace data...")
     logger.info(f"  Base dataset: {args.input_dataset}")
@@ -323,10 +334,6 @@ def prepare_trace_dataset(args, output_dir, logger):
         f"  Max OSL: {args.max_osl if args.max_osl else 'no clipping'} (clipping)"
     )
     logger.info(f"  Random seed: {args.seed}")
-
-    # Synthetic generation has optional dependencies absent from slim CPU test images.
-    # Keep the request helpers and trace-file path usable without those dependencies.
-    from prefix_data_generator.synthesizer import Synthesizer
 
     synthesizer = Synthesizer(
         args.input_dataset,
