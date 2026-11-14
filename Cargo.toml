@@ -23,7 +23,6 @@ members = [
     "lib/router/session-affinity",
     "lib/router/slot-tracker",
     "lib/router/worker-selection",
-    "lib/http-server",
     "lib/global-common",
     "lib/global-discovery-client",
     "lib/global-discovery-service",
@@ -101,7 +100,6 @@ dynamo-kv-indexer = { path = "lib/router/kv-indexer", version = "1.7.0" }
 dynamo-global-common = { path = "lib/global-common", version = "1.7.0" }
 dynamo-global-router = { path = "lib/global-router", version = "1.7.0" }
 dynamo-global-router-store-dynamodb = { path = "lib/global-router-store-dynamodb", version = "1.7.0" }
-dynamo-http-server = { path = "lib/http-server", version = "1.7.0" }
 dynamo-memory = { path = "lib/memory", version = "1.7.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.7.0" }
 dynamo-kv-router = { path = "lib/router/kv-router", version = "1.7.0" }
