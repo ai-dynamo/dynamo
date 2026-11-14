@@ -18,6 +18,10 @@ checks emitted manifests and `index.json` against the selected Candidates in
 runtime image, namespace, runtime override, and total GPU use. The Pareto checks
 reject rendering the same Candidate repeatedly under different names.
 
+The aggregated case omits the runtime block size, and the router case explicitly
+sets it to `null`; both must omit `--block-size` from the generated worker args.
+The other cases retain explicit block sizes.
+
 The fixed aggregated and disaggregated cases also compare the complete DGD to
 `goldens/`. Run the table from the repository root:
 

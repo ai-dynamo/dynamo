@@ -13,8 +13,6 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-from aisimulate.generator.request.schema import ModelFacts
-from aisimulate.sweeper.config import Workload
 
 from dynamo.aisimulate.output.dgd.renderers import (
     CandidateMaterializationError,
@@ -24,7 +22,6 @@ from dynamo.aisimulate.output.dgd.renderers import base as base_module
 from dynamo.aisimulate.output.dgd.renderers import render_dgd
 from dynamo.aisimulate.output.dgd.renderers.aic import renderer as aic_renderer
 from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
-from dynamo.profiler.utils.config_modifiers import vllm
 
 pytestmark = [
     pytest.mark.unit,
@@ -161,6 +158,12 @@ def _without_transfer_buffer_size(rendered: str) -> dict:
 def test_installed_aic_renders_trace_workloads_like_synthetic_ones(
     monkeypatch, tmp_path, backend, backend_version, image
 ) -> None:
+    pytest.importorskip("aisimulate.generator")
+    from aisimulate.generator.request.schema import ModelFacts
+    from aisimulate.sweeper.config import Workload
+
+    from dynamo.profiler.utils.config_modifiers import vllm
+
     # Keep the renders offline: model facts come from the request below.
     monkeypatch.setattr(vllm, "get_model_context_length", lambda _model: None)
     monkeypatch.setattr(vllm, "get_mamba_cache_align_block_size", lambda _model: None)
