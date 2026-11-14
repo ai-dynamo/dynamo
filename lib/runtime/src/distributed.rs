@@ -103,6 +103,100 @@ mod unit_tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn endpoint_cleanup_bounds_discovery_release_from_shutdown_start() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::endpoint_cleanup_bounds_discovery_release_from_shutdown_start"
+            ),
+            &[
+                ("DYN_SYSTEM_PORT", "0"),
+                ("DYN_TCP_RPC_HOST", "127.0.0.1"),
+                ("DYN_TCP_RPC_PORT", "0"),
+                ("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1"),
+                ("DYN_TCP_RESPONSE_STREAM_PORT", "0"),
+            ],
+        ) {
+            return;
+        }
+        use super::*;
+        use crate::discovery::{MockDiscovery, SharedMockRegistry};
+        use crate::endpoint_test_utils::{NoopHandler, UnavailableUnregisterDiscovery};
+        use crate::pipeline::network::PushWorkHandler;
+
+        tokio::time::timeout(Duration::from_secs(20), async {
+            for full_shutdown in [false, true] {
+                for hanging in [false, true] {
+                    let runtime = Runtime::from_current().unwrap();
+                    let primary = runtime.primary_token();
+                    let _cancel_on_drop = primary.clone().drop_guard();
+                    let mut drt = DistributedRuntime::new(
+                        runtime.clone(),
+                        DistributedConfig::process_local(),
+                    )
+                    .await
+                    .unwrap();
+                    let discovery = Arc::new(UnavailableUnregisterDiscovery {
+                        inner: MockDiscovery::new(
+                            Some(drt.connection_id()),
+                            SharedMockRegistry::new(),
+                        ),
+                        hanging,
+                        attempted: tokio::sync::Notify::new(),
+                    });
+                    drt.discovery_client = discovery.clone();
+                    drt.endpoint_registrations = EndpointRegistrationManager::new(
+                        discovery.clone(),
+                        runtime.secondary(),
+                        primary.clone(),
+                    );
+                    let endpoint = drt
+                        .namespace("shutdown-release")
+                        .unwrap()
+                        .component("worker")
+                        .unwrap()
+                        .endpoint("query");
+                    let handler: Arc<dyn PushWorkHandler> = Arc::new(NoopHandler);
+                    let tracker = drt.graceful_shutdown_tracker();
+                    let initial_count = tracker.get_count();
+                    let started = endpoint
+                        .endpoint_builder()
+                        .handler(handler.clone())
+                        .start_with_registration()
+                        .await
+                        .unwrap();
+                    assert_eq!(tracker.get_count(), initial_count + 1);
+                    let mut cleanup = Box::pin(started.shutdown());
+                    assert!(futures::poll!(cleanup.as_mut()).is_pending());
+                    discovery.attempted.notified().await;
+                    // Ordinary endpoint replacement must still wait for discovery release.
+                    assert!(futures::poll!(cleanup.as_mut()).is_pending());
+                    assert!(!runtime.child_token().is_cancelled());
+                    if full_shutdown {
+                        runtime.shutdown();
+                    } else {
+                        runtime.mark_shutting_down();
+                        assert!(!runtime.child_token().is_cancelled());
+                    }
+                    tokio::time::timeout(Duration::from_secs(3), cleanup)
+                        .await
+                        .expect("endpoint cleanup must finish before primary-token cancellation")
+                        .expect("a discovery timeout must not fail endpoint shutdown");
+                    assert_eq!(tracker.get_count(), initial_count);
+                    assert_eq!(Arc::strong_count(&handler), 1);
+                    if !full_shutdown {
+                        assert!(!primary.is_cancelled());
+                        drt.shutdown();
+                    }
+                    primary.cancelled().await;
+                }
+            }
+        })
+        .await
+        .expect("endpoint shutdown regression test timed out");
+    }
+
     #[test]
     fn response_stream_port_trims_and_treats_empty_as_unset() {
         for value in [None, Some(""), Some(" \t ")] {
