@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -824,6 +825,7 @@ def _assert_agent_parent_context_in_trace(
     timeout_s: float = 30.0,
     *,
     require_observed_parent: bool = False,
+    failure_detail: str = "",
 ) -> None:
     deadline = time.monotonic() + timeout_s
     last_records: list[dict] = []
@@ -843,6 +845,7 @@ def _assert_agent_parent_context_in_trace(
     pytest.fail(
         f"request trace did not contain parent agent_context after {source_label!r} "
         f"within {timeout_s}s; saw {seen}"
+        + (f"\n{failure_detail}" if failure_detail else "")
     )
 
 
@@ -960,9 +963,10 @@ def _run_codex_exec_smoke(
 
     We prompt codex to list `cwd`; `cwd` contains `marker_filename` and nothing
     else the model could pattern-match from prior knowledge. If codex answers
-    without invoking its shell tool, the marker won't appear in stdout and the
-    assertion fails — which proves we're testing the full Responses API
-    tool-calling chain, not just text generation.
+    without invoking its shell tool, no command output in the `--json` event
+    stream contains the marker and the assertion fails — which proves we're
+    testing the full Responses API tool-calling chain, not just text
+    generation. See `_codex_listing_failure` for the exact checks.
     """
     logger.info("Running codex exec smoke test against CODEX_HOME=%s", codex_home)
 
@@ -988,6 +992,9 @@ def _run_codex_exec_smoke(
         "-c",
         "model_provider=local",
         "exec",
+        # JSONL events expose the command output, so the marker check below
+        # does not depend on the 2B model copying a random filename exactly.
+        "--json",
         CODEX_LIST_DIRECTORY_PROMPT,
         "--dangerously-bypass-approvals-and-sandbox",
     ]
@@ -1018,12 +1025,53 @@ def _run_codex_exec_smoke(
             f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
         )
 
-    if marker_filename not in result.stdout:
+    failure = _codex_listing_failure(result.stdout, marker_filename)
+    if failure:
         pytest.fail(
-            "codex exec did not report the marker file — expected stdout to "
-            f"contain {marker_filename!r} (implies the shell tool was invoked "
-            f"and actually ran `ls` in {cwd}). Got:\n{result.stdout}"
+            f"codex exec did not report the marker file — {failure} "
+            f"(cwd {cwd}). Got:\n{result.stdout}"
         )
+
+
+_MARKER_FILENAME_RE = re.compile(r"marker_[0-9a-f]+\.txt")
+
+
+def _codex_listing_failure(stdout: str, marker_filename: str) -> str | None:
+    """Return why a `codex exec --json` run did not prove the listing, or None.
+
+    The exact marker must appear in the output of a successful command, which
+    only a real `exec_command` call routed through `/v1/responses` produces.
+    The final answer must then name a `marker_` file, which the model can only
+    know if Dynamo passed the tool output back in the follow-up request. The
+    answer may miscopy the random hex suffix: a sampled 2B model sometimes
+    drops or repeats a digit, and that is not a Dynamo API-surface failure.
+    """
+    command_outputs: list[str] = []
+    final_message = None
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "item.completed":
+            continue
+        item = event.get("item") or {}
+        if item.get("type") == "command_execution" and item.get("exit_code") == 0:
+            command_outputs.append(item.get("aggregated_output") or "")
+        elif item.get("type") == "agent_message":
+            final_message = item.get("text") or ""
+
+    if not any(marker_filename in output for output in command_outputs):
+        return (
+            f"no successful shell command output contained {marker_filename!r}, "
+            "so the shell tool did not run `ls` through /v1/responses"
+        )
+    if final_message is None or not _MARKER_FILENAME_RE.search(final_message):
+        return (
+            "the final answer did not name a `marker_<hex>.txt` file, so the tool "
+            f"output did not reach the model; final answer: {final_message!r}"
+        )
+    return None
 
 
 def _run_codex_subagent_smoke(
@@ -1076,7 +1124,33 @@ def _run_codex_subagent_smoke(
         "codex subagent",
         trace_start_index,
         require_observed_parent=True,
+        failure_detail=(
+            f"codex turn errors: {_codex_turn_errors(codex_home)}\n"
+            f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
+        ),
     )
+
+
+def _codex_turn_errors(codex_home: Path) -> list[str]:
+    """Return the turn errors Codex recorded in its session rollouts.
+
+    When the frontend rejects a child agent's request, Codex still exits 0 and
+    prints only the parent model's summary; the HTTP error body is kept only in
+    the session rollouts, as the child's `task_complete` error.
+    """
+    errors = []
+    for rollout in sorted((codex_home / "sessions").rglob("rollout-*.jsonl")):
+        for line in rollout.read_text(errors="replace").splitlines():
+            try:
+                payload = json.loads(line).get("payload") or {}
+            except (json.JSONDecodeError, AttributeError):
+                continue
+            if not isinstance(payload, dict) or payload.get("type") != "task_complete":
+                continue
+            error = payload.get("error")
+            if isinstance(error, dict) and error.get("message"):
+                errors.append(error["message"])
+    return errors
 
 
 def _run_claude_exec_smoke(
