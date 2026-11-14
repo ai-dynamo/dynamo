@@ -620,6 +620,8 @@ def build_tool_call_guided_decoding(
             if attempt_structural_tag
             else sglang_tools
         )
+        if native_tools is None:
+            raise PreprocessError("DeepSeek recipe tool choice requires native tools")
         if is_named_choice:
             native_tools = [
                 tool
