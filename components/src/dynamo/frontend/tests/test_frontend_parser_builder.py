@@ -11,9 +11,6 @@ import sys
 import pytest
 
 from dynamo.common.configuration.utils import env_or_default
-from dynamo.common.tests.configuration.ais_perf_inputs_helpers import (  # noqa: F401 -- no_ais_environment is a fixture
-    no_ais_environment,
-)
 from dynamo.frontend import main as frontend_main
 from dynamo.frontend.frontend_args import build_frontend_parser
 

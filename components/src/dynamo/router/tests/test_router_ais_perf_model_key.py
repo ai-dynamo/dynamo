@@ -33,10 +33,11 @@ from aisimulate.sweeper.replay import BackendDeploymentSpec
 
 from dynamo.router.simulation import create_provider
 from dynamo.router.simulation.config import RouterPredictionConfig
-from dynamo.router.tests.ais_perf_model_helpers import (
+from tests.utils.ais_perf_model import (
     AGGREGATED_ENTRY,
-    CONFIG,
+    IDENTITY,
     PREFILL_ENTRY,
+    exactly,
     normalized,
 )
 
@@ -64,10 +65,9 @@ _OLD_FORM_WARNING = (
     "{use: engine} (or a perf model config when the engine does not use an AIS "
     "perf model)."
 )
-_UNKNOWN_KEY_ERROR = (
-    "ais_perf_model: ForwardPassPerfModelConfig.__init__() got an unexpected "
-    "keyword argument 'not_a_field'"
-)
+# A pattern for the error for the key not_a_field: after the prefix comes
+# what the perf model config class says, which is not Dynamo's.
+_UNKNOWN_KEY_ERROR = "ais_perf_model: .*not_a_field.*"
 _NO_ENGINE_PERF_MODEL = (
     "router.ais_perf_model: {{use: engine}} needs an AIS perf model on the "
     "{worker_type} engine; it has none"
@@ -169,13 +169,13 @@ def _compile_old_form_recommendation(provider):
 
 def test_predict_written_config_reaches_hook():
     result = create_provider().compile_prediction(
-        {**_AIS, "ais_perf_model": CONFIG}, _prediction_context()
+        {**_AIS, "ais_perf_model": IDENTITY}, _prediction_context()
     )
 
     hook_config = _hook_config(result)
     assert hook_config["ais_perf_config"] == normalized(AGGREGATED_ENTRY)
     assert "ais_perf_config_from_engine" not in hook_config
-    assert result.config["ais_perf_model"] == CONFIG
+    assert result.config["ais_perf_model"] == IDENTITY
 
 
 @pytest.mark.parametrize(
@@ -331,7 +331,7 @@ def test_recommend_reads_written_value_again_for_each_search(tmp_path):
 def test_recommend_candidate_without_ais_ignores_key():
     provider = create_provider()
     plan = provider.compile_recommendation(
-        {**_AIS_AMONG_CHOICES, **_KNOB_CHOICES, "ais_perf_model": CONFIG},
+        {**_AIS_AMONG_CHOICES, **_KNOB_CHOICES, "ais_perf_model": IDENTITY},
         _recommendation_context(),
     )
 
@@ -356,24 +356,24 @@ def test_recommend_candidate_without_ais_ignores_key():
 
 
 @pytest.mark.parametrize(
-    ("written", "text"),
+    ("written", "pattern"),
     [
         pytest.param(
-            {**CONFIG, "not_a_field": 1}, _UNKNOWN_KEY_ERROR, id="unknown key"
+            {**IDENTITY, "not_a_field": 1}, _UNKNOWN_KEY_ERROR, id="unknown key"
         ),
         pytest.param(
             {"backend": "vllm", "system": "h200_sxm"},
-            "ais_perf_model requires model",
+            exactly("ais_perf_model requires model"),
             id="missing model",
         ),
         pytest.param(
-            {**CONFIG, "system": ""},
-            "ais_perf_model requires system",
+            {**IDENTITY, "system": ""},
+            exactly("ais_perf_model requires system"),
             id="empty system",
         ),
     ],
 )
-def test_recommend_written_value_is_checked_before_search(written, text):
+def test_recommend_written_value_is_checked_before_search(written, pattern):
     provider = create_provider()
 
     with pytest.raises(ValueError) as recommended:
@@ -388,9 +388,9 @@ def test_recommend_written_value_is_checked_before_search(written, text):
         )
 
     assert type(recommended.value) is ValueError
-    assert str(recommended.value) == text
+    assert re.fullmatch(pattern, str(recommended.value))
     assert type(predicted.value) is ValueError
-    assert str(predicted.value) == text
+    assert str(predicted.value) == str(recommended.value)
 
 
 @pytest.mark.parametrize(
@@ -398,10 +398,10 @@ def test_recommend_written_value_is_checked_before_search(written, text):
     [
         pytest.param(_USE_ENGINE, {}, id="use engine"),
         pytest.param(
-            CONFIG,
+            IDENTITY,
             {
                 "aggregated": normalized(AGGREGATED_ENTRY),
-                "prefill": normalized({**CONFIG, "worker_type": "prefill"}),
+                "prefill": normalized({**IDENTITY, "worker_type": "prefill"}),
             },
             id="one config",
         ),
@@ -447,7 +447,7 @@ def test_plan_state_carries_written_value_and_its_configs(written, perf_configs)
         assert json.loads(json.dumps(plan.state)) == plan.state
 
 
-@pytest.mark.parametrize("written", [CONFIG, _USE_ENGINE])
+@pytest.mark.parametrize("written", [IDENTITY, _USE_ENGINE])
 def test_predict_result_config_validates_again(written):
     result = create_provider().compile_prediction(
         {**_AIS, "ais_perf_model": written}, _prediction_context()
@@ -517,7 +517,7 @@ def test_key_rejects_use_in_list_entry(written):
 
 
 @pytest.mark.parametrize(
-    "written", [{**CONFIG, "systems_paths": ["sys"]}, {"from": "template.yaml"}]
+    "written", [{**IDENTITY, "systems_paths": ["sys"]}, {"from": "template.yaml"}]
 )
 def test_key_rejects_relative_paths(written):
     text = re.escape(
@@ -542,19 +542,19 @@ def test_key_requires_ais_load_model():
             {
                 "policy": "kv_router",
                 "prefill_load_model": {"type": "none"},
-                "ais_perf_model": CONFIG,
+                "ais_perf_model": IDENTITY,
             },
             _prediction_context(),
         )
     with pytest.raises(ValueError, match=predict_text):
         provider.compile_prediction(
-            {"policy": "round_robin", "ais_perf_model": CONFIG},
+            {"policy": "round_robin", "ais_perf_model": IDENTITY},
             _prediction_context(),
         )
     # The older check of a round_robin section still comes first.
     with pytest.raises(ValueError, match="round_robin requires") as raised:
         provider.compile_prediction(
-            {"policy": "round_robin", "temperature": 0.5, "ais_perf_model": CONFIG},
+            {"policy": "round_robin", "temperature": 0.5, "ais_perf_model": IDENTITY},
             _prediction_context(),
         )
     assert "ais_perf_model requires" not in str(raised.value)
@@ -569,29 +569,32 @@ def test_key_requires_ais_load_model():
             {
                 "policy": "kv_router",
                 "prefill_load_model": {"type": {"choices": ["none"]}},
-                "ais_perf_model": CONFIG,
+                "ais_perf_model": IDENTITY,
             },
             _recommendation_context(),
         )
 
 
 @pytest.mark.parametrize(
-    ("written", "text"),
+    "written",
     [
-        ({}, "ais_perf_model: the config is empty; write at least one key"),
-        ([], "ais_perf_model: the list is empty; write at least one config"),
-        (
-            [CONFIG],
-            "ais_perf_model: entry 1: worker_type is missing; every config in a "
-            "list needs one of: prefill, decode, aggregated",
-        ),
+        # An empty config or list is a written value, not a missing key.
+        pytest.param({}, id="empty config"),
+        pytest.param([], id="empty list"),
+        pytest.param([IDENTITY], id="list entry without worker type"),
     ],
 )
-def test_key_syntax_errors_are_loader_texts(written, text):
-    with pytest.raises(ValueError, match=re.escape(text)):
+def test_key_syntax_errors_are_loader_errors(written):
+    with pytest.raises(ValidationError) as raised:
         create_provider().compile_prediction(
             {**_AIS, "ais_perf_model": written}, _prediction_context()
         )
+
+    (error,) = raised.value.errors()
+    assert (error["loc"], error["type"]) == (("ais_perf_model",), "value_error")
+    # The loader's own error class, not one of the checks of this section.
+    assert isinstance(error["ctx"]["error"], ValueError)
+    assert type(error["ctx"]["error"]) is not ValueError
 
 
 @pytest.mark.parametrize(
@@ -705,14 +708,10 @@ def test_recommend_default_load_models_skip_ais_without_engine_perf_model(
 
 
 def test_written_list_without_router_entry_error():
-    decode_only = [{**CONFIG, "worker_type": "decode"}]
+    decode_only = [{**IDENTITY, "worker_type": "decode"}]
 
-    with pytest.raises(
-        ValueError,
-        match=re.escape(
-            "ais_perf_model: no entry for worker type 'aggregated'; it has: decode"
-        ),
-    ):
+    # The loader reports the missing entry, in its own words.
+    with pytest.raises(ValueError):
         create_provider().compile_prediction(
             {**_AIS, "ais_perf_model": decode_only}, _prediction_context()
         )
@@ -720,29 +719,23 @@ def test_written_list_without_router_entry_error():
 
 def test_recommend_written_value_must_cover_searched_modes():
     provider = create_provider()
-    # The texts a prediction of a disaggregated engine gives for these values.
-    no_prefill_entry = (
-        "ais_perf_model: no entry for worker type 'prefill'; it has: aggregated"
-    )
-    other_worker_type = (
-        "ais_perf_model entry: worker_type is 'aggregated' but worker type "
-        "'prefill' was requested"
-    )
 
-    for written, text in (
-        ([AGGREGATED_ENTRY], no_prefill_entry),
-        (AGGREGATED_ENTRY, other_worker_type),
-    ):
-        with pytest.raises(ValueError, match=f"^{re.escape(text)}$"):
+    # A list without a prefill entry, and one config written for another
+    # worker type: a search ends in the error a prediction of a
+    # disaggregated engine gives, which is the loader's.
+    for written in ([AGGREGATED_ENTRY], AGGREGATED_ENTRY):
+        with pytest.raises(ValueError) as recommended:
             provider.compile_recommendation(
                 {**_AIS, "ais_perf_model": written},
                 _recommendation_context("agg", "disagg"),
             )
-        with pytest.raises(ValueError, match=f"^{re.escape(text)}$"):
+        with pytest.raises(ValueError) as predicted:
             provider.compile_prediction(
                 {**_AIS, "ais_perf_model": written},
                 _prediction_context("disaggregated"),
             )
+        assert type(recommended.value) is type(predicted.value)
+        assert str(recommended.value) == str(predicted.value)
 
     provider.compile_recommendation(
         {**_AIS, "ais_perf_model": [AGGREGATED_ENTRY]},
@@ -750,7 +743,7 @@ def test_recommend_written_value_must_cover_searched_modes():
     )
     # One config without a worker type serves every worker type.
     provider.compile_recommendation(
-        {**_AIS, "ais_perf_model": CONFIG},
+        {**_AIS, "ais_perf_model": IDENTITY},
         _recommendation_context("agg", "disagg"),
     )
     provider.compile_recommendation(
@@ -761,10 +754,10 @@ def test_recommend_written_value_must_cover_searched_modes():
 def test_hook_key_and_versions_are_unchanged():
     provider = create_provider()
     predicted = provider.compile_prediction(
-        {**_AIS, "ais_perf_model": CONFIG}, _prediction_context()
+        {**_AIS, "ais_perf_model": IDENTITY}, _prediction_context()
     )
     plan = provider.compile_recommendation(
-        {**_AIS, **_KNOB_CHOICES, "ais_perf_model": CONFIG},
+        {**_AIS, **_KNOB_CHOICES, "ais_perf_model": IDENTITY},
         _recommendation_context(),
     )
     recommended = provider.materialize_candidate(plan, _selection(), _candidate())
@@ -791,11 +784,11 @@ def test_search_space_entry_rejects_key():
 
 def test_search_space_plan_with_ais_candidate_is_unchanged_and_silent(tmp_path):
     provider = create_provider()
-    estimator = {**CONFIG, "worker_type": "aggregated", "systems_paths": ["/first"]}
+    estimator = {**IDENTITY, "worker_type": "aggregated", "systems_paths": ["/first"]}
     timing = {
         "type": "external",
         "provider": "ais",
-        "config": {**CONFIG, "worker_type": "aggregated", **_CAPACITY},
+        "config": {**IDENTITY, "worker_type": "aggregated", **_CAPACITY},
     }
 
     with warnings.catch_warnings():
@@ -822,7 +815,7 @@ def test_search_space_plan_with_ais_candidate_is_unchanged_and_silent(tmp_path):
     assert "ais_perf_model" not in plan.state
     assert _hook_config(from_estimator)["ais_perf_config"] == estimator
     assert _hook_config(from_timing)["ais_perf_config"] == {
-        **CONFIG,
+        **IDENTITY,
         "worker_type": "aggregated",
     }
     request = _hook_config(from_request)["ais_perf_config"]
@@ -845,7 +838,7 @@ def test_absolute_paths_give_same_result_from_any_working_directory(
     systems.mkdir()
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
-    written = {**CONFIG, "systems_paths": [str(systems)]}
+    written = {**IDENTITY, "systems_paths": [str(systems)]}
     results = []
 
     for directory in (tmp_path, elsewhere):

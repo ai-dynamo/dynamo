@@ -12,7 +12,13 @@ import pytest
 import yaml
 
 import dynamo.squeeze_evolve.args as squeeze_evolve_args
-from dynamo.common.tests.configuration.ais_perf_inputs_helpers import (  # noqa: F401 -- no_ais_environment is a fixture
+from dynamo.squeeze_evolve.args import (
+    SqueezeEvolveArgGroup,
+    SqueezeEvolveRunConfig,
+    parse_args,
+)
+from dynamo.squeeze_evolve.orchestrator import parse_tiers
+from tests.utils.ais_perf_model import (
     AIS,
     IDENTITY,
     MODEL,
@@ -20,15 +26,8 @@ from dynamo.common.tests.configuration.ais_perf_inputs_helpers import (  # noqa:
     OLD_FLAT,
     exactly,
     expected,
-    no_ais_environment,
     no_warning,
 )
-from dynamo.squeeze_evolve.args import (
-    SqueezeEvolveArgGroup,
-    SqueezeEvolveRunConfig,
-    parse_args,
-)
-from dynamo.squeeze_evolve.orchestrator import parse_tiers
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -459,6 +458,7 @@ def test_tier_relative_path_starts_at_working_directory(tmp_path, monkeypatch):
     config.validate()
     assert config.ais_perf_kwargs_by_tier() == [expected(worker_type="prefill")]
 
+    # The same config in a folder without the file: the tier is named.
     monkeypatch.chdir(other_dir)
-    with pytest.raises(ValueError, match=r"^--tiers\[0\]: cannot read .*cfg.yaml: "):
+    with pytest.raises(ValueError, match=r"^--tiers\[0\]: "):
         config.validate()

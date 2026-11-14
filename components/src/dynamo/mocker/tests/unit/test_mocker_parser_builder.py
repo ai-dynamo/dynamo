@@ -14,21 +14,15 @@ from dynamo.mocker.args import (
     set_ais_perf_model_attributes,
 )
 from dynamo.mocker.config import old_ais_perf_inputs
+from tests.utils.ais_perf_model import ENV_VAR
 
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
     pytest.mark.parallel,
     pytest.mark.unit,
+    pytest.mark.usefixtures("no_ais_environment"),
 ]
-
-ENV_VAR = "DYN_AIS_PERF_MODEL"
-
-
-@pytest.fixture(autouse=True)
-def no_env_value(monkeypatch):
-    """Keep a value set in the shell that runs the tests out of them."""
-    monkeypatch.delenv(ENV_VAR, raising=False)
 
 
 class RecordingEnviron(dict):

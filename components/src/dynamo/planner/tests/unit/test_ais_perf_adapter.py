@@ -83,22 +83,6 @@ class _FakeCapacity:
         self.eligible = eligible
 
 
-@pytest.fixture
-def fake_engine_factory(monkeypatch):
-    class FakeEngineFactory:
-        next_model = None
-        last_kwargs = None
-
-        @classmethod
-        def best_available(cls, **kwargs):
-            assert cls.next_model is not None
-            cls.last_kwargs = kwargs
-            return cls.next_model
-
-    monkeypatch.setattr(ais_adapter, "AISCoreEnginePerfModel", FakeEngineFactory)
-    return FakeEngineFactory
-
-
 def _install_fake_engine(fake_engine_factory, fake_model: _FakeEngineModel) -> None:
     fake_engine_factory.next_model = fake_model
     fake_engine_factory.last_kwargs = None

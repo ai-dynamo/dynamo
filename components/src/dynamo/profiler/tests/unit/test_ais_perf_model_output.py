@@ -28,6 +28,7 @@ try:
         PlannerConfig,
         PlannerPreDeploymentSweepMode,
     )
+    from dynamo.planner.core.perf_model.ais_adapter import PlannerEnginePerfModel
     from dynamo.profiler import __main__ as profiler_main
     from dynamo.profiler.utils import dgd_generation
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
@@ -39,9 +40,6 @@ try:
     from dynamo.profiler.utils.profile_common import ProfilerOperationalConfig
 except ImportError:
     pytest.skip("dynamo.llm bindings not available", allow_module_level=True)
-
-# Outside the guard: a missing test helper is an error, not a skip.
-from dynamo.planner.tests.ais_engine_stubs import adapter_builder
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -414,10 +412,7 @@ def test_pick_with_pipeline_stages_writes_pp(database_version):
     assert "pp" not in single
 
 
-def test_profiler_built_value_round_trips_and_equals_old_form(
-    database_version, monkeypatch
-):
-    adapter = adapter_builder(monkeypatch)
+def test_profiler_built_value_round_trips_and_equals_old_form(database_version):
     request = _request(_planner("disagg"))
     prefill_pick = PickedParallelConfig(tp=1)
     value = _planner_value(request, prefill_pick, DENSE)
@@ -435,10 +430,17 @@ def test_profiler_built_value_round_trips_and_equals_old_form(
             )
         }
     )
+
+    def planner_entry(config, worker_type):
+        # Without worker limits the Planner's adapter builds no engine model.
+        adapter = PlannerEnginePerfModel(
+            worker_type=worker_type, config=config, capabilities=None
+        )
+        return adapter._configured_role()
+
     for worker_type in WORKERS:
-        assert (
-            adapter(read_back, worker_type)._build_ais_config()
-            == adapter(old_form, worker_type)._build_ais_config()
+        assert planner_entry(read_back, worker_type) == planner_entry(
+            old_form, worker_type
         )
 
 

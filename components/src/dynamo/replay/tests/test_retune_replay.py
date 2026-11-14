@@ -1007,11 +1007,8 @@ def test_sweep_candidate_rejects_pinned_perf_config_of_another_worker_type(
         ais_perf_config=_pinned_router_perf_config("prefill"),
     )
 
-    with pytest.raises(
-        ValueError,
-        match="^router_ais_perf_model: ais_perf_model entry: worker_type is "
-        "'prefill' but worker type 'aggregated' was requested$",
-    ):
+    # After the keyword comes the loader's own text.
+    with pytest.raises(ValueError, match="^router_ais_perf_model: "):
         _evaluate_candidate(engine)
 
     assert calls == []

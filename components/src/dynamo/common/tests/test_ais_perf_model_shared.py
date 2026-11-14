@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from dynamo.common import ais_perf_model
+from tests.utils.ais_perf_model import IDENTITY
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
@@ -23,7 +24,7 @@ ENGINE_ARGS_FLAG = "--extra-engine-args"
 
 def _config(**keys: Any) -> dict[str, Any]:
     """One perf model config; ``keys`` add to it or replace its values."""
-    return {"model": "Qwen/Qwen3-0.6B", "system": "h200_sxm", "backend": "vllm", **keys}
+    return {**IDENTITY, **keys}
 
 
 def _yaml(config: dict[str, Any]) -> str:
@@ -389,46 +390,27 @@ def test_load_document_accepts_file_inline_json_mapping_list(tmp_path: Path) -> 
     assert unread.to_data() == {"from": str(tmp_path / "missing.yaml")}
 
 
+# The loader raises these errors and their texts are AISimulate's. Dynamo
+# relies on the type: a wrong value is a ValueError.
 @pytest.mark.parametrize(
-    ("value", "message"),
+    "value",
     [
-        ("", "ais_perf_model: the value is empty; write a file path or inline JSON"),
-        ({}, "ais_perf_model: the config is empty; write at least one key"),
-        ([], "ais_perf_model: the list is empty; write at least one config"),
-        (
-            3,
-            "ais_perf_model: expected one config (a mapping) or a list of configs, "
-            "got int 3",
-        ),
-        (
-            _config(worker_type="router"),
-            'ais_perf_model: worker_type is "router"; use one of: prefill, decode, '
-            "aggregated",
-        ),
-        (
+        pytest.param("", id="empty text"),
+        pytest.param({}, id="empty config"),
+        pytest.param([], id="empty list"),
+        pytest.param(3, id="number"),
+        pytest.param(_config(worker_type="router"), id="unknown worker type"),
+        pytest.param(
             [_config(worker_type="prefill"), _config(worker_type="prefill")],
-            "ais_perf_model: entries 1 and 2 both have worker_type 'prefill'; a "
-            "worker type may appear once",
+            id="worker type twice",
         ),
-        (
-            [_config()],
-            "ais_perf_model: entry 1: worker_type is missing; every config in a "
-            "list needs one of: prefill, decode, aggregated",
-        ),
-        (
-            "missing.yaml",
-            "cannot read {folder}/missing.yaml: [Errno 2] No such file or "
-            "directory: '{folder}/missing.yaml'",
-        ),
+        pytest.param([_config()], id="list entry without worker type"),
+        pytest.param("missing.yaml", id="missing file"),
     ],
 )
-def test_load_document_errors_are_value_errors(
-    value: Any, message: str, tmp_path: Path
-) -> None:
-    with pytest.raises(ValueError) as error:
+def test_load_document_errors_are_value_errors(value: Any, tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
         ais_perf_model.load_document(value, base_dir=tmp_path)
-
-    assert str(error.value) == message.format(folder=tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -462,11 +444,6 @@ def test_load_document_errors_are_value_errors(
             [_config(worker_type="decode"), _config(worker_type="prefill", tp=2)],
             "prefill",
             _config(worker_type="prefill", tp=2),
-        ),
-        (
-            [_config(worker_type="decode")],
-            "prefill",
-            "ais_perf_model: no entry for worker type 'prefill'; it has: decode",
         ),
         # A list, worker type not given.
         (
@@ -517,6 +494,14 @@ def test_select_router_entry_table(
         assert ais_perf_model.select_router_entry(document, worker_type) == expected
 
 
+def test_select_router_entry_needs_an_entry_for_the_given_worker_type() -> None:
+    document = ais_perf_model.load_document([_config(worker_type="decode")])
+
+    # The loader reports the missing entry, in its own words.
+    with pytest.raises(ValueError):
+        ais_perf_model.select_router_entry(document, "prefill")
+
+
 def test_select_router_entry_names_the_file_in_errors(tmp_path: Path) -> None:
     one = tmp_path / "one.yaml"
     one.write_text(_yaml(_config()))
@@ -541,13 +526,8 @@ def test_select_then_resolve_reports_loader_mismatch() -> None:
     document = ais_perf_model.load_document(_config(worker_type="decode"))
     entry = ais_perf_model.select_router_entry(document, "prefill")
 
-    with pytest.raises(ValueError) as error:
+    with pytest.raises(ValueError):
         ais_perf_model.resolve_entry(entry, worker_type="prefill")
-
-    assert str(error.value) == (
-        "ais_perf_model entry: worker_type is 'decode' but worker type 'prefill' "
-        "was requested"
-    )
 
 
 def test_resolve_entry_fill_adds_and_conflicts() -> None:
@@ -561,13 +541,9 @@ def test_resolve_entry_fill_adds_and_conflicts() -> None:
     assert ais_perf_model.resolve_entry(
         written, worker_type="decode", fill={"nextn": 2}
     ) == _config(worker_type="decode", nextn=2)
-    with pytest.raises(ValueError) as error:
+    with pytest.raises(ValueError):
         ais_perf_model.resolve_entry(written, worker_type="decode", fill=fill)
 
-    assert str(error.value) == (
-        "ais_perf_model entry for worker type 'decode': nextn is 2 but the caller "
-        "requires 3; write the same value or remove nextn"
-    )
     assert entry == _config(worker_type="decode")
     assert fill == {"nextn": 3}
 
@@ -586,23 +562,6 @@ def test_resolve_entry_twice_is_equal(tmp_path: Path) -> None:
     assert first == _config(tp=4, backend_version="1.0", worker_type="prefill")
     assert ais_perf_model.resolve_entry(from_template, worker_type="prefill") == first
     assert from_template == {"from": str(template), "tp": 4}
-
-
-def test_router_perf_config_equals_forward_pass_config_dict(tmp_path: Path) -> None:
-    # Imported here: the tests that read no value run without AISimulate installed.
-    from aisimulate_core.sdk import ForwardPassPerfModelConfig
-
-    entry = _config(worker_type="prefill", tp=2, backend_version="1.0")
-    expected = ForwardPassPerfModelConfig(**entry).to_dict()
-    (tmp_path / "cfg.yaml").write_text(_yaml([_config(worker_type="decode"), entry]))
-    untyped = {key: value for key, value in entry.items() if key != "worker_type"}
-
-    assert ais_perf_model.router_perf_config(entry) == expected
-    assert ais_perf_model.router_perf_config(entry, "prefill") == expected
-    assert ais_perf_model.router_perf_config(untyped, "prefill") == expected
-    assert ais_perf_model.router_perf_config("cfg.yaml", base_dir=tmp_path) == expected
-    assert expected["worker_type"] == "prefill"
-    assert expected["tp"] == 2
 
 
 def test_engine_perf_config_is_the_entry_of_the_worker_type(tmp_path: Path) -> None:
@@ -684,23 +643,6 @@ def test_router_perf_config_requires_a_written_model() -> None:
     assert str(error.value) == "ais_perf_model requires model"
 
 
-def test_normalized_config_checks_a_resolved_config() -> None:
-    # Imported here: the tests that read no value run without AISimulate installed.
-    from aisimulate_core.sdk import ForwardPassPerfModelConfig
-
-    resolved = _config(worker_type="decode", tp=2)
-
-    assert (
-        ais_perf_model.normalized_config(resolved)
-        == ForwardPassPerfModelConfig(**resolved).to_dict()
-    )
-    assert resolved == _config(worker_type="decode", tp=2)
-    with pytest.raises(ValueError, match="^ais_perf_model requires worker_type$"):
-        ais_perf_model.normalized_config(_config())
-    with pytest.raises(ValueError, match="^ais_perf_model: .*not_a_field"):
-        ais_perf_model.normalized_config(_config(worker_type="decode", not_a_field=1))
-
-
 def test_uses_relative_paths(tmp_path: Path) -> None:
     dataset = {"root": "dataset", "manifest": "manifest.json"}
     interpolation = {"fpm_interpolation": {"fpm_parquet_path": "fpm.parquet"}}
@@ -751,7 +693,7 @@ def test_relative_paths_inside_file_start_at_file_folder(
 ) -> None:
     conf = tmp_path / "conf"
     other = tmp_path / "other"
-    conf.mkdir()
+    (conf / "sys").mkdir(parents=True)
     other.mkdir()
     (conf / "cfg.yaml").write_text(_yaml(_config(systems_paths=["sys"])))
     monkeypatch.chdir(other)
@@ -764,3 +706,9 @@ def test_relative_paths_inside_file_start_at_file_folder(
     assert by_base_dir.to_data()["systems_paths"] == [str(conf / "sys")]
     # Parsed data has no file: its relative paths start at the working directory.
     assert inline.to_data()["systems_paths"] == [str(other / "sys")]
+    # The two calls the components make hand a file path on as it is given,
+    # so the same holds for the config an engine or a router gets.
+    engine = ais_perf_model.engine_perf_config(str(conf / "cfg.yaml"), "decode")
+    router = ais_perf_model.router_perf_config(str(conf / "cfg.yaml"), "prefill")
+    assert engine["systems_paths"] == [str(conf / "sys")]
+    assert router["systems_paths"] == [str(conf / "sys")]

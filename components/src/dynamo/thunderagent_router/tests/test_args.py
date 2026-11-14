@@ -13,14 +13,9 @@ import pytest
 
 import dynamo.router.args as router_args
 import dynamo.thunderagent_router.args as thunderagent_router_args
-from dynamo.common.tests.configuration.ais_perf_inputs_helpers import (  # noqa: F401 -- no_ais_environment is a fixture
-    AIS,
-    IDENTITY,
-    expected,
-    no_ais_environment,
-)
 from dynamo.thunderagent_router.__main__ import _publish_sglang_generate_capability
 from dynamo.thunderagent_router.args import build_ais_perf_config, parse_args
+from tests.utils.ais_perf_model import AIS, IDENTITY, expected
 
 pytestmark = [
     pytest.mark.pre_merge,
