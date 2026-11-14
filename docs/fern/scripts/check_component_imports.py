@@ -59,10 +59,10 @@ no-op — exactly the failure the paragraph above warns about.
 then reconcile SPECIFIER, ALLOWLIST and SUFFIXES with what those print, and
 move DERIVED_FROM_FERN only once they agree.
 
-Checked against 5.92.0, twelve minor releases past the pin: all three values
-are unchanged. The regex is byte-identical to SPECIFIER below. So a bump is
-normally a verification rather than a rewrite, and the constant should still
-not move until someone has actually run the greps.
+Checked against 5.92.0 and re-derived at 5.216.0: all three values are
+unchanged since 5.80.2. The regex is byte-identical to SPECIFIER below. So a
+bump is normally a verification rather than a rewrite, and the constant should
+still not move until someone has actually run the greps.
 
 If a component ever genuinely needs a third-party dependency, this check has to
 be revisited alongside a package.json and node_modules for the docs project,
@@ -88,7 +88,7 @@ FERN_CONFIG = FERN_ROOT / "fern.config.json"
 SUFFIXES = {".js", ".jsx", ".ts", ".tsx"}
 
 # The fern-api release SPECIFIER and ALLOWLIST were transcribed from.
-DERIVED_FROM_FERN = "5.80.2"
+DERIVED_FROM_FERN = "5.216.0"
 
 # Ported from fern-api's cli.cjs. Both character classes below spell out ASCII
 # explicitly instead of using \w under re.ASCII, because that flag is not
