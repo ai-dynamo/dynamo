@@ -33,14 +33,9 @@ func TestNativeSidecarBackendFramework(t *testing.T) {
 		want     BackendFramework
 		wantErr  string
 	}{
-		{name: "vllm with runtime image entrypoint", engine: []string{"vllm-rs"}, want: BackendFrameworkVLLM},
-		{name: "native vllm executable", engine: []string{"vllm-rs"}, command: []string{"dynamo-vllm-sidecar"}, want: BackendFrameworkVLLM},
-		{name: "wrapped runtime does not change engine backend", engine: []string{"vllm-rs"}, command: []string{"/bin/sh", "-c", "exec dynamo-vllm-sidecar"}, want: BackendFrameworkVLLM},
-		{name: "native launch conflicts with explicit backend", engine: []string{"vllm-rs"}, command: []string{"dynamo-vllm-sidecar"}, explicit: "sglang", wantErr: "backend framework mismatch"},
-		{name: "sglang", engine: []string{"python3", "-m", "dynamo.sglang"}, want: BackendFrameworkSGLang},
-		{name: "trtllm", engine: []string{"python3", "-m", "dynamo.trtllm"}, want: BackendFrameworkTRTLLM},
-		{name: "conflicting explicit backend", engine: []string{"vllm-rs"}, explicit: "sglang", wantErr: "backend framework mismatch"},
-		{name: "opaque engine uses explicit backend", command: []string{"dynamo-vllm-sidecar"}, explicit: "sglang", want: BackendFrameworkSGLang},
+		{name: "native engine command is not inferred", engine: []string{"vllm-rs"}, command: []string{"dynamo-vllm-sidecar"}, want: BackendFrameworkNoop},
+		{name: "native engine uses explicit backend", engine: []string{"vllm-rs"}, command: []string{"dynamo-vllm-sidecar"}, explicit: "vllm", want: BackendFrameworkVLLM},
+		{name: "launcher is detected beside a runtime sidecar", engine: []string{"python3", "-m", "dynamo.sglang"}, command: []string{"dynamo-sglang-sidecar"}, want: BackendFrameworkSGLang},
 		{name: "opaque engine cannot inherit runtime backend", command: []string{"dynamo-vllm-sidecar"}, want: BackendFrameworkNoop},
 	}
 	for _, tc := range cases {
@@ -78,21 +73,19 @@ func TestNativeSidecarBackendFramework(t *testing.T) {
 	}
 }
 
-// TestNativeSidecarCompilationCacheBackendDetection applies inferred vLLM cache
-// defaults to the engine in both graph and standalone component rendering.
-func TestNativeSidecarCompilationCacheBackendDetection(t *testing.T) {
+// TestNativeSidecarCompilationCacheExplicitBackend applies the explicit vLLM
+// cache defaults to the engine in both graph and standalone component rendering.
+func TestNativeSidecarCompilationCacheExplicitBackend(t *testing.T) {
 	for _, tc := range []struct {
 		name, mountPath string
 		command         []string
 	}{
 		{name: "default mount", command: []string{"dynamo-vllm-sidecar"}},
 		{name: "explicit mount", mountPath: "/cache", command: []string{"dynamo-vllm-sidecar"}},
-		{name: "runtime shell wrapper", mountPath: "/cache", command: []string{"bash", "-ec", "exec dynamo-vllm-sidecar"}},
-		{name: "runtime image entrypoint", mountPath: "/cache"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mountPath := tc.mountPath
-			t.Log("Configure a vLLM sidecar without an explicit backend")
+			t.Log("Configure a native vLLM engine sidecar with an explicit backend")
 			component := v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
 				CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "cache", MountPath: mountPath},
@@ -103,31 +96,21 @@ func TestNativeSidecarCompilationCacheBackendDetection(t *testing.T) {
 			}
 			dgd := &v1beta1.DynamoGraphDeployment{
 				Name: "test", Namespace: "test",
-				Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}},
 			}
 			original := dgd.DeepCopy()
 
-			t.Log("Materialize a graph child with the inferred engine backend")
+			t.Log("Materialize a graph child with the explicit engine backend")
 			children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
 			require.NoError(t, err)
 			require.Len(t, children, 1)
 			require.Equal(t, string(BackendFrameworkVLLM), children["worker"].Spec.BackendFramework)
 			require.Equal(t, original, dgd)
 
-			t.Log("Verify inferred and explicit vLLM produce the same worker generation")
-			inferredHash, err := ComputeDGDWorkersSpecHash(dgd)
-			require.NoError(t, err)
-			explicit := dgd.DeepCopy()
-			explicit.Spec.BackendFramework = "vllm"
-			explicitHash, err := ComputeDGDWorkersSpecHash(explicit)
-			require.NoError(t, err)
-			require.Equal(t, explicitHash, inferredHash)
-			require.Equal(t, original, dgd)
-
-			t.Log("Render an independent standalone DCD so graph inference cannot mask controller detection")
+			t.Log("Render an independent standalone DCD with the same explicit backend")
 			dcd := &v1beta1.DynamoComponentDeployment{
 				Name: "worker", Namespace: "test",
-				Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: component},
+				Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: component, BackendFramework: "vllm"},
 			}
 			originalDCD := dcd.DeepCopy()
 			backend, err := GetBackendFrameworkFromDynamoComponent(dcd)

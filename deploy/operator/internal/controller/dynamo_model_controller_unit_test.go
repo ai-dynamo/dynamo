@@ -120,7 +120,9 @@ func TestWithPodIdentityFillsSharedModelSliceMetadata(t *testing.T) {
 }
 
 // TestWithPodIdentityClassifiesNativeSidecarLoRAFallback uses the engine
-// launch independently of the runtime to decide whether prefill fallback is supported.
+// launch independently of the runtime to decide whether prefill fallback is
+// supported. Only Dynamo launchers are detected; native engine commands such as
+// vllm-rs stay undetected (#15463, #17543).
 func TestWithPodIdentityClassifiesNativeSidecarLoRAFallback(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -128,9 +130,8 @@ func TestWithPodIdentityClassifiesNativeSidecarLoRAFallback(t *testing.T) {
 		engine  []string
 		allow   bool
 	}{
-		{name: "native vLLM prefill", engine: []string{"vllm-rs"}, command: []string{"dynamo-vllm-sidecar"}, allow: true},
-		{name: "wrapped runtime", engine: []string{"vllm-rs"}, command: []string{"sh", "-c", "exec dynamo-vllm-sidecar"}, allow: true},
-		{name: "runtime image entrypoint", engine: []string{"vllm-rs"}, allow: true},
+		{name: "vLLM launcher prefill", engine: []string{"python3", "-m", "dynamo.vllm"}, command: []string{"dynamo-vllm-sidecar"}, allow: true},
+		{name: "native vLLM engine is not detected", engine: []string{"vllm-rs"}, command: []string{"dynamo-vllm-sidecar"}},
 		{name: "SGLang engine", engine: []string{"python3", "-m", "dynamo.sglang"}, command: []string{"dynamo-vllm-sidecar"}},
 		{name: "opaque engine", command: []string{"dynamo-vllm-sidecar"}},
 	}

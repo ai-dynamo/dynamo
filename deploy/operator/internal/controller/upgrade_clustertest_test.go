@@ -60,7 +60,12 @@ func prepareUpgradeHistory(ctx context.Context, c client.Client) (func(context.C
 	if len(inputs) == 0 {
 		return nil, fmt.Errorf("no historical inputs")
 	}
-	inputs = append(inputs, upgradeMissingOriginInput)
+	// Compatibility snapshots are seeded with history, before current admission starts.
+	compatibility, err := upgradeInputs("compatibility")
+	if err != nil {
+		return nil, err
+	}
+	inputs = append(inputs, compatibility...)
 	snapshots := map[string][]unstructured.Unstructured{}
 	for _, input := range inputs {
 		objects, err := golden.ReadManifests(input)
@@ -112,6 +117,27 @@ func captureUpgrade(t *testing.T, env *clusterenv.TestEnv) []unstructured.Unstru
 	objects, err := golden.CaptureOwned(t.Context(), env.RESTConfig(), env.Client(), dgd)
 	require.NoError(t, err)
 	return objects
+}
+
+// snapshotBaseline returns the seeded snapshot objects with the live UID and
+// generation, so safety comparisons keep historical fields even if the
+// candidate API schema normalizes them on its first read.
+func snapshotBaseline(t *testing.T, snapshot, live []unstructured.Unstructured) []unstructured.Unstructured {
+	t.Helper()
+	ids := map[string]unstructured.Unstructured{}
+	for _, object := range live {
+		ids[object.GetKind()+"/"+object.GetName()] = object
+	}
+	before := make([]unstructured.Unstructured, 0, len(snapshot))
+	for _, object := range snapshot {
+		old := object.DeepCopy()
+		restored, ok := ids[old.GetKind()+"/"+old.GetName()]
+		require.True(t, ok, "seeded object %s/%s missing from the live graph", old.GetKind(), old.GetName())
+		old.SetUID(restored.GetUID())
+		old.SetGeneration(restored.GetGeneration())
+		before = append(before, *old)
+	}
+	return before
 }
 
 // Capture a graph only if no candidate child call overlapped the API reads.
@@ -234,21 +260,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 				}
 				before := captureUpgrade(t, env)
 				if isHistory {
-					// Preserve historical fields for safety comparisons even if the
-					// candidate API schema normalizes them on its first read.
-					ids := map[string]unstructured.Unstructured{}
-					for _, object := range before {
-						ids[object.GetKind()+"/"+object.GetName()] = object
-					}
-					before = nil
-					for _, object := range objects {
-						old := object.DeepCopy()
-						restored, ok := ids[old.GetKind()+"/"+old.GetName()]
-						require.True(t, ok)
-						old.SetUID(restored.GetUID())
-						old.SetGeneration(restored.GetGeneration())
-						before = append(before, *old)
-					}
+					before = snapshotBaseline(t, objects, before)
 				}
 				dgd := getOnlyClusterDGD(t, ctx, env.Client(), namespace)
 				rollout := newDGDWorkerRolloutReconciler(env.Client(), nil)
@@ -389,7 +401,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 
 	t.Run("component-history-barrier", testUpgradeComponentHistoryBarrier)
 	t.Run("disaggregatedset-replay", testUpgradeDisaggregatedSetReplay)
-	t.Run("missing-origin", testUpgradeMissingOrigin)
+	runUpgradeCompatibilityScenarios(t)
 }
 
 // Upgrade capture and replay use the same version source as production admission.

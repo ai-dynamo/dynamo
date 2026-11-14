@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: workers
+  namespace: upgrade-compatibility-frontend-sidecar-probes
+  annotations:
+    nvidia.com/enable-grove: 'true'
+spec:
+  backendFramework: vllm
+  components:
+  - name: frontend
+    type: frontend
+    replicas: 1
+    minAvailable: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.0
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.frontend
+  - name: worker
+    type: worker
+    replicas: 2
+    minAvailable: 1
+    frontendSidecar: sidecar-frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+        - name: sidecar-frontend
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+          args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - direct
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: http
+            periodSeconds: 30

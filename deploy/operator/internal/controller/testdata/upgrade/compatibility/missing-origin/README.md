@@ -38,7 +38,7 @@ envtest Kubernetes binaries:
 
 ```bash
 KUBEBUILDER_ASSETS=/absolute/path/to/envtest/binaries \
-  python3 deploy/operator/hack/capture_missing_origin.py --output /new/staging/directory
+  python3 deploy/operator/hack/capture_compatibility.py missing-origin --output /new/staging/directory
 ```
 
 Review bootstrap captures and their provenance before initializing this fixture.
@@ -46,6 +46,7 @@ Subsequent advancement uses the normal released-controller regeneration command.
 CI reads the committed snapshot and does not fetch or execute old releases.
 `TestClusterOperatorUpgrade/missing-origin` uses the shared permissive historical
 seeding phase before current admission. It checks independent takeover safety,
+compares the complete owned graph with the reviewed `output.yaml`,
 rejects an invented origin through the safety assertion, and verifies an intentional
 worker edit reaches the requested immediate Grove workload generation while origin
 stays absent. The final bootstrap export and release advancement both use Go

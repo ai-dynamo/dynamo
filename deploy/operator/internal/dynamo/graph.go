@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"maps"
-	"path"
 	"regexp"
 	"slices"
 	"sort"
@@ -2203,14 +2202,18 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		base.Env = MergeEnvs(baseEnv, user.Env)
 
 		// Replace complete probes so handlers cannot merge with the defaults.
-		if user.LivenessProbe != nil {
-			base.LivenessProbe = user.LivenessProbe.DeepCopy()
-		}
-		if user.ReadinessProbe != nil {
-			base.ReadinessProbe = user.ReadinessProbe.DeepCopy()
-		}
-		if user.StartupProbe != nil {
-			base.StartupProbe = user.StartupProbe.DeepCopy()
+		// Workloads created before operator 1.7.0 keep the field merge above so an
+		// operator-only upgrade does not change their rendered probes.
+		if compatibility.FrontendSidecarProbeReplacement.Enabled(parentContext.Annotations) {
+			if user.LivenessProbe != nil {
+				base.LivenessProbe = user.LivenessProbe.DeepCopy()
+			}
+			if user.ReadinessProbe != nil {
+				base.ReadinessProbe = user.ReadinessProbe.DeepCopy()
+			}
+			if user.StartupProbe != nil {
+				base.StartupProbe = user.StartupProbe.DeepCopy()
+			}
 		}
 
 		base.VolumeMounts = appendMissingVolumeMounts(base.VolumeMounts, parentMounts)
@@ -3322,14 +3325,12 @@ func GetDGDPreservedAlphaPVCs(dgd *v1beta1.DynamoGraphDeployment) []v1alpha1.PVC
 	return append([]v1alpha1.PVC(nil), alpha.Spec.PVCs...)
 }
 
-// DetectBackendFrameworkFromArgs detects the backend framework from command/args.
+// DetectBackendFrameworkFromArgs detects the backend framework from the Dynamo
+// launcher in command/args. Native engine commands such as vllm-rs are not
+// detected: the resolved backend is persisted on the child DCD and hashed into
+// the worker generation, so a new launcher heuristic would roll existing
+// workloads (#17543). Native engines set backendFramework explicitly.
 func DetectBackendFrameworkFromArgs(command []string, args []string) (BackendFramework, error) {
-	// Kubernetes command is argv, not shell source. Wrapped native launches
-	// require an explicit backendFramework rather than shell interpretation.
-	if len(command) > 0 && !strings.Contains(command[0], "$(") && path.Base(command[0]) == "vllm-rs" {
-		return BackendFrameworkVLLM, nil
-	}
-
 	// Combine command and args to search through all parts
 	allParts := slices.Concat(command, args)
 	fullCommand := strings.Join(allParts, " ")
