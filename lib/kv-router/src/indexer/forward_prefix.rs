@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::sync::Arc;
 
 use super::hybrid_prefix::HybridPrefixEvaluator;
+use super::kv_cache_groups::{CheckpointWorkerSet, CheckpointWorkers};
 use super::{KvCacheGroupResidency, MatchDetails, MatchEdge, MatchFirstEdge, MatchObserver};
 use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
@@ -22,8 +22,8 @@ impl Checkpoint {
     };
 }
 
-struct SharedCheckpoint {
-    workers: Arc<FxHashSet<WorkerWithDpRank>>,
+struct CurrentCheckpoint {
+    workers: CheckpointWorkerSet,
     latest: Checkpoint,
 }
 
@@ -46,14 +46,15 @@ impl ForwardOverride {
 }
 
 /// Consume current checkpoint worker sets during the forward attention walk.
-/// Each observed set is read under its own record lock. Like attention coverage,
-/// accumulated results are best-effort during concurrent updates.
+/// Presence reads use a directory shard guard; subsequent matching uses owned
+/// query-local sets. Like attention coverage, accumulated results are best-effort
+/// during concurrent updates.
 pub(crate) struct ForwardDeviceEvaluator<'a> {
     residency: &'a KvCacheGroupResidency,
     legacy: Option<Box<HybridPrefixEvaluator>>,
     view: Option<super::kv_cache_groups::KnownWorkerRead>,
     max_blocks: usize,
-    current: Option<SharedCheckpoint>,
+    current: Option<CurrentCheckpoint>,
     overrides: FxHashMap<WorkerWithDpRank, ForwardOverride>,
     cutoffs: Vec<(usize, WorkerWithDpRank)>,
     needs_checkpoints: bool,
@@ -137,7 +138,7 @@ impl<'a> ForwardDeviceEvaluator<'a> {
 
     fn transition_worker(
         overrides: &mut FxHashMap<WorkerWithDpRank, ForwardOverride>,
-        previous: &SharedCheckpoint,
+        previous: &CurrentCheckpoint,
         next: &FxHashSet<WorkerWithDpRank>,
         worker: WorkerWithDpRank,
     ) {
@@ -214,20 +215,30 @@ impl<'a> ForwardDeviceEvaluator<'a> {
         let overrides = &mut self.overrides;
         let default_cap_hint = &mut self.default_cap_hint;
         let majority = self.candidate_count.div_ceil(2);
-        self.residency.with_checkpoint_workers(hash, |workers| {
+        if let Some(update) = self
+            .residency
+            .checkpoint_workers_since(hash, current.as_ref().map(|current| &current.workers))
+        {
             let point = Checkpoint { position, hash };
+            let workers = match update {
+                CheckpointWorkers::Unchanged => {
+                    let previous = current
+                        .as_mut()
+                        .expect("unchanged membership requires a previous checkpoint");
+                    if previous.workers.len() >= majority {
+                        *default_cap_hint = position as u32;
+                    }
+                    previous.latest = point;
+                    return;
+                }
+                CheckpointWorkers::Changed(workers) => workers,
+            };
             if workers.len() >= majority {
                 *default_cap_hint = position as u32;
             }
-            if let Some(previous) = current.as_mut()
-                && (Arc::ptr_eq(&previous.workers, workers) || previous.workers == *workers)
-            {
-                previous.latest = point;
-                return;
-            }
             if let Some(previous) = current.as_ref() {
                 let mut visit =
-                    |worker| Self::transition_worker(overrides, previous, workers, worker);
+                    |worker| Self::transition_worker(overrides, previous, &workers, worker);
                 if let Some(edge) = coverage {
                     let candidates = if edge.first_node {
                         edge.full_workers.len() + edge.worker_cutoffs.len()
@@ -249,11 +260,11 @@ impl<'a> ForwardDeviceEvaluator<'a> {
                     }
                 }
             }
-            *current = Some(SharedCheckpoint {
-                workers: workers.clone(),
+            *current = Some(CurrentCheckpoint {
+                workers,
                 latest: point,
             });
-        });
+        }
     }
 
     fn bounded_point(&self, worker: WorkerWithDpRank, raw_end: u32) -> Option<Checkpoint> {
@@ -533,6 +544,32 @@ mod tests {
         assert_eq!(raw.hybrid_resume_caps.get(&known), Some(&1));
         assert_eq!(raw.hybrid_resume_caps.get(&unknown), None);
         assert_eq!(raw.overlap_scores.scores.get(&unknown), Some(&1));
+    }
+
+    #[test]
+    fn owned_checkpoint_sets_preserve_equal_sized_changes_and_missing_boundaries() {
+        let table = KvCacheGroupResidency::new();
+        let first = WorkerWithDpRank::new(1, 0);
+        let second = WorkerWithDpRank::new(1, 1);
+        for worker in [first, second] {
+            table.declare_groups(ResidencyOwner::worker(worker), &[0]);
+        }
+        store_device_checkpoint(&table, first, 1, 1);
+        store_device_checkpoint(&table, first, 2, 1);
+        // B3 is absent; B4 has the same count but a different DP rank.
+        store_device_checkpoint(&table, second, 4, 1);
+        store_device_checkpoint(&table, second, 5, 1);
+        let raw = raw_device([(first, 6), (second, 6)].into_iter());
+        let (actual, expected) = forward_and_legacy(&table, &raw, None, 6);
+        assert_forward_parity(&actual, &expected);
+        for (worker, position) in [(first, 2), (second, 5)] {
+            assert_eq!(actual.overlap_scores.scores.get(&worker), Some(&position));
+            assert_eq!(actual.hybrid_resume_caps.get(&worker), Some(&position));
+            assert_eq!(
+                actual.last_matched_hashes.get(&worker),
+                Some(&ExternalSequenceBlockHash(u64::from(position)))
+            );
+        }
     }
 
     #[test]
