@@ -120,6 +120,10 @@ const DEFAULT_SYSTEM_LIVE_PATH: &str = "/live";
 pub const DEFAULT_CANARY_WAIT_TIME_SECS: u64 = 10;
 /// Default timeout for individual health check requests
 pub const DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS: u64 = 3;
+/// How long a BUSY endpoint (requests in flight) may go without any observed progress —
+/// a streamed chunk, a completed request or an engine forward pass — before it is marked
+/// NotReady. Busy endpoints are not probed with a canary; this budget replaces it.
+pub const DEFAULT_HEALTH_CHECK_BUSY_STALL_SECS: u64 = 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerConfig {
@@ -273,6 +277,12 @@ pub struct RuntimeConfig {
     #[builder(default = "DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub health_check_request_timeout_secs: u64,
+
+    /// Busy-endpoint stall budget in seconds (no observed progress while requests are in flight)
+    /// Set this at runtime with environment variable DYN_HEALTH_CHECK_BUSY_STALL
+    #[builder(default = "DEFAULT_HEALTH_CHECK_BUSY_STALL_SECS")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub health_check_busy_stall_secs: u64,
 }
 
 impl fmt::Display for RuntimeConfig {
@@ -304,6 +314,11 @@ impl fmt::Display for RuntimeConfig {
             f,
             ", health_check_request_timeout_secs={}",
             self.health_check_request_timeout_secs
+        )?;
+        write!(
+            f,
+            ", health_check_busy_stall_secs={}",
+            self.health_check_busy_stall_secs
         )?;
 
         Ok(())
@@ -375,6 +390,7 @@ impl RuntimeConfig {
                         let mapped_key = match k.as_str() {
                             "ENABLED" => "health_check_enabled",
                             "REQUEST_TIMEOUT" => "health_check_request_timeout_secs",
+                            "BUSY_STALL" => "health_check_busy_stall_secs",
                             _ => k.as_str(),
                         };
                         Some(mapped_key.into())
@@ -462,6 +478,7 @@ impl RuntimeConfig {
             health_check_enabled: false,
             canary_wait_time_secs: DEFAULT_CANARY_WAIT_TIME_SECS,
             health_check_request_timeout_secs: DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS,
+            health_check_busy_stall_secs: DEFAULT_HEALTH_CHECK_BUSY_STALL_SECS,
         }
     }
 
@@ -516,6 +533,7 @@ impl Default for RuntimeConfig {
             health_check_enabled: false,
             canary_wait_time_secs: DEFAULT_CANARY_WAIT_TIME_SECS,
             health_check_request_timeout_secs: DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS,
+            health_check_busy_stall_secs: DEFAULT_HEALTH_CHECK_BUSY_STALL_SECS,
         }
     }
 }
