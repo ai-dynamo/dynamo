@@ -84,6 +84,19 @@ impl HasTokenIds for LLMEngineOutput {
     }
 }
 
+/// Rebuilds a request whose engine-native format owns state the canonical
+/// fields do not carry, such as a `/generate` body's own token budget.
+pub(crate) trait RequestContinuation: Send + Sync {
+    /// Update the engine-native body for the attempt after `delivered_tokens`
+    /// generated tokens, once the canonical fields have been rebased; `Err`
+    /// says why the request cannot continue.
+    fn next_attempt(
+        &self,
+        delivered_tokens: usize,
+        request: &mut PreprocessedRequest,
+    ) -> Result<(), String>;
+}
+
 /// A classifier decision is terminal even when its client-visible error type
 /// would normally identify a retryable worker failure.
 #[derive(Debug, thiserror::Error)]
@@ -542,6 +555,12 @@ where
             }
             retries_left = 0;
         }
+        if let Some(Err(reason)) = &preprocessed_request.continuation {
+            if retries_left > 0 {
+                tracing::debug!(%reason, "Generate request: migration disabled by its format");
+            }
+            retries_left = 0;
+        }
         if has_generation_artifact(&preprocessed_request) {
             if retries_left > 0 {
                 tracing::warn!(
@@ -698,6 +717,20 @@ where
             return Err(error);
         }
         while let Some(attempt) = self.attempts.take() {
+            if attempt > 0
+                && let Some(Ok(continuation)) = self.request.continuation.clone()
+                && let Err(reason) =
+                    continuation.next_attempt(self.completed_tokens, &mut self.request)
+            {
+                self.pending_migration = None;
+                self.record_migration_outcome(
+                    migration_event.as_ref(),
+                    frontend_service::migration_outcome::FAILURE,
+                );
+                let error = Error::msg(format!("request cannot migrate: {reason}"));
+                self.abort_request_lifecycle(error.as_ref());
+                return Err(error);
+            }
             // Once any chunks have arrived from a previous attempt, stamp
             // that worker's span as `migration_link` so the next worker's
             // span renders an OTel Link back to it. Guarded so the initial
