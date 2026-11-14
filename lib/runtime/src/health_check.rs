@@ -423,7 +423,6 @@ mod tests {
         progress
     }
 
-    /// Wait on a check that is never answered. Returns how long the wait lasted.
     async fn unanswered(progress: &Notify) -> Duration {
         let start = Instant::now();
         let check = std::future::pending::<()>();
