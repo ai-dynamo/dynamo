@@ -17,7 +17,9 @@
 
 import asyncio
 import base64
+import errno
 import logging
+import struct
 from io import BytesIO
 from unittest.mock import AsyncMock, patch
 from urllib.parse import quote
@@ -363,6 +365,7 @@ async def test_http_failure_logs_redact_reference(
         "status": 503,
         "timeout": 408,
         "connection": 400,
+        "decode": 400,
         "unsupported": 415,
     }.get(failure)
     if expected_status is not None:
@@ -378,7 +381,7 @@ async def test_http_failure_logs_redact_reference(
 
     if expected_status is not None:
         assert exc_info.value.status == expected_status
-    if failure in errors and failure not in ("timeout", "connection"):
+    if failure in errors and failure not in ("timeout", "connection", "decode"):
         assert exc_info.value is errors[failure]
     fetch.assert_awaited_once()
     assert fetch.await_args.args[0] == url
@@ -978,26 +981,66 @@ async def test_truncated_data_url_batch_raises_400(loader: ImageLoader, caplog) 
 async def test_unexpected_http_decoder_error_not_wrapped_as_value_error(
     loader: ImageLoader,
 ) -> None:
-    """An unexpected decoder failure on a fetched image must not be
-    classified as a client validation error: it propagates unchanged
-    from load_image and the batch path folds it into a generic Exception,
-    so the frontend answers 500, not 400.
+    """Host resource exhaustion while decoding a fetched image must not be
+    classified as a client error: it propagates unchanged from load_image
+    and the batch path folds it into a generic Exception, so the frontend
+    answers 500, not 400.
     """
     loader._open_image = AsyncMock(  # type: ignore[method-assign]
-        side_effect=OSError("image file is truncated")
+        side_effect=OSError(errno.EMFILE, "Too many open files")
     )
     mock_fetch = _mock_fetch_bytes()
 
     with patch(_FETCH_BYTES_PATH, mock_fetch):
-        with pytest.raises(OSError, match="truncated"):
+        with pytest.raises(OSError, match="Too many open files"):
             await loader.load_image("https://example.com/img.png")
 
         with pytest.raises(Exception) as exc_info:
             await loader.load_image_batch(
                 [{URL_VARIANT_KEY: "https://example.com/img.png"}]
             )
-    assert not isinstance(exc_info.value, ValueError)
-    assert "truncated" in str(exc_info.value)
+    assert not isinstance(exc_info.value, (ValueError, HttpStatusError))
+    assert "Too many open files" in str(exc_info.value)
+
+
+def _truncated_jpeg_bytes() -> bytes:
+    """Pillow identifies these bytes, then raises OSError while decoding."""
+    buf = BytesIO()
+    Image.new("RGB", (64, 64), color="red").save(buf, format="JPEG")
+    return buf.getvalue()[:-20]
+
+
+def _broken_png_chunk_bytes() -> bytes:
+    """A short IDAT length makes Pillow read a chunk header from inside the
+    image data, so decoding raises SyntaxError ("broken PNG file")."""
+    idat = PNG_BYTES.find(b"IDAT")
+    (length,) = struct.unpack(">I", PNG_BYTES[idat - 4 : idat])
+    return PNG_BYTES[: idat - 4] + struct.pack(">I", length - 8) + PNG_BYTES[idat:]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [_truncated_jpeg_bytes(), _broken_png_chunk_bytes()],
+    ids=["truncated_jpeg", "broken_png_chunk"],
+)
+async def test_corrupt_http_image_raises_400(
+    loader: ImageLoader, content: bytes
+) -> None:
+    """A fetched image that Pillow identifies but cannot decode is malformed
+    client input, as for the same bytes in a data: URL: both load_image and
+    the batch path raise 400."""
+    with patch(_FETCH_BYTES_PATH, _mock_fetch_bytes(content=content)):
+        with pytest.raises(HttpStatusError) as exc_info:
+            await loader.load_image("https://example.com/img")
+        assert exc_info.value.status == 400
+        assert exc_info.value.message == "Invalid or truncated image data"
+
+        with pytest.raises(HttpStatusError) as exc_info:
+            await loader.load_image_batch(
+                [{URL_VARIANT_KEY: "https://example.com/img"}]
+            )
+        assert exc_info.value.status == 400
+        assert exc_info.value.message == "Invalid or truncated image data"
 
 
 async def test_cache_is_lru_not_fifo(loader: ImageLoader) -> None:

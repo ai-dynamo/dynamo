@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import errno
 import hashlib
 import logging
 import os
@@ -325,11 +326,29 @@ class ImageLoader:
                     raise ValueError("Empty response content from image URL")
                 image_data = BytesIO(content)
 
-            image = await self._open_image(
-                image_data,
-                max_pixels if max_pixels is not None else self._max_pixels,
-                self._to_rgb,
-            )
+            # Only the decode is covered: fetch failures (SSRF blocks, aiohttp
+            # connector errors) are OSErrors too and must not read as bad data.
+            try:
+                image = await self._open_image(
+                    image_data,
+                    max_pixels if max_pixels is not None else self._max_pixels,
+                    self._to_rgb,
+                )
+            except Image.UnidentifiedImageError:
+                raise
+            except (OSError, SyntaxError) as e:
+                # Pillow raises OSError for truncated or corrupt data it has
+                # identified, and SyntaxError for a broken PNG chunk. Host
+                # resource exhaustion is a server fault, not invalid data.
+                if isinstance(e, OSError) and e.errno in (
+                    errno.EMFILE,
+                    errno.ENFILE,
+                    errno.ENOMEM,
+                ):
+                    raise
+                raise HttpStatusError(
+                    400, "Invalid or truncated image data", image_url
+                ) from e
             if self._shared_image_cache is not None and key is not None:
                 # Cache fills are awaited deliberately so Redis acknowledges a
                 # successful write before this request returns. A cache outage

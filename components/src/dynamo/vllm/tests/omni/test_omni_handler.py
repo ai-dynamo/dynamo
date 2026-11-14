@@ -17,6 +17,7 @@ from dynamo.vllm.omni.image_edit import ImageEditLimits
 
 try:
     from PIL import Image
+    from vllm.exceptions import VLLMNotFoundError, VLLMValidationError
     from vllm.sampling_params import RequestOutputKind, SamplingParams
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
@@ -32,6 +33,7 @@ try:
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
     from dynamo.common.utils.output_modalities import RequestType
+    from dynamo.llm.exceptions import HttpError as LlmHttpError
     from dynamo.llm.exceptions import InvalidArgument
     from dynamo.vllm.lora_state import LoRAState
     from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
@@ -374,6 +376,48 @@ class TestHealthCanaries:
         with pytest.raises(error_type, match="Stage-0 has no live replica"):
             async for _ in handler.generate({"prompt": "A teapot"}, context):
                 pytest.fail("An engine failure must not count as successful activity")
+
+    @pytest.mark.parametrize(
+        "error,expected_type,code",
+        [
+            (
+                VLLMValidationError("prompt is longer than the maximum model length"),
+                InvalidArgument,
+                None,
+            ),
+            (VLLMNotFoundError("adapter not found"), LlmHttpError, 404),
+        ],
+        ids=["validation_400", "not_found_404"],
+    )
+    @pytest.mark.asyncio
+    async def test_vllm_client_error_keeps_client_status(
+        self, error, expected_type, code
+    ):
+        """A vLLM request error is not a ValueError, so the endpoint must
+        translate it or the bindings answer 500."""
+        handler = _make_handler()
+        handler.config.output_modalities = ["image"]
+        context = _live_context()
+        context.id.return_value = "image-request"
+
+        async def reject_request(**kwargs):
+            raise error
+            yield  # pragma: no cover
+
+        @asynccontextmanager
+        async def no_abort_monitor(*args):
+            yield
+
+        handler.engine_client.generate = reject_request
+        handler._abort_monitor = no_abort_monitor
+        with pytest.raises(expected_type) as exc_info:
+            async for _ in handler.generate({"prompt": "A teapot"}, context):
+                pytest.fail("A rejected request must not produce response chunks")
+        assert exc_info.value.__cause__ is error
+        if code is None:
+            assert str(error) in str(exc_info.value)
+        else:
+            assert exc_info.value.code == code
 
 
 def test_handler_passes_png_compression_to_formatter():
@@ -2069,23 +2113,21 @@ class TestImageReferenceInputs:
             Image.new("RGB", (64, 64), color="red").save(buffer, format="JPEG")
             truncated = buffer.getvalue()[:-20]
         reference = "https://8.8.8.8/reference.jpg"
-        expected_error = OSError
         if source == "data":
             reference = "data:image/jpeg;base64," + base64.b64encode(truncated).decode()
-            expected_error = HttpStatusError
 
         with patch(
             "dynamo.common.multimodal.image_loader.fetch_bytes",
             new=AsyncMock(return_value=truncated),
         ) as fetch:
-            with pytest.raises(expected_error) as exc_info:
+            with pytest.raises(HttpStatusError) as exc_info:
                 async for _ in handler._generate_openai_mode(
                     {"prompt": "a teapot", "input_reference": reference}, None, "req-1"
                 ):
                     pass
 
+        assert exc_info.value.status == 400
         if source == "data":
-            assert exc_info.value.status == 400
             fetch.assert_not_awaited()
         else:
             fetch.assert_awaited_once()
