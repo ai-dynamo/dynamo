@@ -1310,7 +1310,12 @@ def test_kv_router_config_with_overrides_deprecated_zero_wins() -> None:
     assert updated.overlap_score_weight == 0.0
 
 
-@pytest.mark.timeout(30)
+# The four smoke tests below run the default sweep of six prefill load scales:
+# 15 replays each. Every replay builds a new AIS perf model, which parses the
+# op-level perf tables again. With AISim 0.15 that takes about 1.3 s per replay
+# (652k rows: vLLM 0.30.0 and its fallback sources 0.25.0 and 0.24.0). Lower the
+# limit to 30 s again once replays in one process share the model.
+@pytest.mark.timeout(65)  # ~21 s average, 3x buffer
 def test_agg_optimizer_synthetic_replay_smoke(monkeypatch) -> None:
     pytest.importorskip("aisim_core.sdk.engine")
     monkeypatch.setattr(
@@ -1330,7 +1335,6 @@ def test_agg_optimizer_synthetic_replay_smoke(monkeypatch) -> None:
             ),
             router_mode="both",
             overlap_credits=[0.0, 1.0],
-            prefill_load_scales=[1.0],
         )
     )
 
@@ -1338,7 +1342,7 @@ def test_agg_optimizer_synthetic_replay_smoke(monkeypatch) -> None:
     assert result.best_feasible is not None
 
 
-@pytest.mark.timeout(30)
+@pytest.mark.timeout(65)  # ~21 s average, 3x buffer
 def test_agg_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
     pytest.importorskip("aisim_core.sdk.engine")
     monkeypatch.setattr(
@@ -1358,7 +1362,6 @@ def test_agg_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
             ),
             router_mode="both",
             overlap_credits=[0.0, 1.0],
-            prefill_load_scales=[1.0],
         )
     )
 
@@ -1366,7 +1369,7 @@ def test_agg_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
     assert result.best_feasible is not None
 
 
-@pytest.mark.timeout(30)
+@pytest.mark.timeout(65)  # ~21 s average, 3x buffer
 def test_optimizer_synthetic_replay_smoke(tmp_path, monkeypatch) -> None:
     pytest.importorskip("aisim_core.sdk.engine")
     monkeypatch.setattr(
@@ -1385,7 +1388,6 @@ def test_optimizer_synthetic_replay_smoke(tmp_path, monkeypatch) -> None:
                 mean_e2e_latency_ms=100000.0,
             ),
             overlap_credits=[0.0, 1.0],
-            prefill_load_scales=[1.0],
         )
     )
 
@@ -1393,7 +1395,7 @@ def test_optimizer_synthetic_replay_smoke(tmp_path, monkeypatch) -> None:
     assert result.best_feasible is not None
 
 
-@pytest.mark.timeout(30)
+@pytest.mark.timeout(65)  # ~21 s average, 3x buffer
 def test_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
     pytest.importorskip("aisim_core.sdk.engine")
     monkeypatch.setattr(
@@ -1412,7 +1414,6 @@ def test_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
                 mean_e2e_latency_ms=100000.0,
             ),
             overlap_credits=[0.0, 1.0],
-            prefill_load_scales=[1.0],
         )
     )
 
