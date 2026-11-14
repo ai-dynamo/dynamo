@@ -76,10 +76,6 @@ spec:
                 claimName: model-cache
             - name: criu-work
               emptyDir: {}
-            - name: dev-net-tun
-              hostPath:
-                path: /dev/net/tun
-                type: CharDevice
           containers:
             - name: main
               image: my-registry/tensorrtllm-runtime:my-tag
@@ -116,5 +112,3 @@ spec:
                   mountPath: /home/dynamo/.cache/huggingface
                 - name: criu-work
                   mountPath: /var/criu-work
-                - name: dev-net-tun
-                  mountPath: /dev/net/tun
