@@ -5,6 +5,16 @@
 
 const ARTICLES = [
   {
+    title: "Planner Retune: Staying on the Pareto Frontier as Traffic Drifts",
+    description:
+      "Planner Retune replays recent traffic in AISimulate and applies better KV-router and Planner settings to a running deployment, with no restart.",
+    href: "/dynamo/dev/digest/planner-retune",
+    date: "November 2026",
+    readTime: "15 min read",
+    category: "Engineering",
+    art: "retune",
+  },
+  {
     title: "Benchmarking LLM Inference at Scale with AIPerf",
     description:
       "AIPerf, the successor to GenAI-Perf: a multiprocess load generator that measures the server, not the client, from a first vLLM run to shaped traffic.",

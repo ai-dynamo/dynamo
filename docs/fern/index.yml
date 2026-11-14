@@ -1463,6 +1463,9 @@ navigation:
         contents:
           # Keep this archive in reverse chronological order. Publication dates are
           # rendered in each article header and on the custom landing page.
+          - page: "Planner Retune"
+            path: pages/blog/2026/planner-retune.mdx
+            slug: planner-retune
           - page: "AIPerf Benchmarking"
             path: pages/blog/2026/aiperf-benchmarking.mdx
             slug: aiperf-benchmarking
