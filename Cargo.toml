@@ -82,6 +82,8 @@ aisimulate-core = { version = "=0.13.0-dev.202610290000000087" }
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.7.0" }
 dynamo-global-discovery-client = { path = "lib/global-discovery-client", version = "1.7.0" }
+dynamo-global-view-broadcaster = { path = "lib/global-view-broadcaster", version = "1.7.0" }
+dynamo-global-view-receiver = { path = "lib/global-view-receiver", version = "1.7.0" }
 dynamo-llm = { path = "lib/llm", version = "1.7.0", default-features = false }
 dynamo-lora = { path = "lib/lora", version = "1.7.0" }
 dynamo-sglang-generate = { path = "lib/generate-formats/sglang", version = "1.7.0" }
@@ -120,6 +122,9 @@ dynamo-parsers = { version = "=11.0.11" }
 dynamo-parsers-v2 = { version = "=0.10.2" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.7.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.7.0" }
+dynamo-sglang-sidecar = { path = "lib/sidecar/sglang", version = "1.7.0" }
+dynamo-trtllm-sidecar = { path = "lib/sidecar/trtllm", version = "1.7.0" }
+dynamo-vllm-sidecar = { path = "lib/sidecar/vllm", version = "1.7.0" }
 
 
 

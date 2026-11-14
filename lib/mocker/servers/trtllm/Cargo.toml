@@ -18,7 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-mocker = { workspace = true }
-dynamo-trtllm-sidecar = { path = "../../../sidecar/trtllm" }
+dynamo-trtllm-sidecar = { workspace = true }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
