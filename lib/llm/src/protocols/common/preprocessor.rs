@@ -615,6 +615,16 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timestamp_ms: Option<f64>,
 
+    /// Milliseconds between the frontend receiving this request and the router dispatching this
+    /// attempt to its worker, so it includes routing, router queueing and, for a decode leg, the
+    /// prefill leg. Router-owned, unlike the client's `request_timestamp_ms`: a backend can order
+    /// admission by the original arrival with it (TensorRT-LLM's
+    /// `DisaggregatedParams.orig_elapsed_s`). Absent when no frontend router dispatched the
+    /// request.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_since_arrival_ms: Option<f64>,
+
     /// Optional request tracker for per-request metrics (shared with DeltaGenerator)
     #[builder(default)]
     #[serde(skip)]
@@ -798,6 +808,16 @@ impl PreprocessedRequest {
     /// Get mutable access to routing hints, creating default if None
     pub fn routing_mut(&mut self) -> &mut RoutingHints {
         self.routing.get_or_insert_with(RoutingHints::default)
+    }
+
+    /// Stamp [`Self::elapsed_since_arrival_ms`] from the request's tracker. The router calls
+    /// this as it dispatches each attempt. A request without a tracker, one this process did not
+    /// receive from a client, keeps the value it arrived with.
+    pub fn stamp_elapsed_since_arrival(&mut self) {
+        if let Some(tracker) = &self.tracker {
+            self.elapsed_since_arrival_ms =
+                Some(tracker.elapsed_since_received().as_secs_f64() * 1000.0);
+        }
     }
 
     /// Extract the token IDs and optional block MM info used for KV cache overlap computation.

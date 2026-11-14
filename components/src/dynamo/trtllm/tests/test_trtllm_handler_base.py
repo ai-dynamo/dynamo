@@ -28,6 +28,7 @@ from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
+from tensorrt_llm.llmapi.llm_args import WaitingQueuePolicy
 
 from dynamo.common.backend.logprobs import extract_from_completion_output
 from dynamo.llm.exceptions import EngineShutdown
@@ -38,6 +39,7 @@ from dynamo.trtllm.request_handlers.handler_base import (
     BYPASS_REMOTE_PREFILL_ANNOTATION,
     HandlerBase,
 )
+from dynamo.trtllm.utils.disagg_utils import TRTLLM_HAS_ORIG_ELAPSED_S
 
 pytestmark = [
     pytest.mark.unit,
@@ -794,7 +796,8 @@ class TestPrefillPromptMetadata:
 
 
 class TestDisaggRequestId:
-    """Tests for disagg_request_id population in _setup_disaggregated_params_for_mode."""
+    """Tests for _setup_disaggregated_params_for_mode: disagg_request_id population
+    and the decode handoff."""
 
     def _make_prefill_handler(self, machine_id: int = 42) -> HandlerBase:
         config = MagicMock()
@@ -889,14 +892,66 @@ class TestDisaggRequestId:
         )
         assert params.request_type == "context_and_generation"
 
+    @pytest.mark.parametrize(
+        ("request_extra", "expected"),
+        [({"elapsed_since_arrival_ms": 1500.0}, 1.5), ({}, None)],
+        ids=["stamped", "unstamped"],
+    )
+    def test_decode_passes_frontend_elapsed_as_orig_elapsed_s(
+        self, monkeypatch, request_extra, expected
+    ):
+        """A decode leg orders by its arrival at the frontend, when the router stamped it."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base.TRTLLM_HAS_ORIG_ELAPSED_S",
+            True,
+        )
+        handler = self._make_decode_handler()
+        handler._decode_disaggregated_params_from_prefill = MagicMock(
+            return_value=(SimpleNamespace(request_type="generation_only"), {})
+        )
+
+        params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request={"prefill_result": {"disaggregated_params": {}}, **request_extra},
+            ep_disaggregated_params=None,
+        )
+
+        assert getattr(params, "orig_elapsed_s", None) == expected
+
+    def test_decode_handoff_matches_installed_disaggregated_params(self):
+        """The real params take orig_elapsed_s only on a TRT-LLM build that defines it.
+
+        Before TRT-LLM 1.4.0rc3 the slotted dataclass has no such attribute, and
+        setting one would raise.
+        """
+        handler = self._make_decode_handler()
+        params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request={
+                "elapsed_since_arrival_ms": 1500.0,
+                "prefill_result": {
+                    "disaggregated_params": {
+                        "request_type": "context_only",
+                        "ctx_request_id": 1,
+                        "first_gen_tokens": [7],
+                    }
+                },
+            },
+            ep_disaggregated_params=None,
+        )
+
+        assert params.request_type == "generation_only"
+        expected = 1.5 if TRTLLM_HAS_ORIG_ELAPSED_S else None
+        assert getattr(params, "orig_elapsed_s", None) == expected
+
 
 class TestGenerateLocally:
     """Verify generate_locally forwards request options to generate_async.
 
     Health check requests (built by TrtllmHealthCheckPayload) must reach
     the TRT-LLM engine at priority=1.0.  Regular inference requests
-    (built by the Rust frontend as PreprocessedRequest, which has no
-    priority field) must fall back to DEFAULT_REQUEST_PRIORITY (0.5).
+    (built by the Rust frontend as PreprocessedRequest, which carries a
+    priority only under routing) reach it at routing.priority mapped onto
+    TRT-LLM's scale when the engine's waiting queue orders by priority, and
+    at DEFAULT_REQUEST_PRIORITY (0.5) otherwise.
     """
 
     def _make_handler(self) -> HandlerBase:
@@ -1045,12 +1100,12 @@ class TestGenerateLocally:
 
     @pytest.mark.asyncio
     async def test_regular_request_gets_default_priority(self):
-        """Rust PreprocessedRequest shape (no priority key) → default 0.5."""
+        """Rust PreprocessedRequest shape (no routing priority) → default 0.5."""
         handler = self._make_handler()
         generation_result = self._make_mock_generation_result()
         handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
 
-        # Mirrors the Rust PreprocessedRequest struct — no priority field.
+        # Mirrors the Rust PreprocessedRequest struct without routing hints.
         request = {
             "token_ids": [1, 2, 3],
             "stop_conditions": {"max_tokens": 10},
@@ -1064,6 +1119,44 @@ class TestGenerateLocally:
         handler.engine.llm.generate_async.assert_called_once()
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["priority"] == DEFAULT_REQUEST_PRIORITY
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("waiting_queue_policy", "expected"),
+        [
+            (WaitingQueuePolicy.PRIORITY, 0.5 + 2**-24),
+            (WaitingQueuePolicy.FCFS, DEFAULT_REQUEST_PRIORITY),
+        ],
+        ids=["priority-queue", "fcfs-queue"],
+    )
+    async def test_routing_priority_follows_engine_waiting_queue(
+        self, waiting_queue_policy, expected
+    ):
+        """routing.priority reaches a priority-queue engine on TRT-LLM's scale.
+
+        The default FCFS queue ignores priorities and warns for each request
+        that carries one, so it keeps the default.
+        """
+        handler = self._make_handler()
+        handler.engine.llm.args.scheduler_config.waiting_queue_policy = (
+            waiting_queue_policy
+        )
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+            "routing": {"priority": 1},
+        }
+
+        context = self._make_context()
+        chunks = [c async for c in handler.generate_locally(request, context)]
+        assert len(chunks) > 0
+
+        handler.engine.llm.generate_async.assert_called_once()
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert kwargs["priority"] == expected
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

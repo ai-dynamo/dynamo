@@ -371,6 +371,11 @@ impl RequestTracker {
         self.request_received_epoch_ms
     }
 
+    /// Time since the request was received, on the monotonic clock.
+    pub fn elapsed_since_received(&self) -> Duration {
+        self.request_received.elapsed()
+    }
+
     /// KV cache hit rate as a ratio (0.0 to 1.0).
     pub fn kv_hit_rate(&self) -> Option<f64> {
         let overlap = *self.kv_overlap_blocks.get()?;

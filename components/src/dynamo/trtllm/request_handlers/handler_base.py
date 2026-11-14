@@ -32,6 +32,7 @@ from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
+from tensorrt_llm.llmapi.llm_args import WaitingQueuePolicy
 
 try:
     from tensorrt_llm.llmapi.llm import PreprocessedInputs
@@ -70,6 +71,7 @@ from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import Publisher
 from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
 from dynamo.trtllm.utils.disagg_utils import (
+    TRTLLM_HAS_ORIG_ELAPSED_S,
     DisaggregatedParams,
     DisaggregatedParamsCodec,
     get_compatible_global_disagg_request_id,
@@ -77,7 +79,9 @@ from dynamo.trtllm.utils.disagg_utils import (
 from dynamo.trtllm.utils.request_utils import (
     apply_stop_conditions_to_sampling_params,
     normalize_top_k_for_trtllm,
+    orig_elapsed_s,
     request_cache_salt,
+    request_trtllm_priority,
 )
 
 if TYPE_CHECKING:
@@ -336,6 +340,9 @@ class HandlerBase(BaseGenerativeHandler):
         self._conversation_affinity_dp_rank_source: str = (
             config.conversation_affinity_dp_rank_source
         )
+        # Whether the engine's waiting queue orders by request priority
+        # (scheduler_config.waiting_queue_policy); resolved lazily like the gate above.
+        self._engine_orders_by_priority: Optional[bool] = None
         self.encode_client = config.encode_client
         self.multimodal_processor = config.multimodal_processor
         self.first_generation = True
@@ -850,6 +857,11 @@ class HandlerBase(BaseGenerativeHandler):
                 disaggregated_params,
                 epd_metadata,
             ) = self._decode_disaggregated_params_from_prefill(prefill_result)
+            # TRT-LLM's generation admission orders this request by its arrival at
+            # the frontend rather than at this worker.
+            elapsed_s = orig_elapsed_s(request)
+            if elapsed_s is not None and TRTLLM_HAS_ORIG_ELAPSED_S:
+                disaggregated_params.orig_elapsed_s = elapsed_s
             # For full EPD flow, make decoded params available to multimodal processor
             ep_disaggregated_params = disaggregated_params
 
@@ -1264,6 +1276,11 @@ class HandlerBase(BaseGenerativeHandler):
                     "release newer than 1.3.0rc20)."
                 )
         conv_affinity = self._conversation_affinity
+        if self._engine_orders_by_priority is None:
+            self._engine_orders_by_priority = (
+                self.engine.llm.args.scheduler_config.waiting_queue_policy
+                == WaitingQueuePolicy.PRIORITY
+            )
 
         # Extract dp_rank from request's routing hints for attention DP routing
         routing = request.get("routing", {})
@@ -1300,8 +1317,9 @@ class HandlerBase(BaseGenerativeHandler):
                 f"Using dynamo router dp_rank={dp_rank} for TRTLLM attention DP scheduling"
             )
 
-        # Priority is a float in [0.0, 1.0]; health checks use 1.0. Default is 0.5.
-        priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
+        priority = request_trtllm_priority(
+            request, DEFAULT_REQUEST_PRIORITY, self._engine_orders_by_priority
+        )
         cache_salt = request_cache_salt(request)
         if cache_salt is None and request.get(HEALTH_CHECK_KEY):
             # Keep the canary out of the unsalted namespace that TRT-LLM's

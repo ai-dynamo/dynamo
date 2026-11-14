@@ -81,7 +81,7 @@ Each engine has its own switch. Dynamo converts the priority to the polarity the
     Start SGLang with `--enable-priority-scheduling`. Higher Dynamo values become higher SGLang scheduling priority. Dynamo rejects the inverted SGLang flag. See [Agents on SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/agents-on-sglang.md#priority-scheduling).
   </Tab>
   <Tab title="TensorRT-LLM">
-    Per-request engine scheduling priority is not exposed through Dynamo. Priority still affects router queueing before dispatch.
+    Start each TensorRT-LLM worker with `--trtllm.scheduler_config.waiting_queue_policy priority`. Dynamo maps `priority` linearly into 0.25 to 0.75 on TensorRT-LLM's 0.0 to 1.0 scale, with `0` at TensorRT-LLM's default of 0.5. Values from -4194304 to 4194304 keep a strict order; values outside that range saturate and are served first come, first served among themselves. Health checks keep 1.0. TensorRT-LLM uses the priority to choose which waiting request it admits next; it does not preempt running requests. With the default `fcfs` waiting queue, Dynamo submits every request at the default priority.
   </Tab>
 </Tabs>
 
@@ -94,7 +94,7 @@ Support by backend:
 | Feature | vLLM | SGLang | TensorRT-LLM |
 |---|:---:|:---:|:---:|
 | Priority-aware routing | Yes | Yes | Yes |
-| Engine priority scheduling | Yes | Yes | No |
+| Engine priority scheduling | Yes | Yes | Yes |
 | Priority-based cache eviction | Planned | Yes | Planned |
 
 ## Check That It Works
@@ -155,6 +155,7 @@ Hints and session IDs are separate. A session ID is passive identity for traces 
 | Router priority queue and backend priority plumbing | Dynamo v1.0.0 and later |
 | Higher `priority` means higher priority across the API | Dynamo v1.1.0 and later |
 | EPP and Inference Gateway forwarding fixes for priority hints | Dynamo v1.2.0 and later |
+| TensorRT-LLM engine priority scheduling | Dynamo v1.7.0 and later |
 
 ## Related
 

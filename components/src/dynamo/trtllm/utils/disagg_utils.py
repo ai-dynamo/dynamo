@@ -66,6 +66,14 @@ def get_compatible_global_disagg_request_id(machine_id: int) -> int:
     return _trtllm_get_global_disagg_request_id(machine_id)
 
 
+# TRT-LLM 1.4.0rc3 added ``DisaggregatedParams.orig_elapsed_s``, which orders generation
+# admission by a request's original arrival. The dataclass uses slots, so an older build
+# rejects the attribute. Remove the check once the minimum TRT-LLM is 1.4.0rc3 or newer.
+TRTLLM_HAS_ORIG_ELAPSED_S = "orig_elapsed_s" in {
+    field.name for field in dataclasses.fields(DisaggregatedParams)
+}
+
+
 class DisaggregatedParamsCodec:
     """
     Codec for encoding and decoding disaggregated params for network transfer.
