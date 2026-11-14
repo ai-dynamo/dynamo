@@ -2107,12 +2107,10 @@ impl Client {
             };
 
             if let Some(timeout_s) = timeout_s {
-                if !timeout_s.is_finite() || timeout_s < 0.0 {
-                    return Err(PyValueError::new_err(
-                        "timeout_s must be a finite non-negative number",
-                    ));
-                }
-                let timeout = std::time::Duration::from_secs_f64(timeout_s);
+                let timeout =
+                    std::time::Duration::try_from_secs_f64(timeout_s).map_err(|error| {
+                        PyValueError::new_err(format!("timeout_s is not a valid duration: {error}"))
+                    })?;
                 tokio::time::timeout(timeout, wait).await.map_err(|_| {
                     let matches = last_matches
                         .lock()
@@ -2179,12 +2177,10 @@ impl Client {
             };
 
             if let Some(timeout_s) = timeout_s {
-                if !timeout_s.is_finite() || timeout_s < 0.0 {
-                    return Err(PyValueError::new_err(
-                        "timeout_s must be a finite non-negative number",
-                    ));
-                }
-                let timeout = std::time::Duration::from_secs_f64(timeout_s);
+                let timeout =
+                    std::time::Duration::try_from_secs_f64(timeout_s).map_err(|error| {
+                        PyValueError::new_err(format!("timeout_s is not a valid duration: {error}"))
+                    })?;
                 let result = tokio::time::timeout(timeout, wait).await;
                 match result {
                     Ok(result) => result,

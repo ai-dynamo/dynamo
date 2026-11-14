@@ -16,6 +16,7 @@
 
 import inspect
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -29,6 +30,11 @@ try:
 except ImportError:
     SelectionService = None
 
+try:
+    from dynamo._core import SelectionCacheConfig
+except ImportError:
+    SelectionCacheConfig = None
+
 from dynamo.llm.exceptions import SelectionServiceError
 
 pytestmark = [
@@ -37,6 +43,12 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
 ]
+
+
+def _select_service_env():
+    """Parent environment without DYN_* settings, which the select-service CLI
+    reads before it validates its flags."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("DYN_")}
 
 
 @pytest.mark.timeout(5)  # Expected: ~1s, timeout set to 5x for safety
@@ -234,9 +246,47 @@ def test_selection_service_cli_rejects_invalid_affinity_ttl(ttl):
         capture_output=True,
         text=True,
         timeout=15,
+        env=_select_service_env(),
     )
     assert result.returncode != 0
     assert "session_affinity_ttl_secs must be between" in result.stderr
+    assert "panicked" not in result.stderr
+
+
+@pytest.mark.skipif(
+    SelectionCacheConfig is None,
+    reason="SelectionCacheConfig requires the select-service Cargo feature",
+)
+@pytest.mark.parametrize("ttl", [-1, float("nan"), float("inf"), 1e300])
+@pytest.mark.timeout(5)
+def test_selection_cache_config_rejects_invalid_ttl(ttl):
+    """Invalid TTLs raise ValueError rather than a Rust panic."""
+    with pytest.raises(ValueError, match="not a valid duration"):
+        SelectionCacheConfig(ttl_secs=ttl)
+
+
+@pytest.mark.skipif(
+    SelectionService is None,
+    reason="SelectionService requires the select-service Cargo feature",
+)
+@pytest.mark.parametrize("ttl", ["-1", "NaN", "inf", "1e300"])
+@pytest.mark.timeout(60)  # subprocess wait is capped at 15 s per case
+def test_selection_service_cli_rejects_invalid_selection_cache_ttl(ttl):
+    """The CLI reports invalid TTLs as configuration errors without panicking."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "dynamo.select_service",
+            f"--selection-cache-ttl-secs={ttl}",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env=_select_service_env(),
+    )
+    assert result.returncode != 0
+    assert "selection_cache_ttl_secs is not a valid duration" in result.stderr
     assert "panicked" not in result.stderr
 
 
