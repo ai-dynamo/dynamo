@@ -387,11 +387,14 @@ Backend support:
 | Backend | `nvext.usage` | `size`, `output_format` |
 |---------|---------------|-------------------------|
 | vLLM-Omni | Yes | Yes |
-| SGLang | Not yet | Not yet |
-| TensorRT-LLM | Not yet | Not yet |
+| SGLang | Yes | Not yet |
+| TensorRT-LLM | Yes | Not yet |
 
 vLLM-Omni reports the step count the request asked for in `nvext.num_inference_steps` and omits it
 when the model default applied: its engine output does not carry the count it ran.
+SGLang reports the step count it ran after clamping to its maximum of 50, and counts an
+`input_reference` as one input image. TensorRT-LLM reports the requested or configured default step
+count it passed to the engine, and always reports `input_images: 0`.
 
 ## See Also
 
