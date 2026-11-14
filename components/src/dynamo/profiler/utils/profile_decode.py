@@ -96,6 +96,9 @@ def _profile_decode_helper(
     )
     logger.info(f"Saved data points to {save_path}")
 
+    if not z_itl:
+        raise RuntimeError("Decode profiling produced no valid measurements")
+
     # Plot 3D surface
     plot_decode_3d_surface(
         x_kv_usage, y_context_length, z_itl, z_thpt_per_gpu, work_dir

@@ -109,6 +109,7 @@ STUB_MODULES = [
     "filterpy.kalman",
     "scipy",
     "scipy.interpolate",
+    "scipy.spatial",
     "nats",
     "dynamo._core",
     "psutil",
