@@ -976,7 +976,8 @@ recompute the busy set and does not change startup-only router options such as `
 ### Frontend feature switches
 
 Environment variables controlling frontend extensions and protocol admission. The variables below
-are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-insensitive.
+are disabled by default unless their entry says otherwise. Truthy values are `1`, `true`, `yes`,
+or `on`, case-insensitive.
 
 <ParamField path="DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS" type="boolean" default="false">
   When truthy, `/v1/chat/completions` and `/v1/completions` ignore and drop unknown top-level
@@ -1009,6 +1010,19 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
   groups. Top-level cache salts remain active on chat completions, completions, classify, and
   pooling. On embeddings, classify, and pooling, the switch only drops legacy NvExt annotations;
   these endpoints do not use `x-tenant-id` or `x-dynamo-*` routing headers in either mode.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_CONTROL_TOKENS_AS_TEXT" type="boolean" default="true">
+  Enabled by default. The Rust preprocessor renders control-token spellings in chat request
+  text as ordinary text under every Jinja chat template. A message, tool definition, or
+  `response_format` value that spells a marker such as `<|im_end|>` or `<think>` tokenizes as
+  text, and only the markers the template writes become control tokens. Set the variable to
+  `0`, `false`, `off`, or `no` to turn this off; request text that spells a marker then
+  tokenizes as that control token. Harmony templates, such as the gpt-oss template, render this
+  way regardless of the setting. The setting affects all models served by the frontend process
+  and applies with `--dyn-chat-processor dynamo` only. The value is read when the first prompt
+  formatter is built; restart the process after changing it. A request that spells no marker
+  renders and tokenizes the same either way.
 </ParamField>
 
 ### Media refusal for text-only models

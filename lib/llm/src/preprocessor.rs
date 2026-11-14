@@ -9093,7 +9093,7 @@ mod token_data_tests {
         "model":{"type":"WordLevel","vocab":{"<unk>":0,"b":2},"unk_token":"<unk>"}}"#;
     /// Ids 0 and 1, and an added token that HF gives id 2.
     const ADDED_TOKEN_TOKENIZER: &str = r#"{"version":"1.0","added_tokens":[{"id":2,
-        "content":"<x>","special":true,"single_word":false,"lstrip":false,"rstrip":false,
+        "content":"<x>","special":false,"single_word":false,"lstrip":false,"rstrip":false,
         "normalized":false}],
         "model":{"type":"WordLevel","vocab":{"<unk>":0,"a":1},"unk_token":"<unk>"}}"#;
 
@@ -9199,6 +9199,46 @@ mod token_data_tests {
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
         assert_forwarded(&preprocessor, &[0, 2]).await;
         assert_rejected(&preprocessor, &[0, 3]).await;
+    }
+
+    #[test]
+    fn added_tokens_in_tokenizer_json_encode_as_ordinary_text() {
+        // Only tokenizer.json lists `<x>`, as `special: false` like DeepSeek-R1's
+        // `<｜User｜>`, and the template writes it. With the setting off, the
+        // prompt is one piece; with it on, the default, the user's `<x>` is text.
+        let (mut mdc, dir) = tinyllama_card(NO_VOCAB_SIZE, Some(ADDED_TOKEN_TOKENIZER));
+        let path = dir.path().join("chat_template.jinja");
+        std::fs::write(
+            &path,
+            "{% for m in messages %}<x>{{ m.content }}{% endfor %}",
+        )
+        .unwrap();
+        mdc.chat_template_file = Some(PromptFormatterArtifact::HfChatTemplateJinja {
+            is_custom: true,
+            file: CheckedFile::from_disk(&path).unwrap(),
+        });
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "a<x>"}]
+        }))
+        .unwrap();
+        let PromptFormatter::OAI(formatter) =
+            prompt::prompt_formatter_from_mdc_with(&mdc, false).unwrap();
+        assert!(
+            formatter
+                .render_prompt(&request)
+                .unwrap()
+                .segments()
+                .is_none()
+        );
+
+        let PromptFormatter::OAI(formatter) =
+            prompt::prompt_formatter_from_mdc_with(&mdc, true).unwrap();
+        let prompt = formatter.render_prompt(&request).unwrap();
+        let segments = prompt.encode_segments().unwrap();
+        let encoding = mdc.tokenizer().unwrap().encode_segments(&segments).unwrap();
+        // The template's `<x>` is id 2; the user's is unknown text, `<unk>` (0).
+        assert_eq!(encoding.token_ids(), [2, 1, 0]);
     }
 
     fn completion(prompt: serde_json::Value) -> NvCreateCompletionRequest {

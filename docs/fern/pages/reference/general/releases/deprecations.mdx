@@ -49,6 +49,10 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Set `DYN_ENABLE_FRONTEND_ADMIN_API=1` on frontends that need these routes and call port `8002` (`DYN_FRONTEND_ADMIN_PORT`). The listener binds to `127.0.0.1` (`DYN_FRONTEND_ADMIN_HOST`), so on Kubernetes use `kubectl port-forward pod/<frontend-pod> 8002:8002`. Remove `DYN_DISABLE_FRONTEND_ADMIN_API`; it is ignored.
 
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Control-token spellings in chat request text tokenize as text by default** ([#18159](https://github.com/ai-dynamo/dynamo/pull/18159)). With `--dyn-chat-processor dynamo`, a message, tool definition, or `response_format` value that spells one of the model's control tokens, such as `<|im_end|>`, now tokenizes as ordinary text under every Jinja chat template. Only the markers the template writes become control tokens.
+
+  > **Migrate:** Set `DYN_REQUEST_CONTROL_TOKENS_AS_TEXT=0` on frontends whose clients write control tokens through message text.
+
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **Worker-selection plugin callbacks take `&self` and require `Send + Sync`** ([#17712](https://github.com/ai-dynamo/dynamo/pull/17712)). `WorkerFilter::keep`, `WorkerScorer::score` and `WorkerPicker::pick` no longer take `&mut self`, and one plugin instance may be called from several threads at once.
 
   > **Migrate:** Change each callback's receiver to `&self`. Move state that changes between calls behind atomics, a lock or a thread-local, and make sure the plugin type is `Sync`.
