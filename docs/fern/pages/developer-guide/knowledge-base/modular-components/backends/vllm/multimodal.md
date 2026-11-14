@@ -537,7 +537,7 @@ The session accepts 24 kHz PCM16 input, which the worker resamples to 16 kHz wit
 pip install 'scipy>=1.14,<2'
 ```
 
-The model transcribes each 5-second segment as it arrives. Each segment's text starts on a new line with its own `language <Language><asr_text>` prefix, and a very short final segment can repeat the previous segment's text.
+Each time another 5 seconds of audio arrives, and once more after the commit, the worker transcribes all of the turn's audio so far. Each delta extends the transcript, so a clip shorter than 5 seconds gets its first delta only after the commit. The transcript starts with one `language <Language><asr_text>` prefix.
 
 #### Kubernetes Deployment
 
