@@ -501,6 +501,11 @@ follow_imports = "skip"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# FastAPI comes with the backend extras and is absent from the Dynamo runtime.
+module = ["fastapi", "fastapi.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 # XGrammar comes with the backend extras and is absent from the Dynamo runtime.
 module = ["xgrammar", "xgrammar.*"]
 ignore_missing_imports = true

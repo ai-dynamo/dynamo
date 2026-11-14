@@ -1570,6 +1570,54 @@ async def test_rerank_worker_disables_radix_cache(monkeypatch, mock_sglang_cli):
     assert config.server_args.chunked_prefill_size == -1
 
 
+@pytest.mark.asyncio
+async def test_decoder_rerank_keeps_generation_mode(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    monkeypatch.setattr(sglang_args, "fetch_model", AsyncMock())
+    template = tmp_path / "reranker.jinja"
+    template.write_text("{{ messages[0]['content'] }} {{ messages[1]['content'] }}")
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--rerank-worker",
+        "--rerank-worker-mode",
+        "decoder",
+        "--chat-template",
+        str(template),
+        "--chunked-prefill-size",
+        "128",
+    )
+    config = await parse_args(sys.argv[1:])
+    assert config.server_args.is_embedding is False
+    assert config.server_args.disable_radix_cache is False
+    assert config.server_args.chunked_prefill_size == 128
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "flags,message",
+    [
+        ([], "requires an explicit --chat-template"),
+        (["--is-embedding"], "cannot use --is-embedding"),
+    ],
+)
+async def test_decoder_rerank_rejects_invalid_engine_options(
+    monkeypatch, mock_sglang_cli, flags, message
+):
+    monkeypatch.setattr(sglang_args, "fetch_model", AsyncMock())
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--rerank-worker",
+        "--rerank-worker-mode",
+        "decoder",
+        *flags,
+    )
+    with pytest.raises(ValueError, match=message):
+        await parse_args(sys.argv[1:])
+
+
 @pytest.mark.parametrize(
     (
         "mode",

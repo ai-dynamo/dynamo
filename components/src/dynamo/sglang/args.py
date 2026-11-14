@@ -688,15 +688,23 @@ async def parse_args(args: list[str]) -> Config:
     if dynamo_config.enable_multimodal:
         parsed_args.enable_multimodal = True
 
-    # Both dedicated pooling modes use SGLang's embedding engine.
-    if dynamo_config.embedding_worker or dynamo_config.rerank_worker:
+    # Only cross-encoder rerankers use SGLang's embedding engine.
+    decoder_rerank = (
+        dynamo_config.rerank_worker and dynamo_config.rerank_worker_mode == "decoder"
+    )
+    if decoder_rerank:
+        if parsed_args.is_embedding:
+            raise ValueError("Decoder reranking cannot use --is-embedding")
+        if not parsed_args.chat_template:
+            raise ValueError("Decoder reranking requires an explicit --chat-template")
+    elif dynamo_config.embedding_worker or dynamo_config.rerank_worker:
         parsed_args.is_embedding = True
     if dynamo_config.rerank_worker and (
         parsed_args.disaggregation_mode != "null"
         or getattr(parsed_args, "dllm_algorithm", None)
     ):
-        raise ValueError("--rerank-worker requires aggregated cross-encoder serving")
-    if dynamo_config.rerank_worker:
+        raise ValueError("--rerank-worker requires aggregated serving")
+    if dynamo_config.rerank_worker and not decoder_rerank:
         # Cross-encoders attend bidirectionally: SGLang's XLM-Roberta forward fails
         # with a cached prefix or chunked prefill, so run each sequence in one pass.
         if not parsed_args.disable_radix_cache:

@@ -130,7 +130,16 @@ class DynamoSGLangArgGroup(ArgGroup):
             flag_name="--rerank-worker",
             env_var="DYN_SGL_RERANK_WORKER",
             default=False,
-            help="Run a dedicated text cross-encoder rerank worker. Requires a rerank-capable frontend; also sets SGLang's --is-embedding.",
+            help="Run a dedicated text rerank worker. Requires a rerank-capable frontend.",
+        )
+        add_argument(
+            g,
+            flag_name="--rerank-worker-mode",
+            env_var="DYN_SGL_RERANK_WORKER_MODE",
+            default="cross-encoder",
+            choices=["cross-encoder", "decoder"],
+            help="Reranker engine mode. Decoder mode supports text Qwen3 rerankers "
+            "and requires an explicit SGLang Qwen3 reranker --chat-template.",
         )
 
         add_negatable_bool_argument(
@@ -224,6 +233,7 @@ class DynamoSGLangConfig(ConfigBase):
     embedding_transfer_mode: EmbeddingTransferMode
     embedding_worker: bool
     rerank_worker: bool = False
+    rerank_worker_mode: str = "cross-encoder"
     image_diffusion_worker: bool
 
     disagg_config: Optional[str] = None
@@ -242,6 +252,10 @@ class DynamoSGLangConfig(ConfigBase):
 
     def validate(self) -> None:
         _reject_removed_multimodal_env_vars()
+        if self.rerank_worker_mode not in ("cross-encoder", "decoder"):
+            raise ValueError("Invalid --rerank-worker-mode")
+        if self.rerank_worker_mode == "decoder" and not self.rerank_worker:
+            raise ValueError("--rerank-worker-mode decoder requires --rerank-worker")
         if self.rerank_worker and (
             self.embedding_worker
             or self.image_diffusion_worker

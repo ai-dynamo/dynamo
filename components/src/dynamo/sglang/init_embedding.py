@@ -24,6 +24,9 @@ from dynamo.sglang.publisher import (
 from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import EmbeddingWorkerHandler, RerankWorkerHandler
 from dynamo.sglang.request_handlers.embedding.metrics import init_embedding_metrics
+from dynamo.sglang.request_handlers.rerank.decoder_handler import (
+    DecoderRerankWorkerHandler,
+)
 
 
 async def init_embedding(
@@ -96,7 +99,12 @@ async def _init_pooling(
     body_failed = True
     try:
         if rerank:
-            handler = RerankWorkerHandler(engine, config, publisher, shutdown_event)
+            handler_type = (
+                DecoderRerankWorkerHandler
+                if dynamo_args.rerank_worker_mode == "decoder"
+                else RerankWorkerHandler
+            )
+            handler = handler_type(engine, config, publisher, shutdown_event)
             health_check_payload = SglangRerankHealthCheckPayload(
                 server_args.served_model_name or server_args.model_path
             ).to_dict()

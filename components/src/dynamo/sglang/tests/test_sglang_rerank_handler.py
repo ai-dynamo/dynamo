@@ -177,11 +177,13 @@ async def test_embedding_endpoint_does_not_dispatch_rerank():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("rerank", [False, True])
+@pytest.mark.parametrize("mode", ["embedding", "cross-encoder", "decoder"])
 @pytest.mark.parametrize("fail_startup", [False, True])
 async def test_dedicated_pooling_registration_health_and_cleanup(
-    monkeypatch, rerank, fail_startup
+    monkeypatch, mode, fail_startup
 ):
+    rerank = mode != "embedding"
+    selected = 2 if mode == "decoder" else int(rerank)
     module = pooling_init
     monkeypatch.delenv("DYN_HEALTH_CHECK_PAYLOAD", raising=False)
 
@@ -202,12 +204,14 @@ async def test_dedicated_pooling_registration_health_and_cleanup(
             component="rerank" if rerank else "backend",
             endpoint="generate",
             use_sglang_tokenizer=False,
+            rerank_worker_mode=mode if rerank else "cross-encoder",
         ),
     )
     handler = Mock()
-    handlers = [Mock(return_value=handler), Mock(return_value=handler)]
+    handlers = [Mock(return_value=handler) for _ in range(3)]
     monkeypatch.setattr(module, "EmbeddingWorkerHandler", handlers[0])
     monkeypatch.setattr(module, "RerankWorkerHandler", handlers[1])
+    monkeypatch.setattr(module, "DecoderRerankWorkerHandler", handlers[2])
     monkeypatch.setattr(module.sgl, "Engine", Mock(return_value=engine))
     metrics_task = asyncio.create_task(asyncio.Event().wait())
     monkeypatch.setattr(
@@ -223,7 +227,7 @@ async def test_dedicated_pooling_registration_health_and_cleanup(
 
     init = init_rerank if rerank else module.init_embedding
     if fail_startup:
-        handlers[int(rerank)].side_effect = ValueError("unsupported model")
+        handlers[selected].side_effect = ValueError("unsupported model")
         with pytest.raises(ValueError, match="unsupported model"):
             await init(runtime, config, asyncio.Event(), shutdown_endpoints, deferred)
         register.assert_not_called()
@@ -240,8 +244,10 @@ async def test_dedicated_pooling_registration_health_and_cleanup(
         ModelType.Rerank if rerank else ModelType.Embedding
     )
     assert shutdown_endpoints == [endpoint]
-    handlers[int(rerank)].assert_called_once()
-    handlers[int(not rerank)].assert_not_called()
+    handlers[selected].assert_called_once()
+    for index, factory in enumerate(handlers):
+        if index != selected:
+            factory.assert_not_called()
     assert endpoint.serve_endpoint.call_args.args[0] == handler.generate
     payload = endpoint.serve_endpoint.call_args.kwargs["health_check_payload"]
     assert payload["model"] == "resolved-pooler"
@@ -268,6 +274,19 @@ def test_rerank_flag_defaults_and_rejects_embedding_combination(monkeypatch):
     args = parser.parse_args(["--rerank-worker", "--embedding-worker"])
     with pytest.raises(ValueError, match="cannot be combined"):
         DynamoSGLangConfig.from_cli_args(args).validate()
+
+
+def test_decoder_rerank_flag_requires_dedicated_worker(monkeypatch):
+    monkeypatch.delenv("DYN_SGL_RERANK_WORKER_MODE", raising=False)
+    parser = argparse.ArgumentParser()
+    DynamoSGLangArgGroup().add_arguments(parser)
+    args = parser.parse_args(["--rerank-worker-mode", "decoder"])
+    with pytest.raises(ValueError, match="requires --rerank-worker"):
+        DynamoSGLangConfig.from_cli_args(args).validate()
+    args = parser.parse_args(["--rerank-worker", "--rerank-worker-mode", "decoder"])
+    config = DynamoSGLangConfig.from_cli_args(args)
+    config.validate()
+    assert config.rerank_worker_mode == "decoder"
 
 
 @pytest.mark.asyncio
