@@ -614,7 +614,9 @@ requirements.txt                                                                
 /lib/llm/tests/test_streaming_tool_parsers.rs                                                           @ai-dynamo/dynamo-frontend-codeowners
 /.github/codeowners/external_contributors.yaml                                                          @ai-dynamo/dynamo-process-codeowners
 /tests/router/test_router_e2e_with_vllm_xpu.py                                                          @ai-dynamo/dynamo-xpu-codeowners
+/lib/generate-format-catalog/tests/http/vllm.rs                                                         @ai-dynamo/dynamo-backend-vllm-codeowners
 /components/src/dynamo/vllm/multimodal_handlers/                                                        @ai-dynamo/dynamo-multimodal-codeowners
+/lib/generate-format-catalog/tests/http/sglang.rs                                                       @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/common/tests/test_snapshot*                                                      @ai-dynamo/dynamo-gms-codeowners
 /lib/llm/tests/fixtures/relay-sources-canonical.json                                                    @ai-dynamo/dynamo-global-router-codeowners
 /components/src/dynamo/trtllm/request_handlers/diffusion/                                               @ai-dynamo/dynamo-diffusion-codeowners
