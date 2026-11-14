@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from dynamo._core import InvalidArgument
 from dynamo.llm import (
     KvRouter,
     KvRouterConfig,
@@ -30,6 +31,19 @@ async def _generate_error(_request, _context=None):
     yield
 
 
+# The worker classifies a handler `ValueError` as InvalidRequest with no public
+# message, so the router must surface only the generic `Invalid request` label.
+async def _generate_value_error(_request, _context=None):
+    raise ValueError("private KV-router diagnostic")
+    yield
+
+
+# A handler `InvalidArgument` carries its text as the public message.
+async def _generate_invalid_argument(_request, _context=None):
+    raise InvalidArgument("prompt exceeds the KV-router test limit")
+    yield
+
+
 @dataclass
 class _Worker:
     """One endpoint served on its own runtime."""
@@ -41,7 +55,7 @@ class _Worker:
 
     @classmethod
     @contextlib.asynccontextmanager
-    async def serve(cls, endpoint_path):
+    async def serve(cls, endpoint_path, handler=_generate_error):
         runtime = DistributedRuntime(asyncio.get_running_loop(), "file", "tcp")
         try:
             endpoint = runtime.endpoint(endpoint_path)
@@ -57,9 +71,7 @@ class _Worker:
                     "outputs": [],
                 },
             )
-            server_task = asyncio.ensure_future(
-                endpoint.serve_endpoint(_generate_error)
-            )
+            server_task = asyncio.ensure_future(endpoint.serve_endpoint(handler))
         except BaseException:
             runtime.shutdown()
             raise
@@ -143,6 +155,57 @@ async def test_kv_router_propagates_stream_errors(
 
     with pytest.raises(ValueError, match="intentional KV-router failure"):
         await _generate_and_collect(router, response_buffer_size)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize(
+    "handler, message",
+    [
+        (_generate_value_error, "^Invalid request$"),
+        (_generate_invalid_argument, "^prompt exceeds the KV-router test limit$"),
+    ],
+    ids=["generic-fallback", "public-message"],
+)
+async def test_kv_router_preserves_invalid_argument(
+    router_runtime, handler, message, monkeypatch
+):
+    # response_buffer_size=0 takes the demand-driven iterator, which must raise the
+    # typed InvalidArgument for a classified stream item.
+    monkeypatch.setenv("DYN_ROUTER_MIN_INITIAL_WORKERS", "1")
+    async with _Worker.serve(
+        f"invalid-router-{uuid.uuid4().hex}.worker.generate", handler
+    ) as worker:
+        endpoint = router_runtime.endpoint(worker.endpoint_path)
+        await _wait_for_single_instance(endpoint)
+        router = KvRouter(endpoint, 4, KvRouterConfig(use_kv_events=False))
+
+        with pytest.raises(InvalidArgument, match=message):
+            await _generate_and_collect(router, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize("response_buffer_size", [0, 100])
+async def test_kv_router_unknown_worker_id_raises_invalid_argument(
+    error_router_endpoint, response_buffer_size, monkeypatch
+):
+    # The router rejects an unknown pinned worker before any stream exists, so the
+    # error comes from the generate await. Its diagnostic has no public message.
+    monkeypatch.setenv("DYN_ROUTER_MIN_INITIAL_WORKERS", "1")
+    router = KvRouter(
+        error_router_endpoint,
+        4,
+        KvRouterConfig(use_kv_events=False),
+    )
+
+    with pytest.raises(InvalidArgument, match="^Invalid request$"):
+        await router.generate(
+            [1, 2, 3],
+            "test-model",
+            worker_id=123456789,
+            response_buffer_size=response_buffer_size,
+        )
 
 
 @pytest.mark.asyncio
