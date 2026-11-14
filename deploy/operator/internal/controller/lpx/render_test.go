@@ -486,6 +486,10 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 				require.Equal(t, service.Spec.Selector, getResource[*corev1.Service](t, nextResources, service.Name).Spec.Selector)
 				require.Equal(t, child.Namespace, service.Namespace)
 				require.Equal(t, "inference", service.Labels["example.com/team"])
+				require.Equal(t, dgd.Name, service.Labels[consts.KubeLabelDynamoGraphDeploymentName])
+				require.Equal(t, groupName, service.Labels[consts.KubeLabelDynamoComponent])
+				require.Equal(t, string(component.ComponentType), service.Labels[consts.KubeLabelDynamoComponentType])
+				require.Equal(t, dgd.GetDynamoNamespaceForComponent(component), service.Labels[consts.KubeLabelDynamoNamespace])
 				require.Equal(t, map[string]string{
 					"example.com/description":    "serving",
 					lpx.DeploymentNameAnnotation: child.Name,

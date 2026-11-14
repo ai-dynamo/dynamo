@@ -599,9 +599,16 @@ func (r *dcdWorkloadRenderer) generateService(
 		return nil, false, err
 	}
 
+	// The producer knows its DGD parent without another API lookup.
+	graphDeploymentName := ""
+	if _, managed := managedDGDUIDForDCD(dcd); managed {
+		graphDeploymentName = metav1.GetControllerOf(dcd).Name
+	}
+
 	svc, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
 		ServiceName:     dcd.Name,
 		Namespace:       dcd.Namespace,
+		DGDName:         graphDeploymentName,
 		ComponentType:   componentType,
 		DynamoNamespace: dynamoNamespace,
 		ComponentName:   dynamo.GetDCDComponentName(dcd),
@@ -648,6 +655,7 @@ func (r *dcdWorkloadRenderer) generateServiceForDGDComponent(
 	service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
 		ServiceName:     serviceName,
 		Namespace:       dgd.Namespace,
+		DGDName:         dgd.Name,
 		ComponentType:   workloadComponentType,
 		DynamoNamespace: dynamoNamespace,
 		ComponentName:   componentName,
@@ -660,6 +668,27 @@ func (r *dcdWorkloadRenderer) generateServiceForDGDComponent(
 	}
 	if component.IsMultinode() {
 		service.Spec.Selector[dcdWorkloadRoleLabel] = string(dynamo.RoleLeader)
+
+		// DS Services select the leader, whose complete role template defines identity.
+		if dynamo.HasRolePodTemplates(component) {
+			effective, err := dynamo.EffectiveComponentForRole(component, dynamo.RoleLeader)
+			if err != nil {
+				return nil, false, err
+			}
+			podLabels := dynamo.GetDGDComponentPodLabels(dgd, componentName, effective)
+			effectiveType, err := r.getWorkloadComponentType(ctx, dgd.Namespace, serviceName, string(effective.ComponentType), podLabels)
+			if err != nil {
+				return nil, false, err
+			}
+			if effectiveType != "" {
+				podLabels[commonconsts.KubeLabelDynamoComponentType] = effectiveType
+			}
+			if value, found := podLabels[commonconsts.KubeLabelDynamoComponentType]; found {
+				service.Labels[commonconsts.KubeLabelDynamoComponentType] = value
+			} else {
+				delete(service.Labels, commonconsts.KubeLabelDynamoComponentType)
+			}
+		}
 	}
 	return service, false, nil
 }

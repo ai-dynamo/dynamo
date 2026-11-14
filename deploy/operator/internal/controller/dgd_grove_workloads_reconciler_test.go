@@ -1054,7 +1054,12 @@ func TestGroveServiceRenderingCharacterization(t *testing.T) {
 	}, service.Spec.Selector)
 	require.Equal(t, consts.DynamoServicePortName, service.Spec.Ports[0].Name)
 	require.Equal(t, int32(consts.DynamoServicePort), service.Spec.Ports[0].Port)
-	require.Empty(t, service.Labels)
+	require.Equal(t, map[string]string{
+		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+		consts.KubeLabelDynamoComponent:           "frontend",
+		consts.KubeLabelDynamoComponentType:       consts.ComponentTypeFrontend,
+		consts.KubeLabelDynamoNamespace:           dynamoNamespace,
+	}, service.Labels)
 	require.Equal(t, "1", service.Annotations[commoncontroller.NvidiaAnnotationGenerationKey])
 	require.NotEmpty(t, service.Annotations[commoncontroller.NvidiaAnnotationHashKey])
 	require.Len(t, service.OwnerReferences, 1)

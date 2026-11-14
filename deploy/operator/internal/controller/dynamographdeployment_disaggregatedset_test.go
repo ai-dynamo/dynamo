@@ -376,6 +376,10 @@ func TestSingleNodeStableServiceSelectsDeploymentPod(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Log("Verify every stable Service selector matches the single-node Pod labels")
+	require.Equal(t, dgd.Name, service.Labels[consts.KubeLabelDynamoGraphDeploymentName])
+	for _, key := range []string{consts.KubeLabelDynamoComponent, consts.KubeLabelDynamoComponentType, consts.KubeLabelDynamoNamespace} {
+		require.Equal(t, podTemplate.Labels[key], service.Labels[key], "Service identity %s must match its Pods", key)
+	}
 	require.NotContains(t, service.Spec.Selector, dcdWorkloadRoleLabel)
 	for key, value := range service.Spec.Selector {
 		require.Equal(t, value, podTemplate.Labels[key], "Service selector %q must match its Pod", key)
@@ -710,6 +714,28 @@ func TestDCDAndDirectDisaggregatedSetRoleTemplateRenderingParity(t *testing.T) {
 	require.Equal(t, "worker", dsWorker.Labels["template-source"])
 	require.Equal(t, "leader:1.0.0", dsLeader.Spec.Containers[0].Image)
 	require.Equal(t, "worker:1.0.0", dsWorker.Spec.Containers[0].Image)
+
+	t.Log("Service metadata follows the selected leader's legacy identity without changing its spec")
+	renderer.config.Discovery.Backend = configv1alpha1.DiscoveryBackendKubernetes
+	nativeService, toDelete, err := renderer.generateServiceForDGDComponent(t.Context(), dgd, component, "prefill", dcd.Name)
+	require.NoError(t, err)
+	require.False(t, toDelete)
+	for _, role := range component.Roles {
+		role.PodTemplate.Labels[consts.KubeLabelDynamoComponentType] = consts.ComponentTypeWorker
+	}
+	beforeServiceRender := component.DeepCopy()
+	legacyLeader, legacyWorker, err := renderer.renderMultinodePodTemplateSpecsForDGDComponent(
+		t.Context(), dgd, component, "prefill", dcd.Name, dynamo.GetDynamoNamespace(dgd, component), backend, nil,
+	)
+	require.NoError(t, err)
+	legacyService, toDelete, err := renderer.generateServiceForDGDComponent(t.Context(), dgd, component, "prefill", dcd.Name)
+	require.NoError(t, err)
+	require.False(t, toDelete)
+	require.Equal(t, consts.ComponentTypeWorker, legacyLeader.Labels[consts.KubeLabelDynamoComponentType])
+	require.Equal(t, consts.ComponentTypeWorker, legacyWorker.Labels[consts.KubeLabelDynamoComponentType])
+	require.Equal(t, legacyLeader.Labels[consts.KubeLabelDynamoComponentType], legacyService.Labels[consts.KubeLabelDynamoComponentType])
+	require.Equal(t, nativeService.Spec, legacyService.Spec)
+	require.Equal(t, beforeServiceRender, component)
 }
 
 func TestDisaggregatedSetChildNamesFitDNSLabelLimit(t *testing.T) {

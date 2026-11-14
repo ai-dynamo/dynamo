@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"time"
@@ -27,6 +28,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/serviceidentity"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -201,6 +203,13 @@ func (p *groveProgram) Reconcile(
 			programResult.Status.Components = result.ComponentStatus
 		} else {
 			maps.Copy(programResult.Status.Components, result.ComponentStatus)
+		}
+		if errors.Is(err, serviceidentity.ErrCacheObservationPending) {
+			programResult.applyReconcileResult(req.DGD.Generation, ReconcileResult{
+				State: nvidiacomv1beta1.DGDStatePending, Reason: "ServiceIdentityPending", Message: "Waiting for the Service cache observation",
+				ComponentStatus: programResult.Status.Components,
+			})
+			return programResult, nil
 		}
 		return programResult, fmt.Errorf("failed to reconcile Grove workloads: %w", err)
 	}

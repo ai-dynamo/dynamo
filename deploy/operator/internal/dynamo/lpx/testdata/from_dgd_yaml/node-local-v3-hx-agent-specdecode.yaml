@@ -34,8 +34,12 @@ metadata:
     lpx.nvidia.com/deployment-name: node-local-v3-hx-agent-specdecode
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
+    nvidia.com/dynamo-component: target
+    nvidia.com/dynamo-component-type: lpx
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: "true"
+    nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-agent-specdecode
+    nvidia.com/dynamo-namespace: test-node-local-v3-hx-agent-specdecode
   name: node-local-v3-hx-agent-specdecode-2005-serve
   namespace: test
 spec:

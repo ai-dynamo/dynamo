@@ -731,8 +731,43 @@ func TestStandaloneDCDServiceRenderingCharacterization(t *testing.T) {
 	}, service.Spec.Selector)
 	require.Equal(t, commonconsts.DynamoServicePortName, service.Spec.Ports[0].Name)
 	require.Equal(t, int32(commonconsts.DynamoServicePort), service.Spec.Ports[0].Port)
-	require.Equal(t, dynamo.GetDCDKubeLabels(dcd), service.Labels)
+	require.Equal(t, map[string]string{
+		commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeFrontend,
+		commonconsts.KubeLabelDynamoNamespace:     "dynamo-graph",
+		commonconsts.KubeLabelDynamoComponent:     "frontend",
+	}, service.Labels)
+	require.NotContains(t, service.Labels, commonconsts.KubeLabelDynamoGraphDeploymentName)
 	require.Equal(t, dynamo.GetDCDKubeAnnotations(dcd), service.Annotations)
+}
+
+func TestManagedDCDServiceIdentityUsesGraphParent(t *testing.T) {
+	for _, version := range []string{v1alpha1.GroupVersion.String(), v1beta1.GroupVersion.String()} {
+		t.Run(version, func(t *testing.T) {
+			t.Log("Build a graph-managed frontend with stale authored graph identity")
+			dcd := &v1beta1.DynamoComponentDeployment{
+				Name: "graph-frontend", Namespace: "default", UID: "frontend-uid",
+				OwnerReferences: []metav1.OwnerReference{{APIVersion: version, Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}},
+				Labels:          map[string]string{commonconsts.KubeLabelDynamoGraphDeploymentName: "stale", "example.com/team": "inference"},
+				Spec: v1beta1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+						ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend,
+					},
+				},
+			}
+			before := dcd.DeepCopy()
+			r := &DynamoComponentDeploymentReconciler{Config: &configv1alpha1.OperatorConfiguration{}}
+
+			t.Log("Render Service identity from the locally known graph parent")
+			service, toDelete, err := r.generateService(t.Context(), generateResourceOption{dynamoComponentDeployment: dcd})
+			require.NoError(t, err)
+			require.False(t, toDelete)
+			require.Equal(t, "graph", service.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+			require.Equal(t, "frontend", service.Labels[commonconsts.KubeLabelDynamoComponent])
+			require.Equal(t, "frontend", service.Labels[commonconsts.KubeLabelDynamoComponentType])
+			require.Equal(t, "inference", service.Labels["example.com/team"])
+			require.Equal(t, before, dcd, "Service labels must not change DCD or Pod identity")
+		})
+	}
 }
 
 func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentService(t *testing.T) {
