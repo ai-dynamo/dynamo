@@ -62,6 +62,7 @@
     "/meta_info/request_finished_ts": "attempt",
     "/meta_info/request_received_ts": "attempt",
     "/meta_info/weight_versions": "attempt",
+    "/meta_info/prefill_weight_versions": "attempt",
     "/meta_info/forward_entry_time": "attempt",
     "/meta_info/prefill_finished_time": "attempt",
     "/meta_info/response_sent_to_client_ts": "attempt",
