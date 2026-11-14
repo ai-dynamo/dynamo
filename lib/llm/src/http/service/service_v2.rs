@@ -1816,7 +1816,11 @@ impl HttpServiceConfigBuilder {
             })
             .collect();
         let mut inference_router = axum::Router::new();
-        for (_, route_docs, route) in endpoint_routes {
+        let mut endpoint_docs = HashMap::new();
+        for (endpoint, route_docs, route) in endpoint_routes {
+            for doc in &route_docs {
+                endpoint_docs.insert((doc.method().clone(), doc.path().to_owned()), endpoint);
+            }
             append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
             inference_router = inference_router.merge(route);
         }
@@ -1834,13 +1838,19 @@ impl HttpServiceConfigBuilder {
         ));
 
         // OpenAPI documentation routes (system)
-        let (openapi_docs, openapi_route) = super::openapi_docs::openapi_router(
+        let documentation_state = state.clone();
+        let (openapi_docs, openapi_route) = super::openapi_docs::openapi_router_with_visibility(
             all_docs.clone(),
             super::openapi_docs::OpenApiOptions {
                 reasoning_field: state.reasoning_field(),
                 streaming_tool_dispatch: state.streaming_tool_dispatch_enabled(),
                 streaming_reasoning_dispatch: state.streaming_reasoning_dispatch_enabled(),
             },
+            Some(Arc::new(move |method, path| {
+                endpoint_docs
+                    .get(&(method.clone(), path.to_owned()))
+                    .is_none_or(|endpoint| documentation_state.flags.get(endpoint))
+            })),
         );
         append_route_docs(&mut all_docs, &mut seen_route_docs, openapi_docs)?;
         system_router = system_router.merge(openapi_route);
@@ -2422,6 +2432,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn model_readiness_waits_for_topology_engine_and_routes() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -2869,6 +2880,7 @@ mod tests {
 
     /// Actual HTTP docs must use the service flags and response-key configuration.
     #[tokio::test]
+    #[serial_test::serial]
     async fn openapi_http_uses_service_configuration() {
         for enabled in [false, true] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2879,6 +2891,9 @@ mod tests {
                 .enable_streaming_reasoning_dispatch(enabled)
                 .reasoning_field(crate::reasoning_field::ReasoningField::Reasoning)
                 .build()
+                .unwrap();
+            service
+                .enable_model_endpoint(EndpointType::Chat, true)
                 .unwrap();
             let cancel = CancellationToken::new();
             let server_cancel = cancel.clone();
@@ -2909,6 +2924,103 @@ mod tests {
             cancel.cancel();
             server.await.unwrap();
         }
+    }
+
+    async fn read_openapi(service: &HttpService) -> serde_json::Value {
+        use tower::ServiceExt;
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            service.router.clone().oneshot(
+                axum::http::Request::get("/openapi.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body = axum::body::to_bytes(response.into_body(), 32 * 1024 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn openapi_http_tracks_enabled_endpoint_families() {
+        let service = HttpService::builder()
+            .enable_embeddings_endpoints(false)
+            .build()
+            .unwrap();
+        let independent = HttpService::builder().build().unwrap();
+        let full = super::super::openapi_docs::generate_openapi_spec(service.route_docs()).unwrap();
+        for path in ["/v1/chat/completions", "/v1/completions"] {
+            assert!(full["paths"][path]["post"].is_object());
+        }
+        for path in [
+            "/v1/embeddings",
+            "/v1/images/generations",
+            "/v1/audio/speech",
+            "/v1/realtime",
+        ] {
+            assert!(full["paths"].get(path).is_some(), "{path}");
+        }
+
+        for enabled in [false, true, false] {
+            for endpoint in [EndpointType::Chat, EndpointType::Completion] {
+                service.enable_model_endpoint(endpoint, enabled).unwrap();
+            }
+            let spec = read_openapi(&service).await;
+            for path in ["/v1/chat/completions", "/v1/completions"] {
+                assert_eq!(spec["paths"].get(path).is_some(), enabled, "{path}");
+            }
+            for path in [
+                "/v1/embeddings",
+                "/v1/images/generations",
+                "/v1/audio/speech",
+                "/v1/realtime",
+            ] {
+                assert!(spec["paths"].get(path).is_none(), "{path}");
+            }
+            for path in ["/health", "/live", "/v1/models"] {
+                assert!(spec["paths"][path]["get"].is_object(), "{path}");
+            }
+            assert_eq!(spec["openapi"], full["openapi"]);
+            assert_eq!(spec["components"], full["components"]);
+            let independent_spec = read_openapi(&independent).await;
+            assert!(
+                independent_spec["paths"]
+                    .get("/v1/chat/completions")
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn openapi_http_preserves_extensions_at_remapped_inference_paths() {
+        temp_env::async_with_vars([(HTTP_SVC_CHAT_PATH_ENV, Some("/custom/chat"))], async {
+            let service = HttpService::builder()
+                .add_frontend_route_extension(|context| {
+                    test_status_extension(context, "/custom/chat")
+                })
+                .build()
+                .unwrap();
+            for enabled in [false, true, false] {
+                service
+                    .enable_model_endpoint(EndpointType::Chat, enabled)
+                    .unwrap();
+                let spec = read_openapi(&service).await;
+                let item = &spec["paths"]["/custom/chat"];
+                assert!(item["get"].is_object(), "extension must remain documented");
+                assert_eq!(item.get("post").is_some(), enabled);
+                assert!(spec["paths"].get("/v1/chat/completions").is_none());
+            }
+        })
+        .await;
     }
 
     /// Handler metadata must not allow two registrations of the same method/path.

@@ -11429,18 +11429,21 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     #[ignore = "Run explicitly with DYN_PARSER_VERSION=2; measures upstream native buffering"]
     async fn eight_family_paused_native_http_progress() {
         paused_http_tool_progress(false).await;
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     #[ignore = "Run explicitly with DYN_PARSER_VERSION=2; measures installed forced-tool modes"]
     async fn eight_family_paused_forced_http_progress() {
         paused_http_tool_progress(true).await;
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn eight_family_http_sse_replay() {
         use crate::protocols::openai::chat_completions::unified_parser;
         // Run with the experiment enabled in a separate process: its flag is cached.
