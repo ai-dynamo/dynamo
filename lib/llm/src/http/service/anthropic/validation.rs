@@ -10,7 +10,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{
+    Deserialize, Deserializer,
+    de::{DeserializeOwned, MapAccess, Visitor},
+};
 use serde_json::{Value, value::RawValue};
 
 /// Retain the ingress buffer and small admission fields. Borrowed raw fields
@@ -19,8 +22,40 @@ pub(super) struct ValidatedRequest<T> {
     body: Bytes,
     model: String,
     stream: bool,
+    thread: bool,
     fields: Result<Value, String>,
     marker: PhantomData<T>,
+}
+
+/// The body's top-level fields, borrowed. A repeated `thread` key is an error here, because the
+/// typed parser ignores `thread` and cannot reject the repeat.
+struct RawFields<'a>(HashMap<String, &'a RawValue>);
+
+impl<'de: 'a, 'a> Deserialize<'de> for RawFields<'a> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Fields<'a>(PhantomData<&'a ()>);
+
+        impl<'de: 'a, 'a> Visitor<'de> for Fields<'a> {
+            type Value = RawFields<'a>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut fields: HashMap<String, &'a RawValue> = HashMap::new();
+                while let Some((name, value)) = map.next_entry::<String, &'de RawValue>()? {
+                    if name == "thread" && fields.contains_key("thread") {
+                        return Err(serde::de::Error::duplicate_field("thread"));
+                    }
+                    fields.insert(name, value);
+                }
+                Ok(RawFields(fields))
+            }
+        }
+
+        deserializer.deserialize_map(Fields(PhantomData))
+    }
 }
 
 impl<S: Send + Sync, T: DeserializeOwned + Send> FromRequest<S> for ValidatedRequest<T> {
@@ -50,9 +85,13 @@ impl<T: DeserializeOwned> ValidatedRequest<T> {
     pub(super) fn from_bytes(body: Bytes) -> Self {
         let mut model = String::new();
         let mut stream = false;
+        let mut thread = false;
         let fields = (|| {
-            let raw: HashMap<String, &RawValue> =
+            let RawFields(raw) =
                 serde_json::from_slice(&body).map_err(|error| error.to_string())?;
+            // Compare the text as sent. Parsed as a `Value`, an object with serde_json's
+            // private RawValue key reads as its payload, which can be `null`.
+            thread = raw.get("thread").is_some_and(|raw| raw.get() != "null");
             model = raw
                 .get("model")
                 .and_then(|raw| serde_json::from_str(raw.get()).ok())
@@ -81,6 +120,7 @@ impl<T: DeserializeOwned> ValidatedRequest<T> {
             body,
             model,
             stream,
+            thread,
             fields,
             marker: PhantomData,
         }
@@ -89,6 +129,12 @@ impl<T: DeserializeOwned> ValidatedRequest<T> {
     /// Best-effort labels; validation and typed parsing run inside the handler's metrics guard.
     pub(super) fn identity(&self) -> (String, bool) {
         (self.model.clone(), self.stream)
+    }
+
+    /// Whether the request names a message thread, whose continue requests carry only the
+    /// new messages. Any `thread` value but a literal `null` names one.
+    pub(super) fn has_thread(&self) -> bool {
+        self.thread
     }
 
     /// Inspect native image tags without decoding or copying their source payloads.

@@ -147,9 +147,11 @@ async fn anthropic_error_middleware(mut request: Request<Body>, next: Next) -> R
             .await
             .unwrap_or_default();
         let mut body = match serde_json::from_slice::<AnthropicErrorResponse>(&body_bytes) {
-            Ok(error) if error.object_type == "error" => {
-                serde_json::to_value(error).expect("Anthropic error is serializable")
-            }
+            // Keep the body as sent, with fields the typed envelope lacks (`error.details`).
+            Ok(error) if error.object_type == "error" => serde_json::from_slice(&body_bytes)
+                .unwrap_or_else(|_| {
+                    serde_json::to_value(error).expect("Anthropic error is serializable")
+                }),
             _ => {
                 if matches!(
                     parts.status,
@@ -357,6 +359,19 @@ impl AnthropicHandlerError {
     }
 }
 
+/// A message thread keeps the conversation on the server, so a continue request carries only
+/// the new messages. No thread is kept here, so refuse one rather than answer from those alone,
+/// with the code on which the Anthropic SDK tool runner resends the turn without `thread`.
+fn thread_unsupported_response() -> Response {
+    super::openai::record_local_failure(ErrorClass::InvalidRequest);
+    let mut body = serde_json::to_value(AnthropicErrorResponse::invalid_request(
+        "thread: message threads are not supported; send the full conversation without `thread`",
+    ))
+    .expect("Anthropic error is serializable");
+    body["error"]["details"] = serde_json::json!({"error_code": "thread_unsupported_request"});
+    (StatusCode::BAD_REQUEST, Json(body)).into_response()
+}
+
 fn validate_anthropic_messages(
     messages: &[AnthropicMessage],
 ) -> Result<(), AnthropicRequestValidationError> {
@@ -449,6 +464,10 @@ async fn handler_anthropic_messages(
         streaming,
         &request_id,
     );
+    if request.has_thread() {
+        inflight_guard.mark_error(ErrorType::NotImplemented);
+        return Err(thread_unsupported_response());
+    }
     if state.media_rejection().enabled() {
         let content_type = request.media_content_type(&headers).map_err(|error| {
             AnthropicHandlerError::validation(error).into_marked_response(&mut inflight_guard)
@@ -1043,6 +1062,9 @@ async fn handler_count_tokens(
     headers: HeaderMap,
     request: ValidatedRequest<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
+    if request.has_thread() {
+        return Err(thread_unsupported_response());
+    }
     let mut request = request
         .into_request(&headers)
         .map_err(|error| AnthropicHandlerError::validation(error).into_response())?;

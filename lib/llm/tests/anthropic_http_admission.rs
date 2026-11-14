@@ -127,6 +127,9 @@ async fn duplicate_request_fields_are_rejected_before_generation() {
         let script = load_agent_fixture("text.sse").await.unwrap();
         let svc = HarnessService::start([script]).await;
         let model = serde_json::to_string(MODEL).unwrap();
+        let thread = r#""thread":{"type":"continue","previous_message_id":"msg_01"}"#;
+        // Parsed as a `serde_json::Value`, this object reads as its payload, `null`.
+        let masked = r#""thread":{"$serde_json::private::RawValue":"null"}"#;
         // Keep raw JSON: constructing a Value would discard the duplicate keys.
         let fields = [
             format!(
@@ -144,6 +147,22 @@ async fn duplicate_request_fields_are_rejected_before_generation() {
             format!(
                 r#""model":{model},"messages":[{{"role":"user","content":"ping"}}],"system":null,"system":null"#
             ),
+            // The typed request ignores `thread`, so admission rejects its repeat.
+            format!(
+                r#""model":{model},"messages":[{{"role":"user","content":"ping"}}],{masked},{thread}"#
+            ),
+            format!(
+                r#""model":{model},"messages":[{{"role":"user","content":"ping"}}],{thread},{masked}"#
+            ),
+            format!(
+                r#""model":{model},"messages":[{{"role":"user","content":"ping"}}],{thread},"thread":null"#
+            ),
+            format!(
+                r#""model":{model},"messages":[{{"role":"user","content":"ping"}}],"thread":null,{thread}"#
+            ),
+            format!(
+                r#""model":{model},"messages":[{{"role":"user","content":"ping"}}],"thread":null,"thr\u0065ad":null"#
+            ),
         ];
         for path in ["/v1/messages", "/v1/messages/count_tokens"] {
             for fields in &fields {
@@ -157,7 +176,16 @@ async fn duplicate_request_fields_are_rejected_before_generation() {
                     .send()
                     .await
                     .unwrap();
-                assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
+                let error =
+                    assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
+                // A repeated `thread` is rejected as a repeat, not refused as a thread.
+                if fields.contains(r#""thread""#) {
+                    let message = error["error"]["message"].as_str().unwrap();
+                    assert!(
+                        message.contains("duplicate field `thread`"),
+                        "{path}: {error}"
+                    );
+                }
             }
         }
         assert!(svc.engine.take_requests().await.is_empty());
@@ -421,6 +449,66 @@ async fn thinking_admission_observes_interleaved_beta_and_current_modes() {
             }
         }
         assert_eq!(svc.engine.take_requests().await.len(), 2);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn message_threads_are_refused_before_generation() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([script]).await;
+        let mut create = request();
+        create["system"] = json!("instructions");
+        create["tools"] = json!([{"name": "read", "input_schema": {"type": "object"}}]);
+        create["thread"] = json!({"type": "create"});
+        // A continue request carries only the new messages: the thread holds the rest.
+        let mut follow_up = request();
+        follow_up["stream"] = true.into();
+        follow_up["thread"] = json!({"type": "continue", "previous_message_id": "msg_01"});
+        // Any value but a literal `null` names a thread, also the object that a
+        // `serde_json::Value` parse reads as its payload, `null`.
+        let mut masked = request();
+        masked["thread"] = json!({"$serde_json::private::RawValue": "null"});
+        for path in ["/v1/messages", "/v1/messages/count_tokens"] {
+            for body in [&create, &follow_up, &masked] {
+                let response = svc
+                    .client
+                    .post(format!("{}{path}", svc.base_url))
+                    .timeout(Duration::from_secs(10))
+                    .header("anthropic-beta", "message-threads-2026-08-12")
+                    .json(body)
+                    .send()
+                    .await
+                    .unwrap();
+                let error =
+                    assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
+                // The Anthropic SDK tool runner resends the turn without `thread` on this code.
+                assert_eq!(
+                    error["error"]["details"]["error_code"], "thread_unsupported_request",
+                    "{path}: {error}"
+                );
+            }
+        }
+        let mut unthreaded = request();
+        unthreaded["thread"] = Value::Null;
+        let response = svc
+            .client
+            .post(format!("{}/v1/messages", svc.base_url))
+            .timeout(Duration::from_secs(10))
+            .json(&unthreaded)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{}",
+            response.text().await.unwrap()
+        );
+        assert_eq!(svc.engine.take_requests().await.len(), 1);
         svc.shutdown().await;
     })
     .await;
