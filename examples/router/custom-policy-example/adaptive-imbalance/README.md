@@ -68,10 +68,11 @@ Other gaps:
 ```bash
 DYN_EPP_MODE=standalone \
 DYN_ROUTER_POLICY_CONFIG=examples/router/custom-policy-example/adaptive-imbalance/worker-selection.yaml \
-DYN_ROUTER_WORKER_SELECTION_POLICY=adaptive-imbalance \
 RUST_LOG=info \
   cargo run --release -p dynamo-custom-policy-example-epp
 ```
+
+`worker-selection.yaml` selects the policy for the aggregated role with its parameters. Do not also set `DYN_ROUTER_WORKER_SELECTION_POLICY=adaptive-imbalance`: that override replaces the YAML selection and runs the policy with default parameters, so edits to the file would have no effect.
 
 ## Request-path cost
 
