@@ -677,7 +677,9 @@ async def test_dgd_checkpoint_restore_deploy(
     )
 
     async with ManagedDeployment(
-        log_dir=request.node.name,
+        # The autouse logger fixture wipes request.node.name on each retry; a
+        # per-attempt directory keeps the failed attempt's pod logs for upload.
+        log_dir=f"{request.node.name}-{suffix}",
         deployment_spec=deployment_spec,
         namespace=namespace,
         skip_service_restart=skip_service_restart,
