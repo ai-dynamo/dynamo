@@ -51,8 +51,8 @@ def _load_push_egress():
     runnable wherever the compiled bindings are absent.
     """
     spec = importlib.util.spec_from_file_location(
-        "dynamo.trtllm.request_handlers.push_egress",
-        _COMPONENTS_SRC / "dynamo" / "trtllm" / "request_handlers" / "push_egress.py",
+        "dynamo.common.backend.push_egress",
+        _COMPONENTS_SRC / "dynamo" / "common" / "backend" / "push_egress.py",
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -772,19 +772,23 @@ class TestDecoratorAppliedToRealHandlers:
 
 
 class TestNoBleedIntoOtherEngines:
-    """Only TRT-LLM handlers may be push-capable.
+    """Push capability must come from the decorator, never from a handler's
+    own signature.
 
     `Endpoint.serve_endpoint` is shared by every Python worker -- vLLM, SGLang,
     frontend, planner, router, mocker, and more -- and the ONLY thing keeping
-    them on the pull path is that `handler_supports_push` finds no
-    `response_sender` parameter on their handlers.
-
-    So the moment any other engine's handler declares a parameter with that
-    name, for any unrelated reason, Rust drives it with the push engine. It
-    never calls `sender.send`, and the driver task fails any request whose
-    handler yields instead of pushing -- so that handler's every request dies
-    at the first response. This test makes the collision loud at the source.
+    a handler on the pull path is that `handler_supports_push` finds no
+    `response_sender` parameter on it. Opting in means applying
+    `@push_egress_capable`, whose `dispatch` carries the parameter and does the
+    pushing. So the moment any handler source declares a parameter with that
+    name directly, for any unrelated reason, Rust drives it with the push
+    engine; it never calls `sender.send`, and the driver task fails any request
+    whose handler yields instead of pushing -- so that handler's every request
+    dies at the first response. This test makes the collision loud at the
+    source: only the shared implementation module may declare the parameter.
     """
+
+    IMPLEMENTATION = "dynamo/common/backend/push_egress.py"
 
     @staticmethod
     def _declares_response_sender(path):
@@ -802,37 +806,33 @@ class TestNoBleedIntoOtherEngines:
                 hits.append(node.name)
         return hits
 
-    def test_only_trtllm_handlers_declare_response_sender(self):
+    def test_only_the_decorator_module_declares_response_sender(self):
         offenders = {}
         for path in (_COMPONENTS_SRC / "dynamo").rglob("*.py"):
-            if "/trtllm/" in path.as_posix():
-                continue  # the one engine that is supposed to have it
+            rel = path.relative_to(_COMPONENTS_SRC).as_posix()
+            if rel == self.IMPLEMENTATION or path == pathlib.Path(__file__).resolve():
+                continue  # the implementation, and this file's fake dispatcher
             hits = self._declares_response_sender(path)
             if hits:
-                offenders[path.relative_to(_COMPONENTS_SRC).as_posix()] = hits
-
+                offenders[rel] = hits
         assert not offenders, (
-            "non-TRT-LLM code declares a `response_sender` parameter: "
+            "handler code declares a `response_sender` parameter directly: "
             f"{offenders}. Endpoint.serve_endpoint selects the push egress "
             "engine purely on that parameter name, so these handlers would be "
             "driven in push mode without ever pushing -- silently degrading "
-            "to the forward-yield path. Rename the parameter."
+            "to the forward-yield path. Opt in with @push_egress_capable "
+            "instead, or rename the parameter."
         )
 
-    def test_trtllm_side_is_where_it_lives(self):
-        """Sanity check on the scan: it must actually find the trtllm ones.
+    def test_decorator_module_is_where_it_lives(self):
+        """Sanity check on the scan: it must actually find the implementation.
 
         Guards against the walk silently matching nothing (wrong root, changed
         layout), which would make the test above vacuously green forever.
         """
-        found = {}
-        for path in (_COMPONENTS_SRC / "dynamo" / "trtllm").rglob("*.py"):
-            hits = self._declares_response_sender(path)
-            if hits:
-                found[path.name] = hits
-
-        assert "push_egress.py" in found, (
-            f"scan found no response_sender parameter in trtllm/push_egress.py "
-            f"(found: {found}); the AST walk is probably broken, which would "
+        hits = self._declares_response_sender(_COMPONENTS_SRC / self.IMPLEMENTATION)
+        assert "dispatch" in hits, (
+            f"scan found no response_sender parameter in {self.IMPLEMENTATION} "
+            f"(found: {hits}); the AST walk is probably broken, which would "
             "make the no-bleed assertion vacuous"
         )
