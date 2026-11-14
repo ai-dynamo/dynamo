@@ -2306,7 +2306,12 @@ ComponentNames is the list of underlying resource names for this service. During
 </ParamField>
 
 <ParamField path="runtimeNamespace" type="string">
-RuntimeNamespace is the effective Dynamo runtime namespace for this component. Worker components may include a generation suffix; non-workers and Grove-backed workers use the base namespace. During rolling updates, worker status keeps the old active revision namespace until cutover completes.
+RuntimeNamespace is the effective Dynamo runtime namespace for this component. Worker components may include a generation suffix; non-workers use the base namespace. During rolling updates, worker status keeps the old active revision namespace until cutover completes, and RuntimeNamespaces also lists the new revision's.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="runtimeNamespaces" type="string array">
+RuntimeNamespaces lists every effective Dynamo runtime namespace in which this component may have replicas, while RuntimeNamespace alone does not name them all. During a rolling update of a worker component, it holds the namespaces of the old revisions and of the new one, so that a consumer that must see every replica, such as a DynamoPoolRelay, can follow both before cutover. It is omitted otherwise.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2689,7 +2694,12 @@ componentNames is the list of underlying Kubernetes resource names for this Dyna
 </ParamField>
 
 <ParamField path="runtimeNamespace" type="string">
-runtimeNamespace is the effective Dynamo runtime namespace for this component. Worker components may include a generation suffix; non-workers use the base namespace. During rolling updates, worker status keeps the old active revision namespace until cutover completes.
+runtimeNamespace is the effective Dynamo runtime namespace for this component. Worker components may include a generation suffix; non-workers use the base namespace. During rolling updates, worker status keeps the old active revision namespace until cutover completes, and runtimeNamespaces also lists the new revision's.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="runtimeNamespaces" type="string array">
+runtimeNamespaces lists every effective Dynamo runtime namespace in which this component may have replicas, while runtimeNamespace alone does not name them all. During a rolling update of a worker component, it holds the namespaces of the old revisions and of the new one, so that a consumer that must see every replica, such as a DynamoPoolRelay, can follow both before cutover. It is omitted otherwise.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 

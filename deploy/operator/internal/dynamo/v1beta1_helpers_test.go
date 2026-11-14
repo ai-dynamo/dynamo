@@ -2,6 +2,7 @@ package dynamo
 
 import (
 	"maps"
+	"slices"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -172,6 +173,31 @@ func TestComponentRuntimeNamespace(t *testing.T) {
 			got := ComponentRuntimeNamespace("base", tt.componentType, tt.workerHashSuffix)
 			if got != tt.want {
 				t.Fatalf("ComponentRuntimeNamespace() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestComponentRuntimeNamespaces(t *testing.T) {
+	tests := []struct {
+		name       string
+		active     string
+		namespaces []string
+		want       []string
+	}{
+		{name: "active alone lists nothing", active: "base-old"},
+		{name: "repeats of active list nothing", active: "base-old", namespaces: []string{"base-old", ""}},
+		{name: "a new revision lists both, sorted", active: "base-old", namespaces: []string{"base-new"}, want: []string{"base-new", "base-old"}},
+		{name: "duplicates and empty namespaces are dropped", active: "base-old", namespaces: []string{"base-new", "", "base-older", "base-new"}, want: []string{"base-new", "base-old", "base-older"}},
+		{name: "an empty active namespace lists the others", namespaces: []string{"base-new"}, want: []string{"base-new"}},
+		{name: "nothing known lists nothing", namespaces: []string{""}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := StatusRuntimeNamespaces(tt.active, tt.namespaces...)
+			if !slices.Equal(got, tt.want) || (got == nil) != (tt.want == nil) {
+				t.Fatalf("StatusRuntimeNamespaces(%q, %q) = %q, want %q", tt.active, tt.namespaces, got, tt.want)
 			}
 		})
 	}
