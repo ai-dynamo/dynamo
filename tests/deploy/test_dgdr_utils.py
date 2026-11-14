@@ -4,6 +4,7 @@
 """Unit tests for DynamoGraphDeploymentRequest lifecycle helpers."""
 
 import asyncio
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -17,6 +18,7 @@ from tests.deploy.dgdr_utils import (
     DGDRTestConfig,
     ManagedDGDR,
     build_dgdr,
+    kubectl_read,
     parse_final_dgd,
     parse_served_model_ids,
     run_lifecycle,
@@ -492,6 +494,35 @@ async def test_wait_for_dgd_successful_stops_connection_retries_at_deadline(
         await manager.wait_for_dgd_successful("dgd", timeout=0.25)
 
     assert manager.get_dgd.await_count < VCLUSTER_CONNECTION_RETRY_LIMIT + 1
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected_runs"),
+    [
+        (
+            "The connection to the server 127.0.0.1:8443 was refused - "
+            "did you specify the right host or port?",
+            2,
+        ),
+        ('error: the server doesn\'t have a resource type "dgdr"', 1),
+    ],
+    ids=["connection_refused", "other_error"],
+)
+def test_kubectl_read_retries_only_vcluster_connection_errors(
+    monkeypatch, stderr, expected_runs
+) -> None:
+    failure = subprocess.CompletedProcess(["kubectl"], 1, "", stderr)
+    success = subprocess.CompletedProcess(["kubectl"], 0, "", "")
+    run = MagicMock(side_effect=[failure, success])
+    monkeypatch.setattr("tests.deploy.dgdr_utils.subprocess.run", run)
+    sleep = MagicMock()
+    monkeypatch.setattr("tests.deploy.vcluster_utils.time.sleep", sleep)
+
+    result = kubectl_read("get", "dgdr")
+
+    assert run.call_count == expected_runs
+    assert result is (success if expected_runs == 2 else failure)
+    assert sleep.call_count == expected_runs - 1
 
 
 async def test_cleanup_retries_vcluster_connection_failures(monkeypatch) -> None:

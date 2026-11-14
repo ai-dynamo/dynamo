@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from kubernetes_asyncio.client import exceptions
 
 from tests.deploy.vcluster_utils import (
     VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS,
+    retry_vcluster_api,
     retry_vcluster_api_async,
 )
 
@@ -317,6 +319,34 @@ def kubectl(*args: str, input_: str | None = None) -> subprocess.CompletedProces
         text=True,
         capture_output=True,
         check=False,
+    )
+
+
+# Matches the tunnel errors that .github/scripts/retry_kubectl.sh retries.
+_KUBECTL_CONNECTION_ERROR = re.compile(
+    r"Unable to connect to the server:.*(EOF|connection refused|connection reset"
+    r"|i/o timeout|TLS handshake timeout)"
+    r"|The connection to the server .* was refused"
+    r"|read: connection reset by peer",
+    re.IGNORECASE,
+)
+
+
+class _KubectlConnectionError(RuntimeError):
+    pass
+
+
+def kubectl_read(*args: str) -> subprocess.CompletedProcess[str]:
+    """Run an idempotent kubectl command, retrying while the vCluster tunnel recovers."""
+
+    def run() -> subprocess.CompletedProcess[str]:
+        result = kubectl(*args)
+        if result.returncode != 0 and _KUBECTL_CONNECTION_ERROR.search(result.stderr):
+            raise _KubectlConnectionError(result.stderr.strip())
+        return result
+
+    return retry_vcluster_api(
+        f"running kubectl {' '.join(args)}", run, (_KubectlConnectionError,), logger
     )
 
 
