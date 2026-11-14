@@ -926,6 +926,8 @@ class TestGenerateLocally:
         last_index = len(prompt_logprobs_per_chunk) - 1
         for index, prompt_logprobs in enumerate(prompt_logprobs_per_chunk):
             output = MagicMock()
+            # Every chunk streams the same choice.
+            output.index = 0
             output.token_ids = list(range(42, 43 + index))
             output.finish_reason = "stop" if index == last_index else None
             output.stop_reason = None
@@ -1539,6 +1541,73 @@ class TestGenerateLocally:
                 }
             },
         ]
+
+    @staticmethod
+    def _prompt_logprobs_fixture():
+        raw = [None, {2: MagicMock(logprob=-0.25, rank=1, decoded_token="two")}]
+        payload = [None, {"2": {"logprob": -0.25, "rank": 1, "decoded_token": "two"}}]
+        return raw, payload
+
+    @staticmethod
+    def _chunks_with_prompt_logprobs(chunks):
+        return [
+            i
+            for i, chunk in enumerate(chunks)
+            if "prompt_logprobs" in (chunk.get("engine_data") or {})
+        ]
+
+    @pytest.mark.asyncio
+    async def test_prompt_logprobs_sent_once_on_first_token_chunk(self):
+        handler = self._make_handler()
+        raw, payload = self._prompt_logprobs_fixture()
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result_sequence([raw, raw, raw])
+        )
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+            "output_options": {"prompt_logprobs": 0},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert len(chunks) == 3
+        assert self._chunks_with_prompt_logprobs(chunks) == [0]
+        assert chunks[0]["engine_data"]["prompt_logprobs"] == payload
+
+    @pytest.mark.asyncio
+    async def test_prompt_logprobs_sent_before_terminal(self):
+        handler = self._make_handler()
+        raw, payload = self._prompt_logprobs_fixture()
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result_sequence([raw, [], []])
+        )
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+            "output_options": {"prompt_logprobs": 0},
+        }
+
+        # The frontend matches a stop string after the second chunk and cancels
+        # the worker, so the terminal output is never read.
+        stream = handler.generate_locally(request, self._make_context())
+        chunks = []
+        try:
+            async for chunk in stream:
+                chunks.append(chunk)
+                if len(chunks) == 2:
+                    break
+        finally:
+            await stream.aclose()
+
+        assert all("finish_reason" not in chunk for chunk in chunks)
+        assert chunks[0]["engine_data"]["prompt_logprobs"] == payload
+        assert self._chunks_with_prompt_logprobs(chunks) == [0]
 
     def test_trtllm_sampling_params_accepts_zero_prompt_logprobs(self):
         sampling_params = SamplingParams(prompt_logprobs=0)

@@ -2538,6 +2538,94 @@ async def test_process_token_stream_preserves_cache_usage_before_metadata_clear(
     uploader.upload_choice.assert_awaited_once()
 
 
+_SGLANG_INPUT_LOGPROBS = [(None, 1, None), (-0.5, 17, "p")]
+_SGLANG_PROMPT_PAYLOAD = [None, {"17": {"logprob": -0.5, "decoded_token": "p"}}]
+
+
+def _prompt_logprob_chunk(output_ids, *, reason=None, with_prompt=False):
+    meta_info: dict = {"id": "prompt-logprobs-request", "finish_reason": reason}
+    if with_prompt:
+        meta_info["input_token_logprobs"] = list(_SGLANG_INPUT_LOGPROBS)
+    return {"output_ids": output_ids, "meta_info": meta_info}
+
+
+def _chunks_with_prompt_logprobs(chunks):
+    return [
+        i
+        for i, chunk in enumerate(chunks)
+        if "prompt_logprobs" in (chunk.get("engine_data") or {})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_sends_prompt_logprobs_before_terminal():
+    handler = _new_decode_handler()
+    responses = [
+        _prompt_logprob_chunk([101], with_prompt=True),
+        _prompt_logprob_chunk([102], with_prompt=True),
+        _prompt_logprob_chunk([103], reason={"type": "length"}, with_prompt=True),
+    ]
+
+    # The frontend matches a stop string after the second chunk and cancels
+    # the worker, so the terminal output is never read.
+    stream = handler._process_token_stream(
+        _stream(responses), _Context(), prompt_logprobs_count=0
+    )
+    chunks = []
+    try:
+        async for chunk in stream:
+            chunks.append(chunk)
+            if len(chunks) == 2:
+                break
+    finally:
+        await stream.aclose()
+
+    assert [chunk["token_ids"] for chunk in chunks] == [[101], [102]]
+    assert chunks[0]["engine_data"]["prompt_logprobs"] == _SGLANG_PROMPT_PAYLOAD
+    assert _chunks_with_prompt_logprobs(chunks) == [0]
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_sends_prompt_logprobs_once():
+    handler = _new_decode_handler()
+    responses = [
+        _prompt_logprob_chunk([101], with_prompt=True),
+        _prompt_logprob_chunk([102], with_prompt=True),
+        _prompt_logprob_chunk([103], reason={"type": "length"}, with_prompt=True),
+    ]
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(responses), _Context(), prompt_logprobs_count=0
+        )
+    )
+
+    assert len(chunks) == 3
+    assert _chunks_with_prompt_logprobs(chunks) == [0]
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_sends_late_prompt_logprobs_after_empty_chunk():
+    handler = _new_decode_handler()
+    responses = [
+        _prompt_logprob_chunk([101]),
+        _prompt_logprob_chunk([], with_prompt=True),
+        _prompt_logprob_chunk([102]),
+        _prompt_logprob_chunk([103], reason={"type": "length"}),
+    ]
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(responses), _Context(), prompt_logprobs_count=0
+        )
+    )
+
+    # The empty chunk is not yielded; its payload rides the next token chunk.
+    assert [chunk["token_ids"] for chunk in chunks] == [[101], [102], [103]]
+    assert _chunks_with_prompt_logprobs(chunks) == [1]
+    assert chunks[1]["engine_data"]["prompt_logprobs"] == _SGLANG_PROMPT_PAYLOAD
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "mode", [DisaggregationMode.AGGREGATED, DisaggregationMode.DECODE]
