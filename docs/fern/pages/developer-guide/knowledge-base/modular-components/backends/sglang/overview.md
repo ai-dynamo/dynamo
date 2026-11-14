@@ -222,13 +222,13 @@ SGLang supports multi-node tensor parallelism via the native `--dist-init-addr`,
 
 ### Kubernetes Deployment
 
-You can deploy SGLang with Dynamo on Kubernetes using a `DynamoGraphDeployment`. For more details, see the [SGLang Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy).
+You can deploy SGLang with Dynamo on Kubernetes using a `DynamoGraphDeployment`. For more details, see [Deploy with DGD](../../../../../kubernetes/model-deployment/deploy-with-dgd.md) and the SGLang manifests in the [Examples catalog](../../../../../recipes/examples/overview.mdx).
 
 ## Next Steps
 
 - **[Reference Guide](reference-guide.md)**: Worker types, architecture, and configuration
-- **[Examples](../../../../../recipes/cli-templates/sglang.mdx)**: Local deployment launch scripts
+- **[Examples](../../../../../recipes/examples/overview.mdx)**: Local deployment launch scripts
 - **[Disaggregation](disaggregation.md)**: P/D architecture and KV transfer details
 - **Diffusion**: [image](../../../../../use-cases/diffusion/workflows/text-to-image.md), [video](../../../../../use-cases/diffusion/workflows/text-to-video.md), and [language](../../../../../use-cases/diffusion/workflows/text-to-text-llm-diffusion.md) diffusion models
 - **[Observability](observability.md)**: Metrics, tracing, and Grafana dashboards
-- **[Deploying SGLang with Dynamo on Kubernetes](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy)**: Kubernetes deployment guide
+- **[Deploying SGLang with Dynamo on Kubernetes](../../../../../recipes/examples/overview.mdx)**: Kubernetes deployment examples

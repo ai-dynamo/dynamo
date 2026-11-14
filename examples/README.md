@@ -17,7 +17,14 @@ limitations under the License.
 
 # Dynamo Examples
 
-This directory contains practical examples demonstrating how to deploy and use Dynamo for distributed LLM inference. Each example includes setup instructions, configuration files, and explanations to help you understand different deployment patterns and use cases.
+This directory holds the source for Dynamo's runnable examples: Kubernetes manifests, local launch
+scripts, clients, and supporting assets.
+
+To browse, configure, and deploy the examples, use the
+[Examples catalog](../docs/fern/pages/recipes/examples/overview.mdx) on the Dynamo docs site. Each
+example page renders the manifests and launch scripts from this directory and links to the setup
+guide it needs. To get started, see the [Kubernetes quickstart](../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
+or the [CLI quickstart](../docs/fern/pages/cli/getting-started/quickstart.mdx).
 
 > [!IMPORTANT]
 > All DynamoGraphDeployment manifests use `nvidia.com/v1beta1`. Other custom resources that do not
@@ -25,79 +32,27 @@ This directory contains practical examples demonstrating how to deploy and use D
 > To migrate an existing `v1alpha1` manifest, follow the
 > [API version converter instructions](../deploy/utils/README.md).
 
-**Want to see a specific example?**
-Open a [GitHub issue](https://github.com/ai-dynamo/dynamo/issues) to request an example you'd like to see, or [open a pull request](https://github.com/ai-dynamo/dynamo/pulls) if you'd like to contribute your own!
+## Layout
 
-## Basics & Tutorials
+| Path | Contents |
+|---|---|
+| [`backends/`](backends/) | Per-backend Kubernetes manifests (`deploy/`) and local launch scripts (`launch/`) for vLLM, SGLang, TensorRT-LLM, TokenSpeed, Mocker, and the sample backend |
+| [`deployments/`](deployments/) | Cloud-provider manifests (EKS, AKS, GKE, ECS), DGDR examples, and the offline batch integration |
+| [`diffusers/`](diffusers/) | FastVideo video diffusion runtime, manifests, and local launcher |
+| [`global_planner/`](global_planner/) | GlobalPlanner manifests for shared GPU budgets and multi-pool endpoints |
+| [`gpu-sharing/`](gpu-sharing/) | Manifests and scripts behind the GPU sharing results |
+| [`nemotron_speech_cascaded_pipeline/`](nemotron_speech_cascaded_pipeline/) | Realtime ASR and streaming TTS adapters for NVIDIA Speech NIMs |
+| [`power-aware-budget/`](power-aware-budget/) | Power-cap and power-budget contract fragment for the Planner |
+| [`rl/`](rl/) | Reinforcement learning integrations, such as Slime external rollouts |
+| [`router/`](router/) | Custom router policy examples and policy-class queue configuration |
+| [`custom_backend/`](custom_backend/) | Runtime examples for developers using the Python bindings, such as Hello World and request cancellation |
+| [`custom_encoder/`](custom_encoder/) | Custom vision encoder example |
+| [`chat_templates/`](chat_templates/) | Vendored Jinja chat templates for tool-call and reasoning parsers |
+| [`common/`](common/) | Shared helper scripts used by the launch scripts |
 
-Learn fundamental Dynamo concepts through these introductory examples:
+## Contributing
 
-- **[Quickstart](https://docs.nvidia.com/dynamo/getting-started/quickstart)** - Simple local Dynamo setup across supported backends
-- **[Disaggregated Serving](../docs/fern/pages/kubernetes/disaggregated-serving/overview.md)** - Prefill/decode separation for enhanced performance and scalability
-- **[Multi-node TensorRT-LLM](../docs/fern/pages/developer-guide/additional-resources/tensorrt-llm-details/multinode-examples.md)** - Distributed inference across multiple nodes and GPUs
-
-## Framework Support
-
-These examples show how Dynamo broadly works using major inference engines.
-
-If you want to see advanced, framework-specific deployment patterns and best practices, check out the [Examples Backends](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends) directory:
-- **[vLLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm)** – vLLM-specific deployment and configuration
-- **[SGLang](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang)** – SGLang integration examples and workflows
-- **[TensorRT-LLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm)** – TensorRT-LLM workflows and optimizations
-- **[TokenSpeed](backends/tokenspeed/README.md)** – LongCat-Flash prefill/decode disaggregation with KV-aware routing
-
-## Use Case Examples
-
-- **[Nemotron Speech Cascaded Pipeline](nemotron_speech_cascaded_pipeline/README.md)** - OpenAI-compatible realtime ASR and streaming TTS adapters for NVIDIA Speech NIMs serving Nemotron models
-
-## Deployment Examples
-
-Platform-specific manifests and templates for production environments. Deployment guides live under `docs/kubernetes/cloud-providers/`; each examples folder links to its guide.
-
-- **[Amazon EKS](deployments/EKS/README.md)** - Manifests and templates ([deployment guide](../docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/eks-setup.mdx))
-- **[Azure AKS](deployments/AKS/README.md)** - Helm values ([deployment guide](../docs/fern/pages/kubernetes/installation/managed-kubernetes/azure/aks-setup.mdx))
-- **[Amazon ECS](deployments/ECS/README.md)** - Task definitions ([deployment guide](../docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/ecs.mdx))
-- **[Google GKE](deployments/GKE/README.md)** - DGD manifests ([deployment guide](../docs/fern/pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx))
-
-## Integration Examples
-
-End-to-end examples that connect Dynamo to adjacent inference services:
-
-- **[Offline Batch API](deployments/batch-gateway/README.md)** provides an experimental OpenAI Batch lifecycle for a DynamoGraphDeployment.
-- **[Slime External Rollouts](rl/slime/README.md)** connects a fixed Slime worker set to stock SGLang engines and Dynamo sidecars.
-
-## Runtime Examples
-
-Low-level runtime examples for developers using Python<>Rust bindings:
-
-- **[Hello World](custom_backend/hello_world/README.md)** - Minimal Dynamo runtime service demonstrating basic concepts
-
-## Getting Started
-
-1. **Choose your deployment pattern**: Start with the [Quickstart](https://docs.nvidia.com/dynamo/getting-started/quickstart) for a simple local deployment, or explore [Disaggregated Serving](../docs/fern/pages/kubernetes/disaggregated-serving/overview.md) for advanced architectures.
-
-2. **Set up prerequisites**: Most examples require etcd and NATS services. You can start them using:
-   ```bash
-   docker compose -f dev/docker-compose.yml up -d
-   ```
-
-3. **Follow the example**: Each directory contains detailed setup instructions and configuration files specific to that deployment pattern.
-
-## Prerequisites
-
-Before running any examples, ensure you have:
-
-- **Docker & Docker Compose** - For containerized services
-- **CUDA-compatible GPU** - For LLM inference (except hello_world, which is non-GPU aware)
-- **Python 3.9+** - For client scripts and utilities
-
-### For Kubernetes Deployments
-
-If you're running Kubernetes/cloud deployment examples (EKS, AKS, GKE), you'll also need:
-
-| Tool | Minimum Version | Installation |
-|------|-----------------|--------------|
-| **kubectl** | v1.24+ | [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) |
-| **Helm** | v3.0+ | [Install Helm](https://helm.sh/docs/intro/install/) |
-
-See the [Kubernetes Installation Guide](../docs/fern/pages/kubernetes/installation/install-dynamo.md#prerequisites) for detailed setup instructions and pre-deployment checks.
+To request an example, open a [GitHub issue](https://github.com/ai-dynamo/dynamo/issues). To
+contribute one, open a [pull request](https://github.com/ai-dynamo/dynamo/pulls) and follow the
+[example authoring guide](../docs/fern/pages/recipes/examples/_catalog/README.md) to surface it in the
+Examples catalog.

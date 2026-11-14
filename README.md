@@ -330,5 +330,5 @@ To quickly setup both: `docker compose -f dev/docker-compose.yml up -d`
 [planner]: docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md
 [kvbm]: docs/components/kvbm/README.md
 [migration]: docs/fault-tolerance/request-migration.md
-[lora]: examples/backends/vllm/deploy/lora/README.md
+[lora]: docs/fern/pages/kubernetes/operations/lora-adapters.md
 [tools]: docs/fern/pages/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx

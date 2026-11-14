@@ -1,0 +1,73 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Autoscaling and Budget Examples
+sidebar-title: Overview
+subtitle: Explore Planner, deployment request, global GPU budget, and GPU sharing examples
+hide-toc: true
+---
+
+import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+import { ExampleTargets } from "@/components/ExampleTargets";
+
+Choose an autoscaling or budget example, then filter its available inference backends.
+
+<ExamplesCatalog topicFilter={false}>
+
+<div className="dynamo-example-card" data-example="planner" data-topic="autoscaling-and-budgets" data-topic-label="Autoscaling and Budgets" data-targets="kubernetes:sglang kubernetes:trtllm kubernetes:vllm" data-keywords="disagg_planner.yaml disagg_planner_xpu_dra.yaml">
+
+<span className="dynamo-example-icon"><Icon icon="arrow-trend-up" /></span>
+
+### Planner Autoscaling
+
+Disaggregated serving with Dynamo Planner autoscaling.
+
+<ExampleTargets targets="kubernetes:sglang kubernetes:trtllm kubernetes:vllm" />
+
+<a className="dynamo-example-card-link" href="planner.mdx">Open Planner Autoscaling example</a>
+
+</div>
+
+<div className="dynamo-example-card" data-example="dgdr" data-topic="autoscaling-and-budgets" data-topic-label="Autoscaling and Budgets" data-targets="kubernetes:vllm kubernetes:sglang" data-keywords="generated-dgd-override.yaml mocker.yaml model-cache.yaml moe-sglang.yaml planner.yaml profiling-artifacts.yaml rapid.yaml review-before-deploy.yaml thorough.yaml">
+
+<span className="dynamo-example-icon"><Icon icon="wand-magic-sparkles" /></span>
+
+### Deployment Requests (DGDR)
+
+Generate and customize deployments with DynamoGraphDeploymentRequest.
+
+<ExampleTargets targets="kubernetes:vllm kubernetes:sglang" />
+
+<a className="dynamo-example-card-link" href="dgdr.mdx">Open Deployment Requests (DGDR) example</a>
+
+</div>
+
+<div className="dynamo-example-card" data-example="global-planner" data-topic="autoscaling-and-budgets" data-topic-label="Autoscaling and Budgets" data-targets="kubernetes:vllm kubernetes:mocker" data-keywords="global-planner-gpu-budget.yaml global-planner-mocker-test.yaml global-planner-vllm-test-xpu-dra.yaml global-planner-vllm-test.yaml">
+
+<span className="dynamo-example-icon"><Icon icon="globe" /></span>
+
+### Global Planner
+
+Multi-model GPU budgets and single-endpoint, multi-pool deployments.
+
+<ExampleTargets targets="kubernetes:vllm kubernetes:mocker" />
+
+<a className="dynamo-example-card-link" href="global-planner.mdx">Open Global Planner example</a>
+
+</div>
+
+<div className="dynamo-example-card" data-example="gpu-sharing" data-topic="autoscaling-and-budgets" data-topic-label="Autoscaling and Budgets" data-targets="kubernetes:vllm" data-keywords="dgds-16x.yaml dgds-8x.yaml">
+
+<span className="dynamo-example-icon"><Icon icon="layer-group" /></span>
+
+### GPU Sharing
+
+Many models per GPU with KAI-Scheduler, compared with one model per GPU.
+
+<ExampleTargets targets="kubernetes:vllm" />
+
+<a className="dynamo-example-card-link" href="gpu-sharing.mdx">Open GPU Sharing example</a>
+
+</div>
+
+</ExamplesCatalog>

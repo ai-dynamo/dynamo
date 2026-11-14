@@ -22,7 +22,7 @@ Image-to-video (I2V) uses the same `/v1/videos` endpoint as [text-to-video](text
 | `Wan-AI/Wan2.2-I2V-A14B-Diffusers` | Dual-expert MoE ([model card](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers)) |
 
 For experimental Cosmos3 Nano reference conditioning, use the
-[Cosmos3 example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/omni/cosmos3/README.md),
+[Cosmos 3 guide](../cosmos3.md),
 which specifies its model revision, runtime requirements, and guardrail settings.
 
 To run a non-default model, pass `--model` to the launch script:
@@ -104,13 +104,15 @@ Use `--wan-size 1b` (default, 1 GPU) or `--wan-size 14b` (2 GPUs). See the launc
 
 ## Generate a Video from an Image
 
-Provide the source image alongside the prompt in the `/v1/videos` request. See the [launch script](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/launch/text-to-video-diffusion.sh) and [SGLang Examples](../../../recipes/cli-templates/sglang.mdx) for the full I2V request format and supported models.
+Send the [text-to-video request](text-to-video.md#sglang) with the source image in an
+`input_reference` field. SGLang accepts an HTTP or HTTPS URL there but, unlike vLLM-Omni, not a
+`data:` URI. See the [launch script](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/launch/text-to-video-diffusion.sh) for supported models and options.
 
 ## See Also
 
 - [Text-to-Video with SGLang](text-to-video.md#sglang)
 - [Image-to-Video with vLLM-Omni](image-to-video.md#vllm-omni)
-- [SGLang Examples](../../../recipes/cli-templates/sglang.mdx)
+- [Deployment Examples](../../../recipes/examples/video-generation.mdx)
 
 </Tab>
 </Tabs>
