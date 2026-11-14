@@ -2068,8 +2068,18 @@ class TestRoutedEnginePath:
         assert responses[0]["completion_usage"]["completion_tokens"] == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stream,stream_options,usage_while_held",
+        [
+            (True, None, False),
+            (True, {"include_usage": True}, False),
+            (True, {"include_usage": True, "continuous_usage_stats": True}, True),
+            # Unary responses are aggregated; usage arrives with the final chunk.
+            (False, None, False),
+        ],
+    )
     async def test_stream_usage_retains_metadata_from_suppressed_chunk(
-        self, vllm_processor_module
+        self, vllm_processor_module, stream, stream_options, usage_while_held
     ):
         class SuppressFirstDelta(_FakePostProcessor):
             def __init__(self):
@@ -2103,19 +2113,30 @@ class TestRoutedEnginePath:
             _base_preproc(),
             request={
                 "model": MODEL,
-                "stream": True,
-                "stream_options": {
-                    "include_usage": True,
-                    "continuous_usage_stats": True,
-                },
+                "stream": stream,
+                "stream_options": stream_options,
             },
             post_processors={0: SuppressFirstDelta()},
         )
-        assert "data" not in chunks[0]
-        usage = chunks[1]["data"]["usage"]
-        assert usage["completion_tokens"] == 3
-        assert usage["total_tokens"] == 6
-        assert usage["prompt_tokens_details"] == {"cached_tokens": 2}
+        assert len(chunks) == 2
+        if usage_while_held:
+            held = chunks[0]["data"]
+            assert held["choices"] == []
+            assert held["usage"]["completion_tokens"] == 2
+            assert held["usage"]["total_tokens"] == 5
+            assert held["usage"]["prompt_tokens_details"] == {"cached_tokens": 2}
+            assert held["llm_metrics"]["output_tokens"] == 2
+            assert "event" not in chunks[0]
+        else:
+            assert "data" not in chunks[0]
+            assert chunks[0]["event"] == "llm_metrics"
+        # The last chunk is unfinished, so only continuous or unary usage is due.
+        assert ("usage" in chunks[1]["data"]) == (usage_while_held or not stream)
+        if "usage" in chunks[1]["data"]:
+            usage = chunks[1]["data"]["usage"]
+            assert usage["completion_tokens"] == 3
+            assert usage["total_tokens"] == 6
+            assert usage["prompt_tokens_details"] == {"cached_tokens": 2}
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
