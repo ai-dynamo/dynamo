@@ -35,15 +35,21 @@
 !.github/scripts/helm_chart_version.py
 !.github/scripts/retry_kubectl.sh
 !.github/scripts/collect_vcluster_diagnostics.sh
+# The AIS lane contract reads this one workflow; keep other workflows excluded.
+!.github/workflows
+.github/workflows/*
+!.github/workflows/shared-build-image.yml
 **/*backup*/
 .dockerignore
 **/target/*
 **/*safetensors
 container/Dockerfile*
+!container/Dockerfile.test
 container/**/*.Dockerfile
 # The AISimulate dependency contract test reads this template from runtime test
-# images; keep every other generated/template Dockerfile excluded.
+# images; keep unrelated generated/template Dockerfiles excluded.
 !container/templates/wheel_builder.Dockerfile
+!container/templates/planner.Dockerfile
 container/render.py
 container/context.yaml
 # container/compliance/ is now COPY'd into each image's `licenses` Dockerfile
