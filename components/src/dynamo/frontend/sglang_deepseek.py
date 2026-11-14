@@ -99,7 +99,9 @@ def create_recipe_output_parser(
         separate_reasoning=reasoning_parser_name is not None
         and request.get("separate_reasoning", True),
         stream_reasoning=request.get("stream_reasoning", True),
-        stop=[stop] if isinstance(stop, str) else stop,
+        stop=[stop]
+        if isinstance(stop, str)
+        else [item for item in stop if isinstance(item, str)],
     )
 
 

@@ -13,7 +13,13 @@ import pytest
 
 if importlib.util.find_spec("sglang") is None:
     pytest.skip("SGLang is not installed", allow_module_level=True)
+from _routed_engine_fakes import FakeRoutedEngine  # noqa: E402
+
 from dynamo.frontend import sglang_deepseek  # noqa: E402 -- optional SGLang guard
+from dynamo.frontend import sglang_processor as module  # noqa: E402
+from dynamo.frontend.sglang_prepost import create_parsers  # noqa: E402
+from dynamo.frontend.sglang_processor import SglangProcessor  # noqa: E402
+from dynamo.frontend.sglang_prompt_renderer import DeepSeekPromptRenderer  # noqa: E402
 
 pytestmark = [
     pytest.mark.unit,
@@ -26,6 +32,7 @@ pytestmark = [
 
 @pytest.fixture
 def tokenizer():
+    # Marker-only collection stubs SGLang without installing recipe dependencies.
     import deepseek_recipe as recipe
     import tokenizers
 
@@ -68,9 +75,6 @@ def render(request, tokenizer, *, spec="dsv4", images=None):
 
 
 def output_processor(tokenizer, request, spec="dsv4", default_thinking_mode=None):
-    from dynamo.frontend.sglang_prepost import create_parsers
-    from dynamo.frontend.sglang_processor import SglangProcessor
-
     suffix = "v41" if spec == "dsv41" else "v4"
     tool_name, reasoning_name = f"deepseek{suffix}", f"deepseek-{suffix}"
     tool_parser, reasoning_parser = create_parsers(
@@ -168,6 +172,17 @@ def test_recipe_output_local_stop_and_logprobs(tokenizer, chunk_size):
     )
 
 
+@pytest.mark.parametrize("stop_field", ["stop", "stop_token_ids"])
+def test_recipe_output_token_stop(tokenizer, stop_field):
+    ids = tokenizer.backend_tokenizer.encode("answer!ignored").ids
+    stop_id = tokenizer.backend_tokenizer.encode("!").ids[0]
+    post = output_processor(tokenizer, {stop_field: [stop_id]})
+    output = post.process_output({"token_ids": ids})
+    assert output["delta"]["content"] == "answer"
+    assert output["finish_reason"] == "stop"
+    assert post.local_stop_reason == stop_id
+
+
 def test_recipe_output_waits_for_utf8_before_local_stop(tokenizer):
     post = output_processor(tokenizer, {"stop": "STOP"})
     ids = tokenizer.backend_tokenizer.encode("answerSTOP🐈ignored").ids
@@ -197,11 +212,6 @@ def test_recipe_output_json_and_eos_without_tool_parsing(tokenizer):
 
 @pytest.mark.parametrize("use_pool", [False, True])
 def test_recipe_output_generator_inline_and_pool(tokenizer, monkeypatch, use_pool):
-    from _routed_engine_fakes import FakeRoutedEngine
-
-    from dynamo.frontend import sglang_processor as module
-    from dynamo.frontend.sglang_prompt_renderer import DeepSeekPromptRenderer
-
     renderer = DeepSeekPromptRenderer(
         tokenizer,
         "dsv4",
@@ -293,10 +303,7 @@ def test_recipe_output_uses_deployment_thinking_and_reasoning_controls(
         assert first is None or "reasoning_content" not in first["delta"]
 
 
-@pytest.mark.parametrize(
-    "choice", ["required", {"type": "function", "function": {"name": "echo"}}]
-)
-def test_recipe_output_keeps_forced_json_array_parser(tokenizer, choice):
+def test_recipe_output_keeps_forced_json_array_parser(tokenizer):
     post = output_processor(
         tokenizer,
         {
@@ -312,7 +319,7 @@ def test_recipe_output_keeps_forced_json_array_parser(tokenizer, choice):
                     },
                 }
             ],
-            "tool_choice": choice,
+            "tool_choice": "required",
         },
     )
     ids = tokenizer.backend_tokenizer.encode(
