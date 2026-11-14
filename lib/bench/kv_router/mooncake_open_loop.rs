@@ -130,7 +130,8 @@ impl PreparedMooncakeCorpus {
 #[derive(Debug)]
 enum DispatchPayload {
     Query { lane: usize },
-    Event(RouterEvent),
+    // Boxed: a RouterEvent is ~200 bytes and Query is one word.
+    Event(Box<RouterEvent>),
 }
 
 #[derive(Debug)]
@@ -374,7 +375,7 @@ pub(crate) fn prepare_open_loop_trial(
                     deadline_query_counts[deadline_group].saturating_add(1);
                 DispatchPayload::Query { lane }
             }
-            MooncakeOperationPayload::Event(event) => DispatchPayload::Event(*event),
+            MooncakeOperationPayload::Event(event) => DispatchPayload::Event(event),
         };
         dispatch.push(DispatchEntry {
             id: operation.id,
@@ -748,7 +749,7 @@ fn issue_events<T: SyncIndexer>(
                     break;
                 }
                 DispatchPayload::Event(event) => {
-                    let enqueue_result = enqueue_event(&context, event, entry.id);
+                    let enqueue_result = enqueue_event(&context, *event, entry.id);
                     match enqueue_result {
                         Ok((event_worker, accepted_ns, kind)) => {
                             let record = IssueRecord {
@@ -1764,14 +1765,14 @@ mod tests {
             deadline_ns: u64::from(id),
             deadline_group: id,
             worker_id: u64::from(id),
-            payload: DispatchPayload::Event(RouterEvent::new(
+            payload: DispatchPayload::Event(Box::new(RouterEvent::new(
                 u64::from(id),
                 dynamo_kv_events::event::KvCacheEvent {
                     event_id: u64::from(id),
                     data: KvCacheEventData::Cleared,
                     dp_rank: 0,
                 },
-            )),
+            ))),
         }));
 
         let (queries, event_shards) = partition_dispatch(dispatch, 8)?;
