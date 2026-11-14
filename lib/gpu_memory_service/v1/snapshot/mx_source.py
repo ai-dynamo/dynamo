@@ -138,8 +138,17 @@ def main(argv: list[str] | None = None) -> None:
     os.environ.setdefault("MX_PUBLISH_TIMEOUT_SECS", "0")
     init_vmm(VMMDeviceType.CUDA)
     stop = threading.Event()
-    signal.signal(signal.SIGTERM, lambda *_: stop.set())
-    signal.signal(signal.SIGINT, lambda *_: stop.set())
+
+    def terminate(*_args) -> None:
+        # Event.set() holds a non-reentrant lock. A second SIGTERM or SIGINT
+        # handled inside that set() would block on the lock forever, so ignore
+        # both once stopping has begun.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        stop.set()
+
+    signal.signal(signal.SIGTERM, terminate)
+    signal.signal(signal.SIGINT, terminate)
     gpu_uuid = device_identity.gpu_uuid(args.device)
     serve(
         device_identity.get_socket_path(gpu_uuid, "weights"),
