@@ -23,6 +23,7 @@ from typing import (
 
 import PIL.Image
 from fsspec.implementations.dirfs import DirFileSystem
+from vllm.exceptions import VLLMClientError
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
@@ -54,6 +55,7 @@ from dynamo.llm import (
     register_model,
 )
 from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
+from dynamo.vllm.errors import vllm_client_error_to_public_error
 from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
@@ -338,13 +340,18 @@ class OmniHandler(BaseOmniHandler):
             yield {}
             return
 
-        async with aclosing(
-            self._generate_openai_mode(request, context, request_id)
-        ) as response:
-            async for chunk in response:
-                if error := generation_error(chunk):
-                    raise RuntimeError(f"Omni generation failed: {error}")
-                yield chunk
+        try:
+            async with aclosing(
+                self._generate_openai_mode(request, context, request_id)
+            ) as response:
+                async for chunk in response:
+                    if error := generation_error(chunk):
+                        raise RuntimeError(f"Omni generation failed: {error}")
+                    yield chunk
+        except VLLMClientError as exc:
+            # vLLM request errors (prompt too long, too many multimodal items) are
+            # not ValueErrors, so the bindings would otherwise answer 500.
+            raise vllm_client_error_to_public_error(exc) from exc
 
     async def _check_health(
         self, request: Dict[str, Any], context: Context, request_id: str

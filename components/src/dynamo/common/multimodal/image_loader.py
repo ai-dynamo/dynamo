@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import errno
 import hashlib
 import logging
 import os
@@ -42,6 +43,18 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 UUID_ONLY_VARIANT_KEY: Final = "UuidOnly"
 IMAGE_CACHE_SCOPE_KEY: Final = "image_cache_scope"
 IMAGE_CACHE_SESSION_SCOPED_ENV: Final = "DYN_MM_IMAGE_CACHE_SESSION_SCOPED"
+
+
+# Pillow reports a codec allocation failure as an OSError without errno.
+_PILLOW_CODEC_OOM_MESSAGE: Final = "out of memory when reading image file"
+
+
+def _is_host_resource_error(e: OSError) -> bool:
+    """True when a decode OSError comes from host resource exhaustion rather
+    than from the image bytes."""
+    if e.errno in (errno.EMFILE, errno.ENFILE, errno.ENOMEM):
+        return True
+    return e.errno is None and _PILLOW_CODEC_OOM_MESSAGE in str(e)
 
 
 def image_cache_scope_from_request(request: Mapping[str, Any]) -> str | None:
@@ -325,11 +338,24 @@ class ImageLoader:
                     raise ValueError("Empty response content from image URL")
                 image_data = BytesIO(content)
 
-            image = await self._open_image(
-                image_data,
-                max_pixels if max_pixels is not None else self._max_pixels,
-                self._to_rgb,
-            )
+            # Only the decode is covered: fetch failures (SSRF blocks, aiohttp
+            # connector errors) are OSErrors too and must not read as bad data.
+            try:
+                image = await self._open_image(
+                    image_data,
+                    max_pixels if max_pixels is not None else self._max_pixels,
+                    self._to_rgb,
+                )
+            except Image.UnidentifiedImageError:
+                raise
+            except (OSError, SyntaxError) as e:
+                # Pillow: OSError for truncated or corrupt data, SyntaxError for a
+                # broken PNG chunk. Host resource exhaustion is a server fault.
+                if isinstance(e, OSError) and _is_host_resource_error(e):
+                    raise
+                raise HttpStatusError(
+                    400, "Invalid or truncated image data", image_url
+                ) from e
             if self._shared_image_cache is not None and key is not None:
                 # Cache fills are awaited deliberately so Redis acknowledges a
                 # successful write before this request returns. A cache outage
@@ -523,7 +549,7 @@ class ImageLoader:
                 source = describe_media_source(image_url)
                 logger.error("%s decoding image: '%s': %s", type(e).__name__, source, e)
                 raise ValueError(f"Failed to decoding image: '{source}': {e}") from e
-            except OSError as e:
+            except (OSError, SyntaxError) as e:
                 logger.error(
                     "Invalid or truncated image data: '%s'",
                     describe_media_source(image_url),
