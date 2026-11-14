@@ -40,8 +40,13 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG TARGETARCH
 
-# Remove the upstream runtime's Git LFS package without pruning shared dependencies.
-RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
+# Remove the upstream runtime's Git LFS package and the nasm assembler without
+# pruning shared dependencies. Nothing installed depends on nasm; fail if its
+# purge would remove anything else.
+RUN purged=$(apt-get -s purge nasm | awk '/^(Remv|Purg) /{print $2}') && \
+    { [ "$purged" = nasm ] || { echo "ERROR: purging nasm would remove: ${purged:-nothing}" >&2; exit 1; }; } && \
+    apt-get purge -y git-lfs nasm && rm -rf /var/lib/apt/lists/* && \
+    ! command -v nasm && ! dpkg -s nasm >/dev/null 2>&1
 
 # Create the LD_PRELOAD target before the ENV below names it. ENV applies to
 # every RUN after it, so a preload path that does not exist yet costs one
@@ -251,6 +256,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        apt \
+        apt-utils \
         ca-certificates \
         dirmngr \
         gnupg \
@@ -262,9 +269,21 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         gpgsm \
         gpgv \
         keyboxd \
+        libapt-pkg6.0t64 \
         libbrotli1 \
+        libglib2.0-0t64 \
+        libgnutls30t64 \
+        libperl5.38t64 \
         libssl3t64 \
-        openssl
+        openssh-client \
+        openssh-server \
+        openssh-sftp-server \
+        openssl \
+        perl \
+        perl-base \
+        perl-modules-5.38 \
+        zlib1g \
+        zlib1g-dev
 
 {% include "templates/verify_ca_certificates.Dockerfile" %}
 
@@ -571,8 +590,13 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 # The filesystem overlay does not carry runtime_full's image environment.
 ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
-# Remove the upstream runtime's Git LFS package without pruning shared dependencies.
-RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
+# Remove the upstream runtime's Git LFS package and the nasm assembler without
+# pruning shared dependencies. Nothing installed depends on nasm; fail if its
+# purge would remove anything else.
+RUN purged=$(apt-get -s purge nasm | awk '/^(Remv|Purg) /{print $2}') && \
+    { [ "$purged" = nasm ] || { echo "ERROR: purging nasm would remove: ${purged:-nothing}" >&2; exit 1; }; } && \
+    apt-get purge -y git-lfs nasm && rm -rf /var/lib/apt/lists/* && \
+    ! command -v nasm && ! dpkg -s nasm >/dev/null 2>&1
 
 # Whiteout paths runtime_full removed — COPY can't represent deletions, so
 # without this, upstream's /workspace, /home/ubuntu, standalone
@@ -688,7 +712,13 @@ RUN test ! -e /usr/bin/git-lfs && \
     ! command -v git-lfs && \
     status=$(dpkg-query -W -f='${db:Status-Status}' git-lfs 2>/dev/null || true) && \
     test "$status" != installed && \
-    set -- /var/lib/dpkg/info/git-lfs.* && test ! -e "$1"
+    set -- /var/lib/dpkg/info/git-lfs.* && test ! -e "$1" && \
+    test ! -e /usr/bin/nasm && \
+    test ! -e /usr/bin/ndisasm && \
+    ! command -v nasm && \
+    status=$(dpkg-query -W -f='${db:Status-Status}' nasm 2>/dev/null || true) && \
+    test "$status" != installed && \
+    set -- /var/lib/dpkg/info/nasm.* && test ! -e "$1"
 
 # Post-overlay guard for the Open MPI settings edit in runtime_full. This stage
 # starts from the base image again, where the selected Open MPI's

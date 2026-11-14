@@ -132,7 +132,7 @@ packages:
 
   # nats-server — messaging server rebuilt in dynamo_base.
   - name: nats-server
-    version: v2.14.8
+    version: v2.14.9
     license: Apache-2.0
     source: https://github.com/nats-io/nats-server
     images:

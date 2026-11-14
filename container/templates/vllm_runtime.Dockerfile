@@ -103,6 +103,8 @@ ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 # rebuild picks up the newest patch level (BuildKit reuses this layer otherwise).
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        apt \
+        apt-utils \
         dirmngr \
         gnupg \
         gnupg-utils \
@@ -113,10 +115,21 @@ RUN apt-get update && \
         gpgsm \
         gpgv \
         keyboxd \
+        libapt-pkg6.0t64 \
         libbrotli1 \
+        libglib2.0-0t64 \
         libgnutls30t64 \
+        libperl5.38t64 \
         libssl3t64 \
-        openssl && \
+        openssh-client \
+        openssh-server \
+        openssh-sftp-server \
+        openssl \
+        perl \
+        perl-base \
+        perl-modules-5.38 \
+        zlib1g \
+        zlib1g-dev && \
     rm -rf /var/lib/apt/lists/*
 {% endif %}
 
@@ -357,10 +370,11 @@ RUN apt-get update && \
 # auto-installed. A bare `autoremove --purge` sweeps all of those as "orphaned",
 # which broke runtime JIT (missing C compiler) in the 1.3.0 rc image. Any
 # LGPL/BSD media libs left orphaned (libva, libvdpau, ...) are license-clean
-# dead weight, not a compliance issue.
+# dead weight, not a compliance issue. librist, and the mbedTLS and cJSON
+# libraries that only librist uses, are named because nothing else links them.
 RUN set -eux; \
     purge=$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
-        | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr|libcaca|libcdio|libzvbi|libgme|libvidstab|libdc1394|libraw1394|libiec61883|libtwolame|libshine|libsrt[0-9]|libudfread|libsvtav1|libbs2b|librubberband|libchromaprint|libcodec2|libgsm|libass[0-9]|libbluray|libxvidcore|libflite)' \
+        | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr|libcaca|libcdio|libzvbi|libgme|libvidstab|libdc1394|libraw1394|libiec61883|libtwolame|libshine|libsrt[0-9]|libudfread|libsvtav1|libbs2b|librubberband|libchromaprint|libcodec2|libgsm|libass[0-9]|libbluray|libxvidcore|libflite|librist[0-9]|libmbedcrypto|libmbedtls|libmbedx509|libcjson)' \
         || true); \
     if [ -n "$purge" ]; then \
         DEBIAN_FRONTEND=noninteractive apt-get purge -y $purge; \
