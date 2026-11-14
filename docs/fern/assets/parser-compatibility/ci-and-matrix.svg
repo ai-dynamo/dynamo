@@ -1,0 +1,138 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1010" viewBox="0 0 1800 1010" role="img">
+<!-- SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION &amp; AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0 -->
+<title>DEP #18601 — CI verdict and compatibility matrix</title>
+<desc>The report and exit code come from the same frozen scope • PASS applies only to the exact executed profile</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 1 L7 4 L0 7" fill="none" stroke="#56616a" stroke-width="1.5"/></marker></defs>
+<rect width="1800" height="100%" fill="#fafafa"/>
+<g font-family="Arial, Helvetica, sans-serif" fill="#252b30">
+<text x="34" y="56" font-size="37" font-weight="700" text-anchor="start">DEP #18601 — CI verdict and compatibility matrix</text>
+<text x="36" y="91" font-size="20" font-weight="400" text-anchor="start" fill="#53606a">The report and exit code come from the same frozen scope • PASS applies only to the exact executed profile</text>
+<rect x="1480" y="25" width="284" height="34" rx="9" fill="#fff1d7" stroke="#cda052" stroke-width="1.5"/>
+<text x="1622.0" y="47.78" font-size="17" font-weight="700" text-anchor="middle">PROPOSED DESIGN</text>
+<rect x="34" y="120" width="1732" height="174" rx="13" fill="#ffffff" stroke="#6d7680" stroke-width="1.5"/>
+<path d="M48 121 H1752 Q1765 121 1765 134 V166 H35 V134 Q35 121 48 121" fill="#f0e7f8"/>
+<rect x="50" y="129" width="29" height="29" rx="7" fill="#252b30" stroke="#252b30" stroke-width="1.5"/>
+<text x="64.5" y="151" font-size="20" font-weight="700" text-anchor="middle" fill="#fff">A</text>
+<text x="92" y="152" font-size="25" font-weight="700" text-anchor="start">Check required coverage and evidence</text>
+<text x="1745" y="151" font-size="17" font-weight="700" text-anchor="end" fill="#53606a">Preflight and runtime failures remain visible</text>
+<rect x="50" y="186" width="153" height="54" rx="9" fill="#f0e7f8" stroke="#aa83c5" stroke-width="1.5"/>
+<text x="126.5" y="218.78" font-size="17" font-weight="700" text-anchor="middle">Required cell</text>
+<rect x="225" y="181" width="470" height="82" rx="9" fill="#e2f0fb" stroke="#78afd1" stroke-width="1.5"/>
+<text x="460.0" y="215.96" font-size="19" font-weight="700" text-anchor="middle">Resolve the declared test cell</text>
+<text x="460.0" y="240.96" font-size="19" font-weight="400" text-anchor="middle">Pinned tuple + API + feature + variant</text>
+<rect x="735" y="181" width="480" height="82" rx="9" fill="#fff1d7" stroke="#cda052" stroke-width="1.5"/>
+<text x="975.0" y="215.96" font-size="19" font-weight="700" text-anchor="middle">Check execution evidence</text>
+<text x="975.0" y="240.96" font-size="19" font-weight="400" text-anchor="middle">Required case and usable diagnostics available?</text>
+<rect x="1255" y="181" width="490" height="82" rx="9" fill="#fbe7e0" stroke="#d68d79" stroke-width="1.5"/>
+<text x="1500.0" y="215.96" font-size="19" font-weight="700" text-anchor="middle">MISSING / BLOCKED → nonzero</text>
+<text x="1500.0" y="240.96" font-size="19" font-weight="400" text-anchor="middle">Absent coverage, timeout or unavailable dependency</text>
+<path d="M699 222 H730" stroke="#56616a" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M1219 222 H1250" stroke="#56616a" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="34" y="310" width="1732" height="191" rx="13" fill="#ffffff" stroke="#6d7680" stroke-width="1.5"/>
+<path d="M48 311 H1752 Q1765 311 1765 324 V356 H35 V324 Q35 311 48 311" fill="#e2f0fb"/>
+<rect x="50" y="319" width="29" height="29" rx="7" fill="#252b30" stroke="#252b30" stroke-width="1.5"/>
+<text x="64.5" y="341" font-size="20" font-weight="700" text-anchor="middle" fill="#fff">B</text>
+<text x="92" y="342" font-size="25" font-weight="700" text-anchor="start">Execute every required assertion and aggregate the result</text>
+<text x="1745" y="341" font-size="17" font-weight="700" text-anchor="end" fill="#53606a">A fixture-only runner check cannot certify a model</text>
+<rect x="50" y="383" width="153" height="54" rx="9" fill="#e2f0fb" stroke="#78afd1" stroke-width="1.5"/>
+<text x="126.5" y="415.78" font-size="17" font-weight="700" text-anchor="middle">Assertions</text>
+<rect x="225" y="374" width="470" height="88" rx="9" fill="#e2f0fb" stroke="#78afd1" stroke-width="1.5"/>
+<text x="460.0" y="411.96" font-size="19" font-weight="700" text-anchor="middle">Execute real paths</text>
+<text x="460.0" y="436.96" font-size="19" font-weight="400" text-anchor="middle">Differential checks + independent invariants</text>
+<rect x="735" y="374" width="480" height="88" rx="9" fill="#fbe7e0" stroke="#d68d79" stroke-width="1.5"/>
+<text x="975.0" y="411.96" font-size="19" font-weight="700" text-anchor="middle">Any required mismatch → FAIL</text>
+<text x="975.0" y="436.96" font-size="19" font-weight="400" text-anchor="middle">Return nonzero; retain the reproduction</text>
+<rect x="1255" y="374" width="490" height="88" rx="9" fill="#e9f3df" stroke="#8cae79" stroke-width="1.5"/>
+<text x="1500.0" y="411.96" font-size="19" font-weight="700" text-anchor="middle">All required cells PASS → exit 0</text>
+<text x="1500.0" y="436.96" font-size="19" font-weight="400" text-anchor="middle">Only for this complete, nonempty scope</text>
+<text x="225" y="483" font-size="17" font-weight="400" text-anchor="start" fill="#53606a">A required skip or xfail cannot count as a pass. NOT TESTED stays visible outside the required profile.</text>
+<rect x="34" y="517" width="1732" height="326" rx="13" fill="#ffffff" stroke="#6d7680" stroke-width="1.5"/>
+<path d="M48 518 H1752 Q1765 518 1765 531 V563 H35 V531 Q35 518 48 518" fill="#e9f3df"/>
+<rect x="50" y="526" width="29" height="29" rx="7" fill="#252b30" stroke="#252b30" stroke-width="1.5"/>
+<text x="64.5" y="548" font-size="20" font-weight="700" text-anchor="middle" fill="#fff">C</text>
+<text x="92" y="549" font-size="25" font-weight="700" text-anchor="start">Publish the matrix from those exact results</text>
+<text x="1745" y="548" font-size="17" font-weight="700" text-anchor="end" fill="#53606a">ILLUSTRATIVE ROWS — not measured compatibility</text>
+<rect x="52" y="582" width="340" height="42" rx="0" fill="#edf0f3" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="222.0" y="609" font-size="17" font-weight="700" text-anchor="middle">Model / revision</text>
+<rect x="392" y="582" width="136" height="42" rx="0" fill="#edf0f3" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="460.0" y="609" font-size="17" font-weight="700" text-anchor="middle">API</text>
+<rect x="528" y="582" width="166" height="42" rx="0" fill="#edf0f3" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="611.0" y="609" font-size="17" font-weight="700" text-anchor="middle">Processor</text>
+<rect x="694" y="582" width="150" height="42" rx="0" fill="#edf0f3" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="769.0" y="609" font-size="17" font-weight="700" text-anchor="middle">Input</text>
+<rect x="844" y="582" width="150" height="42" rx="0" fill="#edf0f3" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="919.0" y="609" font-size="17" font-weight="700" text-anchor="middle">Controls</text>
+<rect x="994" y="582" width="150" height="42" rx="0" fill="#edf0f3" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="1069.0" y="609" font-size="17" font-weight="700" text-anchor="middle">Output</text>
+<rect x="1144" y="582" width="160" height="42" rx="0" fill="#edf0f3" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="1224.0" y="609" font-size="17" font-weight="700" text-anchor="middle">Streaming</text>
+<rect x="1304" y="582" width="180" height="42" rx="0" fill="#edf0f3" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="1394.0" y="609" font-size="17" font-weight="700" text-anchor="middle">Media</text>
+<rect x="1484" y="582" width="264" height="42" rx="0" fill="#edf0f3" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="1616.0" y="609" font-size="17" font-weight="700" text-anchor="middle">Verdict</text>
+<rect x="52" y="624" width="340" height="47" rx="0" fill="#ffffff" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="64" y="653" font-size="16" font-weight="400" text-anchor="start">DeepSeek V4.1 / pinned A</text>
+<rect x="392" y="624" width="136" height="47" rx="0" fill="#ffffff" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="460.0" y="653" font-size="16" font-weight="400" text-anchor="middle">Chat</text>
+<rect x="528" y="624" width="166" height="47" rx="0" fill="#ffffff" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="611.0" y="653" font-size="16" font-weight="400" text-anchor="middle">Rust</text>
+<rect x="694" y="624" width="150" height="47" rx="0" fill="#e9f3df" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="769.0" y="653" font-size="16" font-weight="700" text-anchor="middle">PASS</text>
+<rect x="844" y="624" width="150" height="47" rx="0" fill="#e9f3df" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="919.0" y="653" font-size="16" font-weight="700" text-anchor="middle">PASS</text>
+<rect x="994" y="624" width="150" height="47" rx="0" fill="#e9f3df" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="1069.0" y="653" font-size="16" font-weight="700" text-anchor="middle">PASS</text>
+<rect x="1144" y="624" width="160" height="47" rx="0" fill="#e9f3df" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="1224.0" y="653" font-size="16" font-weight="700" text-anchor="middle">PASS</text>
+<rect x="1304" y="624" width="180" height="47" rx="0" fill="#f0f2f4" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="1394.0" y="653" font-size="16" font-weight="700" text-anchor="middle">NOT TESTED</text>
+<rect x="1484" y="624" width="264" height="47" rx="0" fill="#e9f3df" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="1616.0" y="653" font-size="16" font-weight="700" text-anchor="middle">PASS*</text>
+<rect x="52" y="671" width="340" height="47" rx="0" fill="#ffffff" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="64" y="700" font-size="16" font-weight="400" text-anchor="start">DeepSeek V4.1 / pinned A</text>
+<rect x="392" y="671" width="136" height="47" rx="0" fill="#ffffff" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="460.0" y="700" font-size="16" font-weight="400" text-anchor="middle">Responses</text>
+<rect x="528" y="671" width="166" height="47" rx="0" fill="#ffffff" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="611.0" y="700" font-size="16" font-weight="400" text-anchor="middle">Python</text>
+<rect x="694" y="671" width="150" height="47" rx="0" fill="#e9f3df" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="769.0" y="700" font-size="16" font-weight="700" text-anchor="middle">PASS</text>
+<rect x="844" y="671" width="150" height="47" rx="0" fill="#fbe7e0" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="919.0" y="700" font-size="16" font-weight="700" text-anchor="middle">FAIL</text>
+<rect x="994" y="671" width="150" height="47" rx="0" fill="#e9f3df" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="1069.0" y="700" font-size="16" font-weight="700" text-anchor="middle">PASS</text>
+<rect x="1144" y="671" width="160" height="47" rx="0" fill="#e9f3df" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="1224.0" y="700" font-size="16" font-weight="700" text-anchor="middle">PASS</text>
+<rect x="1304" y="671" width="180" height="47" rx="0" fill="#f0f2f4" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="1394.0" y="700" font-size="16" font-weight="700" text-anchor="middle">NOT TESTED</text>
+<rect x="1484" y="671" width="264" height="47" rx="0" fill="#fbe7e0" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="1616.0" y="700" font-size="16" font-weight="700" text-anchor="middle">FAIL</text>
+<rect x="52" y="718" width="340" height="47" rx="0" fill="#ffffff" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="64" y="747" font-size="16" font-weight="400" text-anchor="start">GLM-5.3 / pinned B</text>
+<rect x="392" y="718" width="136" height="47" rx="0" fill="#ffffff" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="460.0" y="747" font-size="16" font-weight="400" text-anchor="middle">Messages</text>
+<rect x="528" y="718" width="166" height="47" rx="0" fill="#ffffff" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="611.0" y="747" font-size="16" font-weight="400" text-anchor="middle">Rust</text>
+<rect x="694" y="718" width="150" height="47" rx="0" fill="#fff1d7" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="769.0" y="747" font-size="16" font-weight="700" text-anchor="middle">BLOCKED</text>
+<rect x="844" y="718" width="150" height="47" rx="0" fill="#fff1d7" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="919.0" y="747" font-size="16" font-weight="700" text-anchor="middle">BLOCKED</text>
+<rect x="994" y="718" width="150" height="47" rx="0" fill="#fff1d7" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="1069.0" y="747" font-size="16" font-weight="700" text-anchor="middle">BLOCKED</text>
+<rect x="1144" y="718" width="160" height="47" rx="0" fill="#fff1d7" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="1224.0" y="747" font-size="16" font-weight="700" text-anchor="middle">BLOCKED</text>
+<rect x="1304" y="718" width="180" height="47" rx="0" fill="#f0f2f4" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="1394.0" y="747" font-size="16" font-weight="700" text-anchor="middle">NOT TESTED</text>
+<rect x="1484" y="718" width="264" height="47" rx="0" fill="#fff1d7" stroke="#c4cbd0" stroke-width="1.5"/>
+<text x="1616.0" y="747" font-size="16" font-weight="700" text-anchor="middle">BLOCKED</text>
+<text x="54" y="793" font-size="18" font-weight="400" text-anchor="start" fill="#53606a">* PASS: text profile only. Media remains NOT TESTED. Each row links to versions, scope and per-feature evidence.</text>
+<text x="54" y="821" font-size="18" font-weight="700" text-anchor="start" fill="#53606a">These example rows explain the final format; they are not support claims for either model.</text>
+<rect x="34" y="859" width="1732" height="123" rx="12" fill="#f3f4f5" stroke="#a7b0b8" stroke-width="1.5"/>
+<text x="51" y="888" font-size="21" font-weight="700" text-anchor="start">Publication boundary</text>
+<rect x="51" y="903" width="530" height="56" rx="9" fill="#f0e7f8" stroke="#aa83c5" stroke-width="1.5"/>
+<text x="316.0" y="937.12" font-size="18" font-weight="700" text-anchor="middle">Local report: declared provenance is labeled</text>
+<rect x="599" y="903" width="568" height="56" rx="9" fill="#e2f0fb" stroke="#78afd1" stroke-width="1.5"/>
+<text x="883.0" y="937.12" font-size="18" font-weight="700" text-anchor="middle">Official docs: trusted, completed CI evidence</text>
+<rect x="1185" y="903" width="563" height="56" rx="9" fill="#fff1d7" stroke="#cda052" stroke-width="1.5"/>
+<text x="1466.5" y="937.12" font-size="18" font-weight="700" text-anchor="middle">A new version / config requires a new run</text>
+</g></svg>

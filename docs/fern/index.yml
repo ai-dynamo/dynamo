@@ -1170,6 +1170,10 @@ navigation:
         path: pages/reference/general/compatibility.mdx
         slug: compatibility
 
+      - page: Parser Compatibility Checks
+        path: pages/reference/general/parser-compatibility.md
+        slug: parser-compatibility
+
       - section: Releases
         icon: tag
         slug: releases
