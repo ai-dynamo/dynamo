@@ -87,6 +87,53 @@ Dynamo supports [vLLM prompt embeddings](https://docs.vllm.ai/en/stable/features
 - Embeddings are sent as base64-encoded PyTorch tensors via the `prompt_embeds` field in the Completions API
 - NATS must be configured with a 15MB max payload for large embeddings (already set in default deployments)
 
+### Native Decoder-Prefix Reuse
+
+**Experimental.** This feature requires trusted orchestration callers.
+
+> [!WARNING]
+> Native Generate accepts caller-supplied NIXL addresses. vLLM can connect to
+> `remote_host:remote_port` before verifying `remote_engine_id`; scalar validation
+> does not authorize a peer. Keep native APIs disabled on frontends serving
+> untrusted inference clients; leave
+> `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE` and `DYN_SGLANG_ENABLE_GENERATE` unset.
+> Use a separate private frontend or gateway authorization that restricts native
+> routes, including overridden paths, to trusted callers. Listener-wide TLS or
+> mTLS does not provide per-route authorization.
+> Isolate backend request endpoints and the NIXL fabric as described in
+> [Secure Deployment Guidelines](../../../../security/secure-deployment-guidelines.md).
+
+For caller-managed decoder-prefix reuse, enable Dynamo's native
+`POST /inference/v1/generate` endpoint with
+`DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE=true`. Use a compatible native
+`NixlConnector` profile and enable `bidirectional_kv_xfer` on both prefill and
+decode workers. Merge this fragment into each worker's existing connector
+configuration:
+
+```json
+{
+  "kv_connector_extra_config": {
+    "bidirectional_kv_xfer": true
+  }
+}
+```
+
+Retain the decoder's returned `kv_transfer_params` and supply them on a later
+native request that extends the same token prefix. The caller must associate
+the coordinates with the correct model, cache salt, and live native lease.
+vLLM owns block groups, tensor-parallel mapping, expiry, and transfer failures;
+Dynamo preserves the coordinates while keeping the normal prefill-to-decode
+handoff.
+
+Nonempty decoder coordinates require the bidirectional NIXL profile. Mooncake
+and LMCache MP reject them. Ordinary OpenAI connector ingress remains reserved,
+and health probes do not consume these coordinates. This adapter does not add
+transparent OpenAI session reuse or a Dynamo-managed retained-KV store.
+
+Native vLLM compatibility restrictions still apply. Validate the selected
+model, attention backend, layout, and parallel configuration together; support
+in one profile does not establish support in every combination.
+
 ## Hashing Consistency for KV Events
 
 When using KV-aware routing, ensure deterministic hashing across processes to avoid radix tree mismatches. Choose one of the following:

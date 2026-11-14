@@ -91,6 +91,337 @@ def test_nixl_prefill_request_shape():
     }
 
 
+def _bidir_config(enabled):
+    """Build a NIXL config with an explicit bidirectional-transfer flag."""
+    config = _config("NixlConnector")
+    config.kv_transfer_config.get_from_extra_config = (
+        lambda key, default: enabled if key == "bidirectional_kv_xfer" else default
+    )
+    return config
+
+
+def test_nixl_prefill_preserves_native_decoder_coordinates_without_mutation():
+    """Preserve opaque coordinates without aliasing nested caller data."""
+    incoming = {
+        "do_remote_decode": False,
+        "do_remote_prefill": True,
+        "remote_engine_id": "decoder-engine",
+        "remote_request_id": "previous-turn",
+        "remote_block_ids": [[0, 2], [4]],
+        "remote_num_tokens": 128,
+        "remote_blocks_expiry_time": 12345.25,
+        "native_extension": {"future": [1]},
+    }
+    params = NixlConnectorProtocol(
+        _bidir_config(True)
+    ).prefill_request_kv_transfer_params(incoming)
+    assert params["do_remote_decode"] is True
+    assert params["do_remote_prefill"] is False
+    for key in incoming.keys() - {"do_remote_decode", "do_remote_prefill"}:
+        assert params[key] == incoming[key]
+    params["remote_block_ids"][0].append(9)
+    params["native_extension"]["future"].append(2)
+    assert incoming["remote_block_ids"] == [[0, 2], [4]]
+    assert incoming["native_extension"] == {"future": [1]}
+    assert incoming["do_remote_decode"] is False
+    assert incoming["do_remote_prefill"] is True
+
+
+@pytest.mark.parametrize(
+    "incoming",
+    [
+        None,
+        {},
+        {"remote_block_ids": None, "remote_num_tokens": 0},
+        {"remote_block_ids": [[], []], "remote_num_tokens": 0},
+    ],
+)
+def test_nixl_native_cold_request_does_not_require_bidirectional_config(incoming):
+    """Allow cold requests without bidirectional transfer."""
+    params = NixlConnectorProtocol(
+        _bidir_config(False)
+    ).prefill_request_kv_transfer_params(incoming)
+    assert params["do_remote_decode"] is True
+    assert params["do_remote_prefill"] is False
+    assert params["remote_engine_id"] is None
+
+
+@pytest.mark.parametrize("config", [_bidir_config(False), _config(None)])
+def test_nixl_native_decoder_source_requires_bidirectional_config(config):
+    """Require explicit bidirectional opt-in for retained decoder blocks."""
+    with pytest.raises(ValueError, match="bidirectional_kv_xfer"):
+        NixlConnectorProtocol(config).prefill_request_kv_transfer_params(
+            {"remote_block_ids": [[0]], "remote_num_tokens": 64}
+        )
+
+
+@pytest.mark.parametrize("blocks", [[[0]], [[], []]])
+@pytest.mark.parametrize("count", ["128", "", 1.5, -1, True, False, [], {}])
+def test_nixl_rejects_invalid_native_token_counts(blocks, count):
+    """Reject unsafe scheduler scalars even when cache groups are empty."""
+    with pytest.raises(ValueError, match="remote_num_tokens"):
+        NixlConnectorProtocol(_bidir_config(True)).prefill_request_kv_transfer_params(
+            {"remote_block_ids": blocks, "remote_num_tokens": count}
+        )
+
+
+@pytest.mark.parametrize(
+    "token_params",
+    [
+        {},
+        {"remote_num_tokens": None},
+        {"remote_num_tokens": 0},
+        {"remote_num_tokens": 128},
+    ],
+)
+def test_nixl_preserves_valid_native_token_counts(token_params):
+    """Keep optional and non-negative integer counts unchanged."""
+    params = NixlConnectorProtocol(
+        _bidir_config(True)
+    ).prefill_request_kv_transfer_params({"remote_block_ids": [[0]], **token_params})
+    assert ("remote_num_tokens" in params) == ("remote_num_tokens" in token_params)
+    assert params.get("remote_num_tokens") == token_params.get("remote_num_tokens")
+
+
+@pytest.mark.parametrize(
+    "blocks",
+    [
+        "blocks",
+        "",
+        b"blocks",
+        {"group": [0]},
+        {},
+        1,
+        1.5,
+        True,
+        False,
+        [0],
+        [None],
+        ["bad"],
+        [{}],
+        [[-1]],
+        [[True]],
+        [[1.5]],
+        [["0"]],
+    ],
+)
+def test_nixl_rejects_malformed_native_block_ids(blocks):
+    """Reject malformed groups and IDs with a field-specific error."""
+    with pytest.raises((TypeError, ValueError), match="remote_block_ids"):
+        NixlConnectorProtocol(_bidir_config(True)).prefill_request_kv_transfer_params(
+            {"remote_block_ids": blocks, "remote_num_tokens": 128}
+        )
+
+
+@pytest.mark.parametrize(
+    "blocks,has_blocks",
+    [
+        (None, False),
+        ([], False),
+        ((), False),
+        ([[], []], False),
+        (((), []), False),
+        ([[0]], True),
+        (([0], ()), True),
+        (((0,), [1, 2]), True),
+    ],
+)
+def test_nixl_preserves_supported_native_block_groups(blocks, has_blocks):
+    """Preserve group forms and require opt-in only for actual blocks."""
+    incoming = {"remote_block_ids": blocks}
+    protocol = NixlConnectorProtocol(_bidir_config(has_blocks))
+    params = protocol.prefill_request_kv_transfer_params(incoming)
+    assert params["remote_block_ids"] == blocks
+    if has_blocks:
+        disabled = NixlConnectorProtocol(_bidir_config(False))
+        with pytest.raises(ValueError, match="bidirectional_kv_xfer"):
+            disabled.prefill_request_kv_transfer_params(incoming)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("remote_engine_id", []),
+        ("remote_engine_id", {}),
+        ("remote_engine_id", 1),
+        ("remote_engine_id", True),
+        ("remote_registration_generation", None),
+        ("remote_registration_generation", "1"),
+        ("remote_registration_generation", []),
+        ("remote_registration_generation", -1),
+        ("remote_registration_generation", True),
+        ("remote_registration_generation", 1.5),
+        ("remote_blocks_expiry_time", "123"),
+        ("remote_blocks_expiry_time", {}),
+        ("remote_blocks_expiry_time", True),
+        ("remote_blocks_expiry_time", float("nan")),
+        ("remote_blocks_expiry_time", float("inf")),
+        ("remote_blocks_expiry_time", 10**400),
+    ],
+)
+def test_nixl_rejects_invalid_native_receive_scalars(field, value):
+    """Reject invalid worker metadata before it reaches receive hooks."""
+    protocol = NixlConnectorProtocol(_bidir_config(True))
+    with pytest.raises(ValueError, match=field):
+        protocol.prefill_request_kv_transfer_params(
+            {"remote_block_ids": [[0]], field: value}
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("remote_host", ""),
+        ("remote_host", []),
+        ("remote_host", {}),
+        ("remote_host", 1),
+        ("remote_host", True),
+        ("remote_request_id", []),
+        ("remote_request_id", {}),
+        ("remote_request_id", 1),
+        ("remote_request_id", True),
+        ("remote_port", 0),
+        ("remote_port", -1),
+        ("remote_port", 65536),
+        ("remote_port", "123"),
+        ("remote_port", 1.5),
+        ("remote_port", True),
+        ("remote_port", False),
+        ("remote_port", []),
+        ("remote_port", {}),
+    ]
+    + [
+        (field, value)
+        for field in ("tp_size", "dcp_size", "pp_size")
+        for value in (0, -1, "2", 1.5, True, None)
+    ],
+)
+def test_nixl_rejects_invalid_native_endpoint_and_topology_scalars(field, value):
+    """Reject malformed handshake and notification values at ingress."""
+    with pytest.raises(ValueError, match=field):
+        NixlConnectorProtocol(_bidir_config(True)).prefill_request_kv_transfer_params(
+            {"remote_block_ids": [[0]], field: value}
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("remote_host", ""),
+        ("remote_port", "123"),
+        ("tp_size", None),
+        ("_p_side_truncated", True),
+    ],
+)
+def test_nixl_rejects_invalid_cold_native_handshake_scalars(field, value):
+    """Validate supplied metadata even without retained decoder blocks."""
+    with pytest.raises(ValueError, match=field):
+        NixlConnectorProtocol(_bidir_config(False)).prefill_request_kv_transfer_params(
+            {"remote_block_ids": [[], []], field: value}
+        )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {
+            "remote_host": None,
+            "remote_port": None,
+            "remote_request_id": None,
+            "remote_block_size": None,
+        },
+        {"remote_host": "::1"},
+        {"remote_host": "peer.example"},
+        {"remote_port": 1},
+        {"remote_port": 65535},
+        {"remote_request_id": "previous-turn"},
+        {"tp_size": 1, "dcp_size": 2, "pp_size": 8},
+        {"tp_size": 3, "dcp_size": 5, "pp_size": 7, "remote_block_size": 17},
+        {"remote_block_size": 1},
+        {"remote_block_size": 128},
+    ],
+)
+@pytest.mark.parametrize("blocks", [[[0]], [[], []]])
+def test_nixl_preserves_partial_native_endpoint_and_topology_scalars(metadata, blocks):
+    """Preserve partial coordinates without imposing topology or DNS policy."""
+    incoming = {"remote_block_ids": blocks, **metadata}
+    params = NixlConnectorProtocol(
+        _bidir_config(True)
+    ).prefill_request_kv_transfer_params(incoming)
+    for field, value in incoming.items():
+        assert params[field] == value
+    for field in ("tp_size", "dcp_size", "pp_size", "remote_block_size"):
+        assert (field in params) == (field in incoming)
+
+
+@pytest.mark.parametrize("value", [True, False, None])
+def test_nixl_rejects_caller_supplied_truncation_marker(value):
+    """Keep scheduler-owned backoff state out of native coordinates."""
+    with pytest.raises(ValueError, match="_p_side_truncated"):
+        NixlConnectorProtocol(_bidir_config(True)).prefill_request_kv_transfer_params(
+            {"remote_block_ids": [[0]], "_p_side_truncated": value}
+        )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"remote_engine_id": None},
+        {"remote_engine_id": "peer"},
+        {"remote_registration_generation": 0},
+        {"remote_registration_generation": 3},
+        {"remote_blocks_expiry_time": None},
+        {"remote_blocks_expiry_time": -1.0},
+        {"remote_blocks_expiry_time": 123},
+        {"remote_blocks_expiry_time": 123.5},
+    ],
+)
+def test_nixl_preserves_valid_native_receive_scalars(metadata):
+    """Preserve optional fields and leave expiry decisions to vLLM."""
+    protocol = NixlConnectorProtocol(_bidir_config(True))
+    params = protocol.prefill_request_kv_transfer_params(
+        {"remote_block_ids": [[0]], **metadata}
+    )
+    for field in (
+        "remote_registration_generation",
+        "remote_blocks_expiry_time",
+    ):
+        assert (field in params) == (field in metadata)
+    for field, value in metadata.items():
+        assert params[field] == value
+
+
+@pytest.mark.parametrize("value", [True, False, None])
+def test_nixl_rejects_caller_supplied_receive_marker(value):
+    """Prevent callers from suppressing vLLM's receive registration."""
+    protocol = NixlConnectorProtocol(_bidir_config(True))
+    with pytest.raises(ValueError, match="_remote_blocks_processed"):
+        protocol.prefill_request_kv_transfer_params(
+            {"remote_block_ids": [[0]], "_remote_blocks_processed": value}
+        )
+
+
+def test_native_decoder_source_rejected_for_cache_mediated_connector():
+    """Reject decoder coordinates for cache-mediated coordination."""
+    protocol = LMCacheMPConnectorProtocol(_config("LMCacheMPConnector"))
+    with pytest.raises(ValueError, match="requires NixlConnector"):
+        protocol.prefill_request_kv_transfer_params({"remote_block_ids": [[0]]})
+    assert protocol.prefill_request_kv_transfer_params({"remote_block_ids": None}) == {}
+
+
+def test_native_decoder_source_rejected_for_mooncake_connector(fake_mooncake):
+    """Reject decoder coordinates for Mooncake push coordination."""
+    protocol = MooncakeConnectorProtocol(_config("MooncakeConnector"))
+    with pytest.raises(ValueError, match="requires NixlConnector"):
+        protocol.prefill_request_kv_transfer_params({"remote_block_ids": [[0]]})
+    assert (
+        protocol.prefill_request_kv_transfer_params({"remote_block_ids": None})
+        == protocol.prefill_request_kv_transfer_params()
+    )
+
+
 def test_nixl_decode_passes_through_engine_response():
     """Decode params come straight off the engine response — NIXL is pull-based."""
     proto = NixlConnectorProtocol(_config("NixlConnector"))
