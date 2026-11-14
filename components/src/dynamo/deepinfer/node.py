@@ -36,15 +36,16 @@ from dynamo.deepinfer.options import (
     DeepInferOptions,
     add_deepinfer_arguments,
     apply_env_defaults,
+    route_address,
     visible_devices,
 )
 from dynamo.deepinfer.protocol import spawn_rank_process, tcp_endpoint
 
 logger = logging.getLogger(__name__)
 
-# The head reaches CLOSE a few seconds after SIGTERM by default (its graceful
-# shutdown grace period), and the CLOSE itself takes a while; the node's ranks
-# must still be there.
+# The head reaches CLOSE up to ~30 s after SIGTERM by default (a 5 s grace,
+# then a prefill engine drains held KV for up to 25 s), and the CLOSE itself
+# takes a while; the node's ranks must still be there.
 DEFAULT_SHUTDOWN_GRACE_S = 90.0
 
 
@@ -64,7 +65,8 @@ def parse_node_args(
         default=DEFAULT_SHUTDOWN_GRACE_S,
         help="After SIGTERM/SIGINT, time the ranks get to finish the head's "
         "CLOSE before they are killed. Must exceed the head's shutdown: its "
-        "grace period and the CLOSE (DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS, "
+        "grace period, a prefill engine's KV drain and the CLOSE "
+        "(DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS + DYN_PREFILL_DRAIN_TIMEOUT_S, "
         "within DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT); raise them together.",
     )
     ns, ignored = parser.parse_known_args(argv)
@@ -84,21 +86,28 @@ def spawn_ranks(opts: DeepInferOptions) -> list[subprocess.Popen]:
     """Start this node's ranks; each connects to the head's controller."""
     local = opts.local_ranks
     devices = visible_devices(len(local))
+    advertise = opts.advertise_addr or route_address(
+        opts.master_addr, opts.control_port
+    )
     endpoint = tcp_endpoint(opts.master_addr, opts.control_port)
     args = [
+        "--advertise-addr",
+        advertise,
         "--node-timeout-s",
         str(opts.node_timeout_s),
         "--startup-timeout-s",
         str(opts.startup_timeout_s),
     ]
     logger.info(
-        "Node %d/%d: ranks %d..%d on GPUs %s, controller %s",
+        "Node %d/%d: ranks %d..%d on GPUs %s, controller %s, KV events on %s:%d+",
         opts.node_rank,
         opts.nnodes,
         local[0],
         local[-1],
         ",".join(devices),
         endpoint,
+        advertise,
+        opts.kv_events_port_base,
     )
     procs: list[subprocess.Popen] = []
     try:

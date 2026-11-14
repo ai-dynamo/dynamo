@@ -16,6 +16,7 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.deepinfer.options import (  # noqa: F401 (re-exported)
     DeepInferOptions,
@@ -52,7 +53,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> DeepInferArgs:
     config.validate()
     _validate(config)
 
-    endpoint = config.endpoint or f"dyn://{config.namespace}.backend.generate"
+    component = (
+        "prefill"
+        if config.disaggregation_mode == DisaggregationMode.PREFILL
+        else "backend"
+    )
+    endpoint = config.endpoint or f"dyn://{config.namespace}.{component}.generate"
     config.namespace, config.component, config.endpoint = parse_endpoint(endpoint)
     return config
 
