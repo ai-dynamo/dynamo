@@ -17,7 +17,7 @@ from dynamo.common.multimodal.image_loader import (
     image_cache_scope_from_request,
 )
 from dynamo.common.utils.token_ids import token_ids_to_list
-from dynamo.trtllm.multimodal_processor import resolve_mm_processor_kwargs
+from dynamo.trtllm.multimodal_processor import _trtllm_rgb, resolve_mm_processor_kwargs
 from dynamo.trtllm.utils.disagg_utils import DisaggregatedParamsCodec
 
 
@@ -33,7 +33,7 @@ class EncodeHelper:
         if cls._image_loader is None:
             with cls._image_loader_lock:
                 if cls._image_loader is None:
-                    cls._image_loader = ImageLoader()
+                    cls._image_loader = ImageLoader(to_rgb=_trtllm_rgb)
         return cls._image_loader
 
     @staticmethod

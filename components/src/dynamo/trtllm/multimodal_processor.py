@@ -23,8 +23,10 @@ from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
 from urllib.parse import urlparse
 
 import torch
+from PIL import Image
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import load_file as safetensors_load_file
+from tensorrt_llm.inputs import convert_image_mode
 from tensorrt_llm.inputs.multimodal_data import VideoData
 from tensorrt_llm.inputs.registry import MULTIMODAL_PLACEHOLDER_REGISTRY
 from tensorrt_llm.inputs.utils import async_load_video
@@ -69,6 +71,15 @@ _EMBEDDING_FETCH_READ_TIMEOUT_S = 300.0
 _SHARED_RESCALE_FLAG_MODEL_TYPES = frozenset(
     {"qwen2_vl", "qwen2_5_vl", "exaone4_5", "minicpmv4_6"}
 )
+
+
+def _trtllm_rgb(image: Image.Image) -> Image.Image:
+    """Convert to RGB as TensorRT-LLM's own image loader does.
+
+    RGBA is pasted on white; every other mode goes through Pillow's
+    ``convert("RGB")``, as in TensorRT-LLM.
+    """
+    return convert_image_mode(image, "RGB")
 
 
 def _nvdec_video_data(content: bytes, num_frames: int) -> VideoData:
@@ -252,6 +263,7 @@ class MultimodalRequestProcessor:
         self.image_loader = ImageLoader(
             enable_frontend_decoding=enable_frontend_decoding,
             max_bytes=self.max_file_size_bytes,
+            to_rgb=_trtllm_rgb,
         )
 
         # Reuse the shared default so this preprocessor and the vLLM/SGLang
