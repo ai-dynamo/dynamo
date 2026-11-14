@@ -55,10 +55,11 @@ pub struct NvCreateCompletionRequest {
     pub no_stop_trim: Option<bool>,
 
     /// Catch-all for unsupported fields - checked during validation
+    // Serialization keeps only `vllm_xargs`, so text-input vLLM workers receive it.
     #[serde(
         flatten,
         default,
-        skip_serializing,
+        serialize_with = "validate::serialize_text_worker_fields",
         deserialize_with = "validate::deserialize_extra_fields"
     )]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
@@ -736,6 +737,27 @@ mod tests {
                 .to_string()
                 .contains("Only one guided-decoding constraint")
         );
+    }
+
+    #[test]
+    fn serialization_forwards_only_vllm_xargs_to_text_workers() {
+        let xargs = json!({"diffusion_max_steps": 4});
+        let request: NvCreateCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "prompt": "hello",
+            "vllm_xargs": xargs,
+            "detokenize": false
+        }))
+        .expect("request should deserialize");
+        ValidateRequest::validate(&request).unwrap();
+
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["vllm_xargs"], xargs);
+        assert!(value.get("detokenize").is_none());
+
+        let back: NvCreateCompletionRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(back.unsupported_fields.get("vllm_xargs"), Some(&xargs));
+        assert_eq!(back.unsupported_fields.len(), 1);
     }
 
     #[test]
