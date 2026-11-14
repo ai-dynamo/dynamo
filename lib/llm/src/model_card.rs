@@ -1237,12 +1237,32 @@ impl ModelDeploymentCard {
     }
 
     pub(crate) fn is_systemone_serial_eligible(&self) -> bool {
-        self.runtime_config
+        self.systemone_backend().is_some()
+    }
+
+    pub(crate) fn systemone_backend(&self) -> Option<crate::protocols::systemone::ScoringBackend> {
+        use crate::local_model::runtime_config::{
+            VLLM_CAUSAL_DECISION_V1, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        };
+        use crate::protocols::systemone::ScoringBackend;
+        let sglang = self
+            .runtime_config
             .supports_runtime_capability(SGLANG_GENERATE_CAPABILITY)
             && self
                 .runtime_config
-                .supports_runtime_capability(SGLANG_SYSTEMONE_SERIAL_V1)
-            && self.runtime_config.max_num_seqs == Some(1)
+                .supports_runtime_capability(SGLANG_SYSTEMONE_SERIAL_V1);
+        let vllm = self
+            .runtime_config
+            .supports_runtime_capability(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+            && self
+                .runtime_config
+                .supports_runtime_capability(VLLM_CAUSAL_DECISION_V1);
+        let backend = match (sglang, vllm) {
+            (true, false) => ScoringBackend::Sglang,
+            (false, true) => ScoringBackend::Vllm,
+            _ => return None,
+        };
+        (self.runtime_config.max_num_seqs == Some(1)
             && self.runtime_config.data_parallel_size == 1
             && self.worker_type == Some(crate::worker_type::WorkerType::Aggregated)
             && self.needs.is_empty()
@@ -1250,7 +1270,8 @@ impl ModelDeploymentCard {
             && !self
                 .runtime_config
                 .runtime_data
-                .contains_key(SPEC_DECODE_RUNTIME_KEY)
+                .contains_key(SPEC_DECODE_RUNTIME_KEY))
+        .then_some(backend)
     }
 
     pub fn mdcsum(&self) -> &str {
@@ -1387,8 +1408,11 @@ impl ModelDeploymentCard {
                 }
 
                 // Preserve legacy checksums when serial scoring is unavailable.
-                if self.is_systemone_serial_eligible() {
-                    bytes_to_hash.extend_from_slice(b"\0sglang_systemone_serial_v1\0true");
+                if let Some(backend) = self.systemone_backend() {
+                    match backend {
+                        crate::protocols::systemone::ScoringBackend::Sglang => bytes_to_hash.extend_from_slice(b"\0sglang_systemone_serial_v1\0true"),
+                        crate::protocols::systemone::ScoringBackend::Vllm => bytes_to_hash.extend_from_slice(b"\0vllm_causal_decision_v1\0true"),
+                    }
                 }
 
                 // The Qwen video contract is resolved per cohort, not per card.
@@ -3740,6 +3764,29 @@ mod ownership_tests {
                     .remove(SGLANG_SYSTEMONE_SERIAL_V1);
             });
             assert_eq!(feature_off.mdcsum(), unsupported.mdcsum());
+        }
+    }
+
+    #[test]
+    fn vllm_causal_scoring_requires_native_serial_capability() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.runtime_config.max_num_seqs = Some(1);
+        card.runtime_config
+            .runtime_data
+            .insert("vllm_inference_v1_generate".into(), true.into());
+        card.runtime_config
+            .runtime_data
+            .insert("vllm_causal_decision_v1".into(), true.into());
+        assert!(card.is_systemone_serial_eligible());
+        let checksum = card.mdcsum().to_string();
+        for key in ["vllm_inference_v1_generate", "vllm_causal_decision_v1"] {
+            let mut unsupported = ModelDeploymentCard::with_name_only("model");
+            unsupported.worker_type = card.worker_type;
+            unsupported.runtime_config = card.runtime_config.clone();
+            unsupported.runtime_config.runtime_data.remove(key);
+            assert!(!unsupported.is_systemone_serial_eligible());
+            assert_ne!(checksum, unsupported.mdcsum());
         }
     }
 

@@ -182,6 +182,8 @@ pub const SGLANG_GENERATE_CAPABILITY: &str = "sglang_generate";
 /// Worker-confirmed isolated scheduling for zero-decode candidate scoring.
 pub const SGLANG_SYSTEMONE_SERIAL_V1: &str = "sglang_systemone_serial_v1";
 
+pub const VLLM_CAUSAL_DECISION_V1: &str = "vllm_causal_decision_v1";
+
 /// Worker-advertised guarantee that disaggregated prefill cancellation is safe
 /// at any point before the prefill stream finishes.
 ///

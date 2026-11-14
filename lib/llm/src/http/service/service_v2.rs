@@ -32,7 +32,9 @@ use super::worker_metrics::register_worker_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{RoutingOverheadMetrics, register_router_queue_metrics};
-use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
+use crate::local_model::runtime_config::{
+    SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+};
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::{Context, Result};
@@ -1635,10 +1637,16 @@ impl HttpServiceConfigBuilder {
             .iter()
             .map(|(_, format)| format.capability())
             .collect::<Vec<_>>();
-        // System One scores through SGLang's native format without mounting `/generate`.
-        if systemone_enabled && !generate_engine_capabilities.contains(&SGLANG_GENERATE_CAPABILITY)
-        {
-            generate_engine_capabilities.push(SGLANG_GENERATE_CAPABILITY);
+        // Decision scoring needs native transports without mounting their public routes.
+        if systemone_enabled {
+            for capability in [
+                SGLANG_GENERATE_CAPABILITY,
+                VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+            ] {
+                if !generate_engine_capabilities.contains(&capability) {
+                    generate_engine_capabilities.push(capability);
+                }
+            }
         }
 
         let model_manager = Arc::new(ModelManager::new());
@@ -4293,7 +4301,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn decisions_mount_both_routes_and_internal_sglang_capability() {
+    fn decisions_mount_both_routes_and_internal_scoring_capabilities() {
         temp_env::with_vars(
             [
                 (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
@@ -4311,7 +4319,10 @@ mod tests {
 
                 assert_eq!(
                     service.generate_engine_capabilities(),
-                    vec![SGLANG_GENERATE_CAPABILITY]
+                    vec![
+                        SGLANG_GENERATE_CAPABILITY,
+                        VLLM_INFERENCE_V1_GENERATE_CAPABILITY
+                    ]
                 );
                 assert!(service.model_endpoint_enabled(EndpointType::SystemOne));
                 assert!(!service.model_endpoint_enabled(EndpointType::Generate));
@@ -4533,6 +4544,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn systemone_does_not_bypass_disabled_public_generate_route() {
+        crate::generate_format::test_formats::install();
         let mut api = FrontendApiConfig::default();
         api.set_systemone_enabled(true);
         let service = HttpService::builder()
