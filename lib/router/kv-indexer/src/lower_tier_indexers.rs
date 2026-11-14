@@ -45,7 +45,6 @@ pub struct LowerTierIndexers {
 }
 
 impl LowerTierIndexers {
-    /// Per-group recurrent state presence shared by every tier.
     pub fn group_residency(&self) -> &KvCacheGroupResidency {
         &self.group_residency
     }
