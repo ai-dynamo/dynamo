@@ -1310,11 +1310,19 @@ func validateDGDRRunJobSpec(spec *batchv1.JobSpec) error {
 	if (spec.Suspend != nil && *spec.Suspend) || (spec.ManualSelector != nil && *spec.ManualSelector) {
 		return errors.New("Job execution policy differs")
 	}
-	if spec.ActiveDeadlineSeconds != nil || spec.PodFailurePolicy != nil || spec.SuccessPolicy != nil ||
+	if spec.ActiveDeadlineSeconds != nil || spec.SuccessPolicy != nil ||
 		spec.BackoffLimitPerIndex != nil || spec.MaxFailedIndexes != nil ||
-		spec.TTLSecondsAfterFinished != nil ||
-		(spec.PodReplacementPolicy != nil && *spec.PodReplacementPolicy != batchv1.TerminatingOrFailed) ||
-		spec.ManagedBy != nil {
+		spec.TTLSecondsAfterFinished != nil || spec.ManagedBy != nil {
+		return errors.New("Job execution policy differs")
+	}
+	// Jobs from earlier operators have no pod failure policy. With the disruption rule, a pod is
+	// replaced only after it failed, so two publishers never run at once.
+	if spec.PodFailurePolicy == nil {
+		if spec.PodReplacementPolicy != nil && *spec.PodReplacementPolicy != batchv1.TerminatingOrFailed {
+			return errors.New("Job execution policy differs")
+		}
+	} else if !apiequality.Semantic.DeepEqual(spec.PodFailurePolicy, dgdrRunPodFailurePolicy()) ||
+		spec.PodReplacementPolicy == nil || *spec.PodReplacementPolicy != batchv1.Failed {
 		return errors.New("Job execution policy differs")
 	}
 	return nil
@@ -1487,7 +1495,9 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 			dgdrRunSnapshotPathAnnotation: execution.SnapshotPath,
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: ptr.To[int32](0),
+			BackoffLimit:         ptr.To[int32](0),
+			PodFailurePolicy:     dgdrRunPodFailurePolicy(),
+			PodReplacementPolicy: ptr.To(batchv1.Failed),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					ServiceAccountName:           name,
@@ -1522,6 +1532,17 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 		},
 	}
 	return job
+}
+
+// dgdrRunPodFailurePolicy replaces a pod that a node disruption ended instead of failing the Run;
+// the search and its publication are idempotent, so the replacement can run them again.
+func dgdrRunPodFailurePolicy() *batchv1.PodFailurePolicy {
+	return &batchv1.PodFailurePolicy{Rules: []batchv1.PodFailurePolicyRule{{
+		Action: batchv1.PodFailurePolicyActionIgnore,
+		OnPodConditions: []batchv1.PodFailurePolicyOnPodConditionsPattern{{
+			Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue,
+		}},
+	}}}
 }
 
 func dgdrRunSweeperCommand() []string {
@@ -1760,7 +1781,9 @@ func dgdrRunFailedContainer(
 	containerName string,
 ) *corev1.ContainerStateTerminated {
 	for i := range pods {
-		if !metav1.IsControlledBy(&pods[i], job) {
+		// The Job ignored a disrupted pod and replaced it; its containers report the disruption,
+		// not the failure.
+		if !metav1.IsControlledBy(&pods[i], job) || dgdrRunPodDisrupted(&pods[i]) {
 			continue
 		}
 		for j := range pods[i].Status.ContainerStatuses {
@@ -1771,6 +1794,15 @@ func dgdrRunFailedContainer(
 		}
 	}
 	return nil
+}
+
+func dgdrRunPodDisrupted(pod *corev1.Pod) bool {
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.DisruptionTarget && condition.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }
 
 func dgdrRunPublisherFailureMessage(terminated *corev1.ContainerStateTerminated) string {

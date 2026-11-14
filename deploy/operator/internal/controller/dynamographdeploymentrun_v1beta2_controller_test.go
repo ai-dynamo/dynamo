@@ -800,8 +800,35 @@ func TestValidateDGDRRunJobExecutionRejectsImmutableBindingSkew(t *testing.T) {
 			wantErr: "Job execution policy differs",
 		},
 		{
-			name: "nondefault pod replacement policy",
+			name: "pod replacement before the disrupted pod failed",
 			mutate: func(job *batchv1.Job) {
+				job.Spec.PodReplacementPolicy = ptr.To(batchv1.TerminatingOrFailed)
+			},
+			wantErr: "Job execution policy differs",
+		},
+		{
+			name: "pod failure policy that fails the Job on a disruption",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.PodFailurePolicy.Rules[0].Action = batchv1.PodFailurePolicyActionFailJob
+			},
+			wantErr: "Job execution policy differs",
+		},
+		{
+			name: "pod failure policy that ignores exit codes",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.PodFailurePolicy.Rules = append(job.Spec.PodFailurePolicy.Rules, batchv1.PodFailurePolicyRule{
+					Action: batchv1.PodFailurePolicyActionIgnore,
+					OnExitCodes: &batchv1.PodFailurePolicyOnExitCodesRequirement{
+						Operator: batchv1.PodFailurePolicyOnExitCodesOpIn, Values: []int32{137},
+					},
+				})
+			},
+			wantErr: "Job execution policy differs",
+		},
+		{
+			name: "earlier Job shape with pod replacement after failure",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.PodFailurePolicy = nil
 				job.Spec.PodReplacementPolicy = ptr.To(batchv1.Failed)
 			},
 			wantErr: "Job execution policy differs",
@@ -1042,12 +1069,23 @@ func TestValidateDGDRRunJobExecutionRejectsImmutableBindingSkew(t *testing.T) {
 		defaulted.Spec.CompletionMode = ptr.To(batchv1.NonIndexedCompletion)
 		defaulted.Spec.Suspend = new(false)
 		defaulted.Spec.ManualSelector = new(false)
-		defaulted.Spec.PodReplacementPolicy = ptr.To(batchv1.TerminatingOrFailed)
+		defaulted.Spec.PodReplacementPolicy = ptr.To(batchv1.Failed)
 		defaulted.Spec.Template.Spec.ShareProcessNamespace = new(false)
 		defaulted.Spec.Template.Spec.Containers[0].SecurityContext.ProcMount = ptr.To(corev1.DefaultProcMount)
 		defaulted.Spec.Template.Spec.Containers[1].SecurityContext.ProcMount = ptr.To(corev1.DefaultProcMount)
 		if err := validateDGDRRunJobExecution(defaulted, run, configMap.Name, execution); err != nil {
 			t.Fatalf("validation error = %v, want API defaults accepted", err)
+		}
+	})
+
+	t.Run("a Job from an operator without the disruption rule remains compatible", func(t *testing.T) {
+		for _, replacement := range []*batchv1.PodReplacementPolicy{nil, ptr.To(batchv1.TerminatingOrFailed)} {
+			legacy := job.DeepCopy()
+			legacy.Spec.PodFailurePolicy = nil
+			legacy.Spec.PodReplacementPolicy = replacement
+			if err := validateDGDRRunJobExecution(legacy, run, configMap.Name, execution); err != nil {
+				t.Fatalf("validation error = %v, want a Job without a pod failure policy accepted", err)
+			}
 		}
 	})
 
@@ -2470,6 +2508,76 @@ func TestV1beta2RunControllerCancelsARunWhoseTraceClaimIsDeleted(t *testing.T) {
 			}
 			assertDGDRRunTraceClaimFinalizers(t, f, "kubernetes.io/pvc-protection")
 		})
+	}
+}
+
+func TestV1beta2RunControllerReportsTheFailureOfTheReplacementPod(t *testing.T) {
+	f := newDGDRRunFixture(t, dgdrRunForTest(t, map[string]any{}))
+	f.reconcile()
+	job := f.job()
+	if !apiequality.Semantic.DeepEqual(job.Spec.PodFailurePolicy, dgdrRunPodFailurePolicy()) ||
+		job.Spec.PodReplacementPolicy == nil || *job.Spec.PodReplacementPolicy != batchv1.Failed {
+		t.Fatalf("Job failure policy = %+v, replacement = %v, want disrupted pods replaced after they fail",
+			job.Spec.PodFailurePolicy, job.Spec.PodReplacementPolicy)
+	}
+
+	t.Log("Evict the first pod before its containers start, then let the replacement's search fail")
+	kubeletTerminated := corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+		ExitCode: 137, Reason: "ContainerStatusUnknown",
+		Message: "The container could not be located when the pod was terminated",
+	}}
+	for _, pod := range []struct {
+		name       string
+		conditions []corev1.PodCondition
+		statuses   []corev1.ContainerStatus
+	}{
+		{
+			name: job.Name + "-evicted",
+			conditions: []corev1.PodCondition{{
+				Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue, Reason: "TerminationByKubelet",
+			}},
+			statuses: []corev1.ContainerStatus{
+				{Name: dgdrRunSweeperContainer, State: kubeletTerminated},
+				{Name: dgdrRunPublisherContainer, State: kubeletTerminated},
+			},
+		},
+		{
+			name: job.Name + "-replacement",
+			statuses: []corev1.ContainerStatus{{
+				Name: dgdrRunSweeperContainer,
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					ExitCode: 1, Message: "search found no feasible candidate",
+				}},
+			}},
+		},
+	} {
+		created := &corev1.Pod{
+			Name: pod.name, Namespace: job.Namespace,
+			Labels:          map[string]string{batchv1.JobNameLabel: job.Name},
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(job, batchv1.SchemeGroupVersion.WithKind("Job"))},
+		}
+		if err := f.client.Create(t.Context(), created); err != nil {
+			t.Fatalf("create Job pod %s: %v", pod.name, err)
+		}
+		created.Status = corev1.PodStatus{Phase: corev1.PodFailed, Conditions: pod.conditions, ContainerStatuses: pod.statuses}
+		if err := f.client.Status().Update(t.Context(), created); err != nil {
+			t.Fatalf("update Job pod %s status: %v", pod.name, err)
+		}
+	}
+	job.Status.Conditions = []batchv1.JobCondition{{
+		Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "BackoffLimitExceeded", LastTransitionTime: metav1.Now(),
+	}}
+	if err := f.client.Status().Update(t.Context(), job); err != nil {
+		t.Fatalf("fail Job: %v", err)
+	}
+
+	t.Log("Report the replacement's sweeper failure, not the evicted pod's kubelet message")
+	f.reconcile()
+	run := f.run()
+	condition := meta.FindStatusCondition(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+	if run.Status.Phase != nvidiacomv1beta2.DGDRRunPhaseFailed || condition == nil ||
+		condition.Reason != dgdrRunReasonSearchFailed || condition.Message != "search found no feasible candidate" {
+		t.Fatalf("Completed condition = %+v, want %s from the replacement pod", condition, dgdrRunReasonSearchFailed)
 	}
 }
 

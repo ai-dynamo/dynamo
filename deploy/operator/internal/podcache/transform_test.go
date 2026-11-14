@@ -174,6 +174,7 @@ func TestProjectConsumerContract(t *testing.T) {
 				Status: corev1.ConditionFalse,
 				Reason: podcontract.RestoreReasonFailed,
 			},
+			{Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue},
 		}, got.Status.Conditions)
 	})
 	t.Run("failover DGDR GMS replacement and Recreate retain status state", func(t *testing.T) {

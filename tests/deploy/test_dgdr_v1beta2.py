@@ -145,7 +145,22 @@ async def test_dgdr_v1beta2_publishes_candidate(namespace: str) -> None:
                         raise
                 else:
                     status = run.get("status", {})
-                    assert status.get("phase") != "Failed", status
+                    if status.get("phase") == "Failed":
+                        # The Run keeps only one container message; the pods name what ended them.
+                        job_name = (status.get("jobRef") or {}).get("name")
+                        pods = (
+                            await core.list_namespaced_pod(
+                                namespace,
+                                label_selector=f"job-name={job_name}",
+                                _request_timeout=30,
+                            )
+                            if job_name
+                            else None
+                        )
+                        pytest.fail(
+                            f"Run failed: status={status}, pods="
+                            f"{api.sanitize_for_serialization(pods.items) if pods else []}"
+                        )
                     if any(
                         condition["type"] == "Completed"
                         and condition["status"] == "True"
@@ -183,12 +198,21 @@ async def test_dgdr_v1beta2_publishes_candidate(namespace: str) -> None:
         pods = await core.list_namespaced_pod(
             namespace, label_selector=f"job-name={job_name}", _request_timeout=30
         )
-        assert len(pods.items) == 1
-        assert {c.name for c in pods.items[0].status.container_statuses} == {
+        # The Job replaces a pod that a node disruption ended.
+        pods = [
+            pod
+            for pod in pods.items
+            if not any(
+                c.type == "DisruptionTarget" and c.status == "True"
+                for c in pod.status.conditions or []
+            )
+        ]
+        assert len(pods) == 1, pods
+        assert {c.name for c in pods[0].status.container_statuses} == {
             "sweeper",
             "publisher",
         }
-        for container in pods.items[0].status.container_statuses:
+        for container in pods[0].status.container_statuses:
             assert container.state.terminated is not None, container
             assert container.state.terminated.exit_code == 0, container
 
