@@ -14,6 +14,11 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
+/// Longest a canary waits for its response, however many forward passes the
+/// engine completes meanwhile. It bounds a stall after the forward pass, where
+/// passes continue but nothing is answered. Longer than any expected prefill.
+const CANARY_MAX_WAIT: Duration = Duration::from_secs(600);
+
 /// Configuration for health check behavior
 pub struct HealthCheckConfig {
     /// Wait time before sending canary health checks (when no activity)
@@ -89,15 +94,30 @@ impl HealthCheckManager {
             .lock()
             .get_endpoint_health_check_notifier(&endpoint_subject)
             .expect("Notifier should exist for registered endpoint");
+        let progress = self
+            .drt
+            .system_health()
+            .lock()
+            .get_endpoint_progress_notifier(&endpoint_subject)
+            .expect("Notifier should exist for registered endpoint");
 
         let task = tokio::spawn(async move {
             let endpoint_subject = endpoint_subject_clone;
             info!("Health check task started for: {}", endpoint_subject);
 
+            // The last canary sent. It can outlive the canary wait: behind a long
+            // request it keeps waiting while the engine makes progress.
+            let mut canary: Option<JoinHandle<()>> = None;
+
             loop {
                 // Wait for either timeout or activity notification
                 tokio::select! {
                     _ = tokio::time::sleep(canary_wait) => {
+                        if canary.as_ref().is_some_and(|canary| !canary.is_finished()) {
+                            // Don't queue another canary behind the one still waiting.
+                            continue;
+                        }
+
                         // Timeout - send health check for this specific endpoint
                         debug!("Canary timer expired for {}, sending health check", endpoint_subject);
 
@@ -105,8 +125,9 @@ impl HealthCheckManager {
                         let target = manager.drt.system_health().lock().get_health_check_target(&endpoint_subject);
 
                         if let Some(target) = target {
-                            if let Err(e) = manager.send_health_check_request(&endpoint_subject, &target.payload).await {
-                                error!("Failed to send health check for {}: {}", endpoint_subject, e);
+                            match manager.send_health_check_request(&endpoint_subject, &target.payload, progress.clone()) {
+                                Ok(sent) => canary = Some(sent),
+                                Err(e) => error!("Failed to send health check for {}: {}", endpoint_subject, e),
                             }
                         } else {
                             // This should never happen - targets are registered at startup and never removed
@@ -198,11 +219,13 @@ impl HealthCheckManager {
     }
 
     /// Send a health check request via the local endpoint registry (in-process).
-    async fn send_health_check_request(
+    /// Returns the task that waits for the response and records the result.
+    fn send_health_check_request(
         &self,
         endpoint_subject: &str,
         payload: &serde_json::Value,
-    ) -> anyhow::Result<()> {
+        progress: Arc<tokio::sync::Notify>,
+    ) -> anyhow::Result<JoinHandle<()>> {
         debug!(
             "Sending health check to {} via local registry",
             endpoint_subject
@@ -224,10 +247,11 @@ impl HealthCheckManager {
         let endpoint_subject_owned = endpoint_subject.to_string();
         let payload = payload.clone();
         let timeout = self.config.request_timeout;
+        let max_wait = CANARY_MAX_WAIT.max(timeout);
 
         // Spawn task to send health check and wait for response
-        tokio::spawn(async move {
-            let result = tokio::time::timeout(timeout, async {
+        let canary = tokio::spawn(async move {
+            let result = timeout_unless_progress(timeout, max_wait, &progress, async {
                 let request = SingleIn::new(payload);
                 match engine.generate(request).await {
                     Ok(mut response_stream) => {
@@ -282,7 +306,7 @@ impl HealthCheckManager {
             .await;
 
             // Handle timeout
-            if result.is_err() {
+            if result.is_none() {
                 warn!("Health check timeout for {}", endpoint_subject_owned);
                 system_health
                     .lock()
@@ -292,7 +316,33 @@ impl HealthCheckManager {
             debug!("Health check completed for {}", endpoint_subject_owned);
         });
 
-        Ok(())
+        Ok(canary)
+    }
+}
+
+/// Wait for `check`, giving up once `timeout` passes with neither a result nor
+/// engine progress, or after `max_wait` in total.
+///
+/// A canary sent during a long prefill is not answered until the prefill ends,
+/// so it keeps waiting while the engine completes forward passes. It still
+/// fails `timeout` after the passes stop.
+async fn timeout_unless_progress<T>(
+    timeout: Duration,
+    max_wait: Duration,
+    progress: &tokio::sync::Notify,
+    check: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::pin!(check);
+    let deadline = tokio::time::sleep(max_wait);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            biased;
+            output = &mut check => return Some(output),
+            _ = &mut deadline => return None,
+            _ = progress.notified() => {}
+            _ = tokio::time::sleep(timeout) => return None,
+        }
     }
 }
 
@@ -349,6 +399,78 @@ pub async fn get_health_check_status(
         "endpoints_checked": endpoint_subjects.len(),
         "endpoint_statuses": endpoint_statuses,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::Notify;
+    use tokio::time::Instant;
+
+    const TIMEOUT: Duration = Duration::from_secs(3);
+    const MAX_WAIT: Duration = Duration::from_secs(60);
+
+    /// The engine completes a forward pass every 2 s, `passes` times, then stops.
+    fn engine_progress(passes: u32) -> Arc<Notify> {
+        let progress = Arc::new(Notify::new());
+        let engine = progress.clone();
+        tokio::spawn(async move {
+            for _ in 0..passes {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                engine.notify_one();
+            }
+        });
+        progress
+    }
+
+    async fn unanswered(progress: &Notify) -> Duration {
+        let start = Instant::now();
+        let check = std::future::pending::<()>();
+        assert_eq!(
+            timeout_unless_progress(TIMEOUT, MAX_WAIT, progress, check).await,
+            None
+        );
+        start.elapsed()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn check_without_progress_times_out() {
+        assert_eq!(unanswered(&Notify::new()).await, TIMEOUT);
+    }
+
+    /// A canary queued behind a long prefill is answered when the prefill ends,
+    /// long after the timeout.
+    #[tokio::test(start_paused = true)]
+    async fn check_outlasts_the_timeout_while_the_engine_makes_progress() {
+        let progress = engine_progress(10);
+        let check = async {
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            "answered"
+        };
+
+        let result = timeout_unless_progress(TIMEOUT, MAX_WAIT, &progress, check).await;
+
+        assert_eq!(result, Some("answered"));
+    }
+
+    /// A stalled engine is detected `timeout` after its last forward pass.
+    #[tokio::test(start_paused = true)]
+    async fn check_times_out_once_progress_stops() {
+        let progress = engine_progress(10);
+
+        assert_eq!(
+            unanswered(&progress).await,
+            Duration::from_secs(20) + TIMEOUT
+        );
+    }
+
+    /// Passes that never stop do not keep an unanswered canary waiting forever.
+    #[tokio::test(start_paused = true)]
+    async fn check_times_out_at_the_cap_despite_progress() {
+        let progress = engine_progress(u32::MAX);
+
+        assert_eq!(unanswered(&progress).await, MAX_WAIT);
+    }
 }
 
 // ============================================================

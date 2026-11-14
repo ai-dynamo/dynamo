@@ -125,7 +125,10 @@ different default; see
    `DYN_HEALTH_CHECK_PAYLOAD`.
 4. **Apply the result.** The runtime marks the endpoint `ready` when the first response has no error.
    A failed request, an empty stream, an error in the first response, or no first response within
-   `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` marks the endpoint `notready`.
+   `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` marks the endpoint `notready`. On workers that publish
+   forward-pass metrics, each completed engine forward pass restarts that timeout, up to 10 minutes
+   in total, so a canary waiting behind a long prefill does not fail while the engine makes
+   progress.
 
 Normal traffic suppresses unnecessary canaries because response activity shows engine progress;
 it does not establish completion of every request or successful client delivery. Active checks are
