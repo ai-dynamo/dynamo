@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import enum
 import logging
 import time
@@ -8,12 +9,14 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
+import tensorrt_llm.llmapi.llm as trtllm_llm_module
 from tensorrt_llm import LLM, MultimodalEncoder
 from tensorrt_llm.llmapi.llm import BaseLLM
 from transformers import PretrainedConfig
 
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine_monitor import TrtllmEngineMonitor
+from dynamo.trtllm.preprocess_pool import PreprocessPool
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,7 @@ class TensorRTLLMEngine:
     ) -> None:
         self._llm: Optional[LLM] = None
         self._health_monitor: Optional[TrtllmEngineMonitor] = None
+        self._preprocess_pool: Optional[PreprocessPool] = None
         self.disaggregation_mode = (
             disaggregation_mode
             if disaggregation_mode is not None
@@ -99,11 +103,20 @@ class TensorRTLLMEngine:
                 # (model path, backend settings, KV cache config, disaggregation settings, etc.)
                 self._llm = self._llm_cls(**self.engine_args)
 
+    async def start_preprocess_pool(self, num_processes: int) -> None:
+        """Run the LLM's multimodal input processing in ``num_processes`` processes."""
+        self._preprocess_pool = await asyncio.to_thread(
+            PreprocessPool.start, trtllm_llm_module, self.llm, num_processes
+        )
+
     async def cleanup(self) -> None:
         await self.stop_health_monitor()
         self.shutdown()
 
     def shutdown(self) -> None:
+        if self._preprocess_pool is not None:
+            self._preprocess_pool.close()
+            self._preprocess_pool = None
         if self._llm:
             try:
                 self._llm.shutdown()
@@ -197,6 +210,7 @@ async def get_llm_engine(
     engine_args: dict[str, Any],
     disaggregation_mode: Optional[DisaggregationMode] = None,
     component_gauges: Any = None,
+    mm_preprocess_processes: int = 0,
 ) -> AsyncGenerator[TensorRTLLMEngine, None]:
     """Get TensorRT-LLM engine instance with load time tracking.
 
@@ -204,6 +218,8 @@ async def get_llm_engine(
         engine_args: Engine configuration arguments.
         disaggregation_mode: Optional disaggregation mode configuration.
         component_gauges: Optional LLMBackendGauges instance for recording load time.
+        mm_preprocess_processes: Processes for multimodal input processing; 0
+            keeps it in the worker process.
     """
     # Time engine initialization
     start_time = time.time()
@@ -217,6 +233,9 @@ async def get_llm_engine(
         # Record model load time immediately after measurement
         if component_gauges:
             component_gauges.set_model_load_time(load_time)
+
+        if mm_preprocess_processes:
+            await engine.start_preprocess_pool(mm_preprocess_processes)
 
         yield engine
     except Exception as e:
