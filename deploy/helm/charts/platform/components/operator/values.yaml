@@ -108,6 +108,16 @@ controllerManager:
     # All cluster-wide operators should use the SAME namespace for proper leader election
     namespace: ""
 
+  crdApply:
+    # -- Resource requests/limits for the crd-apply init container. Set to null to omit.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 1000m
+        memory: 256Mi
+
   manager:
     containerSecurityContext:
       allowPrivilegeEscalation: false
