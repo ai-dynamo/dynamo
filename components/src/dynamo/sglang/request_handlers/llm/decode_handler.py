@@ -126,6 +126,31 @@ def _raise_if_conditional_disagg_bypass(request: Dict[str, Any]) -> None:
     )
 
 
+async def _engine_validation_stream(
+    stream: AsyncIterator[Dict[str, Any]],
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """Re-raise engine input-validation failures as typed InvalidArgument.
+
+    SGLang reports request-level input failures — an over-context prompt,
+    malformed sampling parameters, unsupported input shape — as plain
+    ``ValueError``/``TypeError`` from the engine's output iterator. The Rust
+    binding already classifies both exception types as invalid-argument, but a
+    bare exception keeps its text in the private diagnostic, so the client
+    answers a 400 whose body is only the generic "Invalid request". Wrapping
+    the iterator at the engine boundary and re-raising as the typed exception
+    lets the binding capture the text as the public message, so the reason
+    reaches the client. Any other exception propagates unchanged.
+    """
+    while True:
+        try:
+            chunk = await anext(stream)
+        except StopAsyncIteration:
+            return
+        except (ValueError, TypeError) as exc:
+            raise InvalidArgument(str(exc)) from exc
+        yield chunk
+
+
 class FrontendDecodedVideo(np.ndarray, VideoDecoderWrapper):
     def __new__(
         cls, video_frames: Any, video_metadata: Dict[str, Any]
@@ -776,7 +801,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             cache_salt=request_cache_salt(request),
             kv_hint=request.get("kv_hint"),
         )
-        return native_generate_stream(self.engine, native_request)
+        return _engine_validation_stream(
+            native_generate_stream(self.engine, native_request)
+        )
 
     @property
     def _reports_kv_cache_hit(self) -> bool:
@@ -918,30 +945,34 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # and the transferred KV lines up.
             decode_mm_kwargs = build_disagg_mm_kwargs(request)
 
-            decode = await self.engine.async_generate(
-                **input_param,
-                **decode_mm_kwargs,
-                **cache_salt_kwargs(self.engine, request_cache_salt(request)),
-                sampling_params=sampling_params,
-                stream=True,
-                **require_reasoning_kwargs(
-                    self.engine,
-                    request,
-                    thinking_budget_requested=thinking_budget_requested(request),
-                ),
-                **self._routed_experts_kwargs,
-                bootstrap_host=bootstrap_info["bootstrap_host"],
-                bootstrap_port=bootstrap_info["bootstrap_port"],
-                bootstrap_room=bootstrap_info["bootstrap_room"],
-                **prefill_dp_rank_kwargs(self.engine, routing.get("prefill_dp_rank")),
-                external_trace_header=trace_header,
-                rid=sglang_request_id,
-                data_parallel_rank=dp_rank,
-                lora_path=lora_path,
-                **logprob_kwargs,
-                **priority_kwargs,
-                **agent_session_kwargs(self.engine, request),
-                **kv_hint_kwargs(self.engine, request),
+            decode = _engine_validation_stream(
+                await self.engine.async_generate(
+                    **input_param,
+                    **decode_mm_kwargs,
+                    **cache_salt_kwargs(self.engine, request_cache_salt(request)),
+                    sampling_params=sampling_params,
+                    stream=True,
+                    **require_reasoning_kwargs(
+                        self.engine,
+                        request,
+                        thinking_budget_requested=thinking_budget_requested(request),
+                    ),
+                    **self._routed_experts_kwargs,
+                    bootstrap_host=bootstrap_info["bootstrap_host"],
+                    bootstrap_port=bootstrap_info["bootstrap_port"],
+                    bootstrap_room=bootstrap_info["bootstrap_room"],
+                    **prefill_dp_rank_kwargs(
+                        self.engine, routing.get("prefill_dp_rank")
+                    ),
+                    external_trace_header=trace_header,
+                    rid=sglang_request_id,
+                    data_parallel_rank=dp_rank,
+                    lora_path=lora_path,
+                    **logprob_kwargs,
+                    **priority_kwargs,
+                    **agent_session_kwargs(self.engine, request),
+                    **kv_hint_kwargs(self.engine, request),
+                )
             )
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
@@ -1022,29 +1053,31 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if forwarded is not None:
                     mm_hashes_kwargs["mm_hashes"] = forwarded
 
-            agg = await self.engine.async_generate(
-                **input_param,
-                **cache_salt_kwargs(self.engine, request_cache_salt(request)),
-                image_data=image_data,
-                audio_data=audio_data,
-                video_data=video_data,
-                sampling_params=sampling_params,
-                stream=True,
-                **require_reasoning_kwargs(
-                    self.engine,
-                    request,
-                    thinking_budget_requested=thinking_budget_requested(request),
-                ),
-                **self._routed_experts_kwargs,
-                **mm_hashes_kwargs,
-                external_trace_header=trace_header,
-                rid=sglang_request_id,
-                data_parallel_rank=dp_rank,
-                lora_path=lora_path,
-                **logprob_kwargs,
-                **priority_kwargs,
-                **agent_session_kwargs(self.engine, request),
-                **kv_hint_kwargs(self.engine, request),
+            agg = _engine_validation_stream(
+                await self.engine.async_generate(
+                    **input_param,
+                    **cache_salt_kwargs(self.engine, request_cache_salt(request)),
+                    image_data=image_data,
+                    audio_data=audio_data,
+                    video_data=video_data,
+                    sampling_params=sampling_params,
+                    stream=True,
+                    **require_reasoning_kwargs(
+                        self.engine,
+                        request,
+                        thinking_budget_requested=thinking_budget_requested(request),
+                    ),
+                    **self._routed_experts_kwargs,
+                    **mm_hashes_kwargs,
+                    external_trace_header=trace_header,
+                    rid=sglang_request_id,
+                    data_parallel_rank=dp_rank,
+                    lora_path=lora_path,
+                    **logprob_kwargs,
+                    **priority_kwargs,
+                    **agent_session_kwargs(self.engine, request),
+                    **kv_hint_kwargs(self.engine, request),
+                )
             )
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
