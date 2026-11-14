@@ -658,6 +658,20 @@ fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
     })
 }
 
+// Transformers resolves Python module paths before locating relative imports.
+// Keep Python files in the per-model directory instead of resolving to the
+// shared blob directory, where sibling module basenames do not exist.
+fn materialize_metadata_file(source: &Path, dest: &Path) -> anyhow::Result<()> {
+    if dest.extension().and_then(|ext| ext.to_str()) != Some("py") {
+        return symlink_force(source, dest);
+    }
+    stage_and_rename_sync(dest, |tmp| {
+        std::fs::copy(source, tmp)
+            .with_context(|| format!("copying {} -> {}", source.display(), tmp.display()))?;
+        Ok(())
+    })
+}
+
 /// 1 GiB cap on metadata fetch — realistic files are <20 MiB. Bounds
 /// disk usage if a worker advertises a bogus `CheckedFile.size`, and is
 /// the fallback when `size` is absent on a `CheckedFile`.
@@ -684,12 +698,12 @@ fn file_uri_parent(uri: &str) -> Option<PathBuf> {
     parent.is_dir().then(|| parent.to_path_buf())
 }
 
-/// Symlink non-weight files from `snapshot_dir` into `local_dir`. Picks up
+/// Materialize non-weight files from `snapshot_dir` into `local_dir`. Picks up
 /// `preprocessor_config.json` and other sibling files that
 /// `from_pretrained(local_dir)` consumers need.
 ///
 /// Names in `typed_filenames` are owned by the resolve loop's typed-slot
-/// pass — never overwritten. Every other harvested sibling is re-linked
+/// pass — never overwritten. Every other harvested sibling is replaced
 /// unconditionally so a re-registration with the same `mdcsum` but a
 /// different upstream snapshot picks up fresh contents (mdcsum doesn't
 /// cover harvested files).
@@ -723,12 +737,8 @@ fn harvest_siblings(
             continue;
         }
         let dst = local_dir.join(&name);
-        // Resolve through the canonical target so a downstream
-        // `canonicalize` lands on a stable blob path rather than
-        // chasing snapshot-dir symlinks. `symlink_force` is idempotent
-        // and atomic via `stage_and_rename_sync`.
         let target = std::fs::canonicalize(&path).unwrap_or(path);
-        symlink_force(&target, &dst)
+        materialize_metadata_file(&target, &dst)
             .with_context(|| format!("harvesting {} -> {}", target.display(), dst.display()))?;
         tracing::debug!(
             file = %name,
@@ -1229,9 +1239,11 @@ impl ModelDeploymentCard {
     }
 
     /// Per-MDC resolve directory. After `download_config` runs, every
-    /// typed slot + harvested sibling is symlinked here for
-    /// `from_pretrained(local_dir)` consumers. Pure path — does not
-    /// create the directory; the resolve pipeline owns that.
+    /// typed slot + harvested sibling is available here for
+    /// `from_pretrained(local_dir)` consumers. Python files are regular
+    /// copies so canonicalizing a module preserves relative imports;
+    /// other files link to the cache. This only computes the path;
+    /// the resolve pipeline creates the directory.
     pub fn local_dir(&self) -> PathBuf {
         mdc_local_path(&self.slug, self.mdcsum())
     }
@@ -1867,7 +1879,7 @@ impl ModelDeploymentCard {
             let blob = blobs.join(blake3_hex);
             tracing::debug!(filename = %filename, uri = %uri, blake3 = %blake3_hex, "resolving");
             resolve_uri(&client, uri, expected, &blob, &hf_snapshots).await?;
-            symlink_force(&blob, &local_dir.join(&filename))?;
+            materialize_metadata_file(&blob, &local_dir.join(&filename))?;
         }
         tracing::debug!(
             display_name = %self.display_name,
@@ -1894,7 +1906,7 @@ impl ModelDeploymentCard {
             harvest_siblings(snap, &local_dir, &typed_filenames)?;
         }
 
-        // Pass 3: rewrite cf.path to the cache symlink so downstream
+        // Pass 3: rewrite cf.path to the local cache entry so downstream
         // tokenizer/config loaders read from a verified location.
         for (cf, _) in self.iter_metadata_files_mut() {
             cf.update_dir(&local_dir);
@@ -3072,6 +3084,164 @@ mod tests {
             Ok::<_, anyhow::Error>(())
         })
         .await
+    }
+
+    fn python_metadata_fixture(workspace: &Path, offset: u32) -> anyhow::Result<PathBuf> {
+        let snapshot = hf_cache_fixture(workspace)?;
+        let encoding = format!("def encode(text):\n    return [ord(c) + {offset} for c in text]\n");
+        for (name, body) in [
+            (
+                "tokenization_test.py",
+                "from .encoding import encode\nclass TestTokenizer:\n    def encode(self, text):\n        return encode(text)\n",
+            ),
+            ("encoding.py", encoding.as_str()),
+            ("__init__.py", ""),
+        ] {
+            let blob = workspace
+                .join("blobs")
+                .join(blake3::hash(body.as_bytes()).to_hex().as_str());
+            std::fs::write(&blob, body)?;
+            super::symlink_force(&blob, &snapshot.join(name))?;
+        }
+        Ok(snapshot)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn download_config_materializes_python_metadata() -> anyhow::Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let snapshot = python_metadata_fixture(workspace.path(), 0)?;
+        let home = tempfile::tempdir()?;
+        temp_env::async_with_vars([("HOME", Some(home.path()))], async {
+            // Exercise both advertised files and legacy cards' sibling harvest.
+            for advertised in [false, true] {
+                let mut card = ModelDeploymentCard::load_from_disk(&snapshot, None)?;
+                if advertised {
+                    for name in ["tokenization_test.py", "encoding.py", "__init__.py"] {
+                        card.extra_files
+                            .push(super::CheckedFile::from_disk(snapshot.join(name))?);
+                    }
+                }
+                let checksum = card.mdcsum().to_owned();
+                let mut retry = card.clone();
+                card.download_config(None).await?;
+                let local = card.local_dir();
+                let blobs = super::mdc_blobs_dir()?;
+                for name in ["tokenization_test.py", "encoding.py", "__init__.py"] {
+                    let path = local.join(name);
+                    assert!(
+                        !path.is_symlink(),
+                        "Python module must remain beside its siblings"
+                    );
+                    assert_eq!(
+                        std::fs::canonicalize(&path)?.parent(),
+                        Some(std::fs::canonicalize(&local)?.as_path())
+                    );
+                    assert_eq!(std::fs::read(&path)?, std::fs::read(snapshot.join(name))?);
+                    assert!(
+                        !blobs.join(name).exists(),
+                        "never add basenames to the shared blob cache"
+                    );
+                }
+                for (cf, _) in card.iter_metadata_files() {
+                    assert!(cf.checksum_matches(cf.path().unwrap()));
+                }
+                let resolved: ModelDeploymentCard = serde_json::from_str(&card.to_json()?)?;
+                assert_eq!(resolved.mdcsum(), checksum);
+                // Re-registration repairs a stale view without changing its verified blob.
+                std::fs::write(local.join("encoding.py"), "stale")?;
+                retry.download_config(None).await?;
+                assert_eq!(
+                    std::fs::read(local.join("encoding.py"))?,
+                    std::fs::read(snapshot.join("encoding.py"))?
+                );
+                #[cfg(unix)]
+                assert!(local.join("config.json").is_symlink());
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn download_config_rejects_modified_python_metadata() -> anyhow::Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let snapshot = python_metadata_fixture(workspace.path(), 0)?;
+        let mut card = ModelDeploymentCard::load_from_disk(&snapshot, None)?;
+        let path = snapshot.join("encoding.py");
+        let expected = super::CheckedFile::from_disk(&path)?;
+        card.extra_files.push(expected.clone());
+        std::fs::write(&path, "modified after advertisement")?;
+        let home = tempfile::tempdir()?;
+        temp_env::async_with_vars([("HOME", Some(home.path()))], async {
+            let err = card.download_config(None).await.unwrap_err();
+            assert!(err.to_string().contains("checksum mismatch"), "{err:#}");
+            assert!(!card.local_dir().join("encoding.py").exists());
+            assert!(
+                !super::mdc_blobs_dir()?
+                    .join(expected.checksum().hash())
+                    .exists()
+            );
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+    }
+
+    #[test]
+    fn python_metadata_publish_failure_preserves_existing_file() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let dest = dir.path().join("encoding.py");
+        std::fs::write(&dest, "complete")?;
+        assert!(super::materialize_metadata_file(&dir.path().join("missing"), &dest).is_err());
+        let result = super::stage_and_rename_sync(&dest, |tmp| {
+            std::fs::write(tmp, "partial")?;
+            anyhow::bail!("interrupted copy");
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&dest)?, "complete");
+        assert_eq!(std::fs::read_dir(dir.path())?.count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    #[ignore = "requires python3 with Transformers; run explicitly with --ignored"]
+    async fn download_config_supports_transformers_relative_imports() -> anyhow::Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let home = tempfile::tempdir()?;
+        temp_env::async_with_vars([("HOME", Some(home.path()))], async {
+            let mut dirs = Vec::new();
+            for (model, offset) in [("first", 0), ("second", 1)] {
+                let snapshot = python_metadata_fixture(&workspace.path().join(model), offset)?;
+                let mut card = ModelDeploymentCard::load_from_disk(&snapshot, None)?;
+                for name in ["tokenization_test.py", "encoding.py", "__init__.py"] {
+                    card.extra_files.push(super::CheckedFile::from_disk(snapshot.join(name))?);
+                }
+                card.download_config(None).await?;
+                dirs.push(card.local_dir());
+            }
+            assert_ne!(dirs[0], dirs[1]);
+            assert_eq!(
+                std::fs::read(dirs[0].join("tokenization_test.py"))?,
+                std::fs::read(dirs[1].join("tokenization_test.py"))?,
+            );
+            let mut command = tokio::process::Command::new("python3");
+            command.args(["-c", r#"
+import sys
+from transformers.dynamic_module_utils import get_class_from_dynamic_module
+classes = [get_class_from_dynamic_module("tokenization_test.TestTokenizer", path, local_files_only=True) for path in sys.argv[1:]]
+assert classes[0]().encode("hello") == [104, 101, 108, 108, 111]
+assert classes[1]().encode("hello") == [105, 102, 109, 109, 112]
+"#]).args(&dirs)
+                .env("HF_MODULES_CACHE", home.path().join("modules"))
+                .env("HF_HUB_OFFLINE", "1")
+                .env("TRANSFORMERS_OFFLINE", "1")
+                .kill_on_drop(true);
+            let output = tokio::time::timeout(std::time::Duration::from_secs(30), command.output()).await??;
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            Ok::<_, anyhow::Error>(())
+        }).await
     }
 
     #[tokio::test]
