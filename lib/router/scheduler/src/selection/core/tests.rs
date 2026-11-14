@@ -310,6 +310,7 @@ fn lease_operation<'a>(
         track_active_blocks,
         return_routing_hashes: false,
         replay_id: None,
+        admitted_upstream: false,
     }
 }
 

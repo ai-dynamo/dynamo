@@ -5918,6 +5918,210 @@ async fn committed_session_lease_lives_as_long_as_the_response_stream() {
     runtime.shutdown();
 }
 
+const DECODE_WAIT_LIMIT_POLICY: &str = r#"
+policy_classes:
+  - name: decode-bound
+    quantum: 1
+    decode_busy_threshold_frac: 0.5
+"#;
+
+/// One KV host of a disaggregated pair, serving `worker_id` with the shared policy file.
+async fn disagg_policy_host(
+    distributed: &DistributedRuntime,
+    component: &str,
+    worker_id: u64,
+    worker: ModelRuntimeConfig,
+    policy_path: &std::path::Path,
+    track_active_blocks: bool,
+    metric_worker_type: &'static str,
+) -> Arc<RoutingHost> {
+    let endpoint = distributed
+        .namespace("disagg-decode-wait-limit".to_string())
+        .unwrap()
+        .component(component.to_string())
+        .unwrap()
+        .endpoint("generate");
+    let client = endpoint.client().await.unwrap();
+    let (_workers_tx, workers) = watch::channel(HashMap::from([(worker_id, worker)]));
+    let config = KvRouterConfig {
+        skip_initial_worker_wait: true,
+        use_kv_events: false,
+        router_track_active_blocks: track_active_blocks,
+        router_policy_config: Some(policy_path.display().to_string()),
+        ..Default::default()
+    };
+    let chooser = KvRouter::new(
+        endpoint,
+        client.clone(),
+        workers,
+        None,
+        16,
+        SelectionPolicySource::Registry,
+        Some(config),
+        None,
+        metric_worker_type,
+        None,
+        false,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let host = RoutingHost::builder(client, RouterMode::KV)
+        .kv_router(Arc::new(chooser))
+        .build()
+        .await
+        .unwrap();
+    host.inner
+        .client
+        .override_discovered_instances(vec![worker_id]);
+    host.inner.client.override_instance_avail(vec![worker_id]);
+    Arc::new(host)
+}
+
+async fn request_in_phase(
+    context_id: &str,
+    phase: RequestPhase,
+    tokens: usize,
+    staged_kv: bool,
+) -> Context<PreprocessedRequest> {
+    let tracker = Arc::new(RequestTracker::new());
+    drop(tracker.set_phase(phase).await);
+    let mut input = request();
+    input.token_ids = Arc::new((0..tokens as u32).collect());
+    input.tracker = Some(tracker);
+    input.staged_kv_cleanup = staged_kv;
+    Context::with_id_and_metadata(input, context_id.to_string(), Default::default())
+}
+
+async fn wait_for_pending(host: &RoutingHost, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.kv_router().selection.scheduler().pending_count() != expected {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("queue must reach the expected pending count");
+}
+
+/// Spawn one admission of `request` on `host` and report the worker it booked.
+fn spawn_admission(
+    host: &Arc<RoutingHost>,
+    request: Context<PreprocessedRequest>,
+    phase: RequestPhase,
+) -> tokio::task::JoinHandle<u64> {
+    let host = Arc::clone(host);
+    tokio::spawn(async move {
+        let (selection, _) = host
+            .select_with_affinity(&request, phase, false, &CleanupBudget::default())
+            .await
+            .expect("admission must succeed");
+        selection.worker.worker_id
+    })
+}
+
+/// In disaggregated KV routing the prefill hop's queue is the only gate for a class's
+/// decode wait limit: it holds new requests while the decode pool is past the limit and
+/// releases them when decode frees KV, while the decode hop books every decode leg with
+/// staged KV at once. A conditional-disagg bypass, which never passed the prefill hop,
+/// keeps the class gate at the decode hop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn disagg_decode_wait_limit_gates_the_prefill_hop_and_never_the_decode_hop() {
+    const PREFILL_WORKER: u64 = 10;
+    const DECODE_WORKER: u64 = 20;
+    let policy_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(policy_file.path(), DECODE_WAIT_LIMIT_POLICY).unwrap();
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    // The prefill router never tracks held blocks; the decode workers report 8 KV blocks.
+    let prefill = disagg_policy_host(
+        &distributed,
+        "prefill",
+        PREFILL_WORKER,
+        ModelRuntimeConfig::default(),
+        policy_file.path(),
+        false,
+        "prefill",
+    )
+    .await;
+    let decode = disagg_policy_host(
+        &distributed,
+        "decode",
+        DECODE_WORKER,
+        ModelRuntimeConfig {
+            total_kv_blocks: Some(8),
+            ..Default::default()
+        },
+        policy_file.path(),
+        true,
+        "decode",
+    )
+    .await;
+    let decode_room =
+        Arc::new(crate::kv_router::prefill_router::decode_room::DecodePoolRoom::default());
+    decode_room.set_decode_router(decode.kv_router());
+    assert!(prefill.kv_router().set_paired_pool(decode_room));
+
+    // Two decode legs whose prefill already ran hold 6 of the decode worker's 8 blocks,
+    // past the class decode limit. The decode hop books both without waiting.
+    let mut legs = Vec::new();
+    for leg in ["leg-a", "leg-b"] {
+        let request = request_in_phase(leg, RequestPhase::Decode, 96, true).await;
+        let (selection, _) = decode
+            .select_with_affinity(
+                &request,
+                RequestPhase::Decode,
+                false,
+                &CleanupBudget::default(),
+            )
+            .await
+            .expect("a staged decode leg must never wait at the decode hop");
+        assert_eq!(selection.worker.worker_id, DECODE_WORKER);
+        legs.push(selection);
+    }
+    assert_eq!(decode.kv_router().selection.scheduler().pending_count(), 0);
+
+    // A conditional-disagg bypass is decode-phase with nothing staged and never passed
+    // the prefill queue, so it waits at the decode hop while the decode pool is full.
+    let bypass = spawn_admission(
+        &decode,
+        request_in_phase("bypass", RequestPhase::Decode, 1, false).await,
+        RequestPhase::Decode,
+    );
+    wait_for_pending(&decode, 1).await;
+
+    // A new request waits at the prefill hop even though the prefill worker is idle.
+    let new_request = spawn_admission(
+        &prefill,
+        request_in_phase("new", RequestPhase::Prefill, 16, false).await,
+        RequestPhase::Prefill,
+    );
+    wait_for_pending(&prefill, 1).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!new_request.is_finished());
+
+    // Releasing the legs frees decode KV; that signal alone wakes the prefill queue.
+    assert!(!bypass.is_finished());
+    drop(legs);
+    let prefill_worker = tokio::time::timeout(Duration::from_secs(5), new_request)
+        .await
+        .expect("freed decode KV must release the prefill hop")
+        .unwrap();
+    assert_eq!(prefill_worker, PREFILL_WORKER);
+    let bypass_worker = tokio::time::timeout(Duration::from_secs(5), bypass)
+        .await
+        .expect("freed decode KV must release the bypass at the decode hop")
+        .unwrap();
+    assert_eq!(bypass_worker, DECODE_WORKER);
+
+    drop(prefill);
+    drop(decode);
+    runtime.shutdown();
+}
+
 #[test]
 fn listed_hints_reject_every_non_kv_mode() {
     use dynamo_kv_router::WorkerType;

@@ -34,7 +34,7 @@ use super::single::{
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
 use crate::booking::SchedulerBookingDescriptor;
-use crate::busy::FullRankCounts;
+use crate::busy::{BusyThresholds, FullRankCounts};
 use crate::prelude::{
     ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId, WorkerWithDpRank,
 };
@@ -1395,6 +1395,19 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     .set_worker_capacity(WorkerWithDpRank::new(range.worker_id, dp_rank), capacity);
             }
         }
+    }
+
+    /// Whether any registered rank that `eligible` accepts has booked load within
+    /// `limits`, judged against the capacity recorded by [`Self::set_worker_capacities`].
+    /// True when no rank is eligible.
+    pub fn any_rank_has_room(
+        &self,
+        limits: &BusyThresholds,
+        decay_now: Instant,
+        eligible: impl FnMut(WorkerWithDpRank) -> bool,
+    ) -> bool {
+        self.prompt_registry
+            .any_rank_has_room(limits, decay_now, eligible)
     }
 
     /// Bench hook: project every worker's load into `projections` the way the scheduler

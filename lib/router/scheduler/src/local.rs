@@ -22,9 +22,9 @@ use super::queue::{
 use super::selector::{WorkerInputs, WorkerSelector, log_selection};
 use super::types::{
     AdmissionAttempt, AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId,
-    KvSchedulerError, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad,
-    ScheduleMode, ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
-    WorkerAvailabilityProvider,
+    KvSchedulerError, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PairedPoolRoom,
+    PotentialLoad, ScheduleMode, ScheduleRequest, SchedulingRequest, SchedulingResponse,
+    TierOverlapBlocks, WorkerAvailabilityProvider,
 };
 use crate::protocols::RoutingConstraints;
 use crate::protocols::WorkerConfigLike;
@@ -38,6 +38,7 @@ use dynamo_admission::classifier::{RequestClassifierRuntime, RequestLifecycle};
 use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_indexer::ResidentBlockCountsHandle;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_slot_tracker::busy::BusyThresholds;
 use dynamo_slot_tracker::topology::WorkerDpRange;
 use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, PrefillCompletion, PrefillTokenDeltas,
@@ -114,6 +115,8 @@ where
             kv_transfer_candidates,
             retain_kv_transfer_chain,
             shared_cache_hits,
+            // Read by the admitted path before conversion; advisory selection ignores it.
+            admitted_upstream: _,
         } = request;
         let request = SchedulingRequest {
             mode,
@@ -254,6 +257,7 @@ where
                     // A publisher may already have applied this topology. The queue still
                     // needs every observed config update to recheck pending requests.
                     queue_config_updates.update().await;
+                    queue_config_updates.room_changed().notify();
                     let _ = queue_updates_config.send(());
                 }
             });
@@ -280,6 +284,8 @@ where
                             break;
                         }
                         queue_remote_updates.update().await;
+                        // Peer routers' releases free room here too.
+                        queue_remote_updates.room_changed().notify();
                         let _ = queue_updates_remote.send(());
                     }
                 }
@@ -388,6 +394,7 @@ where
     ) -> Result<(AdmittedSchedulingResponse, Option<BookingHandle>), KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
+        let admitted_upstream = request.admitted_upstream;
         let (mut request, block_hashes) = self.make_scheduling_request(request, Some(resp_tx));
         let tracked = request.mode.is_tracked();
         let request_id = request.mode.request_id().map(str::to_owned);
@@ -405,6 +412,7 @@ where
                 tracked.then_some(attempt_tx),
                 classified_request,
                 ingress_at,
+                admitted_upstream,
             )
             .await;
 
@@ -532,6 +540,34 @@ where
     /// Returns `false` when a spec is already installed.
     pub fn set_selection_trace(&self, spec: SelectionTraceSpec) -> bool {
         self.queue.set_selection_trace(spec)
+    }
+
+    /// Install the pool that serves requests after this scheduler admits them; see
+    /// [`PairedPoolRoom`]. Returns `false` when a pool is already installed.
+    pub fn set_paired_pool(&self, pool: Arc<dyn PairedPoolRoom>) -> bool {
+        self.queue.set_paired_pool(pool)
+    }
+
+    /// Whether some rank of a worker in `available` (every registered worker when `None`)
+    /// has booked load within `limits`. Reads the booked load directly, without a turn of
+    /// this scheduler's actor, so another scheduler's queue can judge this pool as its
+    /// paired pool. True when no rank qualifies.
+    pub fn any_rank_has_room(
+        &self,
+        limits: &BusyThresholds,
+        available: Option<&HashSet<WorkerId>>,
+    ) -> bool {
+        self.slots
+            .any_rank_has_room(limits, Instant::now(), |worker| {
+                available.is_none_or(|available| available.contains(&worker.worker_id))
+            })
+    }
+
+    /// A signal that changes whenever this scheduler releases booked load, its workers
+    /// change, or a peer router's state arrives: the wake a paired queue holding requests
+    /// on this pool's room waits for.
+    pub fn subscribe_room_changed(&self) -> watch::Receiver<()> {
+        self.queue.room_changed().subscribe()
     }
 
     /// Lend the partition's live resident block counts to every selection, for a policy that
@@ -680,6 +716,7 @@ where
             pinned_worker,
             allowed_worker_ids,
             shared_cache_hits,
+            admitted_upstream: false,
         })
         .await
     }
@@ -1075,6 +1112,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pool_room_reads_booked_decode_blocks_and_signals_releases() {
+        let worker_config = SimpleWorkerConfig {
+            total_kv_blocks: Some(8),
+            ..Default::default()
+        };
+        // Queueing disabled: a paired queue's room signal must not depend on this
+        // scheduler queueing anything itself.
+        let (scheduler, slots, _configs, cancellation) = make_scheduler(
+            HashMap::from([(0, worker_config.clone()), (1, worker_config)]),
+            None,
+            true,
+            None,
+        );
+        let decode_limit = BusyThresholds {
+            decode_busy_threshold_frac: Some(0.5),
+            ..Default::default()
+        };
+        let full = WorkerWithDpRank::new(0, 0);
+        let mut room_changed = scheduler.subscribe_room_changed();
+        let booking = scheduler
+            .add_request_if_registered_guarded(SequenceRequest {
+                request_id: "decode".into(),
+                token_sequence: Some((0..6).collect()),
+                track_prefill_tokens: false,
+                expected_output_tokens: None,
+                prefill_load_hint: None,
+                worker: full,
+                lora_name: None,
+            })
+            .unwrap()
+            .commit();
+        assert_eq!(slots.active_blocks()[&full], 6);
+
+        // 6 of 8 blocks puts worker 0 past the limit; worker 1 is idle.
+        assert!(scheduler.any_rank_has_room(&decode_limit, None));
+        assert!(!scheduler.any_rank_has_room(&decode_limit, Some(&HashSet::from([0]))));
+        assert!(scheduler.any_rank_has_room(&decode_limit, Some(&HashSet::from([1]))));
+        // No eligible rank leaves nothing to judge, so nothing holds the request.
+        assert!(scheduler.any_rank_has_room(&decode_limit, Some(&HashSet::from([7]))));
+        assert!(!room_changed.has_changed().unwrap());
+
+        scheduler.free_if_booking(&booking).await.unwrap();
+        assert!(room_changed.has_changed().unwrap());
+        room_changed.mark_unchanged();
+        assert!(scheduler.any_rank_has_room(&decode_limit, Some(&HashSet::from([0]))));
+        cancellation.cancel();
+    }
+
+    #[tokio::test]
     async fn phase_only_booking_completion_reports_applied_once() {
         let worker = WorkerWithDpRank::new(0, 0);
         let (scheduler, _slots, _configs, cancellation) = make_scheduler(
@@ -1243,6 +1329,7 @@ mod tests {
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
             shared_cache_hits: None,
+            admitted_upstream: false,
         }
     }
 

@@ -43,9 +43,11 @@ mod activation;
 mod admission;
 mod cancellation;
 mod conditional_bypass;
+pub(crate) mod decode_room;
 mod handoff;
 mod query;
 use activation::ActivationSnapshot;
+use decode_room::DecodePoolRoom;
 use handoff::PrefillTask;
 pub use query::PrefillReservation;
 
@@ -268,6 +270,9 @@ pub struct PrefillRouter {
     /// Decode routing owns conditional-disagg planning and dispatch. This is
     /// installed after the frontend constructs its one decode `RoutingHost`.
     decode_routing_host: OnceLock<Arc<RoutingHost>>,
+    /// The decode pool every prefill binding's queue judges class decode wait limits on,
+    /// resolved when the decode `RoutingHost` is installed.
+    decode_room: Arc<DecodePoolRoom>,
     selection_policy: Option<SelectionPolicySource>,
     model_manager: Arc<ModelManager>,
     cancel_token: CancellationToken,
@@ -319,6 +324,7 @@ struct PrefillBuildContext {
     load_thresholds: crate::discovery::LoadThresholdHandle,
     parent_token: CancellationToken,
     task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
+    decode_room: Arc<DecodePoolRoom>,
 }
 
 pub(crate) trait PrefillRouterLifecycle: Send + Sync {
@@ -790,25 +796,29 @@ fn independent_prefill_context(
 }
 
 impl PrefillRouter {
-    pub(crate) fn conditional_disagg_enabled(&self) -> bool {
-        self.conditional_disagg_policy.is_enabled()
-    }
-
+    /// Install the frontend's decode `RoutingHost`. Conditional disagg plans and dispatches
+    /// through it, and a KV-routed host also becomes the decode pool on which the prefill
+    /// queue judges each class's decode wait limit.
     pub(crate) fn set_decode_routing_host(&self, routing_host: Arc<RoutingHost>) -> Result<()> {
         match self.decode_routing_host.set(routing_host) {
-            Ok(()) => Ok(()),
+            Ok(()) => {}
             Err(routing_host)
                 if self
                     .decode_routing_host
                     .get()
-                    .is_some_and(|existing| Arc::ptr_eq(existing, &routing_host)) =>
-            {
-                Ok(())
-            }
+                    .is_some_and(|existing| Arc::ptr_eq(existing, &routing_host)) => {}
             Err(_) => anyhow::bail!(
                 "PrefillRouter already has a different decode RoutingHost; rebuild requires a new PrefillRouter"
             ),
         }
+        if let Some(decode) = self
+            .decode_routing_host
+            .get()
+            .and_then(|host| host.kv_router_if_enabled())
+        {
+            self.decode_room.set_decode_router(decode);
+        }
+        Ok(())
     }
 
     fn prepare_prefill_dispatch(
@@ -994,7 +1004,7 @@ mod tests {
             crate::discovery::LoadThresholdHandle::new(Default::default()),
             CancellationToken::new(),
         );
-        assert!(router.conditional_disagg_enabled());
+        assert!(router.conditional_disagg_policy.is_enabled());
         router.lifecycle.store(
             PrefillLifecycleState::Active as u8,
             std::sync::atomic::Ordering::Release,
@@ -1415,6 +1425,82 @@ mod tests {
         ));
         assert_eq!(downstream.requests.load(Ordering::Relaxed), 0);
         drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn kv_decode_host_resolves_the_decode_pool_without_conditional_disagg() {
+        use crate::{kv_router::KvRouter, local_model::runtime_config::ModelRuntimeConfig};
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+        use dynamo_scheduler::host::PairedPoolRoom;
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("decode-pool-room")
+            .unwrap()
+            .component("decode")
+            .unwrap()
+            .endpoint("generate");
+        let client = endpoint.client().await.unwrap();
+        let (_workers_tx, workers) = watch::channel(HashMap::<u64, ModelRuntimeConfig>::new());
+        let chooser = KvRouter::new(
+            endpoint,
+            client.clone(),
+            workers,
+            None,
+            16,
+            SelectionPolicySource::Registry,
+            Some(KvRouterConfig {
+                skip_initial_worker_wait: true,
+                use_kv_events: false,
+                ..Default::default()
+            }),
+            None,
+            "decode",
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let host = Arc::new(
+            RoutingHost::builder(client, RouterMode::KV)
+                .kv_router(Arc::new(chooser))
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let (_activation_tx, activation_rx) = oneshot::channel();
+        let router = PrefillRouter::new(
+            activation_rx,
+            Arc::new(ModelManager::new()),
+            RouterMode::KV,
+            16,
+            Some(KvRouterConfig::default()),
+            None,
+            None,
+            SessionAffinityMode::Hard,
+            "model".to_string(),
+            "namespace".to_string(),
+            crate::discovery::LoadThresholdHandle::new(Default::default()),
+            CancellationToken::new(),
+        );
+        assert!(!router.conditional_disagg_policy.is_enabled());
+        // Until the decode host is installed the pool is unresolved and holds nothing.
+        assert!(router.decode_room.room_changed().is_none());
+
+        router.set_decode_routing_host(Arc::clone(&host)).unwrap();
+        router.set_decode_routing_host(Arc::clone(&host)).unwrap();
+        assert!(router.decode_room.room_changed().is_some());
+
+        drop(router);
+        drop(host);
         runtime.shutdown();
     }
 

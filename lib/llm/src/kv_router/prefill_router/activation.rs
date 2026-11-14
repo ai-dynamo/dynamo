@@ -166,6 +166,7 @@ impl PrefillRouter {
             target: parking_lot::Mutex::new(None),
             target_tx: None,
             decode_routing_host: std::sync::OnceLock::new(),
+            decode_room: Arc::default(),
             selection_policy: None,
             model_manager,
             cancel_token: tokio_util::sync::CancellationToken::new(),
@@ -225,6 +226,7 @@ impl PrefillRouter {
             target: parking_lot::Mutex::new(None),
             target_tx: Some(target_tx),
             decode_routing_host: std::sync::OnceLock::new(),
+            decode_room: Arc::default(),
             selection_policy: Some(selection_policy),
             model_manager: model_manager.clone(),
             cancel_token: cancel_token.clone(),
@@ -385,6 +387,14 @@ impl PrefillRouter {
                     load_context.cancellation_token(),
                 )
                 .await?;
+            // The prefill hop is the only admission gate in KV-routed disagg: its queue
+            // judges each class's decode wait limit on the decode pool, and the decode
+            // hop books every decode leg with staged KV without waiting.
+            if context.decode_router_mode.is_kv_routing()
+                && !kv_chooser.set_paired_pool(Arc::clone(&context.decode_room) as _)
+            {
+                anyhow::bail!("prefill KV router already has a paired decode pool");
+            }
 
             let affinity = create_affinity_coordinator(
                 prefill_session_affinity_ttl,
@@ -535,6 +545,7 @@ impl PrefillRouter {
                 load_thresholds: load_thresholds.clone(),
                 parent_token: cancel_token.child_token(),
                 task_guard: router_ref.task_guard.clone(),
+                decode_room: Arc::clone(&router_ref.decode_room),
             };
             drop(router_ref);
             let build = Self::build_binding(

@@ -43,14 +43,14 @@ use dynamo_runtime::{
 };
 use dynamo_scheduler::host::{
     BookingHandle, CacheHitEstimates, CacheHitWeights, KvSchedulerError, OverlapAnalysis,
-    OverloadedWorkerProvider, PotentialLoad, PrefillLoadEstimator, PromptView,
+    OverloadedWorkerProvider, PairedPoolRoom, PotentialLoad, PrefillLoadEstimator, PromptView,
     RejectThresholdsProvider, RouterConfigOverride, RouterRequest, RouterResponse,
-    RoutingConstraints, Selected, SelectionAdmission, SelectionError, SelectionOperation,
-    SelectionOutcome, SelectionRun, SessionBinding, SharedKvCache, TrackingHashAlgorithm,
-    TrackingHashContext, TrackingHashScope, WorkerAvailabilityProvider, WorkerConfigLike,
-    cache_hit_estimates_from_tiered_matches, effective_prefill_tokens,
+    RoutingConstraints, SchedulingRequest, Selected, SelectionAdmission, SelectionError,
+    SelectionOperation, SelectionOutcome, SelectionRun, SessionBinding, SharedKvCache,
+    TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope, WorkerAvailabilityProvider,
+    WorkerConfigLike, cache_hit_estimates_from_tiered_matches, effective_prefill_tokens,
 };
-use dynamo_slot_tracker::host::{PrefillLoadHint, SchedulerBookingDescriptor};
+use dynamo_slot_tracker::host::{BusyThresholds, PrefillLoadHint, SchedulerBookingDescriptor};
 use dynamo_worker_selection::host::SelectionConfig;
 use futures::stream;
 
@@ -511,6 +511,9 @@ pub enum FindBestMatchOutcome {
 #[derive(Debug, Clone, Copy)]
 pub(super) enum FindBestMatchAdmission {
     WithAdmission,
+    /// Booked like `WithAdmission`, without waiting in the policy-class queue: an
+    /// upstream hop's queue already admitted the request (a disaggregated decode leg).
+    AdmittedUpstream,
     WithoutAdmission,
 }
 
@@ -670,6 +673,8 @@ pub struct KvRouter {
     teardown_task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     /// Optional session-aware logical prefix index.
     session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
+    /// The availability filter selection applies: reachable workers, narrowed by LoRA.
+    available_workers: WorkerAvailabilityProvider,
 }
 
 fn resolve_tracking_model_name(
@@ -924,7 +929,7 @@ impl KvRouter {
                 prefill_load_estimator: prefill_load_estimator.clone(),
                 overloaded_worker_provider,
                 reject_thresholds,
-                available_worker_provider,
+                available_worker_provider: Arc::clone(&available_worker_provider),
                 registration_availability_provider,
                 shared_cache: shared_cache.clone(),
                 // The availability provider refreshes LoRA eligibility at admission.
@@ -967,7 +972,46 @@ impl KvRouter {
             shared_cache,
             teardown_task_guard: None,
             session_prefix_index,
+            available_workers: available_worker_provider,
         })
+    }
+
+    /// Judge each policy class's decode wait limit on `pool`, the decode pool that serves
+    /// this prefill router's requests next. Returns `false` when a pool is already set.
+    pub(crate) fn set_paired_pool(&self, pool: Arc<dyn PairedPoolRoom>) -> bool {
+        self.selection.scheduler().set_paired_pool(pool)
+    }
+
+    /// Whether some worker rank this router could serve `request` on has booked load within
+    /// `limits`, read directly from this router's scheduler. `request` is the prefill hop's,
+    /// so this is a coarse admission check: decode selection still enforces the exact
+    /// eligibility of the decode leg.
+    ///
+    /// Applied: worker reachability and the request's LoRA, through the same availability
+    /// filter selection uses. That filter narrows LoRA candidates by the request's pin and
+    /// allowed workers, which on the prefill hop name prefill workers, so a LoRA request
+    /// carrying either is judged on reachability alone. Not applied: a decode pin, routing
+    /// constraints, and the KV-transfer domain of the prefill worker the hop picks.
+    pub(crate) fn has_room_for_prefill_request(
+        &self,
+        request: &SchedulingRequest,
+        limits: &BusyThresholds,
+    ) -> bool {
+        let lora_candidates_are_ours = request.lora_name.is_none()
+            || (request.pinned_worker.is_none() && request.allowed_worker_ids.is_none());
+        let available = if lora_candidates_are_ours {
+            (self.available_workers)(request)
+        } else {
+            self.client.available_instance_ids()
+        };
+        self.selection
+            .scheduler()
+            .any_rank_has_room(limits, available.as_deref())
+    }
+
+    /// Changes whenever this router's scheduler may have gained room.
+    pub(crate) fn subscribe_room_changed(&self) -> tokio::sync::watch::Receiver<()> {
+        self.selection.scheduler().subscribe_room_changed()
     }
 
     /// Attach a request classifier before placing this router into service.
@@ -1379,7 +1423,10 @@ impl KvRouter {
         if update_states && context_id.is_none() {
             anyhow::bail!("context_id must be provided if update_states is true");
         }
-        let is_admitted_routing = matches!(admission, FindBestMatchAdmission::WithAdmission);
+        let is_admitted_routing = matches!(
+            admission,
+            FindBestMatchAdmission::WithAdmission | FindBestMatchAdmission::AdmittedUpstream
+        );
         let session_index_context = if is_admitted_routing {
             self.session_prefix_index
                 .as_ref()
@@ -1389,12 +1436,18 @@ impl KvRouter {
             None
         };
         let core_admission = match admission {
-            FindBestMatchAdmission::WithAdmission if update_states => SelectionAdmission::Lease {
-                request_id: context_id.expect("validated above").to_string(),
-            },
-            FindBestMatchAdmission::WithAdmission => SelectionAdmission::Query {
-                request_id: context_id.map(str::to_string),
-            },
+            FindBestMatchAdmission::WithAdmission | FindBestMatchAdmission::AdmittedUpstream
+                if update_states =>
+            {
+                SelectionAdmission::Lease {
+                    request_id: context_id.expect("validated above").to_string(),
+                }
+            }
+            FindBestMatchAdmission::WithAdmission | FindBestMatchAdmission::AdmittedUpstream => {
+                SelectionAdmission::Query {
+                    request_id: context_id.map(str::to_string),
+                }
+            }
             FindBestMatchAdmission::WithoutAdmission => SelectionAdmission::Advisory {
                 request_id: context_id.map(str::to_string),
             },
@@ -1435,6 +1488,10 @@ impl KvRouter {
                     return_routing_hashes: return_routing_hashes || session_index_context.is_some(),
                     // Hosted selections do not populate the public reservation replay cache.
                     replay_id: None,
+                    admitted_upstream: matches!(
+                        admission,
+                        FindBestMatchAdmission::AdmittedUpstream
+                    ),
                 },
                 !needs_uncached_prefill,
             )

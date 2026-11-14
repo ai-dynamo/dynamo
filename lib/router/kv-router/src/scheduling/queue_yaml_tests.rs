@@ -556,6 +556,7 @@ policy_classes:
                     Some(attempt_tx),
                     None,
                     Instant::now(),
+                    false,
                 )
                 .await;
             let worker = active_rx.await.unwrap().unwrap().best_worker;

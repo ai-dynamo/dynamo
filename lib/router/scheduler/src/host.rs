@@ -67,6 +67,6 @@ pub use crate::prefill_load::effective_prefill_tokens;
 pub use crate::queue::{BookingHandle, SchedulerBookingCleanup};
 pub use crate::types::WorkerIdSet;
 pub use crate::types::{
-    AdvisoryWorkerLoad, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
+    AdvisoryWorkerLoad, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PairedPoolRoom,
     WorkerAvailabilityProvider,
 };
