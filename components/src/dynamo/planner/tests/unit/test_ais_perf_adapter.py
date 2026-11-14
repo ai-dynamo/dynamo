@@ -45,6 +45,7 @@ class _FakeEngineModel:
         self._tune_fail_after = tune_fail_after
         self.tuned_iterations = []
         self.capacity_requests = []
+        self.queued_prefill_queries = []
 
     def diagnostics(self):
         return self._diagnostics
@@ -55,7 +56,8 @@ class _FakeEngineModel:
             raise self._tune_error
         self.tuned_iterations.extend(iterations)
 
-    def get_queued_prefill_time(self, _metrics_by_rank):
+    def get_queued_prefill_time(self, metrics_by_rank):
+        self.queued_prefill_queries.append(metrics_by_rank)
         return self._queued_prefill_time
 
     def find_engine_capacity_rps(self, request):
@@ -433,6 +435,89 @@ def test_ais_none_result_remains_unavailable(fake_engine_factory):
     )
 
     assert result is None
+
+
+@pytest.mark.parametrize("worker_type", ["prefill", "aggregated"])
+@pytest.mark.parametrize(
+    "queued_tokens,hit_rate,queue_scale,add_next,expected_tokens,expected_requests",
+    [
+        pytest.param(0, 0.9375, 1.0, True, 2048, 1, id="fresh-next"),
+        pytest.param(32768, 0.9375, 1.0, False, 2048, 1, id="raw-queue-only"),
+        pytest.param(32768, 0.9375, 1.0, True, 4096, 2, id="queue-and-fresh-next"),
+        pytest.param(32768, 0.9375, 0.0, True, 2048, 1, id="own-time"),
+        pytest.param(32768, None, 1.0, True, 34816, 2, id="missing-hit-rate"),
+        pytest.param(32768, 0.0, 1.0, True, 34816, 2, id="zero-hit-rate"),
+        pytest.param(0, 0.9375, 1.0, False, 0, 0, id="no-queue-or-next"),
+        pytest.param(33, 0.6, 0.5, True, 2055, 2, id="fractional-queue-and-next"),
+        pytest.param(33, 0.6, 0.5, False, 7, 1, id="fractional-queue-only"),
+        pytest.param(32768, 1.0, 1.0, True, 3687, 2, id="clamped-hit-rate"),
+    ],
+)
+def test_queued_prefill_query_discounts_only_raw_backlog(
+    fake_engine_factory,
+    worker_type,
+    queued_tokens,
+    hit_rate,
+    queue_scale,
+    add_next,
+    expected_tokens,
+    expected_requests,
+):
+    fake = _FakeEngineModel(
+        diagnostics={
+            "source": "aic",
+            "readiness": "ready",
+            "retained_observations": 0,
+            "correction_ready_buckets": 0,
+            "last_warning": None,
+        },
+        queued_prefill_time=0.25,
+    )
+    _install_fake_engine(fake_engine_factory, fake)
+    model = PlannerEnginePerfModel(
+        worker_type=worker_type, config=_config(), capabilities=_caps()
+    )
+    fpm = ForwardPassMetrics(
+        worker_id="w0",
+        wall_time=0.01,
+        scheduled_requests=ScheduledRequestMetrics(
+            num_prefill_requests=1,
+            sum_prefill_tokens=2048,
+            sum_prefill_kv_tokens=30720,
+            num_decode_requests=2,
+            sum_decode_kv_tokens=8192,
+        ),
+        queued_requests=QueuedRequestMetrics(
+            num_prefill_requests=1 if queued_tokens else 0,
+            sum_prefill_tokens=queued_tokens,
+            num_decode_requests=3,
+            sum_decode_kv_tokens=4096,
+        ),
+    )
+    model.add_observations({("w0", 0): fpm})
+    assert model.avg_isl == 2048
+
+    result = model.estimate_queued_prefill_time(
+        [fpm],
+        max_num_batched_tokens=1024,
+        kv_hit_rate=hit_rate,
+        queue_scale=queue_scale,
+        decode_scale=0.5,
+        include_queued_decode=True,
+        add_next_request=add_next,
+    )
+
+    assert result == 0.25
+    assert len(fake.queued_prefill_queries) == 1
+    (synthetic,) = fake.queued_prefill_queries[0]
+    assert synthetic.queued_requests == QueuedRequestMetrics(
+        num_prefill_requests=expected_requests,
+        sum_prefill_tokens=expected_tokens,
+    )
+    assert synthetic.scheduled_requests == ScheduledRequestMetrics(
+        num_decode_requests=3,
+        sum_decode_kv_tokens=6144,
+    )
 
 
 def test_flat_bootstrap_fpms_skip_aic_tuning_for_attention_dp(fake_engine_factory):
