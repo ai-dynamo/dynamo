@@ -15,7 +15,6 @@
 
 import asyncio
 import dataclasses
-import io
 import logging
 import tempfile
 import time
@@ -23,7 +22,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
 from urllib.parse import urlparse
 
-import soundfile as sf
 import torch
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import load_file as safetensors_load_file
@@ -32,13 +30,7 @@ from tensorrt_llm.inputs.registry import MULTIMODAL_PLACEHOLDER_REGISTRY
 from tensorrt_llm.inputs.utils import async_load_video
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
-from dynamo.common.http import (
-    HttpConfigurationError,
-    HttpConnectionError,
-    HttpStatusError,
-    HttpTimeoutError,
-    fetch_bytes,
-)
+from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_bytes
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -58,6 +50,7 @@ from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.token_ids import token_ids_to_list
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.trtllm.audio_loader import AudioLoader
 
 configure_dynamo_logging()
 
@@ -268,6 +261,9 @@ class MultimodalRequestProcessor:
         # backends agree on DYN_MM_VIDEO_NUM_FRAMES.
         self.num_video_frames = max(1, VideoLoader.NUM_FRAMES_DEFAULT)
         self._url_policy = UrlValidationPolicy.from_env()
+        self.audio_loader = AudioLoader(
+            max_bytes=self.max_file_size_bytes, url_policy=self._url_policy
+        )
 
         # Input processor used to size an omitted max_tokens (see
         # _expanded_prompt_len) and to read the model's preferred video format
@@ -487,44 +483,6 @@ class MultimodalRequestProcessor:
             if mm_emb:
                 embedding_paths = mm_emb
         return text, image_urls, embedding_paths
-
-    async def _load_audio(self, item: Any) -> tuple[Any, int]:
-        url = item.get("Url") if isinstance(item, dict) else item
-        source = describe_media_source(url) if isinstance(url, str) else "audio item"
-        if not isinstance(url, str):
-            raise HttpStatusError(400, "Malformed audio_url item", source)
-        try:
-            normalized_url = await validate_media_url(url, self._url_policy)
-            scheme = urlparse(normalized_url).scheme
-            if scheme == "data":
-                content = decode_data_uri(
-                    normalized_url, max_bytes=self.max_file_size_bytes
-                )
-            elif scheme in ("http", "https"):
-                content = await fetch_bytes(
-                    normalized_url,
-                    30.0,
-                    policy=self._url_policy,
-                    max_bytes=self.max_file_size_bytes,
-                )
-            else:
-                raise HttpStatusError(400, "Unsupported audio URL scheme", source)
-        except UrlValidationError as exc:
-            raise HttpStatusError(400, str(exc), source) from exc
-        except HttpTimeoutError as exc:
-            raise HttpStatusError(408, "Timed out loading audio", source) from exc
-        except HttpConnectionError as exc:
-            raise HttpStatusError(400, "Could not load audio URL", source) from exc
-
-        try:
-            waveform, sample_rate = await asyncio.to_thread(
-                sf.read, io.BytesIO(content), dtype="float32"
-            )
-            if waveform.size == 0 or sample_rate <= 0 or waveform.ndim not in (1, 2):
-                raise ValueError("Audio has no decodable samples")
-            return waveform, sample_rate
-        except (RuntimeError, ValueError) as exc:
-            raise HttpStatusError(400, "Invalid audio data", source) from exc
 
     async def process_openai_request(
         self, request: Dict, embeddings: Any, ep_disaggregated_params: Any
@@ -897,9 +855,9 @@ class MultimodalRequestProcessor:
                 logging.info("Loaded %d video(s)", len(videos))
 
             if audio_items:
-                processed_mm_data["audio"] = [
-                    await self._load_audio(item) for item in audio_items
-                ]
+                processed_mm_data["audio"] = await self.audio_loader.load_audio_batch(
+                    audio_items
+                )
                 logging.debug("Loaded %d audio clip(s)", len(audio_items))
 
             if loaded_embeddings:
