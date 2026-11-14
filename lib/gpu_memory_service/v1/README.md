@@ -149,6 +149,12 @@ configuration:
 | `nixl-gds` | Read and verify each shard before direct transfer, because GDS has no CPU-visible staging buffer. Keep files unchanged between verification and transfer. |
 | `mx` | Does not verify, because it reads no shard. It fills the allocations over RDMA from a ModelExpress peer that serves the same weights under the same source key (`v1.snapshot.mx_source`), pairing allocations by creation order and requiring equal sizes. |
 
+`nixl-gds` needs the checkpoint on a file system that cuFile can register.
+NFS works. SMB/CIFS (for example, the default Azure Files storage class) does
+not. A local ext4 or xfs disk works only when the container can read the host's
+`/run/udev`. Before the integrity pass, the loader registers one shard and fails
+with the file system type when cuFile rejects it. Use `nixl` on other storage.
+
 After transfer and verification succeed, the loader synchronizes, releases its
 temporary mappings, commits the socket from RW to RO, and closes its lease.
 The loader process stays running so Kubernetes does not restart the container.
