@@ -573,7 +573,11 @@ fn validate_intent(
     host_instance: &dynamo_runtime::component::Instance,
     publisher_id: u64,
 ) -> Result<()> {
-    if &intent.target_host != host_instance {
+    // The worker echoes the instance this host advertised. A v1.5 or v1.6 worker drops the
+    // instance fields it does not know, so compare what identifies the host.
+    if intent.target_host.endpoint_instance_id() != host_instance.endpoint_instance_id()
+        || intent.target_host.transport != host_instance.transport
+    {
         anyhow::bail!("attachment intent targets another host incarnation");
     }
     if intent.intent_incarnation != publisher_id {
@@ -1044,6 +1048,7 @@ mod tests {
             transport: TransportType::Tcp(format!("tcp://127.0.0.1:{}", 10_000 + instance_id)),
             device_type: None,
             request_plane_codec: None,
+            response_plane: None,
         }
     }
 
@@ -1251,6 +1256,33 @@ mod tests {
         );
         assert!(!intents.contains_key(&moved.cache_owner_id));
         assert_eq!(intent_owners[&101], accepted.cache_owner_id);
+    }
+
+    #[test]
+    fn intent_from_an_older_worker_still_names_this_host() {
+        let mut host = instance("kv_state_agent", 1);
+        // A v1.5 or v1.6 worker parses the advertised instance without `response_plane`
+        // and echoes it back that way.
+        let echoed = host.clone();
+        host.response_plane = Some(dynamo_runtime::pipeline::network::ResponsePlaneMode::Tcp);
+        let from_older_worker = intent(
+            &echoed,
+            instance("vllm", 11),
+            owner(4),
+            WorkerWithDpRank::new(17, 4),
+            101,
+        );
+        validate_intent(&from_older_worker, &host, 101).unwrap();
+
+        let other_incarnation = intent(
+            &instance("kv_state_agent", 2),
+            instance("vllm", 11),
+            owner(4),
+            WorkerWithDpRank::new(17, 4),
+            101,
+        );
+        let error = validate_intent(&other_incarnation, &host, 101).unwrap_err();
+        assert!(error.to_string().contains("another host incarnation"));
     }
 
     #[test]

@@ -498,6 +498,7 @@ mod push_handler_notify_tests {
                 transport: TransportType::Nats(endpoint_name.to_string()),
                 device_type: None,
                 request_plane_codec: None,
+                response_plane: None,
             },
             payload,
         );
@@ -750,6 +751,7 @@ mod integration_tests {
                 transport: crate::component::TransportType::Nats(endpoint.to_string()),
                 device_type: None,
                 request_plane_codec: None,
+                response_plane: None,
             },
             payload.clone(),
         );
@@ -787,6 +789,7 @@ mod integration_tests {
                     transport: crate::component::TransportType::Nats(endpoint.clone()),
                     device_type: None,
                     request_plane_codec: None,
+                    response_plane: None,
                 },
                 payload,
             );
@@ -832,6 +835,7 @@ mod integration_tests {
                 transport: crate::component::TransportType::Nats(endpoint.to_string()),
                 device_type: None,
                 request_plane_codec: None,
+                response_plane: None,
             },
             payload.clone(),
         );

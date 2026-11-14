@@ -30,7 +30,7 @@ bitflags! {
     /// Using bitflags avoids deep branching on a single enum variant,
     /// simplifies checks like `supports_chat()`, and enables efficient,
     /// type-safe combinations of multiple endpoint types.
-    #[derive(Copy, Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
+    #[derive(Copy, Debug, Default, Clone, Serialize, Eq, PartialEq, Hash)]
     pub struct ModelType: u16 {
         const Chat = 1 << 0;
         const Completions = 1 << 1;
@@ -67,6 +67,52 @@ bitflags! {
         /// Batch speech-to-text through the OpenAI `/v1/audio/transcriptions`
         /// endpoint.
         const Transcriptions = 1 << 12;
+    }
+}
+
+/// A model card can come from a newer worker inside the N-2 compatibility window. A
+/// capability this version does not know is skipped, so the card still loads with the
+/// capabilities it can serve. A card left with none is rejected: an empty `ModelType` already
+/// means a worker with no client-facing endpoint. The derived reader fails on any unknown name.
+impl<'de> Deserialize<'de> for ModelType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Mirrors the `bitflags` wire forms: a `"A | B"` string in human-readable formats,
+        // the raw bits otherwise.
+        if !deserializer.is_human_readable() {
+            return u16::deserialize(deserializer).map(Self::from_bits_truncate);
+        }
+        let text = String::deserialize(deserializer)?;
+        let mut flags = Self::empty();
+        let mut unknown = Vec::new();
+        for name in text
+            .split('|')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            if let Some(flag) = Self::from_name(name) {
+                flags |= flag;
+            } else if let Some(bits) = name
+                .strip_prefix("0x")
+                .and_then(|hex| u16::from_str_radix(hex, 16).ok())
+            {
+                flags |= Self::from_bits_truncate(bits);
+            } else {
+                unknown.push(name);
+            }
+        }
+        if unknown.is_empty() {
+            return Ok(flags);
+        }
+        if flags.is_empty() {
+            return Err(serde::de::Error::custom(format!(
+                "no model type this version knows in `{text}`"
+            )));
+        }
+        tracing::debug!(?unknown, kept = %flags.as_str(), "Skipping unknown model types");
+        Ok(flags)
     }
 }
 
@@ -300,6 +346,38 @@ impl ModelInput {
 mod tests {
     use super::*;
     use crate::endpoint_type::EndpointType;
+
+    #[test]
+    fn unknown_model_type_names_are_skipped() {
+        // A card from a newer worker that adds a capability this version predates.
+        let mixed: ModelType =
+            serde_json::from_str("\"Chat | FutureSurface | Completions\"").unwrap();
+        assert_eq!(mixed, ModelType::Chat | ModelType::Completions);
+
+        // Nothing servable is left, and empty already means "no client-facing endpoint".
+        assert!(serde_json::from_str::<ModelType>("\"FutureSurface\"").is_err());
+
+        // Known cards keep the derived wire form in both directions.
+        let all = ModelType::all();
+        let wire = serde_json::to_string(&all).unwrap();
+        assert_eq!(serde_json::from_str::<ModelType>(&wire).unwrap(), all);
+        assert_eq!(
+            serde_json::from_str::<ModelType>("\"\"").unwrap(),
+            ModelType::empty()
+        );
+        // Bits this version has no name for are dropped in both wire forms.
+        assert_eq!(
+            serde_json::from_str::<ModelType>("\"Chat | 0x8000\"").unwrap(),
+            ModelType::Chat
+        );
+        let bits = rmp_serde::to_vec(&(ModelType::Chat.bits() | 0x8000)).unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<ModelType>(&bits).unwrap(),
+            ModelType::Chat
+        );
+        let known = rmp_serde::to_vec(&all).unwrap();
+        assert_eq!(rmp_serde::from_slice::<ModelType>(&known).unwrap(), all);
+    }
 
     #[test]
     fn dedicated_rerank_does_not_change_legacy_embedding_cards() {

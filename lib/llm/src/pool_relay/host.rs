@@ -2729,6 +2729,7 @@ mod tests {
                 transport: dynamo_runtime::component::TransportType::Tcp("127.0.0.1:0".to_string()),
                 device_type: None,
                 request_plane_codec: None,
+                response_plane: None,
             })
             .await
             .unwrap();

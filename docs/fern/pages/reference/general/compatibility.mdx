@@ -54,6 +54,79 @@ The environment variable can also be supplied through `valueFrom` or `envFrom`. 
 
 The fix is included in the [1.6.0 release branch](https://github.com/ai-dynamo/dynamo/tree/release/1.6.0) and is targeted for Dynamo 1.6.0. It registers an embedding-shaped `SglangEmbeddingHealthCheckPayload` by default, so workers with this fix do not need the override for this issue.
 
+### Feature-Specific Exceptions in 1.7
+
+The following settings narrow the N-2 guarantee for Dynamo 1.7. Each applies only to deployments that use the setting.
+
+#### Worker Request Limit
+
+- **Setting:** `--engine-request-limit` on a worker, or `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` (legacy name `DYN_ENGINE_REQUEST_LIMIT`).
+- **Affected pairing:** 1.5.x or 1.6.x frontend with 1.7 workers.
+
+A 1.7 worker refuses a request that exceeds the limit. A 1.5.x or 1.6.x worker queues up to 16 such requests before it refuses one. What the frontend does with a refusal depends on the frontend version and on request migration. Migration is off when `--migration-limit` is `0`, which is the default.
+
+| Frontend | Migration off | Migration on | Worker that refused |
+| :---- | :---- | :---- | :---- |
+| 1.7.x | Returns HTTP 529. | Retries on another worker. Returns HTTP 529 if every worker refuses. | Marks the worker overloaded for up to 1 second. |
+| 1.6.x | Returns HTTP 529. | Retries on another worker. Returns HTTP 503 if every worker refuses. | Inhibits the worker for 5 seconds by default. |
+| 1.5.x | Returns HTTP 500. | Retries on another worker. Returns HTTP 503 if every worker refuses. | Inhibits the worker for 5 seconds by default. |
+
+A frontend sends no requests to a worker that it has marked overloaded or inhibited, with migration on or off. The two states end differently:
+
+- A 1.7 frontend treats the refusal as backpressure. It clears the overloaded mark as soon as the worker publishes new load data.
+- A 1.5.x or 1.6.x frontend treats the refusal as a worker fault. It keeps the worker inhibited for `DYN_RUNTIME_INHIBITED_DURATION_SECS`, even after the worker has capacity again. While every worker is inhibited, the frontend returns HTTP 503 for every request.
+
+Set the limit on 1.7 workers after every frontend runs 1.7.
+
+#### Response Plane
+
+- **Setting:** `--response-plane` or `DYN_RESPONSE_PLANE`.
+- **Affected pairing:** any pairing with a 1.6.x frontend or worker on `quic`, and a 1.7 `quic` frontend with 1.5.x or 1.6.x workers.
+
+A 1.7 worker advertises its response plane and also answers over `tcp`. A 1.7 frontend uses its own response plane with workers that advertise the same one, and `tcp` with every other worker that advertises. A 1.5.x or 1.6.x frontend on `tcp` is answered by a 1.7 worker on any response plane. A 1.7 frontend or worker on `tcp` or `velo` therefore serves every peer in the window except a 1.6.x peer on `quic`.
+
+1.6 runs `quic` without the advertisement. A 1.6.x frontend or worker on `quic` accepts only `quic`, and a 1.7 `quic` frontend sends `quic` to every worker that does not advertise. The following pairings result:
+
+| Frontend | Worker | Result |
+| :---- | :---- | :---- |
+| 1.7 on `quic` | 1.6.x on `quic` | Serves over `quic`. |
+| 1.7 on `quic` | 1.6.x on `tcp` | The worker refuses the request. The frontend returns HTTP 503. |
+| 1.7 on `quic` | 1.5.x | The worker accepts the request and never answers. The frontend returns HTTP 504 after 30 seconds and stops routing to the worker for `DYN_RUNTIME_INHIBITED_DURATION_SECS`. To change the bound, set [`DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS`](../components/runtime-configuration.mdx). |
+| 1.7 on `tcp` or `velo` | 1.6.x on `quic` | The worker refuses the request. The frontend returns HTTP 503. |
+| 1.6.x on `quic` | 1.7 on `quic` | Serves over `quic`. |
+| 1.6.x on `quic` | 1.7 on `tcp` or `velo` | The worker refuses the request. The frontend returns HTTP 503. |
+
+To avoid these pairings:
+
+- Change 1.7 frontends and workers between `tcp` and `velo` in any order.
+- Set a 1.7 frontend to `quic` only when it has no 1.5.x workers and every 1.6.x worker is on `quic`.
+- Keep the workers of a 1.6.x `quic` frontend on `quic`.
+- Set a 1.6.x worker to `quic` only when every frontend is on `quic`.
+
+#### Model Types Added After the Frontend's Release
+
+- **Affected pairing:** transcription workers (`--transcription-worker`, added in 1.7) behind a 1.5.x or 1.6.x frontend, and rerank workers (added in 1.6) behind a 1.5.x frontend.
+
+The frontend rejects that worker's model card and logs `unrecognized named flag`. Other workers keep serving. A 1.7 frontend skips model types it does not know when the card also carries one it does.
+
+Upgrade the frontend before adding workers that serve the new model type.
+
+#### Tool-Call and Reasoning Parser Pairs
+
+- **Setting:** `--dyn-tool-call-parser` and `--dyn-reasoning-parser` from different parser families, where one name exists only in the unified parsers.
+- **Affected pairing:** 1.7 frontend with 1.5.x or 1.6.x workers.
+
+A 1.5.x or 1.6.x frontend admits the model. A 1.7 frontend rejects it at registration, and the model does not become ready. For 1.6 workers, the unified-only names are `deepseek_v41`, `glm45`, `kimi_k25`, `muse`, `muse_glimmer`, and `qwen3` for tool calls, and `deepseek_v41`, `glm47`, `kimi_k2`, `muse`, `muse_glimmer`, and `qwen3_coder` for reasoning. For 1.5 workers, they are `muse` and `muse_glimmer`. The parser pairs in the 1.6 recipes are not affected.
+
+Before upgrading the frontend, set both selectors to names from the same family, or omit one.
+
+#### Power-of-Two Router Mode
+
+- **Setting:** `--router-mode power-of-two` on a worker.
+- **Affected pairing:** 1.7 frontend with 1.5.x or 1.6.x workers.
+
+The mode is removed in 1.7. The frontend routes that WorkerSet with `least-loaded` and logs a warning. Change `--router-mode` when you upgrade the workers, because 1.7 workers reject `power-of-two` at startup.
+
 ### Rolling Update Behavior
 
 In Kubernetes deployments, worker spec changes during a rolling update create generation-specific Dynamo runtime namespaces (service-discovery scopes, not Kubernetes namespaces). The frontend watches the deployment's base runtime namespace prefix, so it can discover overlapping generations without allowing direct worker-to-worker communication across those generations. In a disaggregated deployment, prefill and decode workers in the same generation share one runtime namespace and remain isolated from other generations.

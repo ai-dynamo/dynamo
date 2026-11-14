@@ -3451,6 +3451,7 @@ mod tests {
                 transport: TransportType::Tcp(tcp_addr),
                 device_type: None,
                 request_plane_codec: None,
+                response_plane: None,
             }])
             .unwrap();
 

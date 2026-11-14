@@ -1873,6 +1873,7 @@ mod integration_tests {
                             transport: crate::component::TransportType::Nats(endpoint.to_string()),
                             device_type: None,
                             request_plane_codec: None,
+                            response_plane: None,
                         },
                         health_check_payload.clone(),
                     );

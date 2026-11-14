@@ -207,6 +207,20 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   `65535`.
 </ParamField>
 
+<ParamField path="--response-plane" type="string" default="tcp">
+  Transport a worker uses to stream a response back to the frontend. `quic` is available since v1.6 and `velo` since v1.7.
+
+  Frontends and workers on v1.7 do not have to use the same value. A worker advertises its response plane in discovery and also answers over `tcp`. A frontend uses its own response plane with workers that advertise the same one, and `tcp` with every other worker that advertises. The frontend logs one warning per process, the first time it uses `tcp` for a worker this way.
+
+  The `tcp` fallback is encrypted only when `DYN_TCP_TLS_*` is set. Two `velo` peers also have to use the same `DYN_VELO_RESPONSE_TRANSPORT`; a mismatch fails the request and does not fall back to `tcp`.
+
+  Workers on v1.5 and v1.6 do not advertise. A `velo` frontend uses `tcp` with them, and a `quic` frontend uses `quic`, because v1.6 can run `quic`. See [Response Plane](../general/compatibility.mdx#response-plane) for the pairings that fail across releases.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>tcp</Badge> <Badge intent="note" minimal>quic</Badge> <Badge intent="note" minimal>velo</Badge></span>
+
+  Environment variable: `DYN_RESPONSE_PLANE`
+</ParamField>
+
 <ParamField path="--event-plane" type="string" default="zmq">
   Event publishing transport. ZMQ is the default for every discovery backend; select `nats`
   explicitly to use NATS Core. See [Event Plane](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#event-plane) for design details.
@@ -365,15 +379,21 @@ For image edits, these limits apply alongside the
   local inhibited set while the selected worker remains in discovery.
 </ParamField>
 
-<ParamField path="DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS" type="integer" default="0">
+<ParamField path="DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS" type="integer" default="unset">
   Seconds a frontend waits for a worker to establish its response stream after the worker
   acknowledges a unary request. The timer starts at the acknowledgement, so waiting for local
   admission, connecting, and sending does not count. It covers worker queueing and setup before the
   response stream opens, and a worker that accepts requests but cannot connect back. Set it above the
   worst-case time a healthy worker takes to start a response. On expiry the request fails with a
   response timeout, or migrates when migration is enabled, and the worker is locally inhibited for
-  `DYN_RUNTIME_INHIBITED_DURATION_SECS`. Set to `0` or leave unset to disable. Routers without fault
-  detection and bidirectional requests do not apply this timeout.
+  `DYN_RUNTIME_INHIBITED_DURATION_SECS`. Routers without fault detection and bidirectional requests do
+  not apply this timeout.
+
+  When the variable is unset, a frontend on the `tcp` or `velo` response plane applies no timeout,
+  and a frontend on `quic` applies 30 seconds, because a 1.5.x worker behind a `quic` frontend
+  accepts the request and never answers. Set to `0` to disable the timeout on every response plane.
+  On `quic`, raise it above the longest time a request can wait in a backend admission queue before
+  the worker starts it.
 </ParamField>
 
 ## Operations

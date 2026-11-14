@@ -192,6 +192,7 @@ impl EndpointConfigBuilder {
                 transport: transport.clone(),
                 device_type: endpoint_device_type(),
                 request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
+                response_plane: Some(endpoint.drt().response_plane()),
             };
             tracing::debug!(endpoint_name = %endpoint.name, "Registering endpoint health check target");
             let guard = system_health.lock();
@@ -248,6 +249,7 @@ impl EndpointConfigBuilder {
             transport,
             device_type: endpoint_device_type(),
             request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
+            response_plane: Some(endpoint.drt().response_plane()),
         };
 
         let discovery_instance = match discovery.register(discovery_spec).await {
@@ -409,6 +411,7 @@ impl Endpoint {
             transport,
             device_type: endpoint_device_type(),
             request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
+            response_plane: Some(drt.response_plane()),
         });
 
         let discovery = drt.discovery();
@@ -452,6 +455,7 @@ impl Endpoint {
             transport,
             device_type: endpoint_device_type(),
             request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
+            response_plane: Some(drt.response_plane()),
         };
 
         let discovery = drt.discovery();

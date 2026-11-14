@@ -60,7 +60,7 @@ fn resolve_advertisement_from_cards(
     let mode_of = |card: &ModelDeploymentCard| {
         card.router_config
             .as_ref()
-            .map_or(decode_router_mode, |config| config.router_mode)
+            .map_or(decode_router_mode, |config| config.router_mode.effective())
     };
 
     let Some(first) = cards.first() else {
@@ -698,6 +698,18 @@ mod tests {
         let mut card = ModelDeploymentCard::with_name_only("test-model");
         card.router_config = router_config;
         card
+    }
+
+    #[test]
+    fn advertised_power_of_two_routes_least_loaded() {
+        let advertised = RouterConfig {
+            router_mode: RouterMode::PowerOfTwoChoices,
+            ..Default::default()
+        };
+        let advertisement =
+            resolve_advertisement_from_cards(&[card(Some(advertised))], RouterMode::RoundRobin)
+                .unwrap();
+        assert_eq!(advertisement.router_mode, RouterMode::LeastLoaded);
     }
 
     #[test]

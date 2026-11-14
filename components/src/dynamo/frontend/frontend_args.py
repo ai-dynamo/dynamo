@@ -781,7 +781,8 @@ class FrontendArgGroup(ArgGroup):
             flag_name="--response-plane",
             env_var="DYN_RESPONSE_PLANE",
             default="tcp",
-            help="Select the response transport. Frontend and workers must match.",
+            help="Select the response transport. A frontend uses tcp with a worker on another "
+            "response transport.",
             choices=["tcp", "quic", "velo"],
             env=self.env,
         )

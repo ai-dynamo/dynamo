@@ -79,7 +79,7 @@ pub struct RuntimeConfig {
     /// Request-plane transport — e.g. `"tcp"`, `"nats"`. Maps to `DYN_REQUEST_PLANE`.
     #[arg(long, env = "DYN_REQUEST_PLANE", value_parser = ["tcp", "nats"], ignore_case = true)]
     pub request_plane: Option<String>,
-    /// Response transport. Frontend and workers must use the same value.
+    /// Response transport. A frontend uses tcp with a worker on another response transport.
     /// Maps to `DYN_RESPONSE_PLANE`.
     #[arg(long, env = "DYN_RESPONSE_PLANE", value_parser = ["tcp", "quic", "velo"])]
     pub response_plane: Option<String>,
@@ -4368,6 +4368,7 @@ mod handoff_and_lifecycle_tests {
             transport: dynamo_runtime::component::TransportType::Tcp("127.0.0.1:0".to_string()),
             device_type: None,
             request_plane_codec: None,
+            response_plane: None,
         };
         system_health.lock().register_health_check_target(
             endpoint.name(),

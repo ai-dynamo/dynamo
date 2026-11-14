@@ -43,7 +43,7 @@ See the [SGLang 1.5.x compatibility requirement](https://github.com/ai-dynamo/dy
 ## Run
 
 Use Linux amd64 candidate image tags beginning with their runtime version, such
-as `1.5.0-ci-<sha>-...`. The test requires a shared PVC accessible to both
+as `1.7.0-ci-<sha>-...`. The test requires a shared PVC accessible to both
 frontend and worker Pods. Prepare the pinned snapshots in `model-download.yaml`
 using a candidate SGLang image, then run:
 
@@ -61,8 +61,8 @@ they are functional prerequisites rather than a strict experimental control.
 
 The default compatibility baseline is `DEFAULT_RELEASE_LINE` in
 `tests/deploy/n2_utils.py`, independently of the development version in
-`Cargo.toml`. It is currently `1.6`, which tests candidate images against the
-published 1.5 and 1.4 lines. `N2_RELEASE_LINE` overrides this default for one
+`Cargo.toml`. It is currently `1.7`, which tests candidate images against the
+published 1.6 and 1.5 lines. `N2_RELEASE_LINE` overrides this default for one
 run. When the candidate moves to a new minor, first add the preceding published
 release images to `releases.json`, then advance `DEFAULT_RELEASE_LINE`. The
 current matrix selects predecessors within the same major version; crossing a

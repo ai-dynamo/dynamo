@@ -2004,6 +2004,7 @@ mod tests {
                 ),
                 device_type: None,
                 request_plane_codec: None,
+                response_plane: None,
             },
             intent_incarnation: worker.worker_id,
             worker,

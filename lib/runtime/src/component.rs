@@ -42,7 +42,8 @@ use crate::{
 use super::{DistributedRuntime, Runtime, traits::*, transports::nats::Slug, utils::Duration};
 
 use crate::pipeline::network::{
-    PushWorkHandler, RequestPlanePayloadCodec, ingress::push_endpoint::PushEndpoint,
+    PushWorkHandler, RequestPlanePayloadCodec, ResponsePlaneMode,
+    ingress::push_endpoint::PushEndpoint,
 };
 use crate::protocols::EndpointId;
 use async_nats::{
@@ -120,6 +121,14 @@ pub struct Instance {
     /// Missing metadata identifies a legacy JSON-only worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_plane_codec: Option<RequestPlanePayloadCodec>,
+    /// Response plane this worker serves in addition to tcp.
+    /// Missing metadata identifies a worker that predates the advertisement.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::pipeline::network::advertised_response_plane"
+    )]
+    pub response_plane: Option<ResponsePlaneMode>,
 }
 
 impl Instance {

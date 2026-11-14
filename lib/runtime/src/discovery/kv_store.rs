@@ -809,6 +809,7 @@ mod tests {
             transport: TransportType::Nats("nats://127.0.0.1:4222".to_string()),
             device_type: None,
             request_plane_codec: None,
+            response_plane: None,
         })
     }
 
@@ -1175,6 +1176,7 @@ mod tests {
             endpoint: "ep1".to_string(),
             device_type: None,
             request_plane_codec: None,
+            response_plane: None,
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
         client.register(spec1).await.unwrap();
@@ -1184,6 +1186,7 @@ mod tests {
             component: "comp1".to_string(),
             device_type: None,
             request_plane_codec: None,
+            response_plane: None,
             endpoint: "ep2".to_string(),
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
@@ -1193,6 +1196,7 @@ mod tests {
             namespace: "ns2".to_string(),
             device_type: None,
             request_plane_codec: None,
+            response_plane: None,
             component: "comp2".to_string(),
             endpoint: "ep1".to_string(),
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
@@ -1243,6 +1247,7 @@ mod tests {
             let spec = DiscoverySpec::Endpoint {
                 device_type: None,
                 request_plane_codec: None,
+                response_plane: None,
                 namespace: "test".to_string(),
                 component: "comp1".to_string(),
                 endpoint: "ep1".to_string(),
@@ -1279,6 +1284,7 @@ mod tests {
                 endpoint: "ep".to_string(),
                 device_type: None,
                 request_plane_codec: None,
+                response_plane: None,
                 transport: TransportType::Nats("nats://127.0.0.1:4222".to_string()),
             })
             .await
@@ -1333,6 +1339,7 @@ mod tests {
                 endpoint: "ep".to_string(),
                 device_type: None,
                 request_plane_codec: None,
+                response_plane: None,
                 transport: TransportType::Nats("nats://127.0.0.1:4222".to_string()),
             })
             .await
@@ -1559,6 +1566,7 @@ mod etcd_tests {
             endpoint: endpoint.to_string(),
             device_type: None,
             request_plane_codec: None,
+            response_plane: None,
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
         }
     }

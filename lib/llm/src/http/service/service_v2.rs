@@ -3036,6 +3036,7 @@ mod tests {
                 ),
                 device_type: None,
                 request_plane_codec: None,
+                response_plane: None,
             })
             .await
             .unwrap();

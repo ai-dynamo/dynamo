@@ -900,6 +900,51 @@ mod tests {
     use crate::protocols::openai::chat_completions::tool_parser_v2::V2_FAMILIES;
 
     #[test]
+    fn prefill_cancel_capability_reads_from_older_worker_cards() {
+        // `runtime_config` as a v1.6.2 SGLang prefill or decode worker registers it. The
+        // frontend forwards a client cancel to the prefill worker only for this shape.
+        let v1_6: ModelRuntimeConfig = serde_json::from_value(serde_json::json!({
+            "data_parallel_size": 1,
+            "data_parallel_start_rank": 0,
+            "enable_eagle": false,
+            "enable_local_indexer": true,
+            "exclude_tools_when_tool_choice_none": true,
+            "max_num_batched_tokens": null,
+            "max_num_seqs": null,
+            "reasoning_parser": null,
+            "runtime_data": {"disagg_prefill_cancel_anytime_v1": true},
+            "structural_tag_mode": "off",
+            "structural_tag_schema": "auto",
+            "structural_tag_scope": "auto",
+            "tool_call_arguments_format": "json_string",
+            "tool_call_parser": null,
+            "total_kv_blocks": null
+        }))
+        .unwrap();
+        assert!(v1_6.supports_runtime_capability(DISAGG_PREFILL_CANCEL_ANYTIME_V1));
+
+        // A v1.5.1 worker predates the capability and writes no `runtime_data` at all.
+        let v1_5: ModelRuntimeConfig = serde_json::from_value(serde_json::json!({
+            "data_parallel_size": 1,
+            "data_parallel_start_rank": 0,
+            "enable_eagle": false,
+            "enable_local_indexer": true,
+            "exclude_tools_when_tool_choice_none": true,
+            "max_num_batched_tokens": null,
+            "max_num_seqs": null,
+            "reasoning_parser": null,
+            "structural_tag_mode": "off",
+            "structural_tag_schema": "auto",
+            "structural_tag_scope": "auto",
+            "tool_call_arguments_format": "json_string",
+            "tool_call_parser": null,
+            "total_kv_blocks": null
+        }))
+        .unwrap();
+        assert!(!v1_5.supports_runtime_capability(DISAGG_PREFILL_CANCEL_ANYTIME_V1));
+    }
+
+    #[test]
     fn structural_tag_config_accepts_future_wire_fields_and_rejects_unknown_input_fields() {
         assert_eq!(
             serde_json::from_value::<StructuralTagConfig>(serde_json::json!({})).unwrap(),

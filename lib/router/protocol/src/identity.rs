@@ -227,9 +227,48 @@ impl FromStr for ClusterId {
 /// NOTE: A global indexer has one domain and distinct pool lanes whose `cluster_id` values differ.
 /// Runtime endpoint resolution happens only after a query selects a pool lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(into = "PoolIdWire", try_from = "PoolIdWire")]
 pub struct PoolId {
     indexer_domain: IndexerDomainId,
     cluster_id: ClusterId,
+}
+
+/// Compatibility with v1.5 and v1.6 state agents and routers, which know `cluster_id` only as
+/// `dc_id`. Both names are written, so either side can be upgraded first. Either name is read,
+/// and `cluster_id` wins when both are present.
+// TODO(v1.9): Remove `dc_id` and this type when v1.6 falls outside the N-2 compatibility window.
+#[derive(Serialize, Deserialize)]
+struct PoolIdWire {
+    indexer_domain: IndexerDomainId,
+    #[serde(default)]
+    cluster_id: Option<ClusterId>,
+    #[serde(default)]
+    dc_id: Option<ClusterId>,
+}
+
+impl From<PoolId> for PoolIdWire {
+    fn from(pool: PoolId) -> Self {
+        Self {
+            indexer_domain: pool.indexer_domain,
+            cluster_id: Some(pool.cluster_id),
+            dc_id: Some(pool.cluster_id),
+        }
+    }
+}
+
+impl TryFrom<PoolIdWire> for PoolId {
+    type Error = &'static str;
+
+    fn try_from(wire: PoolIdWire) -> Result<Self, Self::Error> {
+        let cluster_id = wire
+            .cluster_id
+            .or(wire.dc_id)
+            .ok_or("missing field `cluster_id`")?;
+        Ok(Self {
+            indexer_domain: wire.indexer_domain,
+            cluster_id,
+        })
+    }
 }
 
 impl PoolId {
