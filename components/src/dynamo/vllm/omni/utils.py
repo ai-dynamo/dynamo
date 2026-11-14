@@ -529,4 +529,7 @@ def _build_sampling_params(stage_config: Any, overrides: dict | None) -> list | 
         for arg, value in overrides.items():
             if hasattr(llm_params, arg):
                 setattr(llm_params, arg, value)
+    # setattr skips __post_init__ (temperature clamp, _verify_args, greedy reset),
+    # and vLLM validates before the process_inputs clone reruns it.
+    llm_params.__post_init__()
     return [llm_params]
