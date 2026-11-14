@@ -150,6 +150,7 @@ def add_argument(
     arg_type: Optional[Union[type, Callable[..., Any]]] = str,
     env_value_type: Optional[Union[type, Callable[..., Any]]] = None,
     deprecated: Optional[Deprecated] = None,
+    help_default: Optional[str] = None,
     env: Optional[ArgEnv] = None,
     **kwargs: Any,
 ) -> None:
@@ -169,6 +170,7 @@ def add_argument(
         arg_type: Type for the argument (default: str)
         env_value_type: Optional parser used only for the environment value
         deprecated: Warn on explicit CLI/env use and show the migration in help.
+        help_default: Optional text shown as the default in help instead of the raw value.
         env: Another process's env (see ``ArgEnv``); skips ``deprecated``.
     """
     arg_dest = _get_dest_name(flag_name, kwargs.get("dest"))
@@ -193,7 +195,12 @@ def add_argument(
     env_help = (
         argparse.SUPPRESS
         if help == argparse.SUPPRESS
-        else _build_help_message(help, env_var, default, obsolete_flag)
+        else _build_help_message(
+            help,
+            env_var,
+            default if help_default is None else help_default,
+            obsolete_flag,
+        )
     )
 
     add_arg_opts = {
@@ -253,7 +260,15 @@ def add_negatable_bool_argument(
         obsolete_flag: Optional obsolete/legacy flag (for help msg only, must start with '--')
         env_value_type: Optional strict parser for the environment value
         env: Another process's env (see ``ArgEnv``)
+
+    Help shows the default as the spelling that selects it, for example
+    ``default: on (--foo)`` or ``default: off (--no-foo)``.
     """
+    if flag_name.startswith("--no-"):
+        raise ValueError(
+            f"negatable flag {flag_name!r} must use the positive spelling; "
+            "argparse adds the --no- form"
+        )
     add_argument(
         parser,
         flag_name=flag_name,
@@ -266,8 +281,17 @@ def add_negatable_bool_argument(
         env_value_type=env_value_type,
         action=argparse.BooleanOptionalAction,
         deprecated=deprecated,
+        help_default=_bool_help_default(flag_name, default),
         env=env,
     )
+
+
+def _bool_help_default(flag_name: str, default: Optional[bool]) -> str:
+    if default is None:
+        return "unset"
+    if default:
+        return f"on ({flag_name})"
+    return f"off (--no-{flag_name.removeprefix('--')})"
 
 
 def _build_help_message(
