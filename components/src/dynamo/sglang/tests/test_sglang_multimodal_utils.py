@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import re
 
 import pytest
 
@@ -271,3 +272,43 @@ async def test_multimodal_stream_keeps_reading_after_one_choice_finishes():
         "stop",
         "stop",
     ]
+
+
+async def _rejecting_stream(chunks, error):
+    for chunk in chunks:
+        yield chunk
+    raise error
+
+
+@pytest.mark.asyncio
+async def test_multimodal_stream_raises_sglang_validation_errors_as_invalid_argument():
+    message = "logit_bias must has keys in [0, 151935], got 999999."
+    stream = StreamProcessor.process_sglang_stream(
+        _rejecting_stream([], ValueError(message))
+    )
+
+    with pytest.raises(InvalidArgument, match=re.escape(message)):
+        await anext(stream)
+
+
+@pytest.mark.asyncio
+async def test_multimodal_stream_keeps_errors_after_output_in_band():
+    chunks = [
+        chunk
+        async for chunk in StreamProcessor.process_sglang_stream(
+            _rejecting_stream(
+                [{"output_ids": [101], "meta_info": {"finish_reason": None}}],
+                ValueError("late failure"),
+            )
+        )
+    ]
+
+    outputs = [json.loads(chunk) for chunk in chunks]
+
+    assert outputs[0]["token_ids"] == [101]
+    assert outputs[1] == {
+        "token_ids": [],
+        "finish_reason": "error",
+        "error": "late failure",
+        "finished": True,
+    }
