@@ -416,6 +416,93 @@ def test_sparse_usage_survives_flushes(
             assert usage["prompt_tokens_details"] == {"cached_tokens": expected_cache}
 
 
+class _HoldingPostProcessor(_PostProcessor):
+    """Holds the middle tokens back, like a tool parser buffering a call."""
+
+    def process_output(self, mapped_response):
+        if mapped_response["finish_reason"] is None and 102 in (
+            mapped_response["token_ids"]
+        ):
+            return None
+        return super().process_output(mapped_response)
+
+
+@pytest.mark.parametrize(
+    "stream,stream_options,usage_while_held",
+    [
+        (True, None, False),
+        (True, {"include_usage": True, "continuous_usage_stats": False}, False),
+        (True, {"include_usage": True, "continuous_usage_stats": True}, True),
+        # Unary responses are aggregated; usage arrives with the final chunk.
+        (False, None, False),
+    ],
+)
+def test_held_output_still_reports_continuous_usage(
+    module_stubs, stream, stream_options, usage_while_held
+):
+    module = _load_processor_module(module_stubs)
+    processor = module.SglangProcessor(
+        tokenizer=None,
+        routed_engine=FakeRoutedEngine(
+            items=[
+                {
+                    "token_ids": [101],
+                    "completion_usage": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 1,
+                        "total_tokens": 4,
+                        "prompt_tokens_details": {"cached_tokens": 2},
+                    },
+                },
+                {"token_ids": [102]},
+                {"token_ids": [102]},
+                {"token_ids": [103], "finish_reason": "stop"},
+            ]
+        ),
+        tool_call_parser_name=None,
+        reasoning_parser_name=None,
+        eos_token_ids=None,
+    )
+    processor.stream_interval = 1
+
+    async def collect():
+        return [
+            item
+            async for item in processor._generate_and_stream(
+                "req-held",
+                {
+                    "model": "test-model",
+                    "stream": stream,
+                    "stream_options": stream_options,
+                },
+                {},
+                [1, 2, 3],
+                _HoldingPostProcessor(),
+            )
+        ]
+
+    items = asyncio.run(collect())
+    assert len(items) == 4
+    held = items[1:3]
+    for count, item in zip([2, 3], held):
+        if usage_while_held:
+            data = item["data"]
+            assert data["choices"] == []
+            assert data["usage"]["completion_tokens"] == count
+            assert data["usage"]["total_tokens"] == 3 + count
+            assert data["usage"]["prompt_tokens_details"] == {"cached_tokens": 2}
+            assert data["llm_metrics"]["output_tokens"] == count
+            assert "event" not in item
+        else:
+            assert "data" not in item
+            assert item["event"] == "llm_metrics"
+    final = items[3]["data"]
+    assert final["choices"][0]["finish_reason"] == "stop"
+    assert ("usage" in final) == (
+        not stream or bool((stream_options or {}).get("include_usage"))
+    )
+
+
 @pytest.mark.parametrize(
     "tokenizer_module",
     [
