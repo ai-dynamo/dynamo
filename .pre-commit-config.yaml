@@ -245,6 +245,13 @@ repos:
       language: system
       files: ^scripts/check_action_pins\.py$
       pass_filenames: false
+    - id: trtllm-system-site-pins
+      name: Check every TensorRT-LLM system-site pin has a whiteout
+      entry: python3 tests/dependencies/test_trtllm_system_site_pins.py
+      language: python
+      additional_dependencies: [packaging, pytest]
+      pass_filenames: false
+      always_run: true
     - id: pynvvideocodec-spec
       name: Check the PyNvVideoCodec spec is consistent
       entry: python3 tests/dependencies/test_pynvvideocodec_spec.py
