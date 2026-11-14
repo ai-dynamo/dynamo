@@ -53,9 +53,7 @@ fn args(engine_type: EngineType) -> MockerConfig {
             "num_gpu_blocks": 128,
             "max_num_seqs": 8,
             "max_num_batched_tokens": 64,
-            "speedup_ratio": 1000.0,
-            // These pools are smaller than SGLang's default decode reservation.
-            "sglang": {"num_reserved_decode_tokens": 0}
+            "speedup_ratio": 1000.0
         }
     }))
     .unwrap()
@@ -68,12 +66,12 @@ fn handoff_args(engine_type: EngineType, worker_type: WorkerType) -> MockerConfi
             "backend": engine_type,
             "worker_type": worker_type,
             "block_size": 4,
-            "num_gpu_blocks": 128,
+            // One block for a 4-token prompt plus 128 blocks for the 512 decode tokens
+            // that an SGLang destination reserves per handoff by default.
+            "num_gpu_blocks": 129,
             "max_num_seqs": 8,
             "max_num_batched_tokens": 64,
-            "speedup_ratio": 1000.0,
-            // These pools are smaller than SGLang's default decode reservation.
-            "sglang": {"num_reserved_decode_tokens": 0}
+            "speedup_ratio": 1000.0
         }
     }))
     .unwrap()
@@ -628,6 +626,9 @@ async fn decode_admission_reserves_kv_without_recomputing_the_prompt() {
             };
             let mut engine_args = args(engine_type);
             engine_args.num_gpu_blocks = pool_blocks;
+            // These pools are smaller than the 512 decode tokens that an SGLang
+            // destination reserves by default, so this test reserves none.
+            engine_args.sglang.num_reserved_decode_tokens = 0;
             let passes = Arc::new(Passes::default());
             let engine = LiveEngine::start_with_config(
                 engine_args,

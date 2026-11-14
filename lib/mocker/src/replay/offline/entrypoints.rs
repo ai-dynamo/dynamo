@@ -407,10 +407,15 @@ fn concurrency_workload_driver(
 
 /// Run the deterministic offline half of the live/offline handoff conformance
 /// fixture through the packaged Replay crate.
+///
+/// `num_gpu_blocks` is the KV pool of the prefill and of the decode engine, in
+/// blocks of 4 tokens. The fixture sets no SGLang option, so an SGLang
+/// destination reserves its default 512 decode tokens next to the 8-token prompt.
 #[doc(hidden)]
 pub fn run_offline_handoff_conformance(
     engine_type: EngineType,
     transfer_timing_mode: crate::common::protocols::KvTransferTimingMode,
+    num_gpu_blocks: usize,
 ) -> Result<NormalizedHandoffConformance> {
     let build_args = |worker_type| {
         MockerConfig::from_value(serde_json::json!({
@@ -418,16 +423,14 @@ pub fn run_offline_handoff_conformance(
                 "backend": engine_type,
                 "worker_type": worker_type,
                 "block_size": 4,
-                "num_gpu_blocks": 64,
+                "num_gpu_blocks": num_gpu_blocks,
                 "max_num_batched_tokens": 64,
                 "max_num_seqs": 2,
                 "speedup_ratio": 1000.0,
                 "decode_speedup_ratio": 1000.0,
                 "kv_transfer_bandwidth": 1.0,
                 "kv_transfer_bytes_per_token": 1_000_000,
-                "kv_transfer_timing_mode": transfer_timing_mode,
-                // This pool is smaller than SGLang's default decode reservation.
-                "sglang": {"num_reserved_decode_tokens": 0}
+                "kv_transfer_timing_mode": transfer_timing_mode
             }
         }))
     };

@@ -23,6 +23,12 @@ use uuid::Uuid;
 
 use std::collections::HashSet;
 
+const BLOCK_SIZE: usize = 4;
+/// The smallest pool in which an SGLang destination accepts the 8-token prompt of `request`:
+/// its 2 blocks plus 128 blocks for the 512 decode tokens SGLang reserves per handoff by
+/// default. The live and the offline surface run the same pool.
+const POOL_BLOCKS: usize = 130;
+
 fn args_with_mode(
     engine_type: EngineType,
     worker_type: WorkerType,
@@ -32,17 +38,15 @@ fn args_with_mode(
         "engine": {
             "backend": engine_type,
             "worker_type": worker_type,
-            "block_size": 4,
-            "num_gpu_blocks": 64,
+            "block_size": BLOCK_SIZE,
+            "num_gpu_blocks": POOL_BLOCKS,
             "max_num_batched_tokens": 64,
             "max_num_seqs": 2,
             "speedup_ratio": 1000.0,
             "decode_speedup_ratio": 1000.0,
             "kv_transfer_bandwidth": 1.0,
             "kv_transfer_bytes_per_token": 1_000_000,
-            "kv_transfer_timing_mode": transfer_timing_mode,
-            // This pool is smaller than SGLang's default decode reservation.
-            "sglang": {"num_reserved_decode_tokens": 0}
+            "kv_transfer_timing_mode": transfer_timing_mode
         }
     }))
     .unwrap()
@@ -823,12 +827,16 @@ async fn wait_for_idle(engine: &LiveEngine) {
 }
 
 async fn probe_engine_drained(engine: &LiveEngine, engine_type: EngineType) -> bool {
-    // A prompt that fits only when the whole pool is free. SGLang admits a
-    // shorter one: 62 of the 64 blocks is its largest block-aligned prompt.
-    let probe_tokens: u32 = match engine_type {
-        EngineType::Sglang => 248,
-        _ => 252,
+    // A prompt that fits only when the whole pool is free. vLLM takes a prompt of the whole
+    // pool: its one output token needs no block. SGLang rejects that one: two blocks below
+    // the pool is its largest block-aligned prompt. TensorRT-LLM rejects it too, and no
+    // test here probes a TensorRT-LLM engine.
+    let probe_blocks = match engine_type {
+        EngineType::Vllm => POOL_BLOCKS,
+        EngineType::Sglang => POOL_BLOCKS - 2,
+        EngineType::Trtllm => unimplemented!("no drain probe is sized for TensorRT-LLM"),
     };
+    let probe_tokens = (probe_blocks * BLOCK_SIZE) as u32;
     let mut probe = engine
         .submit(dynamo_mocker::common::protocols::DirectRequest {
             tokens: (10_000..10_000 + probe_tokens).collect(),
@@ -1029,6 +1037,7 @@ async fn live_and_offline_handoff_surfaces_share_one_conformance_report() {
                 let offline = dynamo_mocker::replay::run_offline_handoff_conformance(
                     engine_type,
                     transfer_timing_mode,
+                    POOL_BLOCKS,
                 )
                 .unwrap();
                 assert_eq!(report, offline);
@@ -1040,5 +1049,39 @@ async fn live_and_offline_handoff_surfaces_share_one_conformance_report() {
                 destination_engine.shutdown().await.unwrap();
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn sglang_conformance_fixture_runs_the_default_decode_reservation() {
+    // One block below `POOL_BLOCKS` the prompt and the 512 reserved decode tokens no longer
+    // fit. An SGLang destination then refuses the handoff on both surfaces, unless a
+    // fixture lowers the reservation.
+    for transfer_timing_mode in [
+        KvTransferTimingMode::FullPrompt,
+        KvTransferTimingMode::DestinationMissing,
+    ] {
+        let mut args = args_with_mode(EngineType::Sglang, WorkerType::Decode, transfer_timing_mode);
+        args.num_gpu_blocks = POOL_BLOCKS - 1;
+        let engine = LiveEngine::start(args, 0).unwrap();
+        let error = engine
+            .submit_decode(request(Uuid::new_v4(), 2))
+            .await
+            .err()
+            .expect("the live destination must refuse the handoff");
+        assert!(
+            format!("{error:#}").contains("reserved decode tokens exceed the KV pool capacity"),
+            "{error:#}"
+        );
+        engine.shutdown().await.unwrap();
+
+        assert!(
+            dynamo_mocker::replay::run_offline_handoff_conformance(
+                EngineType::Sglang,
+                transfer_timing_mode,
+                POOL_BLOCKS - 1,
+            )
+            .is_err()
+        );
     }
 }

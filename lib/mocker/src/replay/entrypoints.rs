@@ -3072,6 +3072,11 @@ mod tests {
         }
     }
 
+    /// The smallest pool in which an SGLang destination accepts the 8-token prompt of the
+    /// handoff conformance fixture: its 2 blocks plus 128 blocks for the 512 decode tokens
+    /// SGLang reserves per handoff by default.
+    const HANDOFF_CONFORMANCE_POOL_BLOCKS: usize = 130;
+
     #[rstest]
     fn offline_handoff_conformance_supports_native_backends(
         #[values(EngineType::Vllm, EngineType::Sglang, EngineType::Trtllm)] engine_type: EngineType,
@@ -3081,10 +3086,45 @@ mod tests {
         )]
         transfer_timing: crate::common::protocols::KvTransferTimingMode,
     ) {
-        crate::replay::run_offline_handoff_conformance(engine_type, transfer_timing)
-            .unwrap()
-            .validate()
-            .unwrap();
+        crate::replay::run_offline_handoff_conformance(
+            engine_type,
+            transfer_timing,
+            HANDOFF_CONFORMANCE_POOL_BLOCKS,
+        )
+        .unwrap()
+        .validate()
+        .unwrap();
+    }
+
+    #[rstest]
+    fn offline_handoff_conformance_runs_the_default_sglang_decode_reservation(
+        #[values(
+            crate::common::protocols::KvTransferTimingMode::FullPrompt,
+            crate::common::protocols::KvTransferTimingMode::DestinationMissing
+        )]
+        transfer_timing: crate::common::protocols::KvTransferTimingMode,
+    ) {
+        // One block below the fixture's pool the prompt and the 512 reserved decode tokens
+        // no longer fit. An SGLang destination then refuses the handoff, unless the
+        // fixture lowers the reservation.
+        let one_block_short = HANDOFF_CONFORMANCE_POOL_BLOCKS - 1;
+        assert!(
+            crate::replay::run_offline_handoff_conformance(
+                EngineType::Sglang,
+                transfer_timing,
+                one_block_short,
+            )
+            .is_err()
+        );
+        // vLLM reserves nothing, so the smaller pool alone does not stop a handoff.
+        crate::replay::run_offline_handoff_conformance(
+            EngineType::Vllm,
+            transfer_timing,
+            one_block_short,
+        )
+        .unwrap()
+        .validate()
+        .unwrap();
     }
 
     const PREFILL_DP_SIZE: u32 = 2;
@@ -3103,10 +3143,9 @@ mod tests {
                     "backend": engine_type,
                     "worker_type": worker_type,
                     "block_size": 4,
-                    "num_gpu_blocks": 64,
-                    "speedup_ratio": 1000.0,
-                    // This pool is smaller than SGLang's default decode reservation.
-                    "sglang": {"num_reserved_decode_tokens": 0}
+                    // Large enough for the 512 decode tokens SGLang reserves per handoff.
+                    "num_gpu_blocks": 256,
+                    "speedup_ratio": 1000.0
                 }
             }))
             .unwrap()
@@ -3595,15 +3634,16 @@ mod tests {
 
     #[test]
     fn disagg_sglang_fails_a_handoff_into_a_pool_smaller_than_its_decode_reservation() {
-        // 64 blocks of 4 tokens hold less than the 512 decode tokens that an
-        // SGLang destination reserves for each handoff by default.
+        // 131 blocks of 4 tokens: one block short of a 16-token prompt plus the
+        // 512 decode tokens that an SGLang destination reserves for each handoff
+        // by default.
         let role_args = |worker_type: WorkerType| {
             MockerConfig::from_value(serde_json::json!({
                 "engine": {
                     "backend": EngineType::Sglang,
                     "worker_type": worker_type,
                     "block_size": 4,
-                    "num_gpu_blocks": 64,
+                    "num_gpu_blocks": 131,
                     "speedup_ratio": 1000.0
                 }
             }))
