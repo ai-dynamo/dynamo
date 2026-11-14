@@ -120,18 +120,21 @@ func applyGroveRootOverride(result *unstructured.Unstructured, override *nvidiac
 		return err
 	}
 
-	// Replace the registered opaque subtree without defining merge or null semantics.
-	topologyConstraint, err := groveTopologyConstraint(override)
-	if err != nil {
-		return err
+	// Decode without a provider struct so unknown fields and explicit nulls survive.
+	var value map[string]any
+	if err := sigsjson.UnmarshalCaseSensitivePreserveInts(override.Value.Raw, &value); err != nil {
+		return fmt.Errorf("decode value: %w", err)
 	}
-	return unstructured.SetNestedField(
-		result.Object,
-		topologyConstraint,
-		"spec",
-		"template",
-		"topologyConstraint",
-	)
+
+	// Replace the opaque topology subtree; the renderer already resolved the typed delay.
+	topologyConstraint, found, err := unstructured.NestedFieldNoCopy(value, "spec", "template", "topologyConstraint")
+	if err != nil {
+		return fmt.Errorf("read value.spec.template.topologyConstraint: %w", err)
+	}
+	if !found {
+		return nil
+	}
+	return unstructured.SetNestedField(result.Object, topologyConstraint, "spec", "template", "topologyConstraint")
 }
 
 // applyGroveComponentOverride applies an optional component fragment. result
@@ -282,28 +285,4 @@ func setNamedGroveOverride(
 		return unstructured.SetNestedSlice(result.Object, items, path...)
 	}
 	return fmt.Errorf("generated destination %s[%q] was not found", strings.Join(path, "."), name)
-}
-
-// groveTopologyConstraint extracts the raw opaque subtree registered for one
-// Grove target. override must not be nil.
-func groveTopologyConstraint(override *nvidiacomv1beta1.ProviderOverride) (any, error) {
-	// Decode without a provider struct so unknown fields and explicit nulls survive.
-	var value map[string]any
-	if err := sigsjson.UnmarshalCaseSensitivePreserveInts(override.Value.Raw, &value); err != nil {
-		return nil, fmt.Errorf("decode value: %w", err)
-	}
-
-	// Select the registered subtree path for the standalone or embedded target.
-	path := []string{"topologyConstraint"}
-	if override.Target == TargetPodCliqueSet {
-		path = []string{"spec", "template", "topologyConstraint"}
-	}
-	topologyConstraint, found, err := unstructured.NestedFieldNoCopy(value, path...)
-	if err != nil {
-		return nil, fmt.Errorf("read value.%s: %w", strings.Join(path, "."), err)
-	}
-	if !found {
-		return nil, fmt.Errorf("value.%s is required", strings.Join(path, "."))
-	}
-	return topologyConstraint, nil
 }

@@ -12270,3 +12270,66 @@ func TestDetectBackendFrameworkDoesNotMutateCommand(t *testing.T) {
 	assert.Equal(t, BackendFrameworkVLLM, backend)
 	assert.Equal(t, []string{"python3", "unchanged"}, backing)
 }
+
+func TestGroveTerminationDelayOverride(t *testing.T) {
+	t.Log("Render a graph with the operator recovery delay")
+	dgd := &v1beta1.DynamoGraphDeployment{
+		Name: "graph", Namespace: "default",
+		Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+			{ComponentName: "decode", ComponentType: commonconsts.ComponentTypeDecode, Replicas: new(int32(2))},
+		}},
+	}
+	operatorConfig := &configv1alpha1.OperatorConfiguration{}
+	operatorConfig.Orchestrators.Grove.TerminationDelay = metav1.Duration{Duration: 4 * time.Hour}
+	originalHash, err := ComputeDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+	var previous *grovev1alpha1.PodCliqueSet
+
+	// Each render starts with the operator default, including after removal of an override.
+	for _, tc := range []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{name: "operator default", want: 4 * time.Hour},
+		{name: "set delay", value: "2m", want: 2 * time.Minute},
+		{name: "update delay", value: "3m", want: 3 * time.Minute},
+		{name: "remove delay", want: 4 * time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Set the authored delay and render the ordinary and LPX provider resources")
+			dgd.Spec.ProviderOverride = nil
+			if tc.value != "" {
+				dgd.Spec.ProviderOverride = &v1beta1.ProviderOverride{
+					APIVersion: provideroverride.GroveAPIVersion,
+					Value:      apiextensionsv1.JSON{Raw: []byte(fmt.Sprintf(`{"spec":{"template":{"terminationDelay":%q}}}`, tc.value))},
+				}
+				provideroverride.DefaultTarget(dgd.Spec.ProviderOverride, commonconsts.WorkloadProviderGrove, provideroverride.ScopeRoot, nil)
+			}
+			original := dgd.DeepCopy()
+			desired, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, operatorConfig, &controller_common.RuntimeConfig{}, nil, &mockSecretsRetriever{}, nil, nil, false, nil)
+			require.NoError(t, err)
+			composed, err := provideroverride.ComposeGroveOverrides(dgd, desired)
+			require.NoError(t, err)
+			var typed grovev1alpha1.PodCliqueSet
+			require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(composed.Object, &typed))
+			lpxPodCliqueSet, err := RenderLPXPodCliqueSet(t.Context(), dgd, operatorConfig, &controller_common.RuntimeConfig{}, "graph-lpx", nil)
+			require.NoError(t, err)
+
+			t.Log("Verify the effective delay on both resources, Grove admission, and stable worker identity")
+			require.Equal(t, tc.want, typed.Spec.Template.TerminationDelay.Duration)
+			require.Equal(t, tc.want, lpxPodCliqueSet.Spec.Template.TerminationDelay.Duration)
+			require.Equal(t, 4*time.Hour, operatorConfig.Orchestrators.Grove.TerminationDelay.Duration)
+			newGrovePodCliqueSetRequestValidator(t).validate(t, &typed, previous)
+			hash, err := ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+			require.Equal(t, originalHash, hash)
+			if previous != nil {
+				require.Equal(t, previous.Spec.Template.Cliques, typed.Spec.Template.Cliques)
+			}
+			require.False(t, provideroverride.HasGroveTopologyOverrides(dgd))
+			require.Equal(t, original, dgd)
+			previous = &typed
+		})
+	}
+}

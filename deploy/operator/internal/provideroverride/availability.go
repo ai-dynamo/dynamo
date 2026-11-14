@@ -6,6 +6,7 @@ package provideroverride
 import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	sigsjson "sigs.k8s.io/json"
 )
 
@@ -85,6 +86,23 @@ func GroveMaxUnavailable(raw []byte) (int32, bool) {
 		return 0, false
 	}
 	return *value.RollingUpdate.MaxUnavailable, true
+}
+
+// GroveTerminationDelay returns the root recovery delay, if present and well-formed.
+// Shape and value errors are reported by ValidateValue.
+func GroveTerminationDelay(raw []byte) (metav1.Duration, bool) {
+	// Decode only the supported knob without modifying the raw provider fragment.
+	var value struct {
+		Spec struct {
+			Template struct {
+				TerminationDelay *metav1.Duration `json:"terminationDelay"`
+			} `json:"template"`
+		} `json:"spec"`
+	}
+	if err := sigsjson.UnmarshalCaseSensitivePreserveInts(raw, &value); err != nil || value.Spec.Template.TerminationDelay == nil {
+		return metav1.Duration{}, false
+	}
+	return *value.Spec.Template.TerminationDelay, true
 }
 
 // EffectiveGroveMaxUnavailable resolves an explicit budget or Grove's rolling-strategy default.

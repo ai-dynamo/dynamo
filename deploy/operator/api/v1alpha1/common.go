@@ -32,7 +32,8 @@ import (
 //   - target is `PodCliqueSet`, `PodCliqueTemplateSpec`, or
 //     `PodCliqueScalingGroupConfig`, according to the field location and
 //     component shape.
-//   - value may set topologyConstraint, and component contexts may set the
+//   - value may set topologyConstraint, and root contexts may also set
+//     spec.template.terminationDelay. Component contexts may set the
 //     native minAvailable field and rollingUpdate.maxUnavailable. Availability
 //     and rollout budgets are not supported at root or role scope.
 //
@@ -51,8 +52,10 @@ type ProviderOverride struct {
 	Target string `json:"target,omitempty"`
 
 	// value is a sparse fragment of the selected provider schema. For Grove,
-	// PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded
-	// targets accept `topologyConstraint`. Component contexts also accept
+	// PodCliqueSet accepts `spec.template.topologyConstraint` and
+	// `spec.template.terminationDelay`, separately or together. The delay must
+	// be a positive duration string; omission uses the operator configuration.
+	// Embedded targets accept `topologyConstraint`. Component contexts also accept
 	// `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on
 	// PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the
 	// deprecated component field preserves its value and leaves the update strategy unchanged.

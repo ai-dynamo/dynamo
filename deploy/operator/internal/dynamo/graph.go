@@ -3122,6 +3122,13 @@ func newGrovePodCliqueSet(
 	if operatorConfig.Orchestrators.Grove.TerminationDelay.Duration > 0 {
 		gangSet.Spec.Template.TerminationDelay = &operatorConfig.Orchestrators.Grove.TerminationDelay
 	}
+
+	// An authored root delay replaces the operator default for every PodCliqueSet of this graph.
+	if override := dynamoDeployment.Spec.ProviderOverride; override != nil {
+		if delay, exists := provideroverride.GroveTerminationDelay(override.Value.Raw); exists {
+			gangSet.Spec.Template.TerminationDelay = &delay
+		}
+	}
 	gangSet.Spec.Template.TopologyConstraint = specToGroveTopologyConstraint(dynamoDeployment.Spec.TopologyConstraint)
 
 	return gangSet, nil
