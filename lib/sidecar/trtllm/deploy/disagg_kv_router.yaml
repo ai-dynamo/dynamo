@@ -59,7 +59,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20261023-75d0686@sha256:e237cc1347d8db6af2f84ace9150a59b950b47472ddc9429924d5e4bc5790395
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20261113-b43cd4a@sha256:a86b1afa74a364eda2f56bedb3c2edbff5a0b0961e2aa6a209c46a89f0be9774
           env:
           - name: DYN_ROUTER_MODE
             value: kv
@@ -152,7 +152,7 @@ spec:
         initContainers:
         # Start the Dynamo sidecar before the engine.
         - name: runtime
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar-nightly:20261023-75d0686@sha256:fc13f0a227d78499fbaed257e2373bcb54df32ca8e1fcea1e0ad6289087cbcb8
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar-nightly:20261113-b43cd4a@sha256:8b0ddfc26aa411d5072685f7239996fddfab3733b7c6182c7f7fb15a8253541f
           restartPolicy: Always
           command:
           - dynamo-trtllm-sidecar
@@ -240,7 +240,7 @@ spec:
           - /config/config.yaml
         initContainers:
         - name: runtime
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar-nightly:20261023-75d0686@sha256:fc13f0a227d78499fbaed257e2373bcb54df32ca8e1fcea1e0ad6289087cbcb8
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar-nightly:20261113-b43cd4a@sha256:8b0ddfc26aa411d5072685f7239996fddfab3733b7c6182c7f7fb15a8253541f
           restartPolicy: Always
           command:
           - dynamo-trtllm-sidecar
