@@ -1,0 +1,15 @@
+{
+  "account": "111111111111",
+  "stackName": "example-foundation",
+  "config": {
+    "name": "example-east",
+    "region": "us-east-2",
+    "vpcCidr": "10.44.0.0/16",
+    "availabilityZones": [
+      "us-east-2a",
+      "us-east-2b"
+    ],
+    "systemInstanceType": "m5.large",
+    "systemNodeCount": 2
+  }
+}

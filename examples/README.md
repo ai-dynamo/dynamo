@@ -59,6 +59,8 @@ Platform-specific manifests and templates for production environments. Deploymen
 - **[Amazon ECS](deployments/ECS/README.md)** - Task definitions ([deployment guide](../docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/ecs.mdx))
 - **[Google GKE](deployments/GKE/README.md)** - DGD manifests ([deployment guide](../docs/fern/pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx))
 
+- **[Global Router on AWS](global-router/README.md)** - CDK foundation, DynamoDB discovery and affinity, serving pools, and CloudWatch observability
+
 ## Integration Examples
 
 End-to-end examples that connect Dynamo to adjacent inference services:
