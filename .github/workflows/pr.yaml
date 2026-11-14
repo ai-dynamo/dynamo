@@ -36,6 +36,7 @@ jobs:
       sidecar_trtllm_image: ${{ steps.changes.outputs.sidecar_trtllm_image }}
       deploy: ${{ steps.changes.outputs.deploy }}
       dgdr: ${{ steps.changes.outputs.dgdr }}
+      gaie: ${{ steps.changes.outputs.gaie }}
       vllm: ${{ steps.changes.outputs.vllm }}
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
@@ -190,6 +191,7 @@ jobs:
       - deploy-test-checkpoint-vllm
       - deploy-test-checkpoint-sglang
       - deploy-test-checkpoint-trtllm
+      - deploy-test-gaie
       - deploy-cleanup
       - deploy-cleanup-checkpoint-vllm
       - deploy-cleanup-checkpoint-sglang
@@ -224,6 +226,7 @@ jobs:
       needs.changed-files.outputs.trtllm == 'true' ||
       needs.changed-files.outputs.deploy == 'true' ||
       needs.changed-files.outputs.dgdr == 'true' ||
+      needs.changed-files.outputs.gaie == 'true' ||
       needs.changed-files.outputs.snapshot == 'true' ||
       needs.changed-files.outputs.snapshot_vllm == 'true' ||
       needs.changed-files.outputs.snapshot_sglang == 'true' ||
@@ -788,7 +791,8 @@ jobs:
       needs.changed-files.outputs.snapshot_vllm == 'true' ||
       needs.changed-files.outputs.snapshot_sglang == 'true' ||
       needs.changed-files.outputs.snapshot_trtllm == 'true' ||
-      needs.changed-files.outputs.deploy == 'true'
+      needs.changed-files.outputs.deploy == 'true' ||
+      needs.changed-files.outputs.gaie == 'true'
     uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -1237,7 +1241,8 @@ jobs:
        needs.changed-files.outputs.snapshot == 'true' ||
       needs.changed-files.outputs.snapshot_vllm == 'true' ||
       needs.changed-files.outputs.snapshot_sglang == 'true' ||
-      needs.changed-files.outputs.snapshot_trtllm == 'true') &&
+      needs.changed-files.outputs.snapshot_trtllm == 'true' ||
+      needs.changed-files.outputs.gaie == 'true') &&
       needs.frontend-build.result == 'success'
     uses: $/.github/workflows/shared-copy.yml
     with:
@@ -1320,7 +1325,8 @@ jobs:
        needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
-       needs.changed-files.outputs.dgdr == 'true') &&
+       needs.changed-files.outputs.dgdr == 'true' ||
+       needs.changed-files.outputs.gaie == 'true') &&
       needs.operator.result == 'success'
     needs: [changed-files, operator]
     runs-on: prod-deploy-tester-v1
@@ -1438,6 +1444,96 @@ jobs:
       DOCKERHUB_LOGIN_USER: ${{ secrets.DOCKERHUB_LOGIN_USER }}
       DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
       DD_API_KEY: ${{ secrets.DD_API_KEY }}
+
+  # ============================================================================
+  # GAIE DEPLOY TEST
+  # The backends' GAIE examples behind agentgateway and the EPP, with mocker
+  # workers: the EPP, the frontend sidecars, and the mockers all run from the
+  # frontend image, so the `gaie` filter leaves out engine changes.
+  # ============================================================================
+  deploy-test-gaie:
+    name: GAIE Deploy Test
+    runs-on: prod-deploy-tester-v1
+    needs: [changed-files, deploy-operator, frontend-copy-to-acr]
+    if: |
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
+      !cancelled() && !failure() &&
+      needs.deploy-operator.result == 'success' &&
+      needs.frontend-copy-to-acr.result == 'success' &&
+      needs.changed-files.outputs.gaie == 'true'
+    timeout-minutes: 30
+    env:
+      # One Datadog auto test retry, instead of five, so a case that keeps
+      # failing reports its error before the job times out.
+      DD_CIVISIBILITY_FLAKY_RETRY_COUNT: '1'
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: $/.github/actions/check-vcluster-exists
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: $/.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: $/.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Install GAIE prerequisites (Gateway API, agentgateway, Inference Extension CRDs)
+        shell: bash
+        env:
+          KUBECONFIG_B64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+        run: |
+          kubeconfig_file="${GITHUB_WORKSPACE}/.kubeconfig_gaie"
+          trap 'rm -f "${kubeconfig_file}"' EXIT
+          (umask 077 && echo "${KUBECONFIG_B64}" | base64 -d > "${kubeconfig_file}")
+          export KUBECONFIG="${kubeconfig_file}"
+          export NAMESPACE=default
+          # The script only applies and upgrades, so it can rerun after a
+          # dropped vCluster tunnel, once the helm releases the drop left
+          # pending are cleared (helm then adopts what they created).
+          for attempt in $(seq 1 3); do
+            bash deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh && break
+            if [ "${attempt}" -eq 3 ]; then
+              exit 1
+            fi
+            echo "::warning::GAIE prerequisites install failed on attempt ${attempt}; retrying in 10s"
+            sleep 10
+            kubectl -n agentgateway-system delete secret --ignore-not-found \
+              -l 'owner=helm,status in (pending-install,pending-upgrade,pending-rollback)' || true
+          done
+      - name: Run GAIE Deploy Test
+        id: deploy-test
+        uses: $/.github/actions/dynamo-deploy-test
+        with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          test_name: gaie
+          # One pytest-xdist worker per case, so the cases' image pulls overlap.
+          extra_pytest_args: >-
+            -m framework_with_gaie
+            -n 4
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
 
   # Serialize checkpoint lifecycles through cleanup: each Snapshot install
   # reserves resources on the same GPU nodes until its namespace is deleted.
@@ -1954,7 +2050,7 @@ jobs:
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always()
-    needs: [changed-files, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-dgdr]
+    needs: [changed-files, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-dgdr, deploy-test-gaie]
     runs-on: prod-deploy-tester-v1
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

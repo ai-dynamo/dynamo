@@ -54,4 +54,22 @@ python -m pytest tests/deploy/test_deploy_efa_sglang.py \
   --namespace=efa-test -v -s
 ```
 
+`test_gaie_deployment` in `test_dgd.py` is the Gateway API Inference Extension
+lane. Its `vllm-agg`, `vllm-disagg`, `sglang-agg`, and `trtllm-agg` cases
+deploy the GAIE examples in `examples/backends/<backend>/deploy/gaie/`. Each
+case replaces every engine with a mocker of that engine from the frontend
+image, applies an HTTPRoute to the generated `InferencePool`, and sends a chat
+completion through the Gateway. Because the mockers run from the frontend
+image, the test needs no GPU and no `--image`. The cluster needs the Dynamo
+operator, an `hf-token-secret` Secret in the test namespace, and the Gateway
+that `deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh`
+installs:
+
+```bash
+python -m pytest tests/deploy/test_dgd.py \
+  -m framework_with_gaie \
+  --frontend-image=registry.example/dynamo-frontend:tag \
+  --namespace=gaie-test -v -s
+```
+
 New operator deployment tests belong in this directory.
