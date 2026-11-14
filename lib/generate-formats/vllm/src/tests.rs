@@ -10,6 +10,7 @@ fn routing_metadata(
 ) -> Worker<'_> {
     Worker {
         model: "test-model",
+        engine_info: &Value::Null,
         kv_cache_block_size,
         tower_connector_lora_enabled,
         lora_name,
