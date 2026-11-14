@@ -147,8 +147,9 @@ async def test_context_exit_preserves_primary_error_for_cleanup_defect(
         requests.Timeout("forward stalled"),
     ],
 )
+@pytest.mark.parametrize("method", ["POST", "GET"])
 def test_request_rebuilds_port_forward_after_transport_failure(
-    monkeypatch, tmp_path, transport_error
+    monkeypatch, tmp_path, transport_error, method
 ) -> None:
     deployment = managed_deployment(tmp_path)
     original_port_forward = MagicMock(local_port=31001)
@@ -158,15 +159,18 @@ def test_request_rebuilds_port_forward_after_transport_failure(
     request_sender = MagicMock(side_effect=[transport_error, response, response])
     sleep = MagicMock()
     monkeypatch.setattr("tests.deploy.dgd_utils.time.sleep", sleep)
+    endpoint = "/v1/models" if method == "GET" else "/v1/chat/completions"
+    payload = None if method == "GET" else {"model": "test"}
 
     result, active_port_forward = deployment.send_request_with_port_forward_retry(
         pod=MagicMock(),
         remote_port=8000,
-        endpoint="/v1/chat/completions",
-        payload={"model": "test"},
+        endpoint=endpoint,
+        payload=payload,
         timeout=120,
         port_forward=original_port_forward,
         request_sender=request_sender,
+        method=method,
     )
 
     assert result is response
@@ -177,18 +181,28 @@ def test_request_rebuilds_port_forward_after_transport_failure(
         request_sender.call_args_list[1].args[0].startswith("http://localhost:31002/")
     )
     assert active_port_forward is replacement_port_forward
+    assert [call.kwargs["method"] for call in request_sender.call_args_list] == [
+        method,
+        method,
+    ]
+    assert request_sender.call_args.args == (
+        f"http://localhost:{replacement_port_forward.local_port}{endpoint}",
+        payload,
+    )
     next_result, next_port_forward = deployment.send_request_with_port_forward_retry(
         pod=MagicMock(),
         remote_port=8000,
-        endpoint="/v1/chat/completions",
-        payload={"model": "test"},
+        endpoint=endpoint,
+        payload=payload,
         timeout=120,
         port_forward=active_port_forward,
         request_sender=request_sender,
+        method=method,
     )
     assert next_result is response
     assert next_port_forward is replacement_port_forward
     assert request_sender.call_count == 3
+    assert request_sender.call_args.kwargs["method"] == method
     assert (
         request_sender.call_args_list[2].args[0].startswith("http://localhost:31002/")
     )
