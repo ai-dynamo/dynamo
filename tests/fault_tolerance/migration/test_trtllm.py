@@ -44,6 +44,11 @@ KV_TRANSFER_MAX_SEQ_LEN = 2048
 KV_TRANSFER_MAX_TOKENS = 1536
 KV_TRANSFER_BASELINE_MAX_TOKENS = 256
 KV_TRANSFER_BASELINE_REQUESTS = 3
+# One discarded request per round-robin decode worker before the baselines.
+KV_TRANSFER_WARMUP_REQUESTS = 2
+# Room for the pre-fault snapshot (about 60 characters observed) plus the
+# 32-character continuation margin that run_migration_test enforces.
+KV_TRANSFER_MIN_STABLE_PREFIX_CHARS = 128
 KV_TRANSFER_PROMPT_REPETITIONS = 128
 
 # Keep one active worker-failure case for every migration-policy outcome while
@@ -623,22 +628,49 @@ def test_request_migration_trtllm_kv_transfer(
                 {("prefill", "generate"): 1, ("backend", "generate"): 2},
             )
 
+            baseline_request_options = dict(
+                use_chat_completion=(request_api == "chat"),
+                stream=stream,
+                max_tokens=KV_TRANSFER_BASELINE_MAX_TOKENS,
+                use_long_prompt=True,
+                long_prompt_repetitions=KV_TRANSFER_PROMPT_REPETITIONS,
+                force_max_output_tokens=True,
+            )
+            # A cold first request can produce a different greedy continuation and
+            # shorten the common prefix, so discard one per decode worker first.
+            for _ in range(KV_TRANSFER_WARMUP_REQUESTS):
+                request_to_completion(
+                    frontend.frontend_port, **baseline_request_options
+                )
+
             # GPU model output can diverge despite fixed sampling parameters.
             # Characterize the stable prefix across both round-robin decode
             # workers, then require migration to preserve it past the fault.
             baseline_outputs = [
                 request_to_completion(
-                    frontend.frontend_port,
-                    use_chat_completion=(request_api == "chat"),
-                    stream=stream,
-                    max_tokens=KV_TRANSFER_BASELINE_MAX_TOKENS,
-                    use_long_prompt=True,
-                    long_prompt_repetitions=KV_TRANSFER_PROMPT_REPETITIONS,
-                    force_max_output_tokens=True,
+                    frontend.frontend_port, **baseline_request_options
                 )
                 for _ in range(KV_TRANSFER_BASELINE_REQUESTS)
             ]
             stable_output_prefix = os.path.commonprefix(baseline_outputs)
+            pairwise_prefix_lengths = {
+                (i, j): len(
+                    os.path.commonprefix([baseline_outputs[i], baseline_outputs[j]])
+                )
+                for i in range(len(baseline_outputs))
+                for j in range(i + 1, len(baseline_outputs))
+            }
+            logger.info(
+                "Fault-free baselines: stable prefix %d characters, "
+                "pairwise common-prefix lengths %s",
+                len(stable_output_prefix),
+                pairwise_prefix_lengths,
+            )
+            assert len(stable_output_prefix) >= KV_TRANSFER_MIN_STABLE_PREFIX_CHARS, (
+                f"Fault-free baselines agree on only {len(stable_output_prefix)} "
+                f"characters, below {KV_TRANSFER_MIN_STABLE_PREFIX_CHARS}; "
+                f"pairwise common-prefix lengths: {pairwise_prefix_lengths}"
+            )
 
             transfer_baselines = {
                 worker.system_port: read_trtllm_kv_transfer_metrics(worker.system_port)
