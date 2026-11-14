@@ -12,7 +12,6 @@ trace file. With the unified event-driven path these all run through the same
 multi-worker runtime, so a bare run drives every request to completion.
 """
 
-import copy
 import threading
 
 import pytest
@@ -21,7 +20,7 @@ from dynamo._core import run_mocker_synthetic_trace_replay
 from dynamo.mocker.config import normalize_mocker_config
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 
-from .replay_utils import _vllm_args, _write_trace_and_args
+from .replay_utils import _canonical_report, _vllm_args, _write_trace_and_args
 
 pytestmark = [
     pytest.mark.core,
@@ -189,17 +188,6 @@ class _DisabledScalingPolicy:
 
     def on_tick(self, metrics):
         raise AssertionError("a disabled scaling policy must not receive ticks")
-
-
-def _canonical_report(report):
-    report = copy.deepcopy(report.summary)
-    for key in (
-        "wall_time_ms",
-        "processed_tokens_per_s",
-        "processed_output_tokens_per_s",
-    ):
-        report.pop(key, None)
-    return report
 
 
 @pytest.mark.parametrize("disagg", [False, True])

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import json
 import os
 import subprocess
@@ -252,6 +253,18 @@ def _partial_router_config():
         router_event_threads=1,
         router_queue_policy="wspt",
     )
+
+
+def _canonical_report(report):
+    """The report summary without the fields measured in wall-clock time."""
+    summary = copy.deepcopy(report.summary)
+    for key in (
+        "wall_time_ms",
+        "processed_tokens_per_s",
+        "processed_output_tokens_per_s",
+    ):
+        summary.pop(key, None)
+    return summary
 
 
 def _report_summary(report):

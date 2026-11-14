@@ -12,6 +12,8 @@ import pytest
 
 from dynamo.runtime import DistributedRuntime
 
+from .replay_utils import _canonical_report
+
 pytestmark = [
     pytest.mark.aiconfigurator,
     pytest.mark.gpu_0,
@@ -100,6 +102,30 @@ def test_aggregated_replay_uses_native_ais_engine() -> None:
     assert report["num_requests"] == 2
     assert report["mean_ttft_ms"] > 0.0
     assert report["mean_tpot_ms"] > 0.0
+
+
+def test_repeated_replays_return_equal_results() -> None:
+    from dynamo.replay import run_synthetic_trace_replay
+
+    def replay(tensor_parallel: int) -> dict:
+        args = _engine_args()
+        args["tensor_parallel_size"] = tensor_parallel
+        args["engine"]["timing_model"]["config"]["tp"] = tensor_parallel
+        return _canonical_report(
+            run_synthetic_trace_replay(
+                128,
+                8,
+                2,
+                extra_engine_args=args,
+                replay_concurrency=1,
+                replay_mode="offline",
+            )
+        )
+
+    first = replay(1)
+    # A replay with another model in between must not change what the first config returns.
+    assert replay(2)["mean_tpot_ms"] != first["mean_tpot_ms"]
+    assert replay(1) == first
 
 
 def test_disaggregated_replay_uses_native_ais_engine() -> None:
