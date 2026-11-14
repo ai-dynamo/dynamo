@@ -2471,11 +2471,14 @@ impl KvRouter {
                 None
             };
 
-        let extra_args: Option<serde_json::Value> = if let Some(obj) = extra_args {
-            Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
-        } else {
-            None
-        };
+        // Read exact builtins directly; anything else goes through pythonize as before.
+        let extra_args: Option<serde_json::Value> = extra_args
+            .map(|obj| {
+                let obj = obj.bind(py);
+                super::py_convert::exact_json_value(obj)
+                    .map_or_else(|| depythonize(obj).map_err(to_pyerr), Ok)
+            })
+            .transpose()?;
 
         let block_mm_infos = block_mm_infos
             .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
@@ -2554,9 +2557,12 @@ impl KvRouter {
         context: Option<crate::context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let response_buffer_size = validate_response_buffer_size(response_buffer_size)?;
-        // Depythonize the request directly into PreprocessedRequest
+        // Read `token_ids` and `extra_args` directly; the full pythonize path is the
+        // fallback and the source of every error.
+        let request = request.bind(py);
         let mut request: llm_rs::protocols::common::preprocessor::PreprocessedRequest =
-            depythonize(request.bind(py)).map_err(to_pyerr)?;
+            super::routed_engine::fast_preprocessed_request(request)
+                .map_or_else(|| depythonize(request).map_err(to_pyerr), Ok)?;
 
         // Create tracker if not already set, to capture worker routing info
         let tracker = match request.tracker {
