@@ -20,7 +20,6 @@ from typing import Any, List, Literal, Optional, Tuple, Union
 import msgspec
 import torch
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
-from pydantic_core import core_schema
 from typing_extensions import NotRequired
 from vllm.inputs import TokensPrompt  # noqa: F401
 
@@ -67,15 +66,6 @@ class PrefillResponse(BaseModel):
 # ModalityData is defined here: https://github.com/vllm-project/vllm/blob/main/vllm/multimodal/inputs.py#L80
 class PatchedTokensPrompt(TokensPrompt):
     multi_modal_data: NotRequired[Optional[Any]]  # type: ignore
-
-
-# Monkey-patch the SamplingParams type to add a dummy core schema so pydantic can validate it
-# Sampling params is a mspspec struct
-# SamplingParams is defined here: https://github.com/vllm-project/vllm/blob/a4c402a756fa3213caf9d2cde0e4ceb2d57727f2/vllm/sampling_params.py#L88
-
-SamplingParams.__get_pydantic_core_schema__ = classmethod(
-    lambda cls, source, handler: core_schema.any_schema()
-)
 
 
 class vLLMGenerateRequest(BaseModel):
