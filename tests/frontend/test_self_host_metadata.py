@@ -73,11 +73,11 @@ def test_worker_serves_metadata_via_http(
 
         slug = _slugify(TEST_MODEL)
         suffix = "_base"  # BASE_SUFFIX in lib/runtime/src/metadata_registry.rs
-        # MockerWorkerProcess defaults: --component=sample, the rest pick up
-        # WorkerConfig defaults from lib/runtime — namespace=dynamo,
-        # endpoint=generate. The route is now keyed on the endpoint triple
-        # so the URL includes (namespace, component, endpoint).
-        base = f"http://localhost:{system_port}/v1/metadata/dynamo/sample/generate"
+        # MockerWorkerProcess passes no --endpoint, so the mocker registers
+        # under its default `dyn://dynamo.backend.generate`. The route is keyed
+        # on that endpoint triple, so the URL includes (namespace, component,
+        # endpoint).
+        base = f"http://localhost:{system_port}/v1/metadata/dynamo/backend/generate"
 
         url = f"{base}/{slug}/{suffix}/config.json"
         response = requests.get(url, timeout=10)
