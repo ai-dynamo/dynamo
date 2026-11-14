@@ -102,6 +102,28 @@ def test_aggregated_replay_uses_native_ais_engine() -> None:
     assert report["mean_tpot_ms"] > 0.0
 
 
+def test_repeated_replay_reuses_the_ais_model_with_equal_results() -> None:
+    from dynamo.replay import run_synthetic_trace_replay
+
+    def summary() -> dict:
+        report = run_synthetic_trace_replay(
+            128,
+            8,
+            2,
+            extra_engine_args=_engine_args(),
+            replay_concurrency=1,
+            replay_mode="offline",
+        )
+        return {
+            key: value for key, value in report.summary.items() if key != "wall_time_ms"
+        }
+
+    first = summary()
+    assert first["mean_ttft_ms"] > 0.0
+    # The second replay takes the model the first one built.
+    assert summary() == first
+
+
 def test_disaggregated_replay_uses_native_ais_engine() -> None:
     from dynamo.replay import run_synthetic_trace_replay
 

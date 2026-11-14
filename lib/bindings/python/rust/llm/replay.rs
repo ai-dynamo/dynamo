@@ -6,7 +6,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use dynamo_mocker::common::perf_model::PerfModel;
+use dynamo_mocker::common::perf_model::{AisCallback, PerfModel};
 use dynamo_mocker::common::protocols::{
     DirectRequest, MockerConfig, ReasoningConfig as RsReasoningConfig,
 };
@@ -30,7 +30,9 @@ use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::ais_callback::{create_ais_callback, create_ais_prefill_load_estimator};
+use super::ais_callback::{
+    create_ais_callback, create_ais_prefill_load_estimator, create_replay_ais_callback,
+};
 use super::entrypoint::{AisPerfConfig, KvRouterConfig, normalize_ais_perf_config, to_pyerr};
 
 #[derive(Debug, Serialize)]
@@ -1584,18 +1586,28 @@ fn materialize_replay_mocker_args(
     py: Python<'_>,
     config: &Bound<'_, PyAny>,
 ) -> PyResult<MockerConfig> {
-    materialize_mocker_config(py, mocker_config_from_python(py, config)?)
+    materialize_with(
+        py,
+        mocker_config_from_python(py, config)?,
+        create_replay_ais_callback,
+    )
 }
 
 pub(super) fn materialize_mocker_config(
     py: Python<'_>,
+    args: MockerConfig,
+) -> PyResult<MockerConfig> {
+    materialize_with(py, args, create_ais_callback)
+}
+
+fn materialize_with(
+    py: Python<'_>,
     mut args: MockerConfig,
+    create_callback: fn(Python<'_>, &serde_json::Value) -> PyResult<Arc<dyn AisCallback>>,
 ) -> PyResult<MockerConfig> {
     resolve_mocker_capacity(py, &mut args)?;
     if let Some(config) = args.ais_perf_config() {
-        args.perf_model = Arc::new(PerfModel::from_ais_callback(create_ais_callback(
-            py, config,
-        )?));
+        args.perf_model = Arc::new(PerfModel::from_ais_callback(create_callback(py, config)?));
     }
     Ok(args)
 }

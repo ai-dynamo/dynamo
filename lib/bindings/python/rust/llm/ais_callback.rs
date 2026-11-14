@@ -15,9 +15,57 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(feature = "ais-forward-pass")]
+#[derive(Clone)]
 pub(super) struct RustAisCallback {
     model: ForwardPassPerfModel,
     nextn: u32,
+}
+
+#[cfg(feature = "ais-forward-pass")]
+static REPLAY_MODELS: parking_lot::Mutex<RecentCache<RustAisCallback>> =
+    parking_lot::Mutex::new(RecentCache::new(8));
+
+/// Most recently used first; the oldest entry is dropped at capacity.
+#[cfg(any(test, feature = "ais-forward-pass"))]
+struct RecentCache<T> {
+    entries: Vec<(String, T)>,
+    capacity: usize,
+}
+
+#[cfg(any(test, feature = "ais-forward-pass"))]
+impl<T: Clone> RecentCache<T> {
+    const fn new(capacity: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            capacity,
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<T> {
+        let index = self.entries.iter().position(|(k, _)| k == key)?;
+        let entry = self.entries.remove(index);
+        let value = entry.1.clone();
+        self.entries.insert(0, entry);
+        Some(value)
+    }
+
+    fn insert(&mut self, key: String, value: T) {
+        self.entries.retain(|(k, _)| *k != key);
+        self.entries.insert(0, (key, value));
+        self.entries.truncate(self.capacity);
+    }
+}
+
+/// A profile, snapshot or other estimator input can be rewritten in place between replays, so
+/// only a model that reads nothing but its systems root is kept.
+#[cfg(any(test, feature = "ais-forward-pass"))]
+fn is_replay_cacheable(config: &serde_json::Value) -> bool {
+    let is_unset = |key: &str| match config.get(key) {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::Object(map)) => map.is_empty(),
+        Some(_) => false,
+    };
+    is_unset("fpm_profile") && is_unset("estimator_config")
 }
 
 #[cfg(feature = "ais-forward-pass")]
@@ -191,6 +239,34 @@ pub(super) fn create_ais_callback(
     ))
 }
 
+/// [`create_ais_callback`] for offline replay. A sweep replays the same few engine
+/// configurations many times and building a model parses its perf tables each time, so built
+/// models are kept. Each caller gets its own clone; clones share the compiled engine and the
+/// tables it has loaded.
+#[cfg_attr(not(feature = "ais-forward-pass"), allow(unused_variables))]
+pub(super) fn create_replay_ais_callback(
+    _py: Python<'_>,
+    config: &serde_json::Value,
+) -> PyResult<Arc<dyn AisCallback>> {
+    #[cfg(feature = "ais-forward-pass")]
+    {
+        if !is_replay_cacheable(config) {
+            return Ok(Arc::new(build_model(config)?));
+        }
+        let key = config.to_string();
+        if let Some(model) = REPLAY_MODELS.lock().get(&key) {
+            return Ok(Arc::new(model));
+        }
+        let model = build_model(config)?;
+        REPLAY_MODELS.lock().insert(key, model.clone());
+        Ok(Arc::new(model))
+    }
+    #[cfg(not(feature = "ais-forward-pass"))]
+    Err(pyo3::exceptions::PyRuntimeError::new_err(
+        "AIS perf model requires the ais-forward-pass feature",
+    ))
+}
+
 #[cfg_attr(not(feature = "ais-forward-pass"), allow(unused_variables))]
 pub(super) fn create_ais_prefill_load_estimator(
     _py: Python<'_>,
@@ -204,6 +280,42 @@ pub(super) fn create_ais_prefill_load_estimator(
     Err(pyo3::exceptions::PyRuntimeError::new_err(
         "AIS perf model requires the ais-forward-pass feature",
     ))
+}
+
+#[cfg(test)]
+mod replay_cache_tests {
+    use super::{RecentCache, is_replay_cacheable};
+    use serde_json::json;
+
+    #[test]
+    fn recent_cache_keeps_the_most_recently_used_entries() {
+        let mut cache = RecentCache::new(2);
+        cache.insert("a".to_owned(), 1);
+        cache.insert("b".to_owned(), 2);
+        assert_eq!(cache.get("a"), Some(1));
+        cache.insert("c".to_owned(), 3);
+        assert_eq!(cache.get("b"), None, "b was the least recently used");
+        assert_eq!(cache.get("a"), Some(1));
+        assert_eq!(cache.get("c"), Some(3));
+    }
+
+    #[test]
+    fn only_models_without_caller_owned_inputs_are_kept() {
+        let packaged = json!({"model": "m", "fpm_profile": null, "estimator_config": {}});
+        assert!(is_replay_cacheable(&packaged));
+        assert!(is_replay_cacheable(&json!({"model": "m"})));
+        for (key, value) in [
+            ("fpm_profile", json!({"path": "/tmp/profile"})),
+            (
+                "estimator_config",
+                json!({"state_snapshot": {"path": "/tmp/s"}}),
+            ),
+        ] {
+            let mut config = packaged.clone();
+            config[key] = value;
+            assert!(!is_replay_cacheable(&config), "{key}");
+        }
+    }
 }
 
 #[cfg(all(test, feature = "ais-forward-pass"))]
