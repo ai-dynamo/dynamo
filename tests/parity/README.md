@@ -9,14 +9,14 @@ The cross-implementation parity harness, fixture authoring and HTML table genera
 
 ## Verify the external Rust runner
 
-The consumer pins both dependencies to commit `7e9ef9ed36d97d4e1bfab371cbf714aa611e17a7` from [frontend-crates PR #532](https://github.com/ai-dynamo/frontend-crates/pull/532):
+The consumer pins both dependencies to commit `cb366dae149aa72abcd9f26aafab07699beee26f` from [frontend-crates PR #532](https://github.com/ai-dynamo/frontend-crates/pull/532):
 
 | Crate | Version |
 | --- | --- |
 | `dynamo-conformance-fixtures-v2` | `0.1.0` |
-| `dynamo-parsers-v2` | `0.9.9` |
+| `dynamo-parsers-v2` | `0.10.7` |
 
-The runner and parser candidate are taken from the same immutable Git revision and a committed lockfile. Parser version `0.9.9` identifies this unpublished candidate; it does not change Dynamo's root workspace parser pin. This independent Cargo workspace reads the authored corpus from Cargo's dependency checkout and keeps the serving dependency graph separate.
+The runner and parser candidate are taken from the same immutable Git revision and a committed lockfile. Parser version `0.10.7` identifies this unpublished candidate; it does not change the root workspace parser pin. This independent Cargo workspace reads the authored corpus from Cargo dependency checkout and keeps the serving dependency graph separate.
 
 Run the integration tests from the Dynamo root:
 
@@ -49,7 +49,7 @@ cargo run --release --locked --manifest-path tests/parity/unified/Cargo.toml --b
 
 A family selection runs every active authored case with default split, stream/batch and stream isolation checks. This is broader than the eight-case Qwen3 integration test. The command prints counts per family, individual failures and unsupported cases, and a final family summary. Exit status is 0 for a passing run, help or listing; 1 for conformance failures or missing coverage; and 2 for invalid arguments. Unsupported cases are a separate verdict by default; `--fail-on-unsupported` makes them blocking. Cargo build failures retain Cargo's exit status.
 
-This pin fixes numeric YAML chunk decoding and exact JSON argument comparison. A full run selects 3,831 authored cases across 13 canonical Unified families: 3,816 pass, five are unsupported, and ten disagree with GOLDEN on `UNIFIED.5-missing_inner_closers_then_valid_call`. These are parser recovery failures, so `all`, `glm` and `qwen3` still return status 1; `gemma4` passes all 286 selected cases. The runner reports those differences without changing the authored oracle. Passing the small integration tests certifies only their selected cases.
+With this pin, `all` selects 4,516 authored cases across 15 canonical Unified families: 4,373 pass, 10 are unsupported, and 133 GOLDEN failures occur across 14 case IDs. The isolation checks report zero failures; two families pass all selected cases and 13 fail. The failures include quoted control-marker cases and argument representation mismatches. The runner reports them without changing authored GOLDEN expectations, and `all` returns status 1. Passing the small integration tests certifies only their selected cases.
 
 Structural-tag generation constraints are unsupported by the upstream runner. To fail on those explicit unsupported records as well as parser mismatches and corpus errors, use:
 

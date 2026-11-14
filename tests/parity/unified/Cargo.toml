@@ -13,8 +13,8 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-dynamo-conformance-fixtures-v2 = { version = "=0.1.0", git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "54d616fc43c9fffa14b29be099221ffb0a7faede" }
-dynamo-parsers-v2 = { version = "=0.9.11", git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "54d616fc43c9fffa14b29be099221ffb0a7faede" }
+dynamo-conformance-fixtures-v2 = { version = "=0.1.0", git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "cb366dae149aa72abcd9f26aafab07699beee26f" }
+dynamo-parsers-v2 = { version = "=0.10.7", git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "cb366dae149aa72abcd9f26aafab07699beee26f" }
 
 [[bin]]
 name = "dynamo-conformance"
