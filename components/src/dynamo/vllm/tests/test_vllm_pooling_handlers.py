@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import torch
+from vllm.renderers import TokenizeParams
 
 import dynamo.vllm.handlers as base_handlers
 import dynamo.vllm.pooling_handlers as mod
@@ -182,8 +183,6 @@ class TestClassifyWorkerHandler:
     async def test_pretokenized_input_uses_vllm_truncation(
         self, input_field, is_pooling, expected_token_ids
     ):
-        from vllm.renderers import TokenizeParams
-
         handler = _make_handler()
         handler.engine_client.renderer.default_cmpl_tok_params = TokenizeParams(
             max_total_tokens=8
@@ -218,9 +217,35 @@ class TestClassifyWorkerHandler:
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
-    async def test_explicit_right_truncation_keeps_first_tokens(self):
-        from vllm.renderers import TokenizeParams
+    async def test_pretokenized_input_reaches_vllm_rendered(self):
+        handler = _make_handler()
+        handler.engine_client.model_config = SimpleNamespace(is_encoder_decoder=False)
+        handler.engine_client.renderer.default_cmpl_tok_params = TokenizeParams(
+            max_total_tokens=8
+        )
+        handler.engine_client.renderer.tokenizer = SimpleNamespace(
+            truncation_side="right"
+        )
+        rendered = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+        handler.engine_client.renderer.render_cmpl = MagicMock(return_value=[rendered])
+        seen_prompts: list[Any] = []
 
+        async def fake_encode(prompt, pooling_params, request_id, **kwargs):
+            seen_prompts.append(prompt)
+            yield _pooling_output([0.5, 0.5], prompt["prompt_token_ids"])
+
+        handler.engine_client.encode = fake_encode
+        request = {"input": [1, 2, 3], "model": "test-model"}
+
+        [_] = [item async for item in handler.generate(request, _make_context())]
+
+        assert seen_prompts == [rendered]
+        [(prompts, _), _] = handler.engine_client.renderer.render_cmpl.call_args
+        assert prompts == [{"prompt_token_ids": [1, 2, 3]}]
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_explicit_right_truncation_keeps_first_tokens(self):
         handler = _make_handler()
         handler.engine_client.renderer.default_cmpl_tok_params = TokenizeParams(
             max_total_tokens=8
