@@ -890,6 +890,228 @@ async fn builtin_affinity_uses_common_host_for_every_policy() {
     runtime.shutdown();
 }
 
+async fn declare_worker_dp_ranks(
+    endpoint: &dynamo_runtime::component::Endpoint,
+    load_context: &RoutingLoadContext,
+    worker_id: u64,
+    dp_ranks: std::ops::Range<u32>,
+) {
+    let id = endpoint.id();
+    let mut card = crate::model_card::ModelDeploymentCard::with_name_only("test-model");
+    card.runtime_config = ModelRuntimeConfig {
+        data_parallel_start_rank: dp_ranks.start,
+        data_parallel_size: dp_ranks.len() as u32,
+        ..Default::default()
+    };
+    endpoint
+        .drt()
+        .discovery()
+        .register(
+            dynamo_runtime::discovery::DiscoverySpec::from_model(
+                id.namespace,
+                id.component,
+                id.name,
+                &card,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let monitor = load_context.monitor().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while monitor.declared_dp_ranks(worker_id) != Some(dp_ranks.clone()) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("monitor must observe the declared DP ranks");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_hard_affinity_pins_declared_dp_rank_for_every_policy() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let component = distributed
+        .namespace("builtin-hard-affinity-dp-rank".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap();
+
+    for (index, mode) in [
+        RouterMode::RoundRobin,
+        RouterMode::Random,
+        RouterMode::LeastLoaded,
+        RouterMode::DeviceAwareWeighted,
+        RouterMode::Direct,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let endpoint = component.endpoint(format!("mode-{index}"));
+        let client = endpoint.client().await.unwrap();
+        let load_context = test_load_context(&client).await;
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+        declare_worker_dp_ranks(&endpoint, &load_context, worker_id, 4..8).await;
+        let first_turn_worker = (mode == RouterMode::Direct).then_some(worker_id);
+        let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+        let (host, affinity) = builtin_host_with_affinity(
+            client,
+            mode,
+            dispatch.clone(),
+            load_context,
+            crate::session_affinity::SessionAffinityMode::Hard,
+        )
+        .await;
+
+        let mut pinned_ranks = HashSet::new();
+        for session in 0..4 {
+            let session_id = format!("session-{index}-{session}");
+            // The last turn names only the worker, which must keep the bound rank.
+            for explicit_worker in [first_turn_worker, None, Some(worker_id)] {
+                let mut stream = host
+                    .generate(affinity_request(&session_id, explicit_worker))
+                    .await
+                    .unwrap();
+                while stream.next().await.is_some() {}
+            }
+            let pinned = affinity
+                .query_target(&SessionAffinityId::new(session_id), None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(pinned.worker_id, worker_id);
+            let dp_rank = pinned
+                .dp_rank
+                .unwrap_or_else(|| panic!("{mode:?} hard pin must include a DP rank"));
+            assert!((4..8).contains(&dp_rank), "{mode:?} pinned rank {dp_rank}");
+            let dp_ranks = dispatch.dp_ranks.lock().unwrap();
+            assert_eq!(
+                &dp_ranks[dp_ranks.len() - 3..],
+                &[Some(dp_rank); 3],
+                "{mode:?} must dispatch every turn to the pinned rank"
+            );
+            pinned_ranks.insert(dp_rank);
+        }
+        assert!(
+            pinned_ranks.len() > 1,
+            "{mode:?} sessions must spread across ranks: {pinned_ranks:?}"
+        );
+
+        let mut sessionless = request();
+        sessionless.routing_mut().backend_instance_id = first_turn_worker;
+        let mut stream = host.generate(Context::new(sessionless)).await.unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            dispatch.dp_ranks.lock().unwrap().last(),
+            Some(&None),
+            "{mode:?} requests without a session leave rank selection to the engine"
+        );
+    }
+
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_hard_affinity_assigns_rank_to_worker_only_binding() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-hard-affinity-worker-only".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate");
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+    declare_worker_dp_ranks(&endpoint, &load_context, worker_id, 4..8).await;
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let (host, affinity) = builtin_host_with_affinity(
+        client,
+        RouterMode::RoundRobin,
+        dispatch.clone(),
+        load_context,
+        crate::session_affinity::SessionAffinityMode::Hard,
+    )
+    .await;
+    // A binding from a peer, or from before the router learned the worker's ranks.
+    let session_id = SessionAffinityId::new("worker-only-binding");
+    bind_affinity_target(&host, &session_id, AffinityTarget::worker(worker_id)).await;
+
+    for _ in 0..2 {
+        let mut stream = host
+            .generate(affinity_request("worker-only-binding", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+    }
+    let dp_ranks = dispatch.dp_ranks.lock().unwrap().clone();
+    assert!(
+        dp_ranks[0].is_some_and(|dp_rank| (4..8).contains(&dp_rank)),
+        "a worker-only binding must dispatch a declared rank: {dp_ranks:?}"
+    );
+    assert_eq!(dp_ranks[0], dp_ranks[1]);
+    assert_eq!(
+        affinity.query_target(&session_id, None).unwrap(),
+        Some(AffinityTarget::worker(worker_id))
+    );
+
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_soft_affinity_does_not_pin_declared_dp_rank() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-soft-affinity-dp-rank".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate");
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+    declare_worker_dp_ranks(&endpoint, &load_context, worker_id, 4..8).await;
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let (host, affinity) = builtin_host_with_affinity(
+        client,
+        RouterMode::RoundRobin,
+        dispatch.clone(),
+        load_context,
+        crate::session_affinity::SessionAffinityMode::Soft,
+    )
+    .await;
+
+    for _ in 0..2 {
+        let mut stream = host
+            .generate(affinity_request("soft-dp-rank", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+    }
+    assert_eq!(
+        affinity
+            .query_target(&SessionAffinityId::new("soft-dp-rank"), None)
+            .unwrap(),
+        Some(AffinityTarget::worker(worker_id))
+    );
+    assert_eq!(dispatch.dp_ranks.lock().unwrap().as_slice(), &[None, None]);
+
+    runtime.shutdown();
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn builtin_soft_affinity_clears_dp_rank_after_worker_fallback() {

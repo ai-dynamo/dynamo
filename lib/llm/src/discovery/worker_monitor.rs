@@ -798,6 +798,15 @@ impl KvWorkerMonitor {
         &self.thresholds
     }
 
+    /// The data-parallel ranks declared by the worker's runtime config, once discovery
+    /// has reported it.
+    pub(crate) fn declared_dp_ranks(&self, worker_id: u64) -> Option<std::ops::Range<u32>> {
+        let state = self.worker_load_states.get(&worker_id)?;
+        let ranks = state.declared_dp_ranks.as_ref()?;
+        let start = ranks.iter().copied().min()?;
+        Some(start..start + ranks.len() as u32)
+    }
+
     /// Returns true iff the user explicitly configured at least one threshold.
     ///
     /// When false, all three per-field checks are skipped in `is_overloaded` and
