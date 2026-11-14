@@ -645,7 +645,10 @@ def test_cli_preflight_failure_writes_summary_and_junit(
     elif failure == "schedule":
         args += ["--schedules", "interval0"]
     assert main(args) == 2
-    assert loads((output / "summary.json").read_bytes())["status"] == "infra_error"
+    summary = loads((output / "summary.json").read_bytes())
+    assert summary["status"] == "infra_error"
+    if failure == "schedule":
+        assert summary["infrastructure_errors"] == ["unsupported mode or schedule"]
     suite = ET.parse(output / "junit.xml").getroot()
     assert suite.attrib["errors"] == "1"
     assert suite.find("testcase/error") is not None
