@@ -214,12 +214,17 @@ class ImageGenerationHandler(BaseGenerativeHandler):
             emit_count = min(images.shape[0], num_images_per_prompt)
 
             async def _encode_one(i: int) -> ImageData:
+                """Encode one image with the configured level and return its response data."""
                 image_np = images[i].cpu().numpy()
                 logger.debug(
                     f"Request {request_id}: encoding image {i + 1}/{emit_count} "
                     f"(shape={image_np.shape}) to PNG"
                 )
-                image_bytes = await asyncio.to_thread(encode_to_png_bytes, image_np)
+                image_bytes = await asyncio.to_thread(
+                    encode_to_png_bytes,
+                    image_np,
+                    compress_level=self.config.image_png_compression_level,
+                )
                 if response_format == "url":
                     storage_path = f"images/{request_id}_{i}.png"
                     image_url = await upload_to_fs(

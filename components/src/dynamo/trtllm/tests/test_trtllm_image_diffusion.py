@@ -10,6 +10,7 @@ These tests do NOT require visual_gen, torch, or GPU - they test logic only.
 """
 
 import asyncio
+import io
 import logging
 import sys
 import threading
@@ -18,8 +19,10 @@ import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
+from PIL import Image
 
 from dynamo.common.protocols.image_protocol import (
     ImageData,
@@ -27,6 +30,7 @@ from dynamo.common.protocols.image_protocol import (
     NvCreateImageRequest,
     NvImagesResponse,
 )
+from dynamo.common.utils.image_utils import encode_to_png_bytes
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 
@@ -64,6 +68,7 @@ class MockDiffusionConfig:
     default_height: int = 480
     default_num_frames: int = 81
     default_num_images_per_prompt: int = 1
+    image_png_compression_level: int = 6
     default_fps: int = 24
     default_seconds: int = 4
     max_width: int = 4096
@@ -812,6 +817,82 @@ class TestImageHandlerResponseFormats:
         assert len(results) == 1
         assert len(results[0]["data"]) == 2
         assert mock_upload.call_count == 2
+
+
+# Part 6b: PNG Compression Level Tests
+
+
+def _png_test_image():
+    """Create compressible pixels whose PNG size varies with the level."""
+    rng = np.random.default_rng(0)
+    # Smooth gradient plus noise, so the zlib level changes the size.
+    y, x = np.mgrid[0:256, 0:256]
+    array = np.stack([x, y, (x + y) // 2], -1)
+    return (array // 4 + rng.integers(0, 4, array.shape)).astype(np.uint8)
+
+
+class TestPngCompressionLevel:
+    """--image-png-compression-level reaches the PNG encoder losslessly."""
+
+    @pytest.mark.parametrize("level", [-1, 10])
+    def test_diffusion_config_rejects_out_of_range_level(self, level):
+        """Reject PNG levels outside the supported range at config creation."""
+        with pytest.raises(ValueError, match="--image-png-compression-level"):
+            DiffusionConfig(image_png_compression_level=level)
+
+    def test_levels_keep_pixels_and_trade_size(self):
+        """Check that compression reduces size while preserving every pixel."""
+
+        array = _png_test_image()
+        sizes = {}
+        for level in (0, 1, 6, 9):
+            png = encode_to_png_bytes(array, compress_level=level)
+            decoded = np.asarray(Image.open(io.BytesIO(png)))
+            np.testing.assert_array_equal(decoded, array)
+            sizes[level] = len(png)
+
+        assert sizes[0] > sizes[1] >= sizes[6] >= sizes[9]
+
+    def test_default_level_matches_plain_pillow_png(self):
+        """Check that the default level produces the same bytes as Pillow."""
+        array = _png_test_image()
+        expected = io.BytesIO()
+        Image.fromarray(array).save(expected, format="PNG")
+
+        assert encode_to_png_bytes(array) == expected.getvalue()
+        assert encode_to_png_bytes(array, compress_level=6) == expected.getvalue()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("response_format", ["url", "b64_json"])
+    async def test_handler_passes_configured_level(self, tmp_path, response_format):
+        """Check that URL and base64 responses use the configured PNG level."""
+        handler = TestImageHandlerResponseFormats()._make_handler(
+            tmp_path, image_png_compression_level=0
+        )
+        request = {
+            "prompt": "a test image",
+            "model": "test-model",
+            "response_format": response_format,
+        }
+
+        with patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            wraps=encode_to_png_bytes,
+        ) as mock_encode, patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
+            return_value="https://cdn.example.com/media/images/test.png",
+        ):
+            results = [r async for r in handler.generate(request, MagicMock())]
+
+        mock_encode.assert_called_once()
+        assert mock_encode.call_args.kwargs == {"compress_level": 0}
+        assert len(results) == 1
+        data = results[0]["data"]
+        assert len(data) == 1
+        if response_format == "url":
+            assert data[0]["url"] == "https://cdn.example.com/media/images/test.png"
+        else:
+            assert data[0]["b64_json"]
 
 
 # =============================================================================

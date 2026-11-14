@@ -16,11 +16,14 @@ logger = logging.getLogger(__name__)
 
 def encode_to_png_bytes(
     image: np.ndarray,
+    *,
+    compress_level: int = 6,
 ) -> bytes:
     """Encode numpy image to PNG bytes (in-memory).
 
     Args:
         image: Numpy image array of shape (H, W, 3) with uint8 values 0-255.
+        compress_level: Lossless zlib level 0-9. 6 is Pillow's default.
 
     Returns:
         PNG-encoded bytes.
@@ -41,7 +44,7 @@ def encode_to_png_bytes(
     try:
         img = Image.fromarray(image)
         buf = io.BytesIO()
-        img.save(buf, format="PNG")
+        img.save(buf, format="PNG", compress_level=compress_level)
         image_bytes = buf.getvalue()
         logger.info(f"Encoded PNG image to {len(image_bytes)} bytes")
         return image_bytes

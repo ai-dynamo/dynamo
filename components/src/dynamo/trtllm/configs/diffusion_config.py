@@ -69,6 +69,8 @@ class DiffusionConfig:
     default_seconds: int = 4  # Default video duration when only fps is specified
     default_num_inference_steps: int = 50
     default_guidance_scale: float = 5.0
+    # Lossless PNG zlib level for image responses; 6 is Pillow's default.
+    image_png_compression_level: int = 6
 
     # ── Pipeline optimization config (maps to PipelineConfig) ──
     disable_torch_compile: bool = False
@@ -105,6 +107,7 @@ class DiffusionConfig:
     dit_cfg_size: int = 1
 
     def __post_init__(self) -> None:
+        """Reject invalid image counts and PNG compression levels."""
         # The image request model bounds `n` to 1..10 (OpenAI's documented
         # range). The default used when a request omits `n` obeys the same rule.
         if not 1 <= self.default_num_images_per_prompt <= 10:
@@ -112,6 +115,8 @@ class DiffusionConfig:
                 "default_num_images_per_prompt must be in [1, 10], got "
                 f"{self.default_num_images_per_prompt}"
             )
+        if not 0 <= self.image_png_compression_level <= 9:
+            raise ValueError("--image-png-compression-level must be between 0 and 9")
 
     @classmethod
     def from_config(cls, config: Any) -> "DiffusionConfig":
@@ -128,6 +133,7 @@ class DiffusionConfig:
         return cls(**kwargs)
 
     def __str__(self) -> str:
+        """Summarize worker settings for logging, including PNG compression."""
         return (
             f"DiffusionConfig("
             f"namespace={self.namespace}, "
@@ -140,6 +146,7 @@ class DiffusionConfig:
             f"default_width={self.default_width}, "
             f"default_num_frames={self.default_num_frames}, "
             f"default_num_images_per_prompt={self.default_num_images_per_prompt}, "
+            f"image_png_compression_level={self.image_png_compression_level}, "
             f"default_num_inference_steps={self.default_num_inference_steps}, "
             f"enable_teacache={self.enable_teacache}, "
             f"attn_backend={self.attn_backend}, "
