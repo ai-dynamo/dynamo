@@ -55,14 +55,6 @@ func groveProviderOverride(target, value string) *nvidiacomv1beta1.ProviderOverr
 	}
 }
 
-func alphaGroveProviderOverride(target, value string) *nvidiacomv1alpha1.ProviderOverride {
-	return &nvidiacomv1alpha1.ProviderOverride{
-		APIVersion: provideroverride.GroveAPIVersion,
-		Target:     target,
-		Value:      apiextensionsv1.JSON{Raw: []byte(value)},
-	}
-}
-
 var (
 	// Fixture barriers observe the same cache used by webhook validation.
 	admissionReader client.Reader
@@ -171,6 +163,10 @@ type admissionTestCase struct {
 	notWantError      string
 }
 
+// runAdmissionTest executes one admission case through the real API server. Cases
+// are authored against served API versions only: nvidia.com/v1alpha1 is unserved, so
+// its admission path no longer exists and the api package conversion round-trip
+// tests cover the machinery that stored v1alpha1 objects still rely on.
 func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstructured {
 	t.Helper()
 
