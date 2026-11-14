@@ -86,6 +86,11 @@ const testCases = [
     desc: 'protocol tooling is covered without unrelated runtime builds'
   },
   {
+    file: 'scripts/validate_structured_tool_calls.py',
+    expect: { ignore: true, rust: false, core: false, frontend: false },
+    desc: 'manual live-endpoint verifier is covered without unrelated builds'
+  },
+  {
     file: 'components/src/dynamo/artifacts/storage.py',
     expect: { core: true, frontend: true, vllm: false },
     desc: 'generic artifact transport keeps shared runtime CI'

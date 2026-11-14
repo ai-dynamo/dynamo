@@ -161,6 +161,10 @@ ignore:
   # covered by `core` and `frontend`; the generate-media-protocols hook
   # validates the script itself.
   - 'scripts/generate_media_protocols.py'
+  # Manual live-endpoint verifier for structured tool calls. It needs a running
+  # model and is not executed by CI; the runtime paths it exercises are covered
+  # by `core` and `frontend`.
+  - 'scripts/validate_structured_tool_calls.py'
   # CODEOWNERS generation tooling (data + scripts). Validated by its own
   # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
   - '.github/codeowners/**'
