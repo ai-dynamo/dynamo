@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.reasoning import ReasoningParser
+from vllm.reasoning.glm47_moe_reasoning_parser import Glm47MoeParserReasoningAdapter
 from vllm.renderers import ChatParams
 from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.renderers.hf import resolve_chat_template
@@ -44,7 +45,10 @@ from .structural_tag_policy import (
     effective_tool_strict,
     should_attempt_structural_tag,
 )
-from .thinking import apply_default_thinking_mode_to_template_kwargs
+from .thinking import (
+    apply_default_thinking_mode_to_template_kwargs,
+    glm_prompt_reasoning_open,
+)
 from .utils import legacy_guided_decoding
 
 get_model_structural_tag: Any
@@ -566,9 +570,37 @@ def _reasoning_parser_enabled(
     See https://github.com/ai-dynamo/dynamo/issues/8636 for the enable_thinking
     half: when the chat template runs with enable_thinking=False the reasoning
     tags live in the prompt and the generated output carries none.
+
+    GLM is exempt from that half: its template may still open ``<think>`` with
+    the flag false, which is only known after render. The gate stays open and
+    the rendered prompt decides (see _glm_prompt_reasoning_open).
     """
     return reasoning_parser_class is not None and (
         chat_template_kwargs.get("enable_thinking") is not False
+        or issubclass(reasoning_parser_class, Glm47MoeParserReasoningAdapter)
+    )
+
+
+def _glm_prompt_reasoning_open(
+    prompt_token_ids: Sequence[int],
+    *,
+    tokenizer: TokenizerLike,
+    reasoning_parser_class: type[ReasoningParser] | None,
+    request_for_sampling: ChatCompletionRequest,
+) -> bool | None:
+    """The rendered GLM prompt's reasoning state, or None if unknown or not GLM.
+
+    vLLM maps both ``glm45`` and ``glm47`` to Glm47MoeParserReasoningAdapter.
+    """
+    if reasoning_parser_class is None or not issubclass(
+        reasoning_parser_class, Glm47MoeParserReasoningAdapter
+    ):
+        return None
+    return glm_prompt_reasoning_open(
+        prompt_token_ids,
+        tokenizer,
+        add_generation_prompt=request_for_sampling.add_generation_prompt,
+        continue_final_message=request_for_sampling.continue_final_message,
     )
 
 
@@ -583,6 +615,7 @@ def _prompt_leaves_reasoning_open(
     reasoning_parser_class: type[ReasoningParser] | None,
     chat_template_kwargs: dict[str, Any],
     model_config: ModelConfig | None,
+    request_for_sampling: ChatCompletionRequest,
 ) -> bool:
     """Whether the rendered prompt ends with an opened reasoning block.
 
@@ -591,6 +624,14 @@ def _prompt_leaves_reasoning_open(
     opening marker. A prompt without that marker, e.g. for models that emit
     their own opener, does not start in reasoning.
     """
+    glm_open = _glm_prompt_reasoning_open(
+        prompt_token_ids,
+        tokenizer=tokenizer,
+        reasoning_parser_class=reasoning_parser_class,
+        request_for_sampling=request_for_sampling,
+    )
+    if glm_open is not None:
+        return glm_open
     if not prompt_token_ids or not _reasoning_parser_enabled(
         reasoning_parser_class, chat_template_kwargs
     ):
@@ -818,6 +859,7 @@ async def preprocess_chat_request(
     structural_tag_schema: str = "auto",
     structural_tag_excludes_reasoning: bool = False,
 ) -> PreprocessResult:
+    """Render a validated chat request and select its engine guidance and parsers."""
     validated_request = _validate_chat_completion_request(request)
     assistant_guided_decoding = _build_assistant_guided_decoding(validated_request)
     client_structured_guidance = deepcopy(
@@ -902,6 +944,7 @@ async def preprocess_chat_request(
                 reasoning_parser_class=reasoning_parser_class,
                 chat_template_kwargs=chat_template_kwargs,
                 model_config=model_config,
+                request_for_sampling=request_for_sampling,
             )
         ),
     )
@@ -1202,26 +1245,27 @@ class StreamingPostProcessor:
         return parsed_tool_calls
 
     def _process_dynamo_json_fallback_tool_calls(
-        self, output: Any
+        self, output: Any, *, content: str | None, reasoning: str | None = None
     ) -> dict[str, Any] | None:
+        """Buffer answer text for tool JSON while forwarding requested reasoning."""
         chunks = self._dynamo_json_fallback_chunks.setdefault(output.index, [])
-        if output.text:
-            chunks.append(output.text)
+        if content:
+            chunks.append(content)
+        delta: dict[str, Any] = {}
+        if reasoning and not self._suppress_reasoning_output:
+            delta = {"role": "assistant", "reasoning_content": reasoning}
         if not output.finish_reason:
-            return None
+            return self._build_choice(output, delta) if delta else None
 
         text = "".join(self._dynamo_json_fallback_chunks.pop(output.index))
-        delta: dict[str, Any]
         try:
             tool_calls = self._decode_dynamo_json_fallback_tool_calls(text)
         except (TypeError, ValueError):
-            delta = {"role": "assistant", "content": text} if text else {}
+            if text:
+                delta.update(role="assistant", content=text)
             return self._build_choice(output, delta)
 
-        delta = {
-            "role": "assistant",
-            "tool_calls": tool_calls,
-        }
+        delta.update(role="assistant", tool_calls=tool_calls)
         return self._build_choice(output, delta)
 
     def _should_buffer_for_non_streaming_tool_parse(self) -> bool:
@@ -1524,11 +1568,19 @@ class StreamingPostProcessor:
     def process_output(self, output: Any) -> dict[str, Any] | None:
         # BEFORE any branch below: every path must feed the ledger, including
         # the ones that emit nothing for this chunk.
+        """Parse one engine chunk into a response choice, or wait for buffered output."""
         if self.reasoning_parser is not None:
             self._reasoning_token_ids.extend(output.token_ids or [])
-        if self._uses_dynamo_json_tool_call_fallback:
-            return self._process_dynamo_json_fallback_tool_calls(output)
-        if self._should_buffer_for_non_streaming_tool_parse():
+        if self._uses_dynamo_json_tool_call_fallback and (
+            self.reasoning_parser is None or self.reasoning_is_done
+        ):
+            return self._process_dynamo_json_fallback_tool_calls(
+                output, content=output.text
+            )
+        if (
+            not self._uses_dynamo_json_tool_call_fallback
+            and self._should_buffer_for_non_streaming_tool_parse()
+        ):
             return self._process_non_streaming_tool_output(output)
 
         # TODO: Emit the role only once per choice here instead of relying on
@@ -1633,7 +1685,11 @@ class StreamingPostProcessor:
                 current_token_ids = []
 
                 tool_start_markers = self._tool_start_markers()
-                if (
+                if self._uses_dynamo_json_tool_call_fallback:
+                    delta_message = self._compose_delta_message(
+                        saved_reasoning, post_content or None
+                    )
+                elif (
                     post_content
                     and self._should_parse_tools()
                     and self.tool_parser is not None
@@ -1703,6 +1759,7 @@ class StreamingPostProcessor:
                 and delta_message.content
                 and not delta_message.reasoning
                 and self._should_parse_tools()
+                and not self._uses_dynamo_json_tool_call_fallback
             ):
                 # Reasoning parser returned content (not reasoning).
                 # The model may have skipped reasoning and gone straight
@@ -1742,6 +1799,15 @@ class StreamingPostProcessor:
                     self._finish_engine_parser(self.tool_parser),
                 )
                 self._tool_parser_streaming_started = False
+
+        if self._uses_dynamo_json_tool_call_fallback:
+            self.previous_text = current_text
+            self.previous_token_ids = current_token_ids
+            return self._process_dynamo_json_fallback_tool_calls(
+                output,
+                content=delta_message.content if delta_message else None,
+                reasoning=delta_message.reasoning if delta_message else None,
+            )
 
         choice = None
         if delta_message is None:

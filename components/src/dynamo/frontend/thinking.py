@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,14 @@ THINKING_CONTROL_KEYS = (
     "thinking_mode",
     "reasoning_effort",
 )
+
+# Reasoning parsers whose generation mode follows the rendered prompt rather
+# than the request's thinking flags, as in the Rust preprocessor (#17660).
+GLM_REASONING_PARSERS = frozenset({"glm45", "glm47"})
+_GLM_THINK_START = "<think>"
+_GLM_THINK_END = "</think>"
+# Enough trailing prompt tokens to contain either reasoning marker.
+_GLM_PROMPT_TAIL_TOKENS = 16
 
 
 def runtime_default_thinking_mode(runtime_config: dict[str, Any] | None) -> str | None:
@@ -58,3 +67,33 @@ def apply_default_thinking_mode_to_template_kwargs(
     merged["enable_thinking"] = enabled
     merged["thinking_mode"] = default_thinking_mode
     return merged
+
+
+def glm_prompt_reasoning_open(
+    prompt_token_ids: Sequence[int],
+    tokenizer: Any,
+    *,
+    add_generation_prompt: bool,
+    continue_final_message: bool,
+) -> bool | None:
+    """Whether a rendered GLM generation prompt leaves reasoning open.
+
+    ``True`` when the prompt (trailing whitespace ignored) ends with ``<think>``,
+    ``False`` when it ends with ``</think>``, and ``None`` when the state is
+    unknown: no generation prompt, a continued final message, or neither marker.
+    Mirrors ``reasoning_closed_by_prompt`` for ``glm45``/``glm47`` in the Rust
+    preprocessor. A GLM template may ignore a false thinking flag and still open
+    ``<think>``, so a known state overrides the request flags; callers keep the
+    request-based behavior when this returns ``None``.
+    """
+    if not add_generation_prompt or continue_final_message or not prompt_token_ids:
+        return None
+    tail = tokenizer.decode(
+        list(prompt_token_ids[-_GLM_PROMPT_TAIL_TOKENS:]),
+        skip_special_tokens=False,
+    ).rstrip()
+    if tail.endswith(_GLM_THINK_START):
+        return True
+    if tail.endswith(_GLM_THINK_END):
+        return False
+    return None

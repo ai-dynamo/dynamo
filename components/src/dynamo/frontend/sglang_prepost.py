@@ -41,7 +41,11 @@ from .structural_tag_policy import (
     effective_tool_strict,
     should_attempt_structural_tag,
 )
-from .thinking import apply_default_thinking_mode_to_template_kwargs
+from .thinking import (
+    GLM_REASONING_PARSERS,
+    apply_default_thinking_mode_to_template_kwargs,
+    glm_prompt_reasoning_open,
+)
 from .utils import PreprocessError, legacy_guided_decoding, random_call_id
 
 logger = logging.getLogger(__name__)
@@ -882,6 +886,27 @@ def preprocess_chat_request(
         template_tools=template_tools,
         resolved_responses_template=resolved_responses_template,
     )
+    # A known GLM prompt state overrides the thinking flags, as in the Rust
+    # preprocessor; the request's template kwargs stay as rendered.
+    if _normalize_sglang_parser_name(reasoning_parser_name) in GLM_REASONING_PARSERS:
+        template_kwargs = (
+            request.get("chat_template_kwargs")
+            or request.get("chat_template_args")
+            or {}
+        )
+        glm_open = glm_prompt_reasoning_open(
+            prompt_token_ids,
+            tokenizer,
+            # The renderer always adds a generation prompt unless the template
+            # kwargs override it, and has no continue_final_message mode.
+            add_generation_prompt=template_kwargs.get("add_generation_prompt", True)
+            is not False,
+            continue_final_message=bool(
+                template_kwargs.get("continue_final_message", False)
+            ),
+        )
+        if glm_open is not None:
+            force_reasoning = glm_open
 
     response_format_guided_decoding = build_response_format_guided_decoding(request)
     tool_call_guided_decoding = build_tool_call_guided_decoding(
