@@ -343,7 +343,6 @@ fn last_content_event(events: &mut [ResponseOutputEvent]) -> Option<&mut Respons
     events.iter_mut().rev().find(|event| !event.is_score())
 }
 
-/// Record `count` more scores, folding into a trailing event of the same kind.
 fn push_score_event(events: &mut Vec<ResponseOutputEvent>, count: usize, hidden: bool) {
     match (events.last_mut(), hidden) {
         (Some(ResponseOutputEvent::Scores(total)), false)
