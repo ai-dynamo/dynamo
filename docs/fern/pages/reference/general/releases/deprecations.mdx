@@ -26,13 +26,37 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 | Old | New |
 | :---- | :---- |
 | Frontend and routers: `--ais-perf-config` and `DYN_AIS_PERF_CONFIG`; `--ais-backend`, `--ais-system`, `--ais-model-path`, `--ais-backend-version`, `--ais-tp-size`, `--ais-moe-tp-size`, `--ais-moe-ep-size`, `--ais-attention-dp-size`, and `--ais-nextn`, with their `DYN_AIS_*` variables and `--aic-*` spellings | `--ais-perf-model VALUE` or `DYN_AIS_PERF_MODEL` |
-| The same inputs on `dynamo.squeeze_evolve` | `ais_perf_model` in each `--tiers` entry (or `--ais-perf-model` with one tier) |
+| The same inputs on `dynamo.squeeze_evolve` | `ais_perf_model` in each `--tiers` entry. A typed `--ais-perf-model` is an error there, and `DYN_AIS_PERF_MODEL` is ignored |
 | Mocker: `--ais-perf-model` without a value (also spelled `--aic-perf-model`) and `--ais-perf-config`; `--ais-backend`, `--ais-system`, `--ais-backend-version`, `--ais-tp-size`, `--ais-moe-tp-size`, `--ais-moe-ep-size`, and `--ais-attention-dp-size`, with their `--aic-*` spellings | `--ais-perf-model VALUE` or `DYN_AIS_PERF_MODEL` |
-| Planner: the `roles` and `dataset_profiles` keys of `ais_perf_model` | `ais_perf_model` with one perf model config or a list of configs |
+| Planner, and `planner_config=` of the Python replay API: the `roles` and `dataset_profiles` keys of `ais_perf_model` | `ais_perf_model` with one perf model config or a list of configs |
 | Python replay API: `ais_perf_config=` | `router_ais_perf_model=` |
-| Simulation config: `router.prefill_load_model.type: ais` without `router.ais_perf_model` | `router.ais_perf_model: {use: engine}` or a perf model config |
+| Simulation config: `router.prefill_load_model.type: ais` written without `router.ais_perf_model` | `router.ais_perf_model: {use: engine}` or a perf model config |
 
-  > **Migrate:** Write the values of the old inputs into one perf model config per worker type, and pass it through the new input of the component. For the keys of a config, see [Unified perf-model input](https://github.com/ai-dynamo/aisimulate/blob/main/docs/perf-model/configuration.md#unified-perf-model-input) in the AISimulate documentation.
+Several config keys are not named like the flag they replace. The `--aic-*` spelling of a flag has the same key. The mocker has no variables for these flags.
+
+| Old flag | Variable (frontend and routers) | Config key |
+| :---- | :---- | :---- |
+| `--ais-backend` | `DYN_AIS_BACKEND` | `backend` |
+| `--ais-system` | `DYN_AIS_SYSTEM` | `system` |
+| `--ais-model-path` (frontend and routers) | `DYN_AIS_MODEL_PATH` | `model` |
+| `--ais-backend-version` | `DYN_AIS_BACKEND_VERSION` | `backend_version` |
+| `--ais-tp-size` | `DYN_AIS_TP_SIZE` | `tp` |
+| `--ais-moe-tp-size` | `DYN_AIS_MOE_TP_SIZE` | `moe_tp_size` |
+| `--ais-moe-ep-size` | `DYN_AIS_MOE_EP_SIZE` | `moe_ep_size` |
+| `--ais-attention-dp-size` | `DYN_AIS_ATTENTION_DP_SIZE` | `attention_dp` |
+| `--ais-nextn` (deprecated on the frontend and routers) | `DYN_AIS_NEXTN` | `nextn` |
+| `--ais-perf-config` | `DYN_AIS_PERF_CONFIG` | The whole config; its keys stay as they are. Relative paths inside a config file now start at the folder of that file; the old input started them at the working directory |
+
+The old inputs filled in values that the new input does not:
+
+| Component | Filled in by the old inputs | Write with the new input |
+| :---- | :---- | :---- |
+| Frontend and routers | The flat flags set `worker_type: aggregated` | `worker_type` in the config, or `--router-prefill-load-worker-type` (`DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE`) |
+| Mocker | `--ais-perf-model` without a value took `model` from `--model-path`, `backend` from `--engine-type`, and `system` as `h200_sxm` | `model`, `backend`, and `system` in the config |
+
+With one config that has no `worker_type` and without `--router-prefill-load-worker-type`, the frontend or a router stops when it reads its arguments, for example with `ais_perf_model: the config has no worker_type; write worker_type or set --router-prefill-load-worker-type`. The mocker still takes `worker_type` from its own mode when the config does not write one, and `--ais-nextn` still sets `nextn` there.
+
+  > **Migrate:** Write the values of the old inputs into one perf model config per worker type, under the config keys of the table above. Add the values that the old inputs filled in, and pass the config through the new input of the component. A key copied from a flag name, such as `tp_size` or `model_path`, is an error. For the other keys of a config, see [Unified perf-model input](https://github.com/ai-dynamo/aisimulate/blob/main/docs/perf-model/configuration.md#unified-perf-model-input) in the AISimulate documentation.
 
 <a id="v170"></a>
 

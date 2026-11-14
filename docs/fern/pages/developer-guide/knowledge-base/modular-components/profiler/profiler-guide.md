@@ -9,7 +9,7 @@ subtitle: Runs the AIConfigurator-driven profiling pipeline that turns a model, 
 
 The Dynamo Profiler analyzes model inference performance and generates optimized deployment configurations (DynamoGraphDeployments). Given a model, hardware, and SLA targets, it determines the best parallelization strategy, selects optimal prefill and decode engine configurations, and produces a ready-to-deploy DGD YAML.
 
-The profiler accepts a `DynamoGraphDeploymentRequestSpec` (DGDR) as input and uses [AIConfigurator (AIC)](../../../additional-resources/aiconfigurator-reference.md) compatibility APIs from the `aisimulate` wheel for performance simulation, candidate enumeration, and configuration picking. When the Planner is enabled, the profiler also emits the canonical AIS configuration under `ais_perf_model` and can generate optional engine interpolation curves used to bootstrap runtime autoscaling.
+The profiler accepts a `DynamoGraphDeploymentRequestSpec` (DGDR) as input and uses [AIConfigurator (AIC)](../../../additional-resources/aiconfigurator-reference.md) compatibility APIs from the `aisimulate` wheel for performance simulation, candidate enumeration, and configuration picking. When the Planner is enabled, the profiler can generate optional engine interpolation curves used to bootstrap runtime autoscaling; with `optimization_target: sla` it also emits the canonical AIS configuration under `ais_perf_model` (see [Planner Integration](#planner-integration)).
 
 ## Workflow
 
@@ -128,7 +128,7 @@ Triggered when there is **no planner and no target load**. Maximizes throughput 
 
 ## Planner Integration
 
-When the Planner is enabled, the profiler emits `ais_perf_model` as a list with one configuration per deployed worker type. It preserves model identity, backend version and parallel topology; new configurations use `auto` selection with `deny` fallback. An `ais_perf_model` value written in the request is kept as written. Mocker workers get one `--ais-perf-model` argument with the configuration as inline JSON. The `pre_deployment_sweeping_mode` field controls optional bootstrap data:
+When the Planner is enabled with `optimization_target: sla`, the profiler emits `ais_perf_model` as a list with one configuration per deployed worker type. It preserves model identity, backend version and parallel topology; new configurations use `auto` selection with `deny` fallback. An `ais_perf_model` value written in the request is kept as written. Mocker workers get one `--ais-perf-model` argument with the configuration as inline JSON. The `pre_deployment_sweeping_mode` field controls optional bootstrap data:
 
 ```yaml
 features:
@@ -156,15 +156,17 @@ When `features.mocker.enabled: true`, the profiler outputs a mocker DGD that sim
 
 Mocker requires pre-deployment sweeping to generate simulated performance profiles — `pre_deployment_sweeping_mode` cannot be `none` when mocker is enabled.
 
-Each generated mocker worker gets one `--ais-perf-model` argument. When `overrides.dgd` adds one of the arguments below to the `args` or `command` of any service or component, all generated mocker workers keep the deprecated arguments (`--ais-perf-model` without a value plus the flat `--ais-*` flags), and the profiler logs one warning that names the override arguments:
+Each generated mocker worker gets one `--ais-perf-model` argument. When `overrides.dgd` adds one of the arguments below to the `args` or `command` of any service or component, all generated mocker workers keep the deprecated arguments (`--ais-perf-model` without a value plus the flat `--ais-*` flags), and the profiler logs one warning that names them by the mocker's full option names (an `--aic-` spelling is reported under the `--ais-` name, and an abbreviation under the full name):
 
-- `--ais-perf-model` without a value, or any other `--ais-*` or `--aic-*` argument except `--ais-nextn`, `--ais-nextn-accept-rates`, `--ais-mtp-seed`, and their `--aic-` spellings
+- `--ais-perf-model` without a value, `--ais-backend`, `--ais-system`, `--ais-backend-version`, `--ais-tp-size`, `--ais-moe-tp-size`, `--ais-moe-ep-size`, or `--ais-attention-dp-size`, each also in its `--aic-` spelling, or `--ais-perf-config` (it has no `--aic-` spelling); an abbreviation the mocker accepts counts as the full name
 - `--extra-engine-args`
 - `--model-path`
 
-An override that gives `--ais-perf-model` a value in the `args` of any service or component does not have this effect, whatever else it adds; every generated worker then gets the one argument, and the value the override gives a worker replaces the generated one. In a `spec.components` override, add `$patch: {args: append}` to the container to keep the other generated arguments; without it, the override's `args` replace the whole generated list (see [Generated DGD overrides](../../../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#generated-dgd-overrides)).
+The profiler reads each argument list with the mocker's own argument parser. An argument that is not a mocker option is skipped, also when its name starts with `--ais-` or `--aic-`. A list that this parser rejects (an ambiguous abbreviation such as `--ais-next`, a flag without its value, `--aic-perf-model` with a value, or `--ais-perf-model` both with and without a value) is not read; a worker that gets such a list does not start. `--planner-profile-data` is not one of the arguments above, so the workers keep the generated `--ais-perf-model`. A mocker has one timing provider: a worker that gets `--planner-profile-data` next to the generated argument stops with `--ais-perf-model cannot be combined with --planner-profile-data`.
 
-Write the value in `args`, not in `command`. A generated worker's `args` come after its `command`, so the worker would use the generated value; the profiler fails with an error instead when an override gives `--ais-perf-model` a value in a `command` list.
+An override that gives `--ais-perf-model` a value in the `args` of any service or component does not have this effect: every generated worker then gets the one argument, and the value the override gives a worker replaces the generated one. The profiler does not check the other arguments of such an override. A worker that gets `--ais-perf-model` with a value together with a deprecated AIS argument from the list above does not start (`--ais-perf-model cannot be combined with --ais-tp-size`), so remove those arguments from the override. In a `spec.components` override, add `$patch: {args: append}` to the container to keep the other generated arguments; without it, the override's `args` replace the whole generated list (see [Generated DGD overrides](../../../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#generated-dgd-overrides)).
+
+Write the value in `args`, not in `command`. A generated worker's `args` come after its `command`, so the worker would use the generated value; the profiler fails with an error instead when an override gives `--ais-perf-model` a value in a `command` list. A token that starts with `-` and is not an option, such as `-1`, counts as the value, as it does for the mocker.
 
 An override that changes the `image` of the Planner or of a generated mocker worker must name an image of v1.8 or newer: older images do not read the list form of `ais_perf_model` or `--ais-perf-model` with a value.
 

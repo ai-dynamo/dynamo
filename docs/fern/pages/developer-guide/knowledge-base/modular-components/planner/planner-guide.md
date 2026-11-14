@@ -121,8 +121,11 @@ The retired `aic_perf_model` field and `hf_id` / parallel-pick shape are rejecte
 
 > [!WARNING]
 > **Deprecated.** Use a list of configs. Removed in v1.9. The `roles` and
-> `dataset_profiles` keys of `ais_perf_model` still work and print one warning. A
-> deprecated key together with other keys of `ais_perf_model` is an error.
+> `dataset_profiles` keys of `ais_perf_model` still work and print one warning.
+> `dynamo.replay.run_trace_replay` and `run_synthetic_trace_replay` print it too for a
+> `planner_config` written this way. `roles` and `dataset_profiles` can be written
+> together when they name different worker types. Either of them next to any other key
+> of `ais_perf_model` is an error.
 
 At startup, the planner always tries to fetch self-benchmark results from the `get_perf_metrics` Dynamo endpoint. If unavailable, it falls back to rapid-mode AIC interpolation data or profiler-generated data (npz or JSON) at `profile_results_dir` when configured. These sources are converted to ForwardPassMetrics and used to tune or bootstrap the perf model. With `pre_deployment_sweeping_mode: none`, the planner can still start; throughput decisions report `model_not_ready` until native AIS estimates are available or enough live FPMs have warmed the regression fallback.
 
@@ -156,6 +159,15 @@ spec:
                 max_observations: 64
               min_observations: 5
 ```
+
+> [!NOTE]
+> With `optimization_target: sla`, the profiler compares `model`, `system`, `backend`,
+> `tp`, and the other parallelism keys of each config with the deployment it selects. A
+> key you leave out counts with its default, so no `tp` means `tp: 1`. A difference fails
+> the request, for example
+> `ais_perf_model entry for prefill: tp=1 conflicts with selected deployment tp=2`.
+> Leave `ais_perf_model` unset to let the profiler write it. For the full rule, see
+> [`ais_perf_model` in the DynamoGraphDeploymentRequest reference](../../../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#performance-model-and-pre-deployment-sweeping).
 
 ### Throughput-Based Scaling Settings
 

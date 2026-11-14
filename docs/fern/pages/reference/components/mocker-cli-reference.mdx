@@ -187,7 +187,9 @@ MTP (`--ais-nextn`).
 ## Performance modeling
 
 <ParamField path="--planner-profile-data" type="path" default="null">
-  Path to either a mocker-format `.npz` file or a profiler results directory.
+  Path to either a mocker-format `.npz` file or a profiler results directory. Cannot be combined
+  with `--ais-perf-model VALUE` or `DYN_AIS_PERF_MODEL`; see
+  [AIS performance model](#ais-performance-model).
 </ParamField>
 
 <ParamField path="--reasoning" type="JSON string" default="null">
@@ -233,6 +235,14 @@ For the timing-model design, see [Mocker Engine Architecture](../../developer-gu
 
   `DYN_AIS_PERF_MODEL` holds the same value. When the flag is not given, the variable turns on AIS
   timing for every mocker that has it in its environment.
+
+  The value cannot be combined with `--planner-profile-data`, because a mocker has one timing
+  provider. The mocker exits when it reads its arguments, before it looks up the model:
+  `--ais-perf-model cannot be combined with --planner-profile-data`, or
+  `DYN_AIS_PERF_MODEL cannot be combined with --planner-profile-data` when the value comes from
+  the variable. To keep profile data timing on a mocker whose environment sets the variable, set
+  `DYN_AIS_PERF_MODEL` to an empty value for that mocker; an empty value counts as not set. With
+  `--extra-engine-args` the profile data is not used for timing, so the combination is accepted.
 </ParamField>
 
 The inputs below are deprecated. They still work and print one warning that names the inputs in
@@ -461,7 +471,7 @@ for the shared fields.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DYN_MOCKER_KV_CACHE_TRACE` | off | Set to `1` or `true` to log structured native KV-cache allocation and eviction traces. |
-| `DYN_AIS_PERF_MODEL` | unset | Value of [`--ais-perf-model`](#ais-performance-model) when the flag is not given. |
+| `DYN_AIS_PERF_MODEL` | unset | Value of [`--ais-perf-model`](#ais-performance-model) when the flag is not given. An empty value counts as not set. |
 
 ## Related pages
 

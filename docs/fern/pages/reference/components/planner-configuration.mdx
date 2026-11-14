@@ -152,12 +152,21 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
   environment variable for it, and a string is an error:
   `ais_perf_model must be a perf model config (a mapping) or a list of configs, not a string; a file path is not read here`.
 
-  The Planner keeps the value as written. It checks the names of the keys of a config
-  when the config is loaded, and an unknown key is an error, for example
-  `ais_perf_model: unknown keys: tp_size`. It reads the files a config names and checks
-  the values when it first needs the model; the keys inside a file that `from` names are
-  checked then too. Relative paths start at the
-  working directory of the Planner. Each model is constructed through
+  The Planner keeps the value as written. When the Planner config is loaded, the names
+  of the keys of every config are checked, and an unknown key is an error, for example
+  `ais_perf_model: unknown keys: tp_size`. A config without `from` that the mode uses is
+  checked in full at the same time: a wrong value, an unknown key inside
+  `estimator_config`, or a `systems_paths` directory or state snapshot that does not
+  exist is an error, for example
+  `ais_perf_model entry for prefill: invalid engine config: invalid forward pass perf model config: tp, pp, and attention_dp must be positive`.
+  A directory in `systems_paths` and a state snapshot under `estimator_config` must
+  therefore exist where the config is loaded. A config with `from` is read and checked
+  when the Planner first needs the model; the keys inside the file that `from` names are
+  checked then too. When a path exists only in the Planner pod, write those keys in a
+  template file and name it with `from`. Relative paths written in the Planner config,
+  the path that `from` names among them, start at the working directory of the process
+  that loads or reads the config. Relative paths inside a template file start at the
+  folder of that file. Each model is constructed through
   `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
   interpolation sweep. The retired `aic_perf_model` and `hf_id` / pick shape
   are rejected.
@@ -165,7 +174,8 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
   The `roles` and `dataset_profiles` keys are the deprecated form of the value. They
   still work, and the Planner prints one warning that names the keys in use, for example
   `ais_perf_model.roles is deprecated and will be removed in v1.9; use ais_perf_model with one perf model config or a list of configs (one per worker_type).`
-  A deprecated key together with other keys is an error, for example
+  `roles` and `dataset_profiles` can be written together when they name different worker
+  types. Either of them next to any other key is an error, for example
   `ais_perf_model mixes the old form (roles, dataset_profiles) with other keys (model); write one form`.
 </ParamField>
 
@@ -1126,7 +1136,7 @@ The Planner enforces these cross-field rules at startup and rejects a config tha
 - `global_planner_namespace` is required when `environment` is `global-planner`.
 - Under `optimization_target: load`, prefill modes require `prefill_scale_up_queue_tokens` > `prefill_scale_down_queue_tokens`, and decode modes require `decode_scale_up_kv_rate` > `decode_scale_down_kv_rate`.
 - At least one scaling mode must be enabled. Under any `optimization_target` other than `sla`, the Planner forces load scaling on and throughput scaling off and ignores `ttft_ms` / `itl_ms`. The only exception is retune-only mode: `retune` set with both `enable_load_scaling` and `enable_throughput_scaling` explicitly `false` (see [Retune](#retune-experimental)).
-- When `ais_perf_model` is set, it must have an entry for every worker type of the mode: `prefill` and `decode` for `disagg`, the matching worker type for `prefill`/`decode`, or `aggregated` for `agg`. One config without `worker_type` covers every worker type. The retired `aic_perf_model` input is rejected. Unknown keys written in the config are rejected when the config is loaded; wrong values, missing files and unknown keys inside a file that `from` names are rejected when the Planner first uses the config (at startup for the deprecated `roles` form).
+- When `ais_perf_model` is set, it must have an entry for every worker type of the mode: `prefill` and `decode` for `disagg`, the matching worker type for `prefill`/`decode`, or `aggregated` for `agg`. One config without `worker_type` covers every worker type. The retired `aic_perf_model` input is rejected. Unknown keys written in the config are rejected when the config is loaded. For a config without `from` that the mode uses, wrong values and a missing `systems_paths` directory or state snapshot are rejected then too, as for the deprecated `roles` form. For a config with `from`, the file it names is read, and its values and keys are checked, when the Planner first uses the config.
 - `scheduling.scale_interval_seconds` must evenly divide `load_adjustment_interval_seconds` and, when throughput scaling is enabled, `throughput_adjustment_interval_seconds`.
 - When both scaling modes are enabled, `load_adjustment_interval_seconds` must be shorter than `throughput_adjustment_interval_seconds`.
 - `retune` has its own cross-field rules, listed with its fields in [Retune](#retune-experimental). A live Planner rejects a `retune` with executor `local`; executor `dgdr` adds the [configuration rules](../../kubernetes/auto-deployment/planner-live-retune.md#deployment-rules) of live retune.

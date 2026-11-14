@@ -643,6 +643,8 @@ The Python SDK accepts one config without `from` as
 > variables, and the `--aic-*` spellings of the flat flags. They still work and print one
 > warning that names the inputs in use, for example
 > `--ais-backend, --ais-system and --ais-model-path are deprecated and will be removed in v1.9; use --ais-perf-model.`
+> A flat flag is named with the spelling that was typed, `--ais-` or `--aic-`, and a value
+> from the environment is named by its variable.
 > A deprecated input together with `--ais-perf-model` or `DYN_AIS_PERF_MODEL` is an error,
 > for example `--ais-perf-model cannot be combined with --ais-backend`.
 

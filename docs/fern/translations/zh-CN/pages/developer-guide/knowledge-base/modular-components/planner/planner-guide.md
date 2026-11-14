@@ -94,7 +94,7 @@ SLA 模式通过唯一构造接口 `aisimulate_core.sdk.RustForwardPassPerfModel
 通过 `ais_perf_model` 配置模型身份和 estimator 参数。旧 `aic_perf_model` 字段及 `hf_id` / parallel-pick 格式不再支持，使用时会报错。
 
 > [!WARNING]
-> **已弃用。** 请改用配置列表。将在 v1.9 中移除。`ais_perf_model` 的 `roles` 和 `dataset_profiles` 键仍然可用，并会打印一条警告。已弃用的键与 `ais_perf_model` 的其他键同时出现会报错。
+> **已弃用。** 请改用配置列表。将在 v1.9 中移除。`ais_perf_model` 的 `roles` 和 `dataset_profiles` 键仍然可用，并会打印一条警告。`dynamo.replay.run_trace_replay` 和 `run_synthetic_trace_replay` 在 `planner_config` 使用这种写法时也会打印这条警告。`roles` 和 `dataset_profiles` 可以同时使用，只要各自对应不同的 worker 类型；二者之一与 `ais_perf_model` 的任何其他键同时出现会报错。
 
 启动时，planner 总会先尝试从 `get_perf_metrics` Dynamo 端点获取自基准测试结果。如果不可用，则在配置存在时回退到 rapid 模式 AIC interpolation 数据或 `profile_results_dir` 中 profiler 生成的数据（npz 或 JSON）。这些数据都会转换为 ForwardPassMetrics，并用于调优或启动性能模型。当 `pre_deployment_sweeping_mode: none` 时，planner 仍然可以启动；吞吐量决策会在原生 AISimulate 可用或在线 FPM 足够之前报告 `model_not_ready`。
 
@@ -128,6 +128,9 @@ spec:
                 max_observations: 64
               min_observations: 5
 ```
+
+> [!NOTE]
+> 当 `optimization_target: sla` 时，profiler 会把每份配置的 `model`、`system`、`backend`、`tp` 以及其他并行度相关的键与它选定的部署进行比较。没有写出的键按默认值参与比较，因此不写 `tp` 等同于 `tp: 1`。只要有差异，请求就会失败，例如 `ais_perf_model entry for prefill: tp=1 conflicts with selected deployment tp=2`。不设置 `ais_perf_model` 时，由 profiler 写入该字段。完整规则见 [DynamoGraphDeploymentRequest 参考中的 `ais_perf_model`](../../../../../../../pages/reference/kubernetes-api/dynamo-graph-deployment-request.mdx#performance-model-and-pre-deployment-sweeping)。
 
 ### 基于吞吐量的扩缩容设置
 

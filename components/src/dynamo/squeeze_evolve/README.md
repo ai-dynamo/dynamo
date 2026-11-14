@@ -52,7 +52,7 @@ python -m dynamo.squeeze_evolve \
 python -m dynamo.frontend --http-port 8000 --router-mode round-robin
 ```
 
-`--tiers` is a JSON array, cheapest first; each entry needs `endpoint` and `model`, plus optional `temperature` / `top_p` / `max_tokens` / `block_size` / `tokenizer` / `trust_remote_code` / `ais_perf_model` (needed in every entry with `--router-prefill-load-model ais`; with one tier `--ais-perf-model` also works). For N tiers, pass N-1 `--confidence-percentiles`. The model card served to clients defaults to the most expensive tier's model; pass `--model-path` to override. Run `python -m dynamo.squeeze_evolve --help` for the other knobs.
+`--tiers` is a JSON array, cheapest first; each entry needs `endpoint` and `model`, plus optional `temperature` / `top_p` / `max_tokens` / `block_size` / `tokenizer` / `trust_remote_code` / `ais_perf_model` (needed in every entry with `--router-prefill-load-model ais`; `--ais-perf-model` and `DYN_AIS_PERF_MODEL` are not read here, and a typed `--ais-perf-model` is an error). For N tiers, pass N-1 `--confidence-percentiles`. The model card served to clients defaults to the most expensive tier's model; pass `--model-path` to override. Run `python -m dynamo.squeeze_evolve --help` for the other knobs.
 
 Then call `--model-name` like any chat model:
 

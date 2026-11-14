@@ -573,13 +573,41 @@ service.
   in the AISimulate documentation. One config without `worker_type` covers every worker
   type. A string is an error; a file path is not read here.
 
+  The profiler job checks a config without `from` that the Planner mode uses in full
+  when it reads the request. A directory in `systems_paths` or a state snapshot that such
+  a config names must therefore exist in the profiler job; a missing one is an error, for
+  example
+  `ais_perf_model entry for decode: forward-pass systems path is not a directory: /data/systems`.
+  When a path exists only in the Planner pod, write those keys in a template file and
+  name it with `from`.
+
+  With `optimization_target: sla`, the profiler writes the field when it is unset and
+  compares a value you write with the deployment it selects. With any other
+  `optimization_target`, it does neither: an unset field stays unset, and a value you
+  write is passed on as written.
+
   When the field is unset, the profiler writes a list with one config per worker type of
-  the Planner mode into the generated Planner config. A value you write is kept as
-  written. The profiler compares `model`, `system`, `backend`, `worker_type`, `tp`, `pp`,
-  `attention_dp`, `moe_tp_size`, and `moe_ep_size` of each config with the deployment it
-  selects; for a config with `from` it compares only the keys the config writes itself.
-  A difference is an error, for example
+  the Planner mode into the generated Planner config. Each generated config holds
+  `model`, `system`, `backend`, `backend_version`, `worker_type`, `tp`, and
+  `attention_dp`, plus `pp` when it is not 1 and `moe_tp_size` and `moe_ep_size` for an
+  MoE deployment. The profiler writes the list only for a vLLM, SGLang, or TensorRT-LLM
+  backend for which AISimulate has performance data on the selected system. Otherwise
+  the field stays unset and the Planner uses FPM regression.
+
+  A value you write is kept as written. The profiler compares `model`, `system`,
+  `backend`, `worker_type`, `tp`, `pp`, `attention_dp`, `moe_tp_size`, and `moe_ep_size`
+  of each config with the deployment it selects. A key that a config without `from`
+  leaves out counts with its default, so no `tp` means `tp: 1`. A difference is an error,
+  for example
   `ais_perf_model entry for decode: tp=4 conflicts with selected deployment tp=2`.
+
+  For a config with `from`, the profiler compares only the keys the config writes itself.
+  It does not read the file, dataset, or state snapshot that `from` names, so the fields
+  that come from there are not compared, and the Planner does not compare them with the
+  deployment either. The profiler logs one warning that names these fields for each
+  worker type, for example
+  `ais_perf_model: the profiler does not read the source a config takes keys from, so it did not compare these fields with the selected deployment: decode: model, system, backend, tp, pp, attention_dp, moe_tp_size and moe_ep_size. The Planner takes them from the source without a comparison.`
+  Make sure that the source describes the selected deployment.
 
   Constructs each model through
   `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
@@ -589,7 +617,8 @@ service.
   The `roles` and `dataset_profiles` keys are the deprecated form of the value. They
   still work and print one warning, for example
   `ais_perf_model.roles is deprecated and will be removed in v1.9; use ais_perf_model with one perf model config or a list of configs (one per worker_type).`
-  A deprecated key together with other keys is an error.
+  `roles` and `dataset_profiles` can be written together when they name different worker
+  types. Either of them next to any other key is an error.
 </ParamField>
 
 <Indent>
