@@ -3202,12 +3202,16 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 .unwrap_or_else(|| status_message.to_string());
             // Keep the typed error when it carries a public message, so the
             // unary response renders it. Other messages stay diagnostic.
-            let keep_semantic = overloaded
-                || semantic.is_some_and(|error| error.public_message().is_some());
+            let keep_semantic =
+                overloaded || semantic.is_some_and(|error| error.public_message().is_some());
             return Some(BackendErrorInfo {
                 message,
                 status: code,
-                semantic: if keep_semantic { semantic.cloned() } else { None },
+                semantic: if keep_semantic {
+                    semantic.cloned()
+                } else {
+                    None
+                },
                 sanitized: overloaded.then_some(SanitizedError::Overloaded),
                 metric_error_type,
             });
