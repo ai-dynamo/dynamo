@@ -26,6 +26,32 @@ Preferred routing taints are optional candidate metadata. A filter, scorer, or p
 
 Declare `plugins::worker_selection::experimental::resident_blocks::RESIDENT_BLOCKS` together with `WorkerInputs::CACHE`, and import that module's `ResidentBlocks` trait to read `resident_blocks()` from a candidate, or `ResidentBlocksByRow` to read `input.resident_blocks(row)` in a picker. It returns how many blocks the router's indexer holds for that worker rank, including cached blocks no running request uses, as of the last event the indexer applied. Without the declaration, with a remote indexer, or for a rank the indexer has held no blocks for or has removed, it returns `None`; a cleared rank returns `0`. The `experimental` module has no compatibility guarantee.
 
+### Read Experimental Decode Progress
+
+A picker declaring `DECODE_PROGRESS` can query a candidate only when it needs that
+signal. Collection starts from the declaration; no output-block tracking flag or
+environment variable is required. Import the extension alongside the plugin API:
+
+```rust
+use dynamo_kv_router::plugins::prelude::WorkerInputView;
+use dynamo_kv_router::plugins::worker_selection::experimental::decode_progress::{
+    DECODE_PROGRESS, DecodeProgressByRow,
+};
+use std::time::Duration;
+
+// Return DECODE_PROGRESS from the picker's required_worker_inputs().
+fn remaining_budget(input: WorkerInputView<'_>, row: usize, max_age: Duration) -> Option<usize> {
+    let progress = input.decode_progress(row)?;
+    (progress.observed_age()? <= max_age).then_some(progress.remaining_token_budget())
+}
+```
+
+`None` requires a fallback. This frontend-local signal covers supported aggregated,
+single-choice, explicit-limit, ignore-EOS streams only, and is unavailable while
+any active request on the rank lacks valid observations. A remaining budget is a
+token bound, not a time estimate. See the [API guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx#experimental-decode-progress)
+for lifetime, collection cost, and missing-data behavior.
+
 ## Pick a Starting Point
 
 | Crate | Use it for |

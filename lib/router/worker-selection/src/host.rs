@@ -21,3 +21,10 @@ pub use crate::trace::{SelectionTrace, SelectionTraceSpec};
 
 // What the frontend host (lib/llm) names beyond the lists above.
 pub use crate::conditional_disagg::{ConditionalDisaggPolicy, make_conditional_disagg_policy};
+
+/// A live lookup lent by the scheduler for one selection. Pickers reach it through
+/// `experimental::decode_progress`; the returned summary belongs to this frontend.
+pub type DecodeProgressSource<'a> = dyn Fn(
+        dynamo_router_protocol::worker::WorkerWithDpRank,
+    ) -> Option<dynamo_slot_tracker::host::DecodeProgress>
+    + 'a;

@@ -27,6 +27,7 @@ use dynamo_kv_hashing::routing::{
     BlockHashOptions, compute_block_hash_for_seq, compute_next_seq_hash,
 };
 use dynamo_kv_indexer::host::{ApproximateAcquireMode, ApproximateLruBlock, RoutingDecisionHashes};
+use dynamo_kv_router::plugins::worker_selection::experimental::decode_progress::DECODE_PROGRESS;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     error::DynamoError,
@@ -36,6 +37,39 @@ use dynamo_runtime::{
 };
 use dynamo_scheduler::host::{BookingHandle, RequestLifecycle};
 use dynamo_session_affinity::host::AffinityLease;
+use dynamo_slot_tracker::host::DecodeProgressUpdate;
+
+fn decode_progress_output_limit(request: &PreprocessedRequest, phase: RequestPhase) -> Option<u32> {
+    let limit = request
+        .stop_conditions
+        .max_tokens
+        .filter(|limit| *limit > 0)?;
+    (phase == RequestPhase::Aggregated
+        && request.sampling_options.n.unwrap_or(1) == 1
+        && request.sampling_options.best_of.unwrap_or(1) == 1
+        && request.stop_conditions.ignore_eos == Some(true)
+        && request
+            .stop_conditions
+            .stop
+            .as_ref()
+            .is_none_or(Vec::is_empty)
+        && request
+            .stop_conditions
+            .stop_token_ids
+            .as_ref()
+            .is_none_or(Vec::is_empty)
+        && request
+            .stop_conditions
+            .stop_token_ids_visible
+            .as_ref()
+            .is_none_or(Vec::is_empty)
+        && request
+            .stop_conditions
+            .stop_token_ids_hidden
+            .as_ref()
+            .is_none_or(Vec::is_empty))
+    .then_some(limit)
+}
 
 #[derive(Clone)]
 struct OutputHashBranch {
@@ -391,6 +425,7 @@ impl RequestObservability {
 struct OutputBlockUpdate {
     num_blocks: usize,
     decay_fraction: Option<f64>,
+    progress: Option<DecodeProgressUpdate>,
 }
 
 /// Tracks when streamed output grows into a new scheduler accounting block.
@@ -400,6 +435,9 @@ struct OutputBlockTracker {
     isl_tokens: usize,
     block_size: usize,
     expected_output_tokens: Option<u32>,
+    progress_limit: Option<u32>,
+    progress_last: usize,
+    progress_invalid: bool,
 }
 
 /// Owns the shared attempt-scoped scheduler and approximate-LRU lifecycle after
@@ -557,28 +595,63 @@ impl OutputBlockTracker {
             isl_tokens,
             block_size,
             expected_output_tokens,
+            progress_limit: None,
+            progress_last: 0,
+            progress_invalid: false,
+        }
+    }
+
+    fn enable_decode_progress(&mut self, output_limit: u32) {
+        self.progress_limit = Some(output_limit);
+    }
+
+    fn invalidate_decode_progress(&mut self) {
+        if self.progress_limit.take().is_some() {
+            self.progress_invalid = true;
         }
     }
 
     fn observe(&mut self, cumulative_osl: usize) -> Option<OutputBlockUpdate> {
-        if !self.track_output_blocks {
+        if !self.track_output_blocks && self.progress_limit.is_none() && !self.progress_invalid {
             return None;
         }
-
-        let new_total_blocks = (self.isl_tokens + cumulative_osl).div_ceil(self.block_size);
-        if new_total_blocks <= self.current_total_blocks {
+        let progress = if std::mem::take(&mut self.progress_invalid) {
+            Some(DecodeProgressUpdate::unavailable())
+        } else if let Some(limit) = self.progress_limit {
+            if cumulative_osl < self.progress_last {
+                self.progress_limit = None;
+                Some(DecodeProgressUpdate::unavailable())
+            } else if cumulative_osl > self.progress_last {
+                self.progress_last = cumulative_osl;
+                Some(DecodeProgressUpdate::observed(limit, cumulative_osl))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let num_blocks = if self.track_output_blocks {
+            let new_total_blocks = (self.isl_tokens + cumulative_osl).div_ceil(self.block_size);
+            let num_blocks = new_total_blocks.saturating_sub(self.current_total_blocks);
+            self.current_total_blocks = self.current_total_blocks.max(new_total_blocks);
+            num_blocks
+        } else {
+            0
+        };
+        if num_blocks == 0 && progress.is_none() {
             return None;
         }
-
-        let num_blocks = new_total_blocks - self.current_total_blocks;
-        // Advance before returning so a failed scheduler update preserves existing no-retry behavior.
-        self.current_total_blocks = new_total_blocks;
-        let decay_fraction = self
-            .expected_output_tokens
-            .map(|expected| (1.0 - cumulative_osl as f64 / expected.max(1) as f64).max(0.0));
+        // Raw progress supplements the existing path without changing block/OSL-hint semantics.
+        let decay_fraction = (num_blocks > 0)
+            .then(|| {
+                self.expected_output_tokens
+                    .map(|expected| (1.0 - cumulative_osl as f64 / expected.max(1) as f64).max(0.0))
+            })
+            .flatten();
         Some(OutputBlockUpdate {
             num_blocks,
             decay_fraction,
+            progress,
         })
     }
 }
@@ -641,15 +714,22 @@ impl RequestGuard {
         let output_hashes = approximate_lru
             .as_ref()
             .map(|_| CanonicalOutputTracker::new(request, block_size as u32, chooser.is_eagle()));
+        let mut output_blocks = OutputBlockTracker::new(
+            track_output_blocks,
+            isl_tokens,
+            block_size,
+            expected_output_tokens,
+        );
+        if attempt_id.is_some()
+            && chooser.required_worker_inputs().contains(DECODE_PROGRESS)
+            && let Some(limit) = decode_progress_output_limit(request, phase)
+        {
+            output_blocks.enable_decode_progress(limit);
+        }
         Self {
             cleanup: RequestCleanup::Kv(cleanup),
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
-            output_blocks: OutputBlockTracker::new(
-                track_output_blocks,
-                isl_tokens,
-                block_size,
-                expected_output_tokens,
-            ),
+            output_blocks,
             approximate_lru,
             output_hashes,
             record_itl_at_completion: false,
@@ -776,6 +856,11 @@ impl RequestGuard {
         self.materialize_output_hashes(item);
         self.observability.observe_tokens(new_tokens);
         self.capture_kv_worker_hit(item);
+        if item.data.as_ref().is_some_and(|data| {
+            data.index.is_some_and(|index| index != 0) || data.finish_reason.is_some()
+        }) {
+            self.output_blocks.invalidate_decode_progress();
+        }
         self.observe_output_blocks().await;
     }
 
@@ -871,20 +956,24 @@ impl RequestGuard {
             && lifecycle.is_active()
             && let Err(error) = cleanup
                 .chooser
-                .add_output_blocks_if_booking(
+                .update_output_if_booking(
                     lifecycle.booking(),
                     update.num_blocks,
                     update.decay_fraction,
+                    update.progress,
                 )
                 .await
         {
             tracing::warn!(
                 request_id = %cleanup.context_id,
                 %error,
-                "Failed to add output blocks"
+                "Failed to update tracked output"
             );
         }
-        self.observability.observe_output_block_boundary();
+
+        if update.num_blocks > 0 {
+            self.observability.observe_output_block_boundary();
+        }
     }
 
     /// The worker finished the response: complete the classifier lifecycle,
@@ -1006,6 +1095,7 @@ mod output_block_tests {
         let first = tracker.observe(1).unwrap();
         assert_eq!(first.num_blocks, 1);
         assert_eq!(first.decay_fraction, None);
+        assert!(first.progress.is_none());
         assert!(tracker.observe(16).is_none());
         assert_eq!(tracker.observe(33).unwrap().num_blocks, 2);
         assert!(tracker.observe(33).is_none());
@@ -1268,5 +1358,83 @@ mod prefill_start_tests {
         let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
         RequestObservability::new(Some(tracker.clone()), metrics).record_prefill_start(&request);
         assert_eq!(tracker.prefill_wait_time_ms(), recorded_by_prefill);
+    }
+}
+
+#[cfg(test)]
+mod native_decode_progress_producer_tests {
+    use super::*;
+
+    #[test]
+    fn native_decode_progress_metadata_does_not_allocate_a_scheduler_block() {
+        let mut tracker = OutputBlockTracker::new(true, 15, 16, None);
+        tracker.enable_decode_progress(128);
+        let update = tracker.observe(1).unwrap();
+        assert_eq!(update.num_blocks, 0);
+        assert_eq!(update.decay_fraction, None);
+        assert!(update.progress.is_some());
+        assert!(tracker.observe(1).is_none());
+        assert_eq!(tracker.observe(2).unwrap().num_blocks, 1);
+    }
+
+    #[test]
+    fn native_decode_progress_invalidates_without_fabricating_output() {
+        let mut tracker = OutputBlockTracker::new(true, 15, 16, None);
+        tracker.enable_decode_progress(128);
+        tracker.observe(1).unwrap();
+        tracker.invalidate_decode_progress();
+        let update = tracker.observe(1).unwrap();
+        assert_eq!(update.num_blocks, 0);
+        assert!(update.progress.is_some());
+        assert!(tracker.observe(1).is_none());
+    }
+
+    #[test]
+    fn native_decode_progress_is_independent_of_output_block_tracking() {
+        let mut tracker = OutputBlockTracker::new(false, 15, 16, Some(64));
+        tracker.enable_decode_progress(128);
+        for cumulative_osl in [8, 32] {
+            let update = tracker.observe(cumulative_osl).unwrap();
+            assert_eq!(update.num_blocks, 0);
+            assert_eq!(update.decay_fraction, None);
+            assert!(update.progress.is_some());
+            assert_eq!(tracker.current_total_blocks, 1);
+        }
+        assert!(tracker.observe(32).is_none());
+    }
+
+    #[test]
+    fn native_decode_progress_support_preserves_budget_and_stop_semantics() {
+        let mut request = PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+        request.stop_conditions.max_tokens = Some(128);
+        request.stop_conditions.ignore_eos = Some(true);
+        let phase = RequestPhase::Aggregated;
+        assert_eq!(decode_progress_output_limit(&request, phase), Some(128));
+        for unsupported_phase in [RequestPhase::Prefill, RequestPhase::Decode] {
+            assert_eq!(
+                decode_progress_output_limit(&request, unsupported_phase),
+                None
+            );
+        }
+        request.stop_conditions.max_tokens = None;
+        assert_eq!(decode_progress_output_limit(&request, phase), None);
+        request.stop_conditions.max_tokens = Some(0);
+        assert_eq!(decode_progress_output_limit(&request, phase), None);
+        request.stop_conditions.max_tokens = Some(128);
+        request.stop_conditions.ignore_eos = Some(false);
+        assert_eq!(decode_progress_output_limit(&request, phase), None);
+        request.stop_conditions.ignore_eos = Some(true);
+        request.sampling_options.n = Some(2);
+        assert_eq!(decode_progress_output_limit(&request, phase), None);
+        request.sampling_options.n = Some(1);
+        request.stop_conditions.stop = Some(vec!["stop".to_string()]);
+        assert_eq!(decode_progress_output_limit(&request, phase), None);
     }
 }

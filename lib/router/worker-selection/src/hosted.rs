@@ -271,6 +271,14 @@ mod tests {
                 policy(Vec::new(), Vec::new(), declaring(WorkerInputs::LOAD)),
             ),
             (
+                "DECODE_PROGRESS",
+                policy(
+                    Vec::new(),
+                    Vec::new(),
+                    declaring(WorkerInputs::DECODE_PROGRESS),
+                ),
+            ),
+            (
                 "PREFERRED_TAINT",
                 policy(
                     Vec::new(),

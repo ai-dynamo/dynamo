@@ -9,6 +9,7 @@
 
 pub use crate::booking::SchedulerBookingDescriptor;
 pub use crate::busy::{BusyRanksExt, BusyThresholds, RankLoad};
+pub use crate::decode_progress::{DecodeProgress, DecodeProgressUpdate};
 pub use crate::multi_worker::{
     ActiveSequencesMultiWorker, LocalWorkerLoad, NoopSequencePublisher,
     ReplicaRequestLeaseObserver, SchedulerLoadSnapshot, SequenceError, SequencePublishQueueError,
