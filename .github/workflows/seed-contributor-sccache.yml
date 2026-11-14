@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Seed contributor compiler cache
+on:
+  workflow_dispatch:
+    inputs:
+      execute:
+        description: Copy objects; false previews metadata only
+        type: boolean
+        default: false
+      max_objects:
+        description: Maximum keys to consider in one run
+        type: string
+        default: '100000'
+      max_bytes:
+        description: Maximum bytes to consider (default 50 GiB)
+        type: string
+        default: '53687091200'
+      max_age_days:
+        description: Only seed recently written objects; zero includes all ages
+        type: string
+        default: '30'
+      after_key:
+        description: Resume after the key reported by the preceding run
+        type: string
+        default: ''
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: seed-contributor-sccache
+  cancel-in-progress: false
+jobs:
+  seed:
+    if: github.repository == 'ai-dynamo/dynamo' && github.ref == 'refs/heads/main'
+    runs-on: [contributor-cache-seeder]
+    timeout-minutes: 120
+    container:
+      image: 210086341041.dkr.ecr.us-west-2.amazonaws.com/dynamo-ci/aws/dynamo/actions-runner/builder:0.2.0
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - run: |
+          python3 -m venv "$RUNNER_TEMP/cache-seeder"
+          "$RUNNER_TEMP/cache-seeder/bin/pip" install boto3==1.43.116
+      - name: Seed from the canonical cache
+        env:
+          EXECUTE: ${{ inputs.execute }}
+          MAX_OBJECTS: ${{ inputs.max_objects }}
+          MAX_BYTES: ${{ inputs.max_bytes }}
+          MAX_AGE_DAYS: ${{ inputs.max_age_days }}
+          AFTER_KEY: ${{ inputs.after_key }}
+        run: |
+          set -euo pipefail
+          options=()
+          if [[ "$EXECUTE" == true ]]; then options+=(--execute); fi
+          "$RUNNER_TEMP/cache-seeder/bin/python" .github/scripts/seed-contributor-sccache.py \
+            "${options[@]}" --max-objects "$MAX_OBJECTS" --max-bytes "$MAX_BYTES" \
+            --max-age-days "$MAX_AGE_DAYS" --after-key "$AFTER_KEY" | tee cache-seed-result.json
+          cat cache-seed-result.json >> "$GITHUB_STEP_SUMMARY"
