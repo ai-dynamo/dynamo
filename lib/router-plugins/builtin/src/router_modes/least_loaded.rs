@@ -4,9 +4,7 @@
 //! `least-loaded`: the worker with the fewest active requests.
 
 use super::{Samples, ThreadRandom, active_requests, no_candidates};
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 /// The worker with the fewest active requests, ties broken at random.
 pub const LEAST_LOADED: &str = "least-loaded";

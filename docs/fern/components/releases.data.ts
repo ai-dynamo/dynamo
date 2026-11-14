@@ -76,9 +76,9 @@ export const CURRENT_WHEEL = "1.6.0";
 export const MAIN_TOT: BackendPins = {
   sglang: "0.5.23",
   trtllm: "1.4.0rc2",
-  vllm: "0.32.0",
+  vllm: "0.33.0",
   nixlSglang: "1.5.2",
-  nixlTrtllm: "1.3.1",
+  nixlTrtllm: "1.5.0",
   nixlVllm: "1.5.0",
 };
 
@@ -1272,7 +1272,7 @@ export const FEATURE_INTERACTIONS: BackendInteractions[] = [
       // Tool Calling
       [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip", label: "Experimental combination", note: "Tool calling with SGLang LoRA is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }],
       // Speculative Decoding
-      [{ status: "yes" }, { status: "yes" }, { status: "na" }, { status: "wip" }, { status: "na" }, { status: "wip" }, { status: "na" }, { status: "wip", label: "Experimental combination", note: "Speculative decoding with SGLang LoRA is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "yes" }, { status: "na" }],
+      [{ status: "yes" }, { status: "yes" }, { status: "na" }, { status: "wip" }, { status: "na" }, { status: "yes" }, { status: "na" }, { status: "wip", label: "Experimental combination", note: "Speculative decoding with SGLang LoRA is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "yes" }, { status: "na" }],
     ],
   },
   {

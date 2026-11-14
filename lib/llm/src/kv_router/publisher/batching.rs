@@ -4,8 +4,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dynamo_kv_router::indexer::LocalKvIndexer;
-use dynamo_kv_router::protocols::{KvCacheEventData, Placement, PlacementEvent, RouterEvent};
+use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
+use dynamo_kv_events::placement::{Placement, PlacementEvent};
+use dynamo_kv_indexer::host::LocalKvIndexer;
 
 use super::dedup::{EventDedupFilter, EventDedupPolicy};
 use super::sinks::emit;
@@ -255,10 +256,12 @@ impl BatchingState {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheRemoveData, KvCacheStoreData,
-        KvCacheStoredBlockData, LocalBlockHash, Placement, ResidencyDomain, StorageTier,
+    use dynamo_kv_events::event::{
+        KvCacheEvent, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
     };
+    use dynamo_kv_events::placement::Placement;
+    use dynamo_kv_events::residency::{ResidencyDomain, StorageTier};
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 
     use super::*;
 
@@ -293,7 +296,7 @@ mod tests {
 
     #[test]
     fn recurrent_events_do_not_split_attention_runs_and_clear_flushes_both() {
-        use dynamo_kv_router::protocols::{KvCacheGroupKind, KvCacheGroupTag};
+        use dynamo_kv_events::residency::{KvCacheGroupKind, KvCacheGroupTag};
         let mut coalescer = PlacementEventCoalescer::new(128);
         let mut recurrent = stored(None, 1);
         recurrent.placement.kv_cache_group = Some(KvCacheGroupTag {

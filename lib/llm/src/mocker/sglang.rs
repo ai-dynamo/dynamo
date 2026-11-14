@@ -95,7 +95,7 @@ pub(super) fn adapt(
     if let Some(count) = *cached_tokens {
         response["meta_info"]["cached_tokens"] = json!(count);
     }
-    output.engine_data = Some(json!({"sglang_response": response}));
+    output.engine_data = Some(Box::new(json!({"sglang_response": response})));
 }
 
 fn native_finish_reason(reason: &FinishReason) -> Value {

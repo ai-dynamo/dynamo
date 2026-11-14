@@ -6,12 +6,13 @@ use std::sync::{Arc, LazyLock};
 
 use anyhow::Result;
 use dashmap::DashMap;
-use dynamo_kv_router::indexer::{
+use dynamo_kv_hashing::LocalBlockHash;
+use dynamo_kv_indexer::host::{
     IndexerQueryRequest, IndexerQueryResponse, IndexerRecordRoutingDecisionRequest,
     IndexerRecordRoutingDecisionResponse, KV_INDEXER_QUERY_ENDPOINT,
     KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT,
 };
-use dynamo_kv_router::protocols::{LocalBlockHash, WorkerWithDpRank};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::component::{Client, Component};
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery};
 use dynamo_runtime::pipeline::{
@@ -25,16 +26,16 @@ use futures::StreamExt;
 use parking_lot::RwLock;
 use tokio::sync::Mutex;
 
+use crate::kv_router::indexer::reply::{IndexerQueryReply, IndexerRecordRoutingDecisionReply};
 use crate::kv_router::metrics::RemoteIndexerMetrics;
 
 use super::{Indexer, TieredMatchDetails};
 
 pub struct RemoteIndexer {
-    query_router: PushRouter<IndexerQueryRequest, IndexerQueryResponse>,
+    query_router: PushRouter<IndexerQueryRequest, IndexerQueryReply>,
     query_client: Client,
-    record_router: Option<
-        PushRouter<IndexerRecordRoutingDecisionRequest, IndexerRecordRoutingDecisionResponse>,
-    >,
+    record_router:
+        Option<PushRouter<IndexerRecordRoutingDecisionRequest, IndexerRecordRoutingDecisionReply>>,
     record_client: Client,
     component: Component,
     model_name: String,
@@ -113,14 +114,18 @@ impl RemoteIndexer {
             local_hashes,
             sequence_hashes,
         };
-        let mut stream: ManyOut<IndexerRecordRoutingDecisionResponse> = record_router
+        let mut stream: ManyOut<IndexerRecordRoutingDecisionReply> = record_router
             .round_robin(SingleIn::new(request))
             .await
             .inspect_err(|_| {
                 self.metrics.increment_write_failures();
             })?;
 
-        match stream.next().await {
+        match stream
+            .next()
+            .await
+            .map(IndexerRecordRoutingDecisionResponse::from)
+        {
             Some(IndexerRecordRoutingDecisionResponse::Recorded) => Ok(()),
             Some(IndexerRecordRoutingDecisionResponse::Error(msg)) => {
                 self.metrics.increment_write_failures();
@@ -174,7 +179,7 @@ impl RemoteIndexer {
 }
 
 #[async_trait::async_trait]
-impl dynamo_kv_router::services::indexer::backend::RemotePrimary for RemoteIndexer {
+impl dynamo_kv_indexer::host::RemotePrimary for RemoteIndexer {
     async fn find_matches_by_tier(
         &self,
         block_hashes: Vec<LocalBlockHash>,
@@ -200,7 +205,7 @@ impl dynamo_kv_router::services::indexer::backend::RemotePrimary for RemoteIndex
             device_only,
             max_reusable_blocks,
         };
-        let mut stream: ManyOut<IndexerQueryResponse> = self
+        let mut stream: ManyOut<IndexerQueryReply> = self
             .query_router
             .round_robin(SingleIn::new(request))
             .await
@@ -208,7 +213,7 @@ impl dynamo_kv_router::services::indexer::backend::RemotePrimary for RemoteIndex
                 self.metrics.increment_query_failures();
             })?;
 
-        match stream.next().await {
+        match stream.next().await.map(IndexerQueryResponse::from) {
             Some(IndexerQueryResponse::TieredScores(wire)) => Ok(wire.into()),
             Some(IndexerQueryResponse::Error(msg)) => {
                 self.metrics.increment_query_failures();
@@ -224,7 +229,7 @@ impl dynamo_kv_router::services::indexer::backend::RemotePrimary for RemoteIndex
     async fn record_routing_decision(
         &self,
         worker: WorkerWithDpRank,
-        hashes: dynamo_kv_router::indexer::RoutingDecisionHashes,
+        hashes: dynamo_kv_indexer::host::RoutingDecisionHashes,
     ) -> Result<()> {
         self.record_hashed_routing_decision(worker, hashes.local_hashes, hashes.sequence_hashes)
             .await
@@ -412,9 +417,7 @@ fn start_query_endpoint(
 ) -> Result<()> {
     let engine = Arc::new(ServedIndexerQueryEngine { bindings });
     let ingress =
-        Ingress::<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryResponse>>::for_engine(
-            engine,
-        )?;
+        Ingress::<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryReply>>::for_engine(engine)?;
     tokio::spawn(async move {
         if let Err(error) = component
             .endpoint(KV_INDEXER_QUERY_ENDPOINT)
@@ -437,7 +440,7 @@ fn start_record_endpoint(
     let engine = Arc::new(ServedIndexerRecordEngine { bindings });
     let ingress = Ingress::<
         SingleIn<IndexerRecordRoutingDecisionRequest>,
-        ManyOut<IndexerRecordRoutingDecisionResponse>,
+        ManyOut<IndexerRecordRoutingDecisionReply>,
     >::for_engine(engine)?;
     tokio::spawn(async move {
         if let Err(error) = component
@@ -459,13 +462,13 @@ struct ServedIndexerQueryEngine {
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryResponse>, anyhow::Error>
+impl AsyncEngine<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryReply>, anyhow::Error>
     for ServedIndexerQueryEngine
 {
     async fn generate(
         &self,
         request: SingleIn<IndexerQueryRequest>,
-    ) -> Result<ManyOut<IndexerQueryResponse>> {
+    ) -> Result<ManyOut<IndexerQueryReply>> {
         let (request, ctx) = request.into_parts();
         let indexer = self.bindings.read().get(&request.model_name).cloned();
 
@@ -504,7 +507,7 @@ impl AsyncEngine<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryResponse>, a
         };
 
         Ok(ResponseStream::new(
-            Box::pin(stream::iter(vec![response])),
+            Box::pin(stream::iter(vec![IndexerQueryReply(response)])),
             ctx.context(),
         ))
     }
@@ -518,14 +521,14 @@ struct ServedIndexerRecordEngine {
 impl
     AsyncEngine<
         SingleIn<IndexerRecordRoutingDecisionRequest>,
-        ManyOut<IndexerRecordRoutingDecisionResponse>,
+        ManyOut<IndexerRecordRoutingDecisionReply>,
         anyhow::Error,
     > for ServedIndexerRecordEngine
 {
     async fn generate(
         &self,
         request: SingleIn<IndexerRecordRoutingDecisionRequest>,
-    ) -> Result<ManyOut<IndexerRecordRoutingDecisionResponse>> {
+    ) -> Result<ManyOut<IndexerRecordRoutingDecisionReply>> {
         let (request, ctx) = request.into_parts();
         let indexer = self.bindings.read().get(&request.model_name).cloned();
 
@@ -548,7 +551,9 @@ impl
         };
 
         Ok(ResponseStream::new(
-            Box::pin(stream::iter(vec![response])),
+            Box::pin(stream::iter(vec![IndexerRecordRoutingDecisionReply(
+                response,
+            )])),
             ctx.context(),
         ))
     }
@@ -569,18 +574,19 @@ mod tests {
     use crate::kv_router::indexer::{LowerTierIndexers, SideIndexer};
     use std::time::Duration;
 
-    use dynamo_kv_router::indexer::{
-        KvIndexer, KvIndexerInterface, KvIndexerMetrics, pruning::PruneConfig,
-    };
-    use dynamo_kv_router::protocols::{StorageTier, WorkerWithDpRank, compute_seq_hash_for_block};
+    use dynamo_kv_events::residency::StorageTier;
+    use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
+    use dynamo_kv_indexer::host::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, PruneConfig};
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
     async fn query_engine_enforces_hybrid_prompt_limit_for_device_and_tiered_queries() {
-        use dynamo_kv_router::protocols::{
-            ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheGroupTag,
-            KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
+        use dynamo_kv_events::event::{
+            KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
         };
+        use dynamo_kv_events::residency::KvCacheGroupTag;
+        use dynamo_kv_hashing::ExternalSequenceBlockHash;
         let worker = WorkerWithDpRank::new(7, 0);
         let primary = KvIndexer::new(
             CancellationToken::new(),
@@ -640,7 +646,9 @@ mod tests {
                 }))
                 .await
                 .unwrap();
-            let Some(IndexerQueryResponse::TieredScores(wire)) = response.next().await else {
+            let Some(IndexerQueryResponse::TieredScores(wire)) =
+                response.next().await.map(IndexerQueryResponse::from)
+            else {
                 panic!("scores");
             };
             assert_eq!(wire.device.scores, vec![(worker, 1)]);
@@ -664,7 +672,7 @@ mod tests {
         let mut stream = engine.generate(request).await.unwrap();
 
         assert!(matches!(
-            stream.next().await,
+            stream.next().await.map(IndexerQueryResponse::from),
             Some(IndexerQueryResponse::TieredScores(_))
         ));
     }
@@ -724,7 +732,9 @@ mod tests {
             .await
             .unwrap();
 
-        let Some(IndexerQueryResponse::TieredScores(wire)) = stream.next().await else {
+        let Some(IndexerQueryResponse::TieredScores(wire)) =
+            stream.next().await.map(IndexerQueryResponse::from)
+        else {
             panic!("expected TieredScores response");
         };
 
@@ -795,7 +805,9 @@ mod tests {
             .await
             .unwrap();
 
-        let Some(IndexerQueryResponse::TieredScores(wire)) = stream.next().await else {
+        let Some(IndexerQueryResponse::TieredScores(wire)) =
+            stream.next().await.map(IndexerQueryResponse::from)
+        else {
             panic!("expected TieredScores response");
         };
 
@@ -897,7 +909,9 @@ mod tests {
             .await
             .unwrap();
 
-        let Some(IndexerQueryResponse::TieredScores(wire)) = stream.next().await else {
+        let Some(IndexerQueryResponse::TieredScores(wire)) =
+            stream.next().await.map(IndexerQueryResponse::from)
+        else {
             panic!("expected TieredScores response");
         };
 

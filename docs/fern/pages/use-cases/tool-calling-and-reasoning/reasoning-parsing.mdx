@@ -476,7 +476,7 @@ Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. 
   </Accordion>
 
   <Accordion title="Muse Glimmer">
-    **Parser:** `muse_glimmer` (Dynamo alias `muse`)
+    **Parser:** `muse_glimmer`. `muse` is a deprecated alias of `muse_glimmer` and will be removed in a future release.
 
     **Notes:** Unified recipient-routed channels; `to=self` carries reasoning. No V1 reasoning parser exists.
   </Accordion>

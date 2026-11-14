@@ -191,8 +191,8 @@ fn mm_full_block() {
 
 // -----------------------------------------------------------------------------
 // Reviewer P2 — empty LoRA name normalizes to None for cache-share parity with the
-// existing router behavior at lib/kv-router/src/protocols.rs:84
-// (`options.lora_name.filter(|n| !n.is_empty())`). A client that sends "" must share
+// routing hash behavior in lib/kv-hashing/src/routing.rs (`compute_salt_hash` filters an
+// empty `lora_name`). A client that sends "" must share
 // cache with a client that sends None.
 // -----------------------------------------------------------------------------
 #[test]
@@ -342,7 +342,7 @@ fn mm_info_conversion_roundtrip() {
 // The kvbm-consolidator's vLLM/TRT-LLM ingestion path (`lib/kvbm-consolidator/src/tracker.rs`)
 // routes through `Request::into_blocks()` to compute block_hash + PLH. The kv-router's
 // indexer recomputes `tokens_hash` from token_ids via `compute_block_hash_for_seq`
-// (`lib/kv-router/src/protocols.rs:70-125`) using `XXH3_SEED = 1337` as the base seed
+// (`lib/kv-hashing/src/routing.rs`) using `XXH3_SEED = 1337` as the base seed
 // (plus `xxh3_64(lora_name)` when lora is set). For the indexer's lookup to find a
 // match, the producer's `salt_hash` for a default request must equal that seed.
 #[test]
