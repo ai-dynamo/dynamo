@@ -156,17 +156,29 @@ selection in the current runtime.
 | --- | --- | --- |
 | `DYN_HEALTH_CHECK_ENABLED` | `false` | Enables active checks for registered worker endpoints |
 | `DYN_CANARY_WAIT_TIME` | `10` | Seconds without successful endpoint activity before sending a canary |
-| `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` | `3` | Seconds to wait for the canary response |
+| `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` | `3` | Seconds to wait for the canary response; restarts on each completed engine forward pass, up to 10 minutes in total |
 | `DYN_HEALTH_CHECK_PAYLOAD` | Backend default | Optional JSON object or `@/path/to/file.json` canary payload override |
 
 LLM backends supply a minimal inference request that Dynamo sends through the registered worker
 endpoint. Successful response chunks from normal traffic reset the idle timer, including when client
-delivery fails. This reports engine progress, not completion of every request. On vLLM and SGLang
-workers that run forward-pass metrics (`DYN_FORWARDPASS_METRIC_PORT`, set by the operator), each
-forward pass completed while a request is in flight also resets the idle timer, so a long prefill
-does not trigger a canary. Otherwise a canary sent during a request that streams nothing waits
-behind it and can time out on a healthy worker. For the lifecycle and rationale, see
+delivery fails. This reports engine progress, not completion of every request. For the lifecycle and
+rationale, see
 [Observability Architecture](../../developer-guide/knowledge-base/concepts/observability-architecture.md#active-worker-health-checks).
+
+A canary sent while the engine is busy waits behind the work already running. A long prefill streams
+nothing until it ends, so the canary can wait for minutes. On workers that publish forward-pass
+metrics (`DYN_FORWARDPASS_METRIC_PORT`, which the operator sets), each completed forward pass
+restarts the canary's timeout: the canary fails once `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` passes with
+neither a response nor a completed forward pass, or after 10 minutes in total. A forward pass only
+extends that wait. It does not reset the idle timer or mark the endpoint ready, and no second canary
+is sent while one is waiting.
+
+The timeout stays fixed in these cases:
+
+- The worker does not publish forward-pass metrics: it runs outside the operator without
+  `DYN_FORWARDPASS_METRIC_PORT`, a vLLM worker sets its own `--scheduler-cls`, or an SGLang worker
+  runs in snapshot mode.
+- A single forward pass runs longer than the timeout, such as a first-request compile.
 
 For vLLM-Omni workers, see [vLLM-Omni Health Checks](#vllm-omni-health-checks).
 
