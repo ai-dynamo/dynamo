@@ -155,6 +155,21 @@ MTP (`--ais-nextn`).
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>lifo</Badge> <Badge intent="note" minimal>fifo</Badge></span>
 </ParamField>
 
+A vLLM engine models async scheduling by default: a busy engine keeps its next batch committed, so
+a request that arrives while the engine is busy is admitted up to two passes later than with
+synchronous scheduling. A request that arrives at an idle engine is not delayed. To model
+synchronous scheduling (`--no-async-scheduling` in vLLM), set `engine.async_scheduling` to `false`
+in the `--extra-engine-args` file. SGLang and TensorRT-LLM engines reject the setting. The file
+replaces the engine flags and the command line's default `dynamo.enable_local_indexer: true`, so a
+file that changes only the scheduling of a default Mocker is:
+
+```json
+{
+  "engine": {"async_scheduling": false},
+  "dynamo": {"enable_local_indexer": true}
+}
+```
+
 ## Timing
 
 <ParamField path="--speedup-ratio" type="float" default="1.0">

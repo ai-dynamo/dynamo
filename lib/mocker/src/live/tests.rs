@@ -1053,7 +1053,7 @@ async fn full_output_stream_is_cancelled_without_stalling_an_unrelated_request()
     assert!(slow.recv().await.is_none());
     assert!(!slow.is_aborted());
     // A busy vLLM engine keeps the next batch committed, so `fast` may be
-    // admitted one pass later. Count decode work and not passes.
+    // admitted up to two passes later. Count decode work and not passes.
     assert_eq!(
         fpm.decode_requests.load(Ordering::Relaxed),
         1,

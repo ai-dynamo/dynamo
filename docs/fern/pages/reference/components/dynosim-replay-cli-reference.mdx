@@ -226,6 +226,11 @@ for an unlimited scheduler limit; omit the field to use the engine default. With
 backend, a `null` `engine.max_num_seqs` is not unlimited: the engine derives the limit from the KV
 capacity and the context length.
 
+A vLLM engine models async scheduling by default: a request that arrives while the engine is busy
+is admitted one pass later than with synchronous scheduling. Set `engine.async_scheduling` to
+`false` (`False` in Python) to model synchronous scheduling. SGLang and TensorRT-LLM engines reject
+the field.
+
 ### Typed agentic replay through the Dynamo API
 
 AISimulate owns public Weka ingestion, validation, and lowering into the canonical

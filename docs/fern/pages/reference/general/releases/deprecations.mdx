@@ -108,6 +108,14 @@ Removed with no replacement: the dummy shared-cache server, `services::shared_ca
 
   > **Migrate:** Replace each `dynamo_kv_router::<pre-split path>` import with the owner path from the table (the `#[deprecated]` note on a struct alias spells it out), add the owner crate to your `Cargo.toml`, and drop the `standalone-indexer`, `standalone-slot-tracker`, `standalone-selection`, and `runtime-protocols` features in favor of `http`, `ingest-zmq`, `replica-sync-zmq`, and `peer-recovery`. Finish before v1.10.0.
 
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **AISimulate is installed as the `aisim` distribution** ([#18745](https://github.com/ai-dynamo/dynamo/pull/18745)). `ai-dynamo` requires `aisim` 0.15 in place of `aisimulate` 0.13, and the Python packages are `aisim` and `aisim_core`; the old import names `aisimulate` and `aisimulate_core` still work. An upgrade in place, such as `pip install -U ai-dynamo`, installs `aisim` and leaves `aisimulate` installed. The two own the same files, and `import aisim` then fails with an `ImportError` that names both.
+
+  > **Migrate:** Install into a fresh environment, or repair the upgraded one: run `pip uninstall -y aisimulate`, then `pip install --force-reinstall --no-deps "aisim==<version>"` with the version that `pip show aisim` prints. The reinstall is needed because uninstalling `aisimulate` removes files that `aisim` shares with it.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Mocker and replay vLLM engines model async scheduling by default** ([#18745](https://github.com/ai-dynamo/dynamo/pull/18745)). With `aisim` 0.15, a busy vLLM engine keeps its next batch committed, so a request that arrives while the engine is busy is admitted one pass later in offline replay and two passes later on the live Mocker. A request that arrives at an idle engine is not delayed. On one default live Mocker worker with 512-token prompts at 20 requests per second, mean time to first token rose from 46 ms to 66 ms and throughput did not change. SGLang and TensorRT-LLM engines are not affected.
+
+  > **Migrate:** To keep synchronous scheduling, set `engine.async_scheduling` to `false` in the Mocker's `--extra-engine-args` file, or in `extra_engine_args`, `prefill_engine_args`, or `decode_engine_args` of the replay API. The Mocker file replaces the engine flags and the command line's default `dynamo.enable_local_indexer: true`, so a file that changes only the scheduling is `{"engine": {"async_scheduling": false}, "dynamo": {"enable_local_indexer": true}}`.
+
 <a id="v160"></a>
 
 ## v1.6.0 - Oct 22, 2026
