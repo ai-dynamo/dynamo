@@ -298,6 +298,7 @@ impl PreparedRequest {
         token_ids: &[u32],
         total_output_tokens: usize,
         terminal: bool,
+        cached_tokens: Option<usize>,
     ) -> pb::SequenceOutput {
         let stop_token = self
             .stop_token
@@ -350,17 +351,24 @@ impl PreparedRequest {
                 stop_reason: stop_token.map(pb::finish_info::StopReason::StopTokenId),
                 kv_transfer_params: (self.mode == ServerMode::Prefill).then(|| self.handoff()),
                 ec_transfer_params: None,
-                num_cached_tokens: None,
+                // `None` means unknown (e.g. aborted before the first output);
+                // keep it distinct from a measured zero.
+                num_cached_tokens: cached_tokens.map(|tokens| tokens as u32),
             }),
             ..Default::default()
         }
     }
 
-    pub(super) fn aborted_output(&self, token_ids: &[u32]) -> pb::SequenceOutput {
-        let mut output = self.sequence_output(token_ids, token_ids.len(), false);
+    pub(super) fn aborted_output(
+        &self,
+        token_ids: &[u32],
+        cached_tokens: Option<usize>,
+    ) -> pb::SequenceOutput {
+        let mut output = self.sequence_output(token_ids, token_ids.len(), false, None);
         output.finish_info = Some(pb::FinishInfo {
             num_output_tokens: token_ids.len() as u32,
             finish_reason: pb::finish_info::FinishReason::Aborted as i32,
+            num_cached_tokens: cached_tokens.map(|tokens| tokens as u32),
             ..Default::default()
         });
         output

@@ -288,13 +288,19 @@ async fn context_limit_finishes_by_length_before_a_planned_stop() {
     req.stopping.as_mut().unwrap().stop_token_ids = vec![tokens[4]];
 
     let prepared = PreparedRequest::new(req.clone(), &config, 4, None).unwrap();
-    let shortened = prepared.sequence_output(&tokens[..4], 4, true);
+    let shortened = prepared.sequence_output(&tokens[..4], 4, true, None);
     let finish = shortened.finish_info.unwrap();
     assert_eq!(
         finish.finish_reason,
         pb::finish_info::FinishReason::Length as i32
     );
     assert!(finish.stop_reason.is_none());
+    // An unknown cache count stays unknown; a measured zero stays zero.
+    assert_eq!(finish.num_cached_tokens, None);
+    let measured = prepared.sequence_output(&tokens[..4], 4, true, Some(0));
+    assert_eq!(measured.finish_info.unwrap().num_cached_tokens, Some(0));
+    let aborted = prepared.aborted_output(&[], None);
+    assert_eq!(aborted.finish_info.unwrap().num_cached_tokens, None);
 
     let mut args = admitting_args();
     args.max_model_len = Some(8);
@@ -694,6 +700,89 @@ async fn unary_generate_accumulates_output_and_terminal_metadata() {
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
+}
+
+/// A 9-token prompt spans two full 4-token blocks plus one partial block.
+fn nine_token_request(id: &str) -> pb::GenerateRequest {
+    let mut req = request(id);
+    req.prompt = Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+        ids: (1..=9).collect(),
+    }));
+    req
+}
+
+async fn unary_finish(service: &VllmMockerService, req: pb::GenerateRequest) -> pb::FinishInfo {
+    pb::inference_server::Inference::generate(service, Request::new(req))
+        .await
+        .unwrap()
+        .into_inner()
+        .outputs
+        .and_then(|outputs| outputs.finish_info)
+        .expect("unary response carries terminal finish info")
+}
+
+#[tokio::test]
+async fn unary_generate_reports_measured_cache_usage() {
+    let mut args = admitting_args();
+    args.enable_prefix_caching = true;
+    let service = VllmMockerService::new(MockerServerConfig::default(), args).unwrap();
+
+    // A cold prompt is a measured zero, not an unknown count.
+    let cold = unary_finish(&service, nine_token_request("cold")).await;
+    assert_eq!(cold.num_cached_tokens, Some(0));
+    // The repeat hits the two full blocks; the partial block is recomputed.
+    let warm = unary_finish(&service, nine_token_request("warm")).await;
+    assert_eq!(warm.num_cached_tokens, Some(8));
+}
+
+#[tokio::test]
+async fn prefill_reports_its_cache_count_and_decode_counts_no_transferred_kv() {
+    let mut args = admitting_args();
+    args.enable_prefix_caching = true;
+    let prefill = VllmMockerService::new(
+        MockerServerConfig {
+            mode: ServerMode::Prefill,
+            ..Default::default()
+        },
+        args.clone(),
+    )
+    .unwrap();
+    let decode = VllmMockerService::new(
+        MockerServerConfig {
+            mode: ServerMode::Decode,
+            ..Default::default()
+        },
+        args,
+    )
+    .unwrap();
+
+    let mut prefill_request = nine_token_request("prefill");
+    prefill_request.stopping.as_mut().unwrap().max_new_tokens = 1;
+    prefill_request.kv = Some(pb::KvCacheParameters {
+        kv_transfer_params: Some(Struct {
+            fields: BTreeMap::from([("do_remote_decode".to_string(), bool_value(true))]),
+        }),
+        ..Default::default()
+    });
+    let finish = unary_finish(&prefill, prefill_request).await;
+    assert_eq!(finish.num_cached_tokens, Some(0));
+    let handoff = finish
+        .kv_transfer_params
+        .expect("prefill terminal carries a KV handoff");
+
+    // Transferred prompt KV must not count as a cache hit (8 here);
+    // a measured zero and an unknown count are both correct.
+    let mut decode_request = nine_token_request("decode");
+    decode_request.kv = Some(pb::KvCacheParameters {
+        kv_transfer_params: Some(handoff),
+        ..Default::default()
+    });
+    let finish = unary_finish(&decode, decode_request).await;
+    assert_eq!(
+        finish.finish_reason,
+        pb::finish_info::FinishReason::Length as i32
+    );
+    assert_eq!(finish.num_cached_tokens.unwrap_or(0), 0);
 }
 
 #[tokio::test]
