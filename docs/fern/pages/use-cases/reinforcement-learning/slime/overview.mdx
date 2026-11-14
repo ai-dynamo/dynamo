@@ -1,0 +1,42 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Slime Integration
+---
+
+import { TerminalDemo } from "@/components/TerminalDemo";
+
+<Warning title="Experimental">
+Integrations with external RL frameworks are under development/testing and subject to change.
+</Warning>
+
+[Slime](https://github.com/THUDM/slime) is a reinforcement learning framework that uses Megatron-LM for training and SGLang for inference through KubeRay. The Dynamo integration with Slime lets Dynamo handle the inference and rollouts, which is served through a DynamoGraphDeployment.
+
+## Tutorial: Train Qwen3-0.6B with Slime + Dynamo
+
+This tutorial covers how to use the Dynamo integration with Slime to train Qwen3-0.6B to solve elementary math problems through reinforcement learning on the GSM8K (Grade School Math 8K) dataset using the GRPO algorithm.
+
+<CardGroup cols={3}>
+  <Card title="1. Install + Setup" icon="regular download" href="installation.mdx">
+    Install the Dynamo platform and KubeRay, then stage the model and dataset on a shared volume.
+  </Card>
+  <Card title="2. Serve Inference with Dynamo" icon="regular server" href="serve-inference.mdx">
+    Run two SGLang engines behind the Dynamo frontend in a DynamoGraphDeployment.
+  </Card>
+  <Card title="3. Train with Slime + KubeRay" icon="regular brain" href="train.mdx">
+    Run Slime's GRPO loop with Megatron-LM in a RayJob that sends its rollouts through Dynamo.
+  </Card>
+</CardGroup>
+
+## Seeing it in action
+
+<TerminalDemo
+  src="../../../../assets/slime-rl-demo.cast"
+  title="Qwen3-0.6B · GRPO on GSM8K · 10 steps on 3 GPUs"
+  chrome="macos"
+  theme="fern-code"
+  cols={100}
+  rows={25}
+  idleTimeLimit={1.5}
+/>
+
