@@ -252,7 +252,7 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 </ParamField>
 
 <ParamField path="DYN_CANARY_WAIT_TIME" type="integer" default="10">
-  Seconds of endpoint idle time before a canary health check is sent. Lower values check more frequently.
+  Seconds of endpoint idle time before a canary health check is sent. Lower values check more frequently. The first canary is sent when the endpoint registers, without this wait.
 </ParamField>
 
 <ParamField path="DYN_HEALTH_CHECK_REQUEST_TIMEOUT" type="integer" default="3">
