@@ -187,14 +187,14 @@ class DynamoVllmArgGroup(ArgGroup):
             g,
             flag_name="--mm-prompt-template",
             env_var="DYN_VLLM_MM_PROMPT_TEMPLATE",
-            default="USER: <image>\n<prompt> ASSISTANT:",
+            default=None,
             help=(
-                "Different multi-modal models expect the prompt to contain different special media prompts. "
-                "The processor will use this argument to construct the final prompt. "
-                "User prompt will replace '<prompt>' in the provided template. "
-                "For example, if the user prompt is 'please describe the image' and the prompt template is "
-                "'USER: <image> <prompt> ASSISTANT:', the resulting prompt is "
-                "'USER: <image> please describe the image ASSISTANT:'."
+                "Has no effect: multimodal prompts are rendered with the "
+                "model's chat template, so this template is never applied."
+            ),
+            deprecated=Deprecated(
+                replacement="--custom-jinja-template",
+                remove_in="v1.9",
             ),
         )
 
@@ -622,7 +622,7 @@ class DynamoVllmConfig(ConfigBase):
     enable_multimodal: bool
     # Enables RL-style token-in/token-out defaults.
     enable_rl: bool = False
-    mm_prompt_template: str
+    mm_prompt_template: Optional[str]
     frontend_decoding: bool
     embedding_transfer_mode: Union[
         str, EmbeddingTransferMode
