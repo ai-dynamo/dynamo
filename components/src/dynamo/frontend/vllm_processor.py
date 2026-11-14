@@ -44,7 +44,13 @@ from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
 from dynamo.vllm.errors import vllm_client_error_to_public_error
 
-from .prepost import StreamingPostProcessor, preprocess_chat_request
+from .prepost import (
+    StreamingPostProcessor,
+    _is_forced_tool_choice,
+    _is_minimax_m3_reasoning_parser,
+    _prompt_tail_ends_with,
+    preprocess_chat_request,
+)
 from .structural_tag_policy import (
     runtime_structural_tag_excludes_reasoning,
     runtime_structural_tag_options,
@@ -585,6 +591,84 @@ def _ensure_reasoning_parser_output_capable(
         )
 
 
+def _has_explicit_guided_decoding(request_for_sampling: Any) -> bool:
+    """Whether the caller constrained the output with guided_* or structured_outputs.
+
+    Mirrors has_explicit_guided_decoding in lib/llm/src/preprocessor/tool_choice.rs,
+    plus vLLM's native structured_outputs. Read after the tool parser ran: a forced
+    tool choice makes it write its own structured_outputs, and preprocessing has
+    already rejected a forced choice combined with a caller constraint, so on that
+    path structured_outputs is never the caller's.
+    """
+    extra = getattr(request_for_sampling, "model_extra", None) or {}
+    if extra.get("guided_choice") or any(
+        extra.get(key) is not None
+        for key in ("guided_json", "guided_regex", "guided_grammar")
+    ):
+        return True
+    return getattr(
+        request_for_sampling, "structured_outputs", None
+    ) is not None and not _is_forced_tool_choice(
+        getattr(request_for_sampling, "tool_choice", None)
+    )
+
+
+def _has_structured_response_format(request_for_sampling: Any) -> bool:
+    response_format = getattr(request_for_sampling, "response_format", None)
+    if response_format is None:
+        return False
+    kind = (
+        response_format.get("type")
+        if isinstance(response_format, dict)
+        else getattr(response_format, "type", None)
+    )
+    return kind is not None and kind != "text"
+
+
+def _minimax_m3_disabled_thinking_skips_parser(
+    reasoning_parser_class: type[ReasoningParser],
+    tokenizer: TokenizerLike,
+    chat_template_kwargs: dict[str, Any],
+    request_for_sampling: Any,
+    prompt_token_ids: list[int],
+    model_config: Any,
+) -> bool:
+    """Whether a thinking-disabled MiniMax M3 request may skip the reasoning parser.
+
+    Same rule as the Rust preprocessor (#17120, #18017): the request asking for no
+    thinking is not enough, because a chat template that ignores the thinking
+    control leaves the prompt open and the model can still write
+    ``<mm:think>...</mm:think>``. Skip only when the rendered prompt closed
+    reasoning, the prompt is unknown, or guided output owns the output -- and keep
+    parsing when explicit guided decoding follows a prompt left open in
+    ``<mm:think>``.
+
+    The prompt tail is checked rather than calling is_reasoning_end(): that scans
+    the whole prompt, so a ``<mm:think>...</mm:think>`` in an earlier turn makes it
+    report a prompt that is open at the end as closed.
+    """
+    parser = reasoning_parser_class(
+        tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
+    )
+    start = parser.reasoning_start_str
+    end = parser.reasoning_end_str
+    explicit_guided = _has_explicit_guided_decoding(request_for_sampling)
+    if explicit_guided and prompt_token_ids and start:
+        if _prompt_tail_ends_with(prompt_token_ids, start, tokenizer=tokenizer):
+            return False
+    if (
+        explicit_guided
+        or _is_forced_tool_choice(getattr(request_for_sampling, "tool_choice", None))
+        or _has_structured_response_format(request_for_sampling)
+    ):
+        return True
+    return not prompt_token_ids or _prompt_tail_ends_with(
+        prompt_token_ids, end, tokenizer=tokenizer
+    )
+
+
 def _build_reasoning_parser_metadata(
     reasoning_parser_class: type[ReasoningParser] | None,
     tokenizer: TokenizerLike,
@@ -597,7 +681,27 @@ def _build_reasoning_parser_metadata(
         return _ReasoningParserMetadata(None, None, None)
 
     parser_kwargs = {"chat_template_kwargs": chat_template_kwargs}
-    if chat_template_kwargs.get("enable_thinking") is False:
+    thinking_disabled = chat_template_kwargs.get("enable_thinking") is False
+    if _is_minimax_m3_reasoning_parser(reasoning_parser_class) and (
+        thinking_disabled or chat_template_kwargs.get("thinking_mode") == "disabled"
+    ):
+        if _minimax_m3_disabled_thinking_skips_parser(
+            reasoning_parser_class,
+            tokenizer,
+            chat_template_kwargs,
+            request_for_sampling,
+            prompt_token_ids,
+            model_config,
+        ):
+            return _ReasoningParserMetadata(True, True, parser_kwargs)
+        # The prompt left reasoning to the model: run the parser from a
+        # not-in-reasoning start so generated <mm:think>...</mm:think> is split.
+        return _ReasoningParserMetadata(
+            not getattr(request_for_sampling, "include_reasoning", True),
+            False,
+            parser_kwargs,
+        )
+    if thinking_disabled:
         return _ReasoningParserMetadata(True, True, parser_kwargs)
     if getattr(request_for_sampling, "_grammar_from_tool_parser", False):
         return _ReasoningParserMetadata(True, True, parser_kwargs)
