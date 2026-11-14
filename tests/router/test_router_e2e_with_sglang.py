@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = "silence09/DeepSeek-R1-Small-2layers"
 
+
 pytestmark = [
     pytest.mark.router,
     pytest.mark.sglang,
@@ -498,6 +499,8 @@ def test_router_decisions_sglang_dp(
 
 @pytest.mark.e2e
 @pytest.mark.model(MODEL_NAME)
+# DeepSeek's fused_topk_deepseek kernel is unsupported on the A10G runners.
+@pytest.mark.h100
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
@@ -509,6 +512,7 @@ def test_router_decisions_sglang_disagg(
     set_ucx_tls_no_mm,
     request_plane,
 ):
+    """Check KV-aware routing across SGLang prefill and decode workers on H100."""
     run_disagg_router_decisions_test(
         engine_process_cls=SGLangProcess,
         engine_args_name="sglang_args",
