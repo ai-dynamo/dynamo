@@ -16,6 +16,7 @@ Usage:
 """
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from PIL import Image
@@ -36,10 +37,14 @@ logger = logging.getLogger(__name__)
 _shared_image_loader: ImageLoader | None = None
 
 
-def _get_shared_image_loader() -> ImageLoader:
+def _get_shared_image_loader(
+    to_rgb: Callable[[Image.Image], Image.Image] | None = None,
+) -> ImageLoader:
     global _shared_image_loader
     if _shared_image_loader is None:
-        _shared_image_loader = ImageLoader()
+        _shared_image_loader = (
+            ImageLoader() if to_rgb is None else ImageLoader(to_rgb=to_rgb)
+        )
         logger.info(
             "DynamoMediaConnector: shared ImageLoader initialized (cache_size=%d)",
             _shared_image_loader._cache_size,
@@ -49,6 +54,7 @@ def _get_shared_image_loader() -> ImageLoader:
 
 # Lazy registration — only register if vLLM is available.
 try:
+    from vllm.multimodal.image import convert_image_mode, normalize_image
     from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 
     @MEDIA_CONNECTOR_REGISTRY.register("dynamo")
@@ -64,7 +70,9 @@ try:
 
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
-            self._image_loader = _get_shared_image_loader()
+            self._image_loader = _get_shared_image_loader(
+                lambda image: convert_image_mode(normalize_image(image), "RGB")
+            )
 
         async def fetch_image_async(
             self,

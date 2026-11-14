@@ -1,5 +1,5 @@
 name: 'Skopeo Login'
-description: 'Login to multiple container registries using skopeo (ECR, ACR)'
+description: 'Login to multiple container registries using skopeo (ECR, ACR, generic)'
 
 inputs:
   aws_default_region:
@@ -16,6 +16,15 @@ inputs:
     required: false
   azure_acr_password:
     description: 'Azure ACR password'
+    required: false
+  registry:
+    description: 'Registry hostname for username/password login (e.g., nvcr.io)'
+    required: false
+  username:
+    description: 'Registry username'
+    required: false
+  password:
+    description: 'Registry password or token'
     required: false
 
 runs:
@@ -54,3 +63,14 @@ runs:
       run: |
         set -euo pipefail
         echo "${{ inputs.azure_acr_password }}" | skopeo login "${{ inputs.azure_acr_hostname }}" --username "${{ inputs.azure_acr_user }}" --password-stdin
+
+    - name: Registry Login
+      shell: bash
+      if: ${{ inputs.registry != '' && inputs.username != '' && inputs.password != '' }}
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        REGISTRY_USER: ${{ inputs.username }}
+        REGISTRY_PASSWORD: ${{ inputs.password }}
+      run: |
+        set -euo pipefail
+        echo "${REGISTRY_PASSWORD}" | skopeo login "${REGISTRY}" --username "${REGISTRY_USER}" --password-stdin

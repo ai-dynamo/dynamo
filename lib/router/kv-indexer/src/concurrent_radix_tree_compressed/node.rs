@@ -50,7 +50,7 @@ pub(super) struct Node {
 
 impl Node {
     pub(super) fn new() -> Self {
-        Self::from_state_and_children(CrtcNodeState::new(Vec::new()), FxHashMap::default())
+        Self::from_state_and_node_children(CrtcNodeState::new(Vec::new()), NodeChildren::default())
     }
 
     /// A leaf for `blocks` that `worker` fully covers, attached under the node whose edge
@@ -63,26 +63,19 @@ impl Node {
         debug_assert!(!blocks.is_empty());
         let mut state = CrtcNodeState::for_blocks(blocks, worker);
         state.parent_tail = parent_tail.unwrap_or(ExternalSequenceBlockHash(0));
-        Self::from_state_and_children(state, FxHashMap::default())
+        Self::from_state_and_node_children(state, NodeChildren::default())
     }
 
     pub(super) fn from_anchor(
         anchor_local_hash: LocalBlockHash,
         anchor_id: ExternalSequenceBlockHash,
     ) -> Self {
-        let mut node = Self::from_state_and_children(
+        let mut node = Self::from_state_and_node_children(
             CrtcNodeState::new(vec![(anchor_local_hash, anchor_id)]),
-            FxHashMap::default(),
+            NodeChildren::default(),
         );
         node.anchor = true;
         node
-    }
-
-    fn from_state_and_children(
-        state: CrtcNodeState,
-        children: FxHashMap<LocalBlockHash, SharedNode>,
-    ) -> Self {
-        Self::from_state_and_node_children(state, NodeChildren::from_map(children))
     }
 
     fn from_state_and_node_children(state: CrtcNodeState, children: NodeChildren) -> Self {

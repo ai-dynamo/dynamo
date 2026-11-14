@@ -38,6 +38,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.sglang._compat import supports_disagg_prefill_cancel_anytime
 from dynamo.sglang.args import Config
 from dynamo.sglang.capacity import kv_event_block_size
+from dynamo.sglang.drain import DrainConflict, WorkerDrain
 from dynamo.sglang.engine_generate import native_generate_payload
 from dynamo.sglang.engine_routes import resolve_configured_engine_routes
 from dynamo.sglang.gateway import follow_pause_broadcasts
@@ -618,6 +619,7 @@ class BaseWorkerHandler(
             self.input_param_manager = InputParamManager(None)
             self._engine_supports_priority = False
         self._engine_route_lock = asyncio.Lock()
+        self._worker_drain: WorkerDrain | None = None
 
         # Serializes elastic-EP scaling: SGLang tracks a single in-flight scale
         # phase, so concurrent scale_elastic_ep calls must not overlap.
@@ -883,10 +885,13 @@ class BaseWorkerHandler(
         ):
             return
 
-        if tokenizer_manager.is_pause:
+        drain = getattr(self, "_worker_drain", None)
+        if tokenizer_manager.is_pause or (drain is not None and drain.withdrawn):
             await self.generate_endpoint.unregister_endpoint_instance()
         else:
             await self.generate_endpoint.register_endpoint_instance()
+            if drain is not None and drain.withdrawn:
+                await self.generate_endpoint.unregister_endpoint_instance()
 
     def follow_shared_pause_state(self) -> None:
         async def resync() -> None:
@@ -895,9 +900,15 @@ class BaseWorkerHandler(
 
         follow_pause_broadcasts(getattr(self.engine, "tokenizer_manager", None), resync)
 
-    async def _invoke_engine_route(self, route_handler, body: dict) -> dict:
+    async def _invoke_engine_route(
+        self, route_handler, body: dict, *, generation_control: bool = False
+    ) -> dict:
         """Invoke one engine route and then synchronize worker discovery."""
         async with self._engine_route_lock:
+            if generation_control:
+                drain = self._worker_drain
+                assert drain is not None
+                drain.check_generation_control()
             try:
                 return await route_handler(body)
             finally:
@@ -910,6 +921,22 @@ class BaseWorkerHandler(
             return await self._invoke_engine_route(route_handler, body)
 
         return synchronized_handler
+
+    def _wrap_generation_control_http(self, route_handler):
+        async def control(request):
+            if request["path"]:
+                return {"status": 404, "body": {"error": "Unknown engine route"}}
+            try:
+                result = await self._invoke_engine_route(
+                    route_handler,
+                    {} if request["body"] is None else request["body"],
+                    generation_control=True,
+                )
+            except DrainConflict as error:
+                return {"status": 409, "body": {"error": str(error)}}
+            return {"status": 200, "body": result}
+
+        return control
 
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
@@ -963,7 +990,18 @@ class BaseWorkerHandler(
         for path, handler in built_in_routes.items():
             runtime.register_engine_route(path, handler)
         for path, route_handler in [*default_native_routes, *configured_routes]:
-            runtime.register_engine_route(path, self._wrap_engine_route(route_handler))
+            if getattr(self, "_drain_controls_enabled", False) and (
+                path in ("pause_generation", "continue_generation")
+                or route_handler.descriptor.method
+                in ("pause_generation", "continue_generation")
+            ):
+                runtime.register_engine_http_handler(
+                    path, self._wrap_generation_control_http(route_handler)
+                )
+            else:
+                runtime.register_engine_route(
+                    path, self._wrap_engine_route(route_handler)
+                )
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:

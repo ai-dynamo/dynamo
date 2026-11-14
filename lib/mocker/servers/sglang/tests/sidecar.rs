@@ -208,7 +208,8 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
     assert!(prefill_outputs[0].finish_reason.is_none());
     let handoff = prefill_outputs[0]
         .disaggregated_params
-        .clone()
+        .as_deref()
+        .cloned()
         .expect("prefill response should carry SGLang rendezvous metadata");
     assert_eq!(handoff["bootstrap_host"], "127.0.0.1");
     assert_eq!(handoff["bootstrap_port"], 8_998);
