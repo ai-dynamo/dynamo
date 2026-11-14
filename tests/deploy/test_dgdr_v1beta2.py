@@ -54,6 +54,41 @@ async def _read_custom(
     )
 
 
+async def _create_request(
+    custom: client.CustomObjectsApi, namespace: str, body: dict
+) -> dict:
+    name = body["metadata"]["name"]
+    attempts = 0
+
+    async def post() -> dict:
+        nonlocal attempts
+        attempts += 1
+        try:
+            return await custom.create_namespaced_custom_object(
+                "nvidia.com",
+                "v1beta2",
+                namespace,
+                "dynamographdeploymentrequests",
+                body,
+                _request_timeout=30,
+            )
+        except ApiException as error:
+            # Retries follow only connection errors or timeouts and the name is
+            # unique, so a 409 on a retry means the dropped POST was committed.
+            if error.status != 409 or attempts == 1:
+                raise
+            return await _read_custom(
+                custom, namespace, "dynamographdeploymentrequests", name
+            )
+
+    return await retry_vcluster_api_async(
+        f"creating dynamographdeploymentrequests/{name}",
+        post,
+        (aiohttp.ClientError, asyncio.TimeoutError),
+        logger,
+    )
+
+
 def _assert_owned_by(resource: dict, owner: dict) -> None:
     assert any(
         ref.get("controller") and ref["uid"] == owner["metadata"]["uid"]
@@ -74,11 +109,9 @@ async def test_dgdr_v1beta2_publishes_candidate(namespace: str) -> None:
 
         # Hardware is simulated; complete topology avoids DCGM and cluster GPU discovery.
         # Qwen3-32B has AIC performance data; this test never downloads its weights.
-        request = await custom.create_namespaced_custom_object(
-            "nvidia.com",
-            "v1beta2",
+        request = await _create_request(
+            custom,
             namespace,
-            "dynamographdeploymentrequests",
             {
                 "apiVersion": "nvidia.com/v1beta2",
                 "kind": "DynamoGraphDeploymentRequest",
@@ -115,7 +148,6 @@ async def test_dgdr_v1beta2_publishes_candidate(namespace: str) -> None:
                     },
                 },
             },
-            _request_timeout=30,
         )
         assert request["spec"]["workload"]["static"]["load"] == {"concurrency": 10}
         assert request["spec"]["objective"]["metric"] == "ThroughputPerGPU"
