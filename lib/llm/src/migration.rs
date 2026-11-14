@@ -792,7 +792,7 @@ where
                 Ok(next_stream) => {
                     // A dispatch cancelled before its response prologue returns `Ok` empty,
                     // so a stopped context here means the client left during the handshake.
-                    // The parent stops its children before itself, so check the attempt too.
+                    // The attempt can be stopped or killed on its own, so check it too.
                     let outcome = if self.context.is_stopped()
                         || self.context.is_killed()
                         || attempt_context.is_stopped()
@@ -1428,7 +1428,7 @@ mod tests {
             mid_stream: bool,
             fail_after: usize,
             dispatched: Arc<tokio::sync::Notify>,
-            /// Stop only the attempt context, as a parent does before stopping itself
+            /// Stop only the attempt context, which can be stopped on its own
             stop_attempt_only: bool,
         },
         /// One addressed worker rejects admission, then a replacement succeeds.
