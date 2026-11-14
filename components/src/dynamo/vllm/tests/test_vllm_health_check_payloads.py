@@ -13,10 +13,12 @@ import base64
 import io
 import json
 import wave
+from types import SimpleNamespace
 
 import pytest
 
 from dynamo.health_check import HEALTH_CHECK_KEY
+from dynamo.vllm.handlers import build_sampling_params, build_sampling_params_openai
 from dynamo.vllm.health_check import (
     VllmEmbeddingHealthCheckPayload,
     VllmHealthCheckPayload,
@@ -114,3 +116,48 @@ def test_transcription_payload_contains_valid_short_wav():
         assert wav.getsampwidth() == 2
         assert wav.getframerate() == 16_000
         assert wav.getnframes() == 1_600
+
+
+GENERATE_PAYLOAD_CLASSES = [
+    pytest.param(VllmHealthCheckPayload, id="aggregated"),
+    pytest.param(VllmPrefillHealthCheckPayload, id="prefill"),
+]
+
+
+def _engine(return_sampling_mask: bool) -> SimpleNamespace:
+    return SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(return_sampling_mask=return_sampling_mask)
+        ),
+        tokenizer=None,
+    )
+
+
+def _sampling_values(payload: dict, use_text_input: bool) -> dict:
+    return payload if use_text_input else payload["sampling_options"]
+
+
+@pytest.mark.parametrize("use_text_input", [False, True], ids=["tokens", "text"])
+@pytest.mark.parametrize("cls", GENERATE_PAYLOAD_CLASSES)
+def test_mask_mode_canary_is_sampled(cls, use_text_input):
+    """With --return-sampling-mask, vLLM rejects requests unless temperature > 0
+    and top_k > 0; a greedy canary keeps /live at 503 forever."""
+    payload = cls(_engine(True), use_text_input=use_text_input).to_dict()
+    values = _sampling_values(payload, use_text_input)
+    assert values["temperature"] > 0
+    assert values["top_k"] > 0
+
+
+@pytest.mark.parametrize("cls", GENERATE_PAYLOAD_CLASSES)
+def test_mask_mode_canary_passes_vllm_sampling_checks(cls):
+    """The canary values must survive the request path into vLLM's
+    SamplingParams, where input_processor enforces the mask-mode checks."""
+    token_payload = cls(_engine(True), use_text_input=False).to_dict()
+    params = build_sampling_params(token_payload, {})
+    assert params.temperature > 0
+    assert params.top_k > 0
+
+    text_payload = cls(_engine(True), use_text_input=True).to_dict()
+    params = build_sampling_params_openai(text_payload, {})
+    assert params.temperature > 0
+    assert params.top_k > 0
