@@ -449,7 +449,9 @@ class ManagedDGDR:
     async def get_versioned(self, name: str, version: str) -> dict[str, Any]:
         self._require_clients()
         assert self.custom is not None
-        return await self.custom.get_namespaced_custom_object(
+        return await self._retry_vcluster_api(
+            f"reading DGDR {self.config.namespace}/{name} at {version}",
+            self.custom.get_namespaced_custom_object,
             group=DGDR_GROUP,
             version=version,
             namespace=self.config.namespace,
@@ -614,8 +616,10 @@ class ManagedDGDR:
     async def get_crd(self) -> client.V1CustomResourceDefinition:
         self._require_clients()
         assert self.apiextensions is not None
-        return await self.apiextensions.read_custom_resource_definition(
-            "dynamographdeploymentrequests.nvidia.com"
+        return await self._retry_vcluster_api(
+            "reading DGDR CustomResourceDefinition",
+            self.apiextensions.read_custom_resource_definition,
+            "dynamographdeploymentrequests.nvidia.com",
         )
 
     async def ensure_absent(self, name: str) -> None:

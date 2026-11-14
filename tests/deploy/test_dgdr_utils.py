@@ -384,6 +384,39 @@ async def test_get_output_dgd_retries_vcluster_connection_refusal(
     sleep.assert_awaited_once_with(5)
 
 
+@pytest.mark.parametrize(
+    ("client_name", "method_name", "read"),
+    [
+        (
+            "custom",
+            "get_namespaced_custom_object",
+            lambda manager: manager.get_versioned("request", "v1alpha1"),
+        ),
+        (
+            "apiextensions",
+            "read_custom_resource_definition",
+            lambda manager: manager.get_crd(),
+        ),
+    ],
+    ids=["get_versioned", "get_crd"],
+)
+async def test_validation_read_retries_vcluster_connection_refusal(
+    monkeypatch, client_name, method_name, read
+) -> None:
+    manager = initialized_manager()
+    response = {"apiVersion": "nvidia.com/v1alpha1"}
+    request = AsyncMock(side_effect=[vcluster_connection_error(), response])
+    setattr(getattr(manager, client_name), method_name, request)
+    sleep = AsyncMock()
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)
+
+    result = await read(manager)
+
+    assert result == response
+    assert request.await_count == 2
+    sleep.assert_awaited_once_with(5)
+
+
 async def test_cleanup_retries_vcluster_connection_failures(monkeypatch) -> None:
     manager = initialized_manager()
     assert manager.custom is not None
