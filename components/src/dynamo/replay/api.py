@@ -39,11 +39,9 @@ if TYPE_CHECKING:
     from dynamo.planner.core.types import RetuneInputs, TrafficObservation
 
 _AGENTIC_MODEL_PROJECTION_POLICY = "project_to_configured_target"
-# Set while planner configs are replayed whose owner already saw the warning
-# for their deprecated keys.
-_PLANNER_CONFIG_WARNED: ContextVar[bool] = ContextVar(
-    "planner_config_warned", default=False
-)
+# Set while a retune sweep replays its candidates: the replay or the Planner
+# that runs the sweep already warned about its deprecated inputs.
+_OLD_INPUTS_WARNED: ContextVar[bool] = ContextVar("old_inputs_warned", default=False)
 
 
 def _planner_replay_adapter():
@@ -243,7 +241,7 @@ def _perf_model_inputs(
         extra_engine_args = engine_args["extra_engine_args"]
         prefill_engine_args = engine_args["prefill_engine_args"]
         decode_engine_args = engine_args["decode_engine_args"]
-    if ais_perf_config is not None:
+    if ais_perf_config is not None and not _OLD_INPUTS_WARNED.get():
         Deprecated("router_ais_perf_model=", remove_in=REMOVE_IN).warn(
             "ais_perf_config=", stacklevel=3
         )
@@ -419,7 +417,7 @@ def _warn_old_planner_config(config: "PlannerConfig") -> None:
     built: no error of the config follows the warning, and the warning names
     the line that called them.
     """
-    if _PLANNER_CONFIG_WARNED.get():
+    if _OLD_INPUTS_WARNED.get():
         return
     # Imported on first use: ``dynamo.mocker`` imports this module, and the
     # Planner package needs AISimulate.
@@ -434,19 +432,20 @@ def _warn_old_planner_config(config: "PlannerConfig") -> None:
 
 
 @contextmanager
-def _planner_config_already_warned() -> Iterator[None]:
-    """Replay planner configs without the warning for their deprecated keys.
+def _old_inputs_already_warned() -> Iterator[None]:
+    """Replay without the warnings for a deprecated planner config or keyword.
 
-    For the retune sweep only: a candidate replays the config of the Planner
-    that runs the sweep, and that Planner already warned about it.
+    For the retune sweep only: a candidate replays the planner config and the
+    router perf config of the replay or Planner that runs the sweep, which
+    already warned about them.
     The warning filters are not touched: a filter that is set and reset for
     every candidate makes Python show every other warning again each time.
     """
-    token = _PLANNER_CONFIG_WARNED.set(True)
+    token = _OLD_INPUTS_WARNED.set(True)
     try:
         yield
     finally:
-        _PLANNER_CONFIG_WARNED.reset(token)
+        _OLD_INPUTS_WARNED.reset(token)
 
 
 def _materialize_offline_report(

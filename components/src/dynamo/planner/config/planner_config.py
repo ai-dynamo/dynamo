@@ -889,18 +889,34 @@ class RetuneEngineSpec(BaseModel):
         ``router_config`` is ``KvRouterConfig.from_json`` of the startup
         snapshot merged with ``router_overrides``; the pinned
         ``ais_perf_config`` is returned as ``router_ais_perf_model``, the
-        keyword that reads the mapping. Called inside sweep worker processes,
-        because the native object cannot be pickled.
+        keyword that reads the mapping. A pinned config of another worker
+        type than the replay's router reads is returned as the deprecated
+        ``ais_perf_config`` instead, as the native object. Called inside
+        sweep worker processes, because the native objects cannot be pickled.
         """
 
         # Planner config validation and schema generation must not load the
-        # native extension; only replay workers construct this object.
-        from dynamo.llm import KvRouterConfig
+        # native extension; only replay workers construct these objects.
+        from dynamo.llm import AisPerfConfig, KvRouterConfig
 
         # Every field but the pinned perf config is a run_trace_replay kwarg
         # under its own name; model_dump deep-copies.
         kwargs = self.model_dump()
-        kwargs["router_ais_perf_model"] = kwargs.pop("ais_perf_config")
+        perf_config = kwargs.pop("ais_perf_config")
+        disaggregated = (
+            self.prefill_engine_args is not None or self.decode_engine_args is not None
+        )
+        router_worker_type = "prefill" if disaggregated else "aggregated"
+        if (
+            perf_config is not None
+            and perf_config.get("worker_type") != router_worker_type
+        ):
+            # Only the deprecated ais_perf_config= of the outer replay pins such
+            # a config: it takes any worker type, and router_ais_perf_model=
+            # would refuse this one.
+            kwargs["ais_perf_config"] = AisPerfConfig(config=perf_config)
+        else:
+            kwargs["router_ais_perf_model"] = perf_config
         overrides = dict(router_overrides or {})
         if self.router_config is not None or overrides:
             kwargs["router_config"] = KvRouterConfig.from_json(
@@ -2550,7 +2566,9 @@ class PlannerConfig(BaseModel):
                         continue
                     try:
                         ais_perf_model_role_config(role, entry)
-                    except (ValueError, OSError) as error:
+                    # AISimulate reports perf data it cannot find as a
+                    # RuntimeError.
+                    except (ValueError, OSError, RuntimeError) as error:
                         raise ValueError(
                             f"ais_perf_model entry for {role}: {error}"
                         ) from error

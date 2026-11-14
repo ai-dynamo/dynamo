@@ -349,6 +349,21 @@ def test_missing_state_snapshot_is_a_load_error():
     assert str(error) == f"ais_perf_model entry for decode: {error.__cause__}"
 
 
+def test_missing_learned_checkpoint_is_a_load_error():
+    content = {
+        **_CONTENT,
+        "estimation_mode": "fpm_learned",
+        "estimator_config": {"fpm_learned": {"checkpoint_path": "/missing/checkpoint"}},
+    }
+
+    error = _mode_check_error(content)
+
+    assert type(error) is ValueError
+    # AISimulate reports perf data it cannot find as a RuntimeError.
+    assert isinstance(error.__cause__, RuntimeError)
+    assert str(error) == f"ais_perf_model entry for decode: {error.__cause__}"
+
+
 @pytest.mark.parametrize(
     "mode,value,checked",
     [

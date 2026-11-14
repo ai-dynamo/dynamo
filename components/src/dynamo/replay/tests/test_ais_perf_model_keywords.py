@@ -1004,29 +1004,30 @@ def test_old_planner_config_error_comes_before_warning(replay, native_calls):
 
 
 @pytest.mark.unit
-def test_planner_config_already_warned_silences_only_that_warning(
+def test_old_inputs_already_warned_silences_both_old_input_warnings(
     replay, planner_replay_calls
 ):
     perf_config = AisPerfConfig(config=AGGREGATED_ENTRY)
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        with api._planner_config_already_warned():
+        with api._old_inputs_already_warned():
             with pytest.raises(_NativeCallRecorded):
-                replay(planner_config=_OLD_PLANNER_CONFIG)
-            # The warning of the deprecated keyword is another one.
-            with pytest.raises(FutureWarning, match="ais_perf_config= is deprecated"):
                 replay(
                     planner_config=_OLD_PLANNER_CONFIG,
                     ais_perf_config=perf_config,
                     **_kv_router(),
                 )
-        # Outside, the config warns again, also after an error inside.
+        # Outside, both warn again, also after an error inside.
+        with pytest.raises(FutureWarning, match="ais_perf_config= is deprecated"):
+            replay(ais_perf_config=perf_config, **_kv_router())
         with pytest.raises(FutureWarning, match="ais_perf_model.roles is deprecated"):
             replay(planner_config=_OLD_PLANNER_CONFIG)
         with pytest.raises(RuntimeError, match="inside"):
-            with api._planner_config_already_warned():
+            with api._old_inputs_already_warned():
                 raise RuntimeError("inside")
+        with pytest.raises(FutureWarning, match="ais_perf_config= is deprecated"):
+            replay(ais_perf_config=perf_config, **_kv_router())
         with pytest.raises(FutureWarning, match="ais_perf_model.roles is deprecated"):
             replay(planner_config=_OLD_PLANNER_CONFIG)
 

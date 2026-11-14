@@ -776,7 +776,8 @@ def test_only_a_throughput_planner_reads_the_warmup_trace_as_history(tmp_path):
 # Every run_trace_replay kwarg, classified for retune candidate replays, so a
 # new kwarg cannot silently replay candidates on another engine.
 # From the outer replay. A candidate takes the pinned router perf config
-# under the keyword that is not deprecated.
+# under the keyword that is not deprecated, unless only the deprecated one
+# takes it (see test_engine_spec_returns_old_keyword_config_of_another_worker_type).
 _PINNED = (set(RetuneEngineSpec.model_fields) - {"ais_perf_config"}) | {
     "router_ais_perf_model"
 }
@@ -966,6 +967,32 @@ def test_engine_spec_returns_pinned_perf_config_as_router_keyword():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "engine_args,worker_type",
+    [
+        pytest.param({}, "prefill", id="aggregated-replay"),
+        pytest.param(
+            {"prefill_engine_args": {}, "decode_engine_args": {}},
+            "aggregated",
+            id="disaggregated-replay",
+        ),
+    ],
+)
+def test_engine_spec_returns_old_keyword_config_of_another_worker_type(
+    engine_args, worker_type
+):
+    # The deprecated ais_perf_config= of the outer replay takes any worker
+    # type; router_ais_perf_model= would refuse this one.
+    pinned = _pinned_router_perf_config(worker_type)
+
+    kwargs = RetuneEngineSpec(ais_perf_config=pinned, **engine_args).replay_kwargs()
+
+    assert isinstance(kwargs["ais_perf_config"], AisPerfConfig)
+    assert kwargs["ais_perf_config"].to_dict() == pinned
+    assert set(kwargs) == (_PINNED - {"router_ais_perf_model"}) | {"ais_perf_config"}
+
+
+@pytest.mark.unit
 def test_sweep_candidate_passes_engine_perf_config_as_router_keyword(monkeypatch):
     calls: list[dict] = []
 
@@ -990,7 +1017,7 @@ def test_sweep_candidate_passes_engine_perf_config_as_router_keyword(monkeypatch
 
 
 @pytest.mark.unit
-def test_sweep_candidate_rejects_pinned_perf_config_of_another_worker_type(
+def test_sweep_candidate_replays_old_keyword_config_of_another_worker_type(
     monkeypatch,
 ):
     calls: list[dict] = []
@@ -1002,16 +1029,21 @@ def test_sweep_candidate_rejects_pinned_perf_config_of_another_worker_type(
     monkeypatch.setattr(api, "_run_mocker_trace_replay", recording_native_replay)
     # The outer replay can pin such a config only through the deprecated
     # ais_perf_config= keyword, which takes any worker type.
+    pinned = _pinned_router_perf_config("prefill")
     engine = RetuneEngineSpec(
+        router_mode="kv_router",
         router_config={"router_prefill_load_model": "ais"},
-        ais_perf_config=_pinned_router_perf_config("prefill"),
+        ais_perf_config=pinned,
     )
 
-    # After the keyword comes the loader's own text.
-    with pytest.raises(ValueError, match="^router_ais_perf_model: "):
-        _evaluate_candidate(engine)
+    # The outer replay warned about the keyword; its candidates do not.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(RuntimeError, match="recorded"):
+            _evaluate_candidate(engine)
 
-    assert calls == []
+    (call,) = calls
+    assert call["ais_perf_config"].to_dict() == pinned
 
 
 @pytest.mark.unit
