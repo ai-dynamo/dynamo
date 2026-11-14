@@ -6641,8 +6641,8 @@ Worker components receive the following probe configurations:
 - **Path**: `/live`
 - **Port**: `system` (9090)
 - **Period**: 5 seconds
-- **Timeout**: 30 seconds
-- **Failure Threshold**: 1
+- **Timeout**: 4 seconds
+- **Failure Threshold**: 3 for runtime 1.5.0 and later; 1 for older runtimes or when the runtime version cannot be resolved
 
 **Readiness Probe:**
 - **Type**: HTTP GET
