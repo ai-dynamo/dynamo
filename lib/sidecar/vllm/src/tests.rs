@@ -28,6 +28,8 @@ use tokio::sync::{Mutex, Notify, oneshot};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 use tonic_health::ServingStatus as HealthServingStatus;
+use tracing::Instrument;
+use tracing_subscriber::{Layer, layer::SubscriberExt};
 
 use crate::client::{CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::engine::VllmSidecarEngine;
@@ -41,6 +43,8 @@ struct FakeVllm {
     sequence_outputs: Option<Vec<pb::SequenceOutput>>,
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
     data_parallel_rank_metadata: Arc<Mutex<Vec<Option<String>>>>,
+    /// `traceparent` and `tracestate` metadata per `GenerateStream` call.
+    trace_metadata: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
     loras: Arc<Mutex<Vec<pb::LoraAdapter>>>,
     next_lora_id: Arc<AtomicI64>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
@@ -134,6 +138,14 @@ impl pb::inference_server::Inference for FakeVllm {
             .lock()
             .await
             .push(data_parallel_rank);
+        let trace = ["traceparent", "tracestate"]
+            .into_iter()
+            .filter_map(|key| {
+                let value = request.metadata().get(key)?.to_str().ok()?;
+                Some((key.to_string(), value.to_string()))
+            })
+            .collect();
+        self.trace_metadata.lock().await.push(trace);
         let request = request.into_inner();
         self.requests.lock().await.push(request.clone());
         if self.hang_before_headers.load(Ordering::SeqCst) {
@@ -1011,6 +1023,42 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert_eq!(
         server.service.data_parallel_rank_metadata.lock().await[0],
         Some("1".to_string())
+    );
+}
+
+/// The current span's W3C Trace Context rides on `GenerateStream` as gRPC
+/// metadata; without a distributed trace context nothing is sent.
+#[tokio::test]
+async fn trace_context_rides_in_generate_stream_metadata() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let (engine, _) = engine_from_args(&server.endpoint).await;
+    engine.start(0).await.expect("start");
+    collect(&engine, request()).await;
+    let recorded = server.service.trace_metadata.lock().await.pop().unwrap();
+    assert!(recorded.is_empty());
+
+    // Only the request span has the trace fields this layer requires.
+    let subscriber = tracing_subscriber::registry().with(
+        dynamo_runtime::logging::DistributedTraceIdLayer.with_filter(
+            tracing_subscriber::filter::filter_fn(|metadata| metadata.name() == "handle_payload"),
+        ),
+    );
+    let _default = tracing::subscriber::set_default(subscriber);
+    let span = tracing::info_span!(
+        "handle_payload",
+        trace_id = "0af7651916cd43dd8448eb211c80319c",
+        span_id = "b7ad6b7169203331",
+        tracestate = "vendor=value",
+    );
+    collect(&engine, request()).instrument(span).await;
+    let recorded = server.service.trace_metadata.lock().await.pop().unwrap();
+    assert_eq!(
+        recorded.get("traceparent").map(String::as_str),
+        Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+    );
+    assert_eq!(
+        recorded.get("tracestate").map(String::as_str),
+        Some("vendor=value")
     );
 }
 

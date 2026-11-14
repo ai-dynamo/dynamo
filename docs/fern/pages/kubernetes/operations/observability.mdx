@@ -294,6 +294,23 @@ HTTP/protobuf, set `OTEL_EXPORTER_OTLP_PROTOCOL` to `http/protobuf`. Use signal-
 only when traces and logs use different collectors.
 
 </Step>
+<Step title="Enable engine spans in sidecar mode" id="enable-engine-spans-in-sidecar-mode">
+
+In sidecar mode, `spec.envs` reaches the `runtime` container, so the settings above also enable the
+sidecar's spans. The sidecar forwards the W3C `traceparent` and `tracestate` of its `engine.generate`
+span to the engine over gRPC. For the engine's own spans to join the trace, enable the engine's
+OpenTelemetry exporter on the `main` container:
+
+| Engine | Engine configuration |
+| --- | --- |
+| TensorRT-LLM | `trtllm-serve ... --otlp_traces_endpoint <endpoint>/v1/traces` with `return_perf_metrics: true` in the `--extra_llm_api_options` file. The release image ships the http/protobuf exporter, so set `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf` and use the collector's HTTP port. |
+| SGLang | `sglang.launch_server ... --enable-trace --otlp-traces-endpoint <endpoint>` |
+| vLLM | Not yet available: `vllm serve --grpc-port` runs vLLM's Rust frontend, which does not read trace context or export spans. The trace ends at the sidecar's `engine.generate` span. |
+
+TensorRT-LLM reports its spans under `unknown_service` unless `OTEL_SERVICE_NAME` is set on the
+`main` container.
+
+</Step>
 <Step title="Generate and inspect a trace" id="generate-and-inspect-a-trace">
 
 Apply the updated DGD and send an inference request through the frontend. In your tracing backend,

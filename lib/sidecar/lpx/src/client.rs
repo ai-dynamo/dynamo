@@ -82,24 +82,16 @@ impl OpenEngineClient {
     /// Opens a `Generate` stream. The status comes back raw because its code
     /// decides how the failure reaches the frontend (see `engine.rs`).
     ///
-    /// `trace_headers` become W3C Trace Context metadata, which the hybrid
-    /// engine reads into its request tracing and the LPU-only engine ignores.
-    /// No routing metadata is sent: the sidecar rejects nonzero data-parallel
-    /// ranks and priorities before dispatch.
+    /// The current span's W3C Trace Context rides as metadata, which the
+    /// hybrid engine reads into its request tracing and the LPU-only engine
+    /// ignores. No routing metadata is sent: the sidecar rejects nonzero
+    /// data-parallel ranks and priorities before dispatch.
     pub(crate) async fn generate(
         &self,
         request: pb::GenerateRequest,
-        trace_headers: Vec<(&'static str, String)>,
     ) -> Result<tonic::Streaming<pb::GenerateResponse>, tonic::Status> {
         let mut request = tonic::Request::new(request);
-        for (key, value) in trace_headers {
-            match value.parse() {
-                Ok(value) => {
-                    request.metadata_mut().insert(key, value);
-                }
-                Err(_) => tracing::debug!(key, "dropping trace metadata that is not ASCII"),
-            }
-        }
+        dynamo_sidecar_common::inject_trace_context(&mut request);
         self.inference()
             .generate(request)
             .await

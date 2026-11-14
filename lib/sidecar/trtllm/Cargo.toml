@@ -56,6 +56,7 @@ tonic-health = { workspace = true }
 tonic-build = { workspace = true }
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 dynamo-kv-hashing = { workspace = true }
 dynamo-router-protocol = { workspace = true }
