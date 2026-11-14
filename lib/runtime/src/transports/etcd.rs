@@ -31,6 +31,7 @@ use lease::*;
 pub use lock::*;
 
 use super::utils::build_in_runtime;
+use crate::config::env_config::positive_secs_or_default;
 use crate::config::environment_names::etcd as env_etcd;
 
 const DEFAULT_STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -1011,29 +1012,11 @@ fn default_lease_ttl() -> u64 {
 }
 
 fn startup_connect_timeout_from_value(value: Option<&str>) -> Duration {
-    match value {
-        Some(raw) => match raw.parse::<u64>() {
-            Ok(seconds) if seconds > 0 => Duration::from_secs(seconds),
-            Ok(_) => {
-                tracing::warn!(
-                    "{} must be >= 1; got 0. Falling back to {}.",
-                    env_etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
-                    DEFAULT_STARTUP_CONNECT_TIMEOUT.as_secs()
-                );
-                DEFAULT_STARTUP_CONNECT_TIMEOUT
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "Invalid {}='{}' ({error}). Falling back to {}.",
-                    env_etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
-                    raw,
-                    DEFAULT_STARTUP_CONNECT_TIMEOUT.as_secs()
-                );
-                DEFAULT_STARTUP_CONNECT_TIMEOUT
-            }
-        },
-        None => DEFAULT_STARTUP_CONNECT_TIMEOUT,
-    }
+    positive_secs_or_default(
+        env_etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
+        value,
+        DEFAULT_STARTUP_CONNECT_TIMEOUT,
+    )
 }
 
 /// Resolve the etcd channel keepalive `(interval, timeout)`, or `None` when disabled
@@ -1067,29 +1050,11 @@ fn keep_alive_from_values(
             ETCD_SERVER_KEEPALIVE_MIN_TIME.as_secs()
         );
     }
-    let timeout = match timeout {
-        Some(raw) => match raw.parse::<u64>() {
-            Ok(seconds) if seconds > 0 => Duration::from_secs(seconds),
-            Ok(_) => {
-                tracing::warn!(
-                    "{} must be >= 1; got 0. Falling back to {}.",
-                    env_etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS,
-                    DEFAULT_KEEPALIVE_TIMEOUT.as_secs()
-                );
-                DEFAULT_KEEPALIVE_TIMEOUT
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "Invalid {}='{}' ({error}). Falling back to {}.",
-                    env_etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS,
-                    raw,
-                    DEFAULT_KEEPALIVE_TIMEOUT.as_secs()
-                );
-                DEFAULT_KEEPALIVE_TIMEOUT
-            }
-        },
-        None => DEFAULT_KEEPALIVE_TIMEOUT,
-    };
+    let timeout = positive_secs_or_default(
+        env_etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS,
+        timeout,
+        DEFAULT_KEEPALIVE_TIMEOUT,
+    );
     Some((interval, timeout))
 }
 
