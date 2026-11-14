@@ -57,4 +57,11 @@ var (
 		Name:             "MultinodeTopologyAliases",
 		MinOriginVersion: *semver.MustParse("1.6.0"),
 	}
+
+	// TRTLLMMpirunMapByNode places GPUs-per-pod mpirun ranks on each TRT-LLM node. Enabled for
+	// DGDs created by operator >= 1.7.0 so an upgrade does not roll existing multinode workloads.
+	TRTLLMMpirunMapByNode = Gate{
+		Name:             "TRTLLMMpirunMapByNode",
+		MinOriginVersion: *semver.MustParse("1.7.0"),
+	}
 )
