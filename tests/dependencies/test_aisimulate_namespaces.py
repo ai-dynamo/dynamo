@@ -193,7 +193,7 @@ def test_aisimulate_wheel_uses_canonical_import_namespaces() -> None:
     legacy_cli = next(
         entry for entry in release.entry_points if entry.name == "aiconfigurator"
     )
-    assert legacy_cli.value == "aisimulate.legacy_cli.entrypoint:main"
+    assert legacy_cli.value == "aisim.legacy_cli.entrypoint:main"
 
 
 def test_pinned_aisimulate_materializes_shared_host_offload() -> None:
