@@ -15,7 +15,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::event::{KvCacheEvent, KvCacheEventData, KvCacheRemoveData};
 use crate::placement::{Placement, PlacementEvent};
-use crate::residency::StorageTier;
+use crate::residency::{KvCacheGroupKind, KvCacheGroupTag, StorageTier};
 use dynamo_router_protocol::worker::{DpRank, WorkerWithDpRank};
 
 mod convert;
@@ -91,6 +91,8 @@ pub struct ZmqEventNormalizer {
     /// partial tail (vLLM `--prefix-match-unit` below the block size), not a
     /// misconfiguration, and is filtered quietly instead of warned about.
     full_block_workers: FxHashSet<WorkerWithDpRank>,
+    recurrent_groups: Option<Vec<u32>>,
+    recurrent_alignment_blocks: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +151,8 @@ impl ZmqEventNormalizer {
             cache_namespaces: FxHashMap::default(),
             engine_mm: mm_exclusion::EngineMmState::new(false),
             full_block_workers: FxHashSet::default(),
+            recurrent_groups: None,
+            recurrent_alignment_blocks: 1,
         }
     }
 
@@ -162,7 +166,21 @@ impl ZmqEventNormalizer {
             cache_namespaces: FxHashMap::default(),
             engine_mm: mm_exclusion::EngineMmState::new(false),
             full_block_workers: FxHashSet::default(),
+            recurrent_groups: None,
+            recurrent_alignment_blocks: 1,
         }
+    }
+
+    /// Opt in only when every downstream consumer supports recurrent checkpoints.
+    /// The complete group list also classifies removals received before stores.
+    pub fn with_recurrent_groups(mut self, groups: Option<Vec<u32>>) -> Self {
+        self.recurrent_groups = groups;
+        self
+    }
+
+    pub fn with_recurrent_alignment_blocks(mut self, blocks: u32) -> Self {
+        self.recurrent_alignment_blocks = blocks.max(1);
+        self
     }
 
     /// Mark this source as deriving multimodal pad values from engine
@@ -252,11 +270,26 @@ impl ZmqEventNormalizer {
         //    which drops them, would instead accept the event, burn a
         //    next_event_id, and leave an id gap the event processor mistakes for
         //    an engine drop -- the same trap the locality gate above avoids.
+        let recurrent_metadata = raw.metadata();
+        if recurrent_metadata.kv_cache_spec_kind == Some(KvCacheSpecKind::Mamba)
+            && matches!(raw, RawKvEvent::BlockStored { .. })
+        {
+            self.learn_metadata(recurrent_metadata, worker.dp_rank);
+        }
+        let recurrent = matches!(
+            self.resolved_kind(recurrent_metadata, worker.dp_rank),
+            Some((_, KvCacheSpecKind::Mamba))
+        );
+        if recurrent && let Some(reason) = self.filter_reason(recurrent_metadata, worker.dp_rank) {
+            return Err(reason);
+        }
         let mut is_lower_tier = false;
         if let Some(m) = raw.medium() {
             match StorageTier::from_kv_medium(m) {
                 Some(StorageTier::Device | StorageTier::HostPinned) => {}
-                Some(_) if ownership == KvEventOwnership::Framework => return Ok(raw),
+                Some(_) if ownership == KvEventOwnership::Framework && !recurrent => {
+                    return Ok(raw);
+                }
                 Some(_) => is_lower_tier = true,
                 None => return Err(ZmqEventFilterReason::UnknownMedium),
             }
@@ -277,6 +310,16 @@ impl ZmqEventNormalizer {
             Some(reason) => return Err(reason),
             None => {}
         }
+        // A recurrent-group store with no block geometry is the placeholder
+        // payload of a publisher without self-describing offload events
+        // (vLLM before vllm-project/vllm#62613): it is dropped as before the
+        // tag existed. Its group is still learned above, so a later removal
+        // is tagged and lands in the presence table as a no-op.
+        if let RawKvEvent::BlockStored { block_size: 0, .. } = &raw
+            && self.kv_cache_group_tag(metadata, worker.dp_rank).is_some()
+        {
+            return Err(ZmqEventFilterReason::NonMainAttentionKind);
+        }
         // Only blocks that survived group filtering count toward a worker's
         // full-block history, so a filtered (non-main-attention) group cannot
         // suppress a size-mismatch warning for the routed group. A clear resets
@@ -293,6 +336,20 @@ impl ZmqEventNormalizer {
             }
             _ => {}
         }
+        if self.kv_cache_group_tag(metadata, worker.dp_rank).is_some() {
+            // Recurrent-group events share positional hashes with the
+            // attention group but are not part of its namespace chain: a
+            // Mamba store or removal must not mark or delete attention
+            // namespace state. Only normalise the empty-string namespace.
+            if let RawKvEvent::BlockStored {
+                cache_namespace, ..
+            } = &mut raw
+                && cache_namespace.as_deref() == Some("")
+            {
+                *cache_namespace = None;
+            }
+            return Ok(raw);
+        }
         if !is_lower_tier {
             self.propagate_cache_namespace(&mut raw, worker)?;
         }
@@ -300,6 +357,25 @@ impl ZmqEventNormalizer {
     }
 
     pub fn normalize_preprocessed(
+        &mut self,
+        raw: RawKvEvent,
+        event_id: u64,
+        worker: WorkerWithDpRank,
+    ) -> Option<PlacementEvent> {
+        // Tag before conversion consumes the raw event: a recurrent group's
+        // event is routed to the per-group presence table, not the attention
+        // tree, whatever shape conversion gives it.
+        let kv_cache_group = self.kv_cache_group_tag(raw.metadata(), worker.dp_rank);
+        let mut event = if kv_cache_group.is_some() {
+            convert::convert_recurrent_event(raw, event_id, worker)?
+        } else {
+            self.convert_preprocessed(raw, event_id, worker)?
+        };
+        event.placement.kv_cache_group = kv_cache_group;
+        Some(event)
+    }
+
+    fn convert_preprocessed(
         &mut self,
         mut raw: RawKvEvent,
         event_id: u64,
@@ -517,13 +593,70 @@ impl ZmqEventNormalizer {
         Ok(())
     }
 
+    /// Resolve the event's KV cache group kind from the explicit field or the
+    /// per-(dp_rank, group_idx) metadata learned from earlier stores.
+    fn resolved_kind(
+        &self,
+        metadata: KvCacheEventMetadata,
+        dp_rank: DpRank,
+    ) -> Option<(Option<u32>, KvCacheSpecKind)> {
+        if let Some(kind) = metadata.kv_cache_spec_kind {
+            return Some((metadata.group_idx, kind));
+        }
+        let group_idx = metadata.group_idx?;
+        self.group_metadata
+            .get(&(dp_rank, group_idx))
+            .map(|learned| (Some(group_idx), learned.kind))
+            .or_else(|| {
+                self.recurrent_groups
+                    .as_ref()
+                    .filter(|groups| groups.contains(&group_idx))
+                    .map(|_| (Some(group_idx), KvCacheSpecKind::Mamba))
+            })
+    }
+
+    /// Tag for events that are kept but belong to a non-main-attention group.
+    /// Only recurrent state groups are kept today; see [`Self::filter_reason`].
+    pub(crate) fn kv_cache_group_tag(
+        &self,
+        metadata: KvCacheEventMetadata,
+        dp_rank: DpRank,
+    ) -> Option<KvCacheGroupTag> {
+        let (group_idx, kind) = self.resolved_kind(metadata, dp_rank)?;
+        (kind == KvCacheSpecKind::Mamba).then_some(KvCacheGroupTag {
+            group_idx: group_idx?,
+            kind: KvCacheGroupKind::Mamba,
+            expected_group_count: self
+                .recurrent_groups
+                .as_ref()
+                .map(|groups| groups.len() as u32),
+            alignment_blocks: Some(self.recurrent_alignment_blocks),
+        })
+    }
+
     fn filter_reason(
         &self,
         metadata: KvCacheEventMetadata,
         dp_rank: DpRank,
     ) -> Option<ZmqEventFilterReason> {
+        if let Some((_, KvCacheSpecKind::Mamba)) = self.resolved_kind(metadata, dp_rank) {
+            return if self.recurrent_groups.as_ref().is_some_and(|groups| {
+                metadata
+                    .group_idx
+                    .is_some_and(|group| groups.contains(&group))
+            }) {
+                None
+            } else {
+                Some(ZmqEventFilterReason::NonMainAttentionKind)
+            };
+        }
         if let Some(kind) = metadata.kv_cache_spec_kind {
-            if kind.is_main_attention() {
+            if kind == KvCacheSpecKind::Mamba && metadata.group_idx.is_none() {
+                return Some(ZmqEventFilterReason::UnlearnedGroupIdx);
+            }
+            if kind.is_main_attention() || kind == KvCacheSpecKind::Mamba {
+                // Recurrent state groups are kept and tagged; they are indexed
+                // as per-group presence, not in the attention tree.
                 return None;
             }
             if kind == KvCacheSpecKind::Unknown {
@@ -536,7 +669,7 @@ impl ZmqEventNormalizer {
 
         if let Some(metadata) = self.group_metadata.get(&(dp_rank, group_idx)) {
             let _sliding_window = metadata.sliding_window;
-            if metadata.kind.is_main_attention() {
+            if metadata.kind.is_main_attention() || metadata.kind == KvCacheSpecKind::Mamba {
                 return None;
             }
             if metadata.kind == KvCacheSpecKind::Unknown {
@@ -545,7 +678,7 @@ impl ZmqEventNormalizer {
             return Some(ZmqEventFilterReason::NonMainAttentionGroup);
         }
 
-        if group_idx == 0 {
+        if group_idx == 0 && self.recurrent_groups.is_none() {
             None
         } else {
             Some(ZmqEventFilterReason::UnlearnedGroupIdx)

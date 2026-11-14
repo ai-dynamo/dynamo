@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::residency::{ResidencyDomain, StorageTier};
+use crate::residency::{KvCacheGroupTag, ResidencyDomain, StorageTier};
 use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 
 use crate::event::{KvCacheEvent, RouterEvent};
@@ -22,6 +22,10 @@ pub struct Placement {
     pub tier: StorageTier,
     #[serde(default)]
     pub residency_domain: ResidencyDomain,
+    /// Set for events of a non-main-attention KV cache group; `None` is the
+    /// attention group (and every legacy publisher).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_cache_group: Option<KvCacheGroupTag>,
 }
 
 impl Placement {
@@ -30,6 +34,7 @@ impl Placement {
             owner: PlacementOwner::LocalWorker(WorkerWithDpRank::new(worker_id, dp_rank)),
             tier,
             residency_domain: ResidencyDomain::Worker,
+            kv_cache_group: None,
         }
     }
 
@@ -80,6 +85,9 @@ impl PlacementEvent {
             self.placement.residency_domain,
         );
         event.session_id = self.session_id;
+        if let Some(kv_cache_group) = self.placement.kv_cache_group {
+            event = event.with_kv_cache_group(kv_cache_group);
+        }
         Some(event)
     }
 }

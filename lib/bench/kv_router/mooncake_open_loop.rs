@@ -69,7 +69,8 @@ struct QueryCorpus {
 #[derive(Debug)]
 pub(crate) enum MooncakeOperationPayload {
     Query,
-    Event(RouterEvent),
+    // Boxed: a RouterEvent is ~200 bytes and Query is empty.
+    Event(Box<RouterEvent>),
 }
 
 #[derive(Debug)]
@@ -129,7 +130,8 @@ impl PreparedMooncakeCorpus {
 #[derive(Debug)]
 enum DispatchPayload {
     Query { lane: usize },
-    Event(RouterEvent),
+    // Boxed: a RouterEvent is ~200 bytes and Query is one word.
+    Event(Box<RouterEvent>),
 }
 
 #[derive(Debug)]
@@ -277,7 +279,10 @@ pub(crate) fn prepare_mooncake_corpus(
                         } else {
                             RouterEvent::with_storage_tier(worker_id, event.clone(), *storage_tier)
                         };
-                        (MooncakeOperationPayload::Event(event), QuerySpec::default())
+                        (
+                            MooncakeOperationPayload::Event(Box::new(event)),
+                            QuerySpec::default(),
+                        )
                     }
                 };
                 operations.push((
@@ -744,7 +749,7 @@ fn issue_events<T: SyncIndexer>(
                     break;
                 }
                 DispatchPayload::Event(event) => {
-                    let enqueue_result = enqueue_event(&context, event, entry.id);
+                    let enqueue_result = enqueue_event(&context, *event, entry.id);
                     match enqueue_result {
                         Ok((event_worker, accepted_ns, kind)) => {
                             let record = IssueRecord {
@@ -1760,14 +1765,14 @@ mod tests {
             deadline_ns: u64::from(id),
             deadline_group: id,
             worker_id: u64::from(id),
-            payload: DispatchPayload::Event(RouterEvent::new(
+            payload: DispatchPayload::Event(Box::new(RouterEvent::new(
                 u64::from(id),
                 dynamo_kv_events::event::KvCacheEvent {
                     event_id: u64::from(id),
                     data: KvCacheEventData::Cleared,
                     dp_rank: 0,
                 },
-            )),
+            ))),
         }));
 
         let (queries, event_shards) = partition_dispatch(dispatch, 8)?;

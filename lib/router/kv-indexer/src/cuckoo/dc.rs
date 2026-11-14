@@ -1658,6 +1658,33 @@ mod tests {
     }
 
     #[test]
+    fn recurrent_group_events_never_touch_attention_membership() {
+        use crate::prelude::{KvCacheGroupKind, KvCacheGroupTag};
+
+        let worker = WorkerWithDpRank::new(1, 0);
+        let resident = canonical_root(7);
+        let mut state = DcCkfState::new(CkfConfig::new(32)).unwrap();
+        state.apply_event(stored(worker, 1, &[7]));
+        let tag = KvCacheGroupTag {
+            group_idx: 0,
+            kind: KvCacheGroupKind::Mamba,
+            expected_group_count: Some(1),
+            alignment_blocks: Some(1),
+        };
+
+        // vLLM publishes a recurrent group at the attention block's positional hash.
+        let removal = state.apply_event(removed(worker, 2, &[7]).with_kv_cache_group(tag));
+        assert!(removal.first_error().is_none());
+        assert_eq!(removal.unknown_removals(), 0);
+        assert!(state.contains(resident));
+
+        let store = state.apply_event(stored(worker, 3, &[8]).with_kv_cache_group(tag));
+        assert!(store.first_error().is_none());
+        assert!(!state.contains(canonical_root(8)));
+        assert_eq!(state.stats().aggregation().contribution_count(), 1);
+    }
+
+    #[test]
     fn non_device_store_is_ignored_but_unknown_device_remove_is_counted() {
         let worker = WorkerWithDpRank::new(1, 0);
         let resident = canonical_root(7);

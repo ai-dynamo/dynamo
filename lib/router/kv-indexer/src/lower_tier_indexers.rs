@@ -22,9 +22,9 @@ use crate::prelude::{
     LocalBlockHash, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent, StorageTier,
 };
 use crate::{
-    KvIndexerMetrics, KvRouterError, LowerTierContinuation, LowerTierIndexer,
-    LowerTierMatchDetails, MatchDetails, ThreadPoolIndexer, WireTieredMatchDetails,
-    record_unsupported_residency_event,
+    KvCacheGroupResidency, KvIndexerMetrics, KvRouterError, LowerTierContinuation,
+    LowerTierIndexer, LowerTierMatchDetails, MatchDetails, ThreadPoolIndexer,
+    WireTieredMatchDetails, record_unsupported_residency_event,
 };
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -39,9 +39,16 @@ pub struct LowerTierIndexers {
     block_size: u32,
     routing_snapshot: Arc<ArcSwap<ResidencyRoutingSnapshot>>,
     indexers: Arc<RwLock<HashMap<StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>>>>,
+    /// Recurrent-group (Mamba) state presence across all tiers, used to cut
+    /// hybrid workers' matches to boundaries where every group has a state.
+    group_residency: Arc<KvCacheGroupResidency>,
 }
 
 impl LowerTierIndexers {
+    pub fn group_residency(&self) -> &KvCacheGroupResidency {
+        &self.group_residency
+    }
+
     /// Metrics-less constructor for call sites without a `KvIndexerMetrics` handle.
     /// Router production assembly should use [`new_with_metrics`](Self::new_with_metrics)
     /// so lower-tier traffic is included in `kv_cache_events_applied`.
@@ -67,6 +74,7 @@ impl LowerTierIndexers {
             metrics,
             routing_snapshot: Arc::new(ArcSwap::from_pointee(ResidencyRoutingSnapshot::default())),
             indexers: Arc::new(RwLock::new(HashMap::new())),
+            group_residency: Arc::new(KvCacheGroupResidency::new()),
         }
     }
 

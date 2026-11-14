@@ -561,6 +561,7 @@ impl PositionalIndexer {
                     worker_id: worker.worker_id,
                     state_source: None,
                     session_id: None,
+                    kv_cache_group: None,
                     storage_tier: crate::prelude::StorageTier::Device,
                     residency_domain: crate::prelude::WireResidencyDomain::explicit(
                         crate::prelude::ResidencyDomain::Worker,

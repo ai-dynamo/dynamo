@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, RouterEvent};
-use dynamo_kv_events::residency::{ResidencyDomain, StorageTier};
+use dynamo_kv_events::placement::Placement;
 use dynamo_kv_indexer::host::{KvRouterError, LocalKvIndexer};
 use dynamo_runtime::transports::event_plane::EventPublisher;
 use dynamo_scheduler::host::RouterEventSink;
@@ -167,15 +167,21 @@ pub(super) async fn admit_local_event(
 pub(super) async fn emit(
     local_indexer: &Option<Arc<LocalKvIndexer>>,
     worker_id: u64,
-    storage_tier: StorageTier,
-    residency_domain: ResidencyDomain,
+    placement: &Placement,
     event: KvCacheEvent,
     session_id: Option<String>,
     output: &mut Vec<RouterEvent>,
 ) -> bool {
-    let mut router_event =
-        RouterEvent::with_residency_domain(worker_id, event, storage_tier, residency_domain);
+    let mut router_event = RouterEvent::with_residency_domain(
+        worker_id,
+        event,
+        placement.tier,
+        placement.residency_domain,
+    );
     router_event.session_id = session_id;
+    if let Some(kv_cache_group) = placement.kv_cache_group {
+        router_event = router_event.with_kv_cache_group(kv_cache_group);
+    }
     let applied = match admit_local_event(local_indexer.as_deref(), &router_event).await {
         Ok(()) => true,
         Err(error) => {

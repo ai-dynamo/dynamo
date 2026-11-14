@@ -20,6 +20,7 @@ use super::sinks::emit;
 #[derive(Debug)]
 pub(super) struct PlacementEventCoalescer<K> {
     pending: Option<(K, PlacementEvent)>,
+    recurrent_pending: Option<(K, PlacementEvent)>,
     max_batch_blocks: usize,
 }
 
@@ -27,24 +28,33 @@ impl<K: Eq> PlacementEventCoalescer<K> {
     pub(super) fn new(max_batch_blocks: usize) -> Self {
         Self {
             pending: None,
+            recurrent_pending: None,
             max_batch_blocks,
         }
     }
 
     pub(super) fn has_pending(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || self.recurrent_pending.is_some()
     }
 
-    /// Push one input and return up to two ready outputs in stream order.
-    ///
-    /// Two outputs are possible when an incompatible or oversized mutation
-    /// follows a pending mutation, or when `Cleared` flushes the pending value
-    /// and then passes through as its own barrier.
-    pub(super) fn push(&mut self, key: K, event: PlacementEvent) -> [Option<PlacementEvent>; 2] {
-        if matches!(&event.event.data, KvCacheEventData::Cleared) {
-            return [self.flush(), Some(event)];
+    /// Attention and recurrent mutations commute; keep their pending runs separate.
+    /// Clears flush both lanes before passing through as an ordering barrier.
+    pub(super) fn push(&mut self, key: K, event: PlacementEvent) -> [Option<PlacementEvent>; 3] {
+        if matches!(event.event.data, KvCacheEventData::Cleared) {
+            return [self.flush(), self.flush(), Some(event)];
         }
+        let recurrent = event.placement.kv_cache_group.is_some();
+        if recurrent {
+            std::mem::swap(&mut self.pending, &mut self.recurrent_pending);
+        }
+        let [first, second] = self.push_lane(key, event);
+        if recurrent {
+            std::mem::swap(&mut self.pending, &mut self.recurrent_pending);
+        }
+        [first, second, None]
+    }
 
+    fn push_lane(&mut self, key: K, event: PlacementEvent) -> [Option<PlacementEvent>; 2] {
         let can_merge = self.pending.as_ref().is_some_and(|(pending_key, pending)| {
             pending_key == &key
                 && pending.event.dp_rank == event.event.dp_rank
@@ -59,12 +69,12 @@ impl<K: Eq> PlacementEventCoalescer<K> {
                 .1;
             merge_data(&mut pending.event.data, event.event.data);
             if event_block_count(pending) >= self.max_batch_blocks {
-                return [self.flush(), None];
+                return [self.pending.take().map(|(_, event)| event), None];
             }
             return [None, None];
         }
 
-        let flushed = self.flush();
+        let flushed = self.pending.take().map(|(_, event)| event);
         if event_block_count(&event) >= self.max_batch_blocks {
             return [flushed, Some(event)];
         }
@@ -73,7 +83,10 @@ impl<K: Eq> PlacementEventCoalescer<K> {
     }
 
     pub(super) fn flush(&mut self) -> Option<PlacementEvent> {
-        self.pending.take().map(|(_, event)| event)
+        self.pending
+            .take()
+            .or_else(|| self.recurrent_pending.take())
+            .map(|(_, event)| event)
     }
 }
 
@@ -154,7 +167,7 @@ impl BatchingState {
         dedup: &mut EventDedupFilter,
         output: &mut Vec<RouterEvent>,
     ) {
-        if let Some(event) = self.coalescer.flush() {
+        while let Some(event) = self.coalescer.flush() {
             self.emit_ready(event, local_indexer, worker_id, dedup, output)
                 .await;
         }
@@ -191,9 +204,13 @@ impl BatchingState {
     ) {
         let tier = placement_event.placement.tier;
         let domain = placement_event.placement.residency_domain;
+        let kv_cache_group = placement_event.placement.kv_cache_group;
         let session_id = placement_event.session_id;
         let mut event = placement_event.event;
+        // Recurrent-group events are set-like presence at hashes the attention
+        // group also uses; keep them out of the attention reference counts.
         event.data = match event.data {
+            data if kv_cache_group.is_some() => data,
             KvCacheEventData::Removed(data) => {
                 let Some(filtered) = dedup.filter_remove_in_domain(
                     event.dp_rank,
@@ -224,8 +241,7 @@ impl BatchingState {
         let _ = emit(
             local_indexer,
             worker_id,
-            tier,
-            domain,
+            &placement_event.placement,
             event,
             session_id,
             output,
@@ -279,6 +295,40 @@ mod tests {
     }
 
     #[test]
+    fn recurrent_events_do_not_split_attention_runs_and_clear_flushes_both() {
+        use dynamo_kv_events::residency::{KvCacheGroupKind, KvCacheGroupTag};
+        let mut coalescer = PlacementEventCoalescer::new(128);
+        let mut recurrent = stored(None, 1);
+        recurrent.placement.kv_cache_group = Some(KvCacheGroupTag {
+            group_idx: 0,
+            kind: KvCacheGroupKind::Mamba,
+            expected_group_count: Some(1),
+            alignment_blocks: Some(1),
+        });
+        let mut output = Vec::new();
+        for input in [
+            stored(None, 1),
+            recurrent,
+            stored(Some(1), 2),
+            event(KvCacheEventData::Cleared),
+        ] {
+            output.extend(
+                coalescer
+                    .push(input.placement.clone(), input)
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+        assert_eq!(output.len(), 3);
+        assert!(
+            matches!(&output[0].event.data, KvCacheEventData::Stored(data) if data.blocks.len() == 2)
+        );
+        assert!(output[1].placement.kv_cache_group.is_some());
+        assert!(matches!(output[2].event.data, KvCacheEventData::Cleared));
+        assert!(!coalescer.has_pending());
+    }
+
+    #[test]
     fn coalesces_legacy_mutations_and_keeps_clear_as_a_boundary() {
         let mut coalescer = PlacementEventCoalescer::new(128);
         let mut output = Vec::new();
@@ -292,7 +342,9 @@ mod tests {
             let key = input.placement.clone();
             output.extend(coalescer.push(key, input).into_iter().flatten());
         }
-        output.extend(coalescer.flush());
+        while let Some(event) = coalescer.flush() {
+            output.push(event);
+        }
 
         assert_eq!(output.len(), 3);
         assert!(matches!(

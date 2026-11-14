@@ -698,6 +698,8 @@ impl MockerExecutionContext {
                                 image_token_id: None,
                                 video_token_id: None,
                                 engine_owned_mm_identity: false,
+                                recurrent_groups: None,
+                                recurrent_alignment_blocks: 1,
                                 recovery: None,
                             });
                             match KvEventPublisher::new_with_local_indexer(
