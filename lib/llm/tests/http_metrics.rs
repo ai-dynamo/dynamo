@@ -931,6 +931,126 @@ async fn test_responses_non_streaming_observes_metrics_before_backend_error_pref
     .await;
 }
 
+/// Names of the fields recorded on `http-request` spans.
+#[derive(Clone, Default)]
+struct RequestSpanRecords(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl<S> tracing_subscriber::Layer<S> for RequestSpanRecords
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        struct Names<'a>(&'a mut Vec<String>);
+        impl tracing::field::Visit for Names<'_> {
+            fn record_debug(&mut self, field: &tracing::field::Field, _: &dyn std::fmt::Debug) {
+                self.0.push(field.name().to_string());
+            }
+        }
+        if ctx
+            .span(id)
+            .is_some_and(|span| span.name() == "http-request")
+        {
+            values.record(&mut Names(&mut self.0.lock().unwrap()));
+        }
+    }
+}
+
+/// The response body is polled outside the HTTP request span, and completions and responses
+/// run their handlers in their own spans; a streamed request's summary must still land on the
+/// HTTP request span.
+#[tokio::test]
+async fn test_streamed_request_summary_is_recorded_on_http_request_span() {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    // A second dispatcher stops another thread's cached callsite interest from hiding spans.
+    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let records = RequestSpanRecords::default();
+    let _subscriber =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(records.clone()));
+
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .enable_cmpl_endpoints(true)
+        .enable_responses_endpoints(true)
+        .build()
+        .unwrap();
+    let manager = service.state_clone().manager_clone();
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let card = ModelDeploymentCard::with_name_only("gatedmodel");
+    let chat = Arc::new(MockGatedMetricsEngine {
+        gate: Arc::clone(&gate),
+    });
+    let completions = Arc::new(MockGatedCompletionsEngine {
+        gate: Arc::clone(&gate),
+    });
+    manager
+        .add_chat_completions_model("gatedmodel", card.mdcsum(), chat)
+        .unwrap();
+    manager
+        .add_completions_model("gatedmodel", card.mdcsum(), completions)
+        .unwrap();
+    wait_for_metrics_ready(port).await;
+
+    let client = reqwest::Client::new();
+    for (path, request) in [
+        (
+            "/v1/chat/completions",
+            serde_json::json!({"model": "gatedmodel", "stream": true, "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]}),
+        ),
+        (
+            "/v1/completions",
+            serde_json::json!({"model": "gatedmodel", "stream": true, "max_tokens": 8, "prompt": "hi"}),
+        ),
+        (
+            "/v1/responses",
+            serde_json::json!({"model": "gatedmodel", "stream": true, "max_output_tokens": 8, "input": "hi"}),
+        ),
+    ] {
+        records.0.lock().unwrap().clear();
+        gate.notify_one();
+        let response = client
+            .post(format!("http://localhost:{port}{path}"))
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{path}");
+        response.text().await.unwrap();
+        // The server drops the collector after the last frame, which can trail the client.
+        let recorded = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let recorded = records.0.lock().unwrap().clone();
+                if recorded.iter().any(|name| name == "output_tokens") {
+                    return recorded;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{path}: no summary on http-request"));
+        for field in ["input_tokens", "ttft_ms"] {
+            assert!(
+                recorded.iter().any(|name| name == field),
+                "{path}: {recorded:?}"
+            );
+        }
+    }
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
 // Integration tests that require distributed runtime with etcd
 #[cfg(feature = "integration")]
 mod integration_tests {

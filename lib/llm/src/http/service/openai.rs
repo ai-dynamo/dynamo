@@ -1361,14 +1361,16 @@ async fn handler_completions(
 
     // possibly long running task
     // if this returns a streaming response, the stream handle will be armed and captured by the response stream
-    let response = tokio::spawn(completions(state, request, stream_handle).in_current_span())
-        .await
-        .map_err(|e| {
-            ErrorMessage::internal_server_error_with_details(
-                "Failed to await chat completions task",
-                format!("{e:?}"),
-            )
-        })?;
+    let request_span = tracing::Span::current();
+    let response =
+        tokio::spawn(completions(state, request, stream_handle, request_span).in_current_span())
+            .await
+            .map_err(|e| {
+                ErrorMessage::internal_server_error_with_details(
+                    "Failed to await chat completions task",
+                    format!("{e:?}"),
+                )
+            })?;
 
     // if we got here, then we will return a response and the potentially long running task has completed successfully
     // without need to be cancelled.
@@ -1382,6 +1384,7 @@ async fn completions(
     state: Arc<service_v2::State>,
     request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
+    request_span: tracing::Span,
 ) -> Result<Response, ErrorResponse> {
     use crate::protocols::openai::completions::get_prompt_batch_size;
 
@@ -1399,11 +1402,11 @@ async fn completions(
 
     // If single prompt or single-element batch, use original flow
     if batch_size == 1 {
-        return completions_single(state, request, stream_handle).await;
+        return completions_single(state, request, stream_handle, request_span).await;
     }
 
     // Batch processing: handle multiple prompts
-    completions_batch(state, request, stream_handle, batch_size, n).await
+    completions_batch(state, request, stream_handle, batch_size, n, request_span).await
 }
 
 /// Handle single prompt completions (original logic)
@@ -1412,6 +1415,7 @@ async fn completions_single(
     state: Arc<service_v2::State>,
     mut request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
+    request_span: tracing::Span,
 ) -> Result<Response, ErrorResponse> {
     // Handler body only; for a streaming request the SSE stream outlives this range.
     let _nvtx = dynamo_nvtx_range!("frontend.http.completions.handler");
@@ -1436,7 +1440,8 @@ async fn completions_single(
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
     // Create inflight_guard early to ensure all errors are counted
-    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
+    let mut inflight_guard = state.metrics_clone().create_inflight_guard_in(
+        request_span,
         &metric_model,
         Endpoint::Completions,
         streaming,
@@ -1730,6 +1735,7 @@ async fn completions_batch(
     stream_handle: ConnectionHandle,
     batch_size: usize,
     n: u8,
+    request_span: tracing::Span,
 ) -> Result<Response, ErrorResponse> {
     use dynamo_protocols::types::Prompt;
     use futures::stream::{self, StreamExt};
@@ -1749,7 +1755,8 @@ async fn completions_batch(
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
     // Create inflight_guard early to ensure all errors are counted
-    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
+    let mut inflight_guard = state.metrics_clone().create_inflight_guard_in(
+        request_span,
         &metric_model,
         Endpoint::Completions,
         streaming,
@@ -2639,6 +2646,7 @@ async fn handler_chat_completions(
     body: Body,
 ) -> Result<Response, ErrorResponse> {
     let request_id = get_or_create_request_id(&headers);
+    let request_span = tracing::Span::current();
     let lifecycle = LifecycleTrace::frontend_request_without_session(request_id.as_str());
     let lifecycle_request = lifecycle.start_request();
     lifecycle_request.record_session(&request_id, None);
@@ -2770,6 +2778,7 @@ async fn handler_chat_completions(
                 stream_handle,
                 lifecycle,
                 request_lifecycle.clone(),
+                request_span,
                 terminal.clone(),
             ),
             terminal.clone(),
@@ -4132,6 +4141,7 @@ fn apply_chat_completions_request_template(
 ///
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
+#[allow(clippy::too_many_arguments)]
 async fn chat_completions(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
@@ -4139,6 +4149,7 @@ async fn chat_completions(
     stream_handle: ConnectionHandle,
     lifecycle: LifecycleTrace,
     request_lifecycle: tracing::Span,
+    request_span: tracing::Span,
     terminal: LifecycleTerminal,
 ) -> Result<Response, ErrorResponse> {
     // Covers the handler body only: template resolution, validation, engine
@@ -4175,7 +4186,8 @@ async fn chat_completions(
     tracing::trace!("Received chat completions request: {:?}", request.content());
 
     // Create inflight_guard early to ensure all errors (including validation) are counted
-    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
+    let mut inflight_guard = state.metrics_clone().create_inflight_guard_in(
+        request_span,
         &metric_model,
         Endpoint::ChatCompletions,
         streaming,
@@ -4851,15 +4863,17 @@ async fn handler_responses(
     )
     .await;
 
-    let response =
-        tokio::spawn(responses(state, template, request, stream_handle).in_current_span())
-            .await
-            .map_err(|e| {
-                ErrorMessage::internal_server_error_with_details(
-                    "Failed to await responses task",
-                    format!("{e:?}"),
-                )
-            })?;
+    let request_span = tracing::Span::current();
+    let response = tokio::spawn(
+        responses(state, template, request, stream_handle, request_span).in_current_span(),
+    )
+    .await
+    .map_err(|e| {
+        ErrorMessage::internal_server_error_with_details(
+            "Failed to await responses task",
+            format!("{e:?}"),
+        )
+    })?;
 
     // if we got here, then we will return a response and the potentially long running task has completed successfully
     // without need to be cancelled.
@@ -4876,6 +4890,7 @@ async fn responses(
     template: Option<RequestTemplate>,
     mut request: Context<NvCreateResponse>,
     stream_handle: ConnectionHandle,
+    request_span: tracing::Span,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -4912,7 +4927,8 @@ async fn responses(
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
-    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
+    let mut inflight_guard = state.metrics_clone().create_inflight_guard_in(
+        request_span,
         &metric_model,
         Endpoint::Responses,
         streaming,
