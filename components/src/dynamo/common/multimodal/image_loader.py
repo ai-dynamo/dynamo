@@ -45,6 +45,18 @@ IMAGE_CACHE_SCOPE_KEY: Final = "image_cache_scope"
 IMAGE_CACHE_SESSION_SCOPED_ENV: Final = "DYN_MM_IMAGE_CACHE_SESSION_SCOPED"
 
 
+# Pillow reports a codec allocation failure as an OSError without errno.
+_PILLOW_CODEC_OOM_MESSAGE: Final = "out of memory when reading image file"
+
+
+def _is_host_resource_error(e: OSError) -> bool:
+    """True when a decode OSError comes from host resource exhaustion rather
+    than from the image bytes."""
+    if e.errno in (errno.EMFILE, errno.ENFILE, errno.ENOMEM):
+        return True
+    return e.errno is None and _PILLOW_CODEC_OOM_MESSAGE in str(e)
+
+
 def image_cache_scope_from_request(request: Mapping[str, Any]) -> str | None:
     """Return a non-empty frontend-derived image-cache scope, if present."""
     scope = request.get(IMAGE_CACHE_SCOPE_KEY)
@@ -339,11 +351,7 @@ class ImageLoader:
             except (OSError, SyntaxError) as e:
                 # Pillow: OSError for truncated or corrupt data, SyntaxError for a
                 # broken PNG chunk. Host resource exhaustion is a server fault.
-                if isinstance(e, OSError) and e.errno in (
-                    errno.EMFILE,
-                    errno.ENFILE,
-                    errno.ENOMEM,
-                ):
+                if isinstance(e, OSError) and _is_host_resource_error(e):
                     raise
                 raise HttpStatusError(
                     400, "Invalid or truncated image data", image_url

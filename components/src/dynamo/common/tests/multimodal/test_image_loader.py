@@ -978,29 +978,38 @@ async def test_truncated_data_url_batch_raises_400(loader: ImageLoader, caplog) 
     _assert_inline_reference_elided(caplog, encoded)
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError(errno.EMFILE, "Too many open files"),
+        # Pillow's ImageFile.load raises this, without errno, when the codec
+        # cannot allocate memory.
+        OSError("out of memory when reading image file"),
+    ],
+    ids=["emfile", "pillow_codec_oom"],
+)
 async def test_unexpected_http_decoder_error_not_wrapped_as_value_error(
-    loader: ImageLoader,
+    loader: ImageLoader, error: OSError
 ) -> None:
     """Host resource exhaustion while decoding a fetched image must not be
     classified as a client error: it propagates unchanged from load_image
     and the batch path folds it into a generic Exception, so the frontend
     answers 500, not 400.
     """
-    loader._open_image = AsyncMock(  # type: ignore[method-assign]
-        side_effect=OSError(errno.EMFILE, "Too many open files")
-    )
+    loader._open_image = AsyncMock(side_effect=error)  # type: ignore[method-assign]
     mock_fetch = _mock_fetch_bytes()
 
     with patch(_FETCH_BYTES_PATH, mock_fetch):
-        with pytest.raises(OSError, match="Too many open files"):
+        with pytest.raises(OSError) as raised:
             await loader.load_image("https://example.com/img.png")
+        assert raised.value is error
 
         with pytest.raises(Exception) as exc_info:
             await loader.load_image_batch(
                 [{URL_VARIANT_KEY: "https://example.com/img.png"}]
             )
     assert not isinstance(exc_info.value, (ValueError, HttpStatusError))
-    assert "Too many open files" in str(exc_info.value)
+    assert str(error) in str(exc_info.value)
 
 
 def _truncated_jpeg_bytes() -> bytes:
