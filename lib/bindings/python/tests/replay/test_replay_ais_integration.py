@@ -12,6 +12,8 @@ import pytest
 
 from dynamo.runtime import DistributedRuntime
 
+from .replay_utils import _canonical_report
+
 pytestmark = [
     pytest.mark.aiconfigurator,
     pytest.mark.gpu_0,
@@ -102,32 +104,28 @@ def test_aggregated_replay_uses_native_ais_engine() -> None:
     assert report["mean_tpot_ms"] > 0.0
 
 
-def test_repeated_replay_reuses_the_ais_model_with_equal_results() -> None:
+def test_repeated_replays_return_equal_results() -> None:
     from dynamo.replay import run_synthetic_trace_replay
 
-    def summary() -> dict:
-        report = run_synthetic_trace_replay(
-            128,
-            8,
-            2,
-            extra_engine_args=_engine_args(),
-            replay_concurrency=1,
-            replay_mode="offline",
+    def replay(tensor_parallel: int) -> dict:
+        args = _engine_args()
+        args["tensor_parallel_size"] = tensor_parallel
+        args["engine"]["timing_model"]["config"]["tp"] = tensor_parallel
+        return _canonical_report(
+            run_synthetic_trace_replay(
+                128,
+                8,
+                2,
+                extra_engine_args=args,
+                replay_concurrency=1,
+                replay_mode="offline",
+            )
         )
-        # These are measured in wall-clock time, not simulated time.
-        wall_clock = {
-            "wall_time_ms",
-            "processed_tokens_per_s",
-            "processed_output_tokens_per_s",
-        }
-        return {
-            key: value for key, value in report.summary.items() if key not in wall_clock
-        }
 
-    first = summary()
-    assert first["mean_ttft_ms"] > 0.0
-    # The second replay takes the model the first one built.
-    assert summary() == first
+    first = replay(1)
+    # A replay with another model in between must not change what the first config returns.
+    assert replay(2)["mean_tpot_ms"] != first["mean_tpot_ms"]
+    assert replay(1) == first
 
 
 def test_disaggregated_replay_uses_native_ais_engine() -> None:

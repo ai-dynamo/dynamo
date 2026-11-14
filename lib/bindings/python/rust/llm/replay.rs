@@ -1586,7 +1586,7 @@ fn materialize_replay_mocker_args(
     py: Python<'_>,
     config: &Bound<'_, PyAny>,
 ) -> PyResult<MockerConfig> {
-    materialize_with(
+    materialize_mocker_config_with(
         py,
         mocker_config_from_python(py, config)?,
         create_replay_ais_callback,
@@ -1597,10 +1597,10 @@ pub(super) fn materialize_mocker_config(
     py: Python<'_>,
     args: MockerConfig,
 ) -> PyResult<MockerConfig> {
-    materialize_with(py, args, create_ais_callback)
+    materialize_mocker_config_with(py, args, create_ais_callback)
 }
 
-fn materialize_with(
+fn materialize_mocker_config_with(
     py: Python<'_>,
     mut args: MockerConfig,
     create_callback: fn(Python<'_>, &serde_json::Value) -> PyResult<Arc<dyn AisCallback>>,

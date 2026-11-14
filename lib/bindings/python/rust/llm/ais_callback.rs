@@ -15,15 +15,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(feature = "ais-forward-pass")]
-#[derive(Clone)]
 pub(super) struct RustAisCallback {
     model: ForwardPassPerfModel,
     nextn: u32,
 }
 
+/// A sweep varies a handful of engine configurations; router settings do not change the model.
 #[cfg(feature = "ais-forward-pass")]
-static REPLAY_MODELS: parking_lot::Mutex<RecentCache<RustAisCallback>> =
-    parking_lot::Mutex::new(RecentCache::new(8));
+const REPLAY_MODEL_CAPACITY: usize = 8;
+
+#[cfg(feature = "ais-forward-pass")]
+static REPLAY_MODELS: parking_lot::Mutex<RecentCache<Arc<RustAisCallback>>> =
+    parking_lot::Mutex::new(RecentCache::new(REPLAY_MODEL_CAPACITY));
 
 /// Most recently used first; the oldest entry is dropped at capacity.
 #[cfg(any(test, feature = "ais-forward-pass"))]
@@ -50,10 +53,34 @@ impl<T: Clone> RecentCache<T> {
     }
 
     fn insert(&mut self, key: String, value: T) {
-        self.entries.retain(|(k, _)| *k != key);
         self.entries.insert(0, (key, value));
         self.entries.truncate(self.capacity);
     }
+}
+
+/// The model for `config`: a kept one, or the one `build` returns.
+#[cfg(any(test, feature = "ais-forward-pass"))]
+fn kept_or_built<T: Clone, E>(
+    models: &parking_lot::Mutex<RecentCache<T>>,
+    config: &serde_json::Value,
+    build: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    if !is_replay_cacheable(config) {
+        return build();
+    }
+    let key = config.to_string();
+    if let Some(model) = models.lock().get(&key) {
+        return Ok(model);
+    }
+    // Built outside the lock, because a build parses perf tables. Callers that miss together
+    // each build, and the first to finish is kept.
+    let model = build()?;
+    let mut models = models.lock();
+    if let Some(kept) = models.get(&key) {
+        return Ok(kept);
+    }
+    models.insert(key, model.clone());
+    Ok(model)
 }
 
 /// A profile, snapshot or other estimator input can be rewritten in place between replays, so
@@ -239,10 +266,9 @@ pub(super) fn create_ais_callback(
     ))
 }
 
-/// [`create_ais_callback`] for offline replay. A sweep replays the same few engine
-/// configurations many times and building a model parses its perf tables each time, so built
-/// models are kept. Each caller gets its own clone; clones share the compiled engine and the
-/// tables it has loaded.
+/// [`create_ais_callback`] for replay. A sweep replays the same few engine configurations many
+/// times and building a model parses its perf tables each time, so replays share the built
+/// model. Data under a systems root is taken as fixed for the life of the process.
 #[cfg_attr(not(feature = "ais-forward-pass"), allow(unused_variables))]
 pub(super) fn create_replay_ais_callback(
     _py: Python<'_>,
@@ -250,16 +276,8 @@ pub(super) fn create_replay_ais_callback(
 ) -> PyResult<Arc<dyn AisCallback>> {
     #[cfg(feature = "ais-forward-pass")]
     {
-        if !is_replay_cacheable(config) {
-            return Ok(Arc::new(build_model(config)?));
-        }
-        let key = config.to_string();
-        if let Some(model) = REPLAY_MODELS.lock().get(&key) {
-            return Ok(Arc::new(model));
-        }
-        let model = build_model(config)?;
-        REPLAY_MODELS.lock().insert(key, model.clone());
-        Ok(Arc::new(model))
+        let model = kept_or_built(&REPLAY_MODELS, config, || build_model(config).map(Arc::new))?;
+        Ok(model)
     }
     #[cfg(not(feature = "ais-forward-pass"))]
     Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -284,37 +302,63 @@ pub(super) fn create_ais_prefill_load_estimator(
 
 #[cfg(test)]
 mod replay_cache_tests {
-    use super::{RecentCache, is_replay_cacheable};
-    use serde_json::json;
+    use super::{RecentCache, kept_or_built};
+    use parking_lot::Mutex;
+    use serde_json::{Value, json};
 
-    #[test]
-    fn recent_cache_keeps_the_most_recently_used_entries() {
-        let mut cache = RecentCache::new(2);
-        cache.insert("a".to_owned(), 1);
-        cache.insert("b".to_owned(), 2);
-        assert_eq!(cache.get("a"), Some(1));
-        cache.insert("c".to_owned(), 3);
-        assert_eq!(cache.get("b"), None, "b was the least recently used");
-        assert_eq!(cache.get("a"), Some(1));
-        assert_eq!(cache.get("c"), Some(3));
+    /// The value is the number of the build that produced it.
+    fn model(models: &Mutex<RecentCache<u32>>, config: &Value, builds: &mut u32) -> u32 {
+        kept_or_built(models, config, || {
+            *builds += 1;
+            Ok::<_, ()>(*builds)
+        })
+        .unwrap()
     }
 
     #[test]
-    fn only_models_without_caller_owned_inputs_are_kept() {
-        let packaged = json!({"model": "m", "fpm_profile": null, "estimator_config": {}});
-        assert!(is_replay_cacheable(&packaged));
-        assert!(is_replay_cacheable(&json!({"model": "m"})));
-        for (key, value) in [
-            ("fpm_profile", json!({"path": "/tmp/profile"})),
-            (
-                "estimator_config",
-                json!({"state_snapshot": {"path": "/tmp/s"}}),
-            ),
+    fn a_config_is_built_once_and_each_config_separately() {
+        let models = Mutex::new(RecentCache::new(4));
+        let a = json!({"model": "a", "estimator_config": {}});
+        let b = json!({"model": "b", "fpm_profile": null});
+        let mut builds = 0;
+        assert_eq!(model(&models, &a, &mut builds), 1);
+        assert_eq!(model(&models, &a, &mut builds), 1);
+        assert_eq!(model(&models, &b, &mut builds), 2);
+        assert_eq!(model(&models, &a, &mut builds), 1);
+    }
+
+    #[test]
+    fn a_config_with_caller_owned_inputs_is_built_every_time() {
+        for config in [
+            json!({"model": "a", "fpm_profile": {"path": "/tmp/profile"}}),
+            json!({"model": "a", "estimator_config": {"state_snapshot": {"path": "/tmp/s"}}}),
         ] {
-            let mut config = packaged.clone();
-            config[key] = value;
-            assert!(!is_replay_cacheable(&config), "{key}");
+            let models = Mutex::new(RecentCache::new(4));
+            let mut builds = 0;
+            model(&models, &config, &mut builds);
+            model(&models, &config, &mut builds);
+            assert_eq!(builds, 2, "{config}");
         }
+    }
+
+    #[test]
+    fn the_least_recently_used_model_is_dropped_and_a_failed_build_is_not_kept() {
+        let models = Mutex::new(RecentCache::new(2));
+        let config = |name: &str| json!({ "model": name });
+        let mut builds = 0;
+        for name in ["a", "b", "a", "c"] {
+            model(&models, &config(name), &mut builds);
+        }
+        assert_eq!(model(&models, &config("a"), &mut builds), 1);
+        assert_eq!(
+            model(&models, &config("b"), &mut builds),
+            4,
+            "c pushed b out"
+        );
+
+        let failed: Result<u32, &str> = kept_or_built(&models, &config("d"), || Err("no data"));
+        assert_eq!(failed, Err("no data"));
+        assert_eq!(model(&models, &config("d"), &mut builds), 5);
     }
 }
 
