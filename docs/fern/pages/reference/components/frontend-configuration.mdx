@@ -773,6 +773,13 @@ The `dynamo` chat processor runs Rust parsing in the frontend; workers publish p
   Any value other than `dynamo`, `vllm` or `sglang` loads a [custom chat processor](../../developer-guide/knowledge-base/modular-components/frontend/custom-chat-processors.md):
   a name registered in the `dynamo.frontend.chat_processors` entry-point group, or a `module:function` path.
 
+  For DeepSeek V4 and V4.1 checkpoints, `sglang` uses SGLang's native recipe output
+  parser when the corresponding reasoning or tool-call parser is configured
+  (`deepseek-v4` / `deepseekv4`, or `deepseek-v41` / `deepseekv41`). This preserves
+  tool argument whitespace and numeric literals. Custom chat templates, custom parser combinations, and
+  forced tool calls using the JSON array grammar retain the generic parser path.
+  SGLang builds without the recipe output parser also retain that path.
+
   Environment variable: `DYN_CHAT_PROCESSOR`
 </ParamField>
 
