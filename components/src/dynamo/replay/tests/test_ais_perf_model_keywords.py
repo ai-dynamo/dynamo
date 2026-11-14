@@ -520,6 +520,7 @@ def test_new_keywords_reject_other_objects(replay, keyword, native_calls):
 
 
 @pytest.mark.unit
+@_BOTH_FUNCTIONS
 def test_router_keyword_requires_kv_router_and_router_config(replay, native_calls):
     with pytest.raises(
         ValueError,

@@ -954,28 +954,43 @@ def _pinned_router_perf_config(worker_type: str) -> dict:
     ).to_dict()
 
 
-@pytest.mark.unit
-def test_engine_spec_returns_pinned_perf_config_as_router_keyword():
-    pinned = _pinned_router_perf_config("aggregated")
-
-    kwargs = RetuneEngineSpec(ais_perf_config=pinned).replay_kwargs()
-
-    # The mapping as pinned, under the keyword that reads a mapping.
-    assert kwargs["router_ais_perf_model"] == pinned
-    assert set(kwargs) == _PINNED
-    assert RetuneEngineSpec().replay_kwargs()["router_ais_perf_model"] is None
+_DISAGGREGATED = {"prefill_engine_args": {}, "decode_engine_args": {}}
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "engine_args,worker_type",
     [
-        pytest.param({}, "prefill", id="aggregated-replay"),
+        pytest.param({}, "aggregated", id="aggregated-replay"),
+        pytest.param(_DISAGGREGATED, "prefill", id="disaggregated-replay"),
+    ],
+)
+def test_engine_spec_returns_pinned_perf_config_as_router_keyword(
+    engine_args, worker_type
+):
+    # The worker type the replay's router reads.
+    pinned = _pinned_router_perf_config(worker_type)
+
+    kwargs = RetuneEngineSpec(ais_perf_config=pinned, **engine_args).replay_kwargs()
+
+    # The mapping as pinned, under the keyword that reads a mapping.
+    assert kwargs["router_ais_perf_model"] == pinned
+    assert set(kwargs) == _PINNED
+    assert (
+        RetuneEngineSpec(**engine_args).replay_kwargs()["router_ais_perf_model"] is None
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "engine_args,worker_type",
+    [
+        pytest.param({}, "prefill", id="aggregated-replay-prefill"),
+        pytest.param({}, "decode", id="aggregated-replay-decode"),
         pytest.param(
-            {"prefill_engine_args": {}, "decode_engine_args": {}},
-            "aggregated",
-            id="disaggregated-replay",
+            _DISAGGREGATED, "aggregated", id="disaggregated-replay-aggregated"
         ),
+        pytest.param(_DISAGGREGATED, "decode", id="disaggregated-replay-decode"),
     ],
 )
 def test_engine_spec_returns_old_keyword_config_of_another_worker_type(
