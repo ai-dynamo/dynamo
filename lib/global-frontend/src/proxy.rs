@@ -19,7 +19,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use dynamo_global_router::affinity::tenant_id;
-use dynamo_global_router::{InFlightTracker, PoolSelector, RoutingRequest, SelectionCoreSelector};
+use dynamo_global_router::{
+    InFlightTracker, Pool, PoolSelector, RoutingRequest, SelectionCoreSelector,
+};
+use dynamo_llm::http::service::error::SanitizedError;
 use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BODY_LIMIT_MB;
 use dynamo_runtime::metrics::prometheus_names::frontend_service::error_type;
@@ -36,7 +39,7 @@ use tokio_util::task::TaskTracker;
 use url::Url;
 
 use crate::PoolSnapshot;
-use crate::metrics::Metrics;
+use crate::metrics::{FailoverReason, Metrics};
 
 /// The request body limit when `DYN_HTTP_BODY_LIMIT_MB` is unset, as for
 /// Dynamo's HTTP service: enough for 500k-token prompts.
@@ -50,6 +53,7 @@ struct Proxy {
     in_flight: Arc<InFlightTracker>,
     http: reqwest::Client,
     metrics: Metrics,
+    max_failovers: usize,
 }
 
 /// A pool selector, or the router core.
@@ -64,13 +68,16 @@ enum Selector {
 /// response ends; selectors and signals that weigh this process's own
 /// requests must read the same tracker. `http` must not set a total request
 /// timeout, because a response streams for as long as the pool generates.
-/// `/metrics` serves `metrics`.
+/// `/metrics` serves `metrics`. A request whose pool cannot take it goes to
+/// up to `max_failovers` other pools, as long as nothing has reached the
+/// client.
 pub fn app(
     pools: watch::Receiver<Arc<PoolSnapshot>>,
     selector: Arc<dyn PoolSelector>,
     in_flight: Arc<InFlightTracker>,
     http: reqwest::Client,
     metrics: Metrics,
+    max_failovers: usize,
 ) -> Router {
     build_router(Proxy {
         pools,
@@ -78,6 +85,7 @@ pub fn app(
         in_flight,
         http,
         metrics,
+        max_failovers,
     })
 }
 
@@ -89,6 +97,7 @@ pub fn app_with_selection_core(
     in_flight: Arc<InFlightTracker>,
     http: reqwest::Client,
     metrics: Metrics,
+    max_failovers: usize,
 ) -> Router {
     build_router(Proxy {
         pools,
@@ -96,6 +105,7 @@ pub fn app_with_selection_core(
         in_flight,
         http,
         metrics,
+        max_failovers,
     })
 }
 
@@ -202,7 +212,7 @@ async fn forward(
     method: Method,
     uri: Uri,
     mut headers: HeaderMap,
-    body: Bytes,
+    mut body: Bytes,
 ) -> Response {
     let received = Instant::now();
     let metrics = &proxy.metrics;
@@ -212,7 +222,7 @@ async fn forward(
         return error(StatusCode::BAD_REQUEST, message.to_owned());
     };
     let snapshot = proxy.pools.borrow().clone();
-    let candidates = snapshot.pools_for(&model).collect::<Vec<_>>();
+    let mut candidates = snapshot.pools_for(&model).collect::<Vec<_>>();
     if candidates.is_empty() {
         metrics.rejected(error_type::NOT_FOUND);
         return error(
@@ -223,9 +233,8 @@ async fn forward(
     remove_hop_headers(&mut headers);
     headers.remove(header::HOST);
     headers.insert(header::CONTENT_LENGTH, body.len().into());
-    let session = headers
-        .get(HEADER_DYNAMO_SESSION_ID)
-        .and_then(|session| session.to_str().ok());
+    // Cloned, because the last attempt moves `headers` into its send.
+    let session = headers.get(HEADER_DYNAMO_SESSION_ID).cloned();
     // Selection happens before the pool authorizes the request, so a session
     // binding is not an admission decision and the Global Frontend does not
     // validate the credential. Keying on a digest of it is what keeps two
@@ -237,70 +246,127 @@ async fn forward(
             .and_then(|credential| credential.to_str().ok()),
     );
     let request = RoutingRequest::new(&model)
-        .with_session(session)
+        .with_session(session.as_ref().and_then(|session| session.to_str().ok()))
         .with_tenant(&tenant);
-    let selecting = Instant::now();
-    let selected = match &proxy.selector {
-        Selector::Pool(selector) => selector
-            .select(&request, &candidates)
+    let mut failovers = 0;
+    // The previous attempt's failure, passed through if no other pool is
+    // chosen.
+    let mut failed = None;
+    let (pool, upstream, in_flight) = loop {
+        // A retry is selected without the session, so that a failover does
+        // not move the session to the pool it falls back to.
+        let request = match failed {
+            None => request,
+            Some(_) => request.with_session(None),
+        };
+        let selecting = Instant::now();
+        let selected = match &proxy.selector {
+            Selector::Pool(selector) => selector
+                .select(&request, &candidates)
+                .await
+                .map(|target| (target, proxy.in_flight.start(&target.pool.id))),
+            Selector::SelectionCore(selection_core) => {
+                selection_core.select(&request, &candidates).await
+            }
+        };
+        metrics.selected(selecting);
+        let Some((target, in_flight)) = selected else {
+            match failed {
+                None => {
+                    metrics.rejected(error_type::UNAVAILABLE);
+                    let message = format!("no pool can serve model {model}");
+                    return error(StatusCode::SERVICE_UNAVAILABLE, message);
+                }
+                Some((_, Failed::Answered(pool, upstream))) => {
+                    break (pool, upstream, proxy.in_flight.start(&pool.id));
+                }
+                Some((_, Failed::NoResponse(message))) => {
+                    return error(StatusCode::SERVICE_UNAVAILABLE, message);
+                }
+            }
+        };
+        if let Some((reason, _)) = failed.take() {
+            failovers += 1;
+            metrics.failover(reason);
+        }
+        let pool = target.pool;
+        let Some(url) = route_url(target.frontend, &uri) else {
+            metrics.rejected(error_type::VALIDATION);
+            return error(StatusCode::BAD_REQUEST, "invalid route".to_owned());
+        };
+        let last = failovers == proxy.max_failovers
+            || !candidates
+                .iter()
+                .any(|other| other.id != pool.id && !other.frontends.is_empty());
+        let (headers, body) = if last {
+            (std::mem::take(&mut headers), std::mem::take(&mut body))
+        } else {
+            (headers.clone(), body.clone())
+        };
+        tracing::debug!(pool = %pool.id, %url, "forwarding request");
+        // A stream body cannot be copied, so reqwest keeps none for redirects.
+        // The last attempt's bytes are freed once written to the pool; an
+        // earlier attempt shares them with the next, until its pool answers.
+        let upload =
+            reqwest::Body::wrap_stream(futures::stream::once(futures::future::ready(Ok::<
+                _,
+                io::Error,
+            >(
+                body
+            ))));
+        // If the client leaves while the pool queues the request, this handler
+        // is dropped, which drops the send and closes the pool connection,
+        // cancelling the request there, and counts it as cancelled.
+        let sending = metrics.sending(pool);
+        match proxy
+            .http
+            .request(method.clone(), url.clone())
+            .headers(headers)
+            .body(upload)
+            .send()
             .await
-            .map(|target| (target, proxy.in_flight.start(&target.pool.id))),
-        Selector::SelectionCore(selection_core) => {
-            selection_core.select(&request, &candidates).await
+        {
+            Ok(upstream) => {
+                let status = upstream.status();
+                sending.answered(Some(status));
+                match failover_reason(status, SanitizedError::Overloaded.status()) {
+                    Some(reason) if !last => {
+                        tracing::debug!(
+                            pool = %pool.id,
+                            %url,
+                            %status,
+                            "pool cannot take the request"
+                        );
+                        failed = Some((reason, Failed::Answered(pool, upstream)));
+                    }
+                    _ => break (pool, upstream, in_flight),
+                }
+            }
+            Err(failure) => {
+                sending.answered(None);
+                // reqwest names only the outermost failure ("error sending
+                // request"); the cause, such as a refused or reset connection,
+                // is in its sources.
+                let failure = anyhow::Error::new(failure);
+                tracing::warn!(
+                    pool = %pool.id,
+                    %url,
+                    error = format!("{failure:#}"),
+                    "pool frontend failed"
+                );
+                let message = format!("pool frontend {url} failed: {failure}");
+                if last {
+                    return error(StatusCode::SERVICE_UNAVAILABLE, message);
+                }
+                failed = Some((FailoverReason::NoResponse, Failed::NoResponse(message)));
+            }
         }
-    };
-    metrics.selected(selecting);
-    let Some((target, in_flight)) = selected else {
-        metrics.rejected(error_type::UNAVAILABLE);
-        let message = format!("no pool can serve model {model}");
-        return error(StatusCode::SERVICE_UNAVAILABLE, message);
-    };
-    let pool = target.pool;
-    let Some(url) = route_url(target.frontend, &uri) else {
-        metrics.rejected(error_type::VALIDATION);
-        return error(StatusCode::BAD_REQUEST, "invalid route".to_owned());
-    };
-    tracing::debug!(pool = %pool.id, %url, "forwarding request");
-    // A stream body cannot be copied, so reqwest keeps none for redirects,
-    // and the bytes are freed once written to the pool.
-    let upload = reqwest::Body::wrap_stream(futures::stream::once(futures::future::ready(Ok::<
-        _,
-        io::Error,
-    >(
-        body
-    ))));
-    // If the client leaves while the pool queues the request, this handler
-    // is dropped, which drops the send and closes the pool connection,
-    // cancelling the request there, and counts it as cancelled.
-    let sending = metrics.sending(pool);
-    let upstream = match proxy
-        .http
-        .request(method, url.clone())
-        .headers(headers)
-        .body(upload)
-        .send()
-        .await
-    {
-        Ok(upstream) => upstream,
-        Err(failure) => {
-            sending.answered(None);
-            // reqwest names only the outermost failure ("error sending
-            // request"); the cause, such as a refused or reset connection,
-            // is in its sources.
-            let failure = anyhow::Error::new(failure);
-            tracing::warn!(
-                pool = %pool.id,
-                %url,
-                error = format!("{failure:#}"),
-                "pool frontend failed"
-            );
-            let message = format!("pool frontend {url} failed: {failure}");
-            return error(StatusCode::SERVICE_UNAVAILABLE, message);
-        }
+        // The next selection must not count this request against its pool.
+        drop(in_flight);
+        candidates.retain(|candidate| candidate.id != pool.id);
     };
 
     let status = upstream.status();
-    sending.answered(Some(status));
     let mut timing = status
         .is_success()
         .then(|| metrics.response(pool, received));
@@ -319,6 +385,28 @@ async fn forward(
     *response.status_mut() = status;
     *response.headers_mut() = headers;
     response
+}
+
+/// A pool's failure to take a request, held until another pool is chosen.
+enum Failed<'a> {
+    /// The pool answered with a status that sends the request elsewhere.
+    Answered(&'a Pool, reqwest::Response),
+    /// The pool sent no response; the message the client gets if no other
+    /// pool is chosen.
+    NoResponse(String),
+}
+
+/// Why a pool's answer sends the request to another pool, if it does: 503,
+/// or `overload`, the overload status, even where a status such as 429
+/// would otherwise pass through.
+fn failover_reason(status: StatusCode, overload: StatusCode) -> Option<FailoverReason> {
+    if status == StatusCode::SERVICE_UNAVAILABLE {
+        Some(FailoverReason::Unavailable)
+    } else if status == overload {
+        Some(FailoverReason::Overloaded)
+    } else {
+        None
+    }
 }
 
 /// `uri`'s path and query below `frontend`, keeping any path the frontend
@@ -456,6 +544,33 @@ mod tests {
             Some("http://gateway:8080/ohio/v1/responses")
         );
         assert_eq!(route("http://pool:8000", "/v1/../metrics"), None);
+    }
+
+    #[test]
+    fn only_503_and_the_overload_status_fail_over() {
+        let status = |code| StatusCode::from_u16(code).unwrap();
+        let overload = status(529);
+        assert_eq!(
+            failover_reason(status(503), overload),
+            Some(FailoverReason::Unavailable)
+        );
+        assert_eq!(
+            failover_reason(overload, overload),
+            Some(FailoverReason::Overloaded)
+        );
+        for code in [200, 400, 429, 500, 502, 504] {
+            assert_eq!(failover_reason(status(code), overload), None, "{code}");
+        }
+        // A configured overload status fails over even where it would
+        // otherwise pass through; 503 keeps its own reason.
+        assert_eq!(
+            failover_reason(status(429), status(429)),
+            Some(FailoverReason::Overloaded)
+        );
+        assert_eq!(
+            failover_reason(status(503), status(503)),
+            Some(FailoverReason::Unavailable)
+        );
     }
 
     #[test]
