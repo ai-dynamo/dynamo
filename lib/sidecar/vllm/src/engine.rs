@@ -70,9 +70,8 @@ async fn drain_expired(deadline: Option<Instant>) {
     }
 }
 
-/// Abort a cancelled decode request that vLLM accepted but never answered.
-/// The adapter sends no abort for a decode request that ends before its first
-/// token, so this is the only one vLLM gets.
+/// Abort a cancelled decode request vLLM never answered. The adapter sends no
+/// abort before a first token, so this is the only one vLLM gets.
 async fn abort_undrained_decode(client: &VllmClient, request_id: &str, timeout: Duration) {
     tracing::warn!(
         request_id,

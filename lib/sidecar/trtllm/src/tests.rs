@@ -844,10 +844,8 @@ async fn a_cancelled_decode_request_survives_only_until_the_transfer_lands() {
     assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
 }
 
-/// A live engine that never answers must not hold a cancelled handoff decode
-/// request forever: once the drain deadline passes, the sidecar aborts it, then
-/// releases the dispatch or stream. A decode request without a handoff has
-/// nothing to drain and cancels at once.
+/// A silent engine gets `Control.Abort` once a cancelled handoff decode request's
+/// drain deadline passes; a decode request without a handoff cancels at once.
 #[tokio::test]
 async fn a_cancelled_decode_request_is_aborted_when_the_engine_stays_silent() {
     for withholds_headers in [true, false] {

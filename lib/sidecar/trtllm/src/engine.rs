@@ -91,9 +91,8 @@ async fn drain_expired(deadline: Option<Instant>) {
     }
 }
 
-/// Abort a cancelled handoff decode request that TensorRT-LLM accepted but
-/// never answered. The adapter sends no abort for a decode request that ends
-/// before its first token, so this is the only one the engine gets.
+/// Abort a cancelled handoff decode request TensorRT-LLM never answered. The
+/// adapter sends no abort before a first token, so this is the engine's only one.
 async fn abort_undrained_decode(client: &TrtllmClient, request_id: &str, timeout: Duration) {
     tracing::warn!(
         request_id,
@@ -596,12 +595,8 @@ impl LLMEngine for TrtllmSidecarEngine {
         // the dispatch entirely, leaving the prefill worker's blocks with no
         // decode leg to claim them. Both strand exactly what the deferral
         // exists to protect. Shutdown still wins -- the process is going away.
-        //
-        // The deferral is bounded: the deadline is set once, when a deferred
-        // cancellation is first seen, and carried into the stream so the
-        // header and first-token waits share it. An engine that stays silent
-        // past it gets `Control.Abort` before the dispatch or stream is
-        // dropped.
+        // One deadline, set at the first deferred cancellation, bounds the header
+        // and first-token waits; a silent engine then gets `Control.Abort`.
         let drain_timeout = self.decode_cancel_drain_timeout;
         let mut drain_deadline: Option<Instant> = None;
         // Scoped so the dispatch, and its borrow of `request_id`, ends here.

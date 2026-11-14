@@ -2810,9 +2810,8 @@ async fn check_decode_cancellation(is_cancelled_before_submission: bool) {
     .expect("server stream dropped after first token");
 }
 
-/// A live vLLM that never answers must not hold a cancelled decode request
-/// forever: once the drain deadline passes, the sidecar aborts it, then
-/// releases the dispatch or stream.
+/// A silent vLLM gets `Control.Abort` once a cancelled decode request's drain
+/// deadline passes, before the dispatch or stream is released.
 #[tokio::test]
 async fn decode_cancellation_aborts_a_silent_peer_after_the_drain_deadline() {
     for withholds_headers in [true, false] {
