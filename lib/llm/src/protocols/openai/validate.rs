@@ -435,8 +435,11 @@ pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(),
                 }
             }
             dynamo_protocols::types::Stop::StringArray(sequences) => {
+                // The OpenAI API accepts `"stop": []` and treats it as "no stop
+                // sequences"; several SDKs and CLIs send an empty list by default.
+                // `get_stop()` maps it to `None`, so nothing empty reaches the engine.
                 if sequences.is_empty() {
-                    anyhow::bail!("Stop sequences array cannot be empty");
+                    return Ok(());
                 }
                 if sequences.len() > MAX_STOP_SEQUENCES {
                     return Err(crate::protocols::common::invalid_argument_error(format!(
@@ -1405,6 +1408,21 @@ mod tests {
         }))
         .unwrap();
         validate_response_format(&Some(fmt)).unwrap();
+    }
+
+    #[test]
+    fn validate_stop_accepts_empty_array_as_no_stop() {
+        validate_stop(&Some(dynamo_protocols::types::Stop::StringArray(vec![]))).unwrap();
+        // An empty string, alone or as an element, is still rejected.
+        assert!(
+            validate_stop(&Some(dynamo_protocols::types::Stop::String(String::new()))).is_err()
+        );
+        assert!(
+            validate_stop(&Some(dynamo_protocols::types::Stop::StringArray(vec![
+                String::new()
+            ])))
+            .is_err()
+        );
     }
 
     #[test]
