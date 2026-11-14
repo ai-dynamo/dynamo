@@ -1548,9 +1548,8 @@ class VllmProcessor:
                     and not raw_finish_reason
                     and output_request_id not in locally_stopped_requests
                 ):
-                    # The parser holds the output back (a tool call is emitted only
-                    # once complete). Keep the running count on the wire for
-                    # `continuous_usage_stats`, so a cut stream still reports it.
+                    # The parser is holding output (e.g. a partial tool call); still
+                    # send continuous usage so a cut-off stream reports it.
                     usage_out: dict[str, Any] = {
                         "id": request_id,
                         "choices": [],
