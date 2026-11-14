@@ -9,7 +9,10 @@ When Kubernetes terminates a pod (rollout, scale-down, node drain), Dynamo worke
 
 Once shutdown proceeds past the grace period and any backend-specific draining, workers initiate cancellation of unfinished requests. The Frontend can migrate these requests to a healthy worker when migration is enabled and policy permits it; otherwise the client receives an error. Exhausted retries or an exceeded sequence-length cap can prevent recovery.
 
-The knobs are three timeouts plus enabling migration. The default flow: endpoints unregister from discovery immediately, workers serve for a short grace period, then endpoints drain (bounded by a timeout) before resources are cleaned up.
+The knobs are four timeouts plus enabling migration. The Frontend first fails readiness while it
+continues serving during endpoint propagation, then drains admitted requests before runtime cleanup.
+Workers unregister endpoints from discovery, serve for a short grace period, and then drain before
+resources are cleaned up.
 
 > **How it works:** the signal handlers, the `graceful_shutdown()` sequence, per-backend `cleanup()` code, and error-initiated shutdown are documented in [Graceful Shutdown Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/graceful-shutdown-architecture.md).
 
@@ -42,10 +45,11 @@ Rough guidance:
 
 <Step title="Tune the drain windows">
 
-Three environment variables control Dynamo's internal draining. Set the HTTP timeout on the Frontend and the runtime values on worker components:
+Four environment variables control Dynamo's internal draining. Set the HTTP values on the Frontend and the runtime values on worker components:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
+| `DYN_HTTP_ENDPOINT_DRAIN_DELAY_SECS` | `10` | How long the Frontend remains available after readiness fails, allowing Kubernetes EndpointSlice, kube-proxy, and external load balancers to stop sending traffic. |
 | `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `5` | How long the Frontend waits for admitted HTTP and WebSocket inference requests to finish before it cancels runtime state. |
 | `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` | `5` | How long workers keep serving after endpoints unregister from discovery, before endpoints are invalidated. |
 | `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `900` | Upper bound on waiting for in-flight requests to finish. If draining exceeds this, Dynamo logs the remaining endpoint count and tears down anyway. |
@@ -86,10 +90,11 @@ INFO  DistributedRuntime shutdown complete
 DEBUG Cleaning up worker
 ```
 
-During Frontend shutdown, `/health` returns 503 so readiness routing stops, while `/live` remains
-200 so Kubernetes does not restart the process during the drain. New OpenAI-compatible requests return
-503, but admitted response bodies and accepted `/v1/realtime` WebSocket sessions continue until they
-finish or `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` expires.
+During Frontend shutdown, `/health` first returns 503 while `/live` remains 200. The Frontend keeps
+accepting inference requests for `DYN_HTTP_ENDPOINT_DRAIN_DELAY_SECS` so traffic already in the
+Kubernetes endpoint propagation path does not fail. It then rejects new OpenAI-compatible requests
+with 503 and drains admitted response bodies and `/v1/realtime` WebSocket sessions. Runtime teardown
+starts only after requests finish or `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` expires.
 
 During worker shutdown, endpoints unregister and stop receiving new work while admitted requests
 have time to complete. If a pod receives `SIGKILL` before draining finishes, increase
