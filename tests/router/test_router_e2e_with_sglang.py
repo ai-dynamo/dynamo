@@ -337,6 +337,7 @@ class SGLangProcess(ManagedEngineProcessMixin):
 @pytest.mark.profiled_vram_gib(12.0)
 @pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.smoke
 @pytest.mark.timeout(270)  # 3x ~89s (sglang gpu_1 log)
 def test_sglang_kv_router_basic(
     request,

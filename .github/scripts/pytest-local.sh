@@ -81,6 +81,7 @@ echo "Datadog flaky retries enabled: ${DD_CIVISIBILITY_FLAKY_RETRY_ENABLED:-unse
 TEST_RESULTS_DIR="${GITHUB_WORKSPACE}/test-results"
 mkdir -p "${TEST_RESULTS_DIR}/status"
 chmod 777 "${TEST_RESULTS_DIR}"
+export DYNAMO_CI_TEST_SELECTION_DIR="${TEST_RESULTS_DIR}"
 echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
 
 # Emptied up front so the file read at the end of the job can only have
@@ -184,6 +185,15 @@ cd "${CONTAINER_WORKSPACE}"
 # renamed and the status file is written.
 TEST_EXIT_CODE=0
 python -m pytest "${pytest_args[@]}" || TEST_EXIT_CODE=$?
+if [[ "${TEST_EXIT_CODE}" -eq 5 && "${DYNAMO_CI_TEST_SELECTION_MODE:-}" == "selective" ]]; then
+  SELECTION_REPORT="${TEST_RESULTS_DIR}/ci_test_selection_${TEST_TYPE}.json"
+  if [[ -f "${SELECTION_REPORT}" ]] && python3 -c \
+    'import json, sys; from pathlib import Path; report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")); sys.exit(0 if isinstance(report, dict) and report.get("intentional_empty") is True else 1)' \
+    "${SELECTION_REPORT}" > /dev/null 2>&1; then
+    echo "✅ No tests selected in selective mode."
+    TEST_EXIT_CODE=0
+  fi
+fi
 echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
 
 # Unique per-stage name so several stages can share one test-results/
