@@ -248,20 +248,33 @@ class AisPerfConfigBase(ConfigBase):
 
 
 class AisPerfArgGroup(ArgGroup):
+    def __init__(self, *, replacement: str | None = None) -> None:
+        """``replacement`` is for a component that does not read
+        ``--ais-perf-model``: what it reads instead, as it gives it to
+        ``validate_ais_perf_inputs``. The help texts then point to it.
+        """
+        self.replacement = replacement
+
     def add_arguments(self, parser) -> None:
         group = parser.add_argument_group("AISimulate Perf Model Options")
-        deprecated = Deprecated("--ais-perf-model", remove_in=REMOVE_IN)
+        if self.replacement is None:
+            new_input = "--ais-perf-model"
+            new_input_help = (
+                "AIS perf model for --router-prefill-load-model=ais: a file path "
+                "or inline JSON, holding one perf model config or a list of "
+                f"configs with one worker_type each; {ENV_VAR}."
+            )
+        else:
+            new_input = self.replacement
+            new_input_help = f"Not read here; write {new_input}."
+        deprecated = Deprecated(new_input, remove_in=REMOVE_IN)
         # The two environment variables are read when the config is validated.
         group.add_argument(
             "--ais-perf-model",
             dest="ais_perf_model",
             default=None,
             metavar="VALUE",
-            help=(
-                "AIS perf model for --router-prefill-load-model=ais: a file path "
-                "or inline JSON, holding one perf model config or a list of "
-                f"configs with one worker_type each; {ENV_VAR}."
-            ),
+            help=new_input_help,
         )
         group.add_argument(
             "--router-prefill-load-worker-type",
@@ -269,7 +282,7 @@ class AisPerfArgGroup(ArgGroup):
             choices=ROUTER_WORKER_TYPES,
             default=None,
             help=(
-                "Worker type whose config the router takes from --ais-perf-model; "
+                f"Worker type whose config the router takes from {new_input}; "
                 "needed when the value has both or names none; "
                 f"{WORKER_TYPE_ENV_VAR}."
             ),

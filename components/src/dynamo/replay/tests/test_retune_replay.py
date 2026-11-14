@@ -954,6 +954,18 @@ def _pinned_router_perf_config(worker_type: str) -> dict:
 
 
 @pytest.mark.unit
+def test_engine_spec_returns_pinned_perf_config_as_router_keyword():
+    pinned = _pinned_router_perf_config("aggregated")
+
+    kwargs = RetuneEngineSpec(ais_perf_config=pinned).replay_kwargs()
+
+    # The mapping as pinned, under the keyword that reads a mapping.
+    assert kwargs["router_ais_perf_model"] == pinned
+    assert set(kwargs) == _PINNED
+    assert RetuneEngineSpec().replay_kwargs()["router_ais_perf_model"] is None
+
+
+@pytest.mark.unit
 def test_sweep_candidate_passes_engine_perf_config_as_router_keyword(monkeypatch):
     calls: list[dict] = []
 

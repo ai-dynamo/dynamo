@@ -231,6 +231,33 @@ def test_typed_global_flag_is_rejected(tiers_and_inputs):
         config.validate()
 
 
+def test_help_offers_only_the_tier_key(capsys):
+    with pytest.raises(SystemExit) as error:
+        parse_args(["--help"])
+    assert error.value.code == 0
+    text = " ".join(capsys.readouterr().out.split())
+
+    assert (
+        "--ais-perf-model VALUE Not read here; write ais_perf_model in each "
+        "--tiers entry." in text
+    )
+    assert (
+        "Worker type whose config the router takes from ais_perf_model in each "
+        "--tiers entry;" in text
+    )
+    # --ais-perf-config and the nine identity flags.
+    assert (
+        text.count(
+            " deprecated and will be removed in v1.9; use ais_perf_model in "
+            "each --tiers entry."
+        )
+        == 10
+    )
+    # No text offers the flag, which squeeze_evolve rejects.
+    assert "use --ais-perf-model" not in text
+    assert "from --ais-perf-model" not in text
+
+
 def test_global_environment_variable_is_not_read(monkeypatch):
     # Other processes may read the variable from the same environment.
     monkeypatch.setenv("DYN_AIS_PERF_MODEL", "/not/a/local/file.yaml")

@@ -30,7 +30,11 @@ from dynamo.common.forward_pass_metrics import (
     QueuedRequestMetrics,
     ScheduledRequestMetrics,
 )
-from dynamo.planner.config.planner_config import AISPerfModelSpec, PlannerConfig
+from dynamo.planner.config.planner_config import (
+    AISPerfModelSpec,
+    PlannerConfig,
+    ais_perf_model_role_config,
+)
 from dynamo.planner.core.perf_model.base import _clamp_kv_hit_rate
 from dynamo.planner.core.perf_model.engine_query import (
     AISCoreEnginePerfModel,
@@ -255,12 +259,12 @@ class PlannerEnginePerfModel:
             raise ValueError("AIS role configuration is absent")
         if not isinstance(spec, AISPerfModelSpec):
             if self._written_perf_model != spec:
-                entry = engine_perf_config(spec, self._worker_type)
-                # The content gets the checks a roles entry gets when the
-                # Planner config is loaded.
-                self._resolved_perf_model = AISPerfModelSpec(
-                    roles={self._worker_type: entry}
-                ).roles[self._worker_type]
+                # What a source named with `from` gives is checked here for
+                # the first time; a config without `from` was checked when
+                # the Planner config was loaded.
+                self._resolved_perf_model = ais_perf_model_role_config(
+                    self._worker_type, engine_perf_config(spec, self._worker_type)
+                )
                 self._written_perf_model = deepcopy(spec)
             if self._resolved_perf_model is None:
                 raise RuntimeError("AIS perf model entry was not resolved")
@@ -277,9 +281,7 @@ class PlannerEnginePerfModel:
                     source.manifest,
                     Path(directory.name) / "prepared",
                 )
-                normalized = AISPerfModelSpec(
-                    roles={self._worker_type: prepared}
-                ).roles[self._worker_type]
+                normalized = ais_perf_model_role_config(self._worker_type, prepared)
             except BaseException:
                 directory.cleanup()
                 raise

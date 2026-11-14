@@ -306,7 +306,7 @@ class SqueezeEvolveArgGroup(ArgGroup):
         )
         # Shared per-tier KvRouter knobs (--router-*) + AIS perf model flags.
         KvRouterArgGroup().add_arguments(parser)
-        AisPerfArgGroup().add_arguments(parser)
+        AisPerfArgGroup(replacement=_TIER_KEY).add_arguments(parser)
 
 
 def parse_args(argv: Optional[list[str]] = None) -> SqueezeEvolveRunConfig:

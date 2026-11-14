@@ -1066,7 +1066,7 @@ def test_planner_config_already_warned_silences_only_that_warning(
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        with api.planner_config_already_warned():
+        with api._planner_config_already_warned():
             with pytest.raises(_NativeCallRecorded):
                 replay(planner_config=_OLD_PLANNER_CONFIG)
             # The warning of the deprecated keyword is another one.
@@ -1080,7 +1080,7 @@ def test_planner_config_already_warned_silences_only_that_warning(
         with pytest.raises(FutureWarning, match="ais_perf_model.roles is deprecated"):
             replay(planner_config=_OLD_PLANNER_CONFIG)
         with pytest.raises(RuntimeError, match="inside"):
-            with api.planner_config_already_warned():
+            with api._planner_config_already_warned():
                 raise RuntimeError("inside")
         with pytest.raises(FutureWarning, match="ais_perf_model.roles is deprecated"):
             replay(planner_config=_OLD_PLANNER_CONFIG)

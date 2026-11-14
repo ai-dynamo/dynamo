@@ -147,6 +147,25 @@ def test_reads_the_argument_list_of_another_mocker(monkeypatch):
     assert old_ais_perf_inputs(namespace) == []
 
 
+def test_empty_variable_of_the_other_mocker_is_unset():
+    # A caller may pass the variable as the other mocker's env holds it.
+    parser = build_mocker_parser({})
+
+    namespace = parser.parse_args([])
+    set_ais_perf_model_attributes(parser, namespace, "")
+
+    assert namespace.ais_perf_model_value is None
+    assert namespace.ais_perf_model_source is None
+
+    # So the option without a value next to it is the switch alone.
+    namespace = parser.parse_args(["--ais-perf-model"])
+    set_ais_perf_model_attributes(parser, namespace, "")
+
+    assert namespace.ais_perf_model_without_value is True
+    assert namespace.ais_perf_model_value is None
+    assert namespace.ais_perf_model_source is None
+
+
 def test_conflicting_uses_are_an_error_of_the_given_parser():
     class Raising(argparse.ArgumentParser):
         def error(self, message):

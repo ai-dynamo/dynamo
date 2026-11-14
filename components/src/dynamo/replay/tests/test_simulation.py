@@ -7,9 +7,8 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
-import warnings
+from contextlib import nullcontext
 from dataclasses import replace
 
 import pytest
@@ -1346,20 +1345,13 @@ def test_router_hook_mapping_is_passed_as_router_keyword(monkeypatch, workload) 
 @pytest.mark.parametrize(
     "workload", [_TRACE_WORKLOAD, _SYNTHETIC_WORKLOAD], ids=["trace", "synthetic"]
 )
-def test_planner_hook_with_old_perf_model_keys_does_not_warn(
+def test_planner_hook_with_old_perf_model_keys_warns(
     monkeypatch, native_replay_kwargs, workload
 ) -> None:
-    adapter_calls: list[dict] = []
-
-    @contextlib.contextmanager
-    def adapter(**kwargs):
-        adapter_calls.append(kwargs)
-        yield None
-
-    monkeypatch.setattr(replay_api, "_planner_replay_adapter", lambda: adapter)
+    monkeypatch.setattr(
+        replay_api, "_planner_replay_adapter", lambda: lambda **_kwargs: nullcontext()
+    )
     perf_config = {key: _AIS_PERF_CONFIG[key] for key in ("backend", "system", "model")}
-    # A retune candidate replays the config of the Planner that runs the
-    # sweep, and that Planner warned when it read the config.
     planner_config = {
         "mode": "agg",
         "ais_perf_model": {"roles": {"aggregated": perf_config}},
@@ -1382,15 +1374,10 @@ def test_planner_hook_with_old_perf_model_keys_does_not_warn(
         },
     )
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
+    # The runner calls the public replay functions, and they warn.
+    with pytest.warns(FutureWarning, match="^ais_perf_model.roles is deprecated"):
         with pytest.raises(_NativeCallRecorded):
             simulation.DynamoReplayRunnerFactory().create(0).run(replay)
-
-    (adapter_call,) = adapter_calls
-    assert set(adapter_call["planner_config_arg"].ais_perf_model.roles) == {
-        "aggregated"
-    }
 
 
 def _ais_timing_model(worker_type: str) -> dict:

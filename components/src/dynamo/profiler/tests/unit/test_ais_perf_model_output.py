@@ -198,9 +198,10 @@ def test_old_argument_list_is_unchanged(database_version, backend, pick, added):
     assert out == _worker_arguments() + added
 
 
-@pytest.mark.parametrize("lookup", [None, lambda **kwargs: None])
-def test_old_argument_list_without_database_version_is_unchanged(monkeypatch, lookup):
-    monkeypatch.setattr(dgd_generation, "get_latest_database_version", lookup)
+def test_old_argument_list_without_database_version_is_unchanged(monkeypatch):
+    monkeypatch.setattr(
+        dgd_generation, "get_latest_database_version", lambda **kwargs: None
+    )
 
     out = dgd_generation._inject_mocker_ais_args_old_form(
         _worker_arguments(), _interpolation(), DENSE
@@ -263,9 +264,10 @@ def test_trtllm_writes_backend_and_keeps_engine_type(database_version):
     assert "--engine-type" not in out
 
 
-@pytest.mark.parametrize("lookup", [None, lambda **kwargs: None])
-def test_no_database_version_omits_key(monkeypatch, lookup):
-    monkeypatch.setattr(dgd_generation, "get_latest_database_version", lookup)
+def test_no_database_version_omits_key(monkeypatch):
+    monkeypatch.setattr(
+        dgd_generation, "get_latest_database_version", lambda **kwargs: None
+    )
 
     out = dgd_generation._inject_mocker_ais_args(
         _worker_arguments(), _interpolation(), DENSE
@@ -334,28 +336,14 @@ def test_old_and_new_arguments_give_same_engine_args(
     assert (timing["backend"], timing["worker_type"]) == (backend, worker)
 
 
-def _generated_entry(worker_type, pick):
-    moe = (pick.moe_tp, pick.moe_ep) != (1, 1)
-    return {
-        "model": MODEL,
-        "system": SYSTEM,
-        "backend": "vllm",
-        "backend_version": "0.24.0",
-        "worker_type": worker_type,
-        "tp": pick.tp,
-        "pp": 1,
-        "attention_dp": pick.dp,
-        "moe_tp_size": pick.moe_tp if moe else None,
-        "moe_ep_size": pick.moe_ep if moe else None,
-    }
-
-
 def test_profiler_built_planner_value_is_a_list(database_version):
     prefill_pick = PickedParallelConfig(tp=1)
 
     disagg = _planner_value(_request(_planner("disagg")), prefill_pick, MOE)
     agg = _planner_value(_request(_planner("agg")), prefill_pick, DENSE)
 
+    # A key that would only repeat a default is not written: pp of 1 and the
+    # MoE sizes of a dense pick.
     assert disagg == [
         {
             "model": MODEL,
@@ -364,10 +352,7 @@ def test_profiler_built_planner_value_is_a_list(database_version):
             "backend_version": "0.24.0",
             "worker_type": "prefill",
             "tp": 1,
-            "pp": 1,
             "attention_dp": 1,
-            "moe_tp_size": None,
-            "moe_ep_size": None,
         },
         {
             "model": MODEL,
@@ -376,13 +361,57 @@ def test_profiler_built_planner_value_is_a_list(database_version):
             "backend_version": "0.24.0",
             "worker_type": "decode",
             "tp": 1,
-            "pp": 1,
             "attention_dp": 8,
             "moe_tp_size": 1,
             "moe_ep_size": 8,
         },
     ]
-    assert agg == [_generated_entry("aggregated", DENSE)]
+    assert agg == [
+        {
+            "model": MODEL,
+            "system": SYSTEM,
+            "backend": "vllm",
+            "backend_version": "0.24.0",
+            "worker_type": "aggregated",
+            "tp": 2,
+            "attention_dp": 1,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "pick",
+    [
+        pytest.param(DENSE, id="dense"),
+        pytest.param(MOE, id="moe"),
+        pytest.param(PickedParallelConfig(tp=2, pp=2), id="two-pipeline-stages"),
+    ],
+)
+def test_planner_entry_is_the_mocker_config_with_a_worker_type(database_version, pick):
+    workers = _generated_workers(_request(), _interpolation(pick=pick))
+    planner_value = _planner_value(_request(_planner("disagg")), pick, pick)
+
+    assert planner_value == [
+        {**_perf_model(workers[worker]), "worker_type": worker} for worker in WORKERS
+    ]
+
+
+def test_pick_with_pipeline_stages_writes_pp(database_version):
+    pick = PickedParallelConfig(tp=2, pp=2)
+
+    staged = _perf_model(
+        dgd_generation._inject_mocker_ais_args(
+            _worker_arguments(), _interpolation(pick=pick), pick
+        )
+    )
+    single = _perf_model(
+        dgd_generation._inject_mocker_ais_args(
+            _worker_arguments(), _interpolation(), DENSE
+        )
+    )
+
+    assert staged == {**single, "pp": 2}
+    assert "pp" not in single
 
 
 def test_profiler_built_value_round_trips_and_equals_old_form(
@@ -557,20 +586,31 @@ def _assert_old_arguments_kept(caplog, override, names):
             "--ais-perf-model without a value",
             id="perf-model-before-flag",
         ),
-        pytest.param(["--aic-system", "s"], "--aic-system", id="aic-name"),
+        # The mocker's parser reads the list: an abbreviation or an --aic-
+        # spelling is named by the full --ais- name.
+        pytest.param(["--aic-system", "s"], "--ais-system", id="aic-name"),
         pytest.param(["--ais-system=s"], "--ais-system", id="equals-sign"),
-        pytest.param(["--ais-sys", "s"], "--ais-sys", id="short-system"),
-        pytest.param(["--ais-backend-v", "1"], "--ais-backend-v", id="short-version"),
-        pytest.param(["--ais-tp", "2"], "--ais-tp", id="short-tp"),
+        pytest.param(["--ais-sys", "s"], "--ais-system", id="short-system"),
+        pytest.param(
+            ["--ais-backend-v", "1"], "--ais-backend-version", id="short-version"
+        ),
+        pytest.param(["--ais-tp", "2"], "--ais-tp-size", id="short-tp"),
         pytest.param(
             ["--extra-engine-args", "f"], "--extra-engine-args", id="engine-args"
         ),
+        pytest.param(["--ex", "f"], "--extra-engine-args", id="short-engine-args"),
         pytest.param(["--model-path", "m"], "--model-path", id="model-path"),
-        pytest.param(["--model-p", "m"], "--model-p", id="short-model-path"),
+        pytest.param(["--model-p", "m"], "--model-path", id="short-model-path"),
         pytest.param(
             ["--ais-system", "s", "--model-path", "m", "--ais-system=t"],
             "--ais-system and --model-path",
             id="two-names",
+        ),
+        # The names of one list come in the mocker's order, not as typed.
+        pytest.param(
+            ["--model-path", "m", "--ais-tp-size", "2", "--ais-backend", "vllm"],
+            "--ais-backend, --ais-tp-size and --model-path",
+            id="three-names",
         ),
     ],
 )
@@ -613,6 +653,8 @@ def test_override_trigger_is_read_in_every_shape(database_version, caplog, shape
                 ["--ais-perf-model", PERF_MODEL_VALUE],
                 [f"--ais-perf-model={PERF_MODEL_VALUE}"],
                 ["--ais-perf-m", PERF_MODEL_VALUE],
+                # Not a mocker option: the mocker's list decides, not the prefix.
+                ["--ais-model-path", "m"],
                 ["--model-name", "m"],
             )
         ),

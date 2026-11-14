@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 from dynamo.common.ais_perf_model import ENV_VAR
-from dynamo.mocker.args import parse_args
+from dynamo.mocker.args import build_mocker_parser, parse_args
 from dynamo.mocker.config import load_mocker_engine_args, performance_config
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.parallelization import PickedParallelConfig
@@ -19,10 +19,10 @@ from dynamo.planner.config.planner_config import (
     PlannerConfig,
     PlannerPreDeploymentSweepMode,
 )
+from dynamo.profiler.utils import dgd_generation
 from dynamo.profiler.utils.dgd_generation import (
     _build_planner_config,
     _inject_mocker_ais_args,
-    _load_latest_database_version,
     build_aic_interpolation_spec,
     build_ais_perf_model_spec,
     enable_vllm_benchmark_mode,
@@ -42,39 +42,6 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
 ]
-
-
-def test_aic_import_treats_missing_root_package_as_optional(monkeypatch):
-    def raise_missing_root(_):
-        raise ModuleNotFoundError(name="aisimulate_core")
-
-    monkeypatch.setattr(
-        "dynamo.profiler.utils.dgd_generation.importlib.import_module",
-        raise_missing_root,
-    )
-
-    assert _load_latest_database_version() is None
-
-
-@pytest.mark.parametrize(
-    "missing_module",
-    ["aisimulate_core.sdk.operations.attention", "unrelated_dependency"],
-)
-def test_aic_import_propagates_internal_or_unrelated_missing_module(
-    monkeypatch, missing_module
-):
-    def raise_missing_dependency(_):
-        raise ModuleNotFoundError(name=missing_module)
-
-    monkeypatch.setattr(
-        "dynamo.profiler.utils.dgd_generation.importlib.import_module",
-        raise_missing_dependency,
-    )
-
-    with pytest.raises(ModuleNotFoundError) as exc_info:
-        _load_latest_database_version()
-
-    assert exc_info.value.name == missing_module
 
 
 def _dgdr(
@@ -501,31 +468,6 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         )
 
         assert spec is None
-
-    def test_ais_perf_model_falls_back_when_sdk_is_unavailable(
-        self, monkeypatch, caplog
-    ):
-        monkeypatch.setattr(
-            "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
-            None,
-        )
-        planner = PlannerConfig(
-            enable_throughput_scaling=True,
-            enable_load_scaling=False,
-            optimization_target="sla",
-        )
-        dgdr = _dgdr(planner=planner)
-
-        spec = build_ais_perf_model_spec(
-            dgdr,
-            best_prefill_pick=PickedParallelConfig(tp=1),
-            best_decode_pick=PickedParallelConfig(tp=2),
-            resolved_backend="vllm",
-            system="h200_sxm",
-        )
-
-        assert spec is None
-        assert "AISimulate perf model is unavailable" in caplog.text
 
     @pytest.mark.parametrize(
         ("mode", "prefill_pick", "decode_pick"),
@@ -1027,6 +969,166 @@ def test_list_reports_the_entry_that_conflicts(
     assert str(caught.value) == conflict
 
 
+_TEMPLATE = "/missing/template.yaml"
+_DATASET_PROFILE = {"root": "/not-mounted-yet/dataset", "manifest": "profile.json"}
+_COMPLETE = {"model": "Qwen/Qwen3-32B", "system": "h200_sxm", "backend": "vllm"}
+_EVERY_FIELD = (
+    "model, system, backend, tp, pp, attention_dp, moe_tp_size and moe_ep_size"
+)
+
+
+def _generation_warnings(caplog) -> list[str]:
+    """Return what the DGD generation logged; loading a Planner config logs too."""
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == dgd_generation.logger.name
+    ]
+
+
+@pytest.mark.parametrize(
+    "mode,written,not_compared",
+    [
+        pytest.param(
+            "decode", {"from": _TEMPLATE}, f"decode: {_EVERY_FIELD}", id="from-alone"
+        ),
+        pytest.param(
+            "decode",
+            {"from": _TEMPLATE, "model": "Qwen/Qwen3-32B", "tp": 2},
+            "decode: system, backend, pp, attention_dp, moe_tp_size and moe_ep_size",
+            id="from-next-to-two-fields",
+        ),
+        pytest.param(
+            "disagg",
+            {"from": _TEMPLATE},
+            f"prefill: {_EVERY_FIELD}; decode: {_EVERY_FIELD}",
+            id="one-config-for-two-worker-types",
+        ),
+        pytest.param(
+            "disagg",
+            [
+                {"worker_type": "prefill", "from": _TEMPLATE, "pp": 1},
+                {**_COMPLETE, "worker_type": "decode", "tp": 2},
+            ],
+            "prefill: model, system, backend, tp, attention_dp, moe_tp_size and "
+            "moe_ep_size",
+            id="list-with-one-from-entry",
+        ),
+        pytest.param(
+            "decode",
+            {"from": {"state_snapshot": {"path": "/missing/snapshot"}}},
+            f"decode: {_EVERY_FIELD}",
+            id="state-snapshot",
+        ),
+        pytest.param(
+            "decode",
+            {"dataset_profiles": {"decode": _DATASET_PROFILE}},
+            f"decode: {_EVERY_FIELD}",
+            id="old-dataset-profile",
+        ),
+        pytest.param(
+            "disagg",
+            {
+                "roles": {"prefill": {**_COMPLETE, "tp": 2}},
+                "dataset_profiles": {"decode": _DATASET_PROFILE},
+            },
+            f"decode: {_EVERY_FIELD}",
+            id="old-roles-and-dataset-profile",
+        ),
+    ],
+)
+def test_fields_taken_from_a_source_are_named_in_one_warning(
+    caplog, mode, written, not_compared
+):
+    planner = _written_planner(mode, written)
+    pick = PickedParallelConfig(tp=2)
+
+    with caplog.at_level(logging.WARNING):
+        value = _checked_value(planner, prefill_pick=pick, decode_pick=pick)
+
+    assert value == planner.ais_perf_model
+    assert value is not planner.ais_perf_model
+    assert _generation_warnings(caplog) == [
+        "ais_perf_model: the profiler does not read the source a config takes keys "
+        "from, so it did not compare these fields with the selected deployment: "
+        f"{not_compared}. The Planner takes them from the source without a "
+        "comparison."
+    ]
+
+
+@pytest.mark.parametrize(
+    "written",
+    [
+        pytest.param({**_COMPLETE, "tp": 2}, id="config-without-from"),
+        pytest.param(
+            {
+                "from": _TEMPLATE,
+                **_COMPLETE,
+                "tp": 2,
+                "pp": 1,
+                "attention_dp": 1,
+                "moe_tp_size": 1,
+                "moe_ep_size": 1,
+            },
+            id="from-next-to-every-field",
+        ),
+        pytest.param({"roles": {"decode": {**_COMPLETE, "tp": 2}}}, id="old-roles"),
+    ],
+)
+def test_no_warning_when_every_field_is_compared(caplog, written):
+    planner = _written_planner("decode", written)
+
+    with caplog.at_level(logging.WARNING):
+        _checked_value(planner, decode_pick=PickedParallelConfig(tp=2))
+
+    assert _generation_warnings(caplog) == []
+
+
+@pytest.mark.parametrize(
+    "written,name",
+    [
+        pytest.param(
+            {"roles": {"decode": _COMPLETE}}, "ais_perf_model.roles.decode", id="old"
+        ),
+        pytest.param(dict(_COMPLETE), "ais_perf_model entry for decode", id="config"),
+        pytest.param(
+            {"from": _TEMPLATE}, "ais_perf_model entry for decode", id="from-entry"
+        ),
+    ],
+)
+def test_written_value_needs_a_selected_deployment(written, name):
+    planner = _written_planner("decode", written)
+
+    with pytest.raises(ValueError) as caught:
+        _checked_value(planner, decode_pick=None)
+
+    assert str(caught.value) == f"cannot validate {name} without a selected deployment"
+
+
+def test_one_check_serves_every_form(monkeypatch):
+    """A config without ``from`` is compared as the Planner reads it."""
+    calls = []
+
+    def record(worker_type, config):
+        calls.append(worker_type)
+        return real(worker_type, config)
+
+    real = dgd_generation.ais_perf_model_role_config
+    planner = _written_planner(
+        "disagg",
+        [
+            {"worker_type": "prefill", "from": _TEMPLATE},
+            {**_COMPLETE, "worker_type": "decode", "tp": 2},
+        ],
+    )
+    monkeypatch.setattr(dgd_generation, "ais_perf_model_role_config", record)
+    pick = PickedParallelConfig(tp=2)
+
+    _checked_value(planner, prefill_pick=pick, decode_pick=pick)
+
+    assert calls == ["decode"]
+
+
 WORKERS = ("prefill", "decode")
 OVERRIDE_SHAPES = ["services", "components"]
 
@@ -1268,8 +1370,23 @@ def test_override_with_a_value_keeps_new_arguments_for_every_worker(
         pytest.param({"args": ENGINE_FILE}, "--extra-engine-args", id="engine-args"),
         pytest.param({"args": MODEL_PATH}, "--model-path", id="model-path"),
         pytest.param({"args": OLD_FLAG}, "--ais-system", id="old-flag"),
-        pytest.param({"args": ["--ais-next", "2"]}, "--ais-next", id="ambiguous-nextn"),
-        pytest.param({"args": ["--aic-m", "5"]}, "--aic-m", id="ambiguous-mtp-seed"),
+        # The profiler cannot read a file or a variable of the worker: a value
+        # is kept as typed.
+        pytest.param(
+            {"args": ["--ais-perf-config", "/missing/perf.yaml"]},
+            "--ais-perf-config",
+            id="file-that-is-not-here",
+        ),
+        pytest.param(
+            {"args": ["--ais-tp-size", "$(TP_SIZE)"]},
+            "--ais-tp-size",
+            id="value-from-a-variable",
+        ),
+        pytest.param(
+            {"args": ["--disaggregation-mode", "$(MODE)", *OLD_FLAG]},
+            "--ais-system",
+            id="choice-from-a-variable",
+        ),
         pytest.param(
             {"command": MOCKER_COMMAND + OLD_FLAG}, "--ais-system", id="command"
         ),
@@ -1292,6 +1409,131 @@ def test_override_without_a_value_keeps_old_arguments_for_every_worker(
     assert [record.getMessage() for record in caplog.records] == [
         _old_arguments_warning(names)
     ]
+
+
+def _with_old_arguments(arguments: list[str]) -> list[str]:
+    """Return a generated worker's arguments with the old AIS arguments instead."""
+    assert arguments[-len(NEW_AIS_ARGUMENTS) :] == NEW_AIS_ARGUMENTS
+    return arguments[: -len(NEW_AIS_ARGUMENTS)] + OLD_AIS_ARGUMENTS
+
+
+@pytest.mark.parametrize("shape", OVERRIDE_SHAPES)
+@pytest.mark.parametrize(
+    "added",
+    [
+        pytest.param(["--ais-next", "2"], id="ambiguous-nextn"),
+        pytest.param(["--aic-m", "5"], id="ambiguous-mtp-seed"),
+        pytest.param(["--model", "m", *OLD_FLAG], id="ambiguous-model"),
+        pytest.param(["--ais-system"], id="flag-without-its-value"),
+        pytest.param(["--aic-perf-model", "perf_model.yaml"], id="aic-name-with-value"),
+        pytest.param(["--ais-perf-model", *VALUE], id="with-and-without-a-value"),
+        pytest.param(["--", *OLD_FLAG], id="after-double-dash"),
+    ],
+)
+def test_override_list_the_mocker_rejects_is_not_read(
+    mocker_inputs, caplog, capsys, added, shape
+):
+    override = _worker_override(shape, {"decode": {"args": added}})
+
+    with caplog.at_level(logging.WARNING):
+        workers = _mocker_workers(override)
+
+    assert _ais_arguments(workers) == dict.fromkeys(WORKERS, NEW_AIS_ARGUMENTS)
+    assert caplog.records == []
+    # The worker that gets the list does not start, and the old arguments
+    # would not change that.
+    assert "error" in _mocker_reads(workers["decode"] + added, capsys)
+    assert "error" in _mocker_reads(
+        _with_old_arguments(workers["decode"]) + added, capsys
+    )
+
+
+@pytest.mark.parametrize("shape", OVERRIDE_SHAPES)
+@pytest.mark.parametrize(
+    "rejected",
+    [
+        pytest.param(["--aic-perf-model", "perf_model.yaml"], id="aic-name-with-value"),
+        pytest.param(["--ais-perf-model", *VALUE], id="with-and-without-a-value"),
+    ],
+)
+def test_override_list_the_mocker_rejects_gives_no_value(
+    mocker_inputs, caplog, rejected, shape
+):
+    """A rejected list is not a value that keeps the new arguments.
+
+    The old flag of the other worker still counts.
+    """
+    override = _worker_override(
+        shape, {"prefill": {"args": rejected}, "decode": {"args": OLD_FLAG}}
+    )
+
+    with caplog.at_level(logging.WARNING):
+        workers = _mocker_workers(override)
+
+    assert _ais_arguments(workers) == dict.fromkeys(WORKERS, OLD_AIS_ARGUMENTS)
+    assert [record.getMessage() for record in caplog.records] == [
+        _old_arguments_warning("--ais-system")
+    ]
+
+
+@pytest.mark.parametrize("shape", OVERRIDE_SHAPES)
+def test_override_with_profile_data_keeps_new_arguments(
+    mocker_inputs, caplog, capsys, shape
+):
+    """Profile data is not a reason for the old arguments.
+
+    A mocker has one timing provider: it refuses profile data next to AIS
+    timing in either form of the generated arguments, and reports it.
+    """
+    added = ["--planner-profile-data", "profile"]
+    override = _worker_override(shape, {"decode": {"args": added}})
+
+    with caplog.at_level(logging.WARNING):
+        workers = _mocker_workers(override)
+
+    assert _ais_arguments(workers) == dict.fromkeys(WORKERS, NEW_AIS_ARGUMENTS)
+    assert caplog.records == []
+    assert _mocker_reads(workers["decode"] + added, capsys) == {
+        "error": "--ais-perf-model cannot be combined with --planner-profile-data"
+    }
+    with pytest.warns(FutureWarning, match=r"use --ais-perf-model VALUE\.$"):
+        old = parse_args(_with_old_arguments(workers["decode"]) + added)
+    with pytest.raises(ValueError, match="^choose one timing provider: "):
+        load_mocker_engine_args(old)
+
+
+def test_variable_of_the_profiler_process_is_not_read(
+    mocker_inputs, caplog, monkeypatch
+):
+    # The variable would be a value, and a value keeps the new arguments.
+    monkeypatch.setenv(ENV_VAR, "perf_model.yaml")
+    override = _worker_override("services", {"decode": {"args": OLD_FLAG}})
+
+    with caplog.at_level(logging.WARNING):
+        workers = _mocker_workers(override)
+
+    assert _ais_arguments(workers) == dict.fromkeys(WORKERS, OLD_AIS_ARGUMENTS)
+    assert [record.getMessage() for record in caplog.records] == [
+        _old_arguments_warning("--ais-system")
+    ]
+
+
+def test_mocker_flag_that_is_no_old_input_keeps_new_arguments(
+    mocker_inputs, caplog, monkeypatch
+):
+    """What counts as an old input is the mocker's list, not the flag's name."""
+    parser = build_mocker_parser({}, dgd_generation._OverrideArguments(add_help=False))
+    parser.add_argument("--ais-sampling-seed")
+    monkeypatch.setattr(dgd_generation, "_mocker_parser", lambda: parser)
+    added = ["--ais-sampling-seed", "7"]
+
+    with caplog.at_level(logging.WARNING):
+        workers = _mocker_workers(
+            _worker_override("services", {"decode": {"args": added}})
+        )
+
+    assert _ais_arguments(workers) == dict.fromkeys(WORKERS, NEW_AIS_ARGUMENTS)
+    assert caplog.records == []
 
 
 @pytest.mark.parametrize("shape", OVERRIDE_SHAPES)
@@ -1331,6 +1573,11 @@ def test_override_command_without_trigger_keeps_new_arguments(
         pytest.param(
             {"decode": {"command": [*MOCKER_COMMAND, "--ais-perf-m", VALUE[1]]}},
             id="abbreviated",
+        ),
+        pytest.param(
+            # The mocker reads a number as the value.
+            {"decode": {"command": [*MOCKER_COMMAND, "--ais-perf-model", "-1"]}},
+            id="value-that-starts-with-a-dash",
         ),
         pytest.param(
             {"decode": {"command": MOCKER_COMMAND + VALUE, "args": OLD_FLAG}},

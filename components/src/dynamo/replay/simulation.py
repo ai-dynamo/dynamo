@@ -36,7 +36,6 @@ from dynamo.mocker.config import normalize_mocker_config, performance_config
 from dynamo.planner.core.types import TrafficObservation
 from dynamo.replay.api import (
     TelemetryOptions,
-    planner_config_already_warned,
     run_synthetic_trace_replay,
     run_trace_replay,
 )
@@ -193,14 +192,11 @@ class DynamoReplayRunner:
             if not self._is_trace(spec):
                 raise ValueError("conversation_affinity requires an agentic trace")
             common["conversation_affinity"] = conversation_affinity
-        # A hook with the deprecated keys carries the config of a running
-        # Planner (a retune candidate), and that Planner warned about it.
-        with planner_config_already_warned():
-            if self._is_trace(spec):
-                report = self._run_trace(spec, common, execution_model=execution_model)
-            else:
-                common.update(self._synthetic_kwargs(spec))
-                report = self._run_synthetic(spec, common)
+        if self._is_trace(spec):
+            report = self._run_trace(spec, common, execution_model=execution_model)
+        else:
+            common.update(self._synthetic_kwargs(spec))
+            report = self._run_synthetic(spec, common)
 
         metrics, metadata = self._normalize_report(report, output_requirements)
         trace_format = spec.workload.get("trace_format")

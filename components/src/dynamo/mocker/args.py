@@ -173,11 +173,13 @@ def set_ais_perf_model_attributes(
 
     ``args`` is what a parser with the mocker's arguments returned and ``env``
     the value of ``DYN_AIS_PERF_MODEL`` for that mocker, ``None`` when it is
-    unset or empty. ``ais_perf_model_without_value`` is whether the option was
-    given without a value, ``ais_perf_model_value`` the value typed last, else
-    ``env``, and ``ais_perf_model_source`` the name of what gave the value. A
-    combination that has no single meaning is an error of ``parser``.
+    unset; an empty value counts as unset. ``ais_perf_model_without_value`` is
+    whether the option was given without a value, ``ais_perf_model_value`` the
+    value typed last, else ``env``, and ``ais_perf_model_source`` the name of
+    what gave the value. A combination that has no single meaning is an error
+    of ``parser``.
     """
+    env = env or None
     occurrences = args.ais_perf_model_occurrences or []
     del args.ais_perf_model_occurrences
     bare = [flag for flag, value in occurrences if value is None]

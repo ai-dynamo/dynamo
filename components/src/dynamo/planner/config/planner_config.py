@@ -144,6 +144,45 @@ class AISDatasetProfileSpec(BaseModel):
         return value
 
 
+def ais_perf_model_role_config(
+    worker_type: str, config: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Return the perf model config of one worker type, checked, with every default.
+
+    ``config`` holds AISimulate ``ForwardPassPerfModelConfig`` keys and no
+    ``from``. A ``worker_type`` it writes must be ``worker_type``. AISimulate
+    checks the values and reads the paths the config names, so those must
+    exist where this is called. A wrong config is a ``ValueError``.
+
+    This is the one check of a complete config: loading a Planner config,
+    the Planner's perf model adapter and the profiler all call it.
+    """
+    # Operator schema generation imports this module without the optional
+    # estimator runtime. Require AIS only when validating an AIS config.
+    # The package root loads native APIs lazily and types them as object;
+    # import the typed native module directly.
+    from aisimulate_core._native import RustForwardPassPerfModel
+    from aisimulate_core.sdk import ForwardPassPerfModelConfig
+
+    written = deepcopy(dict(config))
+    if written.get("worker_type", worker_type) != worker_type:
+        raise ValueError(f"AIS role {worker_type!r} conflicts with worker_type")
+    written["worker_type"] = worker_type
+    try:
+        # Use the installed SDK's fields/defaults; never duplicate its
+        # expanding schema or discard an unrecognized input field.
+        request = ForwardPassPerfModelConfig(**written)
+        # AISimulate exposes native APIs lazily through module __getattr__.
+        cast(Any, RustForwardPassPerfModel).normalize_config(
+            json.dumps(request.to_dict())
+        )
+        # Keep authored roots portable and controls explicit; to_dict()
+        # resolves package/env roots on the machine doing validation.
+        return asdict(request)
+    except TypeError as error:
+        raise ValueError(f"invalid AIS config for {worker_type}: {error}") from error
+
+
 class AISPerfModelSpec(BaseModel):
     """Role-indexed AISimulate canonical configurations.
 
@@ -171,33 +210,10 @@ class AISPerfModelSpec(BaseModel):
     def validate_role_identity(
         cls, roles: dict[str, dict[str, Any]]
     ) -> dict[str, dict[str, Any]]:
-        # Operator schema generation imports this module without the optional
-        # estimator runtime. Require AIS only when validating an AIS config.
-        # The package root loads native APIs lazily and types them as object;
-        # import the typed native module directly.
-        from aisimulate_core._native import RustForwardPassPerfModel
-        from aisimulate_core.sdk import ForwardPassPerfModelConfig
-
-        result = {}
-        for role, config in roles.items():
-            config = deepcopy(config)
-            if config.get("worker_type", role) != role:
-                raise ValueError(f"AIS role {role!r} conflicts with worker_type")
-            config["worker_type"] = role
-            try:
-                # Use the installed SDK's fields/defaults; never duplicate its
-                # expanding schema or discard an unrecognized input field.
-                request = ForwardPassPerfModelConfig(**config)
-                # AISimulate exposes native APIs lazily through module __getattr__.
-                cast(Any, RustForwardPassPerfModel).normalize_config(
-                    json.dumps(request.to_dict())
-                )
-                # Keep authored roots portable and controls explicit; to_dict()
-                # resolves package/env roots on the machine doing validation.
-                result[role] = asdict(request)
-            except TypeError as error:
-                raise ValueError(f"invalid AIS config for {role}: {error}") from error
-        return result
+        return {
+            role: ais_perf_model_role_config(role, config)
+            for role, config in roles.items()
+        }
 
 
 # What PlannerConfig.ais_perf_model holds: the deprecated mapping with roles
@@ -871,24 +887,25 @@ class RetuneEngineSpec(BaseModel):
         """Return ``run_trace_replay`` engine kwargs for one candidate.
 
         ``router_config`` is ``KvRouterConfig.from_json`` of the startup
-        snapshot merged with ``router_overrides``; ``ais_perf_config`` is
-        rebuilt as ``AisPerfConfig``. Called inside sweep worker processes,
-        because the native objects cannot be pickled.
+        snapshot merged with ``router_overrides``; the pinned
+        ``ais_perf_config`` is returned as ``router_ais_perf_model``, the
+        keyword that reads the mapping. Called inside sweep worker processes,
+        because the native object cannot be pickled.
         """
 
         # Planner config validation and schema generation must not load the
-        # native extension; only replay workers construct these objects.
-        from dynamo.llm import AisPerfConfig, KvRouterConfig
+        # native extension; only replay workers construct this object.
+        from dynamo.llm import KvRouterConfig
 
-        # Every field is a run_trace_replay kwarg; model_dump deep-copies.
+        # Every field but the pinned perf config is a run_trace_replay kwarg
+        # under its own name; model_dump deep-copies.
         kwargs = self.model_dump()
+        kwargs["router_ais_perf_model"] = kwargs.pop("ais_perf_config")
         overrides = dict(router_overrides or {})
         if self.router_config is not None or overrides:
             kwargs["router_config"] = KvRouterConfig.from_json(
                 json.dumps({**(self.router_config or {}), **overrides})
             )
-        if self.ais_perf_config is not None:
-            kwargs["ais_perf_config"] = AisPerfConfig(config=kwargs["ais_perf_config"])
         return kwargs
 
 
@@ -1784,11 +1801,12 @@ class PlannerConfig(BaseModel):
             "worker_type each (prefill, decode or aggregated). A config holds "
             "AISimulate ForwardPassPerfModelConfig keys, or `from` to take "
             "them from a template file, a dataset or a state snapshot. The "
-            "value is stored as written; the Planner reads the files it names "
-            "when it first needs the model. The SDK owns estimator selection, "
-            "tuning, and validation; new configs default to auto selection "
-            "with fallback denied. The older mapping with `roles` and "
-            "`dataset_profiles` is deprecated."
+            "value is stored as written. A config without `from` is checked "
+            "when the Planner config is loaded; a config with `from` is read "
+            "and checked when the Planner first needs the model. The SDK owns "
+            "estimator selection, tuning, and validation; new configs default "
+            "to auto selection with fallback denied. The older mapping with "
+            "`roles` and `dataset_profiles` is deprecated."
         ),
     )
 
@@ -1824,7 +1842,8 @@ class PlannerConfig(BaseModel):
         else:
             return AISPerfModelSpec.model_validate(value)
         # Only the syntax and the names of the keys are checked here: no file
-        # the value names is opened.
+        # the value names is opened. The values of the configs the mode uses
+        # are checked with the mode, in _validate_config.
         load_document(value)
         _reject_unknown_config_keys(value, config_keys)
         return deepcopy(value)
@@ -2513,15 +2532,27 @@ class PlannerConfig(BaseModel):
                         )
             else:
                 document = load_document(self.ais_perf_model)
+                entries = {}
                 for role in required_roles:
                     try:
-                        document.select(role)
+                        entries[role] = document.select(role)
                     except ValueError as error:
                         written = ", ".join(document.worker_types)
                         raise ValueError(
                             f"ais_perf_model: mode={self.mode!r} needs an entry for "
                             f"worker type {role!r}; it has: "
                             f"{written or 'one config without worker_type'}"
+                        ) from error
+                for role, entry in entries.items():
+                    if "from" in entry:
+                        # Its source is read when the Planner first needs the
+                        # model: the file need not exist where this runs.
+                        continue
+                    try:
+                        ais_perf_model_role_config(role, entry)
+                    except (ValueError, OSError) as error:
+                        raise ValueError(
+                            f"ais_perf_model entry for {role}: {error}"
                         ) from error
 
         intervals = [float(self.load_adjustment_interval_seconds)]

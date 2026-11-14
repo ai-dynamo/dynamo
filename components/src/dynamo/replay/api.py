@@ -432,11 +432,11 @@ def _warn_old_planner_config(config: "PlannerConfig") -> None:
 
 
 @contextmanager
-def planner_config_already_warned() -> Iterator[None]:
+def _planner_config_already_warned() -> Iterator[None]:
     """Replay planner configs without the warning for their deprecated keys.
 
-    For code that replays a config its owner was already warned about: a
-    retune candidate replays the config of the Planner that runs the sweep.
+    For the retune sweep only: a candidate replays the config of the Planner
+    that runs the sweep, and that Planner already warned about it.
     The warning filters are not touched: a filter that is set and reset for
     every candidate makes Python show every other warning again each time.
     """

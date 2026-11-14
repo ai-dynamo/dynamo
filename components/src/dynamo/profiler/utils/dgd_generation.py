@@ -13,22 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import importlib
+import argparse
 import json
 import logging
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Iterable, Mapping
 from copy import deepcopy
-from dataclasses import asdict
-from typing import Any, Optional
+from functools import lru_cache
+from typing import Any, NoReturn, Optional
 
 import numpy as np
 import yaml
-from aisimulate_core.sdk import ForwardPassPerfModelConfig
+from aisimulate_core.sdk.perf_database import get_latest_database_version
 
 from dynamo.common.ais_perf_model import REMOVE_IN, load_document
 from dynamo.common.configuration.utils import join_names
 from dynamo.common.utils.paths import get_workspace_dir
+from dynamo.mocker.args import build_mocker_parser, set_ais_perf_model_attributes
+from dynamo.mocker.config import old_ais_perf_inputs
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.backend_components import MockerComponentName
 from dynamo.planner.config.parallelization import (
@@ -40,6 +42,7 @@ from dynamo.planner.config.planner_config import (
     AISPerfModelValue,
     PlannerConfig,
     PlannerPreDeploymentSweepMode,
+    ais_perf_model_role_config,
 )
 from dynamo.profiler.utils.config import (
     DgdPlannerComponentConfig,
@@ -63,19 +66,6 @@ from dynamo.profiler.utils.profile_common import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _load_latest_database_version() -> Optional[Callable[..., Optional[str]]]:
-    try:
-        perf_database = importlib.import_module("aisimulate_core.sdk.perf_database")
-    except ModuleNotFoundError as e:
-        if e.name != "aisimulate_core":
-            raise
-        return None
-    return perf_database.get_latest_database_version
-
-
-get_latest_database_version = _load_latest_database_version()
 
 # ConfigMap name prefixes (a 4-char UUID suffix is appended at runtime
 # so that multiple deployments in the same namespace don't collide)
@@ -459,6 +449,39 @@ def _mocker_ais_worker_picks(
     }
 
 
+def _perf_model_config(
+    pick: PickedParallelConfig,
+    *,
+    model: str,
+    system: str,
+    backend: str,
+    backend_version: Optional[str] = None,
+    worker_type: Optional[str] = None,
+) -> dict[str, Any]:
+    """Return the perf model config of a worker deployed with ``pick``.
+
+    The mocker arguments and the Planner config are both built from it, so
+    the two describe the same deployment. ``backend_version`` and
+    ``worker_type`` are written when given. A key that would only repeat
+    AISimulate's default is left out: ``pp`` of 1 and the MoE sizes of a
+    dense pick.
+    """
+    config: dict[str, Any] = {"model": model, "system": system, "backend": backend}
+    if backend_version is not None:
+        config["backend_version"] = backend_version
+    if worker_type is not None:
+        config["worker_type"] = worker_type
+    config["tp"] = pick.tp
+    if pick.pp != 1:
+        config["pp"] = pick.pp
+    config["attention_dp"] = pick.dp
+    # Dense picks use (1, 1) as a sentinel, not an MoE topology.
+    if (pick.moe_tp, pick.moe_ep) != (1, 1):
+        config["moe_tp_size"] = pick.moe_tp
+        config["moe_ep_size"] = pick.moe_ep
+    return config
+
+
 def _inject_mocker_ais_args(
     args_list: list,
     aic_spec: AICInterpolationSpec,
@@ -470,28 +493,18 @@ def _inject_mocker_ais_args(
     the default ``--engine-type`` and only name trtllm as the config's
     ``backend`` so the perf-model lookups point at the correct database.
     """
-    kwargs = picked_to_aic_model_config_kwargs(pick)
-    config = {
+    config = _perf_model_config(
+        pick,
         # The perf model follows the model the worker serves.
-        "model": args_list[args_list.index("--model-path") + 1]
+        model=args_list[args_list.index("--model-path") + 1]
         if "--model-path" in args_list
         else aic_spec.hf_id,
-        "system": aic_spec.system,
-        "backend": aic_spec.backend,
-        "tp": kwargs["tp_size"],
-        "attention_dp": kwargs["attention_dp_size"],
-    }
-    backend_version = (
-        get_latest_database_version(system=aic_spec.system, backend=aic_spec.backend)
-        if get_latest_database_version is not None
-        else None
+        system=aic_spec.system,
+        backend=aic_spec.backend,
+        backend_version=get_latest_database_version(
+            system=aic_spec.system, backend=aic_spec.backend
+        ),
     )
-    if backend_version is not None:
-        config["backend_version"] = backend_version
-    # Dense picks use (1, 1) as a sentinel, not an MoE topology.
-    if kwargs["moe_tp_size"] * kwargs["moe_ep_size"] > 1:
-        config["moe_tp_size"] = kwargs["moe_tp_size"]
-        config["moe_ep_size"] = kwargs["moe_ep_size"]
     args_list = set_argument_value(
         args_list,
         "--ais-perf-model",
@@ -517,10 +530,8 @@ def _inject_mocker_ais_args_old_form(
     if "--ais-perf-model" not in args_list:
         args_list.append("--ais-perf-model")
     args_list = set_argument_value(args_list, "--ais-backend", aic_spec.backend)
-    backend_version = (
-        get_latest_database_version(system=aic_spec.system, backend=aic_spec.backend)
-        if get_latest_database_version is not None
-        else None
+    backend_version = get_latest_database_version(
+        system=aic_spec.system, backend=aic_spec.backend
     )
     if backend_version is not None:
         args_list = set_argument_value(
@@ -543,18 +554,49 @@ def _inject_mocker_ais_args_old_form(
     return args_list
 
 
-# Mocker options an override may add next to a generated --ais-perf-model
-# value: they are not part of the perf model config. Each comes with the
-# shortest prefix the mocker parser reads as that option.
-_AIS_ARGUMENTS_OUTSIDE_PERF_MODEL = tuple(
-    (f"--{family}-{name}", f"--{family}-{shortest}")
-    for family in ("ais", "aic")
-    for name, shortest in (
-        ("nextn", "nextn"),
-        ("nextn-accept-rates", "nextn-"),
-        ("mtp-seed", "mt"),
-    )
-)
+class _OverrideArguments(argparse.ArgumentParser):
+    """A parser for an argument list that a deployment override writes.
+
+    An error is a ``ValueError``, not an exit. A value is kept as typed: a
+    file it names or a ``$(VAR)`` in it cannot be read where the profiler
+    runs.
+    """
+
+    def error(self, message: str) -> NoReturn:
+        raise ValueError(message)
+
+    def exit(self, status: int = 0, message: Optional[str] = None) -> NoReturn:
+        raise ValueError(message or f"argument parsing exited with {status}")
+
+    def _get_value(self, action: argparse.Action, arg_string: str) -> Any:
+        return arg_string
+
+    def _check_value(self, action: argparse.Action, value: Any) -> None:
+        return None
+
+
+@lru_cache(maxsize=1)
+def _mocker_parser() -> argparse.ArgumentParser:
+    """Return the mocker's own parser; no default comes from this process."""
+    return build_mocker_parser({}, _OverrideArguments(add_help=False))
+
+
+def _read_as_mocker(args: list[str]) -> Optional[argparse.Namespace]:
+    """Return what a mocker reads from ``args``, or ``None`` when it rejects them.
+
+    The mocker's parser reads the list, so an abbreviation or an ``--aic-``
+    spelling means what it means to a worker, and what is not a mocker
+    argument is skipped. A worker that gets a rejected list does not start,
+    with the old generated arguments or the new one.
+    """
+    parser = _mocker_parser()
+    try:
+        namespace, _ = parser.parse_known_args(list(args))
+        # The variable of this process is not the worker's.
+        set_ais_perf_model_attributes(parser, namespace, None)
+    except ValueError:
+        return None
+    return namespace
 
 
 def _nested_value(value: Any, *keys: str) -> Any:
@@ -607,28 +649,6 @@ def _override_argument_lists(
     return argument_lists
 
 
-def _abbreviates(name: str, option: str, shortest: str) -> bool:
-    """Return whether the mocker parser reads ``name`` as ``option``.
-
-    The parser accepts a unique prefix of an option; ``shortest`` is the
-    shortest prefix of ``option`` that is unique.
-    """
-    return option.startswith(name) and len(name) >= len(shortest)
-
-
-def _gives_ais_perf_model_value(args: list[str], index: int) -> bool:
-    """Return whether the token at ``index`` is ``--ais-perf-model`` with a value.
-
-    The value is the text after ``=``, or the next token unless that one
-    starts with ``-``.
-    """
-    token = args[index]
-    if not _abbreviates(token.split("=", 1)[0], "--ais-perf-model", "--ais-perf-m"):
-        return False
-    following = args[index + 1 : index + 2]
-    return "=" in token or bool(following and not following[0].startswith("-"))
-
-
 def _refuse_ais_perf_model_value_in_command(override: Any) -> None:
     """Raise when an override gives ``--ais-perf-model`` a value in a ``command`` list.
 
@@ -638,9 +658,8 @@ def _refuse_ais_perf_model_value_in_command(override: Any) -> None:
     in ``args`` comes after the generated one, or replaces the whole list.
     """
     for command in _override_argument_lists(override, keys=("command",)):
-        if any(
-            _gives_ais_perf_model_value(command, index) for index in range(len(command))
-        ):
+        read = _read_as_mocker(command)
+        if read is not None and read.ais_perf_model_value is not None:
             raise ValueError(
                 "overrides.dgd gives --ais-perf-model a value in a container's "
                 "command list; a generated mocker worker would use its generated "
@@ -652,12 +671,14 @@ def _refuse_ais_perf_model_value_in_command(override: Any) -> None:
 def _old_ais_override_arguments(override: Any) -> list[str]:
     """Return the override arguments that need the old AIS worker arguments.
 
-    An old ``--ais-*`` flag or ``--ais-perf-model`` without a value stops a
-    worker that also gets a generated ``--ais-perf-model`` value. With
+    An old AIS input of the mocker (``old_ais_perf_inputs``: an old
+    ``--ais-*`` flag or ``--ais-perf-model`` without a value) stops a worker
+    that also gets a generated ``--ais-perf-model`` value. With
     ``--extra-engine-args`` the old arguments are not used, and
     ``--model-path`` names the model they use; a generated value would be
-    used in the first case and keep the request's model in the second. The
-    names are returned as typed, each once, in the order they appear.
+    used in the first case and keep the request's model in the second. Each
+    list is read as a mocker reads it (``_read_as_mocker``); the names are
+    the full ``--ais-`` names, each once.
 
     An override that gives ``--ais-perf-model`` a value in any of its
     argument lists needs none of this, whatever else it holds: no name is
@@ -665,26 +686,20 @@ def _old_ais_override_arguments(override: Any) -> list[str]:
     """
     names: list[str] = []
     for args in _override_argument_lists(override):
-        for index, token in enumerate(args):
-            name = token.split("=", 1)[0]
-            if name.startswith(("--ais-", "--aic-")):
-                if any(
-                    _abbreviates(name, option, shortest)
-                    for option, shortest in _AIS_ARGUMENTS_OUTSIDE_PERF_MODEL
-                ):
-                    continue
-                if _abbreviates(name, "--ais-perf-model", "--ais-perf-m"):
-                    if _gives_ais_perf_model_value(args, index):
-                        # A value anywhere makes every generated worker use the
-                        # new argument: the mocker takes the last value typed
-                        # and refuses an old flag next to it.
-                        return []
-                    name = f"{name} without a value"
-            elif not (
-                _abbreviates(name, "--extra-engine-args", "--ex")
-                or _abbreviates(name, "--model-path", "--model-p")
-            ):
-                continue
+        read = _read_as_mocker(args)
+        if read is None:
+            continue
+        if read.ais_perf_model_value is not None:
+            # A value anywhere makes every generated worker use the new
+            # argument: the mocker takes the last value typed and refuses an
+            # old flag next to it.
+            return []
+        found = old_ais_perf_inputs(read)
+        if read.extra_engine_args is not None:
+            found.append("--extra-engine-args")
+        if read.model_path is not None:
+            found.append("--model-path")
+        for name in found:
             if name not in names:
                 names.append(name)
     return names
@@ -950,6 +965,46 @@ def _build_planner_config(
     return planner_cfg
 
 
+# The keys of a perf model config that say which deployment it describes.
+_IDENTITY_FIELDS = (
+    "model",
+    "system",
+    "backend",
+    "worker_type",
+    "tp",
+    "pp",
+    "attention_dp",
+    "moe_tp_size",
+    "moe_ep_size",
+)
+# Of these, the ones that mean 1 where a config has no value for them.
+_ONE_WHEN_UNSET = ("pp", "moe_tp_size", "moe_ep_size")
+
+
+def _stated_configs(
+    value: AISPerfModelValue, roles: Iterable[str]
+) -> dict[str, dict[str, Any]]:
+    """Return what a user's ``ais_perf_model`` value states for each role.
+
+    A config that is complete comes checked and with every default
+    (``ais_perf_model_role_config``, as the Planner reads it). A config that
+    takes keys from a source (``from``, or a dataset profile of the old
+    form) comes with the keys written next to it only: the Planner reads the
+    source, which need not exist where the profiler runs.
+    """
+    if isinstance(value, AISPerfModelSpec):
+        # A dataset profile is written under its worker type and nothing else.
+        return {role: value.roles.get(role, {"worker_type": role}) for role in roles}
+    document = load_document(value)
+    stated = {}
+    for role in roles:
+        entry = document.select(role)
+        stated[role] = (
+            entry if "from" in entry else ais_perf_model_role_config(role, entry)
+        )
+    return stated
+
+
 def build_ais_perf_model_spec(
     dgdr,
     best_prefill_pick: Optional[PickedParallelConfig],
@@ -966,7 +1021,9 @@ def build_ais_perf_model_spec(
 
     The result is a list with one perf model config per worker type of the
     Planner mode. A value the user wrote is checked against the selected
-    deployment and returned in the form it was written in.
+    deployment and returned in the form it was written in. The fields a
+    config takes from a source are not compared, since the source is not
+    read here; one warning names them.
     """
     planner = (
         dgdr.features.planner  # type: ignore[union-attr]
@@ -986,90 +1043,58 @@ def build_ais_perf_model_spec(
     if mode in ("decode", "agg", "disagg"):
         picks["aggregated" if mode == "agg" else "decode"] = best_decode_pick
 
-    if isinstance(planner.ais_perf_model, AISPerfModelSpec):
+    written = planner.ais_perf_model
+    if written is not None:
+        # A message names a config the way its form writes it.
+        name, joiner = (
+            ("ais_perf_model.roles.{}", ".")
+            if isinstance(written, AISPerfModelSpec)
+            else ("ais_perf_model entry for {}", ": ")
+        )
+        stated = _stated_configs(written, picks)
+        not_compared: dict[str, list[str]] = {}
         for role, pick in picks.items():
             if pick is None:
                 raise ValueError(
-                    f"cannot validate ais_perf_model.roles.{role} without a selected deployment"
+                    f"cannot validate {name.format(role)} without a selected deployment"
                 )
-            configured = planner.ais_perf_model.roles[role]
-            expected = {
-                "model": dgdr.model,
-                "system": system,
-                "backend": resolved_backend,
-                "worker_type": role,
-                "tp": pick.tp,
-                "pp": pick.pp,
-                "attention_dp": pick.dp,
-                "moe_tp_size": pick.moe_tp,
-                "moe_ep_size": pick.moe_ep,
-            }
-            for field, selected in expected.items():
-                authored = configured[field]
-                if field in ("moe_tp_size", "moe_ep_size") and authored is None:
-                    authored = 1
-                if authored != selected:
-                    raise ValueError(
-                        f"ais_perf_model.roles.{role}.{field}={authored!r} "
-                        f"conflicts with selected deployment {field}={selected!r}"
-                    )
-        return planner.ais_perf_model.model_copy(deep=True)
-
-    if planner.ais_perf_model is not None:
-        document = load_document(planner.ais_perf_model)
-        for role, pick in picks.items():
-            if pick is None:
-                raise ValueError(
-                    f"cannot validate ais_perf_model entry for {role} without a selected deployment"
-                )
-            expected = {
-                "model": dgdr.model,
-                "system": system,
-                "backend": resolved_backend,
-                "worker_type": role,
-                "tp": pick.tp,
-                "pp": pick.pp,
-                "attention_dp": pick.dp,
-                "moe_tp_size": pick.moe_tp,
-                "moe_ep_size": pick.moe_ep,
-            }
-            entry = document.select(role)
-            if "from" in entry:
-                # The Planner reads the file an entry names; it need not exist
-                # here. A key the entry leaves out may come from that file, so
-                # only the keys the entry writes itself are compared.
-                written = {field: entry[field] for field in expected if field in entry}
-            else:
-                try:
-                    written = asdict(ForwardPassPerfModelConfig(**entry))
-                except TypeError as error:
-                    raise ValueError(
-                        f"invalid AIS config for {role}: {error}"
-                    ) from error
-            for field, selected in expected.items():
-                if field not in written:
+            selected = _perf_model_config(
+                pick,
+                model=dgdr.model,
+                system=system,
+                backend=resolved_backend,
+                worker_type=role,
+            )
+            for field in _IDENTITY_FIELDS:
+                if field not in stated[role]:
+                    not_compared.setdefault(role, []).append(field)
                     continue
-                authored = written[field]
-                if field in ("moe_tp_size", "moe_ep_size") and authored is None:
-                    authored = 1
-                if authored != selected:
+                authored, chosen = stated[role][field], selected.get(field)
+                if field in _ONE_WHEN_UNSET:
+                    authored = 1 if authored is None else authored
+                    chosen = 1 if chosen is None else chosen
+                if authored != chosen:
                     raise ValueError(
-                        f"ais_perf_model entry for {role}: {field}={authored!r} "
-                        f"conflicts with selected deployment {field}={selected!r}"
+                        f"{name.format(role)}{joiner}{field}={authored!r} "
+                        f"conflicts with selected deployment {field}={chosen!r}"
                     )
-        return deepcopy(planner.ais_perf_model)
+        if not_compared:
+            logger.warning(
+                "ais_perf_model: the profiler does not read the source a config "
+                "takes keys from, so it did not compare these fields with the "
+                "selected deployment: %s. The Planner takes them from the source "
+                "without a comparison.",
+                "; ".join(
+                    f"{role}: {join_names(fields)}"
+                    for role, fields in not_compared.items()
+                ),
+            )
+        return deepcopy(written)
 
     if resolved_backend not in ("trtllm", "vllm", "sglang"):
         return None
     selected_picks = {role: pick for role, pick in picks.items() if pick is not None}
     if len(selected_picks) != len(picks):
-        return None
-
-    if get_latest_database_version is None:
-        logger.warning(
-            "AISimulate perf model is unavailable; Planner will use FPM regression "
-            "instead of native AIS estimates."
-        )
         return None
 
     backend_version = get_latest_database_version(
@@ -1085,25 +1110,17 @@ def build_ais_perf_model_spec(
         )
         return None
 
-    roles = {}
-    for role, pick in selected_picks.items():
-        roles[role] = {
-            "model": dgdr.model,
-            "system": system,
-            "backend": resolved_backend,
-            "backend_version": backend_version,
-            "worker_type": role,
-            "tp": pick.tp,
-            "pp": pick.pp,
-            "attention_dp": pick.dp,
-            "moe_tp_size": pick.moe_tp
-            if (pick.moe_tp, pick.moe_ep) != (1, 1)
-            else None,
-            "moe_ep_size": pick.moe_ep
-            if (pick.moe_tp, pick.moe_ep) != (1, 1)
-            else None,
-        }
-    return list(roles.values())
+    return [
+        _perf_model_config(
+            pick,
+            model=dgdr.model,
+            system=system,
+            backend=resolved_backend,
+            backend_version=backend_version,
+            worker_type=role,
+        )
+        for role, pick in selected_picks.items()
+    ]
 
 
 def build_aic_interpolation_spec(

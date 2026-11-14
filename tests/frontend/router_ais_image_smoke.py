@@ -26,9 +26,10 @@ def main() -> None:
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     # An old AIS input only warns; here it fails, so the smoke stays on the
     # input that reads the value with the AISimulate loader in the image.
+    # The pattern is Dynamo's sentence: a library's notice must not fail it.
     warnings.filterwarnings(
         "error",
-        message=r".* deprecated and will be removed in ",
+        message=r".* deprecated and will be removed in v\d+\.\d+; use ",
         category=FutureWarning,
     )
 

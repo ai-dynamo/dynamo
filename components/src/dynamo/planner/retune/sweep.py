@@ -81,7 +81,7 @@ from dynamo.planner.simulation.load_predictor import (
     predictor_fields,
 )
 from dynamo.replay import run_trace_replay
-from dynamo.replay.api import planner_config_already_warned
+from dynamo.replay.api import _planner_config_already_warned
 
 logger = logging.getLogger(__name__)
 
@@ -510,9 +510,6 @@ def evaluate_candidate(
     """
 
     kwargs = engine.replay_kwargs(params.router)
-    # The replay reads the pinned config as the router's perf model.
-    kwargs.pop("ais_perf_config")
-    kwargs["router_ais_perf_model"] = engine.ais_perf_config
     if engine.is_disagg:
         kwargs["num_prefill_workers"] = replicas["prefill"]
         kwargs["num_decode_workers"] = replicas["decode"]
@@ -527,7 +524,7 @@ def evaluate_candidate(
     elif params.planner:
         raise ValueError("planner parameters need an inner planner (base_planner)")
     # The Planner that runs the sweep already warned about its own config.
-    with planner_config_already_warned():
+    with _planner_config_already_warned():
         report = run_trace_replay(
             [window_path],
             trace_format="dynamo",

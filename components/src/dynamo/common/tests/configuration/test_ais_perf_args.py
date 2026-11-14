@@ -177,3 +177,61 @@ def test_legacy_router_selector_normalizes_at_cli_boundary():
         ).router_prefill_load_model
         == "ais"
     )
+
+
+# Every old input: the help of each one names what replaces it.
+_OLD_FLAGS = [
+    "--ais-perf-config",
+    "--ais-backend",
+    "--ais-system",
+    "--ais-backend-version",
+    "--ais-tp-size",
+    "--ais-model-path",
+    "--ais-moe-tp-size",
+    "--ais-moe-ep-size",
+    "--ais-attention-dp-size",
+    "--ais-nextn",
+]
+
+
+def _help_texts(group):
+    """Return ``{option string: help}`` of the options ``group`` registers."""
+    parser = argparse.ArgumentParser()
+    group.add_arguments(parser)
+    # argparse has no public list of a parser's options.
+    return {
+        option: action.help for option, action in parser._option_string_actions.items()
+    }
+
+
+def test_help_points_to_the_flag():
+    texts = _help_texts(AisPerfArgGroup())
+
+    assert texts["--ais-perf-model"] == (
+        "AIS perf model for --router-prefill-load-model=ais: a file path or "
+        "inline JSON, holding one perf model config or a list of configs with "
+        "one worker_type each; DYN_AIS_PERF_MODEL."
+    )
+    assert texts["--router-prefill-load-worker-type"].startswith(
+        "Worker type whose config the router takes from --ais-perf-model; "
+    )
+    for flag in _OLD_FLAGS:
+        assert texts[flag].startswith(
+            f"{flag} is deprecated and will be removed in v1.9; use --ais-perf-model. "
+        )
+
+
+def test_help_of_a_component_with_another_input_points_to_that_input():
+    replacement = "perf_model in each --pools entry"
+    texts = _help_texts(AisPerfArgGroup(replacement=replacement))
+
+    assert texts["--ais-perf-model"] == f"Not read here; write {replacement}."
+    assert texts["--router-prefill-load-worker-type"].startswith(
+        f"Worker type whose config the router takes from {replacement}; "
+    )
+    for flag in _OLD_FLAGS:
+        assert texts[flag].startswith(
+            f"{flag} is deprecated and will be removed in v1.9; use {replacement}. "
+        )
+    # No text sends the reader to the flag the component does not read.
+    assert [flag for flag, text in texts.items() if "--ais-perf-model" in text] == []

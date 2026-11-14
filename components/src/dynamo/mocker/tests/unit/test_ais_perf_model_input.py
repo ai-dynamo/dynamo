@@ -390,8 +390,10 @@ def test_value_with_planner_profile_data_is_rejected(
     source, tmp_path, monkeypatch, capsys
 ):
     profile = ["--planner-profile-data", str(tmp_path / "profile.npz")]
+    # A deprecated alias warns only after this check: a warning here fails the test.
+    alias = ["--sglang-schedule-policy", "fcfs"]
     assert (
-        parser_error([*value_argv(source, monkeypatch), *profile], capsys)
+        parser_error([*value_argv(source, monkeypatch), *profile, *alias], capsys)
         == f"{source} cannot be combined with --planner-profile-data"
     )
 
@@ -596,6 +598,13 @@ def test_hand_built_namespace_with_value_builds_config():
         ais_backend="sglang",
     )
     assert_perf_config(CONFIG.build_mocker_engine_args(args), expected)
+
+    # No parser rejected profile data next to the value, so the builder does.
+    args = argparse.Namespace(
+        **base, ais_perf_model_value=value, planner_profile_data="profile.npz"
+    )
+    with pytest.raises(ValueError, match=f"^{PLANNER_DATA_CONFLICT}$"):
+        CONFIG.build_mocker_engine_args(args)
 
 
 def test_hand_built_namespace_without_value_builds_as_before():
