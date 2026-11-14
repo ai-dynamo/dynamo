@@ -31,7 +31,7 @@ use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionRequestMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestToolMessageContentPart,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ChatCompletionToolChoiceOption, EncodingFormat,
+    ChatCompletionToolChoiceOption, EncodingFormat, InputAudioFormat,
 };
 use dynamo_renderer::{OAIPromptFormatter, PromptRenderError, RenderedPrompt};
 use dynamo_runtime::config::{
@@ -395,6 +395,8 @@ fn tool_content_part_as_user(
     })
 }
 
+type MediaInfo = (&'static str, Option<url::Url>, Option<String>);
+
 enum MultimodalContentPart<'a> {
     User(&'a ChatCompletionRequestUserMessageContentPart),
     Tool(&'a ChatCompletionRequestToolMessageContentPart),
@@ -426,8 +428,8 @@ impl<'a> MultimodalContentPart<'a> {
         }
     }
 
-    fn media_info(&self) -> Option<(&'static str, Option<url::Url>, Option<String>)> {
-        match self {
+    fn media_info(&self) -> Result<Option<MediaInfo>> {
+        Ok(match self {
             Self::User(part) => match *part {
                 ChatCompletionRequestUserMessageContentPart::ImageUrl(part) => Some((
                     "image_url",
@@ -444,6 +446,18 @@ impl<'a> MultimodalContentPart<'a> {
                     part.audio_url.as_ref().map(|media| media.url.clone()),
                     part.uuid.clone(),
                 )),
+                ChatCompletionRequestUserMessageContentPart::InputAudio(part) => {
+                    let format = match &part.input_audio.format {
+                        InputAudioFormat::Wav => "wav",
+                        InputAudioFormat::Mp3 => "mpeg",
+                    };
+                    let url = url::Url::parse(&format!(
+                        "data:audio/{format};base64,{}",
+                        part.input_audio.data
+                    ))
+                    .map_err(|_| invalid_argument_error("Invalid input_audio data"))?;
+                    Some(("audio_url", Some(url), None))
+                }
                 _ => None,
             },
             Self::Tool(part) => match *part {
@@ -464,7 +478,7 @@ impl<'a> MultimodalContentPart<'a> {
                 )),
                 _ => None,
             },
-        }
+        })
     }
 }
 
@@ -4157,6 +4171,11 @@ impl OpenAIPreprocessor {
                         *url = serde_json::Value::String(String::new());
                     }
                 }
+                if let Some(audio) = part.get_mut("input_audio")
+                    && let Some(data) = audio.get_mut("data")
+                {
+                    *data = serde_json::Value::String(String::new());
+                }
             }
         }
     }
@@ -4284,7 +4303,7 @@ impl OpenAIPreprocessor {
                 continue;
             };
             for content_part in content_parts {
-                let Some((type_str, url, uuid)) = content_part.media_info() else {
+                let Some((type_str, url, uuid)) = content_part.media_info()? else {
                     continue;
                 };
 
@@ -9532,7 +9551,8 @@ mod strip_tests {
             "role": "user",
             "content": [
                 {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAA..."}},
-                {"type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}}
+                {"type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}},
+                {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}}
             ]
         }]);
         OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
@@ -9542,6 +9562,7 @@ mod strip_tests {
             parts[1]["audio_url"]["url"],
             "https://example.com/audio.wav"
         );
+        assert_eq!(parts[2]["input_audio"]["data"], "");
     }
 
     #[test]
@@ -16500,6 +16521,50 @@ responses_tools: None,
         .unwrap()
         {
             dynamo_renderer::PromptFormatter::OAI(formatter) => formatter,
+        }
+    }
+
+    #[test]
+    fn audio_urls_and_input_audio_render_as_placeholders() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let tokenizer = mdc.tokenizer().unwrap();
+        let formatter = test_prompt_formatter(
+            "{% for m in messages %}{% for part in m.content %}{{ part.type }};{% endfor %}{% endfor %}",
+        );
+        let preprocessor = OpenAIPreprocessor::new_with_parts(mdc, formatter, tokenizer).unwrap();
+        let audio_url = serde_json::json!({
+            "type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}
+        });
+        for (messages, expected) in [
+            (
+                serde_json::json!([{"role": "user", "content": [audio_url.clone()]}]),
+                "audio;",
+            ),
+            (
+                serde_json::json!([{
+                    "role": "tool", "tool_call_id": "call-1", "content": [audio_url.clone()]
+                }]),
+                "audio;",
+            ),
+            (
+                serde_json::json!([{"role": "user", "content": [
+                    {"type": "input_audio", "input_audio": {"data": "AA==", "format": "wav"}},
+                    audio_url
+                ]}]),
+                "audio;audio;",
+            ),
+        ] {
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test-model", "messages": messages
+                }))
+                .unwrap();
+            let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert_eq!(rendered.as_str(), expected);
         }
     }
 
