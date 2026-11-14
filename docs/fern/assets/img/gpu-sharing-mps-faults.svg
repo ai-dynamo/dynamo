@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="596" viewBox="0 0 1240 596" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Which MPS configurations contain a GPU fault</title>
+  <desc id="desc">A matrix of three MPS configurations against four questions, measured on one GPU with two models, A and B. One namespace per model, the GPU fractions layout using active thread percentages: the models run at the same time; a memory fault such as an illegal address or misaligned access in one model breaks every model on the GPU; a trap or breakpoint breaks every model on the GPU; a device-side assert affects only the model that asserted. One static SM partition per model, with MPS v3 sm-partition or MPS v2 started with -S: the models run at the same time; a memory fault breaks only the models in the faulting partition and the others keep serving; a trap or breakpoint still breaks every model and the GPU resets; a device-side assert affects only the model that asserted. One MPS server per model on the same GPU: the models take turns instead of running at the same time; memory faults, traps, and breakpoints stay inside the faulting model's server, and a device-side assert affects only the model that asserted. Models that share a partition, namespace, or server always share its faults. A final row, set apart for comparison and taken from NVIDIA's MIG documentation rather than measured: with MIG, the models run at the same time, and memory faults, traps, and asserts stay inside the faulting model's instance.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1240.0" height="596.0" fill="#FFFFFF"/>
+  <text x="24.0" y="42.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">Which MPS configurations contain a GPU fault</text>
+  <rect x="16.0" y="74.0" width="1208.0" height="64.0" fill="#F3F4F6" rx="8"/>
+  <text x="36.0" y="112.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">Configuration</text>
+  <text x="400.0" y="101.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">Run at the</text>
+  <text x="400.0" y="121.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start">same time?</text>
+  <text x="580.0" y="101.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">Memory fault</text>
+  <text x="580.0" y="121.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start">illegal address, misaligned</text>
+  <text x="802.0" y="101.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">Trap or breakpoint</text>
+  <text x="802.0" y="121.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start">__trap(), __brkpt()</text>
+  <text x="1024.0" y="101.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">Device-side assert</text>
+  <text x="1024.0" y="121.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start">such as an index check</text>
+  <text x="580.0" y="64.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Which models a fault in model B reaches</text>
+  <line x1="576.0" y1="70.0" x2="1216.0" y2="70.0" stroke="#D1D5DB" stroke-width="1.5" stroke-linecap="round"/>
+  <rect x="32.0" y="160.0" width="92.0" height="52.0" fill="#FFFFFF" rx="6" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="38.0" y="166.0" width="80.0" height="40.0" fill="#F3F4F6" rx="4" stroke="#9CA3AF" stroke-width="1.2" stroke-dasharray="4 3"/>
+  <rect x="43.0" y="172.0" width="32.0" height="28.0" fill="#EAF5D3" rx="4" stroke="#76B900" stroke-width="1.2"/>
+  <text x="59.0" y="190.6" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">A</text>
+  <rect x="81.0" y="172.0" width="32.0" height="28.0" fill="#DDEBFD" rx="4" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="97.0" y="190.6" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">B</text>
+  <text x="140.0" y="174.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">One namespace per model</text>
+  <text x="140.0" y="194.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start">MPS v3, active thread percentage</text>
+  <text x="140.0" y="212.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start">(the GPU fractions layout)</text>
+  <rect x="396.0" y="160.0" width="156.0" height="52.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="414.0" y="192.0" font-size="18" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="430.0" y="191.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Yes</text>
+  <rect x="576.0" y="160.0" width="198.0" height="52.0" fill="#FBE3E3" rx="8" stroke="#C62828" stroke-width="1.5"/>
+  <text x="594.0" y="192.0" font-size="18" font-weight="700" fill="#C62828" text-anchor="middle">✕</text>
+  <text x="610.0" y="183.0" font-size="14" font-weight="700" fill="#C62828" text-anchor="start">Every model</text>
+  <text x="610.0" y="201.0" font-size="13" font-weight="400" fill="#C62828" text-anchor="start">on the GPU</text>
+  <rect x="798.0" y="160.0" width="198.0" height="52.0" fill="#FBE3E3" rx="8" stroke="#C62828" stroke-width="1.5"/>
+  <text x="816.0" y="192.0" font-size="18" font-weight="700" fill="#C62828" text-anchor="middle">✕</text>
+  <text x="832.0" y="183.0" font-size="14" font-weight="700" fill="#C62828" text-anchor="start">Every model</text>
+  <text x="832.0" y="201.0" font-size="13" font-weight="400" fill="#C62828" text-anchor="start">on the GPU</text>
+  <rect x="1020.0" y="160.0" width="188.0" height="52.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="1038.0" y="192.0" font-size="18" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="1054.0" y="183.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Only the model</text>
+  <text x="1054.0" y="201.0" font-size="13" font-weight="400" fill="#3B6B00" text-anchor="start">that asserted</text>
+  <line x1="24.0" y1="234.0" x2="1216.0" y2="234.0" stroke="#D1D5DB" stroke-width="1" stroke-linecap="round"/>
+  <rect x="32.0" y="256.0" width="92.0" height="52.0" fill="#FFFFFF" rx="6" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="39.0" y="264.0" width="34.0" height="36.0" fill="#EAF5D3" rx="4" stroke="#76B900" stroke-width="1.2"/>
+  <text x="56.0" y="286.6" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">A</text>
+  <line x1="78.0" y1="260.0" x2="78.0" y2="304.0" stroke="#1A1A1A" stroke-width="3" stroke-linecap="round"/>
+  <rect x="83.0" y="264.0" width="34.0" height="36.0" fill="#DDEBFD" rx="4" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="100.0" y="286.6" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">B</text>
+  <text x="140.0" y="270.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">One SM partition per model</text>
+  <text x="140.0" y="290.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start">static partitions: MPS v3 sm-partition,</text>
+  <text x="140.0" y="308.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start">or MPS v2 with -S (same results)</text>
+  <rect x="396.0" y="256.0" width="156.0" height="52.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="414.0" y="288.0" font-size="18" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="430.0" y="287.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Yes</text>
+  <rect x="576.0" y="256.0" width="198.0" height="52.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="594.0" y="288.0" font-size="18" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="610.0" y="279.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Only its partition</text>
+  <text x="610.0" y="297.0" font-size="13" font-weight="400" fill="#3B6B00" text-anchor="start">others keep serving</text>
+  <rect x="798.0" y="256.0" width="198.0" height="52.0" fill="#FBE3E3" rx="8" stroke="#C62828" stroke-width="1.5"/>
+  <text x="816.0" y="288.0" font-size="18" font-weight="700" fill="#C62828" text-anchor="middle">✕</text>
+  <text x="832.0" y="279.0" font-size="14" font-weight="700" fill="#C62828" text-anchor="start">Every model</text>
+  <text x="832.0" y="297.0" font-size="13" font-weight="400" fill="#C62828" text-anchor="start">and the GPU resets</text>
+  <rect x="1020.0" y="256.0" width="188.0" height="52.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="1038.0" y="288.0" font-size="18" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="1054.0" y="279.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Only the model</text>
+  <text x="1054.0" y="297.0" font-size="13" font-weight="400" fill="#3B6B00" text-anchor="start">that asserted</text>
+  <line x1="24.0" y1="330.0" x2="1216.0" y2="330.0" stroke="#D1D5DB" stroke-width="1" stroke-linecap="round"/>
+  <rect x="32.0" y="352.0" width="92.0" height="52.0" fill="#FFFFFF" rx="6" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="39.0" y="360.0" width="34.0" height="36.0" fill="#EAF5D3" rx="4" stroke="#76B900" stroke-width="1.2"/>
+  <text x="56.0" y="382.6" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">A</text>
+  <rect x="83.0" y="360.0" width="34.0" height="36.0" fill="#DDEBFD" rx="4" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="100.0" y="382.6" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">B</text>
+  <path d="M58,399 C68,404 88,404 98,399" stroke="#9CA3AF" stroke-width="1.5" fill="none" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#a-gray)"/>
+  <text x="140.0" y="366.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">One MPS server per model</text>
+  <text x="140.0" y="386.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start">two servers on the same GPU</text>
+  <rect x="396.0" y="352.0" width="156.0" height="52.0" fill="#FDEBD3" rx="8" stroke="#D97706" stroke-width="1.5"/>
+  <text x="414.0" y="384.0" font-size="18" font-weight="700" fill="#9A4F00" text-anchor="middle">⟳</text>
+  <text x="430.0" y="375.0" font-size="14" font-weight="700" fill="#9A4F00" text-anchor="start">No,</text>
+  <text x="430.0" y="393.0" font-size="13" font-weight="400" fill="#9A4F00" text-anchor="start">they take turns</text>
+  <rect x="576.0" y="352.0" width="198.0" height="52.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="594.0" y="384.0" font-size="18" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="610.0" y="375.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Only its server</text>
+  <text x="610.0" y="393.0" font-size="13" font-weight="400" fill="#3B6B00" text-anchor="start">others keep serving</text>
+  <rect x="798.0" y="352.0" width="198.0" height="52.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="816.0" y="384.0" font-size="18" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="832.0" y="375.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Only its server</text>
+  <text x="832.0" y="393.0" font-size="13" font-weight="400" fill="#3B6B00" text-anchor="start">others keep serving</text>
+  <rect x="1020.0" y="352.0" width="188.0" height="52.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="1038.0" y="384.0" font-size="18" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="1054.0" y="375.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Only the model</text>
+  <text x="1054.0" y="393.0" font-size="13" font-weight="400" fill="#3B6B00" text-anchor="start">that asserted</text>
+  <rect x="16.0" y="432.0" width="1208.0" height="90.0" fill="#F7F8FA" rx="8"/>
+  <line x1="24.0" y1="426.0" x2="1216.0" y2="426.0" stroke="#9CA3AF" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="6 5"/>
+  <rect x="32.0" y="448.0" width="92.0" height="52.0" fill="#FFFFFF" rx="6" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="37.0" y="454.0" width="38.0" height="40.0" fill="#EAF5D3" rx="3" stroke="#1A1A1A" stroke-width="2.5"/>
+  <text x="56.0" y="478.6" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">A</text>
+  <rect x="81.0" y="454.0" width="38.0" height="40.0" fill="#DDEBFD" rx="3" stroke="#1A1A1A" stroke-width="2.5"/>
+  <text x="100.0" y="478.6" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">B</text>
+  <text x="140.0" y="462.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">MIG, for comparison</text>
+  <text x="140.0" y="482.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start" font-style="italic">hardware instances, not MPS;</text>
+  <text x="140.0" y="500.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start" font-style="italic">from NVIDIA's MIG documentation</text>
+  <rect x="396.0" y="448.0" width="156.0" height="52.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="414.0" y="480.0" font-size="18" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="430.0" y="479.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Yes</text>
+  <rect x="576.0" y="448.0" width="198.0" height="52.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="594.0" y="480.0" font-size="18" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="610.0" y="471.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Only its instance</text>
+  <text x="610.0" y="489.0" font-size="13" font-weight="400" fill="#3B6B00" text-anchor="start">others keep serving</text>
+  <rect x="798.0" y="448.0" width="198.0" height="52.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="816.0" y="480.0" font-size="18" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="832.0" y="471.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Only its instance</text>
+  <text x="832.0" y="489.0" font-size="13" font-weight="400" fill="#3B6B00" text-anchor="start">others keep serving</text>
+  <rect x="1020.0" y="448.0" width="188.0" height="52.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="1038.0" y="480.0" font-size="18" font-weight="700" fill="#3B6B00" text-anchor="middle">✓</text>
+  <text x="1054.0" y="471.0" font-size="14" font-weight="700" fill="#3B6B00" text-anchor="start">Only the model</text>
+  <text x="1054.0" y="489.0" font-size="13" font-weight="400" fill="#3B6B00" text-anchor="start">that asserted</text>
+  <rect x="16.0" y="534.0" width="1208.0" height="50.0" fill="#EAF5D3" rx="8"/>
+  <text x="30.0" y="554.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="start">Models that share a partition, a namespace, or a server always share its faults.</text>
+  <text x="30.0" y="574.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start">Every faulted model must restart. MPS rows measured with MPS v3 and v2 on an RTX PRO 6000 Blackwell, driver 615.71.09; MIG row not measured.</text>
+</svg>

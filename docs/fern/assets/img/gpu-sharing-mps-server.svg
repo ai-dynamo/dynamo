@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="420" viewBox="0 0 1180 420" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">What MPS changes</title>
+  <desc id="desc">Without MPS, each process has its own CUDA context and the GPU switches between them, so their kernels take turns. With MPS, processes connect as clients to one MPS server that holds a single shared context, and kernels from different clients run on the GPU at the same time.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1180.0" height="420.0" fill="#FFFFFF"/>
+  <text x="24.0" y="44.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">What MPS changes</text>
+  <rect x="24.0" y="66.0" width="554.0" height="330.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="44.0" y="98.0" font-size="20" font-weight="700" fill="#1A1A1A" text-anchor="start">Without MPS</text>
+  <rect x="44.0" y="125.0" width="150.0" height="58.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="119.0" y="150.8" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Process A</text>
+  <text x="119.0" y="167.7" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">its own context</text>
+  <rect x="44.0" y="205.0" width="150.0" height="58.0" fill="#DDEBFD" rx="8" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="119.0" y="230.8" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Process B</text>
+  <text x="119.0" y="247.7" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">its own context</text>
+  <line x1="196.0" y1="154.0" x2="270.0" y2="175.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <line x1="196.0" y1="234.0" x2="270.0" y2="214.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="274.0" y="118.0" width="284.0" height="152.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="286.0" y="140.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">GPU</text>
+  <text x="546.0" y="140.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="end">time →</text>
+  <rect x="286.0" y="160.0" width="37.3" height="92.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="304.7" y="212.0" font-size="15" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="329.3" y="160.0" width="37.3" height="92.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="348.0" y="212.0" font-size="15" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <rect x="372.7" y="160.0" width="37.3" height="92.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="391.3" y="212.0" font-size="15" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="416.0" y="160.0" width="37.3" height="92.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="434.7" y="212.0" font-size="15" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <rect x="459.3" y="160.0" width="37.3" height="92.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="478.0" y="212.0" font-size="15" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="502.7" y="160.0" width="37.3" height="92.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="521.3" y="212.0" font-size="15" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <text x="44.0" y="310.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">The GPU runs one context at a time and</text>
+  <text x="44.0" y="332.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">switches between them. While A runs,</text>
+  <text x="44.0" y="354.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">B waits, even if A leaves SMs idle.</text>
+  <rect x="602.0" y="66.0" width="554.0" height="330.0" fill="#FFFFFF" rx="12" stroke="#76B900" stroke-width="2"/>
+  <text x="622.0" y="98.0" font-size="20" font-weight="700" fill="#1A1A1A" text-anchor="start">With MPS</text>
+  <rect x="622.0" y="125.0" width="150.0" height="58.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="697.0" y="150.8" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Process A</text>
+  <text x="697.0" y="167.7" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">MPS client</text>
+  <rect x="622.0" y="205.0" width="150.0" height="58.0" fill="#DDEBFD" rx="8" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="697.0" y="230.8" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Process B</text>
+  <text x="697.0" y="247.7" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">MPS client</text>
+  <rect x="802.0" y="150.0" width="110.0" height="88.0" fill="#F3F4F6" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="857.0" y="182.3" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">MPS server</text>
+  <text x="857.0" y="199.2" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">one shared</text>
+  <text x="857.0" y="216.2" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">context</text>
+  <line x1="774.0" y1="154.0" x2="800.0" y2="175.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <line x1="774.0" y1="234.0" x2="800.0" y2="214.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <line x1="914.0" y1="194.0" x2="938.0" y2="194.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="942.0" y="118.0" width="194.0" height="152.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="954.0" y="140.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">GPU</text>
+  <text x="1124.0" y="140.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="end">time →</text>
+  <rect x="954.0" y="160.0" width="170.0" height="44.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="954.0" y="208.0" width="170.0" height="44.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="1039.0" y="187.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A kernels</text>
+  <text x="1039.0" y="235.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B kernels</text>
+  <text x="622.0" y="310.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">Clients submit work through one server.</text>
+  <text x="622.0" y="332.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">Kernels from A and B share the SMs at</text>
+  <text x="622.0" y="354.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">the same time, each under its own cap.</text>
+</svg>

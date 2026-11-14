@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="830" viewBox="0 0 1280 830" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Example: two MPS-enabled GPU nodes in one Kubernetes cluster</title>
+  <desc id="desc">Cluster services run KAI-Scheduler, the Dynamo operator, one Dynamo frontend per model, and the GPU Operator. Each of two GPU nodes with four H100 80GB GPUs runs mpsd, which starts one MPS v3 server per GPU, and fractiond, which wires each pod to its own namespace. On gpu-node-1, GPU 0 holds chat-8b at 0.5, code-7b at 0.3 and guard-1b at 0.2; GPU 1 holds tenant-a-8b and tenant-b-8b at 0.4 each and embed at 0.2; GPU 2 holds sql-7b and summarize-3b at 0.3 each and rerank at 0.2, with 0.2 free; GPU 3 is free. On gpu-node-2, GPUs 0 and 1 run chat-70b as a whole-GPU tensor-parallel model without MPS; GPU 2 holds four fine-tuned tenant models at 0.25 each; GPU 3 holds vision-7b at 0.6 and ocr-2b at 0.2, with 0.2 free.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1280.0" height="830.0" fill="#FFFFFF"/>
+  <text x="24.0" y="44.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">Example: two MPS-enabled GPU nodes in one Kubernetes cluster</text>
+  <rect x="24.0" y="66.0" width="1232.0" height="112.0" fill="#F3F4F6" rx="12" stroke="#D1D5DB" stroke-width="1.5"/>
+  <text x="42.0" y="92.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">Cluster services (control plane and CPU nodes)</text>
+  <rect x="42.0" y="102.0" width="288.5" height="64.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="186.2" y="123.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">KAI-Scheduler</text>
+  <text x="186.2" y="139.2" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">picks a GPU and a share</text>
+  <text x="186.2" y="155.5" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">for each worker pod</text>
+  <rect x="344.5" y="102.0" width="288.5" height="64.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="488.8" y="123.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Dynamo operator</text>
+  <text x="488.8" y="139.2" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">one DynamoGraphDeployment</text>
+  <text x="488.8" y="155.5" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">per model</text>
+  <rect x="647.0" y="102.0" width="288.5" height="64.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="791.2" y="123.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Dynamo frontends</text>
+  <text x="791.2" y="139.2" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">one per model, on CPU;</text>
+  <text x="791.2" y="155.5" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">routes to that model's worker</text>
+  <rect x="949.5" y="102.0" width="288.5" height="64.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="1093.8" y="123.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">GPU Operator</text>
+  <text x="1093.8" y="139.2" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">driver r615+, device plugin,</text>
+  <text x="1093.8" y="155.5" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">node labels</text>
+  <line x1="328.0" y1="180.0" x2="328.0" y2="210.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="24.0" y="214.0" width="608.0" height="600.0" fill="#FFFFFF" rx="12" stroke="#1A1A1A" stroke-width="2"/>
+  <text x="42.0" y="242.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">gpu-node-1</text>
+  <text x="155.0" y="242.0" font-size="14" font-weight="400" fill="#5A6270" text-anchor="start">4× H100 80GB</text>
+  <rect x="42.0" y="256.0" width="280.0" height="54.0" fill="#F3F4F6" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="182.0" y="280.1" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">mpsd</text>
+  <text x="182.0" y="296.4" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">MPS v3 daemon: one server per GPU</text>
+  <rect x="334.0" y="256.0" width="280.0" height="54.0" fill="#F3F4F6" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="474.0" y="280.1" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">fractiond</text>
+  <text x="474.0" y="296.4" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">joins each pod to its namespace</text>
+  <rect x="42.0" y="328.0" width="135.5" height="470.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="109.8" y="351.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">GPU 0</text>
+  <rect x="48.0" y="364.0" width="123.5" height="208.0" fill="#EAF5D3" rx="5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="109.8" y="464.0" font-size="13.5" font-weight="700" fill="#76B900" text-anchor="middle">chat-8b</text>
+  <text x="109.8" y="482.0" font-size="12" font-weight="400" fill="#1A1A1A" text-anchor="middle">SM 0.5 · 32 GB</text>
+  <rect x="48.0" y="576.0" width="123.5" height="123.2" fill="#DDEBFD" rx="5" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="109.8" y="633.6" font-size="13.5" font-weight="700" fill="#2F80ED" text-anchor="middle">code-7b</text>
+  <text x="109.8" y="651.6" font-size="12" font-weight="400" fill="#1A1A1A" text-anchor="middle">SM 0.3 · 24 GB</text>
+  <rect x="48.0" y="703.2" width="123.5" height="80.8" fill="#FDEBD3" rx="5" stroke="#D97706" stroke-width="1.5"/>
+  <text x="109.8" y="739.6" font-size="13.5" font-weight="700" fill="#D97706" text-anchor="middle">guard-1b</text>
+  <text x="109.8" y="757.6" font-size="12" font-weight="400" fill="#1A1A1A" text-anchor="middle">SM 0.2 · 8 GB</text>
+  <rect x="187.5" y="328.0" width="135.5" height="470.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="255.2" y="351.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">GPU 1</text>
+  <rect x="193.5" y="364.0" width="123.5" height="165.6" fill="#ECE6FB" rx="5" stroke="#7C5CD6" stroke-width="1.5"/>
+  <text x="255.2" y="442.8" font-size="13.5" font-weight="700" fill="#7C5CD6" text-anchor="middle">tenant-a-8b</text>
+  <text x="255.2" y="460.8" font-size="12" font-weight="400" fill="#1A1A1A" text-anchor="middle">SM 0.4 · 28 GB</text>
+  <rect x="193.5" y="533.6" width="123.5" height="165.6" fill="#D5F2F0" rx="5" stroke="#0F9F9A" stroke-width="1.5"/>
+  <text x="255.2" y="612.4" font-size="13.5" font-weight="700" fill="#0F9F9A" text-anchor="middle">tenant-b-8b</text>
+  <text x="255.2" y="630.4" font-size="12" font-weight="400" fill="#1A1A1A" text-anchor="middle">SM 0.4 · 28 GB</text>
+  <rect x="193.5" y="703.2" width="123.5" height="80.8" fill="#FDEBD3" rx="5" stroke="#D97706" stroke-width="1.5"/>
+  <text x="255.2" y="739.6" font-size="13.5" font-weight="700" fill="#D97706" text-anchor="middle">embed</text>
+  <text x="255.2" y="757.6" font-size="12" font-weight="400" fill="#1A1A1A" text-anchor="middle">SM 0.2 · 6 GB</text>
+  <rect x="333.0" y="328.0" width="135.5" height="470.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="400.8" y="351.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">GPU 2</text>
+  <rect x="339.0" y="364.0" width="123.5" height="123.2" fill="#DDEBFD" rx="5" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="400.8" y="421.6" font-size="13.5" font-weight="700" fill="#2F80ED" text-anchor="middle">sql-7b</text>
+  <text x="400.8" y="439.6" font-size="12" font-weight="400" fill="#1A1A1A" text-anchor="middle">SM 0.3 · 24 GB</text>
+  <rect x="339.0" y="491.2" width="123.5" height="123.2" fill="#EAF5D3" rx="5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="400.8" y="548.8" font-size="13.5" font-weight="700" fill="#76B900" text-anchor="middle">summarize-3b</text>
+  <text x="400.8" y="566.8" font-size="12" font-weight="400" fill="#1A1A1A" text-anchor="middle">SM 0.3 · 16 GB</text>
+  <rect x="339.0" y="618.4" width="123.5" height="80.8" fill="#ECE6FB" rx="5" stroke="#7C5CD6" stroke-width="1.5"/>
+  <text x="400.8" y="654.8" font-size="13.5" font-weight="700" fill="#7C5CD6" text-anchor="middle">rerank</text>
+  <text x="400.8" y="672.8" font-size="12" font-weight="400" fill="#1A1A1A" text-anchor="middle">SM 0.2 · 6 GB</text>
+  <rect x="339.0" y="703.2" width="123.5" height="80.8" fill="#F3F4F6" rx="5" stroke="#9CA3AF" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="400.8" y="748.6" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">free 0.2</text>
+  <rect x="478.5" y="328.0" width="135.5" height="470.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="546.2" y="351.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">GPU 3</text>
+  <rect x="484.5" y="364.0" width="123.5" height="420.0" fill="#F3F4F6" rx="5" stroke="#9CA3AF" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="546.2" y="579.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">free 1.0</text>
+  <line x1="952.0" y1="180.0" x2="952.0" y2="210.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="648.0" y="214.0" width="608.0" height="600.0" fill="#FFFFFF" rx="12" stroke="#1A1A1A" stroke-width="2"/>
+  <text x="666.0" y="242.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">gpu-node-2</text>
+  <text x="779.0" y="242.0" font-size="14" font-weight="400" fill="#5A6270" text-anchor="start">4× H100 80GB</text>
+  <rect x="666.0" y="256.0" width="280.0" height="54.0" fill="#F3F4F6" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="806.0" y="280.1" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">mpsd</text>
+  <text x="806.0" y="296.4" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">MPS v3 daemon: one server per GPU</text>
+  <rect x="958.0" y="256.0" width="280.0" height="54.0" fill="#F3F4F6" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="1098.0" y="280.1" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">fractiond</text>
+  <text x="1098.0" y="296.4" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">joins each pod to its namespace</text>
+  <rect x="666.0" y="328.0" width="135.5" height="470.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="733.8" y="351.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">GPU 0</text>
+  <rect x="672.0" y="362.0" width="123.5" height="424.0" fill="#E5E7EB" rx="5" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="733.8" y="552.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">chat-70b</text>
+  <text x="733.8" y="572.0" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">rank 0</text>
+  <text x="733.8" y="592.0" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">whole GPU</text>
+  <text x="733.8" y="610.0" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">no MPS</text>
+  <rect x="811.5" y="328.0" width="135.5" height="470.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="879.2" y="351.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">GPU 1</text>
+  <rect x="817.5" y="362.0" width="123.5" height="424.0" fill="#E5E7EB" rx="5" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="879.2" y="552.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">chat-70b</text>
+  <text x="879.2" y="572.0" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">rank 1</text>
+  <text x="879.2" y="592.0" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">whole GPU</text>
+  <text x="879.2" y="610.0" font-size="12.5" font-weight="400" fill="#5A6270" text-anchor="middle">no MPS</text>
+  <rect x="957.0" y="328.0" width="135.5" height="470.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="1024.8" y="351.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">GPU 2</text>
+  <rect x="963.0" y="364.0" width="123.5" height="102.0" fill="#EAF5D3" rx="5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="1024.8" y="411.0" font-size="13.5" font-weight="700" fill="#76B900" text-anchor="middle">tenant-c-3b</text>
+  <text x="1024.8" y="429.0" font-size="12" font-weight="400" fill="#1A1A1A" text-anchor="middle">SM 0.25 · 18 GB</text>
+  <rect x="963.0" y="470.0" width="123.5" height="102.0" fill="#DDEBFD" rx="5" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="1024.8" y="517.0" font-size="13.5" font-weight="700" fill="#2F80ED" text-anchor="middle">tenant-d-3b</text>
+  <text x="1024.8" y="535.0" font-size="12" font-weight="400" fill="#1A1A1A" text-anchor="middle">SM 0.25 · 18 GB</text>
+  <rect x="963.0" y="576.0" width="123.5" height="102.0" fill="#ECE6FB" rx="5" stroke="#7C5CD6" stroke-width="1.5"/>
+  <text x="1024.8" y="623.0" font-size="13.5" font-weight="700" fill="#7C5CD6" text-anchor="middle">tenant-e-3b</text>
+  <text x="1024.8" y="641.0" font-size="12" font-weight="400" fill="#1A1A1A" text-anchor="middle">SM 0.25 · 18 GB</text>
+  <rect x="963.0" y="682.0" width="123.5" height="102.0" fill="#D5F2F0" rx="5" stroke="#0F9F9A" stroke-width="1.5"/>
+  <text x="1024.8" y="729.0" font-size="13.5" font-weight="700" fill="#0F9F9A" text-anchor="middle">tenant-f-3b</text>
+  <text x="1024.8" y="747.0" font-size="12" font-weight="400" fill="#1A1A1A" text-anchor="middle">SM 0.25 · 18 GB</text>
+  <rect x="1102.5" y="328.0" width="135.5" height="470.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="1170.2" y="351.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">GPU 3</text>
+  <rect x="1108.5" y="364.0" width="123.5" height="250.4" fill="#FDEBD3" rx="5" stroke="#D97706" stroke-width="1.5"/>
+  <text x="1170.2" y="485.2" font-size="13.5" font-weight="700" fill="#D97706" text-anchor="middle">vision-7b</text>
+  <text x="1170.2" y="503.2" font-size="12" font-weight="400" fill="#1A1A1A" text-anchor="middle">SM 0.6 · 40 GB</text>
+  <rect x="1108.5" y="618.4" width="123.5" height="80.8" fill="#DDEBFD" rx="5" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="1170.2" y="654.8" font-size="13.5" font-weight="700" fill="#2F80ED" text-anchor="middle">ocr-2b</text>
+  <text x="1170.2" y="672.8" font-size="12" font-weight="400" fill="#1A1A1A" text-anchor="middle">SM 0.2 · 10 GB</text>
+  <rect x="1108.5" y="703.2" width="123.5" height="80.8" fill="#F3F4F6" rx="5" stroke="#9CA3AF" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="1170.2" y="748.6" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">free 0.2</text>
+  <text x="42.0" y="816.0" font-size="1" font-weight="400" fill="#1A1A1A" text-anchor="start"></text>
+</svg>

@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Choosing how to share GPUs</title>
+  <desc id="desc">Ask four questions in order. If one model has enough traffic to keep a GPU busy, give it dedicated GPUs and scale replicas. If the models are copies or LoRA adapters of one base model, serve them from one engine. If tenants need hard isolation of faults, memory bandwidth or security, use MIG. If models need compute caps and concurrent execution with sizes chosen per model, use MPS v3 GPU fractions. Otherwise time-slicing or HAMi memory caps are enough.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1200.0" height="720.0" fill="#FFFFFF"/>
+  <text x="24.0" y="44.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">Choosing how to share GPUs</text>
+  <rect x="40.0" y="76.0" width="560.0" height="84.0" fill="#FFFFFF" rx="10" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="60.0" y="112.0" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="start">Does one model have enough traffic</text>
+  <text x="60.0" y="136.0" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="start">to keep a whole GPU busy?</text>
+  <line x1="600.0" y1="118.0" x2="716.0" y2="118.0" stroke="#76B900" stroke-width="2" stroke-linecap="round" marker-end="url(#a-green)"/>
+  <text x="660.0" y="110.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">yes</text>
+  <rect x="720.0" y="76.0" width="440.0" height="84.0" fill="#F3F4F6" rx="10" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="740.0" y="112.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">Dedicated GPUs</text>
+  <text x="740.0" y="136.0" font-size="15" font-weight="400" fill="#5A6270" text-anchor="start">Scale whole-GPU replicas behind the Dynamo router</text>
+  <line x1="120.0" y1="160.0" x2="120.0" y2="208.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" marker-end="url(#a-gray)"/>
+  <text x="132.0" y="190.0" font-size="14" font-weight="700" fill="#5A6270" text-anchor="start">no</text>
+  <rect x="40.0" y="212.0" width="560.0" height="84.0" fill="#FFFFFF" rx="10" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="60.0" y="248.0" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="start">Are the models copies of one model,</text>
+  <text x="60.0" y="272.0" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="start">or LoRA adapters of one base model?</text>
+  <line x1="600.0" y1="254.0" x2="716.0" y2="254.0" stroke="#76B900" stroke-width="2" stroke-linecap="round" marker-end="url(#a-green)"/>
+  <text x="660.0" y="246.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">yes</text>
+  <rect x="720.0" y="212.0" width="440.0" height="84.0" fill="#F3F4F6" rx="10" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="740.0" y="248.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">One engine per base model</text>
+  <text x="740.0" y="272.0" font-size="15" font-weight="400" fill="#5A6270" text-anchor="start">Batching and multi-LoRA beat packing</text>
+  <line x1="120.0" y1="296.0" x2="120.0" y2="344.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" marker-end="url(#a-gray)"/>
+  <text x="132.0" y="326.0" font-size="14" font-weight="700" fill="#5A6270" text-anchor="start">no</text>
+  <rect x="40.0" y="348.0" width="560.0" height="84.0" fill="#FFFFFF" rx="10" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="60.0" y="384.0" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="start">Do tenants need hard isolation: faults,</text>
+  <text x="60.0" y="408.0" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="start">memory bandwidth, or security?</text>
+  <line x1="600.0" y1="390.0" x2="716.0" y2="390.0" stroke="#76B900" stroke-width="2" stroke-linecap="round" marker-end="url(#a-green)"/>
+  <text x="660.0" y="382.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">yes</text>
+  <rect x="720.0" y="348.0" width="440.0" height="84.0" fill="#F3F4F6" rx="10" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="740.0" y="384.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">MIG</text>
+  <text x="740.0" y="408.0" font-size="15" font-weight="400" fill="#5A6270" text-anchor="start">Fixed sizes; resize by draining the GPU</text>
+  <line x1="120.0" y1="432.0" x2="120.0" y2="480.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" marker-end="url(#a-gray)"/>
+  <text x="132.0" y="462.0" font-size="14" font-weight="700" fill="#5A6270" text-anchor="start">no</text>
+  <rect x="40.0" y="484.0" width="560.0" height="84.0" fill="#FFFFFF" rx="10" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="60.0" y="520.0" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="start">Do the models need compute caps and to run</text>
+  <text x="60.0" y="544.0" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="start">concurrently, with sizes chosen per model?</text>
+  <line x1="600.0" y1="526.0" x2="716.0" y2="526.0" stroke="#76B900" stroke-width="2" stroke-linecap="round" marker-end="url(#a-green)"/>
+  <text x="660.0" y="518.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">yes</text>
+  <rect x="720.0" y="484.0" width="440.0" height="84.0" fill="#EAF5D3" rx="10" stroke="#76B900" stroke-width="2"/>
+  <text x="740.0" y="520.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">MPS v3 (GPU fractions)</text>
+  <text x="740.0" y="544.0" font-size="15" font-weight="400" fill="#5A6270" text-anchor="start">Distinct, lightly loaded models</text>
+  <line x1="120.0" y1="568.0" x2="120.0" y2="616.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" marker-end="url(#a-gray)"/>
+  <text x="132.0" y="598.0" font-size="14" font-weight="700" fill="#5A6270" text-anchor="start">no</text>
+  <rect x="720.0" y="620.0" width="440.0" height="84.0" fill="#F3F4F6" rx="10" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="740.0" y="656.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">Time-slicing or HAMi</text>
+  <text x="740.0" y="680.0" font-size="15" font-weight="400" fill="#5A6270" text-anchor="start">Dev, test, or bursty and latency-tolerant</text>
+  <path d="M120,620 L120,662.0 L716,662.0" stroke="#9CA3AF" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#a-gray)"/>
+</svg>
