@@ -73,10 +73,8 @@ def _terminate_all(processes: list[subprocess.Popen]) -> None:
 
 
 def _exit_on_signal(*_args) -> None:
-    # The caller's finally stops the children. Stopping them here could
-    # deadlock: this handler may have interrupted Popen.poll() while it holds
-    # the Popen's non-reentrant waitpid lock. Ignore a repeated signal so it
-    # cannot cut that stop short.
+    # Leave stopping to the caller's finally: this may interrupt Popen.poll()
+    # holding its non-reentrant waitpid lock. Ignore repeats to protect that stop.
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     raise SystemExit(0)
