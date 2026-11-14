@@ -95,10 +95,9 @@ def test_native_parity_fixture_accepts_only_target_release_versions(release, is_
         if isinstance(node, ast.FunctionDef) and node.name == "systemone_sglang_server"
     )
     # Execute the fixture's real version assertion without starting any services.
-    assert isinstance(fixture.body[0], ast.Assert)
-    gate = compile(
-        ast.Module(body=[fixture.body[0]], type_ignores=[]), str(source), "exec"
-    )
+    assertion = fixture.body[1 if ast.get_docstring(fixture) is not None else 0]
+    assert isinstance(assertion, ast.Assert)
+    gate = compile(ast.Module(body=[assertion], type_ignores=[]), str(source), "exec")
     namespace = {"version": lambda _: release, "re": re}
     if is_target:
         exec(gate, namespace)
