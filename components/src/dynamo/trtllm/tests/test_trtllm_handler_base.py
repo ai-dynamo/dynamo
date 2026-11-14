@@ -1025,6 +1025,125 @@ class TestGenerateLocally:
         assert chunks[-1].get("engine_data", {}).get("kv_cache_hit") == expected
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("mode", "max_tokens", "engine_steps", "expected_tokens", "expected_finish"),
+        [
+            # TensorRT-LLM 1.4.0rc2 imports the prefill token without a length
+            # check and then samples one more token.
+            (
+                DisaggregationMode.DECODE,
+                1,
+                [([11], None, None), ([11, 12], "length", None)],
+                [11],
+                "length",
+            ),
+            (
+                DisaggregationMode.DECODE,
+                1,
+                [([11, 12], "stop", 12)],
+                [11],
+                "length",
+            ),
+            (
+                DisaggregationMode.DECODE,
+                2,
+                [([11], None, None), ([11, 12], "length", None)],
+                [11, 12],
+                "length",
+            ),
+            (
+                DisaggregationMode.DECODE,
+                8,
+                [([11], None, None), (list(range(11, 19)), "length", None)],
+                list(range(11, 19)),
+                "length",
+            ),
+            (
+                DisaggregationMode.AGGREGATED,
+                1,
+                [([11], None, None), ([11, 12], "length", None)],
+                [11, 12],
+                "length",
+            ),
+        ],
+        ids=[
+            "decode-1-extra-step",
+            "decode-1-stop-cut-off",
+            "decode-2",
+            "decode-8",
+            "aggregated-not-capped",
+        ],
+    )
+    async def test_generation_only_output_is_capped_at_max_tokens(
+        self, mode, max_tokens, engine_steps, expected_tokens, expected_finish
+    ):
+        """Cap decode tokens and usage while consuming every engine result."""
+        handler = self._make_handler()
+        handler.disaggregation_mode = mode
+        params = (
+            SimpleNamespace(request_type="generation_only", disagg_request_id=None)
+            if mode == DisaggregationMode.DECODE
+            else None
+        )
+        handler._setup_disaggregated_params_for_mode = MagicMock(
+            return_value=(params, None, {})
+        )
+
+        results = []
+        for token_ids, finish_reason, stop_reason in engine_steps:
+            output = MagicMock()
+            output.index = 0
+            output.token_ids = token_ids
+            output.logprobs = [-0.5] * len(token_ids)
+            output.finish_reason = finish_reason
+            output.stop_reason = stop_reason
+            output.request_perf_metrics = None
+            output.prompt_logprobs = []
+            res = MagicMock()
+            res.outputs = [output]
+            res.finished = finish_reason is not None
+            res.cached_tokens = None
+            results.append(res)
+
+        generation_result = MagicMock()
+        generation_result.finished = False
+        consumed = []
+
+        async def mock_aiter(self_mock):
+            """Record each engine result consumed before marking generation done."""
+            for res in results:
+                consumed.append(res)
+                yield res
+            generation_result.finished = True
+
+        generation_result.__aiter__ = mock_aiter
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": max_tokens},
+            "sampling_options": {},
+            "output_options": {"logprobs": 0},
+        }
+
+        chunks = [
+            c async for c in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert [t for c in chunks for t in c["token_ids"]] == expected_tokens
+        assert [lp for c in chunks for lp in c.get("log_probs", [])] == [-0.5] * len(
+            expected_tokens
+        )
+        assert chunks[-1]["finish_reason"] == expected_finish
+        assert "stop_reason" not in chunks[-1]
+        assert chunks[-1]["completion_usage"]["completion_tokens"] == len(
+            expected_tokens
+        )
+        assert sum("finish_reason" in c for c in chunks) == 1
+        # The engine must run to completion so the KV transfer finishes.
+        assert len(consumed) == len(engine_steps)
+        generation_result.abort.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_health_check_gets_priority_1(self):
         """TrtllmHealthCheckPayload → generate_locally → generate_async priority=1.0."""
         handler = self._make_handler()

@@ -1219,6 +1219,15 @@ class HandlerBase(BaseGenerativeHandler):
                 no_stop_trim=(output_options or {}).get("no_stop_trim", False),
             )
 
+        # TensorRT-LLM 1.4.0rc2 imports the prefill token without checking max_tokens.
+        # Cap decode output and drain the rest so KV frees normally; drop once fixed.
+        is_generation_only = (
+            disaggregated_params is not None
+            and disaggregated_params.request_type == "generation_only"
+        )
+        output_token_cap = sampling_params.max_tokens if is_generation_only else None
+        capped_choices: set[int] = set()
+
         # TODO: Instead of True, we should use streaming from the request.
         # However, currently dynamo run does not send streaming in the request.
         streaming = (
@@ -1418,14 +1427,31 @@ class HandlerBase(BaseGenerativeHandler):
 
                     for output in res.outputs:
                         output_idx = getattr(output, "index", 0) or 0
+                        if output_idx in capped_choices:
+                            # Its finish chunk was already sent at the cap.
+                            continue
                         tokens_so_far = output_tokens_per_choice.get(output_idx, 0)
-                        next_total_toks = len(output.token_ids)
+                        token_ids = output.token_ids
+                        finish_reason = output.finish_reason
+                        stop_reason = output.stop_reason
+                        clamped = False
+                        if (
+                            output_token_cap is not None
+                            and len(token_ids) >= output_token_cap
+                            and (len(token_ids) > output_token_cap or not finish_reason)
+                        ):
+                            token_ids = token_ids[:output_token_cap]
+                            finish_reason = "length"
+                            stop_reason = None
+                            clamped = True
+                            capped_choices.add(output_idx)
+                        next_total_toks = len(token_ids)
 
                         # The engine returns all tokens generated so far for
                         # this choice. Calculate only the new tokens generated
                         # in this iteration to create the delta.
                         out = {
-                            "token_ids": output.token_ids[tokens_so_far:],
+                            "token_ids": token_ids[tokens_so_far:],
                             "index": output_idx,
                         }
                         if (
@@ -1442,6 +1468,12 @@ class HandlerBase(BaseGenerativeHandler):
                         log_probs, top_logprobs = self._extract_logprobs(
                             output, tokens_so_far
                         )
+                        if clamped:
+                            num_new_tokens = len(out["token_ids"])
+                            if log_probs:
+                                log_probs = log_probs[:num_new_tokens]
+                            if top_logprobs:
+                                top_logprobs = top_logprobs[:num_new_tokens]
                         if log_probs:
                             out["log_probs"] = log_probs
                         if top_logprobs:
@@ -1452,10 +1484,10 @@ class HandlerBase(BaseGenerativeHandler):
                                 output
                             )
 
-                        if output.finish_reason:
-                            out["finish_reason"] = output.finish_reason
-                        if output.stop_reason:
-                            out["stop_reason"] = output.stop_reason
+                        if finish_reason:
+                            out["finish_reason"] = finish_reason
+                        if stop_reason:
+                            out["stop_reason"] = stop_reason
                         if self.disaggregation_mode == DisaggregationMode.PREFILL:
                             # Return the disaggregated params only when
                             # operating in prefill mode.
@@ -1484,7 +1516,10 @@ class HandlerBase(BaseGenerativeHandler):
 
                             num_input_tokens = len(request.get("token_ids", []))
                             total_completion_tokens = sum(
-                                len(o.token_ids) for o in res.outputs
+                                len(o.token_ids)
+                                if output_token_cap is None
+                                else min(len(o.token_ids), output_token_cap)
+                                for o in res.outputs
                             )
 
                             if prefill_prompt_tokens_details:
@@ -1492,10 +1527,6 @@ class HandlerBase(BaseGenerativeHandler):
                                 # attempt already reported cache reuse.
                                 prompt_tokens_details = prefill_prompt_tokens_details
                             else:
-                                is_generation_only = (
-                                    getattr(disaggregated_params, "request_type", None)
-                                    == "generation_only"
-                                )
                                 prompt_tokens_details = _prompt_tokens_details(
                                     res, num_input_tokens, is_generation_only
                                 )
