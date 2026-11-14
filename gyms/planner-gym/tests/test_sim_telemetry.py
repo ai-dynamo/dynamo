@@ -9,6 +9,7 @@ import copy
 import hashlib
 import importlib
 import json
+import runpy
 import sys
 import types
 from collections.abc import Iterator
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from autoscaling_arena.workloads import Workload
 
 
 def _canonical_engine_args(config):
@@ -881,6 +883,168 @@ def test_telemetry_destination_cannot_clobber_trace_or_report(
         sims_module._validate_telemetry_destination(
             output, trace_paths=[str(trace)], report_json=str(output)
         )
+
+
+_RUN_MATCH = Path(__file__).resolve().parents[1] / "scripts" / "run_match.py"
+
+
+def _trace_alias(trace: Path, kind: str) -> Path:
+    if kind == "identical":
+        return trace
+    if kind == "resolved alias":
+        (trace.parent / "sub").mkdir()
+        return trace.parent / "sub" / ".." / trace.name
+    alias = trace.parent / f"report-{kind.replace(' ', '-')}.json"
+    if kind == "symlink":
+        alias.symlink_to(trace)
+    elif kind == "hard link":
+        alias.hardlink_to(trace)
+    else:
+        raise AssertionError(f"unknown alias kind: {kind}")
+    return alias
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "kind", ["identical", "resolved alias", "symlink", "hard link"]
+)
+def test_report_destination_cannot_clobber_trace_input(
+    sims_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text("{}\n")
+    report = _trace_alias(trace, kind)
+    monkeypatch.setattr(
+        sims_module,
+        "_as_config",
+        lambda value: pytest.fail("summary aliasing a trace must fail before setup"),
+    )
+
+    with pytest.raises(ValueError, match="replay trace input"):
+        sims_module.run_arena_replay(
+            trace_file=str(trace),
+            substrate_config={},
+            autoscaler=lambda *args: pytest.fail(
+                "summary aliasing a trace must fail before creating an engine"
+            ),
+            report_json=str(report),
+        )
+    assert trace.read_text() == "{}\n"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("tilde_side", ["report", "trace"])
+def test_report_destination_compares_paths_as_written(
+    sims_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tilde_side: str,
+) -> None:
+    # Neither the replay nor the report writer expands "~", so "~/trace.jsonl"
+    # names the same file as the absolute path under the working directory.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    trace = tmp_path / "~" / "trace.jsonl"
+    trace.parent.mkdir()
+    trace.write_text("{}\n")
+    tilde_arg = "~/trace.jsonl"
+    trace_arg, report_arg = (
+        (str(trace), tilde_arg) if tilde_side == "report" else (tilde_arg, str(trace))
+    )
+    monkeypatch.setattr(
+        sims_module,
+        "_as_config",
+        lambda value: pytest.fail("summary aliasing a trace must fail before setup"),
+    )
+
+    with pytest.raises(ValueError, match="replay trace input"):
+        sims_module.run_arena_replay(
+            trace_file=trace_arg,
+            substrate_config={},
+            autoscaler=lambda *args: pytest.fail("must not create an engine"),
+            report_json=report_arg,
+        )
+    assert trace.read_text() == "{}\n"
+
+
+@pytest.mark.unit
+def test_report_destination_checks_every_trace_shard(
+    sims_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    shards = [tmp_path / "trace-000.jsonl", tmp_path / "trace-001.jsonl"]
+    for shard in shards:
+        shard.write_text(f"{shard.name}\n")
+    monkeypatch.setattr(
+        sims_module,
+        "_as_config",
+        lambda value: pytest.fail("summary aliasing a shard must fail before setup"),
+    )
+
+    with pytest.raises(ValueError, match="replay trace input"):
+        sims_module.run_arena_replay(
+            trace_files=[str(shard) for shard in shards],
+            trace_format="dynamo",
+            substrate_config={},
+            autoscaler=lambda *args: pytest.fail("must not create an engine"),
+            report_json=str(_trace_alias(shards[1], "hard link")),
+        )
+    assert shards[1].read_text() == "trace-001.jsonl\n"
+
+
+@pytest.mark.unit
+def test_report_destination_accepts_separate_existing_file(
+    sims_module: types.ModuleType, tmp_path: Path
+) -> None:
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text("{}\n")
+    report = tmp_path / "report.json"
+    report.write_text("{}")
+
+    sims_module._validate_report_destination(report, trace_paths=[str(trace)])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["identical", "symlink", "hard link"])
+def test_run_match_rejects_report_json_aliasing_trace(
+    sims_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    trace = tmp_path / "trace.jsonl"
+    record = {"timestamp": 0, "input_length": 4, "output_length": 1, "hash_ids": [1]}
+    trace.write_text(json.dumps(record) + "\n")
+    original = trace.read_bytes()
+    report = _trace_alias(trace, kind)
+    # The real adapters need a built Dynamo planner; the CLI only names them.
+    adapters = types.ModuleType("autoscaling_arena.adapters")
+    adapters.ReactiveAutoscaler = adapters.StaticAutoscaler = object
+    monkeypatch.setitem(sys.modules, "autoscaling_arena.adapters", adapters)
+    monkeypatch.setattr(
+        Workload,
+        "materialize",
+        lambda *args, **kwargs: pytest.fail("must reject before staging the trace"),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_match.py", "--trace", str(trace), "--report-json", str(report)],
+    )
+    main = runpy.run_path(str(_RUN_MATCH))["main"]
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code == 2
+    assert (
+        "--report-json must not refer to the --trace input" in capsys.readouterr().err
+    )
+    assert trace.read_bytes() == original
 
 
 def test_ais_bootstrap_skips_rival_before_generating_fpms(
