@@ -447,12 +447,22 @@ def test_recipe_output_reasoning_only_forced_choice(tokenizer):
     assert "tool_calls" not in output["delta"]
 
 
-def test_recipe_forced_choice_rejects_missing_native_constraint(tokenizer, monkeypatch):
+@pytest.mark.parametrize("failure", [None, MemoryError, OSError])
+def test_recipe_forced_constraint_preserves_failure_kind(
+    tokenizer, monkeypatch, failure
+):
+    def build(*args, **kwargs):
+        if failure is not None:
+            raise failure("constraint construction failed")
+        return None
+
     monkeypatch.setattr(
-        "sglang.srt.function_call.function_call_parser.FunctionCallParser.get_structure_constraint",
-        lambda *args, **kwargs: None,
+        FunctionCallParser.ToolCallParserEnum["deepseekv4"],
+        "get_structural_tag",
+        build,
     )
-    with pytest.raises(PreprocessError, match="native structural tag"):
+    message = "constraint construction failed" if failure else "native structural tag"
+    with pytest.raises(failure or PreprocessError, match=message):
         output_processor(
             tokenizer,
             {
@@ -491,13 +501,14 @@ def test_recipe_forced_constraint_respects_schema_policy(
     ]
     original = copy.deepcopy(tools)
     seen = []
-    build = FunctionCallParser.get_structure_constraint
+    detector_class = FunctionCallParser.ToolCallParserEnum["deepseekv4"]
+    build = detector_class.get_structural_tag
 
-    def capture(parser, *args, **kwargs):
-        seen.extend((tool.function.name, tool.function.strict) for tool in parser.tools)
-        return build(parser, *args, **kwargs)
+    def capture(detector, *, tools, **kwargs):
+        seen.extend((tool.function.name, tool.function.strict) for tool in tools)
+        return build(detector, tools=tools, **kwargs)
 
-    monkeypatch.setattr(FunctionCallParser, "get_structure_constraint", capture)
+    monkeypatch.setattr(detector_class, "get_structural_tag", capture)
     guided = build_tool_call_guided_decoding(
         {
             "tools": tools,

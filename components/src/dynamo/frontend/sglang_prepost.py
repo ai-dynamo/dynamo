@@ -632,9 +632,9 @@ def build_tool_call_guided_decoding(
                 tool_call_parser=tool_call_parser_name,
                 **_parser_tokenizer_kwargs(FunctionCallParser, tokenizer),
             )
-            constraint = _call_structure_constraint(
-                parser.get_structure_constraint,
-                sglang_tool_choice,
+            tag = parser.detector.get_structural_tag(
+                tools=parser.structural_tag_tools(),
+                tool_choice=sglang_tool_choice,
                 parallel_tool_calls=parallel_tool_calls,
                 thinking_mode=reasoning_parser_name is None
                 and bool(
@@ -645,6 +645,7 @@ def build_tool_call_guided_decoding(
                     ).get("thinking")
                 ),
             )
+            constraint = ("structural_tag", tag) if tag is not None else None
         except (AttributeError, NotImplementedError, TypeError, ValueError) as exc:
             raise PreprocessError(
                 "DeepSeek recipe tool choice requires a native tool constraint"
