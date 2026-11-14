@@ -42,6 +42,11 @@ spec:
   - port: metrics
     scheme: https
     path: /metrics
+    # honorLabels keeps the namespace label the operator sets on its metrics (the
+    # reconciled resource's namespace); without it Prometheus renames the label to
+    # exported_namespace on collision with the target's namespace, and dashboards
+    # filtering on namespace stop matching. The PodMonitors above already set this.
+    honorLabels: true
     interval: 15s
     bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
     tlsConfig:
