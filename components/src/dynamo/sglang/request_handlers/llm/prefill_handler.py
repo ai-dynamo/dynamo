@@ -7,10 +7,11 @@ from collections.abc import AsyncIterator
 from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
+from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
-from dynamo.health_check import HEALTH_CHECK_KEY
+from dynamo.common.backend.health_check import is_probe
 from dynamo.sglang._compat import cache_salt_kwargs, require_reasoning_kwargs
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.agent_session import agent_session_kwargs
@@ -141,6 +142,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 self._default_sampling_params,
                 self.config.dynamo_args.enable_rl,
             )
+        # The canary marker sits on the top-level payload; check both shapes so
+        # a custom DYN_HEALTH_CHECK_PAYLOAD in the wrapped form is still a probe.
+        is_local_probe = is_probe(request) or is_probe(inner_request)
         native_payload = native_generate_payload(inner_request)
         has_thinking_budget = False
         if native_payload is None:
@@ -176,6 +180,16 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             bootstrap_room = bootstrap_info_from_req.get("bootstrap_room")
             if bootstrap_room is not None:
                 logging.debug(f"Using router-provided bootstrap_room: {bootstrap_room}")
+
+        if is_local_probe and bootstrap_host != FAKE_BOOTSTRAP_HOST:
+            # No decode worker consumes a probe's KV. SGLang picks fake transfer
+            # by host alone, so the probe keeps its port and room.
+            logging.debug(
+                "Health probe bootstrap_host %s replaced with %s",
+                bootstrap_host,
+                FAKE_BOOTSTRAP_HOST,
+            )
+            bootstrap_host = FAKE_BOOTSTRAP_HOST
 
         if bootstrap_room is None:
             bootstrap_room = self._generate_bootstrap_room()
@@ -280,9 +294,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 **agent_session_kwargs(self.engine, inner_request),
                 **kv_hint_kwargs(self.engine, inner_request),
             )
-        if inner_request.get(HEALTH_CHECK_KEY):
+        if is_local_probe:
             # Canary: stream engine output so the Rust canary sees scheduler output.
-            # No _cancellation_monitor — probe is bounded (max_tokens=1, FAKE_BOOTSTRAP_HOST).
+            # No _cancellation_monitor — probe is bounded (max_tokens=1) and the
+            # host was forced to FAKE_BOOTSTRAP_HOST above.
             async for res in results:
                 yield res
             return

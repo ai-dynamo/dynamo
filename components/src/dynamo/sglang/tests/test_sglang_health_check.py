@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
 from dynamo._core import WorkerDraining
 from dynamo.health_check import HEALTH_CHECK_KEY
@@ -19,6 +20,10 @@ from dynamo.sglang.health_check import (
     SglangHealthCheckPayload,
 )
 from dynamo.sglang.protocol import EmbeddingRequest
+from dynamo.sglang.tests.test_sglang_prefill_handler import (
+    _bootstrap_capture_handler,
+    _drain,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -59,6 +64,45 @@ def test_embedding_env_override(monkeypatch):
 
     assert payload == override
     assert EmbeddingRequest(**payload).input == "custom probe"
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize(
+    "bootstrap_info",
+    [None, {"bootstrap_host": "10.0.0.9", "bootstrap_room": 5}],
+    ids=["omits_bootstrap_info", "overrides_bootstrap_host"],
+)
+async def test_disagg_env_override_preserves_marker(monkeypatch, bootstrap_info):
+    """DYN_HEALTH_CHECK_PAYLOAD must not drop the canary marker, and the
+    prefill engine must still get FAKE_BOOTSTRAP_HOST: no decode worker
+    consumes the probe's KV."""
+    override = {
+        "token_ids": [3, 4],
+        "sampling_options": {"temperature": 0.5},
+        "stop_conditions": {"max_tokens": 1},
+    }
+    if bootstrap_info is not None:
+        override["bootstrap_info"] = bootstrap_info
+    monkeypatch.setenv("DYN_HEALTH_CHECK_PAYLOAD", json.dumps(override))
+
+    payload = SglangDisaggHealthCheckPayload().to_dict()
+    assert payload[HEALTH_CHECK_KEY] is True
+
+    handler, calls = _bootstrap_capture_handler(monkeypatch, native=False)
+    context = SimpleNamespace(
+        id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
+    )
+    await _drain(handler.generate(payload, context))
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["bootstrap_host"] == FAKE_BOOTSTRAP_HOST
+    # The rest of the custom probe reaches the engine unchanged.
+    assert call["input_ids"] == [3, 4]
+    assert call["sampling_params"]["temperature"] == 0.5
+    if bootstrap_info is not None:
+        assert call["bootstrap_room"] == 5
 
 
 @pytest.mark.parametrize(
