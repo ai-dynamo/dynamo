@@ -16,6 +16,7 @@ Both paths emit the same Dynamo wire format on ``GenerateChunk``:
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,19 @@ def _parse_non_negative_int(value: Any, name: str) -> Optional[int]:
         )
         return None
     return parsed
+
+
+def validate_sampled_logprobs(output: Any) -> None:
+    """Require a finite logprob for every sampled token in a completion chunk."""
+    token_ids = list(output.token_ids)
+    logprobs = output.logprobs
+    if token_ids and (logprobs is None or len(logprobs) != len(token_ids)):
+        raise ValueError("sampled logprob count must match token count")
+    for token_id, entries in zip(token_ids, logprobs or []):
+        if not isinstance(entries, dict) or token_id not in entries:
+            raise ValueError("sampled token is missing its logprob")
+        if not math.isfinite(float(entries[token_id].logprob)):
+            raise ValueError("sampled token logprob must be finite")
 
 
 def extract_from_completion_output(

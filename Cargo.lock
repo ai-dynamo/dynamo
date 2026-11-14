@@ -3313,6 +3313,7 @@ dependencies = [
  "bytes",
  "chrono",
  "console-subscriber",
+ "constant_time_eq",
  "criterion",
  "crossbeam-queue",
  "dashmap",
