@@ -1,0 +1,317 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Parsed values frozen from release/1.6.0 at 240b7d359f20dbc08469baaf9dc12973261c7df7.
+global:
+  etcd:
+    install: false
+  nats:
+    install: false
+  kai-scheduler:
+    install: false
+    enabled: false
+  volcano-scheduler:
+    enabled: false
+  grove:
+    install: false
+    enabled: false
+  snapshot:
+    install: false
+dynamo-operator:
+  grovePreflight:
+    enabled: true
+    image: docker.io/library/python:3.12-slim
+    imagePullSecrets: []
+    activeDeadlineSeconds: 120
+    affinity: {}
+    podSecurityContext: null
+    namespace: ''
+    deploymentName: ''
+  enabled: true
+  upgradeCRD: true
+  env: []
+  natsAddr: ''
+  etcdAddr: ''
+  modelExpressURL: ''
+  lpx:
+    enabled: false
+    modelRegistryURL: ''
+  namespaceRestriction:
+    enabled: false
+    targetNamespace: null
+    lease:
+      duration: 30s
+      renewInterval: 10s
+  gpuDiscovery:
+    enabled: true
+  discoveryBackend: kubernetes
+  controllerManager:
+    tolerations: []
+    affinity: {}
+    leaderElection:
+      id: ''
+      namespace: ''
+    manager:
+      image:
+        repository: nvcr.io/nvidia/ai-dynamo/kubernetes-operator
+        tag: ''
+        pullPolicy: IfNotPresent
+      args:
+      - --health-probe-bind-address=:8081
+      - --metrics-bind-address=127.0.0.1:8080
+  imagePullSecrets: []
+  dynamo:
+    groveTerminationDelay: 4h
+    dockerRegistry:
+      useKubernetesSecret: false
+      server: null
+      username: null
+      password: null
+      existingSecretName: null
+      secure: true
+    ingress:
+      enabled: false
+      className: null
+      tlsSecretName: my-tls-secret
+    istio:
+      enabled: false
+      gateway: null
+    ingressHostSuffix: ''
+    virtualServiceSupportsHTTPS: false
+    serviceMesh:
+      enabled: false
+      provider: istio
+      istio:
+        tlsMode: SIMPLE
+        insecureSkipVerify: true
+        clientCertificate: ''
+        privateKey: ''
+        caCertificates: ''
+    metrics:
+      prometheusEndpoint: ''
+    mpiRun:
+      secretName: mpi-run-ssh-secret
+  webhook:
+    certificateSecret:
+      name: webhook-server-cert
+      external: false
+    caBundle: ''
+    failurePolicy: Fail
+    podCheckpointRestoreFailurePolicy: Ignore
+    timeoutSeconds: 10
+    namespaceSelector: {}
+    certManager:
+      enabled: false
+      certificate:
+        duration: 8760h
+        renewBefore: 360h
+        rootCA:
+          duration: 87600h
+          renewBefore: 720h
+  checkpoint:
+    enabled: false
+grove:
+  tolerations: []
+  affinity: {}
+  crdInstaller:
+    enabled: true
+  config:
+    server:
+      healthProbes:
+        enable: true
+kai-scheduler:
+  global:
+    tolerations: []
+    affinity: {}
+etcd:
+  image:
+    repository: bitnamilegacy/etcd
+    tag: 3.5.18-debian-12-r5
+  persistence:
+    enabled: true
+    storageClass: null
+    size: 1Gi
+  preUpgradeJob:
+    enabled: false
+  replicaCount: 1
+  auth:
+    rbac:
+      create: false
+  readinessProbe:
+    enabled: false
+  livenessProbe:
+    enabled: false
+  pdb:
+    create: false
+  tolerations: []
+  affinity: {}
+nats:
+  tlsCA:
+    enabled: false
+  config:
+    cluster:
+      enabled: false
+    jetstream:
+      enabled: true
+      fileStore:
+        enabled: true
+        dir: /data
+        pvc:
+          enabled: true
+          size: 10Gi
+          storageClassName: null
+          merge: {}
+          patch: []
+          name: null
+        maxSize: null
+      memoryStore:
+        enabled: false
+      merge: {}
+      patch: []
+    nats:
+      port: 4222
+      tls:
+        enabled: false
+        merge: {}
+        patch: []
+    leafnodes:
+      enabled: false
+    websocket:
+      enabled: false
+    mqtt:
+      enabled: false
+    gateway:
+      enabled: false
+    monitor:
+      enabled: true
+      port: 8222
+      tls:
+        enabled: false
+    profiling:
+      enabled: false
+      port: 65432
+    resolver:
+      enabled: false
+    serverNamePrefix: ''
+    merge:
+      max_payload: 15728640
+    patch: []
+  container:
+    image:
+      repository: nats
+      tag: 2.10.21-alpine
+      pullPolicy: null
+      registry: null
+    ports:
+      nats: {}
+      leafnodes: {}
+      websocket: {}
+      mqtt: {}
+      cluster: {}
+      gateway: {}
+      monitor: {}
+      profiling: {}
+    env: {}
+    merge: {}
+    patch: []
+  reloader:
+    enabled: true
+    image:
+      repository: natsio/nats-server-config-reloader
+      tag: 0.16.0
+      pullPolicy: null
+      registry: null
+    env: {}
+    natsVolumeMountPrefixes:
+    - /etc/
+    merge: {}
+    patch: []
+  promExporter:
+    enabled: false
+  service:
+    enabled: true
+    ports:
+      nats:
+        enabled: true
+      leafnodes:
+        enabled: true
+      websocket:
+        enabled: true
+      mqtt:
+        enabled: true
+      cluster:
+        enabled: false
+      gateway:
+        enabled: false
+      monitor:
+        enabled: false
+      profiling:
+        enabled: false
+    merge: {}
+    patch: []
+    name: null
+  statefulSet:
+    merge: {}
+    patch: []
+    name: null
+  podTemplate:
+    configChecksumAnnotation: true
+    topologySpreadConstraints: {}
+    merge:
+      metadata:
+        annotations:
+          sidecar.istio.io/inject: 'false'
+      spec:
+        tolerations: []
+        affinity: {}
+    patch: []
+  headlessService:
+    merge: {}
+    patch: []
+    name: null
+  configMap:
+    merge: {}
+    patch: []
+    name: null
+  podDisruptionBudget:
+    enabled: true
+  serviceAccount:
+    enabled: false
+  natsBox:
+    enabled: false
+    contexts:
+      default:
+        creds:
+          contents: null
+          secretName: null
+          dir: null
+          key: nats.creds
+        nkey:
+          contents: null
+          secretName: null
+          dir: null
+          key: nats.nk
+        tls:
+          secretName: null
+          dir: null
+          cert: tls.crt
+          key: tls.key
+        merge: {}
+        patch: []
+    defaultContextName: default
+    container:
+      image:
+        repository: natsio/nats-box
+        tag: 0.14.5
+        pullPolicy: null
+        registry: null
+      env: {}
+      merge: {}
+      patch: []
+    serviceAccount:
+      enabled: false
+    podTemplate:
+      merge:
+        spec:
+          tolerations: []
+          affinity: {}
+      patch: []
