@@ -262,6 +262,32 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     python3 -c "import importlib.metadata as m, re, sys; names={re.sub(r'[-_.]+', '-', n).lower() for d in m.distributions() if (n := (d.metadata or {}).get('Name'))}; sys.exit(1 if 'mooncake-transfer-engine-cuda13' in names else 0)"
 {% endif %}
 
+{% if device == "xpu" %}
+# The published XPU base supplies torch_memory_saver. Check its hook without a GPU;
+# import torch first so the hook loads against torch's libsycl.
+RUN python3 - <<'PY'
+import ctypes
+from pathlib import Path
+
+import torch  # noqa: F401
+import torch_memory_saver
+
+pkg = Path(torch_memory_saver.__file__).parent
+libs = sorted(
+    p
+    for d in (pkg, pkg.parent)
+    for p in d.glob("torch_memory_saver_hook_mode_*.so")
+)
+names = [p.name for p in libs]
+if len(libs) != 1 or not names[0].startswith("torch_memory_saver_hook_mode_torch."):
+    raise RuntimeError(
+        f"expected only the XPU torch_memory_saver_hook_mode_torch.*.so, found {names}"
+    )
+ctypes.CDLL(str(libs[0]))
+print(f"torch_memory_saver XPU build OK: {libs[0]}")
+PY
+{% endif %}
+
 # Remove the codec-bearing video-DECODE components from the upstream SGLang image
 # (PyAV, decord, OpenCV, torchcodec + any base ffmpeg/libav*), then copy the
 # VP9-only in-tree ffmpeg from wheel_builder below for the video-generation
