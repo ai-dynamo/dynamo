@@ -228,6 +228,10 @@ def pytest_configure(config: pytest.Config) -> None:
     # regardless of config-load order. See .ai/pytest-guidelines.md.
     config.addinivalue_line(
         "markers",
+        "upstream_vllm: selected unchanged upstream vLLM HTTP tests against Dynamo",
+    )
+    config.addinivalue_line(
+        "markers",
         "elastic_ep: marks vLLM elastic expert-parallelism (ePLB) scaling tests "
         "(scale_elastic_ep over the Ray DP backend)",
     )
