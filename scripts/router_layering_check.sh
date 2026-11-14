@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Router crate layering gate. Checks, from `cargo metadata` and `cargo tree`,
-# that every router crate has exactly the Dynamo dependency edges the split
-# design allows and reaches none of the crates its layer forbids, that the
+# that every router crate has exactly the Dynamo dependency edges the table
+# below allows and reaches none of the crates its layer forbids, that the
 # plugin crates depend on dynamo-kv-router alone, and that the protocol crate
 # carries no executable behavior.
 #
@@ -54,7 +54,7 @@ TABLE=(
   "dynamo-scheduler | dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-kv-hints dynamo-kv-indexer dynamo-router-protocol dynamo-session-affinity dynamo-slot-tracker dynamo-tokens dynamo-worker-selection | dynamo-runtime dynamo-kv-router axum hyper reqwest zmq prometheus"
 )
 
-# Every crate the split produces (SPLIT_V2 3a-final). The composition check
+# Every router crate. The composition check
 # below compares the ROUTER_FAMILY crates found in dynamo-kv-router's
 # no-features tree against COMPOSITION_ROUTER_DEPS.
 ROUTER_FAMILY="dynamo-error dynamo-kv-hashing dynamo-router-protocol dynamo-kv-events dynamo-kv-hints dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-admission dynamo-scheduler dynamo-metrics dynamo-kv-router"
@@ -86,11 +86,11 @@ HOSTS="dynamo-llm dynamo-ext-proc dynamo-mocker"
 # Hosts outside the workspace: "package|manifest|features" (features may be empty). The Python
 # bindings run the standalone services, so they resolve with the service features on.
 HOSTS_EXTERNAL="dynamo-py3|lib/bindings/python/Cargo.toml|kv-indexer,slot-tracker,select-service"
-# prometheus joins this list in step 9c, when exposition moves to dynamo-metrics; today the
-# kv-indexer `export` feature (kv-router `metrics`) reaches it by design.
+# prometheus is not on this list: the kv-indexer `export` feature (kv-router `metrics`)
+# reaches it by design.
 HOST_FORBIDDEN="axum hyper reqwest zmq"
 
-# Executable behavior the protocol crate must not contain (SPLIT_V2 G9).
+# Executable behavior the protocol crate must not contain.
 PROTOCOL_CRATE="dynamo-router-protocol"
 PROTOCOL_BEHAVIOR_DIR="lib/router/protocol/src"
 BEHAVIOR_RE='\bdyn |\basync |std::fs|anyhow|tracing|derive_builder|#\[doc\(hidden\)\][[:space:]]*pub'
@@ -207,7 +207,7 @@ for row in "${TABLE[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# Protocol: no executable behavior in the source tree (SPLIT_V2 G9). A line
+# Protocol: no executable behavior in the source tree. A line
 # carrying ALLOW_MARK is exempt and printed for the reviewer.
 # ---------------------------------------------------------------------------
 [ -d "$PROTOCOL_BEHAVIOR_DIR" ] || die "$PROTOCOL_CRATE: behavior directory $PROTOCOL_BEHAVIOR_DIR does not exist"
@@ -295,7 +295,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Source rules over every router crate (SPLIT_V2 G10): no #[doc(hidden)] (an
+# Source rules over every router crate: no #[doc(hidden)] (an
 # item is documented or absent) and no cross-crate glob re-export. The
 # composition crate is exempt for its one remaining glob: `test_utils` over
 # the kernel's test helpers, compiled for tests and the `bench` feature only.

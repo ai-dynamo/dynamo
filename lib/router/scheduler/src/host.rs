@@ -4,7 +4,7 @@
 //! What a host implements or calls to run the kernel in-process, in one place: the core and
 //! its constructor inputs, the capability structs a host fills, the hook traits it
 //! implements, and the operation it runs. Everything here is re-exported from its owning
-//! module; this list is the contract (hosts inventory section 3.6).
+//! module; this list is the contract.
 
 pub use crate::config::{CacheHitWeights, RouterPrefillLoadModel};
 pub use crate::config::{RouterConfig, RouterConfigOverride, Validated};

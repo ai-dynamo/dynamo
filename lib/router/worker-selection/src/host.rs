@@ -4,8 +4,7 @@
 //! What an in-tree host names from the worker-selection stage beyond the plugin contract it
 //! reaches through `dynamo_kv_router::plugins::prelude`: the configuration slices, the
 //! conditional-disaggregation decision inputs, the LoRA filter, and the trace types it renders.
-//! Every item is re-exported from its owning module; this list is the host contract (hosts
-//! inventory v2, section 3).
+//! Every item is re-exported from its owning module; this list is the host contract.
 
 pub use crate::conditional_disagg::{
     ConditionalDisaggConfig, ConditionalDisaggDecisionInput, ConditionalDisaggPolicyKind,

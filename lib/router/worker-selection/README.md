@@ -9,7 +9,7 @@ Candidate rows in, a pick out. The router's worker selection stage: the plugin A
 
 Dependencies: `dynamo-router-protocol`, `dynamo-slot-tracker` (for the fullness rule, `RankLoad` and `BusyThresholds`, which the slot tracker owns), and `dynamo-session-affinity` (for `WorkerAffinityTarget`, the target a session binds to) and nothing router-side beyond them; no axum, reqwest, zmq, Prometheus, or `dynamo-runtime` under any feature. The `bench` and `testing` features add the reference picker (`parking_lot`) for parity tests and benchmarks.
 
-Part of the router split (see `lib/router/README.md`).
+See `lib/router/README.md` for how the crates fit together.
 
 ## Working rules: the public plugin API
 

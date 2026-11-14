@@ -9,4 +9,4 @@ Session bindings in, constraints out. The router's session affinity stage: the r
 
 Dependencies: `dynamo-router-protocol` and nothing router-side beyond it; no axum, reqwest, zmq, Prometheus, or `dynamo-runtime` under any feature. Tokio stays for the notify and timers; the stage rule forbids sockets and HTTP, not async.
 
-Part of the router split (see `lib/router/README.md`).
+See `lib/router/README.md` for how the crates fit together.

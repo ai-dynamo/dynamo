@@ -9,4 +9,4 @@ Admit, hold, or reject now. The router's admission stage: the per-class policy q
 
 Dependencies: `dynamo-router-protocol`, `dynamo-slot-tracker` (for the fullness rule, `RankLoad` and `BusyThresholds`, which the slot tracker owns), and `dynamo-session-affinity` (for `WorkerAffinityTarget`, the target a session binds to) and nothing router-side beyond them; no axum, reqwest, zmq, Prometheus, or `dynamo-runtime` under any feature. Tokio stays for the queue's instants and the classifier's delivery task; the stage rule forbids sockets and HTTP, not async.
 
-Part of the router split (see `lib/router/README.md`).
+See `lib/router/README.md` for how the crates fit together.
