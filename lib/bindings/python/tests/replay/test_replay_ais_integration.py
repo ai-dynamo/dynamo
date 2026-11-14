@@ -114,8 +114,14 @@ def test_repeated_replay_reuses_the_ais_model_with_equal_results() -> None:
             replay_concurrency=1,
             replay_mode="offline",
         )
+        # These are measured in wall-clock time, not simulated time.
+        wall_clock = {
+            "wall_time_ms",
+            "processed_tokens_per_s",
+            "processed_output_tokens_per_s",
+        }
         return {
-            key: value for key, value in report.summary.items() if key != "wall_time_ms"
+            key: value for key, value in report.summary.items() if key not in wall_clock
         }
 
     first = summary()
