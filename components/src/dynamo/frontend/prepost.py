@@ -45,6 +45,7 @@ from .structural_tag_policy import (
     should_attempt_structural_tag,
 )
 from .thinking import apply_default_thinking_mode_to_template_kwargs
+from .token_prefix import TokenPrefix, TokenPrefixView
 from .utils import legacy_guided_decoding
 
 get_model_structural_tag: Any
@@ -1105,7 +1106,7 @@ class StreamingPostProcessor:
             )
 
         self.previous_text = ""
-        self.previous_token_ids: list[int] = []
+        self._token_prefix = TokenPrefix()
         self.in_progress_tool_calls: dict[int, DeltaToolCall] = {}
         # Per-choice tracking (https://github.com/ai-dynamo/dynamo/issues/8636) of whether a tool_call delta was
         # emitted on that choice, keyed by `output.index`. Required because
@@ -1119,6 +1120,15 @@ class StreamingPostProcessor:
         self._tool_text_buffer: str | None = None
         self._pending_tool_opener = ""
         self._dynamo_json_fallback_chunks: dict[int, list[str]] = {}
+
+    @property
+    def previous_token_ids(self) -> TokenPrefixView:
+        return self._token_prefix.view()
+
+    @previous_token_ids.setter
+    def previous_token_ids(self, value: Sequence[int]) -> None:
+        # Assigning the view just produced by append() must not copy it.
+        self._token_prefix.adopt(value)
 
     @property
     def reasoning_token_total(self) -> int:
@@ -1401,16 +1411,21 @@ class StreamingPostProcessor:
         current_text: str,
         delta_text: str,
         delta_token_ids: list[int],
-        current_token_ids: list[int],
+        current_token_ids: Sequence[int],
+        previous_ids: Sequence[int] | None = None,
     ) -> DeltaMessage | None:
         if self.tool_parser is None:
             return None
         self._tool_parser_streaming_started = True
+        # The property already includes this chunk. Callers pass the pre-chunk
+        # view; after a reasoning reset the empty property is the right default.
+        if previous_ids is None:
+            previous_ids = self.previous_token_ids
         return self.tool_parser.extract_tool_calls_streaming(
             previous_text=self.previous_text,
             current_text=current_text,
             delta_text=delta_text,
-            previous_token_ids=self.previous_token_ids,
+            previous_token_ids=previous_ids,
             current_token_ids=current_token_ids,
             delta_token_ids=delta_token_ids,
             request=self.request_for_sampling,
@@ -1483,7 +1498,7 @@ class StreamingPostProcessor:
         delta_token_ids = list(output.token_ids or [])
         delta_text = output.text or ""
         current_text = self.previous_text + delta_text
-        current_token_ids = self.previous_token_ids + delta_token_ids
+        _previous_ids, current_token_ids = self._token_prefix.append(delta_token_ids)
 
         self.previous_text = current_text
         self.previous_token_ids = current_token_ids
@@ -1565,7 +1580,9 @@ class StreamingPostProcessor:
                 )
 
         current_text = self.previous_text + delta_text
-        current_token_ids = self.previous_token_ids + delta_token_ids
+        previous_token_ids, current_token_ids = self._token_prefix.append(
+            delta_token_ids
+        )
 
         delta_message: DeltaMessage | None = DeltaMessage(content=delta_text)
 
@@ -1597,7 +1614,7 @@ class StreamingPostProcessor:
                 self.previous_text,
                 current_text,
                 delta_text,
-                self.previous_token_ids,
+                previous_token_ids,
                 current_token_ids,
                 delta_token_ids,
             )
@@ -1713,6 +1730,7 @@ class StreamingPostProcessor:
                     delta_text=delta_text,
                     current_token_ids=current_token_ids,
                     delta_token_ids=delta_token_ids,
+                    previous_ids=previous_token_ids,
                 )
         else:
             if self._should_parse_tools():
@@ -1727,6 +1745,7 @@ class StreamingPostProcessor:
                         delta_text=delta_text,
                         current_token_ids=current_token_ids,
                         delta_token_ids=delta_token_ids,
+                        previous_ids=previous_token_ids,
                     )
 
         if output.finish_reason:
