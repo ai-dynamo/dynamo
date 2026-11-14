@@ -349,9 +349,8 @@ class OmniHandler(BaseOmniHandler):
                         raise RuntimeError(f"Omni generation failed: {error}")
                     yield chunk
         except VLLMClientError as exc:
-            # vLLM's request errors (prompt over the maximum model length, too
-            # many multimodal items) are not ValueErrors, so the bindings would
-            # report them as 500.
+            # vLLM request errors (prompt too long, too many multimodal items) are
+            # not ValueErrors, so the bindings would otherwise answer 500.
             raise vllm_client_error_to_public_error(exc) from exc
 
     async def _check_health(

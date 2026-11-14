@@ -337,9 +337,8 @@ class ImageLoader:
             except Image.UnidentifiedImageError:
                 raise
             except (OSError, SyntaxError) as e:
-                # Pillow raises OSError for truncated or corrupt data it has
-                # identified, and SyntaxError for a broken PNG chunk. Host
-                # resource exhaustion is a server fault, not invalid data.
+                # Pillow: OSError for truncated or corrupt data, SyntaxError for a
+                # broken PNG chunk. Host resource exhaustion is a server fault.
                 if isinstance(e, OSError) and e.errno in (
                     errno.EMFILE,
                     errno.ENFILE,
