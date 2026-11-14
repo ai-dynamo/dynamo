@@ -122,8 +122,6 @@ pub struct KvStateAttachmentOwner {
 
 #[pymethods]
 impl KvStateAttachmentOwner {
-    /// `host_component` names the component of the state-agent host to attach
-    /// to; `None` selects the default host component.
     #[new]
     #[pyo3(signature = (endpoint, worker_id, descriptors, host_component=None))]
     fn new(

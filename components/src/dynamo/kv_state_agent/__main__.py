@@ -19,19 +19,15 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_COMPONENT = "kv_state_agent"
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Dynamo KV state-agent host")
     parser.add_argument(
         "--component",
-        default=os.environ.get("DYN_KV_STATE_AGENT_COMPONENT") or DEFAULT_COMPONENT,
+        default="kv_state_agent",
         help=(
             "Dynamo component this host registers under. Workers attach to the "
             "host named by their --kv-state-agent-component, so give each host "
-            "in a namespace its own name. [env: DYN_KV_STATE_AGENT_COMPONENT] "
-            f"(default: {DEFAULT_COMPONENT})"
+            "in a namespace its own name. (default: %(default)s)"
         ),
     )
     parser.add_argument("--max-slots", type=int, default=8)

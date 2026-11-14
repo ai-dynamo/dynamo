@@ -38,7 +38,6 @@ use crate::discovery::kv_state_agent::{
     KvStateHostAdvertisement, KvStateIngressProtocol,
 };
 
-/// Host component a worker searches when it names none.
 const DEFAULT_HOST_COMPONENT: &str = "kv_state_agent";
 const DEFAULT_HOST_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const JSON_SAFE_MASK: u64 = (1u64 << 53) - 1;
@@ -70,9 +69,7 @@ pub struct KvStateAttachmentOwner {
 
 impl KvStateAttachmentOwner {
     /// Attach this worker's ranks to the state-agent host registered under
-    /// `host_component` in the worker's namespace. `None` selects the default
-    /// component; name one to run several hosts in a namespace, each serving
-    /// the workers that name it.
+    /// `host_component` in the worker's namespace; `None` selects the default.
     pub async fn start(
         endpoint: Endpoint,
         worker_id: WorkerId,
@@ -80,7 +77,7 @@ impl KvStateAttachmentOwner {
         host_component: Option<String>,
     ) -> Result<Arc<Self>> {
         validate_descriptors(&descriptors)?;
-        let host_component = resolve_host_component(host_component)?;
+        let host_component = host_component_or_default(host_component);
         let component = endpoint.component().clone();
         let host = discover_single_host(&component, &host_component).await?;
         let producer_instance = producer_instance(&endpoint).await?;
@@ -193,15 +190,10 @@ fn validate_descriptors(descriptors: &[KvStateAttachmentDescriptor]) -> Result<(
     Ok(())
 }
 
-/// The host component a worker searches: the one it names, or the default.
-fn resolve_host_component(host_component: Option<String>) -> Result<String> {
-    match host_component {
-        None => Ok(DEFAULT_HOST_COMPONENT.to_string()),
-        Some(name) if name.trim().is_empty() => {
-            anyhow::bail!("KV state-agent host component must not be empty")
-        }
-        Some(name) => Ok(name),
-    }
+/// An empty name means unset, as it does for the worker's KV state endpoint.
+fn host_component_or_default(name: Option<String>) -> String {
+    name.filter(|name| !name.is_empty())
+        .unwrap_or_else(|| DEFAULT_HOST_COMPONENT.to_string())
 }
 
 /// Resolve the single live V2 state-agent host registered under
@@ -258,14 +250,12 @@ async fn await_single_host(
     timeout: Duration,
     shutdown: &CancellationToken,
 ) -> Result<KvStateHostAdvertisement> {
-    // NOTE: V2 assumes one host per control scope (a namespace and host
-    // component) that remains alive for the deployment run. Hosts under other
-    // components in the namespace serve other workers and are not candidates.
-    // This wait covers only start ordering: source mode is immutable for a
-    // worker lifecycle, so a worker that races the host's advertisement would
-    // otherwise serve without KV routing until it restarts. TODO(#13044):
-    // watch and reselect the host after startup when rolling host replacement
-    // and Kubernetes lifecycle are supported.
+    // NOTE: V2 assumes one host per control scope that remains alive for the
+    // deployment run. This wait covers only start ordering: source mode is
+    // immutable for a worker lifecycle, so a worker that races the host's
+    // advertisement would otherwise serve without KV routing until it
+    // restarts. TODO(#13044): watch and reselect the host after startup when
+    // rolling host replacement and Kubernetes lifecycle are supported.
     if timeout.is_zero() {
         return match list_single_host(discovery, namespace, host_component).await? {
             Some(host) => Ok(host),
@@ -681,7 +671,7 @@ mod tests {
     fn intent_query() -> DiscoveryQuery {
         DiscoveryQuery::EventSources(EventSourceQuery::topic(
             "ns",
-            DEFAULT_HOST_COMPONENT,
+            "kv_state_agent",
             KV_STATE_ATTACHMENT_INTENT_TOPIC_V2,
         ))
     }
@@ -764,8 +754,7 @@ mod tests {
         Arc::new(MockDiscovery::new(Some(1), SharedMockRegistry::new()))
     }
 
-    /// Advertise a host on the V2 topic the way `state_agent_host` would:
-    /// under the component its control endpoint lives in.
+    /// Advertise a host on the V2 topic the way `state_agent_host` would.
     async fn register_host(
         discovery: &dyn Discovery,
         publisher_id: u64,
@@ -943,8 +932,6 @@ mod tests {
         assert!(format!("{error:#}").contains("exactly one live V2 host, found 2"));
     }
 
-    /// Hosts under different components coexist in one namespace: a worker
-    /// sees only the host under the component it names.
     #[tokio::test]
     async fn hosts_under_distinct_components_are_selected_independently() {
         let discovery = mock_discovery();
@@ -980,18 +967,13 @@ mod tests {
     }
 
     #[test]
-    fn host_component_defaults_and_rejects_an_empty_name() {
+    fn host_component_defaults_when_unset_or_empty() {
+        for unset in [None, Some(String::new())] {
+            assert_eq!(host_component_or_default(unset), DEFAULT_HOST_COMPONENT);
+        }
         assert_eq!(
-            resolve_host_component(None).unwrap(),
-            DEFAULT_HOST_COMPONENT
-        );
-        assert_eq!(
-            resolve_host_component(Some("kv_state_agent_3".to_string())).unwrap(),
+            host_component_or_default(Some("kv_state_agent_3".to_string())),
             "kv_state_agent_3"
         );
-        for empty in ["", "  "] {
-            let error = resolve_host_component(Some(empty.to_string())).unwrap_err();
-            assert!(format!("{error:#}").contains("must not be empty"));
-        }
     }
 }

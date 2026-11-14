@@ -37,6 +37,9 @@ Start a state-agent host in the workers' namespace before starting the workers:
 DYN_NAMESPACE=<worker-namespace> python -m dynamo.kv_state_agent
 ```
 
+To run more than one host in a namespace, start each with its own `--component`
+and start its workers with the matching `--kv-state-agent-component`.
+
 The worker reads the raw-event endpoint, incarnation-specific topic, cache owner,
 and peer-control endpoint from SGLang startup metadata. It attaches before model
 registration and uses `state_agent_v2` instead of the legacy event publisher.
