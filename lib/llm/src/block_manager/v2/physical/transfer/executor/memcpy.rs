@@ -5,6 +5,7 @@
 
 use crate::block_manager::v2::physical::transfer::PhysicalLayout;
 use crate::block_manager::v2::physical::transfer::context::TransferCompleteNotification;
+use crate::block_manager::v2::physical::transfer::validation::validate_layout_compatibility;
 use anyhow::Result;
 use std::ops::Range;
 
@@ -26,24 +27,8 @@ pub fn execute_memcpy_transfer(
     layer_range: Option<Range<usize>>,
 ) -> Result<TransferCompleteNotification> {
     // Validate layouts have compatible structure
+    validate_layout_compatibility(src, dst)?;
     let src_layout = src.layout();
-    let dst_layout = dst.layout();
-
-    if src_layout.num_layers() != dst_layout.num_layers() {
-        return Err(anyhow::anyhow!(
-            "Layouts have incompatible layer counts: src={}, dst={}",
-            src_layout.num_layers(),
-            dst_layout.num_layers()
-        ));
-    }
-
-    if src_layout.outer_dim() != dst_layout.outer_dim() {
-        return Err(anyhow::anyhow!(
-            "Layouts have incompatible outer dimensions: src={}, dst={}",
-            src_layout.outer_dim(),
-            dst_layout.outer_dim()
-        ));
-    }
 
     // Determine layer range
     let layers = layer_range.unwrap_or(0..src_layout.num_layers());
