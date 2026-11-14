@@ -62,7 +62,6 @@ fn cancelled(state: &ResponseState) -> LLMEngineOutput {
         .with_usage(state.completion_usage(state.reported_completion_tokens(), None))
 }
 
-/// Resolves at `deadline`, or never when there is none.
 async fn drain_expired(deadline: Option<Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -71,20 +70,32 @@ async fn drain_expired(deadline: Option<Instant>) {
 }
 
 /// Abort a cancelled decode request vLLM never answered. The adapter sends no
-/// abort before a first token, so this is the only one vLLM gets.
-async fn abort_undrained_decode(client: &VllmClient, request_id: &str, timeout: Duration) {
+/// abort before a first token, so this is the only one vLLM gets. Shutdown
+/// interrupts the abort.
+async fn abort_undrained_decode(
+    client: &VllmClient,
+    request_id: &str,
+    timeout: Duration,
+    shutdown: impl std::future::Future<Output = ()>,
+) {
     tracing::warn!(
         request_id,
         ?timeout,
         "Cancelled vLLM decode request produced no first token before the drain deadline; forcing abort"
     );
-    if let Err(error) = client.abort(request_id.to_string()).await {
-        // Escaped: the message embeds the engine's gRPC status text.
-        tracing::warn!(
-            request_id,
-            error = %error.to_string().escape_debug(),
-            "vLLM Control.Abort failed"
-        );
+    tokio::select! {
+        biased;
+        _ = shutdown => {}
+        result = client.abort(request_id.to_string()) => {
+            if let Err(error) = result {
+                // Escaped: the message embeds the engine's gRPC status text.
+                tracing::warn!(
+                    request_id,
+                    error = %error.to_string().escape_debug(),
+                    "vLLM Control.Abort failed"
+                );
+            }
+        }
     }
 }
 
@@ -978,7 +989,13 @@ impl LLMEngine for VllmSidecarEngine {
                     drain_deadline = Some(Instant::now() + drain_timeout);
                 }
                 _ = drain_expired(drain_deadline) => {
-                    abort_undrained_decode(client, ctx.id(), drain_timeout).await;
+                    abort_undrained_decode(
+                        client,
+                        ctx.id(),
+                        drain_timeout,
+                        shutdown_cancellation.as_mut(),
+                    )
+                    .await;
                     break None;
                 }
                 result = &mut submit => break Some(result?),
@@ -1000,7 +1017,13 @@ impl LLMEngine for VllmSidecarEngine {
                         _ = shutdown_cancellation.as_mut() => None,
                         _ = drain_expired(drain_deadline) => {
                             if let Some(client) = &abort_client {
-                                abort_undrained_decode(client, ctx.id(), drain_timeout).await;
+                                abort_undrained_decode(
+                        client,
+                        ctx.id(),
+                        drain_timeout,
+                        shutdown_cancellation.as_mut(),
+                    )
+                    .await;
                             }
                             None
                         }

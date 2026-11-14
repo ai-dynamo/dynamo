@@ -83,7 +83,6 @@ fn cancelled(state: &ResponseState) -> LLMEngineOutput {
     LLMEngineOutput::cancelled().with_usage(usage(state.prompt_tokens(), state.completion_tokens()))
 }
 
-/// Resolves at `deadline`, or never when there is none.
 async fn drain_expired(deadline: Option<Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -93,19 +92,31 @@ async fn drain_expired(deadline: Option<Instant>) {
 
 /// Abort a cancelled handoff decode request TensorRT-LLM never answered. The
 /// adapter sends no abort before a first token, so this is the engine's only one.
-async fn abort_undrained_decode(client: &TrtllmClient, request_id: &str, timeout: Duration) {
+/// Shutdown interrupts the abort.
+async fn abort_undrained_decode(
+    client: &TrtllmClient,
+    request_id: &str,
+    timeout: Duration,
+    shutdown: impl std::future::Future<Output = ()>,
+) {
     tracing::warn!(
         request_id,
         ?timeout,
         "Cancelled TensorRT-LLM decode request produced no first token before the drain deadline; forcing abort"
     );
-    if let Err(error) = client.abort(request_id.to_string()).await {
-        // Escaped: the message embeds the engine's gRPC status text.
-        tracing::warn!(
-            request_id,
-            error = %error.to_string().escape_debug(),
-            "TensorRT-LLM Control.Abort failed"
-        );
+    tokio::select! {
+        biased;
+        _ = shutdown => {}
+        result = client.abort(request_id.to_string()) => {
+            if let Err(error) = result {
+                // Escaped: the message embeds the engine's gRPC status text.
+                tracing::warn!(
+                    request_id,
+                    error = %error.to_string().escape_debug(),
+                    "TensorRT-LLM Control.Abort failed"
+                );
+            }
+        }
     }
 }
 
@@ -633,7 +644,13 @@ impl LLMEngine for TrtllmSidecarEngine {
                     }
                     _ = &mut shutdown_cancellation => break None,
                     _ = drain_expired(drain_deadline) => {
-                        abort_undrained_decode(client, &request_id, drain_timeout).await;
+                        abort_undrained_decode(
+                            client,
+                            &request_id,
+                            drain_timeout,
+                            &mut shutdown_cancellation,
+                        )
+                        .await;
                         break None;
                     }
                     result = &mut dispatch => break Some(result?),
@@ -650,7 +667,6 @@ impl LLMEngine for TrtllmSidecarEngine {
             let mut is_transfer_settled = false;
             loop {
                 if drain_deadline.is_some() && is_transfer_settled {
-                    // The transfer landed, so the deferred cancellation applies.
                     yield Ok(cancelled(&state));
                     break;
                 }
@@ -670,7 +686,13 @@ impl LLMEngine for TrtllmSidecarEngine {
                     }
                     _ = drain_expired(drain_deadline), if drain_deadline.is_some() => {
                         if let Some(client) = &abort_client {
-                            abort_undrained_decode(client, &request_id, drain_timeout).await;
+                            abort_undrained_decode(
+                            client,
+                            &request_id,
+                            drain_timeout,
+                            &mut shutdown_cancellation,
+                        )
+                        .await;
                         }
                         yield Ok(cancelled(&state));
                         break;
