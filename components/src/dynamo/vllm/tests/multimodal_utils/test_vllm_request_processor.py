@@ -2200,8 +2200,9 @@ def _k3_processor(
     return processor, engine_client
 
 
-def test_k3_pad_expands_once_for_scalar_image():
-    processor, _ = _k3_processor()
+@pytest.mark.parametrize("model_type", ["kimi_k3", "kimi_k31"])
+def test_k3_pad_expands_once_for_scalar_image(model_type):
+    processor, _ = _k3_processor(model_type=model_type)
 
     result = processor._expand_kimi_k3_pads(
         [1, _K3_PAD_ID, 2],
@@ -2211,8 +2212,9 @@ def test_k3_pad_expands_once_for_scalar_image():
     assert result == [1, *_K3_NATIVE_IDS, 2]
 
 
-def test_k3_pad_expands_once_per_image():
-    processor, _ = _k3_processor()
+@pytest.mark.parametrize("model_type", ["kimi_k3", "kimi_k31"])
+def test_k3_pad_expands_once_per_image(model_type):
+    processor, _ = _k3_processor(model_type=model_type)
 
     result = processor._expand_kimi_k3_pads(
         [_K3_PAD_ID, 7, _K3_PAD_ID],
@@ -2297,13 +2299,16 @@ def test_k3_without_raw_image_media_is_untouched():
         (_K3_PAD_ID, "<|kimi_image_placeholder|>", ["bad"], "non-empty integer"),
     ],
 )
+@pytest.mark.parametrize("model_type", ["kimi_k3", "kimi_k31"])
 def test_invalid_k3_metadata_fails_fast(
     pad_id: object,
     image_placeholder: object,
     native_ids: object,
     message: str,
+    model_type: str,
 ):
     processor, _ = _k3_processor(
+        model_type=model_type,
         pad_id=pad_id,
         image_placeholder=image_placeholder,
         native_ids=native_ids,

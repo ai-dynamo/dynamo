@@ -223,6 +223,7 @@ STUB_MODULES = [
     "sglang.srt.parser.conversation",
     "sglang.srt.parser.jinja_template_utils",
     "sglang.srt.parser.reasoning_parser",
+    "sglang.srt.runtime_context",
     "sglang.srt.sampling",
     "sglang.srt.sampling.custom_logit_processor",
     "sglang.srt.speculative",

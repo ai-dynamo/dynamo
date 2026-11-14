@@ -426,7 +426,7 @@ class VllmMultimodalRequestProcessor:
         model_type = getattr(hf_config, "model_type", None)
         if model_type is None:
             return None
-        if model_type != "kimi_k3":
+        if model_type not in {"kimi_k3", "kimi_k31"}:
             self._k3_expansion_cached = True
             return None
 
