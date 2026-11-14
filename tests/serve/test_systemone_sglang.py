@@ -49,6 +49,7 @@ def systemone_sglang_server(
     dynamo_dynamic_ports,
     predownload_models,
 ):
+    """Start a frontend and an opted-in serial SGLang decision worker."""
     assert re.fullmatch(
         r"0\.5\.(?:19|22|23)(?:\+cu[0-9]+)?", version("sglang")
     ), "Parity targets SGLang 0.5.19, 0.5.22, or 0.5.23 with an optional CUDA suffix"
