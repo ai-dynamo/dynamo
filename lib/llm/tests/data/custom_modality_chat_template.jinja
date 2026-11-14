@@ -1,0 +1,19 @@
+{# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. #}
+{# SPDX-License-Identifier: Apache-2.0 #}
+{%- for message in messages -%}
+{{- '<|' ~ message.role ~ '|>' -}}
+{%- if message.name is defined -%}{{- '[' ~ message.name ~ ']' -}}{%- endif -%}
+{%- if message.tool_call_id is defined -%}{{- '[' ~ message.tool_call_id ~ ']' -}}{%- endif -%}
+{%- if message.content is string -%}{{- message.content -}}
+{%- else -%}{%- for part in message.content or [] -%}
+{%- if part.type == 'text' -%}{{- part.text -}}
+{%- elif part.type == 'custom' -%}
+{%- if part.fields is defined -%}{{- raise_exception('custom payload reached template') -}}{%- endif -%}
+{%- if part.kind == 'chemistry' -%}{{- '<|chem_projected|>' -}}
+{%- elif part.kind == 'biology' -%}{{- '<|bio_projected|>' -}}{%- endif -%}
+{%- elif part.type == 'image' -%}{{- '<|image_1|>' -}}
+{%- elif part.type == 'audio' -%}{{- '<|audio|>' -}}
+{%- elif part.type == 'video' -%}{{- '<|video|>' -}}{%- endif -%}
+{%- endfor -%}{%- endif -%}{{- '<|end|>' -}}
+{%- endfor -%}
+{%- if add_generation_prompt -%}{{- '<|assistant|>' -}}{%- endif -%}

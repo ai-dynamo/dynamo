@@ -2782,6 +2782,19 @@ mod tests {
     // --- Image passthrough tests ---
 
     #[test]
+    fn test_url_image_source_remains_unsupported() {
+        let source = AnthropicImageSource::Url {
+            url: "https://example.org/image.png".into(),
+        };
+        assert!(
+            convert_image(&source)
+                .unwrap_err()
+                .to_string()
+                .contains("only base64 is supported")
+        );
+    }
+
+    #[test]
     fn test_image_block_becomes_multimodal_content() {
         let req = AnthropicCreateMessageRequest {
             model: "test-model".into(),

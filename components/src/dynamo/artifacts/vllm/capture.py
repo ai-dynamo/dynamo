@@ -368,12 +368,12 @@ class VllmArtifactSession:
                 )
             )
         if "topk_logprobs" in self.contents:
-            candidates = np.asarray(self.candidates, dtype=np.int64).reshape(
-                -1, self.logprob_width
-            )
-            scores = np.asarray(self.candidate_scores, dtype=np.float32).reshape(
-                -1, self.logprob_width
-            )
+            candidates: np.ndarray[Any, np.dtype[np.int64]] = np.asarray(
+                self.candidates, dtype=np.int64
+            ).reshape(-1, self.logprob_width)
+            scores: np.ndarray[Any, np.dtype[np.float32]] = np.asarray(
+                self.candidate_scores, dtype=np.float32
+            ).reshape(-1, self.logprob_width)
             if candidates.ndim != 2 or scores.shape != candidates.shape:
                 raise ValueError("top-k logprobs do not have constant width")
             components.append(
