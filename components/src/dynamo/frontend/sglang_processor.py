@@ -19,6 +19,11 @@ from typing import Any, cast
 
 from sglang.srt.parser.conversation import chat_template_exists
 
+try:
+    import fastokens
+except ImportError:  # Optional: only `--tokenizer fastokens` needs it.
+    fastokens = None
+
 from dynamo._internal import ModelDeploymentCard
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
@@ -243,13 +248,70 @@ def _model_eos_token_ids(tokenizer: Any, source_path: str) -> list[int]:
     return token_ids
 
 
-def _load_tokenizer(source_path: str, trust_remote_code: bool):
+def _sglang_tokenizer_backend(frontend_backend: str) -> str:
+    """Map the frontend `--tokenizer` value to SGLang's `tokenizer_backend`."""
+    if frontend_backend == "fastokens":
+        return "fastokens"
+    if frontend_backend != "default":
+        logger.warning(
+            "--tokenizer %s has no SGLang chat processor equivalent; using HuggingFace",
+            frontend_backend,
+        )
+    return "huggingface"
+
+
+def _load_tokenizer(
+    source_path: str, trust_remote_code: bool, tokenizer_backend: str = "huggingface"
+):
     """Load the SGLang tokenizer, falling back to an on-disk chat template
     (e.g. chat_template.json) when the tokenizer defines none."""
-    tokenizer = get_tokenizer(source_path, trust_remote_code=trust_remote_code)
+    if tokenizer_backend == "huggingface":
+        tokenizer = get_tokenizer(source_path, trust_remote_code=trust_remote_code)
+    else:
+        if tokenizer_backend == "fastokens" and fastokens is not None:
+            # Idempotent. SGLang patches only once per process, so re-patch here
+            # in case an earlier model's fallback unpatched transformers.
+            fastokens.patch_transformers()
+        tokenizer = get_tokenizer(
+            source_path,
+            trust_remote_code=trust_remote_code,
+            tokenizer_backend=tokenizer_backend,
+        )
     if getattr(tokenizer, "chat_template", None) is None:
         tokenizer.chat_template = resolve_chat_template(source_path, backend="sglang")
     return tokenizer
+
+
+def _load_tokenizer_with_fallback(
+    source_path: str,
+    trust_remote_code: bool,
+    tokenizer_backend: str,
+    tokenizer_fallback: bool,
+) -> tuple[Any, str]:
+    """Load the tokenizer; return it with the backend actually in use.
+
+    Follows the Rust frontend's `--tokenizer-fallback` contract: when fastokens
+    is missing or cannot load the model's tokenizer, log a warning and use
+    HuggingFace, or raise when fallback is disabled.
+    """
+    try:
+        return (
+            _load_tokenizer(source_path, trust_remote_code, tokenizer_backend),
+            tokenizer_backend,
+        )
+    except (ImportError, RuntimeError) as exc:
+        if tokenizer_backend == "huggingface" or not tokenizer_fallback:
+            raise
+        logger.warning(
+            "Failed to load the %s tokenizer backend, falling back to HuggingFace: %s",
+            tokenizer_backend,
+            exc,
+        )
+    if fastokens is not None:
+        # The failed load left transformers patched process-wide, which would
+        # also break the HuggingFace load.
+        fastokens.unpatch_transformers()
+    return _load_tokenizer(source_path, trust_remote_code), "huggingface"
 
 
 def _runtime_config_parser_name(
@@ -386,13 +448,17 @@ def _init_worker(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    tokenizer_backend: str = "huggingface",
+    tokenizer_fallback: bool = True,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
     global _w_default_thinking_mode, _w_structural_tag_mode
     global _w_structural_tag_scope, _w_structural_tag_schema, _w_prompt_renderer
-    _w_tokenizer = _load_tokenizer(model_path, trust_remote_code)
+    _w_tokenizer, _ = _load_tokenizer_with_fallback(
+        model_path, trust_remote_code, tokenizer_backend, tokenizer_fallback
+    )
     if chat_template is not None:
         _w_tokenizer.chat_template = chat_template
     _w_tool_call_parser_name = tool_call_parser_name
@@ -1220,6 +1286,8 @@ class SglangEngineFactory:
         self.chat_template = chat_template
 
         self.trust_remote_code = config.trust_remote_code
+        self.tokenizer_backend = _sglang_tokenizer_backend(config.tokenizer_backend)
+        self.tokenizer_fallback = config.tokenizer_fallback
         self.stream_interval = 20
         raw_stream_interval = os.getenv("DYN_SGLANG_STREAM_INTERVAL")
         if raw_stream_interval:
@@ -1254,7 +1322,13 @@ class SglangEngineFactory:
             )
 
         logger.info("Loading SGLang tokenizer from %s", local_dir)
-        tokenizer = _load_tokenizer(local_dir, self.trust_remote_code)
+        tokenizer, tokenizer_backend = _load_tokenizer_with_fallback(
+            local_dir,
+            self.trust_remote_code,
+            self.tokenizer_backend,
+            self.tokenizer_fallback,
+        )
+        logger.info("SGLang tokenizer backend: %s", tokenizer_backend)
         chat_template = _load_chat_template(self.chat_template)
         if chat_template is not None:
             logger.info("Using custom chat template override")
@@ -1322,6 +1396,9 @@ class SglangEngineFactory:
                     structural_tag_mode,
                     structural_tag_scope,
                     structural_tag_schema,
+                    # The main process's result, so workers skip a failed backend.
+                    tokenizer_backend,
+                    self.tokenizer_fallback,
                 ),
             )
             futures = [

@@ -488,6 +488,11 @@ follow_imports = "silent"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# fastokens is an optional tokenizer backend absent from the mypy environment.
+module = ["fastokens", "fastokens.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 # Skip mypy analysis on backend framework internals.
 # ignore_missing_imports silences import-not-found only when the backend
 # is not installed (e.g. sglang/trtllm missing in the vllm container).
