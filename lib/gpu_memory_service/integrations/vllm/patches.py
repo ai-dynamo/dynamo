@@ -101,10 +101,27 @@ def patch_request_memory() -> None:
         logger.debug("[GMS Patch] vllm.v1.worker.utils not available")
         return
 
-    def patched_request_memory(init_snapshot, cache_config):
+    # vLLM 0.32+ CUDA workers pass external_weight_memory positionally; the
+    # default keeps two-argument callers (XPU worker, vLLM <= 0.31) working.
+    def patched_request_memory(init_snapshot, cache_config, external_weight_memory=0):
+        """Return the engine's GPU budget without checking available memory.
+
+        Positive external weight memory is subtracted from the requested budget.
+        """
         requested_memory = int(
             init_snapshot.total_memory * cache_config.gpu_memory_utilization
         )
+        if external_weight_memory > 0:
+            # Match upstream: return only the engine's share of the budget.
+            engine_memory = requested_memory - external_weight_memory
+            logger.info(
+                "[GMS Patch] Shadow mode: bypassing memory check "
+                "(requested=%.2f GiB, external=%.2f GiB, free=%.2f GiB)",
+                requested_memory / (1 << 30),
+                external_weight_memory / (1 << 30),
+                init_snapshot.free_memory / (1 << 30),
+            )
+            return engine_memory
         logger.info(
             "[GMS Patch] Shadow mode: bypassing memory check "
             "(requested=%.2f GiB, free=%.2f GiB)",
