@@ -165,7 +165,6 @@ html.dark,
 /* Sidebar styling */
 #fern-sidebar {
     border-right: 1px solid var(--border, var(--grayscale-a5)) !important;
-    height: 100vh !important;
 }
 .fern-sidebar-link:not(:hover) {
     background-color: transparent !important;
