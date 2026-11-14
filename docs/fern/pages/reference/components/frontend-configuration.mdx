@@ -984,6 +984,15 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
   backend. Named passthrough fields remain subject to their normal validation and handling.
 </ParamField>
 
+<ParamField path="DYN_OPENAI_FE_IGNORED_FIELDS" type="string" default="unset">
+  A comma-separated list of unknown top-level request fields that `/v1/chat/completions` and
+  `/v1/completions` ignore and drop instead of rejecting, for example `reasoning_split`. Other
+  unknown fields are still rejected, unless `DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS` is truthy:
+  that switch takes precedence and drops every unknown field. Use this list in its place when
+  clients send a known set of extension fields. Like that switch, it does not forward fields to a
+  backend.
+</ParamField>
+
 <ParamField path="DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION" type="boolean" default="false">
   When truthy, the frontend skips Dynamo's preflight validation of function parameter schemas
   with explicit `strict: true`. This applies to `/v1/chat/completions`, `/v1/responses` (including

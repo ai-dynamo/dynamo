@@ -483,6 +483,11 @@ pub mod llm {
     pub const DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: &str =
         "DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS";
 
+    /// Comma-separated unknown OpenAI frontend request fields to drop instead of
+    /// rejecting. Other unknown fields are still rejected unless
+    /// `DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS` is truthy.
+    pub const DYN_OPENAI_FE_IGNORED_FIELDS: &str = "DYN_OPENAI_FE_IGNORED_FIELDS";
+
     /// Skip OpenAI strict function-tool schema preflight for legacy clients.
     /// Request schemas and strictness are preserved; basic tool validation and
     /// downstream processor/backend constraints remain active.
@@ -1294,6 +1299,7 @@ mod tests {
             llm::DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS,
             llm::DYN_DISABLE_FRONTEND_NVEXT,
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+            llm::DYN_OPENAI_FE_IGNORED_FIELDS,
             llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
             llm::DYN_ENABLE_FRONTEND_ADMIN_API,
             llm::DYN_FRONTEND_ADMIN_HOST,
