@@ -126,6 +126,12 @@ ARG AWS_SDK_CPP_VERSION={{ context.vllm.aws_sdk_cpp_version }}
 ARG MODELEXPRESS_VERSION={{ context[framework].modelexpress_version }}
 {%- endif -%}
 
+{% if framework == "sglang" and device == "cuda" %}
+
+# MiniMax MSA kernels commit, installed in sglang_runtime.Dockerfile
+ARG MSA_COMMIT={{ context.sglang[device_key].msa_commit }}
+{% endif -%}
+
 {% if make_efa == true %}
 ARG EFA_VERSION={{ context.dynamo.efa_version }}
 ARG EFA_BASE_IMAGE={{ "runtime" if target=="runtime" else "dev" }}

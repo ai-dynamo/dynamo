@@ -103,6 +103,16 @@ packages:
       - trtllm-runtime
       - trtllm-runtime-efa
 
+  # CUTLASS headers — submodule of the MiniMax MSA checkout at /sgl-workspace/minimax-msa,
+  # shipped as source; MSA JIT-compiles its kernels against them on first use.
+  - name: CUTLASS
+    version: dc45f979ae336a235da1676b311f35efeb30149a
+    license: BSD-3-Clause
+    source: https://github.com/NVIDIA/cutlass
+    images:
+      - sglang-runtime
+      - sglang-runtime-efa
+
   # gdrcopy — GPUDirect RDMA copy library, built from source in wheel_builder for
   # CUDA images and installed outside apt.
   - name: gdrcopy
