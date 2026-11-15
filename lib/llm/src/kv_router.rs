@@ -750,8 +750,6 @@ pub struct KvRouter {
     cancellation_token: CancellationToken,
     client: Client,
     is_eagle: bool,
-    /// Present when KV events arrive over the Dynamo event plane; a frontend
-    /// that dials engines directly subscribes to their own publishers instead.
     ingress: Option<Arc<indexer::RuntimeIngress>>,
     tracking_hash: TrackingHashContext,
     tracking_model_name: String,
