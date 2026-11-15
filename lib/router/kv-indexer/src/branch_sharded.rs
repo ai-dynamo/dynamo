@@ -28,7 +28,7 @@ use dashmap::{DashMap, DashSet};
 use rustc_hash::{FxBuildHasher, FxHashSet};
 
 #[cfg(feature = "bench")]
-use super::ShardedIndexerMetrics;
+use super::metrics::ShardedIndexerMetrics;
 use super::shard_handle::AsyncShardHandle;
 use super::{
     AnchorRef, AnchorTask, KvIndexerInterface, KvRouterError, ShardSizeSnapshot, ThreadPoolIndexer,

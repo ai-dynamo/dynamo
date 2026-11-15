@@ -14,10 +14,11 @@ use crate::protocols::RoutingConstraints;
 use crate::replication::HostReplicaChannels;
 use crate::test_utils::{test_core_with, test_router_config};
 use dynamo_kv_events::residency::StorageTier;
-use dynamo_kv_indexer::backend::{RemotePrimary, test_util::store_event};
-use dynamo_kv_indexer::residency::ResidencyOwnerKeyExt;
+use dynamo_kv_indexer::RemotePrimary;
+use dynamo_kv_indexer::ResidencyOwnerKeyExt;
+use dynamo_kv_indexer::testing::store_event;
 use dynamo_session_affinity::SessionAffinityMode;
-use dynamo_slot_tracker::wire::{ActiveSequenceEvent, ActiveSequenceEventData};
+use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
 use dynamo_worker_selection::experimental::resident_blocks::ResidentBlocksByRow;
 use dynamo_worker_selection::{
     WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
@@ -688,7 +689,7 @@ async fn fetch_continuation_books_one_source_from_each_actual_local_frontier() {
     use dynamo_kv_hashing::routing::{
         BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
     };
-    use dynamo_kv_indexer::residency::{
+    use dynamo_kv_indexer::{
         ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
     };
 
@@ -941,7 +942,7 @@ impl crate::selector::WorkerPicker for CapturingPicker {
         &self,
         context: &crate::selector::WorkerSelectionContext<'_>,
         input: crate::selector::WorkerInputView<'_>,
-    ) -> Result<usize, crate::WorkerSelectionPolicyError> {
+    ) -> Result<usize, crate::types::WorkerSelectionPolicyError> {
         self.observed.lock().push(SelectionObservation {
             session_context: context.session_context().cloned(),
             affinity_target: context.affinity_target(),
@@ -1137,7 +1138,7 @@ async fn declaring_policy_reads_live_resident_blocks() {
 
 #[tokio::test]
 async fn only_a_declaring_policy_tracks_resident_blocks() {
-    let indexer = dynamo_kv_indexer::backend::create_indexer(16, 1);
+    let indexer = dynamo_kv_indexer::create_indexer(16, 1);
     let key = default_key();
     let track = |inputs| super::workers::track_resident_blocks(&key, inputs, &indexer);
     assert!(track(WorkerInputs::CACHE | WorkerInputs::LOAD).is_none());
@@ -1584,7 +1585,7 @@ async fn session_context_reaches_worker_selection() {
         assert_eq!(context.session_final(), Some(true));
         assert_eq!(
             context.input_trigger(),
-            Some(crate::WorkerSelectionInputTrigger::ToolResult)
+            Some(crate::types::WorkerSelectionInputTrigger::ToolResult)
         );
         assert!(std::ptr::eq(
             context.agent_headers(),
@@ -2206,8 +2207,8 @@ async fn shutdown_interrupts_indexer_waits(
 /// releases the id claim.
 #[tokio::test]
 async fn dropped_book_selection_during_routing_record_frees_booking_and_claim() {
+    use dynamo_kv_indexer::RemotePrimary;
     use dynamo_kv_indexer::TieredMatchDetails;
-    use dynamo_kv_indexer::backend::RemotePrimary;
     struct PausedRecord {
         entered: AtomicBool,
         release: tokio::sync::Notify,
@@ -2362,7 +2363,7 @@ async fn explicit_reservation_of_a_live_id_is_a_conflict() {
 
 #[test]
 fn index_observer_replaces_stale_and_claimed_rows_of_its_partition() {
-    use crate::AttemptId;
+    use crate::types::AttemptId;
     let index = Arc::new(RwLock::new(HashMap::new()));
     let partition = default_key();
     let observer = ReservationIndexObserver {
@@ -2422,7 +2423,7 @@ fn index_observer_replaces_stale_and_claimed_rows_of_its_partition() {
 
 #[tokio::test]
 async fn index_observer_releases_displaced_affinity_after_unlock() {
-    use crate::AttemptId;
+    use crate::types::AttemptId;
     use dynamo_session_affinity::{AffinityReplicaSink, AffinityVersion};
 
     struct UnlockedIndexSink {
@@ -2475,7 +2476,7 @@ async fn index_observer_releases_displaced_affinity_after_unlock() {
 async fn replaced_claim_cannot_remove_or_overwrite_a_new_reservation(
     #[values("drop", "pending", "installed")] replacement: &str,
 ) {
-    use crate::AttemptId;
+    use crate::types::AttemptId;
     let core = local_core(test_config(false));
     let key = default_key();
     core.upsert_worker(worker(1)).await.unwrap();
@@ -4045,7 +4046,7 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
         RoutingScopeId, StableDpSlotId,
     };
     use dynamo_kv_events::residency::ResidencyOwner;
-    use dynamo_kv_indexer::residency::{
+    use dynamo_kv_indexer::{
         ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
     };
     let mut stale = hint_config("prefill", &[(0, "tcp://stale-worker:23280")]);
@@ -4248,7 +4249,7 @@ fn cache_owner_island_is_published_or_taken_from_its_attached_worker() {
         RoutingScopeId, StableDpSlotId,
     };
     use dynamo_kv_events::residency::ResidencyOwner;
-    use dynamo_kv_indexer::residency::{
+    use dynamo_kv_indexer::{
         ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
     };
     let owner = |slot: u8| {

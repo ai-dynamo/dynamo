@@ -23,7 +23,7 @@ use dynamo_kv_hashing::multimodal::{BlockExtraInfo, BlockMmObjectInfo};
 use dynamo_kv_hashing::routing::{
     BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
-use dynamo_kv_indexer::overlap::OverlapScores;
+use dynamo_kv_indexer::OverlapScores;
 use dynamo_kv_indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
 use dynamo_router_protocol::identity::RoutingPartitionRef;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
@@ -2113,7 +2113,7 @@ async fn register_rejects_oversized_dp_range() {
             "model_name": "model",
             "endpoint": "http://worker-1:8000",
             "block_size": 4,
-            "data_parallel_size": dynamo_slot_tracker::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER + 1,
+            "data_parallel_size": dynamo_slot_tracker::MAX_DATA_PARALLEL_RANKS_PER_WORKER + 1,
         })
         .to_string(),
     )

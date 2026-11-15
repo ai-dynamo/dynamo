@@ -55,10 +55,10 @@ pub use crate::types::{
     SchedulingRequest,
 };
 pub use crate::types::{RejectThresholdsProvider, WorkerSelectionPolicyFactory};
-pub use dynamo_admission::classifier::RequestLifecycle;
+pub use dynamo_admission::RequestLifecycle;
 pub use dynamo_kv_hints::{KvHintTransferWorkerMetadata, KvTransferEnforcement};
-pub use dynamo_kv_indexer::backend::IndexerPolicy;
-pub use dynamo_kv_indexer::registry::IndexRegistry;
+pub use dynamo_kv_indexer::IndexRegistry;
+pub use dynamo_kv_indexer::IndexerPolicy;
 
 // What the frontend host (lib/llm) names beyond the lists above.
 pub use crate::filter::{RoutingEligibility, WorkerEligibilityError};
