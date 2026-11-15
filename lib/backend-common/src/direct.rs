@@ -125,12 +125,23 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Dire
 ///
 /// `config` is the worker configuration a sidecar for these engines would run
 /// with. Each engine's role comes from its spec, not from `config`.
+///
+/// `drt` must use process-local discovery: the engines are listed by the
+/// operator, not discovered, and their records name addresses only this
+/// frontend can dial.
 pub async fn serve_direct_engines(
     drt: &DistributedRuntime,
     config: WorkerConfig,
     specs: Vec<DirectEngineSpec>,
     factory: DirectEngineFactory,
 ) -> Result<Arc<DirectDispatch>, DynamoError> {
+    if !drt.discovery_is_process_local() {
+        return Err(error(
+            ErrorType::InvalidArgument,
+            "direct mode needs process-local discovery (--discovery-backend mem); \
+             engines are listed, not discovered",
+        ));
+    }
     if specs.is_empty() {
         return Err(error(
             ErrorType::InvalidArgument,
@@ -815,6 +826,32 @@ mod tests {
         frontend
             .chat_until(|f| f.served(A) > 0 && f.served(B) > 0)
             .await;
+    }
+
+    #[tokio::test]
+    async fn shared_discovery_is_rejected() {
+        let store = tempfile::tempdir().unwrap();
+        let config = DistributedConfig {
+            discovery_backend: dynamo_runtime::distributed::DiscoveryBackend::KvStore(
+                dynamo_runtime::storage::kv::Selector::File(store.path().to_path_buf()),
+            ),
+            ..DistributedConfig::process_local()
+        };
+        let drt = DistributedRuntime::new(Runtime::from_current().unwrap(), config)
+            .await
+            .unwrap();
+        let factory: DirectEngineFactory = Arc::new(
+            |_: &DirectEngineSpec| -> Result<Arc<dyn LLMEngine>, DynamoError> {
+                panic!("no engine is built when discovery is shared")
+            },
+        );
+        let spec = DirectEngineSpec {
+            url: A.to_string(),
+            mode: DisaggregationMode::Aggregated,
+        };
+        let result = serve_direct_engines(&drt, WorkerConfig::default(), vec![spec], factory).await;
+        assert!(result.is_err());
+        drt.shutdown();
     }
 
     #[test]
