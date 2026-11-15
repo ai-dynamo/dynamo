@@ -226,6 +226,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             None,
         )?;
         Ok(common::SamplingOptions {
+            watermarking: self.common_ext().and_then(|common| common.watermarking),
             n,
             best_of,
             frequency_penalty,
