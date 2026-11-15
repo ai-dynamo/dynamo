@@ -647,6 +647,55 @@ fn cancelled_error(context_id: &str) -> anyhow::Error {
         .into()
 }
 
+/// KV events from engines the frontend dials directly: the ZMQ ingress, except
+/// that an engine advertising no publishers at all stays schedulable without
+/// prefix-cache scoring, as it does behind a sidecar. The plain ZMQ ingress
+/// holds such a worker back as incomplete.
+#[derive(Debug, Default)]
+struct DirectKvIngress(dynamo_kv_router::services::selection::ZmqDirectIngress);
+
+#[async_trait::async_trait]
+impl dynamo_scheduler::host::KvEventIngress for DirectKvIngress {
+    fn attach(
+        &self,
+        index: &Arc<dynamo_scheduler::host::IndexRegistry>,
+        cancel_token: CancellationToken,
+    ) {
+        self.0.attach(index, cancel_token);
+    }
+
+    fn open(
+        &self,
+        index: &dynamo_scheduler::host::IndexRegistry,
+        key: &dynamo_router_protocol::identity::RoutingPartitionId,
+        block_size: u32,
+    ) -> Indexer {
+        self.0.open(index, key, block_size)
+    }
+
+    fn missing_metadata(
+        &self,
+        record: &dynamo_scheduler::host::WorkerCatalogRecord,
+    ) -> Vec<String> {
+        if record.listener_endpoints().is_empty() {
+            return Vec::new();
+        }
+        self.0.missing_metadata(record)
+    }
+
+    async fn reconcile(
+        &self,
+        previous: Option<&dynamo_scheduler::host::WorkerCatalogRecord>,
+        record: &dynamo_scheduler::host::WorkerCatalogRecord,
+    ) -> Result<(), SelectionError> {
+        self.0.reconcile(previous, record).await
+    }
+
+    async fn detach(&self, record: &dynamo_scheduler::host::WorkerCatalogRecord) {
+        self.0.detach(record).await;
+    }
+}
+
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
 pub struct KvRouter {
@@ -838,10 +887,7 @@ impl KvRouter {
             Arc<dyn dynamo_scheduler::host::KvEventIngress>,
             Option<Arc<indexer::RuntimeIngress>>,
         ) = if direct_kv_events {
-            (
-                Arc::new(dynamo_kv_router::services::selection::ZmqDirectIngress::default()),
-                None,
-            )
+            (Arc::new(DirectKvIngress::default()), None)
         } else {
             let runtime_ingress = indexer::RuntimeIngress::start(indexer::RuntimeIngressArgs {
                 endpoint: &endpoint,

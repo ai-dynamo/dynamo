@@ -2471,8 +2471,11 @@ impl ModelManager {
             &effective_kv_router_config,
             index_inputs,
         );
-        let direct_kv_events = self.direct_dispatch.get().is_some();
-        // Directly dialed engines have no event-plane KV sources to track.
+        // Directly dialed engines publish KV events on their own sockets and
+        // have no event-plane KV sources to track. A router that wants no
+        // events keeps the runtime ingress, which then subscribes to nothing.
+        let direct_kv_events =
+            self.direct_dispatch.get().is_some() && kv_event_source_requirement.should_subscribe();
         let kv_source_membership =
             if !direct_kv_events && kv_event_source_requirement.should_subscribe() {
                 Some(

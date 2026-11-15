@@ -439,6 +439,8 @@ mod tests {
         lost: Notify,
         /// Signalled by `cleanup`, which ends a held request as cancelled.
         cleaned: Notify,
+        /// The ZMQ KV-event publisher the engine advertises, if any.
+        kv_events: Option<String>,
     }
 
     /// One incarnation of a listed engine: answers every request with one token.
@@ -499,6 +501,21 @@ mod tests {
             Ok(futures::stream::iter([Ok(chunk::token(1)), Ok(LLMEngineOutput::stop())]).boxed())
         }
 
+        async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
+            Ok(self
+                .state
+                .kv_events
+                .iter()
+                .map(|endpoint| KvEventSource::Zmq {
+                    endpoint: endpoint.clone(),
+                    topic: String::new(),
+                    dp_rank: 0,
+                    image_token_id: None,
+                    heartbeat_timeout: None,
+                })
+                .collect())
+        }
+
         async fn engine_lost(&self) -> DynamoError {
             self.state.lost.notified().await;
             error(
@@ -528,6 +545,17 @@ mod tests {
 
     impl Frontend {
         async fn start(namespace: &str, migration_limit: u32) -> Self {
+            Self::start_with(namespace, migration_limit, RouterConfig::default(), None).await
+        }
+
+        /// `a_kv_events` is the KV-event publisher engine `A` advertises; `B`
+        /// advertises none.
+        async fn start_with(
+            namespace: &str,
+            migration_limit: u32,
+            router_config: RouterConfig,
+            a_kv_events: Option<String>,
+        ) -> Self {
             let runtime = Runtime::from_current().unwrap();
             let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
                 .await
@@ -535,7 +563,10 @@ mod tests {
             let states: HashMap<&'static str, Arc<EngineState>> = [A, B]
                 .into_iter()
                 .map(|url| {
-                    let state = Arc::new(EngineState::default());
+                    let state = Arc::new(EngineState {
+                        kv_events: (url == A).then(|| a_kv_events.clone()).flatten(),
+                        ..EngineState::default()
+                    });
                     state.up.store(true, Ordering::SeqCst);
                     (url, state)
                 })
@@ -574,7 +605,7 @@ mod tests {
             let watcher = Arc::new(ModelWatcher::new(
                 drt.clone(),
                 manager.clone(),
-                RouterConfig::default(),
+                router_config,
                 migration_limit,
                 None,
                 None,
@@ -732,6 +763,31 @@ mod tests {
         });
         assert!(completed, "the request must complete on the other engine");
         assert_eq!(frontend.served(A) + frontend.served(B), before + 1);
+    }
+
+    #[tokio::test]
+    async fn kv_routing_reaches_engines_with_and_without_kv_publishers() {
+        // A port nothing listens on: the router's subscriber keeps reconnecting
+        // in the background, which does not hold the engine back.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let router_config = RouterConfig {
+            router_mode: dynamo_runtime::pipeline::RouterMode::KV,
+            ..RouterConfig::default()
+        };
+        let frontend = Frontend::start_with(
+            "direct-kv",
+            0,
+            router_config,
+            Some(format!("tcp://127.0.0.1:{port}")),
+        )
+        .await;
+        frontend
+            .chat_until(|f| f.served(A) > 0 && f.served(B) > 0)
+            .await;
     }
 
     #[test]
