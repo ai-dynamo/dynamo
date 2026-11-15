@@ -23,7 +23,7 @@ from dynamo.common.protocols.image_protocol import (
     NvImagesResponse,
 )
 from dynamo.common.protocols.request_parsing import parse_media_request
-from dynamo.common.storage import get_fs, upload_to_fs
+from dynamo.common.storage import get_fs, remove_from_fs, upload_to_fs
 from dynamo.common.utils.image_utils import encode_to_png_bytes
 from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
@@ -212,6 +212,7 @@ class ImageGenerationHandler(BaseGenerativeHandler):
             # Engine warns on batch mismatch; here we clamp to the caller's
             # requested count without padding or synthesizing.
             emit_count = min(images.shape[0], num_images_per_prompt)
+            uploaded_paths: list[str] = []
 
             async def _encode_one(i: int) -> ImageData:
                 image_np = images[i].cpu().numpy()
@@ -228,13 +229,20 @@ class ImageGenerationHandler(BaseGenerativeHandler):
                         image_bytes,
                         self.media_output_http_url,
                     )
+                    uploaded_paths.append(storage_path)
                     return ImageData(url=image_url)
                 b64_image = base64.b64encode(image_bytes).decode("utf-8")
                 return ImageData(b64_json=b64_image)
 
-            data_items: list[ImageData] = list(
-                await asyncio.gather(*(_encode_one(i) for i in range(emit_count)))
-            )
+            tasks = [asyncio.create_task(_encode_one(i)) for i in range(emit_count)]
+            try:
+                data_items: list[ImageData] = list(await asyncio.gather(*tasks))
+            except Exception:
+                # Other uploads may still finish after gather reports an error.
+                # Settle them before removing files so none appear after cleanup.
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await remove_from_fs(self.media_output_fs, uploaded_paths, request_id)
+                raise
 
         elif output.video is not None:
             raise RuntimeError(
