@@ -1289,6 +1289,17 @@ pub use dynamo_worker_selection::WorkerSelectionPolicyError;
 /// Pre-split `dynamo_kv_router::scheduling` items that moved; mounted by `src/scheduling/mod.rs`.
 pub mod scheduling {
     // Owner: dynamo_scheduler (36), dynamo_admission (8), dynamo_router_protocol (3), dynamo_worker_selection (2)
+    /// Pre-split `dynamo_kv_router::scheduling::config` items that moved; mounted by `src/scheduling/config.rs`.
+    pub mod config {
+        // Owner: dynamo_scheduler (2)
+        #[deprecated(
+            since = "1.8.0",
+            note = "moved to dynamo_scheduler::RouterConfigOverrideBuilder; removed in 1.10.0"
+        )]
+        pub type RouterConfigOverrideBuilder = dynamo_scheduler::RouterConfigOverrideBuilder;
+        pub use dynamo_scheduler::RouterConfigOverrideBuilderError;
+    }
+
     /// Pre-split `dynamo_kv_router::scheduling::overlap`; its items live in `dynamo_scheduler` now.
     pub mod overlap {
         // Owner: dynamo_scheduler (10)

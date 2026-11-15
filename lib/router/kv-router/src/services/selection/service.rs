@@ -27,14 +27,16 @@ use crate::plugins::RouterPluginRegistry;
 use dynamo_router_protocol::WorkerType;
 #[cfg(feature = "ingest-zmq")]
 use dynamo_scheduler::host::HostCache;
+#[cfg(feature = "ingest-zmq")]
+use dynamo_scheduler::host::KvIndexSource;
 use dynamo_scheduler::host::SelectionCacheConfig;
 use dynamo_scheduler::host::SelectionError;
-use dynamo_scheduler::host::{KvIndexSource, SelectionCore, SelectionHost};
 use dynamo_scheduler::host::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
     SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
 };
+use dynamo_scheduler::host::{SelectionCore, SelectionHost};
 use dynamo_session_affinity::{SessionAffinityConfig, SessionAffinityMode};
 
 pub struct SelectionServiceBuilder {
@@ -96,7 +98,7 @@ impl SelectionServiceBuilder {
             worker_type,
             plugin_registry,
             // The standalone service's partitions index worker KV events
-            // published over ZMQ; `kv_index` and `host` override this. Without
+            // published over ZMQ; `host` overrides this. Without
             // the ZMQ ingress the host feeds the index itself.
             #[cfg(feature = "ingest-zmq")]
             host: SelectionHost {
@@ -123,13 +125,6 @@ impl SelectionServiceBuilder {
         factory: WorkerSelectionPolicyFactory,
     ) -> Self {
         self.worker_selection_policy_factory = Some(factory);
-        self
-    }
-
-    /// Where each partition's KV index comes from (see [`KvIndexSource`]).
-    /// Shorthand for setting `host.cache.index`.
-    pub fn kv_index(mut self, source: KvIndexSource) -> Self {
-        self.host.cache.index = source;
         self
     }
 

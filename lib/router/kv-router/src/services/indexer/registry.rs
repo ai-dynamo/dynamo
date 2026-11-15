@@ -18,7 +18,7 @@ use dynamo_kv_indexer::KvIndexerMetrics;
 use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::WorkerId;
 
-use super::backend::{Indexer, IndexerPolicy};
+use super::backend::Indexer;
 use super::listener::spawn_zmq_listener;
 
 pub use dynamo_kv_indexer::{IndexClaimError, IndexRegistry, IndexerEntry, LifecycleGuard};
@@ -336,13 +336,6 @@ impl WorkerRegistry {
         )
     }
 
-    pub fn new_with_indexer_metrics(
-        num_threads: usize,
-        indexer_metrics: Arc<KvIndexerMetrics>,
-    ) -> Self {
-        Self::new_inner(num_threads, indexer_metrics, CancellationToken::new())
-    }
-
     #[cfg(all(feature = "metrics", feature = "http"))]
     pub(super) fn new_with_indexer_metrics_and_cancel_token(
         num_threads: usize,
@@ -376,11 +369,6 @@ impl WorkerRegistry {
 
     pub fn index(&self) -> &Arc<IndexRegistry> {
         &self.index
-    }
-
-    /// Set the shape used for indexers created from now on.
-    pub fn set_indexer_policy(&self, policy: IndexerPolicy) {
-        self.index.set_indexer_policy(policy);
     }
 
     pub fn signal_ready(&self) {
