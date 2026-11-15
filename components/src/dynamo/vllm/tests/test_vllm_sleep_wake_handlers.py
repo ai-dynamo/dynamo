@@ -177,7 +177,9 @@ async def test_wake_up_passes_explicit_tags_from_request():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cancel", [False, True], ids=["sleep-error", "sleep-cancelled"])
+@pytest.mark.parametrize(
+    "cancel", [False, True], ids=["sleep-error", "sleep-cancelled"]
+)
 async def test_unknown_sleep_outcome_keeps_worker_out_of_discovery(cancel):
     handler = _make_handler()
     sleep_entered = asyncio.Event()
