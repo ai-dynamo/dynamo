@@ -244,6 +244,51 @@ class TestDiffusionFormatterPrepareImages:
         results = await f._prepare_images(imgs, "req-1", "b64_json")
         assert len(results) == 3
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure", ["upload", "encode"])
+    async def test_partial_url_batch_failure_removes_earlier_uploads(
+        self, tmp_path, failure
+    ):
+        from dynamo.common.storage import upload_to_fs as real_upload_to_fs
+
+        f = DiffusionFormatter(
+            model_name="test-model",
+            media_fs=get_fs(tmp_path.as_uri()),
+            media_http_url=None,
+        )
+        images = _generated_images(2)
+        upload_calls = 0
+
+        async def upload_then_fail(*args, **kwargs):
+            nonlocal upload_calls
+            upload_calls += 1
+            if upload_calls == 2:
+                raise OSError("upload failed")
+            url = await real_upload_to_fs(*args, **kwargs)
+            assert (tmp_path / args[1]).is_file()
+            return url
+
+        if failure == "encode":
+            images[1] = MagicMock()
+            images[1].save.side_effect = OSError("encode failed")
+
+        with (
+            patch(
+                "dynamo.vllm.omni.output_formatter.upload_to_fs",
+                side_effect=upload_then_fail,
+            ),
+            patch.object(f, "_cleanup_uploads", wraps=f._cleanup_uploads) as cleanup,
+        ):
+            with pytest.raises(OSError, match=f"{failure} failed"):
+                await f._prepare_images(images, "req-partial", "url")
+
+        assert upload_calls == (2 if failure == "upload" else 1)
+        cleanup.assert_awaited_once()
+        (uploaded,) = cleanup.await_args.args
+        assert len(uploaded) == 1
+        assert uploaded[0].startswith("images/req-partial/")
+        assert not any((tmp_path / "images" / "req-partial").iterdir())
+
 
 def _generated_images(count: int, size: tuple[int, int] = (8, 8)) -> list:
     """Real PIL images, as the diffusion engine returns them."""

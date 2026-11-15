@@ -870,6 +870,9 @@ class DiffusionFormatter:
             response_format: ``"url"`` or ``"b64_json"`` output representation.
             output_format: ``"png"``, ``"jpeg"``, or ``"webp"`` encoding.
 
+        If any image fails to encode or upload, images this call already
+        uploaded are removed before the error is re-raised.
+
         Returns:
             list: Encoded data URLs or uploaded media URLs.
 
@@ -885,35 +888,54 @@ class DiffusionFormatter:
             else {}
         )
         outlist = []
-        for img in images:
-            buf = BytesIO()
-            encoded_image = img
-            if image_encoder == "JPEG":
-                has_transparency = "transparency" in img.info
-                if img.mode not in ("L", "RGB") or has_transparency:
-                    if "A" in img.getbands() or has_transparency:
-                        rgba = img.convert("RGBA")
-                        encoded_image = Image.new("RGB", rgba.size, "white")
-                        encoded_image.paste(rgba, mask=rgba.getchannel("A"))
-                    else:
-                        encoded_image = img.convert("RGB")
-            encoded_image.save(buf, format=image_encoder, **save_kwargs)
-            image_bytes = buf.getvalue()
-            if response_format == "url":
-                url = await upload_to_fs(
-                    self._media_fs,
-                    f"images/{request_id}/{uuid.uuid4()}.{file_extension}",
-                    image_bytes,
-                    self._media_http_url,
-                )
-                outlist.append(url)
-            elif response_format == "b64_json" or response_format is None:
-                outlist.append(
-                    f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}"
-                )
-            else:
-                raise ValueError(f"Invalid response format: {response_format}")
+        uploaded_paths: list[str] = []
+        try:
+            for img in images:
+                buf = BytesIO()
+                encoded_image = img
+                if image_encoder == "JPEG":
+                    has_transparency = "transparency" in img.info
+                    if img.mode not in ("L", "RGB") or has_transparency:
+                        if "A" in img.getbands() or has_transparency:
+                            rgba = img.convert("RGBA")
+                            encoded_image = Image.new("RGB", rgba.size, "white")
+                            encoded_image.paste(rgba, mask=rgba.getchannel("A"))
+                        else:
+                            encoded_image = img.convert("RGB")
+                encoded_image.save(buf, format=image_encoder, **save_kwargs)
+                image_bytes = buf.getvalue()
+                if response_format == "url":
+                    storage_path = (
+                        f"images/{request_id}/{uuid.uuid4()}.{file_extension}"
+                    )
+                    url = await upload_to_fs(
+                        self._media_fs,
+                        storage_path,
+                        image_bytes,
+                        self._media_http_url,
+                    )
+                    uploaded_paths.append(storage_path)
+                    outlist.append(url)
+                elif response_format == "b64_json" or response_format is None:
+                    outlist.append(
+                        f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}"
+                    )
+                else:
+                    raise ValueError(f"Invalid response format: {response_format}")
+        except Exception:
+            # The whole batch fails: remove files already uploaded so a
+            # failed request leaves no orphaned media behind.
+            await self._cleanup_uploads(uploaded_paths)
+            raise
         return outlist
+
+    async def _cleanup_uploads(self, storage_paths: list[str]) -> None:
+        """Best-effort removal of uploaded files after a failed batch."""
+        for path in storage_paths:
+            try:
+                await asyncio.to_thread(self._media_fs.rm, path)
+            except Exception:
+                logger.warning("Failed to clean up uploaded file %s", path)
 
 
 class AudioFormatter:
