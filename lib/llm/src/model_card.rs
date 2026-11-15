@@ -4143,17 +4143,19 @@ mod special_token_boundary_tests {
     use super::*;
 
     /// A WordLevel tokenizer whose `<|user|>` and `<|end|>` take the whitespace after them,
-    /// as Phi-3's chat tokens do. Whitespace runs are words of their own.
+    /// as Phi-3's chat tokens do, and whose plain `<s>` stays a cache split point. Whitespace
+    /// runs are words of their own.
     const RSTRIP_TOKENIZER: &str = r#"{"version":"1.0","truncation":null,"padding":null,
         "added_tokens":[
             {"id":3,"content":"<|user|>","single_word":false,"lstrip":false,"rstrip":true,"normalized":false,"special":true},
-            {"id":4,"content":"<|end|>","single_word":false,"lstrip":false,"rstrip":true,"normalized":false,"special":true}],
+            {"id":4,"content":"<|end|>","single_word":false,"lstrip":false,"rstrip":true,"normalized":false,"special":true},
+            {"id":5,"content":"<s>","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true}],
         "normalizer":null,
         "pre_tokenizer":{"type":"Split","pattern":{"Regex":"\\s+"},"behavior":"Isolated","invert":false},
         "post_processor":null,"decoder":null,
         "model":{"type":"WordLevel","vocab":{"<unk>":0,"hi":1,"\n":2},"unk_token":"<unk>"}}"#;
 
-    /// The same, with a plain special token `<|` that occurs inside `<|user|>`.
+    /// `<|user|>` as above, and a plain special token `<|` that occurs inside it.
     const NESTED_TOKENIZER: &str = r#"{"version":"1.0","truncation":null,"padding":null,
         "added_tokens":[
             {"id":3,"content":"<|user|>","single_word":false,"lstrip":false,"rstrip":true,"normalized":false,"special":true},
@@ -4202,8 +4204,8 @@ mod special_token_boundary_tests {
         (card, dir)
     }
 
-    /// The cached tokenizer gives the ids of the Hugging Face tokenizer, on a miss and on a
-    /// hit.
+    /// The cached tokenizer gives the ids of the Hugging Face tokenizer, on a miss and, where
+    /// the tokenizer leaves the cache enabled, on the hit that follows.
     fn assert_cache_matches_tokenizer(json: &str, text: &str, expected: &[u32]) {
         let (card, dir) = card_with_tokenizer(json);
         let reference = HfTokenizer::from_file(dir.path().join("tokenizer.json"))
@@ -4221,7 +4223,10 @@ mod special_token_boundary_tests {
 
     #[test]
     fn tokenizer_cache_keeps_the_whitespace_rstrip_special_tokens_take() {
-        assert_cache_matches_tokenizer(RSTRIP_TOKENIZER, "<|user|>\nhi<|end|>\n", &[3, 1, 4]);
+        // The cache stays enabled, splitting after `<s>` only.
+        let tokenizer: HfTokenizer = RSTRIP_TOKENIZER.parse().unwrap();
+        assert_eq!(extract_hf_special_tokens(&tokenizer), ["<s>"]);
+        assert_cache_matches_tokenizer(RSTRIP_TOKENIZER, "<s><|user|>\nhi<|end|>\n", &[5, 3, 1, 4]);
     }
 
     #[test]
