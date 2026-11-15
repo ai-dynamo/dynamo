@@ -159,6 +159,10 @@ pub struct DistributedRuntime {
     // Shared with system status server to expose via /metadata endpoint
     discovery_metadata: Option<Arc<tokio::sync::RwLock<discovery::DiscoveryMetadata>>>,
 
+    // Discovery lives in this process's memory: nothing outside it reads or
+    // writes the records.
+    process_local_discovery: bool,
+
     // local registry for components
     // the registry allows us to use share runtime resources across instances of the same component object.
     // take for example two instances of a client to the same remote component. The registry allows us to use
@@ -262,6 +266,10 @@ impl DistributedRuntime {
             None => None,
         };
 
+        let process_local_discovery = matches!(
+            discovery_backend,
+            DiscoveryBackend::KvStore(kv::Selector::Memory)
+        );
         // Initialize discovery client based on backend configuration
         let (discovery_client, discovery_metadata) = match discovery_backend {
             DiscoveryBackend::Kubernetes => {
@@ -337,6 +345,7 @@ impl DistributedRuntime {
             discovery_client,
             endpoint_registrations,
             discovery_metadata,
+            process_local_discovery,
             component_registry,
             endpoint_discovery_sources: Arc::new(Mutex::new(HashMap::new())),
             routing_occupancy_states: Arc::new(Mutex::new(HashMap::new())),
@@ -565,6 +574,12 @@ impl DistributedRuntime {
     /// Returns the discovery interface for service registration and discovery
     pub fn discovery(&self) -> Arc<dyn Discovery> {
         self.discovery_client.clone()
+    }
+
+    /// Whether discovery is held in this process's memory, so no other process
+    /// sees what this one registers.
+    pub fn discovery_is_process_local(&self) -> bool {
+        self.process_local_discovery
     }
 
     /// Register an endpoint until the last runtime-wide owner drops its lease.
