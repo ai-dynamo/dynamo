@@ -19,11 +19,11 @@ use serde::{Deserialize, Serialize};
 
 use uuid::Uuid;
 
+use super::decoded_media::DecodedMediaDescriptor;
 use super::extensions::{AgentContext, RouterParams};
 use super::llm_backend::DecoderCheckpoint;
 use super::timing::{RequestPhase, RequestTracker};
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
 /// Routing hints for directing requests to specific workers.
@@ -325,7 +325,7 @@ pub enum MultimodalData {
     /// URL text without a parsed URL object; not all values have been validated.
     #[serde(rename(serialize = "Url"))]
     RawUrl(String),
-    Decoded(RdmaMediaDataDescriptor),
+    Decoded(DecodedMediaDescriptor),
     /// Payload-free media slot resolved by a backend processor cache.
     UuidOnly(String),
     /// Opaque JSON for a backend-registered modality processor.
@@ -342,7 +342,7 @@ impl<'de> Deserialize<'de> for MultimodalData {
         enum WireData<'a> {
             Url(#[serde(borrow)] Cow<'a, str>),
             RawUrl(String),
-            Decoded(RdmaMediaDataDescriptor),
+            Decoded(DecodedMediaDescriptor),
             UuidOnly(String),
             Json(serde_json::Value),
         }
@@ -943,7 +943,7 @@ mod tests {
             Url(url::Url),
             #[serde(rename(serialize = "Url"))]
             RawUrl(String),
-            Decoded(RdmaMediaDataDescriptor),
+            Decoded(DecodedMediaDescriptor),
             UuidOnly(String),
         }
         let values = [

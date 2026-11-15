@@ -12,10 +12,19 @@ use dynamo_runtime::config::{
 use flate2::{Compression, write::ZlibEncoder};
 use ndarray::{ArrayBase, Dimension, OwnedRepr};
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 use std::io::Write;
 use std::sync::{Arc, LazyLock};
 
 use super::decoders::DecodedMediaMetadata;
+use super::decoders::image::ImageLayout;
+#[cfg(feature = "media-ffmpeg")]
+use crate::protocols::common::decoded_media::DecodedVideoMetadata;
+use crate::protocols::common::decoded_media::{
+    DecodedImageLayout, DecodedImageMetadata, DecodedMediaDataType, DecodedMediaDescriptor,
+    DecodedMediaMetadata as WireMediaMetadata, DecodedMediaTensorInfo, NixlMemType,
+    NixlRegionDescriptor,
+};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
 pub enum DataType {
@@ -38,7 +47,9 @@ pub struct DecodedMediaData {
     pub(crate) content_hash: Option<u64>,
 }
 
-// Decoded media data NIXL descriptor (sent to the next step in the pipeline / NATS)
+// Decoded media data NIXL descriptor. The media loader builds and caches this typed form;
+// requests carry it as the `DecodedMediaDescriptor` wire struct (see the `TryFrom` below),
+// which serializes to the same bytes.
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RdmaMediaDataDescriptor {
@@ -74,6 +85,7 @@ impl RdmaMediaDataDescriptor {
     }
 
     /// Canonical cache/routing key serialized on the descriptor.
+    #[cfg(feature = "mm-routing")]
     pub(crate) fn content_hash_key(&self) -> Option<&str> {
         self.content_hash.as_deref()
     }
@@ -113,6 +125,76 @@ impl RdmaMediaDataDescriptor {
             .local_payload()
             .ok_or_else(|| anyhow::anyhow!("decoded video has no local payload"))?;
         video_dimensions_from_parts(&self.tensor_info, bytes)
+    }
+}
+
+/// The serde name of a unit enum variant. `image` marks its enums `#[non_exhaustive]`, so the
+/// wire descriptor carries them by name instead of mirroring their variants.
+fn wire_variant_name<T: Serialize>(value: &T) -> Result<String> {
+    match serde_json::to_value(value)? {
+        serde_json::Value::String(name) => Ok(name),
+        other => anyhow::bail!("expected a unit enum variant, got {other}"),
+    }
+}
+
+/// The wire form a request carries. Every serialized field is copied as is, and the
+/// registered storage moves into the wire struct's type-erased keep-alive handle.
+impl TryFrom<RdmaMediaDataDescriptor> for DecodedMediaDescriptor {
+    type Error = anyhow::Error;
+
+    fn try_from(descriptor: RdmaMediaDataDescriptor) -> Result<Self> {
+        let RdmaMediaDataDescriptor {
+            nixl_metadata,
+            nixl_descriptor,
+            tensor_info,
+            content_hash,
+            source_storage,
+        } = descriptor;
+        let metadata = match tensor_info.metadata {
+            Some(DecodedMediaMetadata::Image(image)) => {
+                Some(WireMediaMetadata::Image(DecodedImageMetadata {
+                    format: image.format.as_ref().map(wire_variant_name).transpose()?,
+                    color_type: wire_variant_name(&image.color_type)?,
+                    layout: match image.layout {
+                        ImageLayout::HWC => DecodedImageLayout::HWC,
+                    },
+                }))
+            }
+            #[cfg(feature = "media-ffmpeg")]
+            Some(DecodedMediaMetadata::Video(video)) => {
+                Some(WireMediaMetadata::Video(DecodedVideoMetadata {
+                    source_fps: video.source_fps,
+                    source_duration: video.source_duration,
+                    sampled_timestamps: video.sampled_timestamps,
+                }))
+            }
+            None => None,
+        };
+        Ok(Self {
+            nixl_metadata,
+            nixl_descriptor: NixlRegionDescriptor {
+                addr: nixl_descriptor.addr,
+                size: nixl_descriptor.size,
+                mem_type: match nixl_descriptor.mem_type {
+                    nixl::MemType::Dram => NixlMemType::Dram,
+                    nixl::MemType::Vram => NixlMemType::Vram,
+                    nixl::MemType::Block => NixlMemType::Block,
+                    nixl::MemType::Object => NixlMemType::Object,
+                    nixl::MemType::File => NixlMemType::File,
+                    nixl::MemType::Unknown => NixlMemType::Unknown,
+                },
+                device_id: nixl_descriptor.device_id,
+            },
+            tensor_info: DecodedMediaTensorInfo {
+                shape: tensor_info.shape,
+                dtype: match tensor_info.dtype {
+                    DataType::UINT8 => DecodedMediaDataType::UINT8,
+                },
+                metadata,
+            },
+            content_hash,
+            source_storage: source_storage.map(|storage| storage as Arc<dyn Any + Send + Sync>),
+        })
     }
 }
 
@@ -397,6 +479,120 @@ mod tests {
             progress_thread_delay_or_default(MAX_PROGRESS_THREAD_DELAY_US + 1),
             DEFAULT_PROGRESS_THREAD_DELAY_US
         );
+    }
+
+    /// `MultimodalData::Decoded` used to carry `RdmaMediaDataDescriptor` itself. The wire
+    /// struct that replaced it must write the same bytes and read what the old form wrote.
+    #[test]
+    fn wire_descriptor_serializes_like_the_loader_descriptor() {
+        use super::super::decoders::image::ImageLayout;
+        use super::super::decoders::{DecodedMediaMetadata, ImageMetadata};
+        use super::{MediaTensorInfo, RdmaMediaDataDescriptor};
+        use crate::protocols::common::decoded_media::DecodedMediaDescriptor;
+        use dynamo_memory::nixl::{MemType, NixlDescriptor};
+        use image::{ColorType, ImageFormat};
+
+        let descriptor = |mem_type, metadata, content_hash: Option<&str>| RdmaMediaDataDescriptor {
+            nixl_metadata: "b64:eJwrSS0uAQAEXQHB".to_string(),
+            nixl_descriptor: NixlDescriptor {
+                addr: 0x7f00_dead_beef,
+                size: 1125 * 1999 * 4,
+                mem_type,
+                device_id: 3,
+            },
+            tensor_info: MediaTensorInfo {
+                shape: vec![1125, 1999, 4],
+                dtype: DataType::UINT8,
+                metadata,
+            },
+            content_hash: content_hash.map(str::to_string),
+            source_storage: None,
+        };
+        let image = |format, color_type| {
+            Some(DecodedMediaMetadata::Image(ImageMetadata {
+                format,
+                color_type,
+                layout: ImageLayout::HWC,
+            }))
+        };
+
+        let mut cases = vec![
+            descriptor(MemType::Dram, None, None),
+            descriptor(MemType::Dram, None, Some("7a9bbcb11a898630")),
+            descriptor(MemType::Dram, image(None, ColorType::Rgb8), None),
+        ];
+        for mem_type in [
+            MemType::Dram,
+            MemType::Vram,
+            MemType::Block,
+            MemType::Object,
+            MemType::File,
+            MemType::Unknown,
+        ] {
+            cases.push(descriptor(
+                mem_type,
+                image(Some(ImageFormat::Png), ColorType::Rgba8),
+                Some("0123456789abcdef"),
+            ));
+        }
+        for format in ImageFormat::all() {
+            cases.push(descriptor(
+                MemType::Dram,
+                image(Some(format), ColorType::Rgb8),
+                Some("0123456789abcdef"),
+            ));
+        }
+        for color_type in [
+            ColorType::L8,
+            ColorType::La8,
+            ColorType::Rgb8,
+            ColorType::Rgba8,
+            ColorType::L16,
+            ColorType::La16,
+            ColorType::Rgb16,
+            ColorType::Rgba16,
+            ColorType::Rgb32F,
+            ColorType::Rgba32F,
+        ] {
+            cases.push(descriptor(
+                MemType::Dram,
+                image(Some(ImageFormat::Jpeg), color_type),
+                None,
+            ));
+        }
+        #[cfg(feature = "media-ffmpeg")]
+        cases.push(descriptor(
+            MemType::Dram,
+            Some(DecodedMediaMetadata::Video(
+                super::super::decoders::VideoMetadata {
+                    source_fps: 23.976,
+                    source_duration: 10.5,
+                    sampled_timestamps: vec![0.0, 0.1, 5.25],
+                },
+            )),
+            Some("fedcba9876543210"),
+        ));
+
+        for old in cases {
+            let new = DecodedMediaDescriptor::try_from(old.clone()).unwrap();
+
+            let json = serde_json::to_vec(&old).unwrap();
+            assert_eq!(serde_json::to_vec(&new).unwrap(), json);
+            let read: DecodedMediaDescriptor = serde_json::from_slice(&json).unwrap();
+            assert_eq!(serde_json::to_vec(&read).unwrap(), json);
+            let back: RdmaMediaDataDescriptor = serde_json::from_slice(&json).unwrap();
+            assert_eq!(serde_json::to_vec(&back).unwrap(), json);
+
+            let packed = rmp_serde::to_vec(&old).unwrap();
+            assert_eq!(rmp_serde::to_vec(&new).unwrap(), packed);
+            let read: DecodedMediaDescriptor = rmp_serde::from_slice(&packed).unwrap();
+            assert_eq!(rmp_serde::to_vec(&read).unwrap(), packed);
+
+            let named = rmp_serde::to_vec_named(&old).unwrap();
+            assert_eq!(rmp_serde::to_vec_named(&new).unwrap(), named);
+            let read: DecodedMediaDescriptor = rmp_serde::from_slice(&named).unwrap();
+            assert_eq!(rmp_serde::to_vec_named(&read).unwrap(), named);
+        }
     }
 
     #[test]
