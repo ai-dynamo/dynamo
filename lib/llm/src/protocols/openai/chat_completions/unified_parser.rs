@@ -1964,7 +1964,7 @@ pub struct ChoiceState {
 
 impl ChoiceState {
     #[cfg(test)]
-    pub(crate) fn new(
+    pub fn new(
         family: &str,
         tools: &[Tool],
         prefill: impl Into<StreamPrefill>,
@@ -2895,7 +2895,7 @@ pub(crate) fn parse_complete(
 }
 
 #[cfg(test)]
-pub(crate) fn parse_complete_with_policy(
+pub fn parse_complete_with_policy(
     family: &str,
     content: &str,
     guided_tool_constraint: &GuidedToolConstraint,
@@ -3754,7 +3754,7 @@ fn flush_undecided_guided_prefixes(
 }
 
 #[cfg(test)]
-pub(crate) fn apply_stream_with_constraint<S>(
+pub fn apply_stream_with_constraint<S>(
     stream_in: S,
     tool_definitions: Option<Vec<ToolDefinition>>,
     guided_tool_constraint: GuidedToolConstraint,
@@ -4542,8 +4542,122 @@ where
     }
 }
 
+/// Fixtures the tests below share with the preprocessor's tests.
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod test_fixtures {
+    use dynamo_model_card::parser_family::{
+        DEEPSEEK_V4_UNIFIED_FAMILY, DEEPSEEK_V41_UNIFIED_FAMILY, GEMMA4_UNIFIED_FAMILY,
+        GLM47_UNIFIED_FAMILY, KIMI_K2_UNIFIED_FAMILY, KIMI_K3_UNIFIED_FAMILY, MUSE_UNIFIED_FAMILY,
+        QWEN3_UNIFIED_FAMILY,
+    };
+
+    pub fn reasoning_markers(family: &str) -> (&'static str, &'static str) {
+        match family {
+            GEMMA4_UNIFIED_FAMILY => ("<|channel>thought\n", "<channel|>"),
+            MUSE_UNIFIED_FAMILY => ("<|start|>assistant to=self<|message|>", "<|eom|>"),
+            KIMI_K3_UNIFIED_FAMILY => ("<|open|>think<|sep|>", "<|close|>think<|sep|>"),
+            _ => ("<think>", "</think>"),
+        }
+    }
+
+    pub fn eight_family_calls(value: &str) -> Vec<(&'static str, String)> {
+        native_write_file_calls(&[
+            ("count", serde_json::json!(2)),
+            ("content", serde_json::json!(value)),
+        ])
+    }
+
+    pub fn ordered_arguments(fields: &[(&str, serde_json::Value)]) -> String {
+        format!(
+            "{{{}}}",
+            fields
+                .iter()
+                .map(|(key, value)| format!("{}:{value}", serde_json::to_string(key).unwrap()))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    }
+
+    pub fn native_write_file_calls(
+        fields: &[(&str, serde_json::Value)],
+    ) -> Vec<(&'static str, String)> {
+        [QWEN3_UNIFIED_FAMILY, KIMI_K2_UNIFIED_FAMILY, KIMI_K3_UNIFIED_FAMILY, DEEPSEEK_V4_UNIFIED_FAMILY, DEEPSEEK_V41_UNIFIED_FAMILY, GEMMA4_UNIFIED_FAMILY, GLM47_UNIFIED_FAMILY, MUSE_UNIFIED_FAMILY]
+            .into_iter().map(|family| {
+                let parameters: String = fields.iter().map(|(key, value)| {
+                    let raw = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
+                    match family {
+                        QWEN3_UNIFIED_FAMILY => format!("<parameter={key}>{raw}</parameter>"),
+                        KIMI_K3_UNIFIED_FAMILY => format!("<|open|>argument key=\"{key}\" type=\"{}\"<|sep|>{raw}<|close|>argument<|sep|>", if value.is_string() {"string"} else {"number"}),
+                        DEEPSEEK_V4_UNIFIED_FAMILY | DEEPSEEK_V41_UNIFIED_FAMILY => {
+                            let gap = if family == DEEPSEEK_V41_UNIFIED_FAMILY {" "} else {""};
+                            format!("<｜DSML｜{gap}parameter name=\"{key}\" string=\"{}\">{raw}</｜DSML｜{gap}parameter>", value.is_string())
+                        },
+                        GLM47_UNIFIED_FAMILY => format!("<arg_key>{key}</arg_key><arg_value>{raw}</arg_value>"),
+                        MUSE_UNIFIED_FAMILY => format!("<atem:parameter name=\"{key}\">{raw}</atem:parameter>"),
+                        _ => String::new(),
+                    }
+                }).collect();
+                let input = match family {
+                    QWEN3_UNIFIED_FAMILY => format!("<tool_call><function=write_file>{parameters}</function></tool_call>"),
+                    KIMI_K2_UNIFIED_FAMILY => format!("<|tool_calls_section_begin|><|tool_call_begin|>functions.write_file:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>", ordered_arguments(fields)),
+                    KIMI_K3_UNIFIED_FAMILY => format!("<|open|>tools<|sep|><|open|>call tool=\"write_file\" index=\"1\"<|sep|>{parameters}<|close|>call<|sep|><|close|>tools<|sep|>"),
+                    DEEPSEEK_V4_UNIFIED_FAMILY => format!("<｜DSML｜tool_calls><｜DSML｜invoke name=\"write_file\">{parameters}</｜DSML｜invoke></｜DSML｜tool_calls>"),
+                    DEEPSEEK_V41_UNIFIED_FAMILY => format!("<｜DSML｜ calls><｜DSML｜ invoke name=\"write_file\">{parameters}</｜DSML｜ invoke></｜DSML｜ calls>"),
+                    GEMMA4_UNIFIED_FAMILY => {
+                        let parameters = fields.iter().map(|(key,value)| if let Some(raw)=value.as_str() {format!("{key}:<|\"|>{raw}<|\"|>")} else {format!("{key}:{value}")}).collect::<Vec<_>>().join(",");
+                        format!("<|tool_call>call:write_file{{{parameters}}}<tool_call|>")
+                    },
+                    GLM47_UNIFIED_FAMILY => format!("<tool_call>write_file{parameters}</tool_call>"),
+                    MUSE_UNIFIED_FAMILY => format!("<|start|>assistant to=write_file<|message|><atem:invoke name=\"write_file\">{parameters}</atem:invoke><|eom|>"),
+                    _ => unreachable!(),
+                };
+                (family, input)
+            }).collect()
+    }
+
+    pub fn write_file_progress_cases() -> Vec<(&'static str, Vec<(&'static str, serde_json::Value)>)>
+    {
+        [
+            "count_first",
+            "path_first",
+            "content_first",
+            "quoted_markers",
+        ]
+        .into_iter()
+        .map(|shape| {
+            let value = format!(
+                "é {} STAGE_TWO {} END",
+                "first content ".repeat(64),
+                "second content ".repeat(64)
+            );
+            let value = if shape == "quoted_markers" {
+                format!("literal \"<think>\" \"</think>\" {value}")
+            } else {
+                value
+            };
+            let fields = match shape {
+                "path_first" => vec![
+                    ("path", serde_json::json!("a.rs")),
+                    ("content", serde_json::json!(value)),
+                ],
+                "content_first" => vec![
+                    ("content", serde_json::json!(value)),
+                    ("count", serde_json::json!(2)),
+                ],
+                _ => vec![
+                    ("count", serde_json::json!(2)),
+                    ("content", serde_json::json!(value)),
+                ],
+            };
+            (shape, fields)
+        })
+        .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_fixtures::*;
     use super::*;
     use dynamo_parsers_v2::{ToolCallDelta, UnifiedParserExt};
     use dynamo_protocols::types::{
@@ -12604,109 +12718,6 @@ pub(crate) mod tests {
                 );
             }
         }
-    }
-
-    pub(crate) fn reasoning_markers(family: &str) -> (&'static str, &'static str) {
-        match family {
-            GEMMA4_UNIFIED_FAMILY => ("<|channel>thought\n", "<channel|>"),
-            MUSE_UNIFIED_FAMILY => ("<|start|>assistant to=self<|message|>", "<|eom|>"),
-            KIMI_K3_UNIFIED_FAMILY => ("<|open|>think<|sep|>", "<|close|>think<|sep|>"),
-            _ => ("<think>", "</think>"),
-        }
-    }
-
-    pub(crate) fn eight_family_calls(value: &str) -> Vec<(&'static str, String)> {
-        native_write_file_calls(&[
-            ("count", serde_json::json!(2)),
-            ("content", serde_json::json!(value)),
-        ])
-    }
-
-    pub(crate) fn ordered_arguments(fields: &[(&str, serde_json::Value)]) -> String {
-        format!(
-            "{{{}}}",
-            fields
-                .iter()
-                .map(|(key, value)| format!("{}:{value}", serde_json::to_string(key).unwrap()))
-                .collect::<Vec<_>>()
-                .join(",")
-        )
-    }
-
-    pub(crate) fn native_write_file_calls(
-        fields: &[(&str, serde_json::Value)],
-    ) -> Vec<(&'static str, String)> {
-        [QWEN3_UNIFIED_FAMILY, KIMI_K2_UNIFIED_FAMILY, KIMI_K3_UNIFIED_FAMILY, DEEPSEEK_V4_UNIFIED_FAMILY, DEEPSEEK_V41_UNIFIED_FAMILY, GEMMA4_UNIFIED_FAMILY, GLM47_UNIFIED_FAMILY, MUSE_UNIFIED_FAMILY]
-            .into_iter().map(|family| {
-                let parameters: String = fields.iter().map(|(key, value)| {
-                    let raw = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
-                    match family {
-                        QWEN3_UNIFIED_FAMILY => format!("<parameter={key}>{raw}</parameter>"),
-                        KIMI_K3_UNIFIED_FAMILY => format!("<|open|>argument key=\"{key}\" type=\"{}\"<|sep|>{raw}<|close|>argument<|sep|>", if value.is_string() {"string"} else {"number"}),
-                        DEEPSEEK_V4_UNIFIED_FAMILY | DEEPSEEK_V41_UNIFIED_FAMILY => {
-                            let gap = if family == DEEPSEEK_V41_UNIFIED_FAMILY {" "} else {""};
-                            format!("<｜DSML｜{gap}parameter name=\"{key}\" string=\"{}\">{raw}</｜DSML｜{gap}parameter>", value.is_string())
-                        },
-                        GLM47_UNIFIED_FAMILY => format!("<arg_key>{key}</arg_key><arg_value>{raw}</arg_value>"),
-                        MUSE_UNIFIED_FAMILY => format!("<atem:parameter name=\"{key}\">{raw}</atem:parameter>"),
-                        _ => String::new(),
-                    }
-                }).collect();
-                let input = match family {
-                    QWEN3_UNIFIED_FAMILY => format!("<tool_call><function=write_file>{parameters}</function></tool_call>"),
-                    KIMI_K2_UNIFIED_FAMILY => format!("<|tool_calls_section_begin|><|tool_call_begin|>functions.write_file:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>", ordered_arguments(fields)),
-                    KIMI_K3_UNIFIED_FAMILY => format!("<|open|>tools<|sep|><|open|>call tool=\"write_file\" index=\"1\"<|sep|>{parameters}<|close|>call<|sep|><|close|>tools<|sep|>"),
-                    DEEPSEEK_V4_UNIFIED_FAMILY => format!("<｜DSML｜tool_calls><｜DSML｜invoke name=\"write_file\">{parameters}</｜DSML｜invoke></｜DSML｜tool_calls>"),
-                    DEEPSEEK_V41_UNIFIED_FAMILY => format!("<｜DSML｜ calls><｜DSML｜ invoke name=\"write_file\">{parameters}</｜DSML｜ invoke></｜DSML｜ calls>"),
-                    GEMMA4_UNIFIED_FAMILY => {
-                        let parameters = fields.iter().map(|(key,value)| if let Some(raw)=value.as_str() {format!("{key}:<|\"|>{raw}<|\"|>")} else {format!("{key}:{value}")}).collect::<Vec<_>>().join(",");
-                        format!("<|tool_call>call:write_file{{{parameters}}}<tool_call|>")
-                    },
-                    GLM47_UNIFIED_FAMILY => format!("<tool_call>write_file{parameters}</tool_call>"),
-                    MUSE_UNIFIED_FAMILY => format!("<|start|>assistant to=write_file<|message|><atem:invoke name=\"write_file\">{parameters}</atem:invoke><|eom|>"),
-                    _ => unreachable!(),
-                };
-                (family, input)
-            }).collect()
-    }
-
-    pub(crate) fn write_file_progress_cases()
-    -> Vec<(&'static str, Vec<(&'static str, serde_json::Value)>)> {
-        [
-            "count_first",
-            "path_first",
-            "content_first",
-            "quoted_markers",
-        ]
-        .into_iter()
-        .map(|shape| {
-            let value = format!(
-                "é {} STAGE_TWO {} END",
-                "first content ".repeat(64),
-                "second content ".repeat(64)
-            );
-            let value = if shape == "quoted_markers" {
-                format!("literal \"<think>\" \"</think>\" {value}")
-            } else {
-                value
-            };
-            let fields = match shape {
-                "path_first" => vec![
-                    ("path", serde_json::json!("a.rs")),
-                    ("content", serde_json::json!(value)),
-                ],
-                "content_first" => vec![
-                    ("content", serde_json::json!(value)),
-                    ("count", serde_json::json!(2)),
-                ],
-                _ => vec![
-                    ("count", serde_json::json!(2)),
-                    ("content", serde_json::json!(value)),
-                ],
-            };
-            (shape, fields)
-        })
-        .collect()
     }
 
     fn argument_progress_matrix(guided: bool) {

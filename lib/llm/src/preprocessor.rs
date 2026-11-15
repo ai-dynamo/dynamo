@@ -11292,7 +11292,8 @@ mod tests {
     #[tokio::test]
     async fn eight_family_request_initialization() {
         use crate::protocols::openai::chat_completions::unified_parser;
-        for (family, native) in unified_parser::tests::eight_family_calls("é initialized") {
+        for (family, native) in unified_parser::test_fixtures::eight_family_calls("é initialized")
+        {
             let (tool, reason) = match family {
                 "qwen3" => ("qwen3_coder", "qwen3"),
                 "kimi_k2" => ("kimi_k2", "kimi_k25"),
@@ -11313,7 +11314,7 @@ mod tests {
             };
             preprocessor.tool_call_parser = Some(tool.into());
             preprocessor.runtime_config.reasoning_parser = Some(reason.into());
-            let (open, close) = unified_parser::tests::reasoning_markers(family);
+            let (open, close) = unified_parser::test_fixtures::reasoning_markers(family);
             for thinking in [false, true] {
                 for prefilled in [false, true] {
                     for choice in [
@@ -11877,10 +11878,12 @@ mod tests {
         );
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let mut failures = Vec::new();
-        for (shape, fields) in unified_parser::tests::write_file_progress_cases() {
+        for (shape, fields) in unified_parser::test_fixtures::write_file_progress_cases() {
             let expected_arguments: serde_json::Value =
-                serde_json::from_str(&unified_parser::tests::ordered_arguments(&fields)).unwrap();
-            for (family, native) in unified_parser::tests::native_write_file_calls(&fields) {
+                serde_json::from_str(&unified_parser::test_fixtures::ordered_arguments(&fields))
+                    .unwrap();
+            for (family, native) in unified_parser::test_fixtures::native_write_file_calls(&fields)
+            {
                 for named in if guided {
                     vec![false, true]
                 } else {
@@ -11890,7 +11893,7 @@ mod tests {
                     let (port, cancel, join) = start_unified_replay(
                         family,
                         native.clone(),
-                        unified_parser::tests::ordered_arguments(&fields),
+                        unified_parser::test_fixtures::ordered_arguments(&fields),
                         Some(release.clone()),
                     )
                     .await;
@@ -12053,7 +12056,7 @@ mod tests {
             return;
         }
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        for (family, native) in unified_parser::tests::eight_family_calls("é replay") {
+        for (family, native) in unified_parser::test_fixtures::eight_family_calls("é replay") {
             let (port, cancel, join) = start_unified_replay(
                 family,
                 native,
@@ -22070,7 +22073,7 @@ mod tests {
         use crate::preprocessor::OpenAIPreprocessor;
         use crate::protocols::anthropic::stream_converter::{
             AnthropicStreamConverter,
-            tests::{sse_values, text_chunk},
+            test_fixtures::{sse_values, text_chunk},
         };
         use dynamo_model_card::model_card::ModelDeploymentCard;
         use dynamo_runtime::protocols::annotated::Annotated;
@@ -22139,7 +22142,7 @@ mod tests {
     #[test]
     fn named_tool_rendering_policy_matches_the_production_preprocessor() {
         use crate::preprocessor::OpenAIPreprocessor;
-        use crate::protocols::openai::responses::tests::native_tools::{
+        use crate::protocols::openai::responses::test_fixtures::{
             TEMPLATE, formatter, namespace, request,
         };
         use dynamo_model_card::model_card::ModelDeploymentCard;

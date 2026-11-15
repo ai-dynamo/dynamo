@@ -1183,15 +1183,17 @@ impl AnthropicStreamConverter {
     }
 }
 
+/// Fixtures the tests below share with the preprocessor's tests.
 #[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
+pub mod test_fixtures {
+    use axum::response::sse::Event;
     use dynamo_protocols::types::{
-        ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk,
-        ChatCompletionStreamResponseDelta, FinishReason, FunctionCallStream, FunctionType,
+        ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
     };
 
-    pub(crate) fn text_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
+    use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+
+    pub fn text_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
         #[allow(deprecated)]
         NvCreateChatCompletionStreamResponse {
             message_boundary: None,
@@ -1224,6 +1226,31 @@ pub(crate) mod tests {
             model_eos: Vec::new(),
         }
     }
+
+    pub async fn sse_values(events: Vec<Result<Event, anyhow::Error>>) -> Vec<serde_json::Value> {
+        use axum::response::{IntoResponse, Sse};
+
+        let body = Sse::new(futures::stream::iter(events))
+            .into_response()
+            .into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        std::str::from_utf8(&bytes)
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str(data).unwrap())
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_fixtures::{sse_values, text_chunk};
+    use super::*;
+    use dynamo_protocols::types::{
+        ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
+        FinishReason, FunctionCallStream, FunctionType,
+    };
 
     fn tool_call_chunk(
         tc_index: u32,
@@ -1294,23 +1321,6 @@ pub(crate) mod tests {
                 } => Some(partial_json.as_str()),
                 _ => None,
             })
-            .collect()
-    }
-
-    pub(crate) async fn sse_values(
-        events: Vec<Result<Event, anyhow::Error>>,
-    ) -> Vec<serde_json::Value> {
-        use axum::response::{IntoResponse, Sse};
-
-        let body = Sse::new(futures::stream::iter(events))
-            .into_response()
-            .into_body();
-        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
-        std::str::from_utf8(&bytes)
-            .unwrap()
-            .lines()
-            .filter_map(|line| line.strip_prefix("data: "))
-            .map(|data| serde_json::from_str(data).unwrap())
             .collect()
     }
 
@@ -1438,7 +1448,7 @@ pub(crate) mod tests {
             })),
             strict: None,
         }];
-        let mut cases = unified_parser::tests::eight_family_calls("hello");
+        let mut cases = unified_parser::test_fixtures::eight_family_calls("hello");
         let qwen = cases
             .iter()
             .find(|(family, _)| *family == "qwen3")

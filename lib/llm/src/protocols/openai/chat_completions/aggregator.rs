@@ -2538,7 +2538,7 @@ mod tests {
             })),
             strict: None,
         }];
-        for (family, raw) in unified_parser::tests::eight_family_calls("café") {
+        for (family, raw) in unified_parser::test_fixtures::eight_family_calls("café") {
             let (tool, reasoning) = match family {
                 "qwen3" => ("qwen3_coder", "qwen3"),
                 "kimi_k2" => ("kimi_k2", "kimi_k25"),
