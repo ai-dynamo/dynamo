@@ -540,7 +540,6 @@ pub mod indexer {
         note = "moved to dynamo_kv_indexer::MatchRequest; removed in 1.10.0"
     )]
     pub type MatchRequest = dynamo_kv_indexer::MatchRequest;
-    pub use dynamo_kv_indexer::MaybeError;
     #[cfg(feature = "bench")]
     pub use dynamo_kv_indexer::ObservationError;
     #[cfg(feature = "bench")]
@@ -1166,7 +1165,6 @@ pub type LowerTierContinuation = dynamo_kv_indexer::LowerTierContinuation;
     note = "moved to dynamo_kv_indexer::LowerTierIndexer; removed in 1.10.0"
 )]
 pub type LowerTierIndexer = dynamo_kv_indexer::LowerTierIndexer;
-pub use dynamo_kv_indexer::MaybeError;
 pub use dynamo_kv_indexer::NodeId;
 pub use dynamo_slot_tracker::NoopSequencePublisher;
 #[deprecated(

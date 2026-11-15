@@ -128,8 +128,8 @@ pub use api::{
     IndexerQueryRequest, IndexerQueryResponse, IndexerRecordRoutingDecisionRequest,
     IndexerRecordRoutingDecisionResponse, KV_INDEXER_QUERY_ENDPOINT,
     KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT, KvStateAgentIdentity, KvStateAgentStatus,
-    KvStateAttachmentStatus, KvStateProtocolVersion, KvStateRecoveryReceipt, MaybeError,
-    WorkerKvQueryKind, WorkerKvQueryRequest, WorkerKvQueryResponse,
+    KvStateAttachmentStatus, KvStateProtocolVersion, KvStateRecoveryReceipt, WorkerKvQueryKind,
+    WorkerKvQueryRequest, WorkerKvQueryResponse,
 };
 pub use approximate_lru::{
     ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruClient, ApproximateLruIncarnation,

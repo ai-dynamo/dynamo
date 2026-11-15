@@ -42,7 +42,7 @@ pub use compat::{
     AnchorTask, BranchShardedIndexer, ClusterId, ConcurrentRadixTreeCompressed,
     ConditionalDisaggPolicyKind, DEFAULT_ROUTING_GROUP, FcfsPolicy, KvCacheEventError,
     KvRouterConfig, KvSchedulerError, KvTransferEnforcement, LocalBlockHash, LocalScheduler,
-    LogicalNode, LoraWorkerFilter, LowerTierContinuation, LowerTierIndexer, MaybeError, NodeId,
+    LogicalNode, LoraWorkerFilter, LowerTierContinuation, LowerTierIndexer, NodeId,
     NoopSequencePublisher, OverlapScores, PositionalIndexer, PotentialLoad, PrefillLoadEstimator,
     PrefillTokenDeltas, RadixTree, ReplicaWorkerPolicy, RequestId, RouterConfigOverride,
     RouterEvent, RouterEventSink, RouterPrefillLoadModel, RouterQueuePolicy,
