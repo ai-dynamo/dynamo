@@ -1015,38 +1015,9 @@ impl<T> PolicyQueue<T> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// Applies class-local, worker-scaled limits against pre-add counters, then
-    /// captures the immutable scheduling key and accounting snapshot.
-    pub fn enqueue(
-        &mut self,
-        class_index: usize,
-        worker_count: usize,
-        snapshot: QueueSnapshot,
-        arrival_offset_secs: f64,
-        priority_jump: f64,
-        strict_priority: u32,
-        placement: WorkerPlacement,
-        payload: T,
-    ) -> Result<(), (QueueRejection, T)> {
-        self.enqueue_with_due_at(
-            QueueMetadata {
-                class_index,
-                snapshot,
-                due_at: None,
-                class_due_at: None,
-                arrival_offset_secs,
-            },
-            worker_count,
-            priority_jump,
-            strict_priority,
-            placement,
-            payload,
-        )
-    }
-
-    /// [`enqueue`](Self::enqueue) with resolved metadata, including explicit and class due
-    /// times.
+    /// captures the immutable scheduling key and accounting snapshot. The metadata carries
+    /// the resolved explicit and class due times.
     pub fn enqueue_with_due_at(
         &mut self,
         metadata: QueueMetadata,
