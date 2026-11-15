@@ -216,8 +216,8 @@ Manual drain requires the TCP response plane. Other response planes return 409.
 
 ### Drain and resume a worker
 
-Start discovery services and the frontend as described in the
-[SGLang launch scripts](../../../../../recipes/cli-templates/sglang.mdx).
+Start discovery services and the frontend as described in the SGLang `agg.sh` script on the
+[Aggregated Serving](../../../../../recipes/examples/aggregated.mdx) example page.
 For a standalone aggregated worker, enable its system listener before startup:
 
 ```bash
