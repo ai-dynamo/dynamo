@@ -91,7 +91,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 | Pre-split module | Owner crate |
 | :---- | :---- |
 | root re-exports (`ActiveSequences`, `KvSchedulerError`, `RouterEvent`, `WorkerId`, `WorkerSelector`, ...) | the owner of each item, below |
-| `protocols` | `dynamo_router_protocol`, `dynamo_kv_events`, `dynamo_kv_hashing`, `dynamo_kv_hints`, `dynamo_slot_tracker`, `dynamo_kv_indexer`, `dynamo_worker_selection`, `dynamo_scheduler::protocols`, `dynamo_session_affinity` |
+| `protocols` | `dynamo_router_protocol`, `dynamo_kv_events`, `dynamo_kv_hashing`, `dynamo_kv_hints`, `dynamo_slot_tracker`, `dynamo_kv_indexer`, `dynamo_worker_selection`, `dynamo_scheduler`, `dynamo_session_affinity` |
 | `identity`, `worker_type` | `dynamo_router_protocol` (`dynamo_kv_indexer` for the indexer identity specs) |
 | `indexer` and its submodules, `concurrent_radix_tree_compressed`, `nested_map`, `approx`, `radix_tree`, `session_prefix_index` | `dynamo_kv_indexer` |
 | `kv_hints` | `dynamo_kv_hints`, `dynamo_kv_indexer` |
@@ -100,7 +100,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 | `scheduling` items, `scheduling::{overlap, overlap_refresh, policy, prefill_load, queue, selector}`, `queue`, `selector`, `config::RouterConfigOverrideBuilder` | `dynamo_scheduler` (`dynamo_worker_selection` for the hosted picker and the LoRA filter, `dynamo_router_protocol` for `AttemptId` and the session context) |
 | `scheduling::{policy_queue, request_classifier}` | `dynamo_admission` |
 | `conditional_disagg` | `dynamo_worker_selection` |
-| `services::selection` core, host, and request types; `services::overlap` | `dynamo_scheduler::{selection, host, replication, overlap_summary}` |
+| `services::selection` core, host, and request types; `services::overlap` | `dynamo_scheduler` (`dynamo_scheduler::host` for hosts) |
 | `services::selection::affinity` | `dynamo_session_affinity` |
 | `test_utils` (`bench` feature) | `dynamo_kv_indexer::testing` |
 
