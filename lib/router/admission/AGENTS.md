@@ -15,3 +15,24 @@
 - Controlled delay is a per-class setting (`controlled_delay`, EDF only; configuration rejects it elsewhere). `PolicyQueue::with_class_budget_expiry` fixes each class's expiry at construction: an EDF class with controlled delay expires every finite due time at its lane roots (`expiring_roots`, blocked lanes included); every other class expires only explicit deadlines through its own `due_entries` index. `PolicyQueue::new` (offline replay) expires only explicit deadlines. Any removal of a blocked lane's root, by expiry or cancellation, unblocks the lane.
 - Per-worker lanes stay: a full worker blocks only its own lane's head. `take_expired` pops the overdue prefix from `expiring_roots` in due order, O(log n) per entry; a class without head expiry finds its expired explicit deadlines in `due_entries` with one scan and a heap rebuild.
 - The queue's indexes are exposed to tests only through the `testing` hooks at the end of `queue.rs`; the profile-driven tests live in `lib/router/kv-router/src/scheduling/policy_queue_tests.rs`.
+
+## Affinity lanes
+
+Each class distinguishes hard pins, ranked soft targets and worker-only soft targets:
+
+```text
+PolicyClassQueue
+├── pending                                      shared requests
+├── ready_by_worker[Exact(worker, rank)]          hard pins
+├── ready_by_worker[Affinity(worker, rank)]       ranked soft affinity
+├── ready_by_worker[WorkerAffinity(worker)]       worker-only soft affinity
+├── candidate_worker_heads                       unblocked lane roots
+├── fallback_heads                               soft roots awaiting fallback capacity
+└── expiring_roots                               full lane identity, including blocked roots
+```
+
+The scheduler supplies `QueueLane` and tri-state `QueueReadiness`; the admission stage
+owns no worker capacity or eligibility state. A hard pin cannot hide a soft request
+that may fall back. Known fallback heads compete on every dispatch pass; healthy
+blocked lanes stay parked until a wake. Expiry and cancellation update all indexes
+and unblock a removed root's successor. Empty lanes leave the affinity index.
