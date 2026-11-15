@@ -4,7 +4,7 @@
 mod support;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use dynamo_kv_router::plugins::prelude::*;
-use dynamo_router_policies::default_policy;
+use dynamo_router_policies::{default_policy, kvcr_policy};
 use dynamo_scheduler::host::{WorkerKvTransferKeysExt, WorkerSelector};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -333,11 +333,12 @@ impl dynamo_kv_router::plugins::prelude::WorkerConfigLike for HintWorker {
 // worker in eight also holds a longer session prefix, so sources no longer
 // than every rank's own prefix are skipped.
 fn kv_transfer(c: &mut Criterion) {
-    for (name, credit, candidates, shared_prompt) in [
-        ("none", 0.5, false, false),
-        ("credit0", 0.0, true, false),
-        ("credit0.5", 0.5, true, false),
-        ("credit0.5_shared_prompt", 0.5, true, true),
+    for (name, credit, candidates, shared_prompt, copy_credit) in [
+        ("none", 0.5, false, false, false),
+        ("credit0", 0.0, true, false, false),
+        ("credit0.5", 0.5, true, false, false),
+        ("credit0.5_shared_prompt", 0.5, true, true, false),
+        ("kvcr_shared_cache", 0.5, true, true, true),
     ] {
         let mut group = c.benchmark_group(format!("kv_transfer/{name}"));
         group
@@ -382,7 +383,16 @@ fn kv_transfer(c: &mut Criterion) {
                         routing_snapshot: None,
                     });
             }
-            let policy = default_policy(
+            if copy_credit {
+                request.shared_cache_hits =
+                    Some(SharedCacheHits::from_ranges(vec![4..20, 24..32, 48..96]));
+            }
+            let policy_factory = if copy_credit {
+                kvcr_policy
+            } else {
+                default_policy
+            };
+            let policy = policy_factory(
                 SelectionConfig::from(&KvRouterConfig {
                     shared_cache_multiplier: Some(credit),
                     overlap_score_credit_decay: 0.6,

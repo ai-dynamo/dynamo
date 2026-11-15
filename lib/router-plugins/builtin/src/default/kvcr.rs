@@ -58,7 +58,7 @@ impl<const REQUEST_COST: bool> WorkerScorer for CopyCreditScorer<REQUEST_COST> {
     }
 }
 
-/// Blocks a copy would add beyond everything this worker already holds.
+/// Blocks a copy adds beyond local storage and already-credited shared-cache hits.
 fn copyable_blocks(candidate: WorkerCandidate<'_>) -> f64 {
     let (Some(cache), Some(source)) = (
         candidate.cache(),
@@ -70,5 +70,28 @@ fn copyable_blocks(candidate: WorkerCandidate<'_>) -> f64 {
     };
     let local =
         cache.device_overlap_blocks() + cache.host_overlap_blocks() + cache.disk_overlap_blocks();
-    (f64::from(source) - local).max(0.0)
+    let copyable = (f64::from(source) - local).max(0.0);
+    if copyable == 0.0 {
+        return 0.0;
+    }
+    let Some(hits) = cache.shared_hits() else {
+        return copyable;
+    };
+    let shared_start = if cache.has_tier_matches() {
+        local
+    } else {
+        local.max(cache.accounting_cache_estimate().0)
+    }
+    .round() as u32;
+    let already_shared = hits
+        .ranges
+        .iter()
+        .map(|range| {
+            range
+                .end
+                .min(source)
+                .saturating_sub(range.start.max(shared_start))
+        })
+        .sum::<u32>();
+    (copyable - f64::from(already_shared)).max(0.0)
 }

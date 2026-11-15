@@ -209,6 +209,110 @@ fn credit_follows_the_target_island() {
     assert_eq!(select(&workers, &request, 0.5), (0, None));
 }
 
+#[test]
+fn shared_and_peer_hits_do_not_double_credit_a_cold_worker() {
+    let workers = HashMap::from([
+        (0, HintWorker::default()),
+        (1, HintWorker::default()),
+        (2, HintWorker::default()),
+    ]);
+    let mut request = request(&[(0, 0, 16, 0), (1, 6, 0, 2), (2, 10, 320, 30)]);
+    request.shared_cache_hits = Some(SharedCacheHits::from_hits(&[true; PROMPT_BLOCKS]));
+
+    let selected = kvcr_policy(SelectionConfig::from(&config(0.5)), "test")
+        .select_worker(support::selection_input(&workers, &request, BLOCK_SIZE))
+        .unwrap();
+
+    assert_eq!(selected.worker, worker(1));
+    assert_eq!(selected.cached_tokens, 6 * BLOCK_SIZE as usize);
+    let source = selected.kv_transfer_source.unwrap();
+    assert_eq!(source.source, worker(2).into());
+    assert_eq!(source.prefix_blocks, PROMPT_BLOCKS);
+}
+
+#[test]
+fn copy_credit_excludes_only_shared_hits_in_the_nonlocal_copied_prefix() {
+    let workers = HashMap::from([(0, HintWorker::default()), (1, HintWorker::default())]);
+    for (device, host, disk, source_prefix) in [
+        (0, 0, 0, 10),
+        (2, 0, 0, 6),
+        (2, 3, 0, 8),
+        (2, 3, 1, 8),
+        (6, 0, 0, 4),
+    ] {
+        for hit_mask in 0..(1 << PROMPT_BLOCKS) {
+            let shared: Vec<bool> = (0..PROMPT_BLOCKS)
+                .map(|position| hit_mask & (1 << position) != 0)
+                .collect();
+            let mut request = request(&[(0, device, 1600, 0), (1, source_prefix, 32000, 0)]);
+            request
+                .overlap
+                .tier_overlap_blocks
+                .host_pinned
+                .insert(worker(0), host);
+            request
+                .overlap
+                .tier_overlap_blocks
+                .disk
+                .insert(worker(0), disk);
+            request.shared_cache_hits = Some(SharedCacheHits::from_hits(&shared));
+
+            let select_policy = |policy: WorkerSelectionPolicy| {
+                policy
+                    .select_worker(support::selection_input(&workers, &request, BLOCK_SIZE))
+                    .unwrap()
+            };
+            let baseline =
+                select_policy(default_policy(SelectionConfig::from(&config(0.5)), "test"));
+            let actual = select_policy(kvcr_policy(SelectionConfig::from(&config(0.5)), "test"));
+            let expected_copy_blocks = (device + host + disk..source_prefix)
+                .filter(|&position| !shared[position])
+                .count();
+            let credit = baseline.log_fields.unwrap().logit - actual.log_fields.unwrap().logit;
+
+            assert_eq!(actual.worker, worker(0));
+            assert_eq!(actual.cached_tokens, baseline.cached_tokens);
+            assert!(
+                (credit - 0.5 * expected_copy_blocks as f64).abs() < 1e-9,
+                "device={device}, host={host}, disk={disk}, source={source_prefix}, mask={hit_mask}: credit={credit}"
+            );
+        }
+    }
+}
+
+#[test]
+fn copy_credit_preserves_the_accounting_only_shared_cutoff() {
+    let workers = HashMap::from([(0, HintWorker::default()), (1, HintWorker::default())]);
+    for estimate in [0.0_f64, 4.4, 4.6, 12.0] {
+        let mut request = request(&[(0, 0, 1600, 0), (1, 0, 32000, 0)]);
+        request.overlap.tier_overlap_blocks.device.clear();
+        request
+            .overlap
+            .effective_overlap_blocks
+            .insert(worker(0), estimate);
+        request
+            .kv_transfer_candidates
+            .as_mut()
+            .unwrap()
+            .owner_prefix_blocks = vec![(worker(1).into(), PROMPT_BLOCKS)];
+        request.shared_cache_hits = Some(SharedCacheHits::from_hits(&[true; PROMPT_BLOCKS]));
+        let select_policy = |policy: WorkerSelectionPolicy| {
+            policy
+                .select_worker(support::selection_input(&workers, &request, BLOCK_SIZE))
+                .unwrap()
+        };
+        let baseline = select_policy(default_policy(SelectionConfig::from(&config(0.5)), "test"));
+        let actual = select_policy(kvcr_policy(SelectionConfig::from(&config(0.5)), "test"));
+        let credit = baseline.log_fields.unwrap().logit - actual.log_fields.unwrap().logit;
+
+        assert_eq!(actual.worker, worker(0));
+        assert!(
+            (credit - 0.5 * estimate.round().min(PROMPT_BLOCKS as f64)).abs() < 1e-9,
+            "estimate={estimate}: credit={credit}"
+        );
+    }
+}
+
 /// The reference selector, like the default, gives copies no credit.
 #[test]
 fn seeded_selection_matches_reference_with_fetchable_prefixes() {
