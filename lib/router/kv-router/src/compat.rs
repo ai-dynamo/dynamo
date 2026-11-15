@@ -1108,7 +1108,7 @@ pub use scheduling::{queue, selector};
 pub use sequences::{multi_worker as multi_worker_sequence, single as sequence};
 
 // Root re-exports of the pre-split lib.rs.
-// Owner: dynamo_scheduler (22), dynamo_kv_indexer (20), dynamo_slot_tracker (11), dynamo_router_protocol (8), dynamo_worker_selection (5), dynamo_kv_events (2), dynamo_kv_hashing (2), dynamo_admission (1), dynamo_kv_hints (1), dynamo_kv_router (1)
+// Owner: dynamo_scheduler (18), dynamo_kv_indexer (20), dynamo_slot_tracker (11), dynamo_router_protocol (8), dynamo_worker_selection (5), dynamo_kv_events (2), dynamo_kv_hashing (2), dynamo_admission (1), dynamo_kv_hints (1), dynamo_kv_router (1)
 #[deprecated(
     since = "1.8.0",
     note = "moved to dynamo_slot_tracker::ActiveSequences; removed in 1.10.0"
@@ -1143,7 +1143,6 @@ pub use dynamo_worker_selection::ConditionalDisaggPolicyKind;
 )]
 pub type DefaultWorkerSelector = dynamo_scheduler::host::DefaultWorkerSelector;
 pub use dynamo_kv_events::event::KvCacheEventError;
-pub use dynamo_scheduler::FcfsPolicy;
 #[deprecated(
     since = "1.8.0",
     note = "moved to dynamo_kv_router::config::KvRouterConfig; removed in 1.10.0"
@@ -1213,7 +1212,6 @@ pub type RouterEvent = dynamo_kv_events::event::RouterEvent;
 pub use dynamo_admission::RouterQueuePolicy;
 pub use dynamo_scheduler::RouterEventSink;
 pub use dynamo_scheduler::RouterPrefillLoadModel;
-pub use dynamo_scheduler::RouterSchedulingPolicy;
 #[deprecated(
     since = "1.8.0",
     note = "moved to dynamo_router_protocol::identity::RoutingPartitionId; removed in 1.10.0"
@@ -1221,7 +1219,6 @@ pub use dynamo_scheduler::RouterSchedulingPolicy;
 pub type RoutingPartitionId = dynamo_router_protocol::identity::RoutingPartitionId;
 pub use dynamo_router_protocol::identity::RoutingPartitionRef;
 pub use dynamo_scheduler::SchedulerQueue;
-pub use dynamo_scheduler::SchedulingPolicy;
 #[deprecated(
     since = "1.8.0",
     note = "moved to dynamo_scheduler::SchedulingRequest; removed in 1.10.0"
@@ -1282,13 +1279,12 @@ pub use dynamo_router_protocol::session::WorkerSelectionInputTrigger;
 pub use dynamo_router_protocol::worker_type::WorkerType;
 pub use dynamo_scheduler::WorkerSelectionInput;
 pub use dynamo_scheduler::WorkerSelector;
-pub use dynamo_scheduler::WsptPolicy;
 pub use dynamo_worker_selection::WorkerSelectionPolicyError;
 
 // Blocks mounted from modules that still exist in this crate (named lists in the module files).
 /// Pre-split `dynamo_kv_router::scheduling` items that moved; mounted by `src/scheduling/mod.rs`.
 pub mod scheduling {
-    // Owner: dynamo_scheduler (36), dynamo_admission (8), dynamo_router_protocol (3), dynamo_worker_selection (2)
+    // Owner: dynamo_scheduler (31), dynamo_admission (8), dynamo_router_protocol (3), dynamo_worker_selection (2)
     /// Pre-split `dynamo_kv_router::scheduling::config` items that moved; mounted by `src/scheduling/config.rs`.
     pub mod config {
         // Owner: dynamo_scheduler (2)
@@ -1355,16 +1351,6 @@ pub mod scheduling {
         pub use dynamo_scheduler::read_overlap_refresh_after;
         pub use dynamo_scheduler::refresh_overlap;
         pub use dynamo_scheduler::should_refresh_overlap;
-    }
-
-    /// Pre-split `dynamo_kv_router::scheduling::policy`; its items live in `dynamo_scheduler` now.
-    pub mod policy {
-        // Owner: dynamo_scheduler (5)
-        pub use dynamo_scheduler::FcfsPolicy;
-        pub use dynamo_scheduler::LcfsPolicy;
-        pub use dynamo_scheduler::RouterSchedulingPolicy;
-        pub use dynamo_scheduler::SchedulingPolicy;
-        pub use dynamo_scheduler::WsptPolicy;
     }
 
     /// Pre-split `dynamo_kv_router::scheduling::policy_queue`; its items live in `dynamo_admission` now.

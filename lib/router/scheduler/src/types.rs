@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use super::config::RouterConfigOverride;
 use super::filter::RoutingEligibility;
 use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
-use super::prefill_load::effective_prefill_tokens;
 use crate::kv_hints::{KvCopySource, KvTransferCandidates, KvTransferSourceChoice};
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{RoutingConstraints, SelectionLogFields, WorkerConfigLike};
@@ -437,17 +436,9 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
         }
     }
 
-    pub fn request(&self) -> &'a SchedulingRequest {
-        self.request
-    }
-
     pub(crate) fn with_eligibility(mut self, eligibility: RoutingEligibility<'a>) -> Self {
         self.eligibility = eligibility;
         self
-    }
-
-    pub fn best_effective_prefill_tokens(&self) -> usize {
-        effective_prefill_tokens(self.request.isl_tokens, self.best_cached_tokens())
     }
 
     pub fn best_cached_tokens(&self) -> usize {

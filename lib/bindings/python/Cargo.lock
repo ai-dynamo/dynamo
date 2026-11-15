@@ -2822,7 +2822,6 @@ dependencies = [
  "futures-util",
  "http 1.4.2",
  "once_cell",
- "ordered-float 4.6.0",
  "parking_lot",
  "rmp-serde",
  "rustc-hash 2.1.2",

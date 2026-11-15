@@ -19,7 +19,6 @@ mod local;
 mod overlap;
 mod overlap_refresh;
 mod overlap_summary;
-mod policy;
 mod prefill_load;
 mod protocols;
 mod queue;
@@ -60,7 +59,6 @@ pub use overlap_refresh::{
     refresh_overlap, should_refresh_overlap,
 };
 pub use overlap_summary::{MooncakeOverlapSummary, build_mooncake_overlap_summaries};
-pub use policy::{FcfsPolicy, LcfsPolicy, RouterSchedulingPolicy, SchedulingPolicy, WsptPolicy};
 pub use prefill_load::{
     InvalidEffectivePrefillTokens, PrefillLoadEstimator, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,

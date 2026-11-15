@@ -3393,7 +3393,6 @@ dependencies = [
  "futures-util",
  "http 1.4.1",
  "once_cell",
- "ordered-float 4.6.0",
  "parking_lot",
  "rmp-serde",
  "rstest 0.18.2",
