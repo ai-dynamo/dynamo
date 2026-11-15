@@ -1,21 +1,24 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_router_policies::DefaultWorkerSelector;
+use crate::replay::default_selector::DefaultWorkerSelector;
+use dynamo_worker_selection::host::SelectionConfig;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::common::protocols::MockerConfig;
-use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::kv_hints::{WorkerKvTransferKeys, WorkerKvTransferKeysCache};
-use dynamo_kv_router::protocols::{
-    ActiveSequenceEvent, DpRank, KvHintTransferWorkerMetadata, WorkerConfigLike, WorkerId,
-    WorkerWithDpRank,
+use dynamo_kv_hints::{
+    KvHintTransferWorkerMetadata, WorkerKvTransferKeys, WorkerKvTransferKeysCache,
 };
-use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
-use dynamo_kv_router::sequences::{LocalWorkerLoad, SchedulerLoadSnapshot};
-use dynamo_kv_router::{ActiveSequencesMultiWorker, LocalScheduler, SequencePublisher};
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_router_protocol::worker::DEFAULT_MAX_BATCHED_TOKENS;
+use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::host::{LocalScheduler, WorkerConfigLike, WorkerKvTransferKeysExt};
+use dynamo_slot_tracker::host::{
+    ActiveSequenceEvent, ActiveSequencesMultiWorker, LocalWorkerLoad, SchedulerLoadSnapshot,
+    SequencePublisher,
+};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ReplayNoopPublisher;
@@ -96,7 +99,10 @@ impl WorkerConfigLike for ReplayWorkerConfig {
     }
 
     fn kv_transfer_keys(&self) -> Cow<'_, WorkerKvTransferKeys> {
-        Cow::Borrowed(self.kv_transfer_keys.get_or_init(self))
+        Cow::Borrowed(
+            self.kv_transfer_keys
+                .get_or_init(|| WorkerKvTransferKeys::of(self)),
+        )
     }
 }
 
@@ -175,8 +181,10 @@ pub(super) fn replay_selector_with_seed(
     }
 
     Ok(match selector_seed {
-        Some(seed) => DefaultWorkerSelector::new_seeded(Some(config.clone()), "replay", seed),
-        None => DefaultWorkerSelector::new(Some(config.clone()), "replay"),
+        Some(seed) => {
+            DefaultWorkerSelector::new_seeded(Some(SelectionConfig::from(config)), "replay", seed)
+        }
+        None => DefaultWorkerSelector::new(Some(SelectionConfig::from(config)), "replay"),
     })
 }
 
@@ -220,7 +228,7 @@ mod tests {
         // and selections borrow them.
         let keys = config.kv_transfer_keys();
         assert!(matches!(keys, Cow::Borrowed(_)));
-        assert_eq!(*keys, WorkerKvTransferKeys::new(&config));
+        assert_eq!(*keys, WorkerKvTransferKeys::of(&config));
         assert!(keys.target().is_some());
     }
 
@@ -249,11 +257,7 @@ mod tests {
             policy_file.path(),
             r#"
 worker_selection:
-  aggregated: custom
-  instances:
-    - name: custom
-      type: test
-      parameters: {}
+  aggregated: test
 "#,
         )
         .unwrap();
@@ -269,7 +273,7 @@ worker_selection:
         assert!(
             error
                 .to_string()
-                .contains("custom worker-selection policy \"custom\" is not supported by replay")
+                .contains("custom worker-selection policy \"test\" is not supported by replay")
         );
     }
 }

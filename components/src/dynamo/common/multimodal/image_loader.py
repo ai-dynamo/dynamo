@@ -6,7 +6,7 @@ import hashlib
 import logging
 import os
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from io import BytesIO
 from typing import Any, Coroutine, Dict, Final, List, Literal, overload
 from urllib.parse import urlsplit
@@ -135,6 +135,10 @@ async def read_decoded_media_via_nixl(*args: Any, **kwargs: Any) -> Any:
     return await _read_decoded_media_via_nixl(*args, **kwargs)
 
 
+def _pillow_rgb(image: Image.Image) -> Image.Image:
+    return image.convert("RGB")
+
+
 class ImageLoader:
     CACHE_SIZE_MAXIMUM = int(os.environ.get("DYN_MM_IMAGE_CACHE_SIZE", "8"))
 
@@ -147,6 +151,7 @@ class ImageLoader:
         max_bytes: int | None = None,
         session_scoped_cache: bool | None = None,
         max_pixels: int | None = None,
+        to_rgb: Callable[[Image.Image], Image.Image] = _pillow_rgb,
     ):
         """
         Initialize the ImageLoader with caching, HTTP settings, and optional NIXL config for
@@ -168,6 +173,11 @@ class ImageLoader:
                 DYN_MM_IMAGE_CACHE_SESSION_SCOPED (default off). When enabled,
                 HTTP loads without a scope bypass all image caches.
             max_pixels: Optional per-image pixel limit, checked before RGB decode.
+            to_rgb: Converts a decoded image to RGB. The default drops alpha, as
+                Pillow's ``convert("RGB")`` does. A backend whose own loader treats
+                transparency differently passes that conversion. It must return an
+                RGB image and be safe to call from a worker thread. Frontend-decoded
+                arrays that are already RGB skip it.
         """
         self._http_timeout = http_timeout
         self._cache_size = cache_size
@@ -179,6 +189,7 @@ class ImageLoader:
         ):
             raise ValueError("max_pixels must be a positive integer")
         self._max_pixels = max_pixels
+        self._to_rgb = to_rgb
         if session_scoped_cache is None:
             session_scoped_cache = image_cache_session_scoped_from_env()
         self._session_scoped_cache = session_scoped_cache
@@ -232,7 +243,9 @@ class ImageLoader:
 
     @staticmethod
     def _open_image_sync(
-        image_data: BytesIO, max_pixels: int | None = None
+        image_data: BytesIO,
+        max_pixels: int | None = None,
+        to_rgb: Callable[[Image.Image], Image.Image] = _pillow_rgb,
     ) -> Image.Image:
         """Open, validate, and decode an image from raw bytes. Runs in a thread."""
         # formats= is the allowlist. Its JPEG plugin also opens multi-picture JPEGs
@@ -243,16 +256,20 @@ class ImageLoader:
                     413, "Image exceeds the decoded pixel limit", "image"
                 )
             # Image.open() is lazy — check dimensions before RGB expansion.
-            return image.convert("RGB")
+            # Decode here: to_rgb may return its argument, and the file closes on exit.
+            image.load()
+            return to_rgb(image)
 
     @staticmethod
     async def _open_image(
-        image_data: BytesIO, max_pixels: int | None = None
+        image_data: BytesIO,
+        max_pixels: int | None = None,
+        to_rgb: Callable[[Image.Image], Image.Image] = _pillow_rgb,
     ) -> Image.Image:
         """Open and validate an image from raw bytes, converting to RGB."""
         with _nvtx.annotate("mm:img:pil_open_convert", color="lime"):
             return await asyncio.to_thread(
-                ImageLoader._open_image_sync, image_data, max_pixels
+                ImageLoader._open_image_sync, image_data, max_pixels, to_rgb
             )
 
     def _cache_put(self, key: str, image: Image.Image) -> None:
@@ -287,6 +304,7 @@ class ImageLoader:
                         return await self._open_image(
                             BytesIO(cached_content),
                             max_pixels if max_pixels is not None else self._max_pixels,
+                            self._to_rgb,
                         )
                     except (OSError, ValueError) as exc:
                         logger.warning(
@@ -308,7 +326,9 @@ class ImageLoader:
                 image_data = BytesIO(content)
 
             image = await self._open_image(
-                image_data, max_pixels if max_pixels is not None else self._max_pixels
+                image_data,
+                max_pixels if max_pixels is not None else self._max_pixels,
+                self._to_rgb,
             )
             if self._shared_image_cache is not None and key is not None:
                 # Cache fills are awaited deliberately so Redis acknowledges a
@@ -409,7 +429,7 @@ class ImageLoader:
         if arr.ndim == 3 and arr.shape[-1] == 1:
             arr = arr.squeeze(axis=-1)
         image = Image.fromarray(arr)
-        return image if image.mode == "RGB" else image.convert("RGB")
+        return image if image.mode == "RGB" else self._to_rgb(image)
 
     @_nvtx.annotate("mm:img:load_image", color="lime")
     async def load_image(
@@ -488,7 +508,7 @@ class ImageLoader:
                         normalized_url, max_bytes=self._max_bytes()
                     )
                     image_data = BytesIO(image_bytes)
-                return await self._open_image(image_data, max_pixels)
+                return await self._open_image(image_data, max_pixels, self._to_rgb)
             except Image.UnidentifiedImageError as e:
                 logger.error(
                     "Unsupported image format decoding: '%s'",

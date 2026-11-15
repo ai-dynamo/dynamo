@@ -137,7 +137,7 @@ impl ToolNameMap {
     }
 
     /// Restore the original namespace and name, treating unknown aliases as bare names.
-    pub(super) fn decode<'a>(&'a self, alias: &'a str) -> (Option<&'a str>, &'a str) {
+    pub(crate) fn decode<'a>(&'a self, alias: &'a str) -> (Option<&'a str>, &'a str) {
         self.by_alias
             .get(alias)
             .map(|(namespace, name)| (namespace.as_deref(), name.as_str()))

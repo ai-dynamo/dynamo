@@ -34,11 +34,14 @@ pytest.importorskip(
 
 from dynamo.planner.config.planner_config import (
     DgdrExecutorConfig,
+    PlannerConfig,
     RetuneConfig,
     RetuneEngineSpec,
     dgdr_need_seconds,
 )
-from dynamo.planner.core.types import RetuneParams
+from dynamo.planner.core.types import RetuneParams, TrafficObservation
+from dynamo.planner.retune import sweep as sweep_module
+from dynamo.planner.retune.domains import PREDICTOR_KEYS
 from dynamo.planner.retune.live import dgdr
 from dynamo.planner.retune.live.contracts import (
     LABEL_ATTEMPT,
@@ -68,6 +71,7 @@ from dynamo.planner.retune.live.dgdr import (
     window_selection,
 )
 from dynamo.planner.retune.live.reconciler import trace_pvc_source
+from dynamo.planner.retune.live.window_cut import TraceHistory
 from dynamo.planner.retune.sweep import SweepRequest, score_summary
 from dynamo.planner.tests.live_retune_fakes import (
     FakeDgdrOperator,
@@ -2116,3 +2120,403 @@ def test_sweep_with_the_real_window_cutter(tmp_path):
     _, claim_path = trace_pvc_source(h.created()[0]["spec"])
     assert tmp_path / "trace" / claim_path == window_file
     assert_scores(result, request)
+
+
+# ------------------------------------------------------------- Scenario 2
+
+LSD = "load_scaling_down_sensitivity"
+THROUGHPUT_INTERVAL = "throughput_adjustment_interval_seconds"
+
+
+class InlinePool:
+    """``sweep.WorkerPool`` that runs each task in this process."""
+
+    def __init__(self, *args: Any) -> None:
+        self.closed = False
+
+    def run(self, tasks):
+        results = {}
+        for task_id, function, args in tasks:
+            try:
+                results[task_id] = (True, function(*args))
+            except Exception as error:
+                results[task_id] = (False, f"{type(error).__name__}: {error}")
+        return results
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeHistory:
+    """``window_cut.bucket_history``: records calls, returns 4 buckets per
+    interval."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(
+        self,
+        segments_root,
+        history_start_ms,
+        window_start_ms,
+        window_end_ms,
+        as_of_ms,
+        intervals_s,
+        *,
+        deadline_s,
+        cancel=None,
+    ):
+        self.calls.append(
+            {
+                "segments_root": segments_root,
+                "history_start_ms": history_start_ms,
+                "window": (window_start_ms, window_end_ms, as_of_ms),
+                "intervals": list(intervals_s),
+            }
+        )
+
+        def rows(interval: int, count: int):
+            return tuple(
+                TrafficObservation(float(interval), 10.0 + i, 100.0, 20.0)
+                for i in range(count)
+            )
+
+        return TraceHistory(
+            observations={interval: rows(interval, 6) for interval in intervals_s},
+            warmups={interval: rows(interval, 4) for interval in intervals_s},
+            history_requests=40,
+            dropped_members=0,
+        )
+
+
+def _base_planner(**overrides: Any) -> dict[str, Any]:
+    values: dict[str, Any] = {
+        "namespace": "test-ns",
+        "mode": "agg",
+        "enable_load_scaling": True,
+        "enable_throughput_scaling": False,
+        "metric_pulling_prometheus_endpoint": "http://prometheus:9090",
+        **overrides,
+    }
+    return PlannerConfig(**values).model_dump(mode="json")
+
+
+def scenario_2_request(
+    base_planner: dict[str, Any], sensitivities=(70, 90), running=80
+) -> SweepRequest:
+    """SMALL_DOMAIN x load sensitivities, from the running sensitivity, with
+    two ready workers at the window start and three in the spec."""
+
+    request = make_request(spec_replicas={"aggregated": 3})
+    baseline = RetuneParams(router=request.baseline.router, planner={LSD: running})
+    candidates = {
+        RetuneParams(router=point, planner={LSD: value})
+        for point in grid(SMALL_DOMAIN)
+        for value in sensitivities
+    }
+    candidates.add(baseline)
+    return dataclasses.replace(
+        request,
+        candidates=tuple(sorted(candidates, key=RetuneParams.key)),
+        baseline=baseline,
+        replicas={"aggregated": 2},
+        base_planner=base_planner,
+        history_start_ms=request.window_start_ms - 600_000.0,
+    )
+
+
+def test_plan_shards_crosses_router_chunks_with_planner_points():
+    planners = [{LSD: 70}, {LSD: 80}, {LSD: 90}]
+    baseline = grid(SMALL_DOMAIN)[-1]
+
+    shards = plan_shards(
+        SMALL_DOMAIN,
+        baseline=baseline,
+        startup=baseline,
+        max_shards=3,
+        parallelism=8,
+        planner_points=planners,
+        baseline_planner={LSD: 80},
+        startup_planner={LSD: 80},
+    )
+
+    grids = [shard for shard in shards if shard.kind == "grid"]
+    covered = [
+        (json.dumps(point, sort_keys=True), planner[LSD])
+        for shard in grids
+        for point in shard.points
+        for planner in shard.planners
+    ]
+    # Every router point with every planner point, once; 24 points in 3
+    # shards of 8.
+    assert sorted(covered) == sorted(
+        (json.dumps(point, sort_keys=True), value)
+        for point in grid(SMALL_DOMAIN)
+        for value in (70, 80, 90)
+    )
+    assert [shard.size for shard in grids] == [8, 8, 8]
+    (probe,) = [shard for shard in shards if shard.kind == "probe"]
+    assert probe.planners == ({LSD: 80},)
+    # The baseline is in the grid: no point shard.
+    assert [shard.kind for shard in shards].count("point") == 0
+
+
+def test_scenario_2_window_replays_the_inner_planner_from_the_window_start(tmp_path):
+    h = Harness(tmp_path)
+    history = FakeHistory()
+    request = scenario_2_request(_base_planner())
+
+    result = h.sweep(request, bucket_history=history, worker_pool=InlinePool)
+
+    assert result.status == "ok", (result.error, result.details)
+    # Load scaling only: no predictor to warm, so no history is read.
+    assert history.calls == []
+    bodies = h.created()
+    assert bodies
+    for body in bodies:
+        overrides = body["spec"]["aisim"]["inputOverrides"]
+        section = overrides["planner"]["retune_sweep"]
+        # The live config's scaling fields only: no connection settings.
+        assert section["base"]["enable_load_scaling"] is True
+        assert "metric_pulling_prometheus_endpoint" not in section["base"]
+        assert "namespace" not in section["base"]
+        assert section["warmup"] == {}
+        assert {point[LSD] for point in section["points"]} <= {70, 80, 90}
+        # Each inner planner starts from the ready counts at the window
+        # start, not the spec.
+        preset = overrides["engine"]["workers"]["aggregated"]["parallelism"]["preset"]
+        assert preset[0]["replicas"] == 2
+    for candidate in request.candidates:
+        metrics = default_metrics(public(candidate.router))
+        metrics["goodput_output_throughput_tok_s"] += candidate.planner[LSD]
+        expected, _ = score_summary(metrics, request.window_s, request.objective)
+        assert result.scores[candidate.key()] == pytest.approx(expected, rel=1e-12)
+        assert result.metrics[candidate.key()]["params"] == candidate.to_dict()
+    assert result.details["planner"]["points"] == 3
+
+
+def test_scenario_2_throughput_planner_carries_its_history_warmup(tmp_path):
+    h = Harness(tmp_path)
+    history = FakeHistory()
+    base = _base_planner(
+        optimization_target="sla",
+        enable_throughput_scaling=True,
+        enable_load_scaling=True,
+    )
+    request = scenario_2_request(base)
+
+    result = h.sweep(request, bucket_history=history, worker_pool=InlinePool)
+
+    assert result.status == "ok", (result.error, result.details)
+    (call,) = history.calls
+    assert call["intervals"] == [base[THROUGHPUT_INTERVAL]]
+    assert call["history_start_ms"] == int(request.history_start_ms)
+    assert call["window"] == (WINDOW_START_MS, WINDOW_END_MS, AS_OF_MS)
+    interval = base[THROUGHPUT_INTERVAL]
+    for body in h.created():
+        warmup = body["spec"]["aisim"]["inputOverrides"]["planner"]["retune_sweep"][
+            "warmup"
+        ]
+        # Four history buckets, as TrafficObservation rows.
+        assert warmup == {
+            str(interval): [
+                [float(interval), 10.0 + i, 100.0, 20.0, None, None] for i in range(4)
+            ]
+        }
+    # The decision's swap inputs: history and window at the interval.
+    assert len(result.observations_at(interval)) == 6
+    assert result.predictor_warmup_errors == {}
+
+
+def test_scenario_2_off_grid_running_planner_gets_its_own_shard(tmp_path):
+    # Grid {70, 90}, running 80: the planner axis is the grid's two points,
+    # as P13 counts it, and the baseline replays in a single-point shard
+    # instead of adding 80 to the axis of every grid shard.
+    h = Harness(tmp_path)
+    request = dataclasses.replace(
+        scenario_2_request(_base_planner()),
+        grid_planners=({LSD: 70}, {LSD: 90}),
+    )
+
+    result = h.sweep(request, bucket_history=FakeHistory(), worker_pool=InlinePool)
+
+    assert result.status == "ok", (result.error, result.details)
+    assert result.details["planner"]["points"] == 2
+    assert "point-baseline" in result.details["shards"]
+    grid_points = {
+        point[LSD]
+        for body in h.created()
+        if body["metadata"]["labels"][LABEL_SHARD].startswith("grid-")
+        for point in body["spec"]["aisim"]["inputOverrides"]["planner"]["retune_sweep"][
+            "points"
+        ]
+    }
+    assert grid_points == {70, 90}
+    assert all(result.scores[c.key()] is not None for c in request.candidates)
+
+
+def test_scenario_2_presweep_winner_keeps_the_planner_axis(tmp_path, monkeypatch):
+    # The pre-sweep picks kalman while the planner runs arima: the grid's
+    # points carry kalman and the baseline keeps arima, so the baseline is
+    # off the grid instead of doubling the planner axis.
+    h = Harness(tmp_path)
+    base = _base_planner(
+        optimization_target="sla",
+        enable_throughput_scaling=True,
+        enable_load_scaling=True,
+        load_predictor="arima",
+    )
+    request = dataclasses.replace(
+        scenario_2_request(base),
+        grid_planners=({LSD: 70}, {LSD: 90}),
+        predictor_candidates=(("kalman_default", {"load_predictor": "kalman"}),),
+    )
+    interval = str(base[THROUGHPUT_INTERVAL])
+    monkeypatch.setattr(
+        dgdr,
+        "run_presweeps",
+        lambda *args: {
+            "by_interval": {interval: {"fields": {"load_predictor": "kalman"}}}
+        },
+    )
+    monkeypatch.setattr(sweep_module, "prepare_predictor", lambda *args: None)
+
+    result = h.sweep(request, bucket_history=FakeHistory(), worker_pool=InlinePool)
+
+    assert result.status == "ok", (result.error, result.details)
+    assert result.details["planner"]["points"] == 2
+    assert "point-baseline" in result.details["shards"]
+    assert all(result.scores[c.key()] is not None for c in request.candidates)
+
+
+@pytest.mark.parametrize(
+    "predictor_only", [False, True], ids=["router_only", "predictor_only"]
+)
+def test_scenario_2_without_planner_points_replays_the_running_planner(
+    tmp_path, monkeypatch, predictor_only
+):
+    # The grid searches no planner field, so its one planner point is {}:
+    # every Run still replays the running planner (with the pre-sweep winner
+    # when the predictor is searched), and every candidate gets a score.
+    h = Harness(tmp_path)
+    running: dict[str, Any] = {}
+    if predictor_only:
+        base = _base_planner(
+            optimization_target="sla",
+            enable_throughput_scaling=True,
+            enable_load_scaling=True,
+            load_predictor="arima",
+        )
+        running = {key: base[key] for key in PREDICTOR_KEYS}
+    else:
+        base = _base_planner()
+    request = make_request(planner=running)
+    request = dataclasses.replace(
+        request,
+        replicas={"aggregated": 2},
+        base_planner=base,
+        history_start_ms=request.window_start_ms - 600_000.0,
+        grid_planners=({},),
+    )
+    if predictor_only:
+        request = dataclasses.replace(
+            request,
+            predictor_candidates=(("kalman_default", {"load_predictor": "kalman"}),),
+        )
+        interval = str(base[THROUGHPUT_INTERVAL])
+        monkeypatch.setattr(
+            dgdr,
+            "run_presweeps",
+            lambda *args: {
+                "by_interval": {interval: {"fields": {"load_predictor": "kalman"}}}
+            },
+        )
+        monkeypatch.setattr(sweep_module, "prepare_predictor", lambda *args: None)
+
+    result = h.sweep(request, bucket_history=FakeHistory(), worker_pool=InlinePool)
+
+    assert result.status == "ok", (result.error, result.details)
+    assert result.details["planner"]["points"] == 1
+    grid_points = [
+        point
+        for body in h.created()
+        if body["metadata"]["labels"][LABEL_SHARD].startswith("grid-")
+        for point in body["spec"]["aisim"]["inputOverrides"]["planner"]["retune_sweep"][
+            "points"
+        ]
+    ]
+    assert grid_points
+    if predictor_only:
+        assert {point["load_predictor"] for point in grid_points} == {"kalman"}
+    assert all(result.scores[c.key()] is not None for c in request.candidates)
+
+
+def test_scenario_2_candidate_with_a_foreign_planner_point_is_unmapped(tmp_path):
+    h = Harness(tmp_path)
+
+    def foreign(_name: str, parameters: dict) -> None:
+        parameters["adapters"]["dynamo.planner"]["retune_sweep"]["points"] = [{LSD: 55}]
+
+    h.operator.mutate_parameters = foreign
+    result = h.sweep(
+        scenario_2_request(_base_planner()),
+        bucket_history=FakeHistory(),
+        worker_pool=InlinePool,
+    )
+
+    # The baseline is unscored, so the window cannot be decided.
+    assert result.details["unmapped_candidates"]
+    assert all(score is None for score in result.scores.values())
+
+
+def test_scenario_2_prepares_the_predictor_of_a_new_throughput_interval(
+    tmp_path, monkeypatch
+):
+    # Candidates at 360 s next to the running 180 s: the history is read at
+    # both intervals, and the 360-s predictor a decision would swap in is
+    # prepared on that interval's observations.
+    h = Harness(tmp_path)
+    history = FakeHistory()
+    base = _base_planner(
+        optimization_target="sla",
+        enable_throughput_scaling=True,
+        enable_load_scaling=True,
+        load_predictor="constant",
+    )
+    request = scenario_2_request(base)
+    slower = {
+        RetuneParams(
+            router=candidate.router,
+            planner={**candidate.planner, THROUGHPUT_INTERVAL: 360},
+        )
+        for candidate in request.candidates
+        if candidate != request.baseline
+    }
+    request = dataclasses.replace(
+        request,
+        candidates=tuple(sorted({*request.candidates, *slower}, key=RetuneParams.key)),
+    )
+
+    prepared = []
+    monkeypatch.setattr(
+        sweep_module,
+        "prepare_predictor",
+        lambda config, _caps, observations: prepared.append(
+            (config.throughput_adjustment_interval_seconds, len(observations))
+        ),
+    )
+
+    result = h.sweep(request, bucket_history=history, worker_pool=InlinePool)
+
+    assert result.status == "ok", (result.error, result.details)
+    assert history.calls[0]["intervals"] == [180, 360]
+    # Only the new interval needs a predictor, on its 6 observations.
+    assert prepared == [(360, 6)]
+    warmup = h.created()[0]["spec"]["aisim"]["inputOverrides"]["planner"][
+        "retune_sweep"
+    ]["warmup"]
+    assert sorted(warmup) == ["180", "360"]
+    assert sorted(result.interval_observations) == [180, 360]
+    assert result.predictor_warmup_errors == {}
+    scored = [key for key, score in result.scores.items() if score is not None]
+    assert len(scored) == len(request.candidates)

@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
@@ -80,14 +81,19 @@ func (r *disaggregatedSetRestartProgressResolver) Resolve(
 		if err != nil {
 			dsReason = err.Error()
 		} else {
-			// A ready previous revision cannot satisfy the currently requested restart.
-			restartApplied, restartErr := disaggregatedSetRestartApplied(ds, selection, dgd.Spec.Restart.ID)
-			dsReady = readiness.Ready && restartErr == nil && restartApplied
+			dsReady = readiness.Ready
 			dsReason = readiness.Reason
-			if restartErr != nil {
-				dsReason = restartErr.Error()
-			} else if !restartApplied {
-				dsReason = "DisaggregatedSet has not observed the requested restart"
+
+			// A ready previous revision cannot satisfy the currently requested restart.
+			restartID := ptr.Deref(dgd.Spec.Restart, nvidiacomv1beta1.Restart{}).ID
+			if restartID != "" {
+				restartApplied, restartErr := disaggregatedSetRestartApplied(ds, selection, restartID)
+				dsReady = dsReady && restartErr == nil && restartApplied
+				if restartErr != nil {
+					dsReason = restartErr.Error()
+				} else if !restartApplied {
+					dsReason = "DisaggregatedSet has not observed the requested restart"
+				}
 			}
 		}
 	}
@@ -129,7 +135,7 @@ func disaggregatedSetRestartApplied(ds *unstructured.Unstructured, selection dis
 	if err != nil {
 		return false, fmt.Errorf("failed to read DisaggregatedSet restart spec: %w", err)
 	}
-	if !found || restartID == "" {
+	if !found {
 		return false, nil
 	}
 	typedSpec := disaggregatedsetv1.DisaggregatedSetSpec{}
