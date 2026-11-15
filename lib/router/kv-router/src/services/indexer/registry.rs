@@ -303,7 +303,7 @@ impl ListenerRecord {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(all(feature = "metrics", feature = "http"))]
     fn status(&self) -> ListenerStatus {
         self.runtime.lock().status
     }
