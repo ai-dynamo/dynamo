@@ -62,7 +62,8 @@ impl ImageDecodeBackend for ImageReaderBackend {
 const PNG_COLOUR_TYPE_GREYSCALE: u8 = 0;
 
 /// Narrows like Pillow's `convert("RGB")` on a 16-bit PNG and like llm-multimodal (vllm-rs) on any
-/// format. A greyscale PNG with a `tRNS` key decodes with alpha here, but those loaders keep it grey.
+/// format. Unlike them, a greyscale PNG keeps its `tRNS` key as alpha, as an 8-bit PNG does, so
+/// workers that composite transparency can find the key.
 fn narrow_sixteen_bit(image: &DynamicImage, bytes: &[u8]) -> Option<(Vec<u8>, PixelFormat)> {
     let clip = |sample: &u16| (*sample).min(255) as u8;
     let high_byte = |sample: &u16| (*sample >> 8) as u8;
@@ -71,7 +72,11 @@ fn narrow_sixteen_bit(image: &DynamicImage, bytes: &[u8]) -> Option<(Vec<u8>, Pi
         DynamicImage::ImageLumaA16(wide)
             if png_colour_type(bytes) == Some(PNG_COLOUR_TYPE_GREYSCALE) =>
         {
-            (wide.iter().step_by(2).map(clip).collect(), PixelFormat::L8)
+            let pixels = wide
+                .chunks_exact(2)
+                .flat_map(|pixel| [clip(&pixel[0]), high_byte(&pixel[1])])
+                .collect();
+            (pixels, PixelFormat::La8)
         }
         DynamicImage::ImageLumaA16(wide) => {
             (wide.iter().map(high_byte).collect(), PixelFormat::La8)
@@ -119,12 +124,12 @@ mod tests {
                 vec![0x01, 0xFF, 0x00],
                 PixelFormat::Rgb8,
             ),
-            // A greyscale PNG with a `tRNS` key decodes as grey+alpha.
+            // A greyscale PNG with a `tRNS` key decodes as grey+alpha; the key stays as alpha.
             (
                 DynamicImage::ImageLumaA16(grey_alpha.clone()),
                 grey_png.as_slice(),
-                vec![255, 200],
-                PixelFormat::L8,
+                vec![255, 0x00, 200, 0xFF],
+                PixelFormat::La8,
             ),
             (
                 DynamicImage::ImageLumaA16(grey_alpha),

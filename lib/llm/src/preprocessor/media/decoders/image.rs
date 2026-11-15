@@ -803,7 +803,7 @@ mod tests {
     )]
     #[case::grey_with_trns_key(
         "iVBORw0KGgoAAAANSUhEUgAAAAMAAAABEAAAAABuG5crAAAAAnRSTlMAyOMsh7oAAAAPSURBVHicYyg1YDjx/z8ACQoDbMNVpCIAAAAASUVORK5CYII=",
-        1,
+        2,
         &[255, 255, 255, 200, 200, 200, 255, 255, 255]
     )]
     #[case::grey_alpha(
@@ -845,6 +845,25 @@ mod tests {
             })
             .collect();
         assert_eq!(rgb, pillow_rgb);
+    }
+
+    /// A 16-bit greyscale PNG with samples 100 and 0 and a `tRNS` key of 0. The expected bytes are
+    /// Pillow 13.0.0 `Image.open(png).convert("LA")`.
+    #[test]
+    fn test_sixteen_bit_grey_png_keeps_trns_key_as_alpha() {
+        use base64::{Engine as _, engine::general_purpose};
+        use dynamo_memory::actions::Slice as _;
+
+        let png = general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAIAAAABEAAAAACB2fwVAAAAAnRSTlMAAHaTzTgAAAANSURBVHicY2BIYWAAAAExAGWBdOoNAAAAAElFTkSuQmCC")
+            .unwrap();
+        let decoded = ImageDecoder::default()
+            .decode(create_encoded_media_data(png))
+            .unwrap();
+        assert_eq!(decoded.tensor_info.shape, vec![1, 2, 2]);
+        // SAFETY: nothing else holds the storage.
+        let pixels = unsafe { decoded.data.as_slice() }.unwrap();
+        assert_eq!(pixels, [100, 255, 0, 0]);
     }
 
     fn pil_parity_fixture() -> (Vec<u8>, Vec<u8>, u32, u32) {
