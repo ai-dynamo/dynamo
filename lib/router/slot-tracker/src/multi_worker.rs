@@ -499,7 +499,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     /// Test hook: panics unless every tracked request and block has been released.
-    #[cfg(any(test, feature = "testing", feature = "bench"))]
+    #[cfg(any(test, feature = "testing"))]
     pub fn assert_completely_drained(&self, decay_now: Instant) {
         let active_blocks = self.active_blocks();
         assert!(
@@ -1391,18 +1391,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     .set_worker_capacity(WorkerWithDpRank::new(range.worker_id, dp_rank), capacity);
             }
         }
-    }
-
-    /// Bench hook: project every worker's load into `projections` the way the scheduler
-    /// does when it builds candidate rows, with no prefill-load hint.
-    #[cfg(feature = "bench")]
-    pub fn bench_project_worker_loads_into(
-        &self,
-        token_sequence: Option<&[SequenceHash]>,
-        decay_now: Instant,
-        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
-    ) {
-        self.project_worker_loads_into(token_sequence, decay_now, projections, None);
     }
 
     /// Query all workers for their current number of active blocks.

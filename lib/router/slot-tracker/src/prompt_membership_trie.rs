@@ -90,7 +90,7 @@ impl PromptTrieNode {
         }
     }
 
-    #[cfg(any(test, feature = "testing", feature = "bench"))]
+    #[cfg(any(test, feature = "testing"))]
     fn live_children(&self) -> Vec<SharedNode> {
         self.children
             .values()
@@ -619,7 +619,7 @@ impl PromptMembershipTrie {
         worker_hashes
     }
 
-    #[cfg(any(test, feature = "testing", feature = "bench"))]
+    #[cfg(any(test, feature = "testing"))]
     pub(super) fn is_empty(&self) -> bool {
         let root = self.root.read();
         root.live_children().is_empty()

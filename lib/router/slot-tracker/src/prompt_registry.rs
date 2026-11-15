@@ -594,7 +594,7 @@ impl PromptRegistry {
         );
     }
 
-    #[cfg(any(test, feature = "testing", feature = "bench"))]
+    #[cfg(any(test, feature = "testing"))]
     pub fn is_block_index_empty(&self) -> bool {
         self.membership.is_empty()
     }

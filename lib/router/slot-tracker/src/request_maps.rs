@@ -167,12 +167,12 @@ impl RequestIndex {
         counts
     }
 
-    #[cfg(any(test, feature = "testing", feature = "bench"))]
+    #[cfg(any(test, feature = "testing"))]
     pub fn is_empty(&self) -> bool {
         self.request_to_booking.is_empty() && self.request_to_lora.is_empty()
     }
 
-    #[cfg(any(test, feature = "testing", feature = "bench"))]
+    #[cfg(any(test, feature = "testing"))]
     pub fn worker_len(&self) -> usize {
         self.request_to_booking.len()
     }

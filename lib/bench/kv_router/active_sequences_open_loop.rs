@@ -677,10 +677,11 @@ fn execute_payload(
         LanePayload::ProjectAndAdd(request) => {
             let (project_finished_ns, projection_count, projection_inspected, projection_digest) =
                 PROJECTIONS.with_borrow_mut(|projections| {
-                    sequences.bench_project_worker_loads_into(
+                    sequences.project_worker_loads_into(
                         request.token_sequence.as_deref(),
                         decay_now,
                         projections,
+                        None,
                     );
                     let project_finished_ns = clock.now_ns();
                     // Digest after the projection timestamp so it forces materialization
