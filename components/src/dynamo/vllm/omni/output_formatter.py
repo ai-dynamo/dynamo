@@ -925,17 +925,24 @@ class DiffusionFormatter:
         except Exception:
             # The whole batch fails: remove files already uploaded so a
             # failed request leaves no orphaned media behind.
-            await self._cleanup_uploads(uploaded_paths)
+            await self._cleanup_uploads(uploaded_paths, request_id)
             raise
         return outlist
 
-    async def _cleanup_uploads(self, storage_paths: list[str]) -> None:
+    async def _cleanup_uploads(self, storage_paths: list[str], request_id: str) -> None:
         """Best-effort removal of uploaded files after a failed batch."""
         for path in storage_paths:
             try:
                 await asyncio.to_thread(self._media_fs.rm, path)
-            except Exception:
-                logger.warning("Failed to clean up uploaded file %s", path)
+            except Exception as e:
+                # Storage backends raise different error types, and an error
+                # here must not replace the original failure being re-raised.
+                logger.warning(
+                    "Failed to clean up uploaded file %s for request %s: %s",
+                    path,
+                    request_id,
+                    e,
+                )
 
 
 class AudioFormatter:
