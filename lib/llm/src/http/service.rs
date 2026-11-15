@@ -59,20 +59,21 @@ use crate::{
 
 use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 use dynamo_runtime::error::DynamoError;
+use std::collections::HashMap;
 
 /// Build a lookup of model display_name -> context_length from model cards.
 /// Worker sets of one model can advertise different limits (for example during
 /// a rolling update), and requests are routed to any of them. Report the
 /// smallest known limit so that the value is stable and safe for every route;
 /// 0 (unknown) is used only when no card knows its limit.
-fn build_model_context_map(manager: &ModelManager) -> std::collections::HashMap<String, u32> {
+fn build_model_context_map(manager: &ModelManager) -> HashMap<String, u32> {
     smallest_context_lengths(manager.get_model_cards())
 }
 
 fn smallest_context_lengths(
     cards: impl IntoIterator<Item = crate::model_card::ModelDeploymentCard>,
-) -> std::collections::HashMap<String, u32> {
-    let mut map = std::collections::HashMap::new();
+) -> HashMap<String, u32> {
+    let mut map = HashMap::new();
     for card in cards {
         let context_length = card.effective_context_length();
         map.entry(card.display_name)
@@ -94,7 +95,9 @@ fn model_env_overrides() -> (Option<u64>, Option<u64>) {
         let value = std::env::var(name).ok()?;
         let parsed = value.parse().ok();
         if parsed.is_none() {
-            warned.call_once(|| tracing::warn!("Invalid {} value '{}', ignoring", name, value));
+            warned.call_once(
+                || tracing::warn!(env_var = name, %value, "Ignoring invalid environment override"),
+            );
         }
         parsed
     }
@@ -112,7 +115,7 @@ fn model_env_overrides() -> (Option<u64>, Option<u64>) {
 fn resolve_context_window(
     manager: &ModelManager,
     model_name: &str,
-    card_map: &std::collections::HashMap<String, u32>,
+    card_map: &HashMap<String, u32>,
     env_override: Option<u64>,
 ) -> Option<u64> {
     env_override.or_else(|| {
@@ -200,14 +203,8 @@ mod tests {
             card
         };
         let limits = [Some(4096), None, Some(2048)];
-        for order in [
-            [0, 1, 2],
-            [0, 2, 1],
-            [1, 0, 2],
-            [1, 2, 0],
-            [2, 0, 1],
-            [2, 1, 0],
-        ] {
+        // The first-card and last-card rules both fail one of these orders.
+        for order in [[0, 2, 1], [2, 1, 0]] {
             let map = smallest_context_lengths(order.map(|i| card(limits[i])));
             assert_eq!(map["primary"], 2048, "card order {order:?}");
         }

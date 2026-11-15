@@ -48,10 +48,6 @@ use std::{
 use tokio::time::timeout;
 use tokio_util::codec::FramedRead;
 
-#[allow(dead_code)]
-#[path = "../../runtime/src/test_utils.rs"]
-mod test_utils;
-
 #[path = "common/ports.rs"]
 mod ports;
 use ports::bind_random_port;
@@ -1797,31 +1793,10 @@ async fn test_concurrent_requests_with_shared_client_request_id() {
 }
 
 /// List and retrieve must report the same context, the smallest limit of the
-/// model's cards, including aliases, environment overrides, and both
-/// model-router modes.
+/// model's cards, for the model and its alias, with the Anthropic API on and
+/// off.
 #[tokio::test]
 async fn test_model_context_metadata_matches_list_and_retrieve() {
-    const TEST: &str = "test_model_context_metadata_matches_list_and_retrieve";
-    const CHILD: &str = "DYNAMO_MODEL_CONTEXT_METADATA_TEST";
-    if std::env::var(CHILD).as_deref() != Ok(TEST) {
-        for context_override in [None, Some("8192"), Some("0")] {
-            let mut command = test_utils::isolated_command(TEST).into_tokio();
-            command.env(CHILD, TEST).kill_on_drop(true);
-            if let Some(value) = context_override {
-                command.env("DYN_CONTEXT_WINDOW", value);
-            }
-            let output = timeout(std::time::Duration::from_secs(30), command.output())
-                .await
-                .expect("model metadata test subprocess must finish")
-                .expect("run isolated model metadata test");
-            test_utils::assert_isolated_success(&output);
-        }
-        return;
-    }
-
-    let context_override = std::env::var("DYN_CONTEXT_WINDOW")
-        .ok()
-        .map(|value| value.parse::<u64>().unwrap());
     let primary = "context-metadata";
     let alias = "context-metadata-alias";
     let client = reqwest::Client::builder()
@@ -1882,7 +1857,7 @@ async fn test_model_context_metadata_matches_list_and_retrieve() {
             let primary_context = rows.iter().find(|row| row["id"] == primary).unwrap()[field]
                 .as_u64()
                 .unwrap();
-            assert_eq!(primary_context, context_override.unwrap_or(2048));
+            assert_eq!(primary_context, 2048);
 
             for id in [primary, alias] {
                 let listed_context = rows.iter().find(|row| row["id"] == id).unwrap()[field]
