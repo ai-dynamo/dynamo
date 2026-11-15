@@ -31,6 +31,7 @@ use dynamo_runtime::pipeline::{
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::adapter::EngineAdapter;
 use crate::disagg::DisaggregationMode;
@@ -63,6 +64,16 @@ pub type DirectEngineFactory =
 #[derive(Default)]
 pub struct DirectDispatch {
     adapters: parking_lot::RwLock<HashMap<u64, Arc<EngineAdapter>>>,
+    /// One supervisor per engine; each releases its engine on runtime shutdown.
+    supervisors: TaskTracker,
+}
+
+impl DirectDispatch {
+    /// Resolves once runtime shutdown has withdrawn and cleaned up every
+    /// engine. Await it before the process exits.
+    pub async fn stopped(&self) {
+        self.supervisors.wait().await;
+    }
 }
 
 #[async_trait]
@@ -161,8 +172,11 @@ pub async fn serve_direct_engines(
     }
     let shutdown = drt.primary_token();
     for (host, hosted) in hosts {
-        tokio::spawn(host.supervise(hosted, shutdown.clone()));
+        dispatch
+            .supervisors
+            .spawn(host.supervise(hosted, shutdown.clone()));
     }
+    dispatch.supervisors.close();
     Ok(dispatch)
 }
 
@@ -441,6 +455,7 @@ mod tests {
         cleaned: Notify,
         /// The ZMQ KV-event publisher the engine advertises, if any.
         kv_events: Option<String>,
+        cleanups: AtomicUsize,
     }
 
     /// One incarnation of a listed engine: answers every request with one token.
@@ -525,6 +540,7 @@ mod tests {
         }
 
         async fn cleanup(&self) -> Result<(), DynamoError> {
+            self.state.cleanups.fetch_add(1, Ordering::SeqCst);
             self.state.cleaned.notify_one();
             Ok(())
         }
@@ -539,6 +555,7 @@ mod tests {
         fail_next: Arc<AtomicBool>,
         hold_next: Arc<AtomicBool>,
         held: Arc<parking_lot::Mutex<Option<Arc<EngineState>>>>,
+        dispatch: Arc<DirectDispatch>,
         chat: OpenAIChatCompletionsStreamingEngine,
         model: String,
     }
@@ -601,7 +618,7 @@ mod tests {
                 .unwrap();
 
             let manager = Arc::new(ModelManager::new());
-            manager.set_direct_dispatch(dispatch).unwrap();
+            manager.set_direct_dispatch(dispatch.clone()).unwrap();
             let watcher = Arc::new(ModelWatcher::new(
                 drt.clone(),
                 manager.clone(),
@@ -631,6 +648,7 @@ mod tests {
                 fail_next,
                 hold_next,
                 held,
+                dispatch,
                 chat,
                 model,
             }
@@ -719,6 +737,15 @@ mod tests {
         a.up.store(true, Ordering::SeqCst);
         frontend.chat_until(|f| f.served(A) > a_before).await;
         assert!(frontend.listed(A).await);
+
+        // Shutdown releases both engines before the dispatch reports stopped.
+        let cleanups = |url: &str| frontend.states[url].cleanups.load(Ordering::SeqCst);
+        let (a_cleanups, b_cleanups) = (cleanups(A), cleanups(B));
+        frontend.drt.primary_token().cancel();
+        tokio::time::timeout(Duration::from_secs(10), frontend.dispatch.stopped())
+            .await
+            .expect("shutdown must release every engine");
+        assert_eq!((cleanups(A), cleanups(B)), (a_cleanups + 1, b_cleanups + 1));
     }
 
     #[tokio::test]
