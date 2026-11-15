@@ -10,7 +10,9 @@ mod view;
 pub use inputs::RequestClassifierContext;
 pub use progress::{RequestProgress, RequestProgressUpdater};
 pub use runtime::{ClassificationError, RequestClassifierRuntime, RequestLifecycle};
-pub use view::{NoWorkers, WorkerCacheView, WorkerLoadView, WorkerView};
+#[cfg(test)]
+pub(crate) use view::NoWorkers;
+pub use view::{WorkerCacheView, WorkerLoadView, WorkerView};
 
 use std::error::Error;
 use std::future::Future;

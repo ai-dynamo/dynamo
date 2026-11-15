@@ -969,10 +969,6 @@ impl<T> PolicyQueue<T> {
         self.classes.len()
     }
 
-    pub fn class_config(&self, class_index: usize) -> &PolicyClassConfig {
-        &self.classes[class_index].config
-    }
-
     pub fn class_stats(&self, class_index: usize) -> PolicyQueueStats {
         self.classes[class_index].stats
     }
@@ -1502,6 +1498,11 @@ fn subtract_stats(stats: &mut PolicyQueueStats, snapshot: QueueSnapshot) {
 /// the router's YAML resolver in `lib/router/kv-router`.
 #[cfg(any(test, feature = "testing"))]
 impl<T> PolicyQueue<T> {
+    /// The class's resolved configuration, for tests and benchmarks of the profile resolver.
+    pub fn class_config(&self, class_index: usize) -> &PolicyClassConfig {
+        &self.classes[class_index].config
+    }
+
     /// How many entries of the class its explicit-deadline index holds.
     pub fn due_entry_count(&self, class_index: usize) -> usize {
         self.classes[class_index].due_entries.len()
