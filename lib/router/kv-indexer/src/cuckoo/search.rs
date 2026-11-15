@@ -29,17 +29,6 @@ pub(super) struct FallbackStats {
     pub(super) provenance_skips: u64,
 }
 
-impl FallbackStats {
-    #[cfg(test)]
-    fn merge(&mut self, other: Self) {
-        self.left_edge_lanes += other.left_edge_lanes;
-        self.activated_lanes += other.activated_lanes;
-        self.probe_calls += other.probe_calls;
-        self.lane_probes += other.lane_probes;
-        self.provenance_skips += other.provenance_skips;
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PrefixSearchResult<const D: usize> {
     pub(super) depths: [u32; D],
@@ -117,42 +106,6 @@ pub(super) fn find_prefix_depths<const D: usize>(
 }
 
 #[cfg(test)]
-pub(super) fn find_max_depth_matches<const D: usize>(
-    sequence_len: usize,
-    initial_mask: u16,
-    verification_window: usize,
-    prefetch: impl FnMut(usize),
-    probe: impl FnMut(usize) -> u16,
-) -> [u32; D] {
-    find_max_depth_matches_impl::<D, true, false>(
-        sequence_len,
-        initial_mask,
-        verification_window,
-        prefetch,
-        probe,
-    )
-    .depths
-}
-
-#[cfg(test)]
-pub(super) fn fixed_window_prefix_depths<const D: usize>(
-    sequence_len: usize,
-    initial_mask: u16,
-    verification_window: usize,
-    prefetch: impl FnMut(usize),
-    probe: impl FnMut(usize) -> u16,
-) -> [u32; D] {
-    find_prefix_depths_impl::<D, false, false>(
-        sequence_len,
-        initial_mask,
-        verification_window,
-        prefetch,
-        probe,
-    )
-    .depths
-}
-
-#[cfg(test)]
 pub(super) fn find_prefix_depths_with_test_stats<const D: usize>(
     sequence_len: usize,
     initial_mask: u16,
@@ -186,53 +139,6 @@ pub(super) fn find_prefix_depths_with_test_trace<const D: usize>(
             probe,
         )
     })
-}
-
-#[cfg(test)]
-pub(super) fn find_max_depth_matches_with_test_trace<const D: usize>(
-    sequence_len: usize,
-    initial_mask: u16,
-    verification_window: usize,
-    prefetch: impl FnMut(usize),
-    probe: impl FnMut(usize) -> u16,
-) -> (PrefixSearchResult<D>, Vec<SearchTraceEvent>) {
-    trace_search(|| {
-        find_max_depth_matches_impl::<D, true, true>(
-            sequence_len,
-            initial_mask,
-            verification_window,
-            prefetch,
-            probe,
-        )
-    })
-}
-
-#[cfg(test)]
-pub(super) fn refine_binary_level_with_test_trace<const D: usize>(
-    lower: [usize; D],
-    upper: [usize; D],
-    selected: u16,
-    eligible: u16,
-    probe: impl FnMut(usize) -> u16,
-) -> ([usize; D], [usize; D], Vec<SearchTraceEvent>) {
-    let mut state = PrefixSearchState {
-        active: eligible,
-        lower,
-        lower_predecessor: [0; D],
-        upper,
-    };
-    let (_, trace) = trace_search(|| {
-        let mut probe = probe;
-        assert!(refine_binary_level::<D, true>(
-            &mut state,
-            selected,
-            eligible,
-            &mut |_| {},
-            &mut probe,
-        ));
-        empty_result::<D>()
-    });
-    (state.lower, state.upper, trace)
 }
 
 #[cfg(test)]
@@ -281,147 +187,6 @@ fn find_prefix_depths_impl<const D: usize, const FALLBACK: bool, const TRACE: bo
         &mut prefetch,
         &mut probe,
     )
-}
-
-#[cfg(test)]
-fn find_max_depth_matches_impl<const D: usize, const FALLBACK: bool, const TRACE: bool>(
-    sequence_len: usize,
-    initial_mask: u16,
-    verification_window: usize,
-    mut prefetch: impl FnMut(usize),
-    mut probe: impl FnMut(usize) -> u16,
-) -> PrefixSearchResult<D> {
-    if sequence_len == 0 {
-        return empty_result();
-    }
-
-    debug_assert!((1..=MAX_LANES).contains(&D));
-    debug_assert!((1..=MAX_VERIFICATION_WINDOW).contains(&verification_window));
-    let mut state =
-        initialize_search::<D, TRACE>(sequence_len, initial_mask, &mut prefetch, &mut probe);
-    if state.active == 0 {
-        return empty_result();
-    }
-    // Maximum-only search is not universally faster: equal ceilings provide no frontier to
-    // prune. Reuse the full scheduler for that case; see PR #11435 for workload benchmarks.
-    if active_lanes_share_ceiling(&state) {
-        let active = state.active;
-        while refine_binary_level::<D, TRACE>(&mut state, active, active, &mut prefetch, &mut probe)
-        {
-        }
-        return project_max_depths(finalize_lanes::<D, FALLBACK, TRACE>(
-            &state,
-            active,
-            verification_window,
-            &mut prefetch,
-            &mut probe,
-        ));
-    }
-    let mut unresolved = state.active;
-    let mut best_depth = 0u32;
-    let mut winners = 0u16;
-    let mut fallback = FallbackStats::default();
-
-    while unresolved != 0 {
-        for lane in 0..D {
-            let lane_bit = 1u16 << lane;
-            if unresolved & lane_bit != 0 && score_bound(state.upper[lane]) < best_depth {
-                unresolved &= !lane_bit;
-            }
-        }
-        if unresolved == 0 {
-            break;
-        }
-
-        let frontier_ceiling = (0..D)
-            .filter(|&lane| unresolved & (1u16 << lane) != 0)
-            .map(|lane| score_bound(state.upper[lane]))
-            .max()
-            .expect("at least one unresolved CKF lane");
-        let mut frontier = 0u16;
-        let mut terminal = 0u16;
-        for lane in 0..D {
-            let lane_bit = 1u16 << lane;
-            if unresolved & lane_bit == 0 || score_bound(state.upper[lane]) != frontier_ceiling {
-                continue;
-            }
-            frontier |= lane_bit;
-            if state.upper[lane] - state.lower[lane] <= 1 {
-                terminal |= lane_bit;
-            }
-        }
-
-        if terminal != 0 {
-            let result = finalize_lanes::<D, FALLBACK, TRACE>(
-                &state,
-                terminal,
-                verification_window,
-                &mut prefetch,
-                &mut probe,
-            );
-            fallback.merge(result.fallback);
-            for (lane, &depth) in result.depths.iter().enumerate() {
-                let lane_bit = 1u16 << lane;
-                if terminal & lane_bit == 0 || depth == 0 {
-                    continue;
-                }
-                if depth > best_depth {
-                    best_depth = depth;
-                    winners = lane_bit;
-                } else if depth == best_depth {
-                    winners |= lane_bit;
-                }
-            }
-            unresolved &= !terminal;
-            continue;
-        }
-
-        let refined = refine_binary_level::<D, TRACE>(
-            &mut state,
-            frontier,
-            unresolved,
-            &mut prefetch,
-            &mut probe,
-        );
-        debug_assert!(refined, "nonterminal CKF frontier must have a midpoint");
-    }
-
-    let mut depths = [0u32; D];
-    if best_depth != 0 {
-        for (lane, depth) in depths.iter_mut().enumerate() {
-            if winners & (1u16 << lane) != 0 {
-                *depth = best_depth;
-            }
-        }
-    }
-    PrefixSearchResult { depths, fallback }
-}
-
-#[cfg(test)]
-fn active_lanes_share_ceiling<const D: usize>(state: &PrefixSearchState<D>) -> bool {
-    let mut ceiling = None;
-    for lane in 0..D {
-        if state.active & (1u16 << lane) == 0 {
-            continue;
-        }
-        let lane_ceiling = score_bound(state.upper[lane]);
-        if ceiling.is_some_and(|ceiling| ceiling != lane_ceiling) {
-            return false;
-        }
-        ceiling = Some(lane_ceiling);
-    }
-    true
-}
-
-#[cfg(test)]
-fn project_max_depths<const D: usize>(mut result: PrefixSearchResult<D>) -> PrefixSearchResult<D> {
-    let best_depth = result.depths.iter().copied().max().unwrap_or(0);
-    for depth in &mut result.depths {
-        if *depth != best_depth {
-            *depth = 0;
-        }
-    }
-    result
 }
 
 fn initialize_search<const D: usize, const TRACE: bool>(
@@ -737,8 +502,7 @@ fn finalize_lanes<const D: usize, const FALLBACK: bool, const TRACE: bool>(
     PrefixSearchResult { depths, fallback }
 }
 
-#[cfg(any(test, feature = "bench"))]
-#[allow(dead_code)]
+#[cfg(test)]
 pub(super) fn linear_prefix_depths<const D: usize>(
     sequence_len: usize,
     initial_mask: u16,
