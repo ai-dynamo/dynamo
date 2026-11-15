@@ -10,8 +10,8 @@ use std::collections::VecDeque;
 
 use aisimulate_core::replay::{
     CURRENT_REPLAY_SPEC_VERSION, ProviderSpec, ReplayAdapters, ReplayCaptureOptions,
-    ReplayComposition, ReplayEngineConfig, ReplayRuntimeInput, ReplayScalingPolicy, ReplaySpec,
-    ReplayTopology, Replayer, WorkerPoolSpec,
+    ReplayComposition, ReplayEngineConfig, ReplayEngineFactory, ReplayRuntimeInput,
+    ReplayScalingPolicy, ReplaySpec, ReplayTopology, Replayer, WorkerPoolSpec,
 };
 use anyhow::Result;
 
@@ -224,16 +224,14 @@ fn run_aggregated_with_capture_options(
     )?;
 
     match router_mode {
-        ReplayRouterMode::RoundRobin => {
-            let replayer = Replayer::with_composition(
-                spec,
-                factory,
-                RoundRobinReplayComposition::new(scaling_policy),
-            )?
-            .with_capture_options(capture_options)
-            .with_runtime_input(input);
-            Ok(with_telemetry(replayer, telemetry)?.run()?)
-        }
+        ReplayRouterMode::RoundRobin => run_composition(
+            spec,
+            factory,
+            RoundRobinReplayComposition::new(scaling_policy),
+            capture_options,
+            input,
+            telemetry,
+        ),
         ReplayRouterMode::KvRouter => {
             let composition = KvReplayComposition::aggregated(
                 args,
@@ -243,22 +241,40 @@ fn run_aggregated_with_capture_options(
                 scaling_policy,
             );
             if composition.reads_engine_kv_events() {
-                let replayer = Replayer::with_composition(spec, factory, composition)?
-                    .with_capture_options(capture_options)
-                    .with_runtime_input(input);
-                Ok(with_telemetry(replayer, telemetry)?.run()?)
+                run_composition(
+                    spec,
+                    factory,
+                    composition,
+                    capture_options,
+                    input,
+                    telemetry,
+                )
             } else {
-                let replayer = Replayer::with_composition(
+                run_composition(
                     spec,
                     factory,
                     composition.without_engine_kv_events(),
-                )?
-                .with_capture_options(capture_options)
-                .with_runtime_input(input);
-                Ok(with_telemetry(replayer, telemetry)?.run()?)
+                    capture_options,
+                    input,
+                    telemetry,
+                )
             }
         }
     }
+}
+
+fn run_composition<C: ReplayComposition>(
+    spec: ReplaySpec,
+    factory: ReplayEngineFactory,
+    composition: C,
+    capture_options: ReplayCaptureOptions,
+    input: ReplayRuntimeInput,
+    telemetry: Option<ReplayTelemetryOptions>,
+) -> Result<TraceSimulationReport> {
+    let replayer = Replayer::with_composition(spec, factory, composition)?
+        .with_capture_options(capture_options)
+        .with_runtime_input(input);
+    Ok(with_telemetry(replayer, telemetry)?.run()?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -338,33 +354,43 @@ fn run_disaggregated_with_capture_options(
     )?;
 
     match router_mode {
-        ReplayRouterMode::RoundRobin => {
-            let replayer = Replayer::with_composition(
-                spec,
-                factory,
-                RoundRobinReplayComposition::new(scaling_policy),
-            )?
-            .with_capture_options(capture_options)
-            .with_runtime_input(input);
-            Ok(with_telemetry(replayer, telemetry)?.run()?)
-        }
+        ReplayRouterMode::RoundRobin => run_composition(
+            spec,
+            factory,
+            RoundRobinReplayComposition::new(scaling_policy),
+            capture_options,
+            input,
+            telemetry,
+        ),
         ReplayRouterMode::KvRouter => {
-            let replayer = Replayer::with_composition(
-                spec,
-                factory,
-                KvReplayComposition::disaggregated(
-                    config.prefill_args,
-                    config.decode_args,
-                    config.num_prefill_workers,
-                    config.num_decode_workers,
-                    router_config,
-                    prefill_load_estimator,
-                    scaling_policy,
-                ),
-            )?
-            .with_capture_options(capture_options)
-            .with_runtime_input(input);
-            Ok(with_telemetry(replayer, telemetry)?.run()?)
+            let composition = KvReplayComposition::disaggregated(
+                config.prefill_args,
+                config.decode_args,
+                config.num_prefill_workers,
+                config.num_decode_workers,
+                router_config,
+                prefill_load_estimator,
+                scaling_policy,
+            );
+            if composition.reads_engine_kv_events() {
+                run_composition(
+                    spec,
+                    factory,
+                    composition,
+                    capture_options,
+                    input,
+                    telemetry,
+                )
+            } else {
+                run_composition(
+                    spec,
+                    factory,
+                    composition.without_engine_kv_events(),
+                    capture_options,
+                    input,
+                    telemetry,
+                )
+            }
         }
     }
 }

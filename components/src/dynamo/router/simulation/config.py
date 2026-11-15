@@ -127,12 +127,13 @@ class RouterPredictionConfig(BaseModel):
         "overlap_score_credit",
         "prefill_load_scale",
         "temperature",
+        "use_kv_events",
         mode="before",
     )
     @classmethod
     def _reject_explicit_null(cls, value: Any) -> Any:
         if value is None:
-            raise ValueError("Router numeric knobs do not accept null")
+            raise ValueError("Router knobs do not accept null")
         return value
 
     @model_validator(mode="after")

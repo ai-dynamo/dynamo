@@ -12,20 +12,17 @@ use anyhow::{Context, Result, anyhow};
 use dynamo_admission::host::{
     PolicyClassConfig, PolicyProfile, PolicyQueue, QueueMetadata, QueueSnapshot, WorkerPlacement,
 };
-use dynamo_kv_events::event::{
-    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
-    RouterEvent,
-};
+use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
+use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
-use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_kv_hints::KvTransferSourceChoice;
-use dynamo_kv_indexer::RoutingDecisionHashes;
 use dynamo_kv_indexer::host::RadixTree;
 use dynamo_kv_indexer::host::{
-    ApproximateCachePolicyKind, KvIndexerInterface, LowerTierIndexers, LowerTierQueryOptions,
-    PruneConfig, SessionPrefixIndexer, TieredMatchDetails, query_lower_tiers_with_options,
+    ApproximateCachePolicyKind, BlockEntry, KvIndexerInterface, LowerTierIndexers,
+    LowerTierQueryOptions, PruneConfig, PruneManager, RoutingDecisionHashes, SessionPrefixIndexer,
+    TieredMatchDetails, apply_prune_removes, apply_routing_decision,
+    query_lower_tiers_with_options,
 };
-use dynamo_kv_indexer::host::{BlockEntry, PruneManager};
 use dynamo_kv_indexer::host::{KvTransferCandidateSource, KvTransferCandidates};
 pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 use dynamo_kv_router::config::KvRouterConfig;
@@ -275,7 +272,10 @@ struct SyncReplayIndexer {
 /// its own routing decisions instead of engine KV events, and each block expires
 /// `router_ttl_secs` after the latest decision that stored it.
 struct ApproximateRetention {
-    timers: PruneManager<BlockEntry>,
+    config: PruneConfig,
+    /// One set of timers per worker, created at its first decision and dropped
+    /// with the worker, as production's `WorkerPruneManager` keeps them.
+    timers: BTreeMap<WorkerWithDpRank, PruneManager<BlockEntry>>,
     next_event_id: u64,
 }
 
@@ -293,8 +293,7 @@ impl SyncReplayIndexer {
     }
 
     /// Store a routing decision's prompt blocks on `worker` and restart their
-    /// TTL at `now`, as production's approximate index does
-    /// (`apply_routing_decision_with_prune_tracking` in `dynamo-kv-indexer`).
+    /// TTL at `now`, as production's approximate index does.
     fn record_routing_decision(
         &mut self,
         worker: WorkerWithDpRank,
@@ -308,72 +307,35 @@ impl SyncReplayIndexer {
             return Ok(());
         }
         let hashes = RoutingDecisionHashes::from_local_hashes(local_hashes);
-        approximate.next_event_id += 1;
-        let event = RouterEvent::new(
-            worker.worker_id,
-            KvCacheEvent {
-                event_id: approximate.next_event_id,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: None,
-                    start_position: None,
-                    blocks: hashes
-                        .local_hashes
-                        .iter()
-                        .zip(&hashes.sequence_hashes)
-                        .map(|(&tokens_hash, &sequence_hash)| KvCacheStoredBlockData {
-                            tokens_hash,
-                            block_hash: ExternalSequenceBlockHash(sequence_hash),
-                            mm_extra_info: None,
-                        })
-                        .collect(),
-                }),
-                dp_rank: worker.dp_rank,
-            },
-        );
-        self.tree
-            .apply_event(event)
-            .context("failed to record a replay routing decision")?;
-        let entries = hashes
-            .sequence_hashes
-            .iter()
-            .enumerate()
-            .map(|(seq_position, &hash)| BlockEntry {
-                key: ExternalSequenceBlockHash(hash),
-                worker,
-                seq_position,
-            })
-            .collect();
-        approximate.timers.insert_at(entries, now);
+        let entries = apply_routing_decision(
+            &mut self.tree,
+            worker,
+            &hashes.local_hashes,
+            &hashes.sequence_hashes,
+            &mut approximate.next_event_id,
+        )
+        .context("failed to record a replay routing decision")?;
+        approximate
+            .timers
+            .entry(worker)
+            .or_insert_with(|| PruneManager::with_bucket_origin(approximate.config.clone(), now))
+            .insert_at(entries, now);
         self.has_indexed_events = true;
         Ok(())
     }
 
     /// Remove every approximate block whose TTL bucket ended by `now`, as
-    /// production's prune task does (`apply_prune_removes`).
+    /// production's prune task does.
     fn expire_routing_decisions(&mut self, now: Instant) {
         let Some(approximate) = &mut self.approximate else {
             return;
         };
-        let mut expired = BTreeMap::<WorkerWithDpRank, Vec<BlockEntry>>::new();
-        for entry in approximate.timers.pop_expired(now) {
-            expired.entry(entry.worker).or_default().push(entry);
-        }
-        for (worker, mut entries) in expired {
-            entries.sort_unstable_by_key(|entry| entry.seq_position);
-            approximate.next_event_id += 1;
-            let event = RouterEvent::new(
-                worker.worker_id,
-                KvCacheEvent {
-                    event_id: approximate.next_event_id,
-                    data: KvCacheEventData::Removed(KvCacheRemoveData {
-                        block_hashes: entries.into_iter().map(|entry| entry.key).collect(),
-                    }),
-                    dp_rank: worker.dp_rank,
-                },
-            );
-            // A removed worker's blocks are already gone; its timers lapse here.
-            let _ = self.tree.apply_event(event);
-        }
+        let expired = approximate
+            .timers
+            .values_mut()
+            .flat_map(|timers| timers.pop_expired(now))
+            .collect();
+        apply_prune_removes(&mut self.tree, expired, &mut approximate.next_event_id);
     }
 
     fn find_matches_for_request(
@@ -462,6 +424,11 @@ impl SyncReplayIndexer {
 
     fn remove_worker(&mut self, worker_id: WorkerId) {
         self.tree.remove_worker(worker_id);
+        if let Some(approximate) = &mut self.approximate {
+            approximate
+                .timers
+                .retain(|worker, _| worker.worker_id != worker_id);
+        }
         if let Some(index) = &self.session_prefix_index {
             index.clear_worker_id_frontiers(worker_id);
         }
@@ -965,12 +932,10 @@ impl OfflineReplayRouter {
             );
             if reads_kv_index {
                 indexer.approximate = Some(ApproximateRetention {
-                    timers: PruneManager::with_bucket_origin(
-                        PruneConfig {
-                            ttl: Duration::from_secs_f64(config.router_ttl_secs),
-                        },
-                        decay_time_epoch,
-                    ),
+                    config: PruneConfig {
+                        ttl: Duration::from_secs_f64(config.router_ttl_secs),
+                    },
+                    timers: BTreeMap::new(),
                     next_event_id: 0,
                 });
             }
@@ -1790,15 +1755,8 @@ mod tests {
         KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
     };
     use dynamo_kv_events::residency::StorageTier;
-    use dynamo_kv_hashing::routing::{
-        BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
-    };
+    use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
     use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
-    use dynamo_kv_indexer::host::{
-        ConcurrentRadixTreeCompressed, KvIndexer, KvIndexerInterface, KvIndexerMetrics,
-        PruneConfig, ThreadPoolIndexer,
-    };
-    use dynamo_kv_indexer::pruning::PruneManager;
     use dynamo_kv_router::config::KvRouterConfig;
     use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
     use dynamo_scheduler::host::{
@@ -1807,13 +1765,11 @@ mod tests {
     use rustc_hash::FxHashMap;
     use serde_json::Value;
     use tempfile::NamedTempFile;
-    use tokio::time::Instant;
-    use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
     use super::{
-        ApproximateRetention, KvReplayMetadata, KvRouterPlacement, OfflineReplayRouter,
-        ReplayRequestHashes, RouterEventBatch, SyncReplayIndexer, WorkerAdmission,
+        KvReplayMetadata, KvRouterPlacement, OfflineReplayRouter, ReplayRequestHashes,
+        RouterEventBatch, SyncReplayIndexer, WorkerAdmission,
     };
     use crate::common::protocols::{DirectRequest, MockerConfig};
     use crate::replay::ReplayPrefillLoadEstimator;
@@ -4169,78 +4125,25 @@ policy_classes:
         assert_eq!(expired.reported_overlap_tokens, 0);
     }
 
-    /// Production's approximate indexers store a routing decision as the replay
-    /// does: `KvIndexer` and `ThreadPoolIndexer` (the frontend default). They
-    /// prune on wall-clock time in their own threads, so this compares what each
-    /// decision stores; expiry runs production's `PruneManager` and is covered by
-    /// `approximate_index_expires_routing_decisions_after_router_ttl`.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn approximate_index_records_decisions_as_production_indexers() {
-        let prune = || PruneConfig {
-            ttl: Duration::from_secs(3600),
-        };
-        let single = KvIndexer::new_with_pruning(
-            CancellationToken::new(),
-            64,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            Some(prune()),
-        );
-        let pool = ThreadPoolIndexer::new_with_pruning(
-            ConcurrentRadixTreeCompressed::new(),
-            4,
-            64,
-            prune(),
-        );
-        let mut replay = SyncReplayIndexer::new(64);
-        replay.approximate = Some(ApproximateRetention {
-            timers: PruneManager::new(prune()),
-            next_event_id: 0,
-        });
-
-        let hashes =
-            |prompt: &[u32]| compute_block_hash_for_seq(prompt, 64, BlockHashOptions::default());
-        let shared = vec![1; 256];
-        let branch = [&shared[..128], &[2; 128][..]].concat();
-        let extended = [&shared[..], &[4; 64][..]].concat();
-        let other = vec![3; 192];
-        let queries = [&shared, &branch, &extended, &other, &vec![1; 64]];
-        // Branches, another rank, a chain extension and a repeated decision.
-        let decisions = [
-            (WorkerWithDpRank::new(0, 0), &shared),
-            (WorkerWithDpRank::new(1, 0), &branch),
-            (WorkerWithDpRank::new(1, 1), &shared),
-            (WorkerWithDpRank::new(0, 0), &extended),
-            (WorkerWithDpRank::new(2, 0), &other),
-            (WorkerWithDpRank::new(0, 0), &shared),
-        ];
-        for (step, (worker, prompt)) in decisions.into_iter().enumerate() {
-            let local = hashes(prompt);
-            let sequence = compute_seq_hash_for_block(&local);
-            single
-                .process_routing_decision_with_hashes(worker, local.clone(), sequence.clone())
-                .await
-                .unwrap();
-            pool.process_routing_decision_with_hashes(worker, local.clone(), sequence)
-                .await
-                .unwrap();
-            replay
-                .record_routing_decision(worker, local, Instant::now())
-                .unwrap();
-            KvIndexerInterface::flush(&single).await;
-            KvIndexerInterface::flush(&pool).await;
-            for query in queries {
-                let query = hashes(query);
-                let expected = replay
-                    .find_matches_for_hashes(query.clone())
-                    .device
-                    .overlap_scores
-                    .scores;
-                for production in [&single as &dyn KvIndexerInterface, &pool] {
-                    let scores = production.find_matches(query.clone()).await.unwrap().scores;
-                    assert_eq!(scores, expected, "after decision {step}");
-                }
-            }
-        }
+    /// A removed worker's decision timers go with it, as in production, so their
+    /// expiry does not re-create the worker in the index.
+    #[test]
+    fn approximate_index_drops_a_removed_workers_timers() {
+        let config = router_config_json(serde_json::json!({
+            "use_kv_events": false,
+            "router_ttl_secs": 1.0,
+        }));
+        let mut placement = kv_fetch_placement(&replay_args(), config, 2, false);
+        let worker = place_now(&mut placement, &kv_fetch_target(1), 0.0).scheduler_id;
+        PlacementPolicy::<DirectRequest>::request_terminal(&mut placement, Uuid::from_u128(1), 1.0)
+            .unwrap();
+        let indexed_workers =
+            |placement: &KvRouterPlacement| placement.router.indexer.tree.get_workers();
+        assert!(indexed_workers(&placement).contains(&(worker as WorkerId)));
+        placement.router.remove_worker(worker).unwrap();
+        placement.router.finalize_worker_removal(worker).unwrap();
+        placement.router.apply_due_kv_events(2_000.0).unwrap();
+        assert!(!indexed_workers(&placement).contains(&(worker as WorkerId)));
     }
 
     /// Queues the target while both workers are busy and worker 1 holds its

@@ -180,7 +180,6 @@ impl KvReplayComposition {
         }
     }
 
-    /// Whether the router reads engine KV events (`use_kv_events`, on by default).
     pub(in crate::replay) fn reads_engine_kv_events(&self) -> bool {
         self.router_config
             .as_ref()

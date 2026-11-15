@@ -266,6 +266,11 @@ def test_public_router_prediction_forwards_use_kv_events() -> None:
     assert (
         replay_spec.runtime_hooks[0].config["router_config"]["use_kv_events"] is False
     )
+    with pytest.raises(ValueError, match="do not accept null"):
+        create_provider().compile_prediction(
+            {"policy": "kv_router", "use_kv_events": None},
+            PredictionAdapterContext(engine={}, traffic={}, evaluation={}),
+        )
 
 
 def test_public_router_ais_load_model_reaches_runtime_config() -> None:

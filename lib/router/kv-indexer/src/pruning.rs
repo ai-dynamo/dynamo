@@ -92,8 +92,8 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
 
     /// Creates a new, empty PruneManager whose expiry buckets start at
     /// `bucket_origin`. A caller that drives its own clock, such as offline
-    /// replay's virtual time, passes that clock's epoch so expiries do not
-    /// depend on when the manager was created.
+    /// replay's virtual time, passes the current time on that clock, as
+    /// [`PruneManager::new`] does with the wall clock.
     pub fn with_bucket_origin(prune_config: PruneConfig, bucket_origin: Instant) -> Self {
         PruneManager {
             timers: FxHashMap::default(),
