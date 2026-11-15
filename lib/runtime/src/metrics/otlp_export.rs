@@ -262,12 +262,8 @@ fn to_metric(
     };
 
     // "The Prometheus Metric Name MUST be added as the Name of the OTLP metric.
-    // The name SHOULD NOT be altered." The family name is exported as received:
-    // nothing is added or stripped here. A native Rust counter renders at
-    // `/metrics` under its family name, so the two match; a typed Python
-    // counter's family name has no `_total`, because `prometheus_client` adds it
-    // only to the rendered sample. The unit is carried separately, from UNIT
-    // metadata.
+    // The name SHOULD NOT be altered." Python `prometheus_client` counter families
+    // have no `_total`; it is added only at render. Units come from UNIT metadata.
     Some(Metric {
         name: family.name().to_string(),
         description: family.help().to_string(),
@@ -1194,11 +1190,9 @@ mod tests {
 
     /// The spec is explicit that this direction does not rewrite names: the
     /// `_total` and unit suffixes are things OTLP -> Prometheus *adds*, and
-    /// coming back the other way none is added or stripped. The family name is
-    /// exported as is, so the counter family `d_request_bytes`, rendered as
-    /// `d_request_bytes_total`, exports as `d_request_bytes`. Pinned because a
-    /// plausible reading of the reverse-direction rules says otherwise, and
-    /// acting on it renames a third of the exported metrics.
+    /// coming back the other way none is added or stripped. Pinned because a plausible
+    /// reading of the reverse-direction rules says otherwise, and acting on it
+    /// renames a third of the exported metrics.
     #[test]
     fn metric_names_are_not_rewritten() {
         let metrics = export(
