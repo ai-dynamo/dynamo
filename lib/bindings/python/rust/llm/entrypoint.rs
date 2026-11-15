@@ -876,7 +876,6 @@ async fn select_engine(
                 model: Box::new(local_model),
                 chat_engine_factory,
                 prefill_load_estimator,
-                direct_dispatch: None,
             }
         }
         EngineType::Mocker => {

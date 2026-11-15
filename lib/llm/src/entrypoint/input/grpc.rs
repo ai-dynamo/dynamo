@@ -49,16 +49,9 @@ pub async fn run(
         EngineConfig::Dynamic {
             ref model,
             ref prefill_load_estimator,
-            ref direct_dispatch,
             ..
         } => {
             let grpc_service = grpc_service_builder.build()?;
-            if let Some(dispatch) = direct_dispatch {
-                grpc_service
-                    .state()
-                    .manager()
-                    .set_direct_dispatch(dispatch.clone())?;
-            }
             let router_config = model.router_config();
             let migration_limit = model.migration_limit();
             let migration_max_seq_len = model.migration_max_seq_len();
@@ -223,7 +216,6 @@ mod tests {
                     model,
                     chat_engine_factory: None,
                     prefill_load_estimator: None,
-                    direct_dispatch: None,
                 }
             } else {
                 EngineConfig::InProcessText {

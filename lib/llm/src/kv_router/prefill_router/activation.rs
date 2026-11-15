@@ -384,7 +384,6 @@ impl PrefillRouter {
 
             Arc::new(
                 RoutingHost::builder(client, RouterMode::KV)
-                    .dispatch(context.model_manager.direct_dispatch())
                     .kv_router(kv_chooser)
                     .load_context(load_context.clone())
                     .affinity_coordinator(affinity)
@@ -408,7 +407,6 @@ impl PrefillRouter {
             // available in KV routing mode where the router has actual bookkeeping.
             Arc::new(
                 RoutingHost::builder(client, prefill_router_mode)
-                    .dispatch(context.model_manager.direct_dispatch())
                     .load_context(load_context.clone())
                     .affinity_coordinator(affinity)
                     .build()

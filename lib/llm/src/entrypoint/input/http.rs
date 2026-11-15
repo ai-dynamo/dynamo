@@ -237,18 +237,11 @@ async fn run_with_router_plugins(
             ref model,
             ref chat_engine_factory,
             ref prefill_load_estimator,
-            ref direct_dispatch,
         } => {
             // Pass the discovery client so the /health endpoint can query active instances
             http_service_builder =
                 http_service_builder.discovery(Some(distributed_runtime.discovery()));
             let http_service = http_service_builder.build()?;
-            if let Some(dispatch) = direct_dispatch {
-                http_service
-                    .state()
-                    .manager()
-                    .set_direct_dispatch(dispatch.clone())?;
-            }
 
             let router_config = model.router_config();
             let migration_limit = model.migration_limit();
@@ -522,7 +515,6 @@ mod tests {
                     model: Box::new(model.clone()),
                     chat_engine_factory: None,
                     prefill_load_estimator: None,
-                    direct_dispatch: None,
                 },
             ),
         )
@@ -538,7 +530,6 @@ mod tests {
                     model: Box::new(model),
                     chat_engine_factory: None,
                     prefill_load_estimator: None,
-                    direct_dispatch: None,
                 },
             ),
         )
@@ -575,7 +566,6 @@ mod tests {
                     model,
                     chat_engine_factory: None,
                     prefill_load_estimator: None,
-                    direct_dispatch: None,
                 }
             } else {
                 EngineConfig::InProcessText {

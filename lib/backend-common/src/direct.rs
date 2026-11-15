@@ -7,9 +7,11 @@
 //! registers the engine with discovery and serves the request plane through
 //! [`EngineAdapter`]. In direct mode the frontend runs that same engine
 //! implementation and adapter itself. It registers each engine in its own
-//! discovery under the engine's own instance id, so model watching, routing and
-//! prefill activation run unchanged, and its routers hand each request to
-//! [`DirectDispatch`], which calls the engine's adapter in-process.
+//! discovery under the engine's own instance id as a `TransportType::Grpc`
+//! worker, so model watching, routing and prefill activation run unchanged.
+//! [`DirectDispatch`] is registered as the runtime's gRPC dispatch, so routers
+//! hand each request for those workers to it, and it calls the engine's
+//! adapter in-process.
 //!
 //! An engine that stops serving ([`LLMEngine::engine_lost`]) leaves discovery and
 //! is probed again until it serves, then registered again.
@@ -159,6 +161,13 @@ pub async fn serve_direct_engines(
     }
 
     let dispatch = Arc::new(DirectDispatch::default());
+    drt.register_grpc_dispatch::<PreprocessedRequest, Annotated<LLMEngineOutput>>(dispatch.clone())
+        .map_err(|register_error| {
+            error(
+                ErrorType::InvalidArgument,
+                format!("register the direct dispatch: {register_error}"),
+            )
+        })?;
     let mut hosts: Vec<(DirectEngineHost, HostedEngine)> = Vec::with_capacity(specs.len());
     for spec in specs {
         let host = DirectEngineHost {
@@ -629,7 +638,6 @@ mod tests {
                 .unwrap();
 
             let manager = Arc::new(ModelManager::new());
-            manager.set_direct_dispatch(dispatch.clone()).unwrap();
             let watcher = Arc::new(ModelWatcher::new(
                 drt.clone(),
                 manager.clone(),
@@ -722,6 +730,7 @@ mod tests {
     async fn routes_to_hosted_engines_and_follows_their_loss_and_return() {
         let frontend = Frontend::start("direct-membership", 0).await;
         assert_eq!(frontend.model, "direct-test-model");
+        assert!(frontend.drt.has_grpc_dispatch());
 
         // Round robin reaches both engines through the in-process final hop.
         frontend
