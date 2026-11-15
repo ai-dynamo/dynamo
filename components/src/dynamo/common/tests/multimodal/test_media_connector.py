@@ -3,6 +3,8 @@
 
 """Unit tests for DynamoMediaConnector and its ImageLoader integration."""
 
+import base64
+from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -83,6 +85,36 @@ def test_connector_sync_load_rejects_remote_urls_when_disabled(monkeypatch):
         connector.load_from_url("https://example.com/a.wav", MagicMock())
 
     parent_load.assert_not_called()
+
+
+@pytest.mark.vllm
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exif_orientation", [None, 6])
+async def test_connector_image_matches_vllm_connector(exif_orientation, monkeypatch):
+    connector_class = getattr(media_connector_module, "DynamoMediaConnector", None)
+    if connector_class is None:
+        pytest.skip("vLLM is not installed")
+
+    # The loader is a process-wide singleton; build a fresh one for this test.
+    monkeypatch.setattr(media_connector_module, "_shared_image_loader", None)
+    image = Image.new("RGBA", (4, 2))
+    image.putpixel((0, 0), (0, 0, 0, 255))
+    exif = Image.Exif()
+    if exif_orientation is not None:
+        exif[0x0112] = exif_orientation
+    buf = BytesIO()
+    image.save(buf, format="PNG", exif=exif)
+    url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+    loaded = await connector_class().fetch_image_async(url)
+
+    vllm_connector_class = connector_class.__mro__[1]
+    expected = await vllm_connector_class().fetch_image_async(url)
+    assert (loaded.size, loaded.mode, loaded.tobytes()) == (
+        expected.size,
+        expected.mode,
+        expected.tobytes(),
+    )
 
 
 class TestImageLoaderCache:

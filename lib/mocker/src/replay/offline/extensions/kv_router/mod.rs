@@ -21,7 +21,7 @@ use dynamo_kv_indexer::host::{
     KvIndexerInterface, LowerTierIndexers, LowerTierQueryOptions, SessionPrefixIndexer,
     TieredMatchDetails, query_lower_tiers_with_options,
 };
-use dynamo_kv_indexer::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
+use dynamo_kv_indexer::host::{KvTransferCandidateSource, KvTransferCandidates};
 pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::worker_selection::WorkerCapacity;
@@ -1675,7 +1675,7 @@ mod tests {
         KvFetchAction, KvHints, Placement, PlacementDecision, PlacementPolicy,
         ReplayPromptTokenSource, ReplayRequestContext, WorkerTopology,
     };
-    use dynamo_kv_indexer::kv_hints::KvTransferCandidateSource;
+    use dynamo_kv_indexer::host::KvTransferCandidateSource;
 
     #[rstest::rstest]
     #[case(2, 1)]
