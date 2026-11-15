@@ -110,9 +110,16 @@ Workers that fetch media themselves use a default-deny policy:
   `https://`, `http://`, and `data:` URLs to public hostnames pass. IP-address
   hosts, explicit ports, and hostnames that are blocked or resolve to private or
   loopback addresses are refused. `DYN_MM_ALLOW_INTERNAL=1`, set on the worker,
-  allows them. SGLang without `--frontend-decoding` passes most URLs to SGLang
-  to download; see
+  allows them.
+- SGLang without `--frontend-decoding` passes media URLs to SGLang to download.
+  The exception is video on a separate SGLang encode worker
+  (`--disaggregation-mode encode`): it validates video URLs itself under the
+  default-deny policy above, so plain `http://` and internal hosts need
+  `DYN_MM_ALLOW_INTERNAL=1` on that worker. See
   [SGLang Multimodal](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md).
+- `DYN_MM_ALLOW_REMOTE_URLS=0`, on the frontend and the workers, refuses every
+  remote media URL, even when `DYN_MM_ALLOW_INTERNAL=1` is set. Send the media
+  inline as a `data:` URL instead.
 - A worker that reaches the internet through an HTTP proxy must set
   `DYN_MM_TRUST_EGRESS_PROXY=1`. Without it, a fetch that would go through the
   proxy is refused. Direct fetches, including hosts in `NO_PROXY`, are unaffected.
@@ -121,7 +128,8 @@ Workers that fetch media themselves use a default-deny policy:
 
 <Warning>
 `DYN_MM_ALLOW_INTERNAL=1` lets request authors make the worker fetch internal
-URLs. Enable it only when requests come from trusted clients.
+URLs, and with `--frontend-decoding` the Dynamo frontend as well. Enable it only
+when requests come from trusted clients.
 </Warning>
 
 ## Next Steps
