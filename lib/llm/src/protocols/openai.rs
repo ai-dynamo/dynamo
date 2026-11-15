@@ -20,7 +20,7 @@ pub mod chat_completions;
 pub mod classify;
 pub mod common_ext;
 pub mod completions;
-pub(crate) mod delta_common;
+pub mod delta_common;
 pub mod embeddings;
 pub mod images;
 #[cfg(test)]
@@ -427,20 +427,20 @@ pub enum GuidedToolConstraint {
 }
 
 impl GuidedToolConstraint {
-    pub(crate) fn installs_guided_json(&self) -> bool {
+    pub fn installs_guided_json(&self) -> bool {
         matches!(
             self,
             Self::GuidedJsonNamed { .. } | Self::GuidedJsonRequired
         )
     }
 
-    pub(crate) fn uses_structural_tag(&self) -> bool {
+    pub fn uses_structural_tag(&self) -> bool {
         matches!(self, Self::StructuralTag)
     }
 
     /// The request's `response_format` is produced inside the model's answer channel
     /// behind its reasoning, so the output is a native turn and not a bare document.
-    pub(crate) fn frames_structured_answer(&self) -> bool {
+    pub fn frames_structured_answer(&self) -> bool {
         matches!(
             self,
             Self::BeamTurnGrammar {

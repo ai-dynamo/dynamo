@@ -17,7 +17,7 @@ use futures::{Stream, StreamExt};
 use std::collections::{BTreeMap, HashSet};
 
 #[derive(Default)]
-pub(crate) struct ChatCustomToolAdapter {
+pub struct ChatCustomToolAdapter {
     names: HashSet<String>,
     single_tool_call: bool,
     // Choices may interleave, and tool indices restart independently per choice.
@@ -36,7 +36,7 @@ struct PendingToolCall {
 }
 
 impl ChatCustomToolAdapter {
-    pub(crate) fn prepare(request: &mut NvCreateChatCompletionRequest) -> anyhow::Result<Self> {
+    pub fn prepare(request: &mut NvCreateChatCompletionRequest) -> anyhow::Result<Self> {
         Ok(Self {
             names: request
                 .inner
@@ -53,11 +53,11 @@ impl ChatCustomToolAdapter {
 
     /// Keep parser-confirmed calls on a `length` or `content_filter` finish, matching
     /// unary aggregation.
-    pub(crate) fn keep_parser_confirmed_calls(&mut self, keep: bool) {
+    pub fn keep_parser_confirmed_calls(&mut self, keep: bool) {
         self.keep_parser_confirmed = keep;
     }
 
-    pub(crate) fn project_response(
+    pub fn project_response(
         &self,
         response: &mut NvCreateChatCompletionResponse,
     ) -> anyhow::Result<()> {
@@ -223,7 +223,7 @@ impl ChatCustomToolAdapter {
         Ok(())
     }
 
-    pub(crate) fn stream<S>(
+    pub fn stream<S>(
         mut self,
         source: S,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send

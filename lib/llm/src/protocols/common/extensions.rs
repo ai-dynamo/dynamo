@@ -358,7 +358,7 @@ pub const UPSTREAM_ELAPSED_CONTEXT_KEY: &str = "dynamo.llm.upstream_elapsed";
 pub struct SessionAffinityId(String);
 
 impl SessionAffinityId {
-    pub(crate) fn new(value: impl Into<String>) -> Self {
+    pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 
@@ -663,7 +663,7 @@ pub struct NvExtResponse {
     pub prompt_logprobs: Option<PromptLogprobs>,
 }
 
-pub(crate) fn merge_response_nvext(
+pub fn merge_response_nvext(
     target: &mut Option<serde_json::Value>,
     incoming: Option<serde_json::Value>,
 ) {

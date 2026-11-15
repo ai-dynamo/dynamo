@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
 /// Decode JSON without discarding repeated keys at any object depth.
-pub(crate) struct UniqueJsonValue(pub(crate) Value);
+pub struct UniqueJsonValue(pub Value);
 
 impl<'de> Deserialize<'de> for UniqueJsonValue {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {

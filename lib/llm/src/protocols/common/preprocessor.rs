@@ -139,7 +139,7 @@ pub struct TraceLink {
 /// One attempt's remote prefill booking, releasable before the attempt that
 /// made it completes. The router that made the booking implements this;
 /// [`MigrationState`] only parks the handle for a committed retry to run.
-pub(crate) trait PrefillBookingRelease: std::fmt::Debug + Send + Sync {
+pub trait PrefillBookingRelease: std::fmt::Debug + Send + Sync {
     /// Release the booking. The booking is gone when the future resolves.
     fn release(&self) -> futures::future::BoxFuture<'_, ()>;
 }
@@ -148,7 +148,7 @@ pub(crate) trait PrefillBookingRelease: std::fmt::Debug + Send + Sync {
 /// The selected router records a failed worker before the error is exposed;
 /// later attempts use the accumulated set as an attempt-local exclusion.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct MigrationState {
+pub struct MigrationState {
     inner: Arc<OnceLock<Mutex<MigrationStateInner>>>,
 }
 
@@ -161,7 +161,7 @@ struct MigrationStateInner {
 }
 
 impl MigrationState {
-    pub(crate) fn record_failure(&self, worker_id: WorkerId, error: Option<DynamoError>) {
+    pub fn record_failure(&self, worker_id: WorkerId, error: Option<DynamoError>) {
         let mut inner = self
             .inner
             .get_or_init(Default::default)
@@ -175,7 +175,7 @@ impl MigrationState {
         }
     }
 
-    pub(crate) fn excluded_worker_ids(&self) -> Vec<WorkerId> {
+    pub fn excluded_worker_ids(&self) -> Vec<WorkerId> {
         let Some(inner) = self.inner.get() else {
             return Vec::new();
         };
@@ -186,7 +186,7 @@ impl MigrationState {
             .clone()
     }
 
-    pub(crate) fn exhausted_error(&self) -> Option<DynamoError> {
+    pub fn exhausted_error(&self) -> Option<DynamoError> {
         let inner = self.inner.get()?;
         let last_error = inner
             .lock()
@@ -216,7 +216,7 @@ impl MigrationState {
         )
     }
 
-    pub(crate) fn take_request_lifecycle(&self) -> Option<Box<RequestLifecycle>> {
+    pub fn take_request_lifecycle(&self) -> Option<Box<RequestLifecycle>> {
         self.inner
             .get()?
             .lock()
@@ -225,7 +225,7 @@ impl MigrationState {
             .take()
     }
 
-    pub(crate) fn store_request_lifecycle(&self, lifecycle: Box<RequestLifecycle>) {
+    pub fn store_request_lifecycle(&self, lifecycle: Box<RequestLifecycle>) {
         let replaced = self
             .inner
             .get_or_init(Default::default)
@@ -241,7 +241,7 @@ impl MigrationState {
         }
     }
 
-    pub(crate) fn abort_request_lifecycle(&self, error: Option<&AbortCause>) {
+    pub fn abort_request_lifecycle(&self, error: Option<&AbortCause>) {
         let Some(mut lifecycle) = self.take_request_lifecycle() else {
             return;
         };
@@ -251,7 +251,7 @@ impl MigrationState {
     /// Park the latest attempt's remote prefill booking. Its prefill can
     /// outlive a failed decode to serve an in-flight KV transfer, so only a
     /// committed retry, which re-books the same request ID, releases it early.
-    pub(crate) fn store_prefill_release(&self, release: Box<dyn PrefillBookingRelease>) {
+    pub fn store_prefill_release(&self, release: Box<dyn PrefillBookingRelease>) {
         self.inner
             .get_or_init(Default::default)
             .lock()
@@ -259,7 +259,7 @@ impl MigrationState {
             .prefill_release = Some(release);
     }
 
-    pub(crate) fn take_prefill_release(&self) -> Option<Box<dyn PrefillBookingRelease>> {
+    pub fn take_prefill_release(&self) -> Option<Box<dyn PrefillBookingRelease>> {
         self.inner
             .get()?
             .lock()
@@ -272,7 +272,7 @@ impl MigrationState {
 /// Owned abort payload for classifier lifecycle events: the typed
 /// [`DynamoError`] from the chain when one exists, else the whole chain
 /// converted so the root cause survives.
-pub(crate) fn owned_abort_error(error: &AbortCause) -> Arc<AbortCause> {
+pub fn owned_abort_error(error: &AbortCause) -> Arc<AbortCause> {
     let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error);
     while let Some(current) = cause {
         if let Some(dynamo_error) = current.downcast_ref::<DynamoError>() {
@@ -432,7 +432,7 @@ pub struct PreprocessedRequest {
     /// to workers nor exposed as a caller-controlled routing hint.
     #[builder(default)]
     #[serde(skip)]
-    pub(crate) migration_state: Option<MigrationState>,
+    pub migration_state: Option<MigrationState>,
 
     /// Set when remote prefill has staged KV blocks that only this request's
     /// decode worker can release, so the decode leg must reach that worker even
@@ -444,7 +444,7 @@ pub struct PreprocessedRequest {
     /// feeds is made in-process before the request is serialized to a worker.
     #[builder(default)]
     #[serde(skip)]
-    pub(crate) staged_kv_cleanup: bool,
+    pub staged_kv_cleanup: bool,
 
     /// Prompt tokens shared by prefill and decode request clones.
     ///
@@ -561,7 +561,7 @@ pub struct PreprocessedRequest {
     /// a remote worker.
     #[builder(default)]
     #[serde(skip)]
-    pub(crate) jail_seed: Option<DecoderCheckpoint>,
+    pub jail_seed: Option<DecoderCheckpoint>,
 
     /// Bootstrap info for disaggregated serving
     #[builder(default)]
@@ -859,7 +859,7 @@ impl PreprocessedRequest {
         (tokens, Some(mm.block_mm_infos.as_slice()))
     }
 
-    pub(crate) fn expanded_prompt_token_count(&self) -> usize {
+    pub fn expanded_prompt_token_count(&self) -> usize {
         self.mm_routing_info
             .as_ref()
             .filter(|mm| !mm.routing_token_ids.is_empty() && mm.expanded_prompt_len > 0)

@@ -6112,7 +6112,7 @@ impl OpenAIPreprocessor {
         )
         .map_err(|error| invalid_argument_error(format!("{error:#}")))?;
 
-        if selected_version == tool_parser_v2::ParserVersion::V2 {
+        if selected_version == dynamo_runtime::config::ParserVersion::V2 {
             return Err(invalid_argument_error(format!(
                 "{}=2 was requested, but this tool choice requires the v1 tool-call jail",
                 env_llm::DYN_PARSER_VERSION

@@ -18,7 +18,7 @@ pub mod openai;
 pub mod response_merge;
 pub mod systemone;
 pub mod tensor;
-pub(crate) mod unified;
+pub mod unified;
 
 /// The token ID type
 pub type TokenIdType = u32;

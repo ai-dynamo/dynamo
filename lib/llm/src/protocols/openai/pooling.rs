@@ -86,7 +86,7 @@ impl PoolingEmbedDType {
         }
     }
 
-    pub(crate) const fn byte_width(self) -> usize {
+    pub const fn byte_width(self) -> usize {
         match self {
             Self::Float32 => 4,
             Self::Float16 | Self::Bfloat16 => 2,

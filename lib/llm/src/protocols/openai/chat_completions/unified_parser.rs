@@ -73,7 +73,7 @@ use super::NvCreateChatCompletionStreamResponse;
 use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 
 /// The empty thought channel Gemma 4 opens with thinking off.
-pub(crate) const GEMMA4_EMPTY_THOUGHT_CHANNEL: &str = "<|channel>thought\n<channel|>";
+pub const GEMMA4_EMPTY_THOUGHT_CHANNEL: &str = "<|channel>thought\n<channel|>";
 const MISTRAL_REASONING_START: &str = "[THINK]";
 
 /// Dynamo's `--dyn-tool-call-parser` name that pairs into [`QWEN3_UNIFIED_FAMILY`].
@@ -92,7 +92,7 @@ fn uses_qwen_xml_grammar(family: &str) -> bool {
 pub(crate) const DEPRECATED_FAMILY_ALIASES: &[(&str, &str)] = &[("muse", MUSE_UNIFIED_FAMILY)];
 
 /// The startup warning for a deprecated alias, or `None` for any other selector.
-pub(crate) fn deprecated_alias_warning(parser: &str) -> Option<String> {
+pub fn deprecated_alias_warning(parser: &str) -> Option<String> {
     DEPRECATED_FAMILY_ALIASES
         .iter()
         .find(|(alias, _)| *alias == parser)
@@ -114,7 +114,7 @@ pub(crate) fn is_v2_configured_family(
 
 /// The unified family to actually use for this parser pair, or `None` to keep the
 /// existing split reasoning-parser + tool-call-jail path.
-pub(crate) fn selected_family(
+pub fn selected_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
@@ -152,21 +152,21 @@ pub(crate) fn selected_family_for_selection(
     configured_family(tool_call_parser, reasoning_parser)
 }
 
-pub(crate) fn selected_content_decoder_family(
+pub fn selected_content_decoder_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
     selected_family(tool_call_parser, reasoning_parser)
 }
 
-pub(crate) fn selected_batch_family(
+pub fn selected_batch_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
     selected_family(tool_call_parser, reasoning_parser)
 }
 
-pub(crate) fn selected_request_family(
+pub fn selected_request_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
     _tool_choice: Option<&dynamo_protocols::types::ChatCompletionToolChoiceOption>,
@@ -176,7 +176,7 @@ pub(crate) fn selected_request_family(
 }
 
 /// Whether the operator explicitly selected V2 parsing.
-pub(crate) fn parsers_v2_selected() -> bool {
+pub fn parsers_v2_selected() -> bool {
     super::tool_parser_v2::enabled()
 }
 
@@ -208,7 +208,7 @@ fn required_token(family: &str) -> Option<&'static RequiredToken> {
 
 /// Reject model setup when the configured unified family needs a vocabulary token
 /// this tokenizer lacks.
-pub(crate) fn check_family_tokens(
+pub fn check_family_tokens(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
     tokenizer: &dyn Tokenizer,
@@ -230,7 +230,7 @@ pub(crate) fn check_family_tokens(
 }
 
 /// Reject model setup for a known pre-v11 Mistral tokenizer, which has no `[ARGS]`.
-pub(crate) fn check_legacy_mistral_family(
+pub fn check_legacy_mistral_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -273,7 +273,7 @@ fn missing_family_token(
 
 /// Whether the configured family needs the tokenizer vocabulary check of
 /// [`check_family_tokens`] before it can be selected.
-pub(crate) fn needs_tokenizer_check(
+pub fn needs_tokenizer_check(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> bool {
@@ -284,7 +284,7 @@ pub(crate) fn needs_tokenizer_check(
 
 /// Request facts for parser initialization and response interpretation.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct UnifiedRequestPolicy {
+pub struct UnifiedRequestPolicy {
     pub reasoning_disabled: bool,
     pub structured_response: bool,
     pub multiple_choices: bool,
@@ -313,7 +313,7 @@ impl UnifiedRequestPolicy {
         }
     }
 
-    pub(crate) fn resolve_stream_prefill(
+    pub fn resolve_stream_prefill(
         self,
         family: &str,
         mut prefill: StreamPrefill,
@@ -770,7 +770,7 @@ fn starts_bare_json(content: &str) -> bool {
 /// output starts inside a thought the model will close without ever emitting the
 /// opener. Absent that, the answer is per family.
 #[derive(Clone)]
-pub(crate) struct StreamPrefill {
+pub struct StreamPrefill {
     pub starting_state: UnifiedParserStartingState,
     pub prefix: Option<std::sync::Arc<str>>,
 }
@@ -845,10 +845,7 @@ impl From<UnifiedParserStartingState> for StreamPrefill {
     }
 }
 
-pub(crate) fn stream_prefill(
-    family: &str,
-    prompt_injected_reasoning: bool,
-) -> UnifiedParserStartingState {
+pub fn stream_prefill(family: &str, prompt_injected_reasoning: bool) -> UnifiedParserStartingState {
     if prompt_injected_reasoning {
         return UnifiedParserStartingState::Reasoning;
     }
@@ -1148,7 +1145,7 @@ fn first_unquoted_marker_position_after(
 ///
 /// Native markers quoted as prose remain visible text in both streaming and
 /// aggregated responses.
-pub(crate) fn first_unquoted_native_tool_call_marker(content: &str, parser: &str) -> Option<usize> {
+pub fn first_unquoted_native_tool_call_marker(content: &str, parser: &str) -> Option<usize> {
     native_tool_call_start_tokens(parser)?
         .iter()
         .filter_map(|marker| first_unquoted_marker_position(content, marker))
@@ -1175,7 +1172,7 @@ pub(crate) fn first_unquoted_structural_tool_call_marker(
 
 /// Return the start of an unquoted native marker, including an unquoted
 /// partial marker suffix that must remain buffered for the next stream chunk.
-pub(crate) fn unquoted_native_tool_call_marker_or_prefix_start(
+pub fn unquoted_native_tool_call_marker_or_prefix_start(
     content: &str,
     parser: &str,
 ) -> Option<usize> {
@@ -1540,7 +1537,7 @@ pub(crate) fn fanout_llm_metrics_position(choices: &[ChatChoiceStream]) -> Optio
 ///
 /// It carries no `logprobs`: `choices_for` moves a source chunk's raw-token logprobs
 /// onto exactly one of the choices parsed from it.
-pub(crate) fn empty_choice(index: u32) -> ChatChoiceStream {
+pub fn empty_choice(index: u32) -> ChatChoiceStream {
     #[allow(deprecated)]
     ChatChoiceStream {
         index,
@@ -1933,7 +1930,7 @@ impl QuotedControlMarkerProbe {
 /// Per-choice streaming state: one parser instance plus the bookkeeping the OpenAI
 /// streaming tool-call contract needs. One instance parses exactly one choice of one
 /// request, which is what gives per-stream isolation by construction.
-pub(crate) struct ChoiceState {
+pub struct ChoiceState {
     native_grammar_state: NativeGrammarState,
     incomplete_native_call: bool,
     family: String,
@@ -2161,7 +2158,7 @@ impl ChoiceState {
         self.parser.preserve_message_phases(enabled);
     }
 
-    pub(crate) fn push(&mut self, text: &str) -> Vec<UnifiedParserEvent> {
+    pub fn push(&mut self, text: &str) -> Vec<UnifiedParserEvent> {
         if self.failed {
             return text_delta(text.to_string());
         }
@@ -2340,7 +2337,7 @@ impl ChoiceState {
     }
 
     /// Flush buffered partial state at end of stream.
-    pub(crate) fn finish(&mut self) -> Vec<UnifiedParserEvent> {
+    pub fn finish(&mut self) -> Vec<UnifiedParserEvent> {
         self.finish_with_eos(false)
     }
 
@@ -2864,7 +2861,7 @@ fn text_delta(text: String) -> Vec<UnifiedParserEvent> {
 
 /// The aggregated result of parsing one complete (non-streaming) output.
 #[derive(Debug)]
-pub(crate) struct CompleteOutput {
+pub struct CompleteOutput {
     pub incomplete_native_call: bool,
     pub text: String,
     pub reasoning: String,
@@ -3779,7 +3776,7 @@ where
     )
 }
 
-pub(crate) fn apply_stream_with_policy<S>(
+pub fn apply_stream_with_policy<S>(
     stream_in: S,
     tool_definitions: Option<Vec<ToolDefinition>>,
     guided_tool_constraint: GuidedToolConstraint,

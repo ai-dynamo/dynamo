@@ -60,7 +60,7 @@ fn v2_family(parser: &str) -> Option<&'static str> {
 
 pub(crate) use dynamo_runtime::config::ParserVersion;
 
-pub(crate) fn selected_version() -> anyhow::Result<ParserVersion> {
+pub fn selected_version() -> anyhow::Result<ParserVersion> {
     dynamo_runtime::config::selected_parser_version()
 }
 
@@ -79,7 +79,7 @@ pub(crate) fn canonical_family(family: &str) -> &str {
 }
 
 /// Whether the deployment explicitly selects parsers v2.
-pub(crate) fn enabled() -> bool {
+pub fn enabled() -> bool {
     match selected_version() {
         Ok(ParserVersion::V2) => true,
         Ok(ParserVersion::Auto | ParserVersion::V1) => false,
@@ -88,14 +88,14 @@ pub(crate) fn enabled() -> bool {
 }
 
 /// Reject unavailable parsers before model setup or raw-output parsing can fall back.
-pub(crate) fn validate_parser_version(
+pub fn validate_parser_version(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> anyhow::Result<()> {
     validate_parser_version_for_mode(selected_version()?, tool_call_parser, reasoning_parser)
 }
 
-pub(crate) fn validate_tool_request_mode(
+pub fn validate_tool_request_mode(
     version: ParserVersion,
     effective_tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
@@ -121,7 +121,7 @@ pub(crate) fn validate_tool_request_mode(
 // Forced choices therefore stay on the parser path; the preprocessor installs a regex
 // over the native wire instead (see `tool_choice.rs`), which keeps the analysis channel
 // and still forces the call header of an allowed tool.
-pub(crate) fn is_beam_parser(parser_name: Option<&str>) -> bool {
+pub fn is_beam_parser(parser_name: Option<&str>) -> bool {
     parser_name == Some("beam")
 }
 

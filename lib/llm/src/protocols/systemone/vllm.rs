@@ -47,13 +47,13 @@ pub fn causal_scoring_request(
 }
 
 #[derive(Debug, PartialEq)]
-pub(crate) struct VllmScoreResult {
-    pub(crate) scores: Vec<f64>,
-    pub(crate) cached_tokens: usize,
+pub struct VllmScoreResult {
+    pub scores: Vec<f64>,
+    pub cached_tokens: usize,
 }
 
 /// Collect delta outputs before accepting a complete, measured scoring result.
-pub(crate) struct VllmScoreCollector {
+pub struct VllmScoreCollector {
     expected_ids: Vec<u32>,
     prompt_tokens: usize,
     sampled_token: Option<u32>,
@@ -70,10 +70,7 @@ enum CollectionState {
 }
 
 impl VllmScoreCollector {
-    pub(crate) fn new(
-        expected_ids: Vec<u32>,
-        prompt_tokens: usize,
-    ) -> Result<Self, SystemOneError> {
+    pub fn new(expected_ids: Vec<u32>, prompt_tokens: usize) -> Result<Self, SystemOneError> {
         validate_inputs(&expected_ids, prompt_tokens)?;
         Ok(Self {
             expected_ids,
@@ -85,7 +82,7 @@ impl VllmScoreCollector {
         })
     }
 
-    pub(crate) fn observe(&mut self, frame: &LLMEngineOutput) -> Result<(), SystemOneError> {
+    pub fn observe(&mut self, frame: &LLMEngineOutput) -> Result<(), SystemOneError> {
         let result = self.observe_frame(frame);
         if result.is_err() {
             self.state = CollectionState::Failed;
@@ -189,7 +186,7 @@ impl VllmScoreCollector {
         Ok(())
     }
 
-    pub(crate) fn finish(self) -> Result<VllmScoreResult, SystemOneError> {
+    pub fn finish(self) -> Result<VllmScoreResult, SystemOneError> {
         if self.state != CollectionState::Terminal {
             return Err(invalid("scoring stream failed or lacks a terminal result"));
         }

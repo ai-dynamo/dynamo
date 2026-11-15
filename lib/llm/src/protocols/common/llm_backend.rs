@@ -31,7 +31,7 @@ pub struct DecoderCheckpoint {
 
 impl DecoderCheckpoint {
     /// Captures withheld stop-filter text and token IDs buffered by incremental decoding.
-    pub(crate) fn new(jailed_text: String, pending_token_ids: Vec<TokenIdType>) -> Self {
+    pub fn new(jailed_text: String, pending_token_ids: Vec<TokenIdType>) -> Self {
         Self {
             jailed_text,
             pending_token_ids,
@@ -39,7 +39,7 @@ impl DecoderCheckpoint {
     }
 
     /// Splits the checkpoint into its stop-filter text and incremental-decoder state.
-    pub(crate) fn into_parts(self) -> (String, Vec<TokenIdType>) {
+    pub fn into_parts(self) -> (String, Vec<TokenIdType>) {
         (self.jailed_text, self.pending_token_ids)
     }
 }

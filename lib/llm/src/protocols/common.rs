@@ -45,7 +45,7 @@ pub fn preprocessed_mm_routing_hash(modality: &str, raw_kwargs: &[u8]) -> String
     dynamo_kv_hashing::multimodal::mark_mm_hash_for_extra_key(hash)
 }
 
-pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
+pub fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
     let message = message.into();
     DynamoError::builder()
         .error_type(ErrorType::InvalidArgument)

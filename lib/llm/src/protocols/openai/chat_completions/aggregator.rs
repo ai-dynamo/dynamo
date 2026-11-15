@@ -462,7 +462,7 @@ impl DeltaAggregator {
         Self::apply_with_tool_terminal_policy(stream, parsing_options, false).await
     }
 
-    pub(crate) async fn apply_for_selected_unified_parser(
+    pub async fn apply_for_selected_unified_parser(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
         parsing_options: ParsingOptions,
     ) -> Result<NvCreateChatCompletionResponse, DynamoError> {

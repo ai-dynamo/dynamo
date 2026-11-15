@@ -204,7 +204,7 @@ pub(crate) fn enable_usage_for_nonstreaming(
 }
 
 /// Enables usage statistics regardless of the request's `include_usage` value.
-pub(crate) fn force_include_usage(stream_options: &mut Option<ChatCompletionStreamOptions>) {
+pub fn force_include_usage(stream_options: &mut Option<ChatCompletionStreamOptions>) {
     stream_options
         .get_or_insert_with(|| ChatCompletionStreamOptions {
             include_usage: true,

@@ -32,9 +32,7 @@ fn search_call_id(id: Option<&str>) -> anyhow::Result<&str> {
     })
 }
 
-pub(crate) fn effective_response_tools(
-    request: &NvCreateResponse,
-) -> anyhow::Result<Vec<RequestTool>> {
+pub fn effective_response_tools(request: &NvCreateResponse) -> anyhow::Result<Vec<RequestTool>> {
     let mut tools = request.inner.tools.clone().unwrap_or_default();
     let client_search = tools.iter().any(|tool| matches!(&tool.inner, Tool::ToolSearch(search) if search.execution == Some(ToolSearchExecutionType::Client)));
     if tools.iter().any(|tool| matches!(&tool.inner, Tool::ToolSearch(search) if search.execution != Some(ToolSearchExecutionType::Client))) {
@@ -270,7 +268,7 @@ fn convert_template_tools(
 }
 
 impl NvCreateChatCompletionRequest {
-    pub(crate) fn validated_effective_tools(
+    pub fn validated_effective_tools(
         &self,
     ) -> anyhow::Result<std::borrow::Cow<'_, [ChatCompletionTool]>> {
         if self.responses_tools.is_some() {
@@ -323,7 +321,7 @@ impl NvCreateChatCompletionRequest {
     }
 
     /// Phase replay is a model capability, independent of namespace rendering.
-    pub(crate) fn normalize_responses_history_phases(&mut self, enabled: bool) {
+    pub fn normalize_responses_history_phases(&mut self, enabled: bool) {
         if let Some(context) = &mut self.responses_tools
             && let Some((messages, phases)) = &context.phase_history
         {
@@ -337,7 +335,7 @@ impl NvCreateChatCompletionRequest {
         }
     }
 
-    pub(crate) fn normalize_responses_tools(&mut self, native: bool) -> anyhow::Result<()> {
+    pub fn normalize_responses_tools(&mut self, native: bool) -> anyhow::Result<()> {
         // Parser capability selects phase replay independently of tool rendering.
         if let Some(context) = &mut self.responses_tools {
             context.native = native;
