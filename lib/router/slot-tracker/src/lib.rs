@@ -30,8 +30,15 @@ pub mod single;
 pub mod topology;
 pub mod wire;
 
-pub use multi_worker::*;
+pub use multi_worker::{
+    ActiveSequencesMultiWorker, LifecycleMutationOutcome, LocalWorkerLoad, NoopSequencePublisher,
+    ReplicaRequestLeaseObserver, ReplicaWorkerPolicy, SchedulerLoadSnapshot, SequenceError,
+    SequencePublishQueueError, SequencePublisher, SequenceRequest, SequenceSubscriber,
+    SequenceTrackerOptions, active_request_expiry_duration,
+};
 pub use prefill_tracker::PrefillTokenDeltas;
 pub use prompt_registry::WorkerLoadReader;
 pub use prompt_registry::{PotentialLoadMaps, WorkerLoadProjection};
-pub use single::*;
+pub use single::{
+    ActiveSequences, DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION, PrefillCompletion, RequestId,
+};
