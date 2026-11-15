@@ -29,6 +29,7 @@ from dynamo.common.multimodal.image_loader import (
     scope_image_cache_key,
 )
 from dynamo.common.multimodal.media_descriptor import decoded_content_hash_key
+from dynamo.common.multimodal.vllm_image import vllm_rgb
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.runtime import DistributedRuntime
@@ -43,7 +44,6 @@ from ..multimodal_utils import (
     vLLMMultimodalRequest,
 )
 from ..multimodal_utils.model import ModelFamily, resolve_model_family
-from ..multimodal_utils.request_processor import _vllm_rgb
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +161,7 @@ class EncodeWorkerHandler:
         # so passing one here would ignore the operator's setting.
         self.image_loader = ImageLoader(
             enable_frontend_decoding=enable_frontend_decoding,
-            to_rgb=_vllm_rgb,
+            to_rgb=vllm_rgb,
         )
         self.image_processor = _load_image_processor(self.engine_args)
         self.vision_model = load_vision_model(

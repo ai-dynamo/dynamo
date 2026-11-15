@@ -15,6 +15,11 @@ from dynamo.common.http import HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError
 from dynamo.common.multimodal.image_loader import ImageLoader
 
+try:
+    from vllm.multimodal.media.image import ImageMediaIO
+except ImportError:  # vLLM is optional here; the vllm-marked tests skip without it
+    ImageMediaIO = None  # type: ignore[assignment,misc]
+
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.gpu_0,
@@ -159,9 +164,6 @@ async def test_connector_keeps_rgb_when_options_set_image_mode(monkeypatch):
     connector_class = getattr(media_connector_module, "DynamoMediaConnector", None)
     if connector_class is None:
         pytest.skip("vLLM is not installed")
-    # Imported here: this file also runs where vLLM is not installed.
-    from vllm.multimodal.media.image import ImageMediaIO
-
     monkeypatch.setattr(media_connector_module, "_shared_image_loader", None)
     image = Image.new("RGBA", (4, 2))
     image.putpixel((0, 0), (0, 0, 0, 255))

@@ -18,11 +18,9 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
-from PIL import Image
 from vllm.config import ModelConfig
 from vllm.inputs import TokensPrompt
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import convert_image_mode, normalize_image
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.media.image import ImageMediaIO
 
@@ -43,6 +41,7 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
     decode_mm_kwargs_item,
 )
 from dynamo.common.multimodal.video_loader import VideoLoader
+from dynamo.common.multimodal.vllm_image import vllm_rgb
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.llm.exceptions import InvalidArgument
 
@@ -124,13 +123,6 @@ def _build_forwarded_mm_uuids(
         return {modality_key: marked_hashes}
 
     return None
-
-
-def _vllm_rgb(
-    image: Image.Image, background: tuple[int, int, int] = (255, 255, 255)
-) -> Image.Image:
-    """Apply EXIF orientation, then composite transparency, as vLLM's loader does."""
-    return convert_image_mode(normalize_image(image), "RGB", background)
 
 
 def _media_io_kwargs(request: dict, modality: str) -> dict:
@@ -397,7 +389,7 @@ class VllmMultimodalRequestProcessor:
         self.trust_remote_code = trust_remote_code
         self.embedding_loader = embedding_loader
         self.image_loader = image_loader or ImageLoader(
-            enable_frontend_decoding=enable_frontend_decoding, to_rgb=_vllm_rgb
+            enable_frontend_decoding=enable_frontend_decoding, to_rgb=vllm_rgb
         )
         self.video_loader = video_loader or VideoLoader(
             enable_frontend_decoding=enable_frontend_decoding
@@ -682,7 +674,7 @@ class VllmMultimodalRequestProcessor:
             image_to_rgb = (
                 None
                 if background is None
-                else functools.partial(_vllm_rgb, background=background)
+                else functools.partial(vllm_rgb, background=background)
             )
 
             # A separate encoder consumes URL images and, when frontend
@@ -715,9 +707,14 @@ class VllmMultimodalRequestProcessor:
 
             image_key = "vision_chunk" if self.use_unified_vision_chunk else "image"
             if image_key not in vllm_mm_data and image_items:
+                # The encoder path also takes bare URL strings; the loader takes variants.
+                local_items = [
+                    {URL_VARIANT_KEY: item} if isinstance(item, str) else item
+                    for item in image_items
+                ]
                 with _nvtx.annotate("mm_backend:image_download", color="green"):
                     images = await self.image_loader.load_image_batch(
-                        image_items,
+                        local_items,
                         cache_scope=image_cache_scope_from_request(request),
                         preserve_uuid_slots=True,
                         to_rgb=image_to_rgb,

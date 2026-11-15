@@ -55,15 +55,10 @@ def _get_shared_image_loader(
 
 # Lazy registration — only register if vLLM is available.
 try:
-    from vllm.multimodal.image import convert_image_mode, normalize_image
     from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
     from vllm.multimodal.media.image import ImageMediaIO
 
-    def _vllm_rgb(
-        image: Image.Image, background: tuple[int, int, int] = (255, 255, 255)
-    ) -> Image.Image:
-        """Apply EXIF orientation, then composite transparency, as vLLM's loader does."""
-        return convert_image_mode(normalize_image(image), "RGB", background)
+    from dynamo.common.multimodal.vllm_image import vllm_rgb
 
     @MEDIA_CONNECTOR_REGISTRY.register("dynamo")
     class DynamoMediaConnector(MediaConnector):
@@ -78,7 +73,7 @@ try:
 
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
-            self._image_loader = _get_shared_image_loader(_vllm_rgb)
+            self._image_loader = _get_shared_image_loader(vllm_rgb)
 
         async def fetch_image_async(
             self,
@@ -95,7 +90,7 @@ try:
             ).rgba_background_color
             to_rgb: Callable[[Image.Image], Image.Image] | None = None
             if background != (255, 255, 255):
-                to_rgb = functools.partial(_vllm_rgb, background=background)
+                to_rgb = functools.partial(vllm_rgb, background=background)
             try:
                 img = await self._image_loader.load_image(image_url, to_rgb=to_rgb)
             except (UrlValidationError, HttpStatusError, HttpConfigurationError):

@@ -209,7 +209,9 @@ def _vllm_pixels(
     return _pixels(image_io.load_bytes(content).media)
 
 
-_RED_BACKGROUND = {"rgba_background_color": [255, 0, 0]}
+def _red_background() -> dict:
+    # A new dict on each call, so a test cannot change another test's options.
+    return {"rgba_background_color": [255, 0, 0]}
 
 
 @pytest.mark.asyncio
@@ -261,11 +263,14 @@ async def test_worker_image_matches_vllm_loader(build_image):
 async def test_worker_applies_request_rgba_background_color(build_image):
     content = build_image()
     processor = _processor(real_image_loader=True)
-    request = {**_image_request(content), "media_io_kwargs": {"image": _RED_BACKGROUND}}
+    request = {
+        **_image_request(content),
+        "media_io_kwargs": {"image": _red_background()},
+    }
 
     result = await processor.extract_multimodal_data(request, "request-1", None)
 
-    assert _pixels(result["image"]) == _vllm_pixels(content, _RED_BACKGROUND)
+    assert _pixels(result["image"]) == _vllm_pixels(content, _red_background())
 
 
 @pytest.mark.asyncio
@@ -321,11 +326,12 @@ def test_worker_prompt_keys_vllm_cache_on_background():
 
     white = vllm_hash(None)
     assert vllm_hash({"image": {"rgba_background_color": [255, 255, 255]}}) == white
-    assert vllm_hash({"image": _RED_BACKGROUND}) != white
+    assert vllm_hash({"image": _red_background()}) != white
 
 
 @pytest.mark.asyncio
-async def test_worker_loads_image_itself_when_request_sets_image_options():
+@pytest.mark.parametrize("bare_url", [False, True], ids=["url_variant", "bare_url"])
+async def test_worker_loads_image_itself_when_request_sets_image_options(bare_url):
     """The encode worker gets no media_io_kwargs, so the worker loads such an image itself."""
     processor = _processor(real_image_loader=True)
     processor.embedding_loader = SimpleNamespace(
@@ -333,13 +339,17 @@ async def test_worker_loads_image_itself_when_request_sets_image_options():
     )
     request = {
         **_image_request(_rgba_ink_png()),
-        "media_io_kwargs": {"image": _RED_BACKGROUND},
+        "media_io_kwargs": {"image": _red_background()},
     }
+    if bare_url:
+        # The encoder path also takes an image item as a bare URL string.
+        items = request["multi_modal_data"]["image_url"]
+        items[0] = items[0]["Url"]
 
     result = await processor.extract_multimodal_data(request, "request-1", None)
 
     processor.embedding_loader.load_multimodal_embeddings.assert_not_awaited()
-    assert _pixels(result["image"]) == _vllm_pixels(_rgba_ink_png(), _RED_BACKGROUND)
+    assert _pixels(result["image"]) == _vllm_pixels(_rgba_ink_png(), _red_background())
 
 
 @pytest.mark.asyncio
