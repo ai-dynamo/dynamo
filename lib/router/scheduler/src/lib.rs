@@ -35,8 +35,7 @@ pub mod test_utils;
 
 pub use config::{
     CacheHitWeights, PolicyProfileSource, RouterConfig, RouterConfigError, RouterConfigOverride,
-    RouterConfigOverrideBuilder, RouterConfigOverrideBuilderError, RouterPrefillLoadModel,
-    Validated,
+    RouterPrefillLoadModel, Validated,
 };
 pub use filter::{RoutingEligibility, WorkerEligibilityError};
 pub use hint_policy::{

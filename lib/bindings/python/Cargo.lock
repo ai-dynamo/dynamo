@@ -2807,7 +2807,6 @@ dependencies = [
  "async-trait",
  "blake3",
  "crossbeam-queue",
- "derive_builder",
  "dynamo-admission",
  "dynamo-kv-events",
  "dynamo-kv-hashing",

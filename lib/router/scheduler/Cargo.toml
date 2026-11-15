@@ -35,7 +35,6 @@ arc-swap = "1.9.1"
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 crossbeam-queue = "0.3"
-derive_builder = { workspace = true }
 fastrand = "2"
 futures-util = { workspace = true }
 http = { workspace = true }

@@ -33,11 +33,6 @@ use dynamo_worker_selection::{
 };
 
 pub use dynamo_scheduler::{RouterConfigOverride, RouterPrefillLoadModel};
-// Pre-split paths kept through 1.9 and removed in 1.10; the named list is the inventory in compat.rs.
-#[allow(deprecated)]
-pub use crate::compat::scheduling::config::{
-    RouterConfigOverrideBuilder, RouterConfigOverrideBuilderError,
-};
 
 const fn default_track_prefill_tokens() -> bool {
     true
