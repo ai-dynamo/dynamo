@@ -284,22 +284,6 @@ pub enum ScheduleMode {
 }
 
 impl ScheduleMode {
-    pub fn from_legacy(
-        request_id: Option<String>,
-        update_states: bool,
-    ) -> Result<Self, KvSchedulerError> {
-        if !update_states {
-            return Ok(Self::QueryOnly { request_id });
-        }
-
-        let Some(request_id) = request_id else {
-            return Err(KvSchedulerError::BookingFailed(
-                "tracked scheduling request requires a request_id".to_string(),
-            ));
-        };
-        Ok(Self::Tracked { request_id })
-    }
-
     pub fn request_id(&self) -> Option<&str> {
         match self {
             Self::QueryOnly { request_id } => request_id.as_deref(),
