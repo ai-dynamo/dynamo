@@ -256,17 +256,45 @@ pub const ROOT_PATH: &str = "v1/mdc";
 ///
 /// "Special" here means `AddedToken { special: true, .. }` — these are the only tokens
 /// guaranteed atomic in BPE (won't be merged with surrounding bytes), so they are the
-/// only safe boundary points for the L1 prefix cache.
+/// only candidate boundary points for the L1 prefix cache. The cache encodes the text
+/// on each side of a boundary separately, so a boundary is safe only where that gives
+/// the same ids as encoding the whole prompt. Tokens whose match depends on the text
+/// around them are left out: `rstrip` takes the whitespace after the token (Phi-3's
+/// `<|user|>\n`), `single_word` matches only between word boundaries, and `normalized`
+/// matches the normalized text. A kept token that can overlap one of those is left out
+/// as well, so no boundary lands inside it (the cache screens kept tokens against each
+/// other the same way). `lstrip` takes whitespace before the token, which stays on the
+/// token's side of the boundary.
 fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
-    let added = hf.get_added_tokens_decoder();
-    let mut out: Vec<String> = added
-        .values()
+    let has_normalizer = hf.get_normalizer().is_some();
+    let (unsafe_tokens, safe_tokens): (Vec<_>, Vec<_>) = hf
+        .get_added_tokens_decoder()
+        .into_values()
         .filter(|t| t.special)
-        .map(|t| t.content.clone())
+        .partition(|t| t.rstrip || t.single_word || (t.normalized && has_normalizer));
+    let mut out: Vec<String> = safe_tokens
+        .into_iter()
+        .map(|t| t.content)
+        .filter(|token| {
+            !unsafe_tokens
+                .iter()
+                .any(|other| special_tokens_can_overlap(token, &other.content))
+        })
         .collect();
     out.sort();
     out.dedup();
     out
+}
+
+/// Whether occurrences of `a` and `b` can overlap: one contains the other, or an
+/// end of one is a start of the other.
+fn special_tokens_can_overlap(a: &str, b: &str) -> bool {
+    if a.contains(b) || b.contains(a) {
+        return true;
+    }
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    (1..a.len().min(b.len()))
+        .any(|len| a[a.len() - len..] == b[..len] || b[b.len() - len..] == a[..len])
 }
 
 /// Exclusive bound for client token ids: the largest id plus one, added tokens
@@ -4095,5 +4123,126 @@ mod worker_type_tests {
         );
         let restored: ModelDeploymentCard = serde_json::from_value(serialized).unwrap();
         assert!(restored.indexer_identity.is_none());
+    }
+}
+
+#[cfg(test)]
+mod special_token_boundary_tests {
+    use super::*;
+
+    /// A WordLevel tokenizer whose `<|user|>` and `<|end|>` take the whitespace after them,
+    /// as Phi-3's chat tokens do. Whitespace runs are words of their own.
+    const RSTRIP_TOKENIZER: &str = r#"{"version":"1.0","truncation":null,"padding":null,
+        "added_tokens":[
+            {"id":3,"content":"<|user|>","single_word":false,"lstrip":false,"rstrip":true,"normalized":false,"special":true},
+            {"id":4,"content":"<|end|>","single_word":false,"lstrip":false,"rstrip":true,"normalized":false,"special":true}],
+        "normalizer":null,
+        "pre_tokenizer":{"type":"Split","pattern":{"Regex":"\\s+"},"behavior":"Isolated","invert":false},
+        "post_processor":null,"decoder":null,
+        "model":{"type":"WordLevel","vocab":{"<unk>":0,"hi":1,"\n":2},"unk_token":"<unk>"}}"#;
+
+    /// The same, with a plain special token `<|` that occurs inside `<|user|>`.
+    const NESTED_TOKENIZER: &str = r#"{"version":"1.0","truncation":null,"padding":null,
+        "added_tokens":[
+            {"id":3,"content":"<|user|>","single_word":false,"lstrip":false,"rstrip":true,"normalized":false,"special":true},
+            {"id":4,"content":"<|","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true}],
+        "normalizer":null,
+        "pre_tokenizer":{"type":"Split","pattern":{"Regex":"\\s+"},"behavior":"Isolated","invert":false},
+        "post_processor":null,"decoder":null,
+        "model":{"type":"WordLevel","vocab":{"<unk>":0,"hi":1,"\n":2},"unk_token":"<unk>"}}"#;
+
+    fn card_with_tokenizer(json: &str) -> (ModelDeploymentCard, tempfile::TempDir) {
+        let mut card =
+            ModelDeploymentCard::load_from_disk("tests/data/sample-models/TinyLlama_v1.1", None)
+                .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokenizer.json");
+        std::fs::write(&path, json).unwrap();
+        card.tokenizer = Some(TokenizerKind::HfTokenizerJson(
+            CheckedFile::from_disk(&path).unwrap(),
+        ));
+        (card, dir)
+    }
+
+    /// The cached tokenizer gives the ids of the Hugging Face tokenizer, on a miss and on a
+    /// hit.
+    fn assert_cache_matches_tokenizer(json: &str, text: &str, expected: &[u32]) {
+        let (card, dir) = card_with_tokenizer(json);
+        let reference = HfTokenizer::from_file(dir.path().join("tokenizer.json"))
+            .unwrap()
+            .encode(text, false)
+            .unwrap()
+            .get_ids()
+            .to_vec();
+        assert_eq!(reference, expected);
+        let tokenizer = card.tokenizer().unwrap();
+        for _ in 0..2 {
+            assert_eq!(tokenizer.encode(text).unwrap().token_ids(), expected);
+        }
+    }
+
+    #[test]
+    fn tokenizer_cache_keeps_the_whitespace_rstrip_special_tokens_take() {
+        // Each special token takes the newline after it.
+        assert_cache_matches_tokenizer(RSTRIP_TOKENIZER, "<|user|>\nhi<|end|>\n", &[3, 1, 4]);
+    }
+
+    #[test]
+    fn tokenizer_cache_does_not_split_inside_a_token_it_cannot_split_after() {
+        // `<|` is not a split point either: an occurrence inside `<|user|>` would split it.
+        assert_cache_matches_tokenizer(NESTED_TOKENIZER, "<|user|>\nhi", &[3, 1]);
+    }
+
+    #[test]
+    fn cache_split_points_leave_out_tokens_matched_with_surrounding_text() {
+        let tokenizer = |normalizer: &str| -> HfTokenizer {
+            let added = [
+                (
+                    3,
+                    "<plain>",
+                    r#""lstrip":false,"rstrip":false,"single_word":false,"normalized":false"#,
+                ),
+                (
+                    4,
+                    "<left>",
+                    r#""lstrip":true,"rstrip":false,"single_word":false,"normalized":false"#,
+                ),
+                (
+                    5,
+                    "<right>",
+                    r#""lstrip":false,"rstrip":true,"single_word":false,"normalized":false"#,
+                ),
+                (
+                    6,
+                    "<word>",
+                    r#""lstrip":false,"rstrip":false,"single_word":true,"normalized":false"#,
+                ),
+                (
+                    7,
+                    "<norm>",
+                    r#""lstrip":false,"rstrip":false,"single_word":false,"normalized":true"#,
+                ),
+            ]
+            .map(|(id, content, flags)| {
+                format!(r#"{{"id":{id},"content":"{content}","special":true,{flags}}}"#)
+            })
+            .join(",");
+            format!(
+                r#"{{"version":"1.0","added_tokens":[{added}],"normalizer":{normalizer},
+                "pre_tokenizer":null,"post_processor":null,"decoder":null,
+                "model":{{"type":"WordLevel","vocab":{{"<unk>":0}},"unk_token":"<unk>"}}}}"#
+            )
+            .parse()
+            .unwrap()
+        };
+        // Without a normalizer, a normalized token matches the text as written.
+        assert_eq!(
+            extract_hf_special_tokens(&tokenizer("null")),
+            ["<left>", "<norm>", "<plain>"]
+        );
+        assert_eq!(
+            extract_hf_special_tokens(&tokenizer(r#"{"type":"Lowercase"}"#)),
+            ["<left>", "<plain>"]
+        );
     }
 }
