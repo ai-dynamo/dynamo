@@ -321,9 +321,6 @@ pub enum SequenceError {
 
     #[error("Request {request_id} not found")]
     RequestNotFound { request_id: String },
-
-    #[error("Failed to publish replica-sync event: {0}")]
-    ReplicaSyncPublishFailed(String),
 }
 
 /// Bundled parameters for adding a request to the sequence tracker.

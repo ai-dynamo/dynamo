@@ -572,7 +572,6 @@ enum CompletionFailure {
     WorkerNotFound,
     DuplicateRequest,
     RequestNotFound,
-    ReplicaSyncPublishFailed,
     InvalidRequestIndex,
 }
 
@@ -582,7 +581,6 @@ impl CompletionFailure {
             SequenceError::WorkerNotFound { .. } => Self::WorkerNotFound,
             SequenceError::DuplicateRequest { .. } => Self::DuplicateRequest,
             SequenceError::RequestNotFound { .. } => Self::RequestNotFound,
-            SequenceError::ReplicaSyncPublishFailed(_) => Self::ReplicaSyncPublishFailed,
         }
     }
 }
