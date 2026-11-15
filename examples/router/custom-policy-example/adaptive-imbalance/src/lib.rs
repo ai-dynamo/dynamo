@@ -259,6 +259,7 @@ fn provider(
                 vec![Box::new(scorer::AdaptiveScorer::new(
                     Arc::clone(&shared),
                     params.interval(),
+                    params.stale_after(),
                 ))],
                 Box::new(picker::AdaptivePicker::new(config.router_temperature)),
             )
@@ -462,6 +463,14 @@ mod tests {
         config: SelectionConfig,
         interval: Duration,
     ) -> (Arc<state::SharedState>, WorkerSelectionPolicy) {
+        adaptive_policy_with_view_ttl(config, interval, Parameters::default().stale_after())
+    }
+
+    fn adaptive_policy_with_view_ttl(
+        config: SelectionConfig,
+        interval: Duration,
+        view_ttl: Duration,
+    ) -> (Arc<state::SharedState>, WorkerSelectionPolicy) {
         let shared = Arc::new(state::SharedState::new(state::Weights::baseline(&config)));
         let temperature = config.router_temperature;
         let policy = WorkerSelectionPolicy::new(
@@ -470,6 +479,7 @@ mod tests {
             vec![Box::new(scorer::AdaptiveScorer::new(
                 Arc::clone(&shared),
                 interval,
+                view_ttl,
             ))],
             Box::new(picker::AdaptivePicker::with_seed(temperature, PICKER_SEED)),
         );
@@ -739,6 +749,100 @@ mod tests {
             observed,
             vec![3.0, 5.0],
             "the next two-worker request still publishes"
+        );
+    }
+
+    /// Selects on `workers` with only `allowed` eligible, as `allowed_worker_ids` restricts a request.
+    fn select_restricted(
+        policy: &WorkerSelectionPolicy,
+        workers: &HashMap<u64, TestWorker>,
+        loads: &[(WorkerWithDpRank, usize)],
+        allowed: &[u64],
+    ) -> WorkerWithDpRank {
+        let mut request = request_with_loads(loads);
+        request.allowed_worker_ids = Some(allowed.iter().copied().collect());
+        policy
+            .select_worker(WorkerSelectionInput::configured(
+                workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap()
+            .worker
+    }
+
+    fn sorted_sample(shared: &state::SharedState) -> Vec<f64> {
+        let mut observed = shared.load_snapshot().active_requests.clone();
+        observed.sort_by(f64::total_cmp);
+        observed
+    }
+
+    #[test]
+    fn restricted_requests_do_not_replace_the_pool_sample() {
+        let (shared, policy) = adaptive_policy(
+            SelectionConfig {
+                decode_active_request_weight: 1.0,
+                router_temperature: 0.0,
+                ..SelectionConfig::default()
+            },
+            // Zero interval: any request with a valid sample would publish.
+            Duration::ZERO,
+        );
+        let workers = HashMap::from([
+            (1, TestWorker),
+            (2, TestWorker),
+            (3, TestWorker),
+            (4, TestWorker),
+        ]);
+        let [w1, w2, w3, w4] = [1, 2, 3, 4].map(WorkerWithDpRank::from_worker_id);
+        // The hotspot: two workers carry all the load.
+        let hot = [(w1, 20), (w2, 20), (w3, 0), (w4, 0)];
+
+        for round in 0..3 {
+            select(&policy, &workers, &hot);
+            assert_eq!(sorted_sample(&shared), vec![0.0, 0.0, 20.0, 20.0]);
+            let pool_sample = shared.load_snapshot();
+
+            // A request allowed only on the two hot workers sees [20, 20], which reads as balanced.
+            select_restricted(&policy, &workers, &hot, &[1, 2]);
+            assert!(
+                Arc::ptr_eq(&pool_sample, &shared.load_snapshot()),
+                "round {round}: a restricted request must not replace the pool sample"
+            );
+        }
+
+        // An unrestricted request after the restricted ones still publishes.
+        select(&policy, &workers, &[(w1, 5), (w2, 6), (w3, 7), (w4, 8)]);
+        assert_eq!(sorted_sample(&shared), vec![5.0, 6.0, 7.0, 8.0]);
+    }
+
+    #[test]
+    fn a_smaller_pool_publishes_again_once_the_larger_view_expires() {
+        let (shared, policy) = adaptive_policy_with_view_ttl(
+            SelectionConfig {
+                decode_active_request_weight: 1.0,
+                router_temperature: 0.0,
+                ..SelectionConfig::default()
+            },
+            Duration::ZERO,
+            Duration::from_millis(20),
+        );
+        let [w1, w2, w3] = [1, 2, 3].map(WorkerWithDpRank::from_worker_id);
+        let three = HashMap::from([(1, TestWorker), (2, TestWorker), (3, TestWorker)]);
+        select(&policy, &three, &[(w1, 1), (w2, 2), (w3, 3)]);
+
+        // Worker 3 leaves the pool; until the three-worker view expires, two workers look restricted.
+        let two = HashMap::from([(1, TestWorker), (2, TestWorker)]);
+        select(&policy, &two, &[(w1, 4), (w2, 5)]);
+        assert_eq!(sorted_sample(&shared), vec![1.0, 2.0, 3.0]);
+
+        std::thread::sleep(Duration::from_millis(40));
+        select(&policy, &two, &[(w1, 4), (w2, 5)]);
+        assert_eq!(
+            sorted_sample(&shared),
+            vec![4.0, 5.0],
+            "after the view TTL the smaller pool is the new reference"
         );
     }
 
