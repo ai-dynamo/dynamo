@@ -60,7 +60,7 @@ The cost omits these default-policy terms, so picks can differ from the default 
 
 Other gaps:
 
-- Requests constrained to a subset of workers (allowed worker ids, routing constraints) can produce a load sample that covers only that subset. The scorer skips samples with fewer than two observed workers, pinned requests and previews, but not larger subsets.
+- The load sample covers the workers a request may use. A request restricted to fewer workers than the largest set seen within `stale_after_ms` (allowed worker ids, affinity, taint constraints) neither publishes nor uses up the interval, so it cannot hide a hotspot; after `stale_after_ms` without a request that large, the smaller set counts as the pool. Workers that the router's busy or reject thresholds remove from every request are missing from the sample too, so with those thresholds a hotspot on full workers reads as smaller than it is.
 - Decode pools: decode requests routed after a disaggregated prefill do not track prefill tokens, so this policy drops their prefill term, as the default policy does. With normal disaggregation the default policy also forces `overlap_score_credit` to 0 for them, and its cost is then the same as this policy's. With conditional disaggregation the default policy keeps a positive credit and uses a decode-specific branch that subtracts cached blocks from the decode blocks; this policy does not reproduce that branch, so it ignores the cache for decode.
 
 ## Run the Standalone EPP
@@ -76,7 +76,7 @@ RUST_LOG=info \
 
 ## Request-path cost
 
-This policy is an exception to the rule of keeping shared state out of `score` and `pick`: the scorer takes one lock-free `arc-swap` guard read of the current weights per request. For requests with at least two observed workers, no pinned worker and no preview, the scorer also reads the clock once; at most once per `interval_ms` one of them wins a compare-and-swap and stores a new load sample (one `Vec` and one `Arc` allocation). The picker holds a short lock on its PRNG and a reused cost buffer while it picks, as the default picker does with its softmax scratch. The request path does not allocate otherwise.
+This policy is an exception to the rule of keeping shared state out of `score` and `pick`: the scorer takes one lock-free `arc-swap` guard read of the current weights per request. For requests with at least two observed workers, no pinned worker and no preview, the scorer also reads the clock once and compares the candidate count with the largest set seen (two relaxed atomic loads; a store only when that set changes or every quarter of `stale_after_ms`); at most once per `interval_ms` one of them wins a compare-and-swap and stores a new load sample (one `Vec` and one `Arc` allocation). The picker holds a short lock on its PRNG and a reused cost buffer while it picks, as the default picker does with its softmax scratch. The request path does not allocate otherwise.
 
 ## Observability
 
