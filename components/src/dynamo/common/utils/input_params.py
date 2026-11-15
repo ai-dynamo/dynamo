@@ -102,7 +102,15 @@ class InputParamManager:
                     **extra_kwargs,
                 )
             elif "prompt" in request:
-                return self.tokenizer.encode(request["prompt"])
+                # The tokenizer adds its special tokens (such as BOS) to a
+                # completions prompt, as vLLM's /v1/completions does, unless
+                # the request sets add_special_tokens.
+                add_special_tokens = request.get("add_special_tokens")
+                if add_special_tokens is None:
+                    return self.tokenizer.encode(request["prompt"])
+                return self.tokenizer.encode(
+                    request["prompt"], add_special_tokens=add_special_tokens
+                )
             elif "text" in request:
                 return self.tokenizer.encode(request["text"])
             else:

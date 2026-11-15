@@ -9507,6 +9507,7 @@ mod tests {
         // Frequency Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateCompletionRequest {
             no_stop_trim: None,
+            add_special_tokens: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -9533,6 +9534,7 @@ mod tests {
         // Presence Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateCompletionRequest {
             no_stop_trim: None,
+            add_special_tokens: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -9558,6 +9560,7 @@ mod tests {
         // Temperature: Should be a float between 0.0 and 2.0
         let request = NvCreateCompletionRequest {
             no_stop_trim: None,
+            add_special_tokens: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -9583,6 +9586,7 @@ mod tests {
         // Top P: Should be a float between 0.0 and 1.0
         let request = NvCreateCompletionRequest {
             no_stop_trim: None,
+            add_special_tokens: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -9608,6 +9612,7 @@ mod tests {
         // Repetition Penalty: Should be a float between 0.0 and 2.0
         let request = NvCreateCompletionRequest {
             no_stop_trim: None,
+            add_special_tokens: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -9634,6 +9639,7 @@ mod tests {
 
         let request = NvCreateCompletionRequest {
             no_stop_trim: None,
+            add_special_tokens: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -9664,6 +9670,7 @@ mod tests {
         // Test metadata field with nested object
         let request = NvCreateCompletionRequest {
             no_stop_trim: None,
+            add_special_tokens: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
