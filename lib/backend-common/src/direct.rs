@@ -32,6 +32,7 @@ use dynamo_runtime::pipeline::{
     AddressedRequest, AsyncEngine, Context, Error, ManyIn, ManyOut, SingleIn, StreamingDispatch,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
+use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -56,10 +57,60 @@ pub struct DirectEngineSpec {
     pub mode: DisaggregationMode,
 }
 
-/// Builds the engine implementation that talks to one listed engine; the same
-/// implementation a sidecar for that engine runs.
-pub type DirectEngineFactory =
-    Arc<dyn Fn(&DirectEngineSpec) -> Result<Arc<dyn LLMEngine>, DynamoError> + Send + Sync>;
+/// Builds the engine implementation that talks to one listed engine, and the
+/// worker configuration it registers with: what a sidecar for that engine runs
+/// and registers.
+pub type DirectEngineFactory = Arc<
+    dyn Fn(
+            DirectEngineSpec,
+        ) -> BoxFuture<'static, Result<(Arc<dyn LLMEngine>, WorkerConfig), DynamoError>>
+        + Send
+        + Sync,
+>;
+
+/// Frontend settings an engine factory applies to every engine it builds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DirectEngineOptions {
+    pub namespace: String,
+    /// Model files on the frontend host, when the engines report a path the
+    /// frontend cannot read.
+    pub model_path: Option<String>,
+    /// Dynamo parser names, as a sidecar's `--dyn-tool-call-parser` and
+    /// `--dyn-reasoning-parser`.
+    pub tool_call_parser: Option<String>,
+    pub reasoning_parser: Option<String>,
+}
+
+impl DirectEngineOptions {
+    /// The arguments a sidecar for `spec` would be started with.
+    pub fn sidecar_args(&self, binary: &str, spec: &DirectEngineSpec) -> Vec<String> {
+        let mut args = vec![
+            binary.to_string(),
+            "--grpc-endpoint".to_string(),
+            spec.url.clone(),
+            "--disaggregation-mode".to_string(),
+            spec.mode.to_string(),
+            "--namespace".to_string(),
+            self.namespace.clone(),
+        ];
+        for (flag, value) in [
+            ("--dyn-tool-call-parser", &self.tool_call_parser),
+            ("--dyn-reasoning-parser", &self.reasoning_parser),
+        ] {
+            if let Some(value) = value {
+                args.extend([flag.to_string(), value.clone()]);
+            }
+        }
+        args
+    }
+
+    /// Apply the settings a sidecar's arguments cannot carry.
+    pub fn apply(&self, config: &mut WorkerConfig) {
+        if let Some(model_path) = &self.model_path {
+            config.model_name = model_path.clone();
+        }
+    }
+}
 
 /// The routers' final hop in direct mode: the adapter of the engine each
 /// request was routed to.
@@ -125,15 +176,11 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Dire
 /// Probe and register every listed engine, then keep each registered while it
 /// serves. Returns once every engine serves; fails if any cannot be started.
 ///
-/// `config` is the worker configuration a sidecar for these engines would run
-/// with. Each engine's role comes from its spec, not from `config`.
-///
 /// `drt` must use process-local discovery: the engines are listed by the
 /// operator, not discovered, and their records name addresses only this
 /// frontend can dial.
 pub async fn serve_direct_engines(
     drt: &DistributedRuntime,
-    config: WorkerConfig,
     specs: Vec<DirectEngineSpec>,
     factory: DirectEngineFactory,
 ) -> Result<Arc<DirectDispatch>, DynamoError> {
@@ -176,7 +223,6 @@ pub async fn serve_direct_engines(
     for spec in specs {
         let host = DirectEngineHost {
             drt: drt.clone(),
-            config: config.clone(),
             instance_id: instance_id_for_url(&spec.url),
             spec,
             factory: factory.clone(),
@@ -216,7 +262,6 @@ fn normalized_url(url: &str) -> String {
 /// One listed engine and everything needed to (re)register it.
 struct DirectEngineHost {
     drt: DistributedRuntime,
-    config: WorkerConfig,
     spec: DirectEngineSpec,
     instance_id: u64,
     factory: DirectEngineFactory,
@@ -236,10 +281,12 @@ struct HostedEngine {
 impl DirectEngineHost {
     /// Start the engine, make it dispatchable, then publish it.
     async fn start(&self) -> Result<HostedEngine, DynamoError> {
-        let engine = (self.factory)(&self.spec)?;
+        let (engine, config) = (self.factory)(self.spec.clone()).await?;
         let started = async {
             let engine_config = engine.start(self.instance_id).await?;
-            let (endpoint, model) = self.discovery_records(&engine, &engine_config).await?;
+            let (endpoint, model) = self
+                .discovery_records(&engine, &engine_config, config)
+                .await?;
             Ok::<_, DynamoError>((endpoint, model))
         }
         .await;
@@ -348,8 +395,8 @@ impl DirectEngineHost {
         &self,
         engine: &Arc<dyn LLMEngine>,
         engine_config: &EngineConfig,
+        mut config: WorkerConfig,
     ) -> Result<(DiscoveryInstance, DiscoveryInstance), DynamoError> {
-        let mut config = self.config.clone();
         config.disaggregation_mode = self.spec.mode;
         if config.model_name.is_empty() {
             config.model_name = engine_config.model.clone();
@@ -619,13 +666,19 @@ mod tests {
             let factory_fail_next = fail_next.clone();
             let factory_hold_next = hold_next.clone();
             let factory_held = held.clone();
-            let factory: DirectEngineFactory = Arc::new(move |spec: &DirectEngineSpec| {
-                Ok(Arc::new(FakeEngine {
+            let factory_namespace = namespace.to_string();
+            let factory: DirectEngineFactory = Arc::new(move |spec: DirectEngineSpec| {
+                let engine = Arc::new(FakeEngine {
                     state: factory_states[spec.url.as_str()].clone(),
                     fail_next: factory_fail_next.clone(),
                     hold_next: factory_hold_next.clone(),
                     held: factory_held.clone(),
-                }) as Arc<dyn LLMEngine>)
+                }) as Arc<dyn LLMEngine>;
+                let config = WorkerConfig {
+                    namespace: factory_namespace.clone(),
+                    ..WorkerConfig::default()
+                };
+                Box::pin(async move { Ok((engine, config)) })
             });
             let specs = [A, B]
                 .map(|url| DirectEngineSpec {
@@ -633,13 +686,7 @@ mod tests {
                     mode: DisaggregationMode::Aggregated,
                 })
                 .to_vec();
-            let config = WorkerConfig {
-                namespace: namespace.to_string(),
-                ..WorkerConfig::default()
-            };
-            let dispatch = serve_direct_engines(&drt, config, specs, factory)
-                .await
-                .unwrap();
+            let dispatch = serve_direct_engines(&drt, specs, factory).await.unwrap();
 
             let manager = Arc::new(ModelManager::new());
             let watcher = Arc::new(ModelWatcher::new(
@@ -858,16 +905,13 @@ mod tests {
         let drt = DistributedRuntime::new(Runtime::from_current().unwrap(), config)
             .await
             .unwrap();
-        let factory: DirectEngineFactory = Arc::new(
-            |_: &DirectEngineSpec| -> Result<Arc<dyn LLMEngine>, DynamoError> {
-                panic!("no engine is built when discovery is shared")
-            },
-        );
+        let factory: DirectEngineFactory =
+            Arc::new(|_: DirectEngineSpec| panic!("no engine is built when discovery is shared"));
         let spec = DirectEngineSpec {
             url: A.to_string(),
             mode: DisaggregationMode::Aggregated,
         };
-        let result = serve_direct_engines(&drt, WorkerConfig::default(), vec![spec], factory).await;
+        let result = serve_direct_engines(&drt, vec![spec], factory).await;
         assert!(result.is_err());
         drt.shutdown();
     }
@@ -898,6 +942,40 @@ mod tests {
             dp_rank: 0,
         };
         assert!(record_kv_event_sources(&mut HashMap::new(), vec![push]).is_err());
+    }
+
+    #[test]
+    fn options_become_the_sidecar_arguments_for_each_engine() {
+        let options = DirectEngineOptions {
+            namespace: "ns".to_string(),
+            model_path: Some("/models/qwen".to_string()),
+            tool_call_parser: Some("hermes".to_string()),
+            reasoning_parser: None,
+        };
+        let spec = DirectEngineSpec {
+            url: "http://prefill-0:30001".to_string(),
+            mode: DisaggregationMode::Prefill,
+        };
+        assert_eq!(
+            options.sidecar_args("dynamo-vllm-sidecar", &spec),
+            [
+                "dynamo-vllm-sidecar",
+                "--grpc-endpoint",
+                "http://prefill-0:30001",
+                "--disaggregation-mode",
+                "prefill",
+                "--namespace",
+                "ns",
+                "--dyn-tool-call-parser",
+                "hermes",
+            ]
+        );
+        let mut config = WorkerConfig {
+            model_name: "Qwen/Qwen3-0.6B".to_string(),
+            ..WorkerConfig::default()
+        };
+        options.apply(&mut config);
+        assert_eq!(config.model_name, "/models/qwen");
     }
 
     #[test]
