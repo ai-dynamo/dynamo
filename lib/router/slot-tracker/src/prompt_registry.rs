@@ -142,6 +142,8 @@ struct WorkerLoadTable {
     // slot so the per-request scan streams the same bytes as before and reads capacity only
     // when a pass judges busy thresholds.
     capacities: Vec<WorkerCapacity>,
+    /// Changes whenever a rank is added or removed.
+    version: u64,
 }
 
 impl WorkerLoadTable {
@@ -189,6 +191,7 @@ impl WorkerLoadTable {
             .or_insert_with(|| WorkerLoadSlot::new(WorkerLoadSnapshot::default()));
         if self.entries.len() > before {
             self.capacities.push(WorkerCapacity::default());
+            self.version += 1;
         }
     }
 
@@ -206,6 +209,7 @@ impl WorkerLoadTable {
         } else {
             self.entries.insert(worker, WorkerLoadSlot::new(load));
             self.capacities.push(WorkerCapacity::default());
+            self.version += 1;
         }
     }
 
@@ -213,6 +217,7 @@ impl WorkerLoadTable {
         // `swap_remove` moves the last entry into the hole; mirror it so indices stay aligned.
         if let Some((index, _, _)) = self.entries.swap_remove_full(&worker) {
             self.capacities.swap_remove(index);
+            self.version += 1;
         }
     }
 }
@@ -386,19 +391,33 @@ impl PromptRegistry {
         )
     }
 
+    /// The `additional_active_blocks` a projection of `token_sequence` gives `worker`,
+    /// computed for that rank alone.
+    pub(super) fn additional_active_blocks(
+        &self,
+        token_sequence: &[SequenceHash],
+        worker: WorkerWithDpRank,
+    ) -> usize {
+        token_sequence
+            .len()
+            .saturating_sub(self.membership.overlap_depth_for(token_sequence, worker))
+    }
+
     /// Project every registered rank's load for one request into `projections`. With
     /// `full_ranks`, the same pass also judges each rank's projection against the busy
-    /// thresholds it carries and counts the ranks without room per worker.
+    /// thresholds it carries and counts the ranks without room per worker. Returns the
+    /// load table's version, which changes whenever a rank is added or removed.
     pub fn project_worker_loads_into(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
         projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
         full_ranks: Option<&mut FullRankCounts>,
-    ) {
+    ) -> u64 {
         let query_len = token_sequence.map_or(0, |query| query.len());
         let matched_depth = self.membership.compute_overlap_depths(token_sequence);
         let loads = self.loads.read();
+        let version = loads.version;
         let project = |worker: WorkerWithDpRank, load: WorkerLoadSnapshot| {
             let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
             load.projection(decay_now, query_len.saturating_sub(overlap_depth))
@@ -417,7 +436,7 @@ impl PromptRegistry {
                         .is_some()
                 })
             {
-                return;
+                return version;
             }
 
             projections.clear();
@@ -427,7 +446,7 @@ impl PromptRegistry {
                     .iter()
                     .map(|(worker, load)| (worker, project(worker, load))),
             );
-            return;
+            return version;
         };
 
         // The same two shapes, judging each rank as its projection is written.
@@ -442,7 +461,7 @@ impl PromptRegistry {
                     .is_some()
             });
             if refreshed {
-                return;
+                return version;
             }
             // The in-place pass counted a prefix before the key sets diverged.
             full_ranks.clear();
@@ -455,6 +474,70 @@ impl PromptRegistry {
             full_ranks.record(worker, loads.capacity_at(index), &projection);
             (worker, projection)
         }));
+        version
+    }
+
+    /// Overwrite each of `workers`' entries in `projections` with its entry in
+    /// [`Self::project_worker_loads_into`]. `version` is what that pass returned: false,
+    /// with nothing overwritten, when a rank was added or removed since.
+    pub(super) fn reproject_worker_loads(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        workers: &[WorkerWithDpRank],
+        version: u64,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) -> bool {
+        // Each edge on the query's path is matched once for every worker.
+        let additional_active_blocks: Vec<usize> = match token_sequence {
+            Some(query) => {
+                let path = self.membership.overlap_path(query);
+                workers
+                    .iter()
+                    .map(|&worker| query.len().saturating_sub(path.depth_for(worker)))
+                    .collect()
+            }
+            None => vec![0; workers.len()],
+        };
+        let loads = self.loads.read();
+        if loads.version != version {
+            return false;
+        }
+        // NOTE(perf): read every rank before writing any. A slot read ends in a memory
+        // barrier, and `projections` was filled on another thread, so written in the same
+        // loop each cache miss on it would wait for the one before.
+        let reread: Vec<Option<WorkerLoadProjection>> = workers
+            .iter()
+            .zip(additional_active_blocks)
+            .map(|(&worker, additional_active_blocks)| {
+                let load = loads.get(worker)?;
+                Some(load.projection(decay_now, additional_active_blocks))
+            })
+            .collect();
+        drop(loads);
+        for (worker, reread) in workers.iter().zip(reread) {
+            // The ranks are those of the pass, so one it did not project is not registered.
+            if let (Some(reread), Some(projection)) = (reread, projections.get_mut(worker)) {
+                *projection = reread;
+            }
+        }
+        true
+    }
+
+    pub(super) fn record_full_worker_ranks_at(
+        &self,
+        decay_now: Instant,
+        full_ranks: &mut FullRankCounts,
+    ) {
+        full_ranks.clear();
+        let loads = self.loads.read();
+        for (index, worker, load) in loads.iter_indexed() {
+            full_ranks.record(
+                worker,
+                loads.capacity_at(index),
+                &load.projection(decay_now, 0),
+            );
+        }
     }
 
     /// Stage operation the router drives; documented with the kernel contract in step 6.
@@ -855,6 +938,17 @@ mod tests {
             "unreported capacity is never full"
         );
         assert_eq!(projections[&worker_a].active_decode_blocks, 7);
+        let mut count_only = FullRankCounts::default();
+        count_only.reset(limits);
+        registry.record_full_worker_ranks_at(decay_now, &mut count_only);
+        for worker_id in [1, 2, 3] {
+            for dp_size in [1, 2] {
+                assert_eq!(
+                    count_only.worker_is_full(worker_id, dp_size),
+                    full_ranks.worker_is_full(worker_id, dp_size),
+                );
+            }
+        }
 
         // Worker 1 leaves and worker 3 arrives with the same capacity and load. The in-place
         // pass counts a prefix before it notices the key sets diverged; the rebuild must count
@@ -879,6 +973,15 @@ mod tests {
         assert!(full_ranks.worker_is_full(3, 1));
         assert!(!full_ranks.worker_is_full(3, 2), "one rank is counted once");
         assert_eq!(projections.len(), 2);
+        registry.record_full_worker_ranks_at(decay_now, &mut count_only);
+        for worker_id in [1, 2, 3] {
+            for dp_size in [1, 2] {
+                assert_eq!(
+                    count_only.worker_is_full(worker_id, dp_size),
+                    full_ranks.worker_is_full(worker_id, dp_size),
+                );
+            }
+        }
     }
 
     #[test]

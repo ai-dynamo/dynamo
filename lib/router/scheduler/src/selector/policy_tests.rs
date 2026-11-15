@@ -322,7 +322,7 @@ fn components_read_fetchable_prefixes_only_when_declared() {
         ) -> Result<(), WorkerSelectionPolicyError> {
             for (candidate, cost) in candidates.iter().zip(costs) {
                 let transfer = candidate
-                    .kv_transfer()
+                    .kv_copy()
                     .map(|transfer| transfer.source_prefix_blocks());
                 self.seen
                     .lock()
@@ -338,7 +338,7 @@ fn components_read_fetchable_prefixes_only_when_declared() {
 
     impl WorkerFilter for TransferFilter {
         fn required_worker_inputs(&self) -> WorkerInputs {
-            WorkerInputs::KV_TRANSFER
+            WorkerInputs::KV_COPY
         }
 
         fn keep(
@@ -347,7 +347,7 @@ fn components_read_fetchable_prefixes_only_when_declared() {
             candidate: WorkerCandidate<'_>,
         ) -> Result<bool, WorkerSelectionPolicyError> {
             // Only scorers receive fetch inputs.
-            assert_eq!(candidate.kv_transfer(), None);
+            assert_eq!(candidate.kv_copy(), None);
             Ok(true)
         }
     }
@@ -365,7 +365,7 @@ fn components_read_fetchable_prefixes_only_when_declared() {
             vec![Box::new(TransferFilter)],
             vec![
                 Box::new(TransferScorer {
-                    inputs: WorkerInputs::KV_TRANSFER,
+                    inputs: WorkerInputs::KV_COPY,
                     seen: declared.clone(),
                 }),
                 Box::new(TransferScorer {
@@ -542,7 +542,7 @@ fn prepared_candidates_select_like_rows_built_at_selection() {
             WorkerInputs::CACHE
                 | WorkerInputs::LOAD
                 | WorkerInputs::PREFERRED_TAINT
-                | WorkerInputs::KV_TRANSFER
+                | WorkerInputs::KV_COPY
         }
 
         fn score(
@@ -555,7 +555,7 @@ fn prepared_candidates_select_like_rows_built_at_selection() {
                 let load = candidate.load().unwrap();
                 let cache = candidate.cache().unwrap();
                 let fetchable = candidate
-                    .kv_transfer()
+                    .kv_copy()
                     .and_then(|transfer| transfer.source_prefix_blocks())
                     .unwrap_or(0);
                 *cost = (load.decode_cost_blocks() + load.active_prefill_tokens() as f64
@@ -796,6 +796,175 @@ fn custom_policy_skips_undeclared_preferred_taints() {
     // Eligibility checks required taints once. The preference multiplier must not perform a
     // second lookup when no policy component declares it.
     assert_eq!(workers[&0].taint_reads.get(), 1);
+}
+
+#[test]
+fn resident_blocks_reach_only_declaring_components() {
+    use dynamo_kv_indexer::ResidentBlockCountsHandle;
+    use dynamo_worker_selection::experimental::resident_blocks::{
+        ResidentBlocks, ResidentBlocksByRow,
+    };
+
+    // Worker 8 is tracked with no blocks, which reads as 0 rather than None. Worker ids differ
+    // from row indices, so a row-for-worker mix-up fails.
+    fn held(worker: WorkerWithDpRank) -> u64 {
+        if worker.worker_id == 3 { 12 } else { 0 }
+    }
+
+    struct ResidencyProbe(WorkerInputs);
+
+    impl ResidencyProbe {
+        fn check(&self, candidate: WorkerCandidate<'_>) {
+            let expected = self
+                .0
+                .contains(WorkerInputs::RESIDENT_BLOCKS)
+                .then_some(held(candidate.worker()));
+            assert_eq!(candidate.resident_blocks(), expected);
+        }
+    }
+
+    impl WorkerFilter for ResidencyProbe {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            self.0
+        }
+
+        fn keep(
+            &self,
+            _context: &WorkerSelectionContext<'_>,
+            candidate: WorkerCandidate<'_>,
+        ) -> Result<bool, WorkerSelectionPolicyError> {
+            self.check(candidate);
+            Ok(true)
+        }
+    }
+
+    impl WorkerScorer for ResidencyProbe {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            self.0
+        }
+
+        fn score(
+            &self,
+            _context: &WorkerSelectionContext<'_>,
+            candidates: WorkerCandidates<'_>,
+            costs: &mut [f64],
+        ) -> Result<(), WorkerSelectionPolicyError> {
+            for (candidate, cost) in candidates.iter().zip(costs) {
+                self.check(candidate);
+                *cost = 0.0;
+            }
+            Ok(())
+        }
+    }
+
+    /// Picks the fewest resident blocks; an undeclared picker reads None and takes row 0.
+    struct ResidencyPicker(WorkerInputs);
+
+    impl WorkerPicker for ResidencyPicker {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            self.0
+        }
+
+        fn pick(
+            &self,
+            _context: &WorkerSelectionContext<'_>,
+            input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            let rows = input.candidates().len();
+            assert_eq!(input.resident_blocks(rows), None);
+            let declared = self.0.contains(WorkerInputs::RESIDENT_BLOCKS);
+            for (row, candidate) in input.candidates().iter().enumerate() {
+                let expected = declared.then_some(held(candidate.worker()));
+                assert_eq!(input.resident_blocks(row), expected);
+            }
+            Ok((0..rows)
+                .min_by_key(|&row| input.resident_blocks(row).unwrap_or(0))
+                .unwrap())
+        }
+    }
+
+    let workers = HashMap::from([
+        (3, TaintedWorkerConfig::default()),
+        (8, TaintedWorkerConfig::default()),
+    ]);
+    let request = base_request(16);
+    let counts = ResidentBlockCountsHandle::fixed([
+        (WorkerWithDpRank::new(3, 0), 12),
+        (WorkerWithDpRank::new(8, 0), 0),
+    ]);
+    let probes = || -> Vec<Box<ResidencyProbe>> {
+        vec![
+            Box::new(ResidencyProbe(WorkerInputs::RESIDENT_BLOCKS)),
+            Box::new(ResidencyProbe(WorkerInputs::NONE)),
+        ]
+    };
+    for picker_inputs in [WorkerInputs::RESIDENT_BLOCKS, WorkerInputs::NONE] {
+        let policy = WorkerSelectionPolicy::new_with_filters(
+            SelectionConfig::default(),
+            "test",
+            probes()
+                .into_iter()
+                .map(|probe| probe as Box<dyn WorkerFilter>)
+                .collect(),
+            probes()
+                .into_iter()
+                .map(|probe| probe as Box<dyn WorkerScorer>)
+                .collect(),
+            Box::new(ResidencyPicker(picker_inputs)),
+        );
+
+        // The kernel lends one load of the counts to each selection, as the queue actor does.
+        let counts = counts.load();
+        let selected = policy
+            .select_worker(
+                WorkerSelectionInput::configured(&workers, &request, request.eligibility(), 16)
+                    .with_resident_blocks(Some(&**counts)),
+            )
+            .unwrap();
+        if picker_inputs.contains(WorkerInputs::RESIDENT_BLOCKS) {
+            assert_eq!(selected.worker, WorkerWithDpRank::new(8, 0));
+        }
+    }
+}
+
+#[test]
+fn resident_blocks_are_none_without_published_counts() {
+    use dynamo_kv_indexer::ResidentBlockCountsHandle;
+    use dynamo_worker_selection::experimental::resident_blocks::ResidentBlocksByRow;
+
+    struct ExpectNoCounts;
+
+    impl WorkerPicker for ExpectNoCounts {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::RESIDENT_BLOCKS
+        }
+
+        fn pick(
+            &self,
+            _context: &WorkerSelectionContext<'_>,
+            input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            assert_eq!(input.resident_blocks(0), None);
+            Ok(0)
+        }
+    }
+
+    let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
+    let request = base_request(16);
+    let policy = WorkerSelectionPolicy::new(
+        SelectionConfig::default(),
+        "test",
+        Vec::new(),
+        Box::new(ExpectNoCounts),
+    );
+    let input = || WorkerSelectionInput::configured(&workers, &request, request.eligibility(), 16);
+    // No counts lent, then counts with no tracked ranks yet.
+    policy.select_worker(input()).unwrap();
+    let empty = ResidentBlockCountsHandle::default();
+    let counts = empty.load();
+    policy
+        .select_worker(input().with_resident_blocks(Some(&**counts)))
+        .unwrap();
 }
 
 #[test]
@@ -1432,8 +1601,8 @@ fn hosted_rejected_kv_policies_select_through_the_kernel() {
         ),
         // Stripped from the picker's effective inputs, but still a KV-only declaration.
         (
-            "KV_TRANSFER",
-            policy(Vec::new(), Vec::new(), WorkerInputs::KV_TRANSFER),
+            "KV_COPY",
+            policy(Vec::new(), Vec::new(), WorkerInputs::KV_COPY),
         ),
     ];
     let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);

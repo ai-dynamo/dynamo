@@ -54,6 +54,7 @@ use super::{
         process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
     },
+    response_headers::{RESPONSE_HEADERS_CONTEXT_KEY, ResponseHeaders},
     service_v2::{self, BackendErrorCheck},
 };
 use crate::engines::ValidateRequest;
@@ -69,6 +70,7 @@ use crate::protocols::common::extensions::{
 use crate::protocols::common::input_trigger::{
     classify_chat_request, classify_completion_request, classify_response_request,
 };
+use crate::protocols::common::metadata_upload::UniqueJsonValue;
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::chat_completions::tool_call_merge::{
     ToolCallMergeOutcome, merge_tool_call_chunk,
@@ -2724,6 +2726,13 @@ async fn handler_chat_completions(
             captured,
         );
     }
+    // Headers the chat engine sets on this response. The request carries them
+    // only when the engine's stream is read before the response is committed;
+    // otherwise the engine would race the commit.
+    let response_headers = ResponseHeaders::default();
+    if !streaming || state.streaming_backend_error_check() != BackendErrorCheck::Skip {
+        request.insert(RESPONSE_HEADERS_CONTEXT_KEY, response_headers.clone());
+    }
     let context = request.context();
 
     if lifecycle.is_enabled() {
@@ -2785,7 +2794,22 @@ async fn handler_chat_completions(
     // without need to be cancelled.
     connection_handle.disarm();
 
-    response
+    with_response_headers(response, response_headers.take())
+}
+
+/// Add the headers a chat engine set to its response, error responses included.
+fn with_response_headers(
+    response: Result<Response, ErrorResponse>,
+    headers: HeaderMap,
+) -> Result<Response, ErrorResponse> {
+    if headers.is_empty() {
+        return response;
+    }
+    let mut response = response.unwrap_or_else(IntoResponse::into_response);
+    for (name, value) in &headers {
+        response.headers_mut().append(name, value.clone());
+    }
+    Ok(response)
 }
 
 /// Parse typed JSON with the existing control-character recovery and error mapping.
@@ -2793,11 +2817,11 @@ pub(super) fn parse_json_request<T>(endpoint: &'static str, body: &[u8]) -> Resu
 where
     T: DeserializeOwned,
 {
-    match serde_json::from_slice(body) {
+    match from_slice_dedup_reasoning(endpoint, body) {
         Ok(request) => Ok(request),
         Err(original_error) => {
             if let Some(escaped_body) = escape_json_string_control_chars(body) {
-                match serde_json::from_slice(&escaped_body) {
+                match from_slice_dedup_reasoning(endpoint, &escaped_body) {
                     Ok(request) => {
                         tracing::warn!(
                             endpoint,
@@ -2816,18 +2840,78 @@ where
     }
 }
 
+/// Deserialize `body`, retrying once without `reasoning` on messages that also carry
+/// `reasoning_content`. `reasoning` is an alias of `reasoning_content` on assistant
+/// messages, so a client that echoes both (as some SDKs do) trips serde's duplicate-field
+/// check. Every recovery path (control-character escaping, lossy UTF-8) goes through
+/// here, so a body needing both fixes still parses.
+fn from_slice_dedup_reasoning<T>(
+    endpoint: &'static str,
+    body: &[u8],
+) -> Result<T, serde_json::Error>
+where
+    T: DeserializeOwned,
+{
+    match serde_json::from_slice(body) {
+        Ok(request) => Ok(request),
+        Err(error)
+            if error
+                .to_string()
+                .contains("duplicate field `reasoning_content`") =>
+        {
+            match drop_duplicate_reasoning(body).map(|deduped| serde_json::from_slice(&deduped)) {
+                Some(Ok(request)) => {
+                    tracing::warn!(
+                        endpoint,
+                        "Dropped `reasoning` duplicating `reasoning_content` in a message"
+                    );
+                    Ok(request)
+                }
+                _ => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Collapse `reasoning` / `reasoning_content` pairs to a single key per message.
+///
+/// `reasoning_content` is authoritative. It is dropped only when it is null and `reasoning`
+/// carries a value, so a null on one side never erases the real reasoning on the other.
+fn drop_duplicate_reasoning(body: &[u8]) -> Option<Vec<u8>> {
+    // A plain `Value` keeps the last copy of a repeated key, so it would accept a second
+    // `model` or `messages` that the typed parse rejects.
+    let UniqueJsonValue(mut value) = serde_json::from_slice(body).ok()?;
+    let messages = value.get_mut("messages")?.as_array_mut()?;
+    for message in messages.iter_mut() {
+        if let Some(object) = message.as_object_mut()
+            && object.contains_key("reasoning_content")
+            && object.contains_key("reasoning")
+        {
+            let content_is_null = object["reasoning_content"].is_null();
+            let reasoning_is_null = object["reasoning"].is_null();
+            if content_is_null && !reasoning_is_null {
+                object.remove("reasoning_content");
+            } else {
+                object.remove("reasoning");
+            }
+        }
+    }
+    serde_json::to_vec(&value).ok()
+}
+
 fn parse_json_request_lossy<T>(endpoint: &'static str, body: &[u8]) -> Result<T, serde_json::Error>
 where
     T: DeserializeOwned,
 {
     let lossy_body = String::from_utf8_lossy(body);
     if lossy_body.as_bytes() == body {
-        return serde_json::from_slice(body);
+        return from_slice_dedup_reasoning(endpoint, body);
     }
 
     let escaped_body = escape_json_string_control_chars(lossy_body.as_bytes())
         .unwrap_or_else(|| lossy_body.into_owned().into_bytes());
-    let request = serde_json::from_slice(&escaped_body)?;
+    let request = from_slice_dedup_reasoning(endpoint, &escaped_body)?;
     tracing::warn!(
         endpoint,
         "Accepted request after replacing invalid UTF-8 and escaping unescaped control characters in JSON strings"
@@ -4893,6 +4977,7 @@ async fn responses(
         text: request.inner.text.clone(),
         service_tier: request.inner.service_tier.clone(),
         include: request.inner.include.clone(),
+        top_logprobs: request.inner.top_logprobs,
         truncation: request.inner.truncation,
         // Upstream `CreateResponse` doesn't carry these yet; plumbed through so
         // the response serializer can default to 0.0 without hardcoding at the
@@ -5952,7 +6037,21 @@ async fn images_with_request(
 
     connection_handle.disarm();
     inflight.mark_ok();
-    Ok(Json(response).into_response())
+    // The body and header `Json(response)` would send, but each b64_json
+    // image is copied instead of checked for escapes byte by byte.
+    // TODO: back to `Json(response)` once serde_json escapes faster; see
+    // `NvImagesResponse::to_json_vec`.
+    let body = response.to_json_vec().map_err(|e| {
+        ErrorMessage::internal_server_error_with_details("Failed to serialize images response", e)
+    })?;
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        )],
+        body,
+    )
+        .into_response())
 }
 
 /// Accept ordered uploads or the JSON reference extension for image edits.
@@ -7030,6 +7129,83 @@ mod tests {
             panic!("expected text content");
         };
         assert_eq!(content, "log \u{1b}[33mPK\u{3}\u{4}");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_drops_duplicate_reasoning() {
+        let body = br#"{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"a","reasoning":"r1","reasoning_content":"r2"},{"role":"user","content":"again"}]}"#;
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        assert_eq!(request.inner.messages.len(), 3);
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "r2");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_keeps_reasoning_when_reasoning_content_is_null() {
+        let body = br#"{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"a","reasoning":"real thinking","reasoning_content":null}]}"#;
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "real thinking");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_keeps_reasoning_content_when_reasoning_is_null() {
+        let body = br#"{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"a","reasoning":null,"reasoning_content":"real thinking"}]}"#;
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "real thinking");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_keeps_non_null_reasoning_with_control_chars() {
+        let body = b"{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"line1\nline2\"},{\"role\":\"assistant\",\"content\":\"a\",\"reasoning\":\"real\",\"reasoning_content\":null}]}";
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "real");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_still_rejects_other_duplicate_fields() {
+        let pair = r#"{"role":"assistant","content":"a","reasoning":"r","reasoning_content":"r"}"#;
+        for body in [
+            format!(r#"{{"model":"m","messages":[{pair}],"model":"n"}}"#),
+            format!(r#"{{"model":"m","messages":[{pair}],"messages":[{{"role":"user","content":"x"}}]}}"#),
+            r#"{"model":"m","messages":[{"role":"assistant","content":"a","reasoning_content":"x","reasoning_content":"y"}]}"#.to_string(),
+        ] {
+            assert!(
+                parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body.as_bytes())
+                    .is_err(),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_drops_duplicate_reasoning_with_control_chars() {
+        let body = b"{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"line1\nline2\"},{\"role\":\"assistant\",\"content\":\"a\",\"reasoning\":\"r1\",\"reasoning_content\":\"r2\"}]}";
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        assert_eq!(request.inner.messages.len(), 2);
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "r2");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_drops_duplicate_reasoning_with_invalid_utf8() {
+        let mut body = br#"{"model":"m","messages":[{"role":"user","content":"bad "#.to_vec();
+        body.push(0xff);
+        body.extend_from_slice(
+            br#" byte"},{"role":"assistant","content":"a","reasoning":"r1","reasoning_content":"r2"}]}"#,
+        );
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", &body).expect("request should parse");
+        assert_eq!(request.inner.messages.len(), 2);
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "r2");
     }
 
     #[test]

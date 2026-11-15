@@ -644,11 +644,6 @@ impl LocalKvIndexer {
         self.indexer.snapshot_event_sender()
     }
 
-    /// Get a sender for worker removal requests.
-    pub fn remove_worker_sender(&self) -> mpsc::Sender<WorkerId> {
-        self.indexer.remove_worker_sender()
-    }
-
     /// Get a sender for get workers requests.
     pub fn get_workers_sender(&self) -> mpsc::Sender<GetWorkersRequest> {
         self.indexer.get_workers_sender()
@@ -751,7 +746,7 @@ impl KvIndexerInterface for LocalKvIndexer {
         for indexer in self.all_lower_tier_indexers() {
             indexer.remove_worker(worker).await;
         }
-        let _ = self.indexer.remove_worker_sender().send(worker).await;
+        self.indexer.remove_worker(worker).await;
     }
 
     async fn remove_worker_dp_rank(&self, worker: WorkerId, dp_rank: DpRank) {

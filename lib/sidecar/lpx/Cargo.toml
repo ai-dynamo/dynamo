@@ -15,6 +15,11 @@ description = "Dynamo LPX sidecar for an out-of-process engine exposed through i
 name = "dynamo-lpx-sidecar"
 path = "src/main.rs"
 
+[features]
+default = ["jemalloc"]
+# jemalloc as the binary's global allocator.
+jemalloc = ["dynamo-sidecar-common/jemalloc"]
+
 [dependencies]
 dynamo-backend-common = { workspace = true }
 # `logging::get_distributed_tracing_context` for W3C trace metadata and the

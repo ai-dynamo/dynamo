@@ -7,6 +7,9 @@
 use std::collections::HashSet;
 
 use crate::protocols::WorkerConfigLike;
+pub use dynamo_kv_hashing::routing::{
+    BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
+};
 pub use dynamo_kv_indexer::testing::{
     add_blocks, add_blocks_with_start_position, create_remove_event, create_store_event,
     create_store_event_with_start_position, make_blocks, make_clear_event,

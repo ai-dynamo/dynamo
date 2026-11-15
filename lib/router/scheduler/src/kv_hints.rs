@@ -3,8 +3,8 @@
 
 //! Typed KV-cache hints attached to selected backend requests: the kernel's view of
 //! `dynamo-kv-hints` (re-exported by name), the [`WorkerConfigLike`] adapter that derives a
-//! worker's transfer keys, and [`resolve_transfer_sources`], which joins the indexer's
-//! candidates with worker keys under a selection scope.
+//! worker's transfer keys, [`resolve_transfer_sources`], which joins the indexer's
+//! candidates with worker keys under a selection scope, and the KV copies hint policies send.
 
 pub use dynamo_kv_hints::{
     KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, KvTransferTarget,
@@ -14,7 +14,8 @@ pub use dynamo_kv_indexer::kv_hints::CacheOwnerKvTransferKeys;
 
 pub use dynamo_kv_hints::{
     KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
-    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
+    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, KvHint, KvHintAction, KvHintActionLimitError,
+    KvSourceLocationsPayload, MAX_KV_HINT_ACTIONS,
 };
 
 pub use dynamo_kv_indexer::kv_hints::{
@@ -24,7 +25,8 @@ pub use dynamo_kv_indexer::kv_hints::{
 use std::collections::HashMap;
 
 use crate::protocols::WorkerConfigLike;
-use dynamo_router_protocol::worker::WorkerId;
+use dynamo_kv_hashing::ExternalSequenceBlockHash;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 
 /// Derives a worker's hashed hint identity from its runtime config. Lives beside
 /// [`WorkerConfigLike`] because the vocabulary crate does not know the config trait; the
@@ -128,6 +130,136 @@ pub fn resolve_transfer_sources<C: WorkerConfigLike>(
         });
     }
     resolved
+}
+
+/// Whether any worker in the published partition snapshot can receive router hints (worker-level
+/// metadata, so one rank suffices).
+pub(crate) fn hint_capable_partition<C: WorkerConfigLike>(configs: &HashMap<WorkerId, C>) -> bool {
+    configs
+        .values()
+        .any(|config| config.kv_transfer_keys().target().is_some())
+}
+
+/// A KV copy the router found for one target worker: the eligible source with the longest prefix
+/// beyond the target's local prefix.
+///
+/// Only the router constructs one, so a copy always names a source the router offered for that
+/// target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KvCopySource {
+    target: WorkerWithDpRank,
+    choice: KvTransferSourceChoice,
+    local_prefix_blocks: usize,
+}
+
+impl KvCopySource {
+    pub(crate) fn new(
+        target: WorkerWithDpRank,
+        choice: KvTransferSourceChoice,
+        local_prefix_blocks: usize,
+    ) -> Self {
+        Self {
+            target,
+            choice,
+            local_prefix_blocks,
+        }
+    }
+
+    /// The worker and rank that receives the blocks.
+    pub fn target(&self) -> WorkerWithDpRank {
+        self.target
+    }
+
+    /// The worker or cache owner the blocks come from.
+    pub fn source(&self) -> KvTransferCandidateSource {
+        self.choice.source
+    }
+
+    /// The root-aligned prefix, in blocks, the source holds.
+    pub(crate) fn source_prefix_blocks(&self) -> usize {
+        self.choice.prefix_blocks
+    }
+
+    /// Blocks the copy adds beyond the target's device and host-pinned prefix; at least one.
+    pub fn additional_blocks(&self) -> usize {
+        self.choice
+            .prefix_blocks
+            .saturating_sub(self.local_prefix_blocks)
+    }
+}
+
+/// Where one copy's blocks are, for the booking that sends it. The source address is copied out of
+/// the router's snapshots, so hint policies run without holding them. The chain is borrowed: the
+/// hint policy that sends the copy picks the range of [`Self::chain`] its action carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KvCopyLocations<'a> {
+    source_address: String,
+    chain: &'a [ExternalSequenceBlockHash],
+    local_prefix_blocks: usize,
+    source_prefix_blocks: usize,
+}
+
+impl<'a> KvCopyLocations<'a> {
+    /// The source's KV control endpoint, from the router's current worker and cache-owner
+    /// snapshots. Never empty.
+    pub fn source_address(&self) -> &str {
+        &self.source_address
+    }
+
+    /// The request's root-aligned block hashes: `chain()[i]` is request block `i`. It covers at
+    /// least the source's prefix.
+    pub fn chain(&self) -> &'a [ExternalSequenceBlockHash] {
+        self.chain
+    }
+
+    /// The target's device and host-pinned prefix, in blocks, when the router found the source.
+    pub fn local_prefix_blocks(&self) -> usize {
+        self.local_prefix_blocks
+    }
+
+    /// The root-aligned prefix, in blocks, the source holds: at least one, and at most
+    /// `chain().len()`.
+    pub fn source_prefix_blocks(&self) -> usize {
+        self.source_prefix_blocks
+    }
+}
+
+/// The locations of `copy`, read from the current snapshots: `workers` for a worker source and
+/// the candidates' routing snapshot for a cache owner. `None` when the source no longer advertises
+/// a control endpoint, or `candidates` no longer covers its prefix.
+pub(crate) fn kv_copy_locations<'a, C: WorkerConfigLike>(
+    workers: &HashMap<WorkerId, C>,
+    candidates: &'a KvTransferCandidates,
+    copy: &KvCopySource,
+) -> Option<KvCopyLocations<'a>> {
+    let choice = copy.choice;
+    let source_address = match choice.source {
+        KvTransferCandidateSource::Worker(worker) => {
+            workers
+                .get(&worker.worker_id)?
+                .kv_hint_transfer_metadata_for_dp_rank(worker.dp_rank)?
+                .source_control_endpoint?
+        }
+        KvTransferCandidateSource::CacheOwner(owner) => candidates
+            .routing_snapshot
+            .as_ref()?
+            .router_hint_source(owner)?
+            .metadata
+            .source_control_endpoint
+            .as_str(),
+    };
+    if source_address.is_empty()
+        || choice.prefix_blocks == 0
+        || choice.prefix_blocks > candidates.block_hashes.len()
+    {
+        return None;
+    }
+    Some(KvCopyLocations {
+        source_address: source_address.to_string(),
+        chain: &candidates.block_hashes,
+        local_prefix_blocks: copy.local_prefix_blocks,
+        source_prefix_blocks: choice.prefix_blocks,
+    })
 }
 
 #[cfg(test)]
