@@ -652,8 +652,9 @@ mod tests {
     use super::*;
     use crate::preprocessor::{
         ModelDeploymentCard, NvCreateChatCompletionRequest, OpenAIPreprocessor,
-        PreprocessedRequest, RoutingImagePromptLayout,
+        RoutingImagePromptLayout,
     };
+    use crate::protocols::common::preprocessor::PreprocessedRequest;
 
     struct TestImageRoutingBackend {
         failing_width: Option<u32>,

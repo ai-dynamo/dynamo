@@ -18,8 +18,10 @@ use std::sync::Arc;
 
 use anyhow::Error;
 use dynamo_llm::http::service::service_v2::HttpService;
-use dynamo_llm::preprocessor::{BackendOutput, OpenAIPreprocessor, PreprocessedRequest};
+use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::Annotated;
+use dynamo_llm::protocols::common::llm_backend::BackendOutput;
+use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_llm::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
 };

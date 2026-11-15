@@ -15,7 +15,7 @@ use super::{
     explicit_target, subagent_group_affinity_id, to_table,
 };
 use crate::{
-    preprocessor::PreprocessedRequest,
+    protocols::common::preprocessor::PreprocessedRequest,
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         preprocessor::RoutingHints,

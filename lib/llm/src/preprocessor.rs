@@ -125,13 +125,11 @@ use crate::preprocessor::prompt::{
 use crate::protocols::openai::common_ext::CommonExtProvider;
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
 
-pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
-pub use crate::protocols::common::metrics::{
-    ANNOTATION_LLM_METRICS, ANNOTATION_PAYLOAD_USAGE, LLMMetricAnnotation,
+use crate::protocols::common::llm_backend::{
+    BackendOutput, EmbeddingsEngineOutput, PreprocessedRequest,
 };
-pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
-
-use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
+use crate::protocols::common::metrics::{ANNOTATION_PAYLOAD_USAGE, LLMMetricAnnotation};
+use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
 /// Takes the encoder's token buffer rather than copying it. The tokenizer cache and fastokens
 /// return `Encoding::Sp` with an exactly sized buffer, so a copy only adds a prompt-sized
@@ -10297,6 +10295,7 @@ mod extra_args_media_copy_tests {
 mod tests {
     use super::*;
     use crate::protocols::common::extensions::{AGENT_CONTEXT_CONTEXT_KEY, AgentContext};
+    use crate::protocols::common::metrics::ANNOTATION_LLM_METRICS;
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_protocols::types::{

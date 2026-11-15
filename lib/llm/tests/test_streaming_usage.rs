@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use async_trait::async_trait;
-use dynamo_llm::preprocessor::{ANNOTATION_PAYLOAD_USAGE, OpenAIPreprocessor};
+use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::llm_backend::{BackendOutput, FinishReason};
+use dynamo_llm::protocols::common::metrics::ANNOTATION_PAYLOAD_USAGE;
 use dynamo_llm::protocols::openai::ParsingOptions;
 use dynamo_llm::protocols::openai::chat_completions::{
     DeltaGenerator, NvCreateChatCompletionRequest, aggregator::ChatCompletionAggregator,

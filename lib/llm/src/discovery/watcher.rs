@@ -24,13 +24,13 @@ use dynamo_renderer::PromptFormatter;
 
 use crate::{
     backend::Backend,
-    discovery::{LoadThresholdHandle, RuntimeConfigWatch, WORKER_TYPE_DECODE, WorkerSet},
+    discovery::{LoadThresholdHandle, RuntimeConfigWatch, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback},
     kv_router::plugins::RouterPluginBuilder,
     kv_router::{EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, role_routing},
-    preprocessor::{
-        OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::prompt_formatter_from_mdc,
-    },
+    preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
+    protocols::common::preprocessor::PreprocessedEmbeddingRequest,
+    protocols::common::timing::WORKER_TYPE_DECODE,
     protocols::{
         common::llm_backend::EmbeddingsEngineOutput,
         openai::{
