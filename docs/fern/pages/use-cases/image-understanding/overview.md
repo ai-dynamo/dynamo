@@ -23,8 +23,8 @@ image workloads, see [VLM Performance Optimization](vlm-performance-optimization
 | `data:` (base64) image | Yes | Yes | Yes |
 | Pre-computed embeddings (`.safetensors`) | No | No | Yes |
 
-Plain `http://` URLs and hosts that resolve to private or loopback addresses are
-refused by default. See [Media URL Policy](#media-url-policy).
+Which `http://` and internal-network URLs are accepted depends on where the
+media is fetched. See [Media URL Policy](#media-url-policy).
 
 ## Set up the backend
 
@@ -100,12 +100,19 @@ To send a local file, base64-encode it as a `data:` URL:
 
 ## Media URL Policy
 
-Workers fetch media URLs under a default-deny policy:
+Workers that fetch media themselves use a default-deny policy:
 
 - `https://` and `data:` sources are allowed.
 - Plain `http://` URLs and hostnames that resolve to private or loopback
   addresses are refused. Set `DYN_MM_ALLOW_INTERNAL=1` on the worker that loads
   the media to fetch from the cluster's internal network.
+- With `--frontend-decoding`, the Dynamo frontend fetches the media instead.
+  `https://`, `http://`, and `data:` URLs to public hostnames pass. IP-address
+  hosts, explicit ports, and hostnames that are blocked or resolve to private or
+  loopback addresses are refused. `DYN_MM_ALLOW_INTERNAL=1`, set on the worker,
+  allows them. SGLang without `--frontend-decoding` passes most URLs to SGLang
+  to download; see
+  [SGLang Multimodal](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md).
 - A worker that reaches the internet through an HTTP proxy must set
   `DYN_MM_TRUST_EGRESS_PROXY=1`. Without it, a fetch that would go through the
   proxy is refused. Direct fetches, including hosts in `NO_PROXY`, are unaffected.

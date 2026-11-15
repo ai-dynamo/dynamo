@@ -114,9 +114,7 @@ curl http://localhost:8000/v1/chat/completions \
 `DYN_MM_VIDEO_NUM_FRAMES` (default `32`) sets the maximum number of frames
 sampled from each clip. Keep it the same on the frontend and every worker.
 
-Video URLs are fetched under the same default-deny policy as images: `https://`
-and `data:` sources pass, and internal or plain `http://` hosts need
-`DYN_MM_ALLOW_INTERNAL=1`. See
+Video URLs follow the same rules as image URLs. See
 [Image Understanding › Media URL Policy](../image-understanding/overview.md#media-url-policy).
 
 ## Next Steps
