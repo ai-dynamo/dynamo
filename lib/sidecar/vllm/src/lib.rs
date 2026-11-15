@@ -6,6 +6,7 @@
 mod args;
 mod client;
 mod convert;
+pub mod direct;
 mod engine;
 mod lora;
 mod model;

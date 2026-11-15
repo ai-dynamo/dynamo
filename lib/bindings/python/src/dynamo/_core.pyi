@@ -3273,6 +3273,11 @@ class EntrypointArgs:
         reject_media: Optional[bool] = None,
         reject_media_status_code: Optional[int] = None,
         default_chat_template_kwargs: Optional[Mapping[str, Any]] = None,
+        direct_backend: Optional[str] = None,
+        engine_urls: Optional[List[str]] = None,
+        prefill_engine_urls: Optional[List[str]] = None,
+        dyn_tool_call_parser: Optional[str] = None,
+        dyn_reasoning_parser: Optional[str] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3316,6 +3321,13 @@ class EntrypointArgs:
             reject_media_status_code: Optional 4xx/5xx status for a request refused by reject_media (default 415)
             default_chat_template_kwargs: Chat template kwargs that the frontend applies
                 under each request's own kwargs, for every discovered model
+            direct_backend: Engine family the frontend dials directly ("vllm"); set
+                only in --direct mode, where the dynamic engine serves engines
+                started in this process instead of discovered workers
+            engine_urls: Aggregated, or decode, engine gRPC endpoints in --direct mode
+            prefill_engine_urls: Prefill engine gRPC endpoints in --direct mode
+            dyn_tool_call_parser: Dynamo tool-call parser for direct engines
+            dyn_reasoning_parser: Dynamo reasoning parser for direct engines
         """
         ...
 
