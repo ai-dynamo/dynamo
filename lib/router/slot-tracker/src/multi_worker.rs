@@ -1275,12 +1275,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.workers.read().slots.len()
     }
 
-    /// Get the worker type for this router ("prefill" or "decode").
-    pub fn worker_type(&self) -> &'static str {
-        self.worker_type
-    }
-
-    /// Query all workers for the potential blocks and tokens.
+    /// Test hook: [`Self::potential_blocks_and_tokens_at`] at `Instant::now()`.
+    #[cfg(any(test, feature = "testing"))]
     pub fn potential_blocks_and_tokens<const INCLUDE_ACTIVE_REQUESTS: bool>(
         &self,
         token_sequence: Option<&[SequenceHash]>,
@@ -1403,7 +1399,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.prompt_registry.active_tokens(decay_now)
     }
 
-    /// Return true if any worker satisfies the provided predicate on active token count.
+    /// Test hook: true if any worker satisfies `predicate` on its active token count.
+    #[cfg(any(test, feature = "testing"))]
     pub fn any_worker_matches_active_tokens(
         &self,
         decay_now: Instant,

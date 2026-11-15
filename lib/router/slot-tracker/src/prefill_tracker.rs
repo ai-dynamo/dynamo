@@ -127,6 +127,8 @@ impl PrefillTokenDeltas {
         Self::default()
     }
 
+    /// Test hook: the same delta for every worker.
+    #[cfg(any(test, feature = "testing"))]
     pub fn uniform(tokens: usize) -> Self {
         Self {
             default_tokens: tokens,

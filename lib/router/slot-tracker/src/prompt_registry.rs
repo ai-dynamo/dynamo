@@ -565,6 +565,7 @@ impl PromptRegistry {
             .collect()
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub(super) fn any_worker_matches_active_tokens(
         &self,
         decay_now: Instant,

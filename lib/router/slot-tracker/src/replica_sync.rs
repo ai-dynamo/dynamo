@@ -53,7 +53,8 @@ impl ReplicaBatchEffects {
 }
 
 impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
-    /// Apply one decoded replica-sync batch and flush its deferred effects once.
+    /// Test hook: apply one decoded replica-sync batch and flush its deferred effects once.
+    #[cfg(any(test, feature = "testing"))]
     pub fn apply_replica_batch(&self, events: Vec<ActiveSequenceEvent>) {
         let mut effects = ReplicaBatchEffects::default();
         for event in events {
