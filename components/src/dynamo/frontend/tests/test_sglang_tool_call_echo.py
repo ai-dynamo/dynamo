@@ -21,7 +21,6 @@ from sglang.srt.entrypoints.openai.protocol import Function as SglangFunction
 from sglang.srt.entrypoints.openai.protocol import Tool as SglangTool
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.parser.reasoning_parser import ReasoningParser
-from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo.frontend.sglang_prepost import (
     SglangStreamingPostProcessor,
@@ -58,6 +57,7 @@ TOOLS = [
         type="function",
         function=SglangFunction(
             name="get_weather",
+            strict=False,
             description="Get weather for a city",
             parameters={
                 "type": "object",
@@ -79,6 +79,13 @@ INJECTED_CALL = (
 
 @pytest.fixture(scope="module")
 def tokenizer():
+    try:
+        from sglang.srt.hf_transformers import get_tokenizer
+    except ModuleNotFoundError as exc:
+        if exc.name != "sglang.srt.hf_transformers":
+            raise
+        from sglang.srt.utils.hf_transformers import get_tokenizer
+
     return get_tokenizer(MODEL)
 
 
