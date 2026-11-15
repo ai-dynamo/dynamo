@@ -38,9 +38,10 @@ pub use hosted::{HostedSelectionRequest, HostedWorkerPicker};
 #[allow(deprecated)]
 pub use inputs::WorkerTransferInput;
 pub use inputs::{
-    CacheSnapshot, CandidateData, ResidentBlockSource, ScoredWorkerCandidate, WorkerCacheData,
-    WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity,
-    WorkerCopyInput, WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs, WorkerLoadInput,
+    ActivePrefillSums, CacheSnapshot, CandidateData, ResidentBlockSource, ScoredWorkerCandidate,
+    WorkerCacheData, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
+    WorkerCapacity, WorkerCopyInput, WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs,
+    WorkerLoadInput,
 };
 pub use policy::{
     CandidatePreparer, CandidateRank, CandidateRowSource, PreparedRows, RankVisitor, RowPick,

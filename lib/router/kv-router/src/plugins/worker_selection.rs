@@ -15,9 +15,9 @@ pub use dynamo_worker_selection::WorkerTransferInput;
 pub use dynamo_worker_selection::experimental;
 pub use dynamo_worker_selection::selection_config;
 pub use dynamo_worker_selection::{
-    CacheSnapshot, CandidateData, CandidatePreparer, CandidateRank, CandidateRowSource,
-    HostedSelectionRequest, HostedWorkerPicker, PreparedRows, RankVisitor, RowPick,
-    RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
+    ActivePrefillSums, CacheSnapshot, CandidateData, CandidatePreparer, CandidateRank,
+    CandidateRowSource, HostedSelectionRequest, HostedWorkerPicker, PreparedRows, RankVisitor,
+    RowPick, RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
     ScoredWorkerCandidate, SelectionConfig, SelectionFailure, SelectionTrace, SelectionTraceRow,
     SelectionTraceSpec, SessionContext, SharedCacheHits, SharedCacheType, WorkerCacheData,
     WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity,

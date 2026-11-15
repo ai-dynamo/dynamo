@@ -6,6 +6,7 @@
 use std::cell::OnceCell;
 
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use rustc_hash::FxHashMap;
 
 use super::shared_cache::SharedCacheHits;
 
@@ -129,6 +130,17 @@ impl<'a> WorkerCandidate<'a> {
         }
     }
 
+    /// Sums over this worker's active prefills, only when this component declared
+    /// ACTIVE_PREFILL_SUMS. None also means the host does not supply them for this selection;
+    /// see [`ActivePrefillSums`].
+    pub fn active_prefill_sums(self) -> Option<ActivePrefillSums> {
+        if self.inputs.contains(WorkerInputs::ACTIVE_PREFILL_SUMS) {
+            self.cache_snapshot.active_prefill_sums(self.data.worker)
+        } else {
+            None
+        }
+    }
+
     /// Backs `experimental::resident_blocks::ResidentBlocks`, which documents the contract: the
     /// count only when this component declared RESIDENT_BLOCKS and the host has one for the rank.
     pub(crate) fn resident_block_count(self) -> Option<u64> {
@@ -234,6 +246,15 @@ pub struct CacheSnapshot<'a> {
     pub has_tier_matches: bool,
     /// Lent only when a component declared RESIDENT_BLOCKS and the host has counts.
     pub resident_blocks: Option<&'a dyn ResidentBlockSource>,
+    /// Every worker's active prefill sums, when the host supplies them for this selection.
+    /// Views look a row up only when its component declared ACTIVE_PREFILL_SUMS.
+    pub active_prefill_sums: Option<&'a FxHashMap<WorkerWithDpRank, ActivePrefillSums>>,
+}
+
+impl CacheSnapshot<'_> {
+    fn active_prefill_sums(&self, worker: WorkerWithDpRank) -> Option<ActivePrefillSums> {
+        self.active_prefill_sums?.get(&worker).copied()
+    }
 }
 
 /// Rows and request-wide cache facts owned by a reader outside worker selection.
@@ -287,6 +308,7 @@ impl WorkerInputRows {
             shared_hits: self.shared_hits.as_ref(),
             has_tier_matches: self.has_tier_matches,
             resident_blocks: None,
+            active_prefill_sums: None,
         };
         let info = |row: usize| WorkerInfo::new(self.rows[row].worker, self.capacities[row]);
         read(WorkerCandidates::new(
@@ -388,6 +410,7 @@ const _: () = assert!(size_of::<WorkerLoadInput>() == 40);
 
 pub use dynamo_router_protocol::columns::{WorkerInfo, WorkerInputs};
 pub use dynamo_router_protocol::worker::WorkerCapacity;
+pub use dynamo_slot_tracker::ActivePrefillSums;
 
 /// A worker's KV copy offer, read through [`WorkerCandidate::kv_copy`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

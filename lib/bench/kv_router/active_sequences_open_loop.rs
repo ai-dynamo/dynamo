@@ -512,6 +512,7 @@ pub(crate) fn prepare_active_sequences_trial(
                                     as u64,
                             )
                         }),
+                        cached_tokens: 0,
                     }),
                     worker: WorkerWithDpRank::from_worker_id(operation.worker_id),
                     lora_name: None,
@@ -1652,6 +1653,7 @@ mod tests {
             prefill_load_hint: Some(PrefillLoadHint {
                 initial_effective_prefill_tokens: hashes.len() * 128,
                 expected_prefill_duration: None,
+                cached_tokens: 0,
             }),
             worker: WorkerWithDpRank::from_worker_id(0),
             lora_name: None,

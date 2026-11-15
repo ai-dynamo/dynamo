@@ -1745,6 +1745,7 @@ impl KvRouter {
         Some(PrefillLoadHint {
             initial_effective_prefill_tokens: effective_isl,
             expected_prefill_duration,
+            cached_tokens: prefix,
         })
     }
 

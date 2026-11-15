@@ -71,7 +71,8 @@ PLUGIN_TABLE=(
   "dynamo-custom-policy-example-simple-filter-score-pick | dynamo-kv-router"
   "dynamo-custom-policy-example-disagg-filter-score-pick | dynamo-kv-router"
   "dynamo-custom-policy-example-simple-stacked-score-pick | dynamo-kv-router"
-  "dynamo-custom-policy-example-catalog | dynamo-kv-router dynamo-custom-policy-example-soft-pin-repin dynamo-custom-policy-example-simple-filter-score-pick dynamo-custom-policy-example-disagg-filter-score-pick dynamo-custom-policy-example-simple-stacked-score-pick"
+  "dynamo-custom-policy-example-prefill-cost-score-pick | dynamo-kv-router"
+  "dynamo-custom-policy-example-catalog | dynamo-kv-router dynamo-custom-policy-example-soft-pin-repin dynamo-custom-policy-example-simple-filter-score-pick dynamo-custom-policy-example-disagg-filter-score-pick dynamo-custom-policy-example-simple-stacked-score-pick dynamo-custom-policy-example-prefill-cost-score-pick"
   "dynamo-custom-policy-example-epp | dynamo-kv-router dynamo-custom-policy-example-catalog dynamo-ext-proc"
 )
 

@@ -32,6 +32,7 @@ pub fn prefill_load_hint_from_effective_tokens(
     Ok(PrefillLoadHint {
         initial_effective_prefill_tokens: effective_prefill_tokens,
         expected_prefill_duration: None,
+        cached_tokens: isl_tokens - effective_prefill_tokens,
     })
 }
 
@@ -58,6 +59,7 @@ mod tests {
     fn direct_hint_validates_against_isl() {
         let hint = prefill_load_hint_from_effective_tokens(100, 60).unwrap();
         assert_eq!(hint.initial_effective_prefill_tokens, 60);
+        assert_eq!(hint.cached_tokens, 40);
         assert!(prefill_load_hint_from_effective_tokens(100, 101).is_err());
     }
 }
