@@ -114,9 +114,6 @@ data:
   worker-selection.yaml: |
     worker_selection:
       aggregated: dynamo-two-tier-cost-fn
-      instances:
-        - name: dynamo-two-tier-cost-fn
-          type: dynamo-two-tier-cost-fn
 ```
 
 Mount it on the Frontend and point `--router-policy-config` at the mounted file:
