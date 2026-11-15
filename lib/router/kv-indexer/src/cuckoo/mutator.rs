@@ -1,22 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(test)]
-use rustc_hash::FxHashSet;
-
 use super::addressing::CkfAddressing;
 use super::bucket::{CuckooBucketStore, PackedBucket};
 use super::canonical::CanonicalSequenceBlockHash;
 use dynamo_kv_events::event::KvCacheEventError;
 
 const SPLITMIX_INCREMENT: u64 = 0x9E37_79B9_7F4A_7C15;
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct DirtyBucket {
-    pub(super) bucket: usize,
-    pub(super) value: PackedBucket,
-}
 
 #[derive(Debug)]
 pub(super) struct CuckooInsertionScratch {
@@ -53,32 +43,6 @@ impl CuckooInsertionScratch {
     }
 }
 
-#[cfg(test)]
-pub(super) struct DcWriterState {
-    pub(super) resident: FxHashSet<CanonicalSequenceBlockHash>,
-    pub(super) rng: u64,
-    pub(super) scratch: CuckooInsertionScratch,
-}
-
-#[cfg(test)]
-impl DcWriterState {
-    pub(super) fn new(
-        expected_blocks: usize,
-        max_kicks: usize,
-        rng: u64,
-    ) -> Result<Self, KvCacheEventError> {
-        let mut resident = FxHashSet::default();
-        resident
-            .try_reserve(expected_blocks)
-            .map_err(|_| KvCacheEventError::AllocationFailed)?;
-        Ok(Self {
-            resident,
-            rng,
-            scratch: CuckooInsertionScratch::new(max_kicks)?,
-        })
-    }
-}
-
 pub(super) struct CuckooMutator<'a, S> {
     store: &'a S,
     addressing: &'a CkfAddressing,
@@ -92,19 +56,6 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
             addressing,
             max_kicks,
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn insert(
-        &self,
-        hash: CanonicalSequenceBlockHash,
-        rng: &mut u64,
-        scratch: &mut CuckooInsertionScratch,
-        mut on_dirty: impl FnMut(DirtyBucket),
-    ) -> Result<(), KvCacheEventError> {
-        self.insert_inner(hash, rng, scratch)?;
-        self.emit_final_dirty(scratch, &mut on_dirty);
-        Ok(())
     }
 
     /// Insert one logical hash and report every physical bucket's value before
@@ -169,30 +120,6 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
         Err(KvCacheEventError::CapacityExhausted)
     }
 
-    #[cfg(test)]
-    pub(super) fn remove(
-        &self,
-        hash: CanonicalSequenceBlockHash,
-        mut on_dirty: impl FnMut(DirtyBucket),
-    ) -> Result<(), KvCacheEventError> {
-        let probe = self.addressing.prepare(hash.as_u64());
-        for bucket in [probe.bucket_a, probe.bucket_b] {
-            let before = self.store.load_bucket(bucket);
-            let Some(slot) = before.first(probe.fingerprint) else {
-                continue;
-            };
-            let after = before.with_slot(slot, 0);
-            self.store.store_bucket(bucket, after);
-            on_dirty(DirtyBucket {
-                bucket,
-                value: after,
-            });
-            return Ok(());
-        }
-
-        Err(KvCacheEventError::IndexerInvariantViolation)
-    }
-
     pub(super) fn remove_with_original(
         &self,
         hash: CanonicalSequenceBlockHash,
@@ -241,23 +168,6 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
     fn rollback(&self, scratch: &mut CuckooInsertionScratch) {
         for &(bucket, before) in scratch.touched.iter().rev() {
             self.store.store_bucket(bucket, before);
-        }
-        scratch.clear();
-    }
-
-    #[cfg(test)]
-    fn emit_final_dirty(
-        &self,
-        scratch: &mut CuckooInsertionScratch,
-        on_dirty: &mut impl FnMut(DirtyBucket),
-    ) {
-        scratch.dirty_buckets.sort_unstable();
-        scratch.dirty_buckets.dedup();
-        for &bucket in &scratch.dirty_buckets {
-            on_dirty(DirtyBucket {
-                bucket,
-                value: self.store.load_bucket(bucket),
-            });
         }
         scratch.clear();
     }

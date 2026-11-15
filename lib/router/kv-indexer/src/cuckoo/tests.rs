@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
 
 use super::addressing::{CkfAddressing, CkfProbe};
 use super::bucket::{CuckooBucketStore, PackedBucket, TransposedCkfTable};
-use super::mutator::{CuckooMutator, DcWriterState};
+use super::mutator::{CuckooInsertionScratch, CuckooMutator};
 use super::search::{
     SearchPhase, SearchTraceEvent, SearchTraceKind, find_prefix_depths,
     find_prefix_depths_with_test_stats, find_prefix_depths_with_test_trace, linear_prefix_depths,
@@ -140,7 +140,7 @@ fn addressing_is_nonzero_and_alternate_bucket_is_an_involution() {
 }
 
 #[test]
-fn bounded_relocation_rolls_back_every_write_and_emits_no_dirty_bucket() {
+fn bounded_relocation_rolls_back_every_write_and_reports_no_touched_bucket() {
     let table = TransposedCkfTable::<1>::new(2).unwrap();
     let view = table.lane(0);
     let full_a = PackedBucket::default()
@@ -157,13 +157,14 @@ fn bounded_relocation_rolls_back_every_write_and_emits_no_dirty_bucket() {
     view.store_bucket(1, full_b);
 
     let addressing = CkfAddressing::new(2, TEST_SEED);
-    let mut state = DcWriterState::new(8, 1, TEST_SEED).unwrap();
-    let mut dirty = Vec::new();
-    let result = CuckooMutator::new(&view, &addressing, 1).insert(
+    let mut rng = TEST_SEED;
+    let mut scratch = CuckooInsertionScratch::new(1).unwrap();
+    let mut touched = Vec::new();
+    let result = CuckooMutator::new(&view, &addressing, 1).insert_with_originals(
         canonical(999),
-        &mut state.rng,
-        &mut state.scratch,
-        |bucket| dirty.push(bucket),
+        &mut rng,
+        &mut scratch,
+        |bucket, before| touched.push((bucket, before)),
     );
 
     assert!(matches!(
@@ -172,7 +173,7 @@ fn bounded_relocation_rolls_back_every_write_and_emits_no_dirty_bucket() {
     ));
     assert_eq!(view.load_bucket(0), full_a);
     assert_eq!(view.load_bucket(1), full_b);
-    assert!(dirty.is_empty());
+    assert!(touched.is_empty());
 }
 
 #[test]
@@ -181,18 +182,19 @@ fn distinct_hashes_with_one_ckf_representation_keep_separate_copies() {
     let (first, second, representation) = colliding_hashes(addressing);
     let table = TransposedCkfTable::<1>::new(2).unwrap();
     let view = table.lane(0);
-    let mut state = DcWriterState::new(8, 20, TEST_SEED).unwrap();
+    let mut rng = TEST_SEED;
+    let mut scratch = CuckooInsertionScratch::new(20).unwrap();
     let mutator = CuckooMutator::new(&view, &addressing, 20);
 
     mutator
-        .insert(first, &mut state.rng, &mut state.scratch, |_| {})
+        .insert_with_originals(first, &mut rng, &mut scratch, |_, _| {})
         .unwrap();
     mutator
-        .insert(second, &mut state.rng, &mut state.scratch, |_| {})
+        .insert_with_originals(second, &mut rng, &mut scratch, |_, _| {})
         .unwrap();
     assert_eq!(fingerprint_copies(&view, representation), 2);
 
-    mutator.remove(first, |_| {}).unwrap();
+    mutator.remove_with_original(first, |_, _| {}).unwrap();
     assert_eq!(fingerprint_copies(&view, representation), 1);
     assert_eq!(table.probe(representation), 1);
 }
@@ -457,21 +459,23 @@ fn store_remove_churn_drains_every_physical_slot() {
     let table = TransposedCkfTable::<1>::new(64).unwrap();
     let view = table.lane(0);
     let addressing = CkfAddressing::new(64, TEST_SEED);
-    let mut state = DcWriterState::new(128, 500, TEST_SEED).unwrap();
+    let mut rng = TEST_SEED;
+    let mut scratch = CuckooInsertionScratch::new(500).unwrap();
+    let mut resident = FxHashSet::default();
     let hashes: Vec<_> = (0..128).map(|hash| canonical(10_000 + hash)).collect();
     let mutator = CuckooMutator::new(&view, &addressing, 500);
     for &hash in &hashes {
         mutator
-            .insert(hash, &mut state.rng, &mut state.scratch, |_| {})
+            .insert_with_originals(hash, &mut rng, &mut scratch, |_, _| {})
             .unwrap();
-        state.resident.insert(hash);
+        resident.insert(hash);
     }
     for &hash in hashes.iter().rev() {
-        mutator.remove(hash, |_| {}).unwrap();
-        state.resident.remove(&hash);
+        mutator.remove_with_original(hash, |_, _| {}).unwrap();
+        resident.remove(&hash);
     }
 
-    assert!(state.resident.is_empty());
+    assert!(resident.is_empty());
     assert!(
         (0..view.bucket_count())
             .all(|bucket| { view.load_bucket(bucket) == PackedBucket::default() })
