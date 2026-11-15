@@ -189,6 +189,10 @@ struct DirectEngineHost {
 struct HostedEngine {
     engine: Arc<dyn LLMEngine>,
     registered: Vec<DiscoveryInstance>,
+    /// Cancelled as `engine.cleanup()` starts, so the adapter reports requests
+    /// the engine ends during cleanup as `EngineShutdown`, which the frontend
+    /// migrates; see `EngineAdapter::with_engine_cleanup`.
+    engine_cleanup: CancellationToken,
 }
 
 impl DirectEngineHost {
@@ -209,13 +213,18 @@ impl DirectEngineHost {
             }
         };
 
+        let engine_cleanup = CancellationToken::new();
         self.dispatch.adapters.write().insert(
             self.instance_id,
-            Arc::new(EngineAdapter::new(engine.clone(), self.spec.mode)),
+            Arc::new(
+                EngineAdapter::new(engine.clone(), self.spec.mode)
+                    .with_engine_cleanup(engine_cleanup.clone()),
+            ),
         );
         let mut hosted = HostedEngine {
             engine,
             registered: Vec::with_capacity(2),
+            engine_cleanup,
         };
         // The endpoint first, so routers built when the model card appears
         // already see the instance.
@@ -248,6 +257,7 @@ impl DirectEngineHost {
             }
         }
         self.dispatch.adapters.write().remove(&self.instance_id);
+        hosted.engine_cleanup.cancel();
         self.cleanup(&hosted.engine).await;
     }
 
@@ -427,14 +437,20 @@ mod tests {
         up: AtomicBool,
         served: AtomicUsize,
         lost: Notify,
+        /// Signalled by `cleanup`, which ends a held request as cancelled.
+        cleaned: Notify,
     }
 
     /// One incarnation of a listed engine: answers every request with one token.
     /// `fail_next`, shared by every engine, makes the next request any of them
-    /// receives fail mid-stream as if its engine went away.
+    /// receives fail mid-stream as if its engine went away. `hold_next` makes
+    /// the next request wait until its engine is cleaned up, then end as
+    /// cancelled; the engine that holds it is posted to `held`.
     struct FakeEngine {
         state: Arc<EngineState>,
         fail_next: Arc<AtomicBool>,
+        hold_next: Arc<AtomicBool>,
+        held: Arc<parking_lot::Mutex<Option<Arc<EngineState>>>>,
     }
 
     #[async_trait]
@@ -470,6 +486,15 @@ mod tests {
                 ))])
                 .boxed());
             }
+            if self.hold_next.swap(false, Ordering::SeqCst) {
+                *self.held.lock() = Some(self.state.clone());
+                let state = self.state.clone();
+                return Ok(futures::stream::once(async move {
+                    state.cleaned.notified().await;
+                    Ok(LLMEngineOutput::cancelled())
+                })
+                .boxed());
+            }
             self.state.served.fetch_add(1, Ordering::SeqCst);
             Ok(futures::stream::iter([Ok(chunk::token(1)), Ok(LLMEngineOutput::stop())]).boxed())
         }
@@ -483,6 +508,7 @@ mod tests {
         }
 
         async fn cleanup(&self) -> Result<(), DynamoError> {
+            self.state.cleaned.notify_one();
             Ok(())
         }
     }
@@ -494,6 +520,8 @@ mod tests {
         namespace: String,
         states: HashMap<&'static str, Arc<EngineState>>,
         fail_next: Arc<AtomicBool>,
+        hold_next: Arc<AtomicBool>,
+        held: Arc<parking_lot::Mutex<Option<Arc<EngineState>>>>,
         chat: OpenAIChatCompletionsStreamingEngine,
         model: String,
     }
@@ -513,12 +541,18 @@ mod tests {
                 })
                 .collect();
             let fail_next = Arc::new(AtomicBool::new(false));
+            let hold_next = Arc::new(AtomicBool::new(false));
+            let held = Arc::new(parking_lot::Mutex::new(None));
             let factory_states = states.clone();
             let factory_fail_next = fail_next.clone();
+            let factory_hold_next = hold_next.clone();
+            let factory_held = held.clone();
             let factory: DirectEngineFactory = Arc::new(move |spec: &DirectEngineSpec| {
                 Ok(Arc::new(FakeEngine {
                     state: factory_states[spec.url.as_str()].clone(),
                     fail_next: factory_fail_next.clone(),
+                    hold_next: factory_hold_next.clone(),
+                    held: factory_held.clone(),
                 }) as Arc<dyn LLMEngine>)
             });
             let specs = [A, B]
@@ -564,6 +598,8 @@ mod tests {
                 namespace: namespace.to_string(),
                 states,
                 fail_next,
+                hold_next,
+                held,
                 chat,
                 model,
             }
@@ -666,6 +702,35 @@ mod tests {
         frontend.fail_next.store(true, Ordering::SeqCst);
         let before = frontend.served(A) + frontend.served(B);
         assert!(frontend.chat().await, "the request must complete elsewhere");
+        assert_eq!(frontend.served(A) + frontend.served(B), before + 1);
+    }
+
+    #[tokio::test]
+    async fn a_request_its_lost_engine_cancels_during_cleanup_migrates() {
+        let frontend = Frontend::start("direct-cleanup", 3).await;
+        frontend
+            .chat_until(|f| f.served(A) > 0 && f.served(B) > 0)
+            .await;
+
+        // The next request waits on its engine; that engine is then lost, and
+        // its cleanup ends the request as cancelled while the client waits.
+        frontend.hold_next.store(true, Ordering::SeqCst);
+        let before = frontend.served(A) + frontend.served(B);
+        let (completed, ()) = tokio::join!(frontend.chat(), async {
+            let state = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let Some(state) = frontend.held.lock().take() {
+                        return state;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("an engine must hold the request");
+            state.up.store(false, Ordering::SeqCst);
+            state.lost.notify_one();
+        });
+        assert!(completed, "the request must complete on the other engine");
         assert_eq!(frontend.served(A) + frontend.served(B), before + 1);
     }
 
