@@ -3,11 +3,12 @@
 
 """Unit tests for dynamo.common.storage module."""
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from dynamo.common.storage import get_fs, get_media_url, upload_to_fs
+from dynamo.common.storage import get_fs, get_media_url, remove_from_fs, upload_to_fs
 
 pytestmark = [
     pytest.mark.unit,
@@ -191,3 +192,30 @@ class TestUploadToFs:
 
         assert call_order == ["pipe", "url_returned"]
         assert url
+
+
+class TestRemoveFromFs:
+    """Tests for remove_from_fs() best-effort cleanup."""
+
+    @pytest.mark.asyncio
+    async def test_failed_removal_is_logged_and_others_still_removed(
+        self, tmp_path, caplog
+    ):
+        fs = get_fs(tmp_path.as_uri())
+        for name in ("a.png", "b.png"):
+            await upload_to_fs(fs, f"images/req-1/{name}", b"data")
+
+        with caplog.at_level(logging.WARNING, logger="dynamo.common.storage"):
+            await remove_from_fs(
+                fs,
+                [
+                    "images/req-1/a.png",
+                    "images/req-1/missing.png",
+                    "images/req-1/b.png",
+                ],
+                "req-1",
+            )
+
+        assert not any((tmp_path / "images" / "req-1").iterdir())
+        (record,) = caplog.records
+        assert record.args[:2] == ("images/req-1/missing.png", "req-1")

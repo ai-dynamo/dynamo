@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from dynamo.common.storage import get_fs
+from dynamo.common.storage import get_fs, remove_from_fs
 from dynamo.common.storage import upload_to_fs as real_upload_to_fs
 from dynamo.common.utils.output_modalities import RequestType
 
@@ -276,14 +276,18 @@ class TestDiffusionFormatterPrepareImages:
                 "dynamo.vllm.omni.output_formatter.upload_to_fs",
                 side_effect=upload_then_fail,
             ),
-            patch.object(f, "_cleanup_uploads", wraps=f._cleanup_uploads) as cleanup,
+            patch(
+                "dynamo.vllm.omni.output_formatter.remove_from_fs",
+                wraps=remove_from_fs,
+            ) as cleanup,
         ):
             with pytest.raises(OSError, match=f"{failure} failed"):
                 await f._prepare_images(images, "req-partial", "url")
 
         assert upload_calls == (2 if failure == "upload" else 1)
         cleanup.assert_awaited_once()
-        uploaded, cleanup_request_id = cleanup.await_args.args
+        cleanup_fs, uploaded, cleanup_request_id = cleanup.await_args.args
+        assert cleanup_fs is f._media_fs
         assert cleanup_request_id == "req-partial"
         assert len(uploaded) == 1
         assert uploaded[0].startswith("images/req-partial/")
@@ -798,7 +802,10 @@ class TestDiffusionFormatterVideo:
                 "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
                 side_effect=encode_then_fail,
             ),
-            patch.object(f, "_cleanup_uploads", wraps=f._cleanup_uploads) as cleanup,
+            patch(
+                "dynamo.vllm.omni.output_formatter.remove_from_fs",
+                wraps=remove_from_fs,
+            ) as cleanup,
         ):
             result = await f._encode_video(
                 videos, "req-partial", fps=16, response_format="url"
@@ -806,7 +813,9 @@ class TestDiffusionFormatterVideo:
 
         assert result["status"] == "failed"
         assert "encode failed" in result["error"]
-        cleanup.assert_awaited_once_with(["videos/req-partial/0.mp4"], "req-partial")
+        cleanup.assert_awaited_once_with(
+            f._media_fs, ["videos/req-partial/0.mp4"], "req-partial"
+        )
         assert not any((tmp_path / "videos" / "req-partial").iterdir())
 
     @pytest.mark.asyncio

@@ -72,7 +72,7 @@ from dynamo.common.protocols.image_protocol import (
     NvImagesResponse,
 )
 from dynamo.common.protocols.video_protocol import NvVideosResponse, VideoData
-from dynamo.common.storage import upload_to_fs
+from dynamo.common.storage import remove_from_fs, upload_to_fs
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.output_modalities import RequestType
 from dynamo.common.utils.video_utils import (
@@ -460,7 +460,7 @@ class DiffusionFormatter:
             ).model_dump()
         except Exception as e:
             logger.error("Failed to encode video for request %s: %s", request_id, e)
-            await self._cleanup_uploads(uploaded_paths, request_id)
+            await remove_from_fs(self._media_fs, uploaded_paths, request_id)
             return NvVideosResponse(
                 id=request_id,
                 object="video",
@@ -927,24 +927,9 @@ class DiffusionFormatter:
                 else:
                     raise ValueError(f"Invalid response format: {response_format}")
         except Exception:
-            await self._cleanup_uploads(uploaded_paths, request_id)
+            await remove_from_fs(self._media_fs, uploaded_paths, request_id)
             raise
         return outlist
-
-    async def _cleanup_uploads(self, storage_paths: list[str], request_id: str) -> None:
-        """Best-effort removal of uploaded files after a failed batch."""
-        for path in storage_paths:
-            try:
-                await asyncio.to_thread(self._media_fs.rm, path)
-            except Exception as e:
-                # Storage backends raise different error types, and an error
-                # here must not replace the original failure being re-raised.
-                logger.warning(
-                    "Failed to clean up uploaded file %s for request %s: %s",
-                    path,
-                    request_id,
-                    e,
-                )
 
 
 class AudioFormatter:
