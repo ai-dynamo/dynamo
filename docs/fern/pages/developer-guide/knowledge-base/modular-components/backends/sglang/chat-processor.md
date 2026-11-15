@@ -134,7 +134,7 @@ The processor uses the token ids to keep the two apart.
 - the chat template rewrites the delimiter-bearing content in a way that cannot be aligned with the original;
 - the parser's delimiters are not single tokens for this tokenizer (parsing by token id is not possible for that parser either);
 - its `chat_template_kwargs` set `padding`, a non-empty `tokenizer_kwargs`, or `return_tensors` (`truncation` and `max_length` are honored);
-- the native DeepSeek-V4 or Kimi K3 encoder renders the prompt (template-free tokenizers): every request is rejected while the option is on.
+- the native DeepSeek-V4/V4.1 or Kimi K3 encoder renders the prompt: every request is rejected while the option is on.
 
 Before enabling it in production, evaluate the option against your model: it changes the tokens the model sees for delimiter-bearing content.
 

@@ -10,7 +10,7 @@ use std::{
 };
 
 use dashmap::DashMap;
-use dynamo_kv_router::protocols::WorkerId;
+use dynamo_router_protocol::worker::WorkerId;
 use dynamo_runtime::{
     component::Endpoint, pipeline::MultimodalCacheIndex, traits::DistributedRuntimeProvider,
     transports::event_plane::EventSubscriber,

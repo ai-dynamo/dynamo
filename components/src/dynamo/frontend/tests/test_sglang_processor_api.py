@@ -12,6 +12,8 @@ import pickle
 
 import pytest
 
+from dynamo.frontend.sglang_processor import get_tokenizer
+
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
     pytest.mark.unit,
@@ -24,12 +26,6 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 # Import tests -- verify all required modules and symbols exist
 # ---------------------------------------------------------------------------
-
-
-def test_get_tokenizer_importable():
-    from sglang.srt.utils.hf_transformers_utils import get_tokenizer
-
-    assert callable(get_tokenizer)
 
 
 def test_function_call_parser_importable():
@@ -63,8 +59,7 @@ def test_sglang_tool_importable():
 
 
 def test_get_tokenizer_accepts_tokenizer_mode():
-    from sglang.srt.utils.hf_transformers_utils import get_tokenizer
-
+    """Require the tokenizer-loading arguments used by the frontend."""
     sig = inspect.signature(get_tokenizer)
     params = sig.parameters
     assert "tokenizer_name" in params or list(params.keys())[0] != ""
