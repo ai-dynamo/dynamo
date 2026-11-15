@@ -72,8 +72,7 @@ fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
     match error {
         KvSchedulerError::NoEndpoints
         | KvSchedulerError::AllEligibleWorkersFiltered
-        | KvSchedulerError::SubscriberShutdown
-        | KvSchedulerError::InitFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
+        | KvSchedulerError::SubscriberShutdown => StatusCode::SERVICE_UNAVAILABLE,
         KvSchedulerError::WorkerSelectionPolicy(_) => StatusCode::INTERNAL_SERVER_ERROR,
         // Deadline expiry is deliberately 429, not 504: the deadline elapsed
         // while waiting for capacity, so it is backpressure the client should

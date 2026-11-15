@@ -7683,13 +7683,14 @@ mod tests {
         let block_size = 16u32;
         let isl = 64usize;
         let worker = WorkerWithDpRank::new(0, 0);
-        let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::from_overlap(
-            OverlapSignals {
+        let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap {
+            overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
                 effective_overlap_blocks: FxHashMap::from_iter([(worker, 7.0)]),
                 effective_cached_tokens: FxHashMap::from_iter([(worker, 56)]),
             },
-        )));
+            kv_transfer_candidates: None,
+        }));
         let (queue, slots) = make_queue_with_blocking_refresher(
             1,
             block_size,
@@ -8415,11 +8416,14 @@ mod tests {
             ],
         );
         let worker = WorkerWithDpRank::new(0, 0);
-        let refreshed = RefreshedOverlap::from_overlap(OverlapSignals {
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: FxHashMap::from_iter([(worker, 3.0)]),
-            effective_cached_tokens: FxHashMap::from_iter([(worker, 48)]),
-        });
+        let refreshed = RefreshedOverlap {
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: FxHashMap::from_iter([(worker, 3.0)]),
+                effective_cached_tokens: FxHashMap::from_iter([(worker, 48)]),
+            },
+            kv_transfer_candidates: None,
+        };
         let refresher = Arc::new(BlockingRefresher::new(refreshed));
         let (queue, slots) = make_queue_with_profile_and_blocking_refresher(
             1,
@@ -8548,11 +8552,14 @@ mod tests {
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a_pending_refresh_completes_under_ordinary_command_traffic() {
         let worker = WorkerWithDpRank::new(0, 0);
-        let refreshed = RefreshedOverlap::from_overlap(OverlapSignals {
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: FxHashMap::from_iter([(worker, 3.0)]),
-            effective_cached_tokens: FxHashMap::from_iter([(worker, 48)]),
-        });
+        let refreshed = RefreshedOverlap {
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: FxHashMap::from_iter([(worker, 3.0)]),
+                effective_cached_tokens: FxHashMap::from_iter([(worker, 48)]),
+            },
+            kv_transfer_candidates: None,
+        };
         let refresher = Arc::new(BlockingRefresher::new(refreshed));
         let (queue, slots) = make_queue_with_blocking_refresher(
             1,
@@ -8635,11 +8642,14 @@ mod tests {
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a_refresh_timeout_runs_from_the_refresh_start_through_scheduler_traffic() {
         let worker = WorkerWithDpRank::new(0, 0);
-        let refreshed = RefreshedOverlap::from_overlap(OverlapSignals {
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: FxHashMap::from_iter([(worker, 3.0)]),
-            effective_cached_tokens: FxHashMap::from_iter([(worker, 48)]),
-        });
+        let refreshed = RefreshedOverlap {
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: FxHashMap::from_iter([(worker, 3.0)]),
+                effective_cached_tokens: FxHashMap::from_iter([(worker, 48)]),
+            },
+            kv_transfer_candidates: None,
+        };
         // A lookup released before the timeout supplies its scores. One never released is
         // dropped at the timeout, counted from the refresh start, and the candidate keeps its
         // queued scores.

@@ -83,10 +83,10 @@ pub use selection::input::{
 };
 pub use selection::types::REQUEST_BODY_LIMIT_BYTES;
 pub use selection::{
-    CatalogObserver, CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostLoad,
-    HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, ModelLoadResponse,
-    OutputBlockRequest, OverlapScoresRequest, PotentialLoadsRequest, PromptRequest, PromptView,
-    ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
+    CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostLoad, HostReplication,
+    HostTelemetry, KvEventIngress, KvIndexSource, ModelLoadResponse, OutputBlockRequest,
+    OverlapScoresRequest, PotentialLoadsRequest, PromptRequest, PromptView, ReadyResponse,
+    ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
     SelectResponse, SelectionCacheConfig, SelectionCore, SelectionError, SelectionHost,
     SelectionInputTrigger, SelectionPartition, SelectionScheduler, SelectionSessionContext,
     SelectionWorkerConfig, SelectionWorkerLoad, WorkerCatalogRecord, WorkerCatalogSource,

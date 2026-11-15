@@ -30,7 +30,7 @@ pub use crate::selection::core::{
 };
 pub use crate::selection::ingress::{KvEventIngress, LocalIndexIngress};
 pub use crate::selection::input::{PromptRequest, PromptView};
-pub use crate::selection::membership::{CatalogObserver, CatalogReconciler, WorkerCatalogSource};
+pub use crate::selection::membership::{CatalogReconciler, WorkerCatalogSource};
 pub use crate::selection::pending::SelectionCacheConfig;
 /// The service request and response DTOs a host or the composed router's HTTP server hands in
 /// and gets back.

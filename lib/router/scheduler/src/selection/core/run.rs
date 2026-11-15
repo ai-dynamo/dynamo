@@ -167,10 +167,11 @@ impl SelectionCore {
                 )));
             }
         };
-        // Wire admissions never book without an endpoint; see `Selected::endpoint`.
+        // Only `Lease` omits the endpoint; wire paths run Query, Advisory, or Book.
+        // See `Selected::endpoint`.
         let endpoint = selected.endpoint.take().ok_or_else(|| {
             SelectionError::Internal(format!(
-                "selected worker {} is no longer schedulable",
+                "selected worker {} carries no endpoint; only Lease selections omit it",
                 selected.response.best_worker.worker_id
             ))
         })?;

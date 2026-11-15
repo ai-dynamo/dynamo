@@ -1613,7 +1613,7 @@ pub mod scheduling {
 pub mod services {
     /// Pre-split `dynamo_kv_router::services::selection` items that moved; mounted by `src/services/selection/mod.rs`.
     pub mod selection {
-        // Owner: dynamo_scheduler (50), dynamo_kv_router (8), dynamo_session_affinity (1)
+        // Owner: dynamo_scheduler (49), dynamo_kv_router (8), dynamo_session_affinity (1)
         /// Pre-split `dynamo_kv_router::services::selection::affinity`; its items live in `dynamo_session_affinity` now.
         pub mod affinity {
             // Owner: dynamo_session_affinity (19)
@@ -1667,7 +1667,6 @@ pub mod services {
             note = "moved to dynamo_session_affinity::AffinityBindingEvent; removed in 1.10.0"
         )]
         pub type AffinityBindingEvent = dynamo_session_affinity::AffinityBindingEvent;
-        pub use dynamo_scheduler::CatalogObserver;
         #[deprecated(
             since = "1.8.0",
             note = "moved to dynamo_scheduler::CatalogReconciler; removed in 1.10.0"

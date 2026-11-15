@@ -132,9 +132,6 @@ pub enum KvSchedulerError {
     #[error("failed to book scheduler state: {0}")]
     BookingFailed(String),
 
-    #[error("failed to initialize event publisher: {0}")]
-    InitFailed(String),
-
     #[error("request classifier panicked: {0}")]
     RequestClassifierPanicked(String),
 
