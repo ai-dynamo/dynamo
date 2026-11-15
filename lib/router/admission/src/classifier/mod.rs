@@ -27,7 +27,6 @@ use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::BusyThresholds;
 
-use crate::profile::PolicyProfile;
 use crate::queue::QueueSnapshot;
 
 #[derive(Debug)]
@@ -43,15 +42,7 @@ pub struct ClassifyRequest {
     progress: RequestProgress,
     session_context: Option<SessionContext>,
     pinned_worker: Option<WorkerWithDpRank>,
-    busy_thresholds: Option<ClassifyBusyThresholds>,
-}
-
-/// The router's policy classes and live router-wide thresholds, as seen by one
-/// classification.
-#[derive(Debug)]
-struct ClassifyBusyThresholds {
-    profile: Arc<PolicyProfile>,
-    reject: BusyThresholds,
+    reject_thresholds: Option<BusyThresholds>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -85,7 +76,7 @@ impl ClassifyRequest {
             progress: RequestProgress::new(input_tokens).0,
             session_context: None,
             pinned_worker: None,
-            busy_thresholds: None,
+            reject_thresholds: None,
         }
     }
 
@@ -115,49 +106,16 @@ impl ClassifyRequest {
         self
     }
 
-    pub fn with_busy_thresholds(
-        mut self,
-        profile: Arc<PolicyProfile>,
-        reject: BusyThresholds,
-    ) -> Self {
-        self.busy_thresholds = Some(ClassifyBusyThresholds { profile, reject });
+    /// The router-wide busy thresholds read when classification started.
+    pub fn with_busy_thresholds(mut self, reject: BusyThresholds) -> Self {
+        self.reject_thresholds = Some(reject);
         self
-    }
-
-    /// Busy thresholds of the policy class this request resolves to now, including a class
-    /// set with [`set_policy_class`](Self::set_policy_class). The queue holds the request
-    /// while every eligible worker is past them. A name that matches no configured class
-    /// reads the default class's thresholds; the request fails before it is queued unless
-    /// its class is then set to a configured one.
-    pub fn queue_thresholds(&self) -> BusyThresholds {
-        self.busy_thresholds
-            .as_ref()
-            .map(|thresholds| {
-                let profile = &thresholds.profile;
-                profile
-                    .resolve_class_index(self.policy_class())
-                    .map_or(profile.default_class(), |index| profile.class(index))
-                    .busy_thresholds
-            })
-            .unwrap_or_default()
-    }
-
-    /// Busy thresholds of the policy class named `policy_class`, or `None` when the router
-    /// does not know the class.
-    pub fn queue_thresholds_for(&self, policy_class: &str) -> Option<BusyThresholds> {
-        let profile = &self.busy_thresholds.as_ref()?.profile;
-        profile
-            .resolve_class_index_strict(policy_class)
-            .map(|index| profile.class(index).busy_thresholds)
     }
 
     /// Router-wide busy thresholds, read when classification started. Selection skips a
     /// worker past them and rejects the request when none remains.
     pub fn reject_thresholds(&self) -> BusyThresholds {
-        self.busy_thresholds
-            .as_ref()
-            .map(|thresholds| thresholds.reject)
-            .unwrap_or_default()
+        self.reject_thresholds.unwrap_or_default()
     }
 
     pub fn request_id(&self) -> Option<&str> {
