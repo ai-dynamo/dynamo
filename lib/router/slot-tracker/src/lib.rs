@@ -46,7 +46,7 @@ pub use single::{
 };
 pub use topology::{MAX_DATA_PARALLEL_RANKS_PER_WORKER, WorkerDpRange, WorkerTopologyError};
 pub use wire::{
-    ActiveBlockEvent, ActiveBlockEventData, ActiveSequenceEvent, ActiveSequenceEventBatch,
-    ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION, MAX_REPLICA_BATCH_EVENTS, PrefillEvent,
-    PrefillEventData, PrefillLoadHint, SchedulerGroup, SchedulerLoad,
+    ActiveSequenceEvent, ActiveSequenceEventBatch, ActiveSequenceEventData,
+    MAX_REPLICA_BATCH_DURATION, MAX_REPLICA_BATCH_EVENTS, PrefillLoadHint, SchedulerGroup,
+    SchedulerLoad,
 };

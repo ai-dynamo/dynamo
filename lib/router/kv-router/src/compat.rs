@@ -715,12 +715,6 @@ pub mod protocols {
     // Owner: dynamo_kv_events (18), dynamo_kv_hashing (17), dynamo_slot_tracker (12), dynamo_scheduler (8), dynamo_kv_indexer (7), dynamo_worker_selection (4), dynamo_router_protocol (3), dynamo_kv_hints (2), dynamo_session_affinity (1)
     #[deprecated(
         since = "1.8.0",
-        note = "moved to dynamo_slot_tracker::ActiveBlockEvent; removed in 1.10.0"
-    )]
-    pub type ActiveBlockEvent = dynamo_slot_tracker::ActiveBlockEvent;
-    pub use dynamo_slot_tracker::ActiveBlockEventData;
-    #[deprecated(
-        since = "1.8.0",
         note = "moved to dynamo_slot_tracker::ActiveSequenceEvent; removed in 1.10.0"
     )]
     pub type ActiveSequenceEvent = dynamo_slot_tracker::ActiveSequenceEvent;
@@ -799,12 +793,6 @@ pub mod protocols {
         note = "moved to dynamo_scheduler::PotentialLoad; removed in 1.10.0"
     )]
     pub type PotentialLoad = dynamo_scheduler::PotentialLoad;
-    #[deprecated(
-        since = "1.8.0",
-        note = "moved to dynamo_slot_tracker::PrefillEvent; removed in 1.10.0"
-    )]
-    pub type PrefillEvent = dynamo_slot_tracker::PrefillEvent;
-    pub use dynamo_slot_tracker::PrefillEventData;
     #[deprecated(
         since = "1.8.0",
         note = "moved to dynamo_slot_tracker::PrefillLoadHint; removed in 1.10.0"
