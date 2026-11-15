@@ -342,24 +342,77 @@ def test_tito_adapter_rejects_content_parts_without_multimodal_worker(
         )
 
 
+def _tracker_stub():
+    return SimpleNamespace(
+        media_io_kwargs=None,
+        allowed_local_media_path="",
+        allowed_media_domains=None,
+    )
+
+
+def test_content_parts_fetch_through_dynamo_media_connector():
+    from vllm.renderers.chat_utils import AsyncMultiModalContentParser
+
+    from dynamo.common.multimodal.media_connector import DynamoMediaConnector
+    from dynamo.vllm.engine_generate import _create_dynamo_media_parser
+
+    tracker = _tracker_stub()
+    tracker.create_parser = lambda: AsyncMultiModalContentParser(tracker)
+
+    parser = _create_dynamo_media_parser(tracker)
+
+    assert isinstance(parser._connector, DynamoMediaConnector)
+
+
+def test_content_parts_refuse_vllm_parser_without_connector_hook():
+    from dynamo.vllm.engine_generate import _create_dynamo_media_parser
+
+    tracker = _tracker_stub()
+    tracker.create_parser = lambda: SimpleNamespace(_connector=object())
+
+    with pytest.raises(RuntimeError, match="media URL policy"):
+        _create_dynamo_media_parser(tracker)
+
+
+def test_render_content_parts_rejects_remote_url_when_disabled(monkeypatch):
+    from vllm.renderers import chat_utils
+
+    from dynamo.common.http.url_validator import UrlValidationError
+    from dynamo.vllm.engine_generate import render_content_parts
+
+    def tracker_must_not_be_built(_model_config):
+        raise AssertionError("media was handed to vLLM despite the URL policy")
+
+    monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", "0")
+    monkeypatch.setattr(
+        chat_utils, "AsyncMultiModalItemTracker", tracker_must_not_be_built
+    )
+    part = {"type": "image_url", "url": "https://example.com/cat.png"}
+    with pytest.raises(UrlValidationError):
+        asyncio.run(render_content_parts(None, None, {}, [part]))
+
+
 def test_render_content_parts_maps_unreachable_media_to_400(monkeypatch):
     import aiohttp
     from vllm.renderers import chat_utils
 
     from dynamo.common.http import HttpStatusError
+    from dynamo.vllm import engine_generate
     from dynamo.vllm.engine_generate import render_content_parts
 
     class Tracker:
         def __init__(self, _model_config):
             pass
 
-        def create_parser(self):
-            return SimpleNamespace(parse_image=lambda url, uuid: None)
-
         async def resolve_items(self):
             raise aiohttp.ClientConnectionError("unreachable")
 
     monkeypatch.setattr(chat_utils, "AsyncMultiModalItemTracker", Tracker)
+    monkeypatch.setattr(
+        engine_generate,
+        "_create_dynamo_media_parser",
+        lambda _tracker: SimpleNamespace(parse_image=lambda url, uuid: None),
+    )
     with pytest.raises(HttpStatusError) as excinfo:
         asyncio.run(render_content_parts(None, None, {}, [_IMAGE_PART]))
 

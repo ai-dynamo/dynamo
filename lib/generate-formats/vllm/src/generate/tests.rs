@@ -515,10 +515,10 @@ fn generate_response_surfaces_expanded_prompt() {
     let chunks = [LLMEngineOutput {
         token_ids: vec![100],
         finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Stop),
-        engine_data: Some(json!({
+        engine_data: Some(Box::new(json!({
             "prompt_token_ids": [1, 9, 9, 9, 9, 2],
             "mm_placeholders": placeholders,
-        })),
+        }))),
         ..Default::default()
     }];
 
