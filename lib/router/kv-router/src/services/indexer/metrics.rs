@@ -129,7 +129,7 @@ pub async fn metrics_middleware(req: Request<axum::body::Body>, next: Next) -> R
 }
 
 #[cfg(feature = "metrics")]
-pub fn set_worker_state(models: usize, workers: usize, listener_counts: [i64; 4]) {
+pub fn set_worker_state(models: usize, workers: usize, listener_counts: [i64; 6]) {
     METRICS.models.set(models as i64);
     METRICS.workers.set(workers as i64);
 
@@ -142,7 +142,7 @@ pub fn set_worker_state(models: usize, workers: usize, listener_counts: [i64; 4]
 }
 
 #[cfg(not(feature = "metrics"))]
-pub fn set_worker_state(_models: usize, _workers: usize, _listener_counts: [i64; 4]) {}
+pub fn set_worker_state(_models: usize, _workers: usize, _listener_counts: [i64; 6]) {}
 
 #[cfg(all(test, feature = "metrics"))]
 mod tests {
@@ -154,7 +154,7 @@ mod tests {
         let registry = prometheus::Registry::new();
         register(&registry).expect("registration should succeed");
 
-        set_worker_state(1, 2, [1, 1, 0, 0]);
+        set_worker_state(1, 2, [1, 0, 0, 1, 0, 0]);
         METRICS
             .request_duration
             .with_label_values(&["/health"])

@@ -19,6 +19,7 @@ pub mod inference_pool;
 mod log_budget;
 pub mod metrics;
 pub mod peer_discovery;
+mod peer_http;
 pub mod picker;
 pub mod pod_discovery;
 pub mod proto;

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,6 +50,9 @@ pub struct SelectionServiceBuilder {
     selection_cache: SelectionCacheConfig,
     worker_type: WorkerType,
     plugin_registry: RouterPluginRegistry,
+    defer_indexer_for_bootstrap: bool,
+    #[cfg(feature = "ingest-zmq")]
+    zmq_ingress: Option<Arc<ZmqDirectIngress>>,
     host: SelectionHost,
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
     session_affinity_ttl: Option<Duration>,
@@ -83,6 +87,24 @@ impl SelectionServiceBuilder {
         worker_type: WorkerType,
         plugin_registry: RouterPluginRegistry,
     ) -> Self {
+        #[cfg(feature = "ingest-zmq")]
+        let zmq_ingress = Some(Arc::new(ZmqDirectIngress::default()));
+        #[cfg(feature = "ingest-zmq")]
+        let host = SelectionHost {
+            cache: HostCache {
+                index: KvIndexSource::Owned(
+                    zmq_ingress
+                        .as_ref()
+                        .expect("default ZMQ ingress was just created")
+                        .clone(),
+                ),
+                ..HostCache::default()
+            },
+            ..SelectionHost::default()
+        };
+        #[cfg(not(feature = "ingest-zmq"))]
+        let host = SelectionHost::default();
+
         Self {
             kv_router_config,
             indexer_threads: 4,
@@ -95,19 +117,10 @@ impl SelectionServiceBuilder {
             selection_cache: SelectionCacheConfig::default(),
             worker_type,
             plugin_registry,
-            // The standalone service's partitions index worker KV events
-            // published over ZMQ; `kv_index` and `host` override this. Without
-            // the ZMQ ingress the host feeds the index itself.
+            defer_indexer_for_bootstrap: false,
             #[cfg(feature = "ingest-zmq")]
-            host: SelectionHost {
-                cache: HostCache {
-                    index: KvIndexSource::Owned(Arc::new(ZmqDirectIngress::default())),
-                    ..HostCache::default()
-                },
-                ..SelectionHost::default()
-            },
-            #[cfg(not(feature = "ingest-zmq"))]
-            host: SelectionHost::default(),
+            zmq_ingress,
+            host,
             worker_selection_policy_factory: None,
             session_affinity_ttl: None,
             session_affinity_mode: SessionAffinityMode::default(),
@@ -130,12 +143,20 @@ impl SelectionServiceBuilder {
     /// Shorthand for setting `host.cache.index`.
     pub fn kv_index(mut self, source: KvIndexSource) -> Self {
         self.host.cache.index = source;
+        #[cfg(feature = "ingest-zmq")]
+        {
+            self.zmq_ingress = None;
+        }
         self
     }
 
     /// What the embedding host supplies to every partition this service creates.
     pub fn host(mut self, host: SelectionHost) -> Self {
         self.host = host;
+        #[cfg(feature = "ingest-zmq")]
+        {
+            self.zmq_ingress = None;
+        }
         self
     }
 
@@ -148,6 +169,13 @@ impl SelectionServiceBuilder {
     #[cfg(all(feature = "ingest-zmq", feature = "peer-recovery"))]
     pub fn indexer_peers(mut self, indexer_peers: Vec<String>) -> Self {
         self.indexer_peers = indexer_peers;
+        self
+    }
+
+    /// Keep new ZMQ listeners buffering until
+    /// [`SelectionService::bootstrap_indexer`] completes recovery.
+    pub fn defer_indexer_for_bootstrap(mut self) -> Self {
+        self.defer_indexer_for_bootstrap = true;
         self
     }
 
@@ -238,6 +266,8 @@ impl SelectionServiceBuilder {
         let indexer_policy = IndexerPolicy::from_config(
             &dynamo_kv_indexer::config::IndexerConfig::from(&self.kv_router_config),
         )?;
+        #[cfg(feature = "ingest-zmq")]
+        let zmq_ingress = self.zmq_ingress.clone();
         let cancel_token = CancellationToken::new();
         let mut startup_guard = StartupGuard::new(cancel_token.clone());
         #[cfg(feature = "replica-sync-zmq")]
@@ -287,12 +317,23 @@ impl SelectionServiceBuilder {
 
         #[cfg(all(feature = "ingest-zmq", feature = "peer-recovery"))]
         if !self.indexer_peers.is_empty() {
-            match crate::services::indexer::recovery::recover_from_peers(
-                &self.indexer_peers,
-                core.index_registry(),
-            )
-            .await
-            {
+            let result = if let Some(ingress) = &zmq_ingress {
+                let listeners = ingress
+                    .listeners()
+                    .expect("SelectionCore attaches the service's ZMQ ingress");
+                crate::services::indexer::recovery::recover_from_peers_with_listeners(
+                    &self.indexer_peers,
+                    listeners,
+                )
+                .await
+            } else {
+                crate::services::indexer::recovery::recover_from_peers(
+                    &self.indexer_peers,
+                    core.index_registry(),
+                )
+                .await
+            };
+            match result {
                 Ok(true) => tracing::info!("Selection indexer recovery completed"),
                 Ok(false) => {
                     tracing::warn!(
@@ -304,7 +345,9 @@ impl SelectionServiceBuilder {
                 }
             }
         }
-        core.signal_indexer_ready();
+        if !self.defer_indexer_for_bootstrap {
+            core.signal_indexer_ready();
+        }
 
         #[cfg(feature = "replica-sync-zmq")]
         let peer_manager = if replica_runtime.is_some() {
@@ -334,6 +377,8 @@ impl SelectionServiceBuilder {
         Ok(SelectionService {
             core,
             session_binding_rx,
+            #[cfg(feature = "ingest-zmq")]
+            zmq_ingress,
             #[cfg(feature = "replica-sync-zmq")]
             peer_manager,
             #[cfg(feature = "replica-sync-zmq")]
@@ -479,6 +524,8 @@ impl Drop for StartupGuard {
 
 pub struct SelectionService {
     core: Arc<SelectionCore>,
+    #[cfg(feature = "ingest-zmq")]
+    zmq_ingress: Option<Arc<ZmqDirectIngress>>,
     /// `None` when replication is disabled; the inner `None` once taken.
     session_binding_rx: Option<Mutex<Option<mpsc::Receiver<AffinityBindingEvent>>>>,
     #[cfg(feature = "replica-sync-zmq")]
@@ -554,6 +601,7 @@ impl SelectionService {
         indexer_threads: usize,
     ) -> Self {
         let cancel_token = CancellationToken::new();
+        let zmq_ingress = Arc::new(ZmqDirectIngress::default());
         Self {
             session_binding_rx: None,
             core: Arc::new(
@@ -570,7 +618,7 @@ impl SelectionService {
                     }),
                     SelectionHost {
                         cache: HostCache {
-                            index: KvIndexSource::Owned(Arc::new(ZmqDirectIngress::default())),
+                            index: KvIndexSource::Owned(zmq_ingress.clone()),
                             ..HostCache::default()
                         },
                         ..SelectionHost::default()
@@ -578,6 +626,7 @@ impl SelectionService {
                 )
                 .expect("valid test config"),
             ),
+            zmq_ingress: Some(zmq_ingress),
             peer_manager: None,
             replica_runtime: None,
             replica_sync_port: None,
@@ -601,6 +650,41 @@ impl SelectionService {
     #[cfg(feature = "replica-sync-zmq")]
     pub fn replica_sync_port(&self) -> Option<u16> {
         self.replica_sync_port
+    }
+
+    /// Complete subscribe-first indexer bootstrap around a caller-provided recovery step.
+    ///
+    /// The service waits until every registered ZMQ listener is buffering, runs
+    /// `recover`, then drains the buffered tail before returning. The builder
+    /// must have been configured with [`SelectionServiceBuilder::defer_indexer_for_bootstrap`].
+    pub async fn bootstrap_indexer<F, Fut>(&self, recover: F) -> anyhow::Result<()>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = anyhow::Result<()>>,
+    {
+        #[cfg(feature = "ingest-zmq")]
+        let Some(ingress) = self.zmq_ingress.as_ref() else {
+            anyhow::bail!(
+                "indexer bootstrap requires the service's ZMQ-direct ingress; a custom host or kv_index ingress owns its own lifecycle"
+            );
+        };
+        #[cfg(not(feature = "ingest-zmq"))]
+        {
+            let _ = recover;
+            anyhow::bail!("indexer bootstrap requires the ingest-zmq feature");
+        }
+        #[cfg(feature = "ingest-zmq")]
+        {
+            anyhow::ensure!(
+                !ingress.listeners_started(),
+                "indexer bootstrap requires deferred listener start; construct the service with \
+             SelectionServiceBuilder::defer_indexer_for_bootstrap()"
+            );
+            ingress.wait_for_listeners_buffering().await?;
+            recover().await?;
+            ingress.start_listeners();
+            ingress.wait_for_listeners_active().await
+        }
     }
 
     pub async fn patch_worker(
@@ -753,8 +837,19 @@ impl SelectionService {
     /// Replay `peers`' indexer state into this service's index.
     #[cfg(all(feature = "ingest-zmq", feature = "peer-recovery"))]
     pub async fn recover_indexer_from_peers(&self, peers: &[String]) -> anyhow::Result<bool> {
-        crate::services::indexer::recovery::recover_from_peers(peers, self.core.index_registry())
+        if let Some(ingress) = &self.zmq_ingress {
+            let listeners = ingress
+                .listeners()
+                .expect("SelectionCore attaches the service's ZMQ ingress");
+            crate::services::indexer::recovery::recover_from_peers_with_listeners(peers, listeners)
+                .await
+        } else {
+            crate::services::indexer::recovery::recover_from_peers(
+                peers,
+                self.core.index_registry(),
+            )
             .await
+        }
     }
 
     pub async fn shutdown(&self) {
@@ -814,6 +909,53 @@ mod tests {
                 role.default_selector_label(),
             )
         }))
+    }
+
+    #[tokio::test]
+    async fn builder_starts_indexer_listeners_by_default() {
+        let service =
+            SelectionServiceBuilder::new(test_config(), WorkerType::Aggregated, test_registry())
+                .indexer_threads(1)
+                .build()
+                .await
+                .unwrap();
+        assert!(service.zmq_ingress.as_ref().unwrap().listeners_started());
+        let error = service
+            .bootstrap_indexer(|| async { Ok(()) })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("deferred listener start"));
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn deferred_builder_bootstraps_indexer_in_order() {
+        let service =
+            SelectionServiceBuilder::new(test_config(), WorkerType::Aggregated, test_registry())
+                .indexer_threads(1)
+                .defer_indexer_for_bootstrap()
+                .build()
+                .await
+                .unwrap();
+        assert!(!service.zmq_ingress.as_ref().unwrap().listeners_started());
+        let error = service
+            .bootstrap_indexer(|| async { Err(anyhow::anyhow!("recovery failed")) })
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "recovery failed");
+        assert!(
+            !service.zmq_ingress.as_ref().unwrap().listeners_started(),
+            "failed recovery must leave buffered listeners gated"
+        );
+        service
+            .bootstrap_indexer(|| async {
+                assert!(!service.zmq_ingress.as_ref().unwrap().listeners_started());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(service.zmq_ingress.as_ref().unwrap().listeners_started());
+        service.shutdown().await;
     }
 
     #[tokio::test]

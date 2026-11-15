@@ -29,6 +29,10 @@ pub trait KvEventIngress: Send + Sync {
         let _ = (index, cancel_token);
     }
 
+    /// Release any transport listeners attached to this index from their
+    /// buffering phase. Passive and host-fed ingresses need no transition.
+    fn signal_ready(&self) {}
+
     fn open(&self, index: &IndexRegistry, key: &RoutingPartitionId, block_size: u32) -> Indexer;
 
     fn missing_metadata(&self, record: &WorkerCatalogRecord) -> Vec<String> {

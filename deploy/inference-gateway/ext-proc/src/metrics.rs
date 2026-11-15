@@ -20,7 +20,8 @@ use axum::{
 };
 use dynamo_llm::http::service::metrics::generate_log_buckets;
 use prometheus::{
-    Encoder, Histogram, HistogramOpts, HistogramVec, Registry, TEXT_FORMAT, TextEncoder,
+    Encoder, Histogram, HistogramOpts, HistogramVec, IntGaugeVec, Opts, Registry, TEXT_FORMAT,
+    TextEncoder,
 };
 
 use crate::tokio_runtime::TaskKind;
@@ -92,6 +93,54 @@ pub fn observe_cached_tokens(cached_tokens: u64) {
     CACHED_TOKENS
         .with_label_values(&[served_model_label()])
         .observe(cached_tokens as f64);
+}
+
+/// Possible startup KV-index recovery outcomes for one EPP replica. The gauge
+/// reports which state is current (1 for it, 0 for the others), so a scrape can
+/// distinguish "recovered from a peer" from "bootstrapped empty" and from
+/// "recovery disabled" — the difference between a normal cold start and a
+/// silent full-index loss.
+pub const KV_RECOVERY_RECOVERED: &str = "recovered";
+pub const KV_RECOVERY_EMPTY_BOOTSTRAP: &str = "empty_bootstrap";
+pub const KV_RECOVERY_DISABLED: &str = "recovery_disabled";
+
+/// Current startup KV-index recovery outcome for this replica. Set once at
+/// startup. A `1` appears on exactly one `state` label; the others are `0`.
+///
+/// Alerts consume the *transition* (a replica that previously exported
+/// `recovered` flipping to `empty_bootstrap` means a full-index loss, whereas
+/// `empty_bootstrap` from first deployment is normal) or a *stuck* `disabled` /
+/// `empty_bootstrap` lasting past the expected upgrade window — not the bare
+/// state, which is expected during first deploy and rolling upgrades.
+static KV_RECOVERY_STATE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    let gauge = IntGaugeVec::new(
+        Opts::new(
+            "dynamo_epp_kv_recovery_state",
+            "Startup KV-index peer-recovery outcome for this EPP replica: \
+             recovered (restored from a peer dump), empty_bootstrap (no eligible \
+             serving peer), or recovery_disabled (the peer recovery HTTP port \
+             is not configured). Exactly one label is 1.",
+        ),
+        &["state"],
+    )
+    .expect("kv_recovery_state gauge options are statically valid");
+    REGISTRY
+        .register(Box::new(gauge.clone()))
+        .expect("kv_recovery_state is the only registrant of its name");
+    gauge
+});
+
+/// Mark this replica's startup KV-index recovery outcome.
+pub fn set_kv_recovery_state(state: &str) {
+    for candidate in [
+        KV_RECOVERY_RECOVERED,
+        KV_RECOVERY_EMPTY_BOOTSTRAP,
+        KV_RECOVERY_DISABLED,
+    ] {
+        KV_RECOVERY_STATE
+            .with_label_values(&[candidate])
+            .set(i64::from(candidate == state));
+    }
 }
 
 /// One step of routing a request, timed in `dynamo_epp_stage_duration_seconds`.

@@ -366,12 +366,13 @@ impl SelectionCore {
         );
         let listens_for_kv_events = config.use_kv_events;
         index_registry.set_indexer_policy(indexer_policy);
-        if signal_indexer_ready {
-            index_registry.signal_ready();
-        }
         {
             let KvIndexSource::Owned(ingress) = &host.cache.index;
             ingress.attach(&index_registry, cancel_token.clone());
+            if signal_indexer_ready {
+                index_registry.signal_ready();
+                ingress.signal_ready();
+            }
         }
         Self {
             catalog: WorkerCatalog::default(),
@@ -456,6 +457,8 @@ impl SelectionCore {
 
     pub fn signal_indexer_ready(&self) {
         self.index_registry.signal_ready();
+        let KvIndexSource::Owned(ingress) = &self.host.cache.index;
+        ingress.signal_ready();
     }
 
     pub fn dispatch_replica_event(&self, envelope: ScopedReplicaEvent) {
