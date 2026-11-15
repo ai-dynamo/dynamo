@@ -1996,8 +1996,9 @@ pub struct OpenAIPreprocessor {
     /// Present only for token-input embedding pipelines. The two tokenizer
     /// variants are initialized independently on demand.
     embedding_tokenizers: Option<TokenizerVariants>,
-    /// Present only for the completions pipeline, whose text prompts are
-    /// tokenized with the model's special tokens unless the request or
+    /// Present for the completions pipeline and in preprocessors built by
+    /// [`Self::new`]: completions text prompts are tokenized with the model's
+    /// special tokens unless the request or
     /// `DYN_COMPLETIONS_TOKENIZATION_ADD_SPECIAL_TOKENS` turns them off.
     completion_tokenizers: Option<TokenizerVariants>,
     model_info: Arc<dyn ModelInfo>,
@@ -2880,11 +2881,23 @@ impl OpenAIPreprocessor {
             .is_some_and(|effort| effort != "none")
     }
 
+    /// Build a preprocessor for the model's chat and completions requests, as
+    /// the inference gateway tokenizes both.
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
         let formatter = prompt_formatter_from_mdc(&mdc)?;
         let tokenizer = mdc.tokenizer()?;
+        let completion_tokenizers =
+            TokenizerVariants::new(&mdc, COMPLETIONS_ADD_SPECIAL_TOKENS_ENV)?;
         match formatter {
-            PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, tokenizer),
+            PromptFormatter::OAI(formatter) => Self::new_with_parts_inner(
+                mdc,
+                formatter,
+                tokenizer,
+                None,
+                Some(completion_tokenizers),
+                None,
+                true,
+            ),
         }
     }
 
@@ -5416,6 +5429,20 @@ impl OpenAIPreprocessor {
             return Ok(None);
         }
         variants.tokenizer(true).map(Some)
+    }
+
+    /// [`Self::gather_tokens`] for a `/v1/completions` request, with the
+    /// special-token policy of [`Self::completion_text_tokenizer`]. Callers that
+    /// tokenize a completions request before the completions pipeline, such as
+    /// the inference gateway, use it so that their ids match the pipeline's.
+    pub async fn gather_completion_tokens(
+        &self,
+        request: &NvCreateCompletionRequest,
+        tracker: Option<&RequestTracker>,
+    ) -> Result<(Vec<crate::protocols::TokenIdType>, HashMap<String, String>)> {
+        let text_tokenizer = self.completion_text_tokenizer(request)?;
+        self.gather_tokens_with(request, None, tracker, text_tokenizer.as_ref())
+            .await
     }
 
     /// Tokenize the request and return the token ids alongside any annotations
@@ -9004,9 +9031,8 @@ impl
         } else {
             // Normal path: tokenize the prompt; embeddings don't need MM routing,
             // so install tokens on the builder right away.
-            let text_tokenizer = self.completion_text_tokenizer(&request)?;
             let (token_ids, ann) = self
-                .gather_tokens_with(&request, None, tracker.as_deref(), text_tokenizer.as_ref())
+                .gather_completion_tokens(&request, tracker.as_deref())
                 .await?;
             builder.token_ids(token_ids);
             ann
@@ -9373,7 +9399,6 @@ mod token_data_tests {
         }
     }
 
-    /// The completions pipeline's preprocessor for the model in `dir`.
     fn completions_preprocessor(dir: &str) -> Arc<OpenAIPreprocessor> {
         let card = ModelDeploymentCard::load_from_disk(dir, None).unwrap();
         let tokenizer = card.tokenizer().unwrap();
@@ -9457,6 +9482,27 @@ mod token_data_tests {
                 completion_prompt_ids(&preprocessor, fields).await,
                 [15043, 3186]
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn general_preprocessor_tokenizes_completions_like_the_pipeline() {
+        // The inference gateway tokenizes completions with `OpenAIPreprocessor::new`
+        // and passes the ids on as `nvext.token_data`.
+        let card = ModelDeploymentCard::load_from_disk(TINYLLAMA_DIR, None).unwrap();
+        let preprocessor = OpenAIPreprocessor::new(card).unwrap();
+        let (with_bos, without_bos) = tinyllama_ids("Hello world");
+        for (add_special_tokens, expected) in [(None, &with_bos), (Some(false), &without_bos)] {
+            let mut body = serde_json::json!({"model": "test-model", "prompt": "Hello world"});
+            if let Some(add_special_tokens) = add_special_tokens {
+                body["add_special_tokens"] = serde_json::json!(add_special_tokens);
+            }
+            let request: NvCreateCompletionRequest = serde_json::from_value(body).unwrap();
+            let (ids, _) = preprocessor
+                .gather_completion_tokens(&request, None)
+                .await
+                .unwrap();
+            assert_eq!(&ids, expected);
         }
     }
 

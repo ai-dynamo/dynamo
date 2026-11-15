@@ -151,8 +151,8 @@ async fn render_and_tokenize(
 }
 
 /// Tokenize a completion request's prompt with
-/// [`OpenAIPreprocessor::gather_tokens`], holding one of `slots` until the
-/// tokenizer finishes. `gather_tokens` tokenizes on the blocking pool, where
+/// [`OpenAIPreprocessor::gather_completion_tokens`], holding one of `slots`
+/// until the tokenizer finishes. It tokenizes on the blocking pool, where
 /// a cancelled pick cannot stop it, so the slot goes to a task that waits for
 /// the tokenizer. As for chat, a pick cancelled while it waits for a slot
 /// never starts; one cancelled later lets the work finish and drops the
@@ -168,7 +168,7 @@ async fn gather_completion_tokens(
         .map_err(|_| TokenizationCancelled)?;
     let tokenized = tokio::spawn(async move {
         let _slot = slot;
-        preprocessor.gather_tokens(&request, None, None).await
+        preprocessor.gather_completion_tokens(&request, None).await
     });
     let (tokens, _annotations) = tokenized.await.map_err(tokenization_join_error)??;
     Ok(tokens)
@@ -483,7 +483,7 @@ impl Router {
     ///
     /// Pre-tokenized (integer) prompts route directly on their token IDs, while text prompts
     /// are tokenized as a raw completion prompt (no chat template) via the
-    /// same [`OpenAIPreprocessor::gather_tokens`] path the backend uses for a
+    /// same [`OpenAIPreprocessor::gather_completion_tokens`] path the backend uses for a
     /// live `/v1/completions` request, so the tokens computed here for
     /// routing/injection are identical to what the backend would compute on
     /// its own. Batched prompts route on the first entry, since KV prefix
@@ -530,7 +530,7 @@ impl Router {
     }
 
     /// Tokenize `text` as a raw `/v1/completions` prompt — no chat template —
-    /// via [`OpenAIPreprocessor::gather_tokens`], the same tokenization path
+    /// via [`OpenAIPreprocessor::gather_completion_tokens`], the same tokenization path
     /// the backend runs for a live completions request. Keeps the
     /// `nvext.token_data` injected downstream identical to what the backend
     /// would have tokenized itself, so preempting backend tokenization does
@@ -2143,8 +2143,8 @@ mod tests {
 
     /// Regression test for a text `/v1/completions` prompt: the tokens
     /// `Router::tokenize_completion_text` computes for routing/injection must
-    /// be byte-identical to what `OpenAIPreprocessor::gather_tokens` produces
-    /// for a real client-shaped completions request with the same prompt —
+    /// be byte-identical to what `OpenAIPreprocessor::gather_completion_tokens`
+    /// produces for a real client-shaped completions request with the same prompt —
     /// i.e. ext-proc must reuse the backend's raw completion tokenization,
     /// not substitute a different one. It must also differ from the old
     /// (buggy) chat-template tokenization of the same text: injecting
@@ -2165,16 +2165,19 @@ mod tests {
 
         let text = "The capital of France is";
 
-        // Mirrors what `Router::tokenize_completion_text` sends to
-        // `gather_tokens`: the client's own request with `prompt` overwritten.
+        // What `Router::tokenize_completion_text` tokenizes: the client's own
+        // request with `prompt` overwritten.
         let ext_proc_request: NvCreateCompletionRequest = serde_json::from_str(
             &serde_json::json!({"model": "default", "prompt": text}).to_string(),
         )
         .unwrap();
-        let (ext_proc_tokens, _) = preprocessor
-            .gather_tokens(&ext_proc_request, None, None)
-            .await
-            .expect("gather_tokens on ext-proc's minimal completion request");
+        let ext_proc_tokens = gather_completion_tokens(
+            Arc::clone(&preprocessor),
+            ext_proc_request,
+            &Arc::new(Semaphore::new(1)),
+        )
+        .await
+        .expect("ext-proc tokenizes its minimal completion request");
 
         // A real client-shaped `/v1/completions` request for the same prompt,
         // tokenized via the same path the backend runs on a live request.
@@ -2188,11 +2191,12 @@ mod tests {
         )
         .unwrap();
         let (backend_tokens, _) = preprocessor
-            .gather_tokens(&backend_request, None, None)
+            .gather_completion_tokens(&backend_request, None)
             .await
-            .expect("gather_tokens on a real completions request");
+            .expect("gather_completion_tokens on a real completions request");
 
-        assert!(!ext_proc_tokens.is_empty());
+        // Like the backend, ext-proc gives a text prompt TinyLlama's BOS (id 1).
+        assert_eq!(ext_proc_tokens.first(), Some(&1));
         assert_eq!(
             ext_proc_tokens, backend_tokens,
             "ext-proc's routed tokens must match the backend's own raw completion tokenization"
@@ -2235,7 +2239,7 @@ mod tests {
     /// applies injected `token_data` to every split of the batch, so
     /// injecting prompt 1's tokens would silently run prompt 2 (and beyond)
     /// on prompt 1's tokens instead of its own. This exercises the same
-    /// `completion_prompt_routing_text` -> `gather_tokens` ->
+    /// `completion_prompt_routing_text` -> `gather_completion_tokens` ->
     /// `completion_text_tokens_safe_to_inject` -> `token_ids` gating chain
     /// that `Router::tokenize_completion` and `Router::pick` run, end to end.
     #[tokio::test]
@@ -2266,9 +2270,9 @@ mod tests {
         )
         .unwrap();
         let (routed_tokens, _) = preprocessor
-            .gather_tokens(&routing_request, None, None)
+            .gather_completion_tokens(&routing_request, None)
             .await
-            .expect("gather_tokens on the routing prompt");
+            .expect("gather_completion_tokens on the routing prompt");
 
         // The multi-entry batch is not safe to inject.
         assert!(!completion_text_tokens_safe_to_inject(
@@ -2290,9 +2294,9 @@ mod tests {
         )
         .unwrap();
         let (prompt2_tokens, _) = preprocessor
-            .gather_tokens(&prompt2_request, None, None)
+            .gather_completion_tokens(&prompt2_request, None)
             .await
-            .expect("gather_tokens on prompt 2");
+            .expect("gather_completion_tokens on prompt 2");
         assert_ne!(
             routed_tokens, prompt2_tokens,
             "prompt 2 must tokenize differently from the routed prompt 1 tokens"
