@@ -31,6 +31,7 @@ from dynamo.vllm.args import (
     update_engine_config_with_dynamo,
 )
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.handlers import build_sampling_params_openai
 from dynamo.vllm.headless import build_headless_namespace
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
@@ -2465,6 +2466,27 @@ class TestRealtimeWorkerFlag:
 
         with pytest.raises(ValueError, match="(?i)endpoint type"):
             parse_args()
+
+
+@pytest.mark.parametrize(
+    ("stop", "expected_stop", "expected_stop_token_ids"),
+    [
+        pytest.param([576], [], [576], id="token-id"),
+        pytest.param("END", ["END"], [], id="string"),
+        pytest.param(["END", "576"], ["END", "576"], [], id="strings"),
+    ],
+)
+def test_build_sampling_params_openai_stop(
+    stop, expected_stop, expected_stop_token_ids
+):
+    request = {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stop": stop,
+    }
+    sp = build_sampling_params_openai(request, default_sampling_params={})
+    assert sp.stop == expected_stop
+    assert sp.stop_token_ids == expected_stop_token_ids
 
 
 def test_build_sampling_params_openai_maps_max_thinking_tokens():

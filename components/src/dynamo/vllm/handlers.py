@@ -1111,8 +1111,16 @@ def build_sampling_params_openai(
         sampling_params.max_tokens = request["max_tokens"]
 
     # Handle stop sequences
-    if "stop" in request and request["stop"] is not None:
-        sampling_params.stop = request["stop"]
+    stop = request.get("stop")
+    if (
+        isinstance(stop, list)
+        and stop
+        and all(isinstance(item, int) and not isinstance(item, bool) for item in stop)
+    ):
+        # An all-integer `stop` array holds token IDs, not strings.
+        sampling_params.stop_token_ids = stop
+    elif stop is not None:
+        sampling_params.stop = stop
 
     # Handle ignore_eos (custom extension)
     if "ignore_eos" in request and request["ignore_eos"] is not None:
