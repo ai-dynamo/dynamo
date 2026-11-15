@@ -4,8 +4,9 @@
 //! What an in-tree host names from the KV indexer stage, in one place: the indexer handles it
 //! builds and feeds, the registry it opens partitions in, the lookup and recording types it
 //! reads back, and the service DTOs. Every item is re-exported from its owning module; this
-//! list is the host contract (hosts inventory v2, section 3). Tier 1 never imports it, and the
-//! DC relay's `cuckoo` module stays a public module of its own.
+//! list is the host contract (hosts inventory v2, section 3). Tier 1 never imports it. The DC
+//! relay has its own contract: the re-export list at the root of the `cuckoo` module, whose
+//! submodules are private.
 
 pub use crate::api::{KvStateProtocolVersion, WorkerKvQueryResponse};
 pub use crate::approximate_lru::{
