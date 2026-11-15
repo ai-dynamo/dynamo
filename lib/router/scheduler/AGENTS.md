@@ -1,6 +1,6 @@
 # lib/router/scheduler
 
-`dynamo-scheduler` is the router's kernel: it runs the stages for one request and owns the request and response types, the queue actor, and `SelectionCore`. Hosts outside `lib/router` import through `host`.
+`dynamo-scheduler` is the router's kernel: it runs the stages for one request and owns the request and response types, the queue actor, and `SelectionCore`. Hosts outside `lib/router` import through `host`. Modules are private except `host` and `test_utils`: the root list in `src/lib.rs` is the in-router contract, `host` is the subset promised to hosts outside `lib/router`, and a type another crate owns is imported from that crate, not re-exported here.
 
 ## Queue actor: due times and controlled delay
 

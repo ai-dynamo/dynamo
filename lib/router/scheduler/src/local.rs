@@ -19,7 +19,7 @@ use super::queue::{
     BookingHandle, ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor,
     SchedulerQueue,
 };
-use super::selector::{WorkerInputs, WorkerSelector, log_selection};
+use super::selector::{WorkerSelector, log_selection};
 use super::types::{
     AdmissionAttempt, AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId,
     KvSchedulerError, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad,
@@ -46,6 +46,7 @@ use dynamo_slot_tracker::{
 use dynamo_tokens::SequenceHash;
 use dynamo_worker_selection::SelectionTraceSpec;
 use dynamo_worker_selection::WorkerCapacity;
+use dynamo_worker_selection::WorkerInputs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkerConfigReconcileOutcome {

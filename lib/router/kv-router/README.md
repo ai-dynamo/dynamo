@@ -107,7 +107,7 @@ see the deprecations page. In-tree hosts import the owner's `host` module; plugi
 | Pre-split path | Owner |
 |---|---|
 | root re-exports of stage and kernel items (`WorkerSelectionPolicy`, `LocalScheduler`, `KvSchedulerError`, `SelectionConfig`, ...) | the owner's `host` module, `plugins::prelude`, or `config::` |
-| `protocols::*` | `dynamo_router_protocol`, `dynamo_kv_events` (`event`, `placement`, `residency`), `dynamo_kv_hashing::routing`, `dynamo_kv_hints`, `dynamo_scheduler::protocols` |
+| `protocols::*` | `dynamo_router_protocol`, `dynamo_kv_events` (`event`, `placement`, `residency`), `dynamo_kv_hashing::routing`, `dynamo_kv_hints`, `dynamo_scheduler` |
 | `protocols::ActiveLoad` | `dynamo_llm::kv_router::ActiveLoad` (this crate cannot see `lib/llm`, which publishes and reads the message) |
 | `identity::*` | `dynamo_router_protocol::identity` (indexer identity specs: `dynamo_kv_indexer`) |
 | `indexer::*`, `concurrent_radix_tree_compressed`, `nested_map`, `approx`, `radix_tree`, `session_prefix_index` | `dynamo_kv_indexer` (`host`, `cuckoo`, `api`) |
@@ -115,12 +115,12 @@ see the deprecations page. In-tree hosts import the owner's `host` module; plugi
 | `scheduling::{queue, selector, overlap, overlap_refresh, prefill_load, protocols, router_config, shared_cache, tracking_hash, classifier_rows}` and its kernel re-exports | `dynamo_scheduler` (`host`) |
 | `scheduling::{policy_queue, request_classifier, admission_config, queue_admission}` | `dynamo_admission` (`host`) |
 | `scheduling::lora_filter`, `conditional_disagg` | `dynamo_worker_selection` (`host`) |
-| `kv_hints` | `dynamo_kv_hints`, `dynamo_kv_indexer`, `dynamo_scheduler::kv_hints` |
+| `kv_hints` | `dynamo_kv_hints`, `dynamo_kv_indexer`, `dynamo_scheduler` |
 | `recovery` | `dynamo_kv_events::cursor` |
 | `zmq_wire` | `dynamo_kv_events::zmq_wire` |
 | `worker_type` | `dynamo_router_protocol::WorkerType` |
 | `services::selection::{affinity, SelectionCore, SelectionHost, PromptRequest, SelectRequest, ...}` | `dynamo_scheduler::host`, `dynamo_session_affinity::host` |
-| `services::overlap` | `dynamo_scheduler::overlap_summary` |
+| `services::overlap` | `dynamo_scheduler` |
 | features `standalone-indexer`, `standalone-slot-tracker`, `standalone-selection`, `runtime-protocols` | the adapter features they expanded to (`http` + `ingest-zmq` + `peer-recovery`; `http` + `replica-sync-zmq`; all four); `runtime-protocols` was empty |
 
 ## Working rules
