@@ -516,6 +516,7 @@ class TestImageHandlerResponseFormats:
         return handler
 
     @pytest.mark.asyncio
+    @pytest.mark.multimodal
     @pytest.mark.timeout(5)
     async def test_failed_batch_removes_uploads_that_finish_after_failure(
         self, tmp_path
