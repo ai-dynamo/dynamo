@@ -232,7 +232,6 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
         .transpose()?;
     let routing_host = Arc::new(
         RoutingHost::builder(router_client, router_mode)
-            .dispatch(model_manager.direct_dispatch())
             .kv_router(chooser)
             .load_context(load_context)
             .affinity_coordinator(affinity)
@@ -263,13 +262,9 @@ pub async fn prepare_engine(
         EngineConfig::Dynamic {
             model: local_model,
             prefill_load_estimator,
-            direct_dispatch,
             ..
         } => {
             let model_manager = Arc::new(ModelManager::new());
-            if let Some(dispatch) = direct_dispatch {
-                model_manager.set_direct_dispatch(dispatch)?;
-            }
             // Create metrics for migration tracking (not exposed via /metrics in Dynamic engine mode)
             let metrics = Arc::new(Metrics::new());
             let mut watcher = ModelWatcher::new(

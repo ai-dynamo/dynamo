@@ -186,11 +186,6 @@ pub struct ModelManager {
     /// ownership tracking because multiple routers may consume the same endpoint watch.
     runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
 
-    /// Set once when the frontend dials engines itself: every router this
-    /// manager builds dispatches through it, and KV events are read from the
-    /// engines' own publishers.
-    direct_dispatch: std::sync::OnceLock<crate::kv_router::LlmDispatch>,
-
     /// Per-endpoint HiCache state and its one Mooncake event subscriber.
     hicache_caches: DashMap<EndpointId, HicacheSharedKvCache>,
 
@@ -293,7 +288,6 @@ impl ModelManager {
             discovery_groups: DashMap::new(),
             worker_inventory: Default::default(),
             runtime_configs: DashMap::new(),
-            direct_dispatch: std::sync::OnceLock::new(),
             hicache_caches: DashMap::new(),
             kv_source_memberships: DashMap::new(),
             lora_domains: DashMap::new(),
@@ -2471,11 +2465,12 @@ impl ModelManager {
             &effective_kv_router_config,
             index_inputs,
         );
-        // Directly dialed engines publish KV events on their own sockets and
-        // have no event-plane KV sources to track. A router that wants no
+        // A frontend that dials its engines itself reaches them through the
+        // runtime's gRPC dispatch; they publish KV events on their own sockets
+        // and have no event-plane KV sources to track. A router that wants no
         // events keeps the runtime ingress, which then subscribes to nothing.
         let direct_kv_events =
-            self.direct_dispatch.get().is_some() && kv_event_source_requirement.should_subscribe();
+            endpoint.drt().has_grpc_dispatch() && kv_event_source_requirement.should_subscribe();
         let kv_source_membership =
             if !direct_kv_events && kv_event_source_requirement.should_subscribe() {
                 Some(
@@ -2770,24 +2765,6 @@ impl ModelManager {
             }
         }
         result
-    }
-
-    // -- Direct engines --
-
-    /// Route every model this manager serves through `dispatch` instead of the
-    /// request plane. Fails if a direct dispatch is already set.
-    pub fn set_direct_dispatch(
-        &self,
-        dispatch: crate::kv_router::LlmDispatch,
-    ) -> anyhow::Result<()> {
-        self.direct_dispatch
-            .set(dispatch)
-            .map_err(|_| anyhow::anyhow!("direct dispatch is already configured"))
-    }
-
-    /// The final hop when the frontend dials engines itself.
-    pub fn direct_dispatch(&self) -> Option<crate::kv_router::LlmDispatch> {
-        self.direct_dispatch.get().cloned()
     }
 
     // -- Runtime configs --
