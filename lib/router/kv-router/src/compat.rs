@@ -954,12 +954,6 @@ pub mod sequences {
     /// Pre-split `dynamo_kv_router::sequences::single`; its items live in `dynamo_slot_tracker` now.
     pub mod single {
         // Owner: dynamo_slot_tracker (3)
-        #[deprecated(
-            since = "1.8.0",
-            note = "moved to dynamo_slot_tracker::ActiveSequences; removed in 1.10.0"
-        )]
-        pub type ActiveSequences = dynamo_slot_tracker::ActiveSequences;
-        pub use dynamo_slot_tracker::DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
         pub use dynamo_slot_tracker::RequestId;
     }
 
@@ -975,13 +969,7 @@ pub mod sequences {
         pub use dynamo_slot_tracker::WorkerTopologyError;
     }
 
-    #[deprecated(
-        since = "1.8.0",
-        note = "moved to dynamo_slot_tracker::ActiveSequences; removed in 1.10.0"
-    )]
-    pub type ActiveSequences = dynamo_slot_tracker::ActiveSequences;
     pub use dynamo_slot_tracker::ActiveSequencesMultiWorker;
-    pub use dynamo_slot_tracker::DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
     pub use dynamo_slot_tracker::LifecycleMutationOutcome;
     #[deprecated(
         since = "1.8.0",
@@ -1097,11 +1085,6 @@ pub use sequences::{multi_worker as multi_worker_sequence, single as sequence};
 
 // Root re-exports of the pre-split lib.rs.
 // Owner: dynamo_scheduler (22), dynamo_kv_indexer (20), dynamo_slot_tracker (11), dynamo_router_protocol (8), dynamo_worker_selection (5), dynamo_kv_events (2), dynamo_kv_hashing (2), dynamo_admission (1), dynamo_kv_hints (1), dynamo_kv_router (1)
-#[deprecated(
-    since = "1.8.0",
-    note = "moved to dynamo_slot_tracker::ActiveSequences; removed in 1.10.0"
-)]
-pub type ActiveSequences = dynamo_slot_tracker::ActiveSequences;
 #[allow(deprecated)]
 pub use dynamo_kv_indexer::AnchorAwareBranchShardedIndexer;
 pub use dynamo_slot_tracker::ActiveSequencesMultiWorker;

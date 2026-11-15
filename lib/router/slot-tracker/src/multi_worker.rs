@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Multi-worker extension of [`ActiveSequences`] with per-worker `parking_lot::RwLock` for
+//! Multi-worker extension of `ActiveSequences` with per-worker `parking_lot::RwLock` for
 //! fine-grained concurrent access, with pluggable event publishing and metric observation via
 //! traits.
 //!
@@ -361,7 +361,7 @@ impl LifecycleMutationOutcome {
     }
 }
 
-/// Multi-worker extension of [`ActiveSequences`] with per-worker `parking_lot::RwLock` for
+/// Multi-worker extension of `ActiveSequences` with per-worker `parking_lot::RwLock` for
 /// fine-grained concurrent access.
 ///
 /// The outer reader-sharded `WorkerTable` lock is held only during sync blocks (never across
