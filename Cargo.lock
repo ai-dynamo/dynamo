@@ -2756,7 +2756,6 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "blake3",
- "criterion",
  "dashmap",
  "dynamo-kv-events",
  "dynamo-kv-hashing",

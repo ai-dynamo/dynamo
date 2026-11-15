@@ -48,12 +48,7 @@ xxhash-rust = { workspace = true }
 
 [dev-dependencies]
 dynamo-router-protocol = { workspace = true, features = ["testing"] }
-criterion = "0.5"
 rmp-serde = { workspace = true }
 rstest = "0.18.2"
 rstest_reuse = "0.7.0"
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
-
-[[bench]]
-name = "indexer_delegate"
-harness = false
