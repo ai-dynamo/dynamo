@@ -15,17 +15,14 @@ use std::{
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
-use dynamo_kv_router::{
-    identity::CacheOwnerId,
-    indexer::{
-        KvStateAgentIdentity, KvStateAgentStatus, KvStateProtocolVersion, WorkerKvQueryResponse,
-    },
-    protocols::{
-        KvCacheEvent, KvCacheEventData, ResetScope, ResidencyDomain, ResidencyProjection,
-        ResidencyRoutingSnapshot, RouterEvent, RouterHintSourceMetadata, StorageTier,
-        WorkerWithDpRank,
-    },
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, RouterEvent};
+use dynamo_kv_events::residency::{ResetScope, ResidencyDomain, StorageTier};
+use dynamo_kv_indexer::host::{
+    KvStateAgentIdentity, KvStateAgentStatus, KvStateProtocolVersion, ResidencyProjection,
+    ResidencyRoutingSnapshot, RouterHintSourceMetadata, WorkerKvQueryResponse,
 };
+use dynamo_router_protocol::identity::CacheOwnerId;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     component::Component,
     discovery::{
@@ -2404,22 +2401,23 @@ async fn clear_cache_owner(indexer: &Indexer, owner: CacheOwnerId, event_id: u64
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
-
-    use dynamo_kv_router::identity::{
+    use dynamo_kv_events::event::{KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData};
+    use dynamo_kv_events::residency::ResidencyOwner;
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_kv_hints::KvTransferCandidateSource;
+    use dynamo_kv_indexer::host::RouterHintSourceMetadata;
+    use dynamo_kv_indexer::host::{
+        KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvStateAttachmentStatus,
+        KvStateRecoveryReceipt, LowerTierIndexers, LowerTierQueryOptions, MatchDetails,
+        ResidencyOwnerKeyExt, query_lower_tiers_with_options,
+    };
+    use dynamo_router_protocol::identity::{
         CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
         StableDpSlotId,
     };
-    use dynamo_kv_router::indexer::{
-        KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvStateAttachmentStatus,
-        KvStateRecoveryReceipt, LowerTierIndexers, LowerTierQueryOptions, MatchDetails,
-        query_lower_tiers_with_options,
-    };
-    use dynamo_kv_router::kv_hints::KvTransferCandidateSource;
-    use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
-        LocalBlockHash, ResidencyOwner, RouterHintSourceMetadata, WorkerWithDpRank,
-    };
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
+    use std::{collections::HashMap, sync::Arc};
+
     use dynamo_runtime::{component::TransportType, protocols::EndpointId};
     use tokio_util::sync::CancellationToken;
 

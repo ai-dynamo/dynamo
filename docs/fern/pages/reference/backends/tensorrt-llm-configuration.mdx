@@ -161,9 +161,15 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
 </ParamField>
 
 <ParamField path="--publish-metrics" type="boolean" default="false">
-  Expose TensorRT-LLM iteration and request metrics on this worker's Prometheus endpoint, and publish the Planner's forward-pass metrics, which read the same iteration statistics. This flag does not publish KV cache events. It enables `enable_iter_perf_stats` and the per-request `SamplingParams.return_perf_metrics`, but keeps the engine's `return_perf_metrics` disabled. The same iteration statistics carry the per-rank used-block count read by the frontend's optional `--active-decode-blocks-threshold`. The KV router's per-worker scoring never reads that sample, so this flag does not change KV-aware ranking; with that threshold set, the count is OR-ed with the router's own decode-block estimate and can mark a worker overloaded, which removes it from the candidate set until it recovers.
+  Expose TensorRT-LLM iteration metrics on this worker's Prometheus endpoint, and publish the Planner's forward-pass metrics, which read the same iteration statistics. This flag does not publish KV cache events, and it does not collect per-request metrics: add `--publish-per-request-metrics` for those. It enables `enable_iter_perf_stats` but keeps the engine's `return_perf_metrics` disabled. The same iteration statistics carry the per-rank used-block count read by the frontend's optional `--active-decode-blocks-threshold`. The KV router's per-worker scoring never reads that sample, so this flag does not change KV-aware ranking; with that threshold set, the count is OR-ed with the router's own decode-block estimate and can mark a worker overloaded, which removes it from the candidate set until it recovers.
 
   Environment variable: `DYN_TRTLLM_PUBLISH_METRICS`
+</ParamField>
+
+<ParamField path="--publish-per-request-metrics" type="boolean" default="false">
+  With `--publish-metrics`, also collect TensorRT-LLM per-request performance metrics by enabling `SamplingParams.return_perf_metrics`. They feed TensorRT-LLM's per-request series, such as `trtllm_e2e_request_latency_seconds` and `trtllm_time_to_first_token_seconds`, and Dynamo's `trtllm_kv_transfer_*` metrics. The worker processes them for every finished request, which costs serving throughput, most with long prompts. Setting this flag without `--publish-metrics` is an error. The frontend's own request latency metrics do not need it.
+
+  Environment variable: `DYN_TRTLLM_PUBLISH_PER_REQUEST_METRICS`
 </ParamField>
 
 ## Engine args passthrough

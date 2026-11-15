@@ -158,7 +158,7 @@ V2 uses one family grammar for reasoning, text, and tools. Either selector can u
 | Kimi K3 | `kimi_k3`, `kimi-k3` |
 | MiniMax M3 | `minimax_m3`, `minimax-m3` |
 | Qwen3 Coder | `qwen3`, `qwen3_coder` |
-| Muse Glimmer | `muse_glimmer`, `muse` |
+| Muse Glimmer | `muse_glimmer`; `muse` is a deprecated alias of `muse_glimmer` |
 | Muse Spark | `muse_spark`, `muse_spark_open` |
 | Nemotron V3 | `nemotron_v3`, `nemotron3` |
 | Beam | `beam` |

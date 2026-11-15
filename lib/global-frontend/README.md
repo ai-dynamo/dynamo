@@ -246,14 +246,37 @@ Use a discovery readiness probe independent of pool availability, such as
 `/live`. The existing `/health` requires a routable pool, so using it to discover
 new routers could keep Relays from ever finding them.
 
+## Router self-registration
+
+With GDS configured for `--router-discovery registrations`, pass both registration flags:
+
+```bash
+global-frontend --port 8000 --relay-view-port 50051 \
+  --global-discovery-url http://global-discovery:8080 \
+  --router-replica-id cluster-a/pod-uid \
+  --router-advertise-url http://10.42.0.5:50051
+```
+
+The advertised URL must reach this replica's state receiver from every Pool Relay. A Pod IP on a
+routed private network works; a Service or load balancer shared by several replicas does not.
+Kubernetes can provide `metadata.uid` and `status.podIP` through the Downward API. Bracket IPv6
+addresses in URLs. Supply a new replica ID if the endpoint changes; reuse an ID only for the same
+incarnation at the same address, such as a container restart in an unchanged Pod.
+
+The frontend registers after binding its listeners, before pools are available, then renews on the
+lease interval returned by GDS. Transient errors retry with bounded backoff. Shutdown stops renewal,
+and GDS removes the router after its lease expires. Both flags require `--global-discovery-url` and
+`--relay-view-port`; omitting both preserves externally managed static/MCS membership.
+
 ## Metrics
 
 `/metrics`, on the same port, serves the Global Frontend's Prometheus metrics,
 named `dynamo_global_frontend_*`: requests per pool by response status,
 `no_response` when the pool sends no response, or `cancelled` when the client
 leaves before the pool's response headers arrive; requests answered without a
-pool; time to first byte and duration per pool; and requests in flight per
-pool. With `--router-policy affinity` it also serves:
+pool; time to first byte and duration per pool; requests in flight per
+pool; and the time to select a pool. With `--router-policy affinity` it also
+serves:
 
 - `overhead_affinity_store_ms`, the time each session request spent in affinity
   storage, named and bucketed like the local router's
@@ -287,6 +310,13 @@ for each family.
   Frontend's hosts, or each idle connection starts over with a small send
   window and a long prompt costs extra round trips.
 
+## Router core
+
+With `--use-selection-core`, the Global Frontend selects pools through an
+embedded router core: each pool is a core worker and the policy is a picker
+plugin. Only `round-robin` runs on the core for now, picking as the
+round-robin selector does.
+
 ## Limitations
 
 Pool registration remains the Relay deployment's responsibility. There is no
@@ -301,6 +331,6 @@ cargo test -p dynamo-global-common -p dynamo-global-router -p dynamo-global-fron
 ```
 
 The common `PoolId` identifies a DGD using its deployment coordinates. It is
-distinct from `dynamo_kv_router::identity::PoolId`, which identifies an indexer
+distinct from `dynamo_router_protocol::identity::PoolId`, which identifies an indexer
 domain/DC lane. Relay routing scope supplies the DGD boundary; catalog producer
 identities retain the indexer-domain/DC scope.

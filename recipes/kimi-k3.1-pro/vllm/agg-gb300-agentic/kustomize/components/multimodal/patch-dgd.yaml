@@ -16,32 +16,38 @@
 # Loads the vision tower and enables image/video input (text-only is the default, measured recipe).
 - op: test
   path: /spec/components/1/name
-  value: worker
+  value: Worker
 - op: test
   path: /spec/components/1/type
   value: worker
 - op: replace
-  path: /spec/components/1/podTemplate/spec/containers/0/args/0
-  value: |
-      set -euo pipefail
-      ulimit -l unlimited
-      ulimit -n 1048576
-
-      exec python3 -m dynamo.vllm \
-        --reasoning-parser kimi_k3 \
-        --model "${MODEL_PATH}" \
-        --served-model-name moonshotai/Kimi-K3.1-Pro \
-        --tensor-parallel-size 8 \
-        --distributed-executor-backend mp \
-        --attention-backend FLASHMLA_SPARSE \
-        --trust-remote-code \
-        --enable-multimodal \
-        --enable-logging-iteration-details \
-        --additional-config '{"decode_backend":"latency_specialized"}' \
-        --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":1024,"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,32,48,64,96,128,192,256,512,1024]}' \
-        --dyn-reasoning-parser kimi_k3 \
-        --dyn-tool-call-parser kimi_k3 \
-        --gpu-memory-utilization 0.92 \
-        --load-format fastsafetensors \
-        --no-enable-flashinfer-autotune \
-        --skip-mm-profiling
+  path: /spec/components/1/podTemplate/spec/containers/0/args
+  value:
+  - --reasoning-parser
+  - kimi_k3
+  - --model
+  - $(MODEL_NAME)
+  - --served-model-name
+  - moonshotai/Kimi-K3.1-Pro
+  - --tensor-parallel-size
+  - '8'
+  - --distributed-executor-backend
+  - mp
+  - --attention-backend
+  - FLASHMLA_SPARSE
+  - --trust-remote-code
+  - --enable-multimodal
+  - --additional-config
+  - '{"decode_backend":"latency_specialized"}'
+  - --compilation-config
+  - '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":1024,"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,32,48,64,96,128,192,256,512,1024]}'
+  - --dyn-reasoning-parser
+  - kimi_k3
+  - --dyn-tool-call-parser
+  - kimi_k3
+  - --gpu-memory-utilization
+  - '0.92'
+  - --load-format
+  - fastsafetensors
+  - --no-enable-flashinfer-autotune
+  - --skip-mm-profiling

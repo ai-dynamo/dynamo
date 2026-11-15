@@ -279,7 +279,12 @@ The Planner does not have per-component maximum endpoint fields. `max_gpu_budget
 </ParamField>
 
 <ParamField path="load_scaling_down_sensitivity" type="integer" default="80">
-  Scale-down sensitivity from 0 to 100 (0 = never scale down, 100 = aggressive).
+  Scale-down sensitivity from 0 to 100 for SLA-mode load scaling (100 = most aggressive). It sets how much
+  latency headroom the performance model must predict before load-based scaling removes a replica; 0 blocks
+  these model-based scale-downs. It does not apply when every fresh FPM observation for a pool is idle: the
+  Planner then removes one replica per decision, down to the larger of 1 and the endpoint floor. Set
+  `min_endpoint` (or the per-component floors) to keep idle capacity. Ignored unless `optimization_target`
+  is `sla`.
 </ParamField>
 
 <ParamField path="load_min_observations" type="integer" default="5">
