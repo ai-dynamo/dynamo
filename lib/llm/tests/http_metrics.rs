@@ -997,7 +997,6 @@ async fn test_responses_non_streaming_observes_metrics_before_backend_error_pref
     .await;
 }
 
-/// Poll `/metrics` until it contains every needle.
 async fn wait_for_metric_lines(
     client: &reqwest::Client,
     url: &str,
