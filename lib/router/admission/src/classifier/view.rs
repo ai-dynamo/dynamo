@@ -6,7 +6,7 @@
 //! selection's rows; the kernel implements it over them.
 
 use dynamo_router_protocol::columns::WorkerInfo;
-use dynamo_slot_tracker::busy::RankLoad;
+use dynamo_slot_tracker::RankLoad;
 
 /// Every worker rank eligible for one request, lent to [`super::RequestClassifier::classify`]
 /// for the duration of the call. Views are read-only snapshots, so they are `Sync` and a
