@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::time::Instant;
 
 use super::PrefillTokenDeltas;
-use super::prefill_tracker::{PrefillLoadSnapshot, PrefillTimeLoadError};
+use super::prefill_tracker::PrefillLoadSnapshot;
 use super::prompt_membership_trie::PromptMembershipTrie;
 use super::sharded_lock::ShardedRwLock;
 use super::single::PromptMembershipDelta;
@@ -84,13 +84,6 @@ impl WorkerLoadSnapshot {
             active_requests: self.active_requests,
             additional_active_blocks,
         }
-    }
-
-    pub(super) fn modeled_remaining_prefill_time_ms(
-        &self,
-        now: Instant,
-    ) -> Result<u64, PrefillTimeLoadError> {
-        self.prefill.modeled_remaining_prefill_time_ms_at(now)
     }
 }
 
@@ -569,17 +562,6 @@ impl PromptRegistry {
             .read()
             .iter()
             .map(|(worker, load)| (worker, load.active_tokens(decay_now)))
-            .collect()
-    }
-
-    pub(super) fn modeled_remaining_prefill_times_ms(
-        &self,
-        now: Instant,
-    ) -> HashMap<WorkerWithDpRank, Result<u64, PrefillTimeLoadError>> {
-        self.loads
-            .read()
-            .iter()
-            .map(|(worker, load)| (worker, load.modeled_remaining_prefill_time_ms(now)))
             .collect()
     }
 
