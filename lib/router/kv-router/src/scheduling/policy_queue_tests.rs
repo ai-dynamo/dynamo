@@ -8,8 +8,10 @@ use tokio::time::Instant;
 
 use crate::scheduling::policy_config::RouterPolicyConfig;
 use crate::scheduling::policy_config::RouterQueuePolicy;
-use dynamo_admission::queue::*;
-use dynamo_admission::{PolicyClassConfig, PolicyProfile, WorkerPlacement};
+use dynamo_admission::{
+    PolicyClassConfig, PolicyProfile, PolicyQueue, PolicyQueueEntry, PolicyQueueStats, QueueLane,
+    QueueLimitKind, QueueMetadata, QueueReadiness, QueueSnapshot, WorkerPlacement,
+};
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_session_affinity::WorkerAffinityTarget;
 

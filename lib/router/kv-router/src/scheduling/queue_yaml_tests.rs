@@ -134,7 +134,7 @@ fn set_worker_capacities_from_configs(
 ) {
     slots.set_worker_capacities(configs.iter().map(|(&id, cfg)| {
         (
-            dynamo_slot_tracker::topology::WorkerDpRange::new(
+            dynamo_slot_tracker::WorkerDpRange::new(
                 id,
                 cfg.data_parallel_start_rank(),
                 cfg.data_parallel_size(),
@@ -197,7 +197,7 @@ policy_classes:
     prefill_busy_threshold_frac: 0.25
 "#,
     );
-    let reject = dynamo_slot_tracker::busy::BusyThresholds {
+    let reject = dynamo_slot_tracker::BusyThresholds {
         prefill_busy_threshold_frac: Some(1.0),
         ..Default::default()
     };
@@ -213,11 +213,11 @@ policy_classes:
     let (mut classified, _workers) =
         queue.build_classify_request(&request, Instant::now(), WorkerInputs::NONE);
 
-    let latency = dynamo_slot_tracker::busy::BusyThresholds {
+    let latency = dynamo_slot_tracker::BusyThresholds {
         decode_busy_threshold_frac: Some(0.5),
         ..Default::default()
     };
-    let bulk = dynamo_slot_tracker::busy::BusyThresholds {
+    let bulk = dynamo_slot_tracker::BusyThresholds {
         prefill_busy_threshold_frac: Some(0.25),
         ..Default::default()
     };
@@ -786,7 +786,7 @@ policy_classes:
     assert_eq!(rejection.policy_class, "capped");
     assert_eq!(
         rejection.limit_kind,
-        dynamo_admission::queue::QueueLimitKind::Requests
+        dynamo_admission::QueueLimitKind::Requests
     );
     assert_eq!(rejection.current, 1);
     assert_eq!(rejection.limit, 1);

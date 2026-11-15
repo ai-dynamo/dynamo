@@ -41,10 +41,10 @@ pub enum RouterPolicyConfigError {
 /// past them, and rejects the request when no eligible worker remains.
 pub use dynamo_scheduler::types::RejectThresholdsProvider;
 
-pub use dynamo_slot_tracker::busy::BusyRanksExt;
-pub use dynamo_slot_tracker::busy::{BusyThresholds, FullRankCounts};
+pub use dynamo_slot_tracker::BusyRanksExt;
+pub use dynamo_slot_tracker::{BusyThresholds, FullRankCounts};
 
-pub use dynamo_admission::profile::{
+pub use dynamo_admission::{
     AdmissionConfigError, PolicyClassConfig, PolicyProfile, RouterQueuePolicy,
     SYNTHETIC_POLICY_CLASS,
 };
@@ -430,7 +430,7 @@ mod tests {
     use super::*;
     use crate::plugins::worker_selection::WorkerSelectionPolicySelection;
     use crate::plugins::worker_selection::{WorkerLoadInput, WorkerLoadInputExt};
-    use dynamo_admission::profile::UnknownPolicyClassError;
+    use dynamo_admission::UnknownPolicyClassError;
     use dynamo_scheduler::types::KvSchedulerError;
     use dynamo_slot_tracker::WorkerLoadProjection;
 
