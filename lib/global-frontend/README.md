@@ -100,8 +100,9 @@ among the pools not yet tried, when its pool:
 - refuses the connection, does not accept it within `--connect-timeout-secs`,
   or fails before sending response headers, even after receiving the request
   (so the work may be done twice);
-- answers 503, or the overload status (`DYN_HTTP_OVERLOAD_STATUS_CODE`, 529 by
-  default; set it as on the pool frontends).
+- answers 503, or `--overload-status-code` (529 by default). Set it to the
+  pool frontends' `DYN_HTTP_OVERLOAD_STATUS_CODE`, or their overload answers
+  come back to the client.
 
 Any other status, such as 429 when it is not the overload status, comes back as
 the pool sent it. A request tries at most `--max-failovers` (default 1) other
@@ -350,8 +351,9 @@ for each family.
 With `--use-selection-core`, the Global Frontend selects pools through an
 embedded router core: each pool is a core worker and the policy is a picker
 plugin. Only `round-robin` runs on the core for now, picking as the
-round-robin selector does. [Failover](#failover) works the same way: the core
-picks again among the pools not yet tried.
+round-robin selector does, except that a [failover](#failover) takes the
+model's next turn (see [Limitations](#limitations)). The core picks again among
+the pools not yet tried.
 
 ## Limitations
 
@@ -360,9 +362,9 @@ has no TLS.
 
 Failover tries other pools, not other frontends of the same pool: a pool with
 one failing frontend sends the request to another pool, and a model served by
-one pool does not fail over. With `round-robin`, choosing the next pool takes
-the model's next turn, so a pool that keeps failing gets more than its share of
-first attempts.
+one pool does not fail over. With `--use-selection-core`, choosing the next
+pool takes `round-robin`'s next turn, so a pool that keeps failing gets more
+than its share of first attempts.
 
 ## Tests
 

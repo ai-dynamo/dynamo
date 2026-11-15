@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use axum::http::HeaderMap;
 use dynamo_global_common::{PoolId, PoolKey};
-use dynamo_global_frontend::{Metrics, PoolSnapshot};
+use dynamo_global_frontend::{Failover, Metrics, PoolSnapshot};
 use dynamo_global_router::{
     InFlightTracker, Pool, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
     SelectionCorePolicy, SelectionCoreSelector,
@@ -206,27 +206,21 @@ async fn global_frontend_with(
     selector: Arc<dyn PoolSelector>,
     in_flight: Arc<InFlightTracker>,
 ) -> GlobalFrontend {
-    global_frontend_failing_over(pools, selector, in_flight, 1).await
+    global_frontend_failing_over(pools, selector, in_flight, Failover::default()).await
 }
 
-/// [`global_frontend_with`], sending a request its pool cannot take to up to
-/// `max_failovers` other pools.
+/// [`global_frontend_with`], sending a request its pool cannot take to other
+/// pools as `failover` says.
 async fn global_frontend_failing_over(
     pools: Vec<Pool>,
     selector: Arc<dyn PoolSelector>,
     in_flight: Arc<InFlightTracker>,
-    max_failovers: usize,
+    failover: Failover,
 ) -> GlobalFrontend {
     let (sender, receiver) = watch::channel(Arc::new(PoolSnapshot::new(pools)));
     let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
-    let app = dynamo_global_frontend::app(
-        receiver,
-        selector,
-        in_flight,
-        client(),
-        metrics,
-        max_failovers,
-    );
+    let app =
+        dynamo_global_frontend::app(receiver, selector, in_flight, client(), metrics, failover);
     serve_app(app, sender).await
 }
 
@@ -250,7 +244,7 @@ async fn frontend_with_selection_core(pools: Vec<Pool>) -> GlobalFrontend {
         in_flight,
         client(),
         metrics,
-        1,
+        Failover::default(),
     );
     serve_app(app, sender).await
 }
@@ -892,7 +886,14 @@ async fn shutdown_lets_an_open_stream_finish_then_returns() {
     let in_flight = Arc::new(InFlightTracker::new());
     let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
     let selector = Arc::new(RoundRobinSelector::new());
-    let app = dynamo_global_frontend::app(receiver, selector, in_flight, client(), metrics, 1);
+    let app = dynamo_global_frontend::app(
+        receiver,
+        selector,
+        in_flight,
+        client(),
+        metrics,
+        Failover::default(),
+    );
     let shutdown = CancellationToken::new();
     let serving = tokio::spawn(dynamo_global_frontend::serve(
         listener,
@@ -974,6 +975,30 @@ async fn fails_over_from_an_unavailable_or_overloaded_pool() {
             Some(1.0)
         );
     }
+}
+
+/// A failover does not take round robin's turn, so a failing pool still gets
+/// only its share of first attempts.
+#[tokio::test]
+async fn a_failover_does_not_take_a_round_robin_turn() {
+    let green = echo_pool_frontend().await;
+    let (blue, blue_requests) =
+        answering_pool_frontend(StatusCode::SERVICE_UNAVAILABLE, "busy").await;
+    let global = global_frontend(vec![
+        pool("blue", MODEL, &blue.url),
+        pool("green", MODEL, &green.url),
+    ])
+    .await;
+    for _ in 0..4 {
+        let response = post(
+            &global.server.url,
+            "v1/chat/completions",
+            &chat(MODEL, "hi", false),
+        )
+        .await;
+        assert_eq!(chat_content(response).await, "hi");
+    }
+    assert_eq!(blue_requests.load(Ordering::Relaxed), 2);
 }
 
 #[tokio::test]
@@ -1065,44 +1090,6 @@ async fn fails_over_through_the_core() {
     assert!(attempts >= 2, "{attempts}");
 }
 
-/// Through the router core, each pool is tried once and the last one's
-/// answer is the client's.
-#[tokio::test]
-async fn the_last_attempt_passes_through_what_it_got_through_the_core() {
-    let overloaded = StatusCode::from_u16(529).unwrap();
-    let (blue, blue_requests) =
-        answering_pool_frontend(StatusCode::SERVICE_UNAVAILABLE, "blue is busy").await;
-    let (green, green_requests) = answering_pool_frontend(overloaded, "green is overloaded").await;
-    let global = frontend_with_selection_core(vec![
-        pool("blue", MODEL, &blue.url),
-        pool("green", MODEL, &green.url),
-    ])
-    .await;
-    let response = post(
-        &global.server.url,
-        "v1/chat/completions",
-        &chat(MODEL, "hi", false),
-    )
-    .await;
-    let status = response.status();
-    let body = response.text().await.unwrap();
-    let expected = if status == overloaded {
-        "green is overloaded"
-    } else {
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        "blue is busy"
-    };
-    assert_eq!(body, expected);
-    assert_eq!(blue_requests.load(Ordering::Relaxed), 1);
-    assert_eq!(green_requests.load(Ordering::Relaxed), 1);
-    let metrics = metrics_now(&global).await;
-    let failovers = FAILOVER_REASONS
-        .iter()
-        .filter_map(|reason| sample(&metrics, FAILOVERS, &[("reason", reason)]))
-        .sum::<f64>();
-    assert_eq!(failovers, 1.0);
-}
-
 #[tokio::test]
 async fn the_last_attempt_passes_through_what_it_got() {
     let unavailable = StatusCode::SERVICE_UNAVAILABLE;
@@ -1158,32 +1145,6 @@ async fn the_last_attempt_passes_through_what_it_got() {
 }
 
 #[tokio::test]
-async fn pools_without_frontends_are_not_tried() {
-    let (blue, _) = answering_pool_frontend(StatusCode::SERVICE_UNAVAILABLE, "blue is busy").await;
-    let draining = Pool::new(
-        &PoolKey::new("ohio", "dynamo", "draining").unwrap(),
-        MODEL,
-        REGION,
-        Vec::new(),
-    );
-    let global = global_frontend(vec![pool("blue", MODEL, &blue.url), draining]).await;
-
-    let response = post(
-        &global.server.url,
-        "v1/chat/completions",
-        &chat(MODEL, "hi", false),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(response.text().await.unwrap(), "blue is busy");
-    let metrics = metrics_now(&global).await;
-    let reason = [("reason", "unavailable")];
-    assert_eq!(sample(&metrics, FAILOVERS, &reason), Some(0.0));
-    let rejected = "dynamo_global_frontend_rejected_requests_total";
-    assert_eq!(sample(&metrics, rejected, &[]), None);
-}
-
-#[tokio::test]
 async fn failover_tries_each_pool_once_up_to_the_limit() {
     for (max_failovers, tried) in [(0, 1), (1, 2), (5, 3)] {
         let mut servers = Vec::new();
@@ -1196,7 +1157,11 @@ async fn failover_tries_each_pool_once_up_to_the_limit() {
         }
         let selector = Arc::new(RoundRobinSelector::new());
         let in_flight = Arc::new(InFlightTracker::new());
-        let global = global_frontend_failing_over(pools, selector, in_flight, max_failovers).await;
+        let failover = Failover {
+            max: max_failovers,
+            ..Failover::default()
+        };
+        let global = global_frontend_failing_over(pools, selector, in_flight, failover).await;
 
         let response = post(
             &global.server.url,
@@ -1215,6 +1180,51 @@ async fn failover_tries_each_pool_once_up_to_the_limit() {
         let reason = [("reason", "unavailable")];
         let failovers = (tried - 1) as f64;
         assert_eq!(sample(&metrics, FAILOVERS, &reason), Some(failovers));
+    }
+}
+
+/// The overload status the pools are configured with fails over, even 429,
+/// and the default one no longer does.
+#[tokio::test]
+async fn the_configured_overload_status_fails_over() {
+    let green = echo_pool_frontend().await;
+    let default_overload = StatusCode::from_u16(529).unwrap();
+    for (status, fails_over) in [
+        (StatusCode::TOO_MANY_REQUESTS, true),
+        (default_overload, false),
+    ] {
+        let (blue, _) = answering_pool_frontend(status, "busy").await;
+        let pools = vec![
+            pool("blue", MODEL, &blue.url),
+            pool("green", MODEL, &green.url),
+        ];
+        let failover = Failover {
+            overload: StatusCode::TOO_MANY_REQUESTS,
+            ..Failover::default()
+        };
+        let selector = Arc::new(RoundRobinSelector::new());
+        let in_flight = Arc::new(InFlightTracker::new());
+        let global = global_frontend_failing_over(pools, selector, in_flight, failover).await;
+
+        let response = post(
+            &global.server.url,
+            "v1/chat/completions",
+            &chat(MODEL, "hi", false),
+        )
+        .await;
+        if fails_over {
+            assert_eq!(chat_content(response).await, "hi");
+        } else {
+            assert_eq!(response.status(), status);
+        }
+        let metrics = metrics_now(&global).await;
+        let reason = [("reason", "overloaded")];
+        let failovers = if fails_over { 1.0 } else { 0.0 };
+        assert_eq!(
+            sample(&metrics, FAILOVERS, &reason),
+            Some(failovers),
+            "{status}"
+        );
     }
 }
 

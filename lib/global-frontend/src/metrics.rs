@@ -40,7 +40,7 @@ pub(crate) enum FailoverReason {
     NoResponse,
     /// The pool answered 503.
     Unavailable,
-    /// The pool answered the overload status (`DYN_HTTP_OVERLOAD_STATUS_CODE`).
+    /// The pool answered `--overload-status-code`.
     Overloaded,
 }
 

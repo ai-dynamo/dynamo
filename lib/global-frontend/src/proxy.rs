@@ -22,7 +22,6 @@ use dynamo_global_router::affinity::tenant_id;
 use dynamo_global_router::{
     InFlightTracker, Pool, PoolSelector, RoutingRequest, SelectionCoreSelector,
 };
-use dynamo_llm::http::service::error::SanitizedError;
 use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BODY_LIMIT_MB;
 use dynamo_runtime::metrics::prometheus_names::frontend_service::error_type;
@@ -53,7 +52,28 @@ struct Proxy {
     in_flight: Arc<InFlightTracker>,
     http: reqwest::Client,
     metrics: Metrics,
-    max_failovers: usize,
+    failover: Failover,
+}
+
+/// How many other pools a request may try, and which status besides 503
+/// sends it to one.
+#[derive(Clone, Copy, Debug)]
+pub struct Failover {
+    /// How many other pools a request may be sent to; 0 turns failover off.
+    pub max: usize,
+    /// The status the pools answer when overloaded, their
+    /// `DYN_HTTP_OVERLOAD_STATUS_CODE`. It fails over, as 503 does.
+    pub overload: StatusCode,
+}
+
+impl Default for Failover {
+    /// One other pool, and the pools' default overload status, 529.
+    fn default() -> Self {
+        Self {
+            max: 1,
+            overload: StatusCode::from_u16(529).expect("a valid status"),
+        }
+    }
 }
 
 /// A pool selector, or the router core.
@@ -69,15 +89,14 @@ enum Selector {
 /// requests must read the same tracker. `http` must not set a total request
 /// timeout, because a response streams for as long as the pool generates.
 /// `/metrics` serves `metrics`. A request whose pool cannot take it goes to
-/// up to `max_failovers` other pools, as long as nothing has reached the
-/// client.
+/// other pools as `failover` says, as long as nothing has reached the client.
 pub fn app(
     pools: watch::Receiver<Arc<PoolSnapshot>>,
     selector: Arc<dyn PoolSelector>,
     in_flight: Arc<InFlightTracker>,
     http: reqwest::Client,
     metrics: Metrics,
-    max_failovers: usize,
+    failover: Failover,
 ) -> Router {
     build_router(Proxy {
         pools,
@@ -85,7 +104,7 @@ pub fn app(
         in_flight,
         http,
         metrics,
-        max_failovers,
+        failover,
     })
 }
 
@@ -97,7 +116,7 @@ pub fn app_with_selection_core(
     in_flight: Arc<InFlightTracker>,
     http: reqwest::Client,
     metrics: Metrics,
-    max_failovers: usize,
+    failover: Failover,
 ) -> Router {
     build_router(Proxy {
         pools,
@@ -105,7 +124,7 @@ pub fn app_with_selection_core(
         in_flight,
         http,
         metrics,
-        max_failovers,
+        failover,
     })
 }
 
@@ -254,10 +273,11 @@ async fn forward(
     let mut failed = None;
     let (pool, upstream, in_flight) = loop {
         // A retry is selected without the session, so that a failover does
-        // not move the session to the pool it falls back to.
+        // not move the session to the pool it falls back to, and as a retry,
+        // so that it does not take round robin's turn.
         let request = match failed {
             None => request,
-            Some(_) => request.with_session(None),
+            Some(_) => request.with_session(None).with_retry(true),
         };
         let selecting = Instant::now();
         let selected = match &proxy.selector {
@@ -277,24 +297,24 @@ async fn forward(
                     let message = format!("no pool can serve model {model}");
                     return error(StatusCode::SERVICE_UNAVAILABLE, message);
                 }
-                Some((_, Failed::Answered(pool, upstream))) => {
+                Some(Failed::Answered(pool, upstream, _)) => {
                     break (pool, upstream, proxy.in_flight.start(&pool.id));
                 }
-                Some((_, Failed::NoResponse(message))) => {
+                Some(Failed::NoResponse(message)) => {
                     return error(StatusCode::SERVICE_UNAVAILABLE, message);
                 }
             }
         };
-        if let Some((reason, _)) = failed.take() {
+        if let Some(failed) = failed.take() {
             failovers += 1;
-            metrics.failover(reason);
+            metrics.failover(failed.reason());
         }
         let pool = target.pool;
         let Some(url) = route_url(target.frontend, &uri) else {
             metrics.rejected(error_type::VALIDATION);
             return error(StatusCode::BAD_REQUEST, "invalid route".to_owned());
         };
-        let last = failovers == proxy.max_failovers
+        let last = failovers == proxy.failover.max
             || !candidates
                 .iter()
                 .any(|other| other.id != pool.id && !other.frontends.is_empty());
@@ -329,7 +349,7 @@ async fn forward(
             Ok(upstream) => {
                 let status = upstream.status();
                 sending.answered(Some(status));
-                match failover_reason(status, SanitizedError::Overloaded.status()) {
+                match failover_reason(status, proxy.failover.overload) {
                     Some(reason) if !last => {
                         tracing::debug!(
                             pool = %pool.id,
@@ -337,7 +357,7 @@ async fn forward(
                             %status,
                             "pool cannot take the request"
                         );
-                        failed = Some((reason, Failed::Answered(pool, upstream)));
+                        failed = Some(Failed::Answered(pool, upstream, reason));
                     }
                     _ => break (pool, upstream, in_flight),
                 }
@@ -358,7 +378,7 @@ async fn forward(
                 if last {
                     return error(StatusCode::SERVICE_UNAVAILABLE, message);
                 }
-                failed = Some((FailoverReason::NoResponse, Failed::NoResponse(message)));
+                failed = Some(Failed::NoResponse(message));
             }
         }
         // The next selection must not count this request against its pool.
@@ -390,10 +410,19 @@ async fn forward(
 /// A pool's failure to take a request, held until another pool is chosen.
 enum Failed<'a> {
     /// The pool answered with a status that sends the request elsewhere.
-    Answered(&'a Pool, reqwest::Response),
+    Answered(&'a Pool, reqwest::Response, FailoverReason),
     /// The pool sent no response; the message the client gets if no other
     /// pool is chosen.
     NoResponse(String),
+}
+
+impl Failed<'_> {
+    fn reason(&self) -> FailoverReason {
+        match self {
+            Self::Answered(.., reason) => *reason,
+            Self::NoResponse(_) => FailoverReason::NoResponse,
+        }
+    }
 }
 
 /// Why a pool's answer sends the request to another pool, if it does: 503,
