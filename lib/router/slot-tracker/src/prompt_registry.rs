@@ -20,8 +20,7 @@ use super::sharded_lock::ShardedRwLock;
 use super::single::PromptMembershipDelta;
 use super::topology::WorkerTopologyChange;
 use crate::busy::FullRankCounts;
-use crate::prelude::WorkerWithDpRank;
-use dynamo_router_protocol::worker::WorkerCapacity;
+use dynamo_router_protocol::worker::{WorkerCapacity, WorkerWithDpRank};
 
 /// Ephemeral, request-specific view of worker load.
 ///
@@ -533,7 +532,7 @@ impl PromptRegistry {
         }
     }
 
-    /// Stage operation the router drives.
+    /// Read ranks' loads one at a time at `decay_now` under one read guard.
     pub fn worker_load_reader(&self, decay_now: Instant) -> WorkerLoadReader<'_> {
         WorkerLoadReader {
             loads: self.loads.read(),
@@ -609,9 +608,9 @@ mod tests {
 
     use super::*;
     use crate::prefill_tracker::AnchoredPrefillSnapshot;
-    use crate::prelude::WorkerWithDpRank;
     use crate::single::{PromptMembershipRemove, PromptMembershipStore};
     use crate::topology::RemovedWorkerState;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
 
     fn worker(worker_id: u64, dp_rank: u32) -> WorkerWithDpRank {
         WorkerWithDpRank::new(worker_id, dp_rank)

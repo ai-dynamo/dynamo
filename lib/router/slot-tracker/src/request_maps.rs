@@ -5,8 +5,8 @@ use dashmap::{DashMap, mapref::entry::Entry};
 use std::collections::HashMap;
 
 use super::single::RequestId;
-use crate::prelude::WorkerWithDpRank;
 use dynamo_router_protocol::attempt::{AttemptId, AttemptIdMinter};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RequestBooking {

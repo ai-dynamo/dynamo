@@ -8,7 +8,7 @@ use rustc_hash::FxHashMap;
 use tokio::time::Instant;
 
 use super::single::RequestId;
-use crate::prelude::WorkerWithDpRank;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PrefillLoadState {

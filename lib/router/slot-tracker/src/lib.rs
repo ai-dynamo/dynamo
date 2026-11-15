@@ -20,7 +20,6 @@ mod compressed_path_arena;
 pub mod host;
 mod multi_worker;
 mod prefill_tracker;
-mod prelude;
 mod prompt_membership_trie;
 mod prompt_registry;
 mod replica_sync;

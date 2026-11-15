@@ -34,11 +34,9 @@ use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTo
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
 use crate::booking::SchedulerBookingDescriptor;
 use crate::busy::FullRankCounts;
-use crate::prelude::{
-    ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId, WorkerWithDpRank,
-};
+use crate::wire::{ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint};
 use dynamo_router_protocol::attempt::AttemptId;
-use dynamo_router_protocol::worker::WorkerCapacity;
+use dynamo_router_protocol::worker::{WorkerCapacity, WorkerId, WorkerWithDpRank};
 
 // How often we force expire stale requests across all workers. See the comment
 // in ActiveSequencesMultiWorker::force_expire_requests_across_all_workers for
@@ -298,8 +296,8 @@ pub enum ReplicaWorkerPolicy {
     RequireRegistered,
 }
 
+/// Construction options for [`ActiveSequencesMultiWorker`].
 #[derive(Debug, Clone, Copy)]
-/// Stage operation the router drives.
 pub struct SequenceTrackerOptions {
     /// How this tracker treats replicated bookings.
     pub replica_worker_policy: ReplicaWorkerPolicy,
@@ -798,7 +796,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.add_request_admitted(req, decay_now).map(|_| ())
     }
 
-    /// Stage operation the router drives.
+    /// Book an admitted request on its worker and return the attempt id minted for it.
     pub fn add_request_admitted(
         &self,
         req: SequenceRequest,
@@ -853,7 +851,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(attempt_id)
     }
 
-    /// Stage operation the router drives.
+    /// The worker rank `request_id` is booked on, if any.
     pub fn request_worker(&self, request_id: &str) -> Option<WorkerWithDpRank> {
         self.request_index.worker_for(request_id)
     }
@@ -869,7 +867,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         })
     }
 
-    /// Stage operation the router drives.
+    /// Whether `booking` still names the live attempt for its request on its worker.
     pub fn has_booking(&self, booking: &SchedulerBookingDescriptor) -> bool {
         self.request_index.booking_for(&booking.request_id)
             == Some(RequestBooking {
@@ -1232,7 +1230,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(())
     }
 
-    /// Stage operation the router drives.
+    /// Add `num_blocks` output blocks to the request only if `attempt_id` is still its live
+    /// booking on `worker`.
     pub fn add_output_blocks_if_booking(
         &self,
         request_id: &RequestId,
@@ -1645,7 +1644,7 @@ mod tests {
 
     use super::*;
     use crate::NoopSequencePublisher;
-    use crate::prelude::{ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint};
+    use crate::wire::{ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint};
     use dynamo_kv_hashing::routing::{
         BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
     };

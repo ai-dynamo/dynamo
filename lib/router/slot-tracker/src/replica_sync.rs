@@ -15,10 +15,11 @@ use super::multi_worker::{
 use super::prompt_registry::WorkerLoadSnapshot;
 use super::single::PrefillCompletion;
 use crate::booking::SchedulerBookingDescriptor;
-use crate::prelude::{
+use crate::wire::{
     ActiveSequenceEvent, ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION,
-    MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
+    MAX_REPLICA_BATCH_EVENTS,
 };
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 #[derive(Default)]
 struct ReplicaBatchEffects {

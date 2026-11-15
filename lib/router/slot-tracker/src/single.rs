@@ -29,7 +29,7 @@ use rustc_hash::FxHashSet;
 use super::block_tracker::{BlockTracker, RequestBlockChain};
 use super::prefill_tracker::{PrefillLoadState, PrefillLoadTracker};
 use super::prompt_registry::WorkerLoadSnapshot;
-use crate::prelude::PrefillLoadHint;
+use crate::wire::PrefillLoadHint;
 
 /// Shared active-request liveness duration (5 minutes).
 ///
