@@ -776,6 +776,40 @@ class TestDiffusionFormatterVideo:
             )
 
     @pytest.mark.asyncio
+    async def test_partial_url_batch_failure_removes_earlier_videos(self, tmp_path):
+        f = DiffusionFormatter(
+            model_name="test-model",
+            media_fs=get_fs(tmp_path.as_uri()),
+            media_http_url=None,
+        )
+        videos = torch.zeros((2, 2, 3, 8, 10), dtype=torch.float32)
+        encode_calls = 0
+
+        def encode_then_fail(*args, **kwargs):
+            nonlocal encode_calls
+            encode_calls += 1
+            if encode_calls == 2:
+                assert (tmp_path / "videos" / "req-partial" / "0.mp4").is_file()
+                raise OSError("encode failed")
+            return b"vp9-mp4"
+
+        with (
+            patch(
+                "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+                side_effect=encode_then_fail,
+            ),
+            patch.object(f, "_cleanup_uploads", wraps=f._cleanup_uploads) as cleanup,
+        ):
+            result = await f._encode_video(
+                videos, "req-partial", fps=16, response_format="url"
+            )
+
+        assert result["status"] == "failed"
+        assert "encode failed" in result["error"]
+        cleanup.assert_awaited_once_with(["videos/req-partial/0.mp4"], "req-partial")
+        assert not any((tmp_path / "videos" / "req-partial").iterdir())
+
+    @pytest.mark.asyncio
     async def test_normalizes_direct_fchw_torch_video(self):
         f = _make_diffusion_formatter()
         video = torch.zeros((2, 3, 8, 10), dtype=torch.float32)

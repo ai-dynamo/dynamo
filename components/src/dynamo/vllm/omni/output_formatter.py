@@ -347,6 +347,7 @@ class DiffusionFormatter:
         Returns:
             Dict[str, Any] | None: Completed response, or a failed response for
                 invalid media metadata, mismatched durations, or encoding errors.
+                A failed response removes videos this call already uploaded.
 
         Raises:
             ValueError: If the response or output format is unsupported.
@@ -361,6 +362,7 @@ class DiffusionFormatter:
             raise ValueError(
                 f"Unsupported output_format: {output_format!r}; only 'mp4' is supported"
             )
+        uploaded_paths: list[str] = []
         try:
             start_time = time.time()
             multimodal_output = multimodal_output or {}
@@ -443,6 +445,7 @@ class DiffusionFormatter:
                         video_bytes,
                         self._media_http_url,
                     )
+                    uploaded_paths.append(filename)
                 data.append(video_data)
 
             return NvVideosResponse(
@@ -457,6 +460,7 @@ class DiffusionFormatter:
             ).model_dump()
         except Exception as e:
             logger.error("Failed to encode video for request %s: %s", request_id, e)
+            await self._cleanup_uploads(uploaded_paths, request_id)
             return NvVideosResponse(
                 id=request_id,
                 object="video",
@@ -923,8 +927,6 @@ class DiffusionFormatter:
                 else:
                     raise ValueError(f"Invalid response format: {response_format}")
         except Exception:
-            # The whole batch fails: remove files already uploaded so a
-            # failed request leaves no orphaned media behind.
             await self._cleanup_uploads(uploaded_paths, request_id)
             raise
         return outlist
