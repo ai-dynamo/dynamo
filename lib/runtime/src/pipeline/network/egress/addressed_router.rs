@@ -659,6 +659,11 @@ impl<T> AddressedRequest<T> {
 
     /// `(request, address, instance)` — public so an external [`StreamingDispatch`]
     /// impl can read the routed address + instance.
+    /// The worker this request was routed to, when the router knows it.
+    pub fn instance(&self) -> Option<&Instance> {
+        self.instance.as_ref()
+    }
+
     pub fn into_parts(self) -> (T, String, Option<Instance>) {
         (self.request, self.address, self.instance)
     }
