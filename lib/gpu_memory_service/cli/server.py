@@ -240,12 +240,11 @@ def main(argv: list[str] | None = None) -> None:
 
         if args.enable_loader is not None:
             loader_argv = list(args.enable_loader)
-            loaders.extend(
-                start_per_device(
-                    "gpu_memory_service.cli.snapshot.loader",
-                    loader_argv,
-                    devices,
-                )
+            start_per_device(
+                "gpu_memory_service.cli.snapshot.loader",
+                loader_argv,
+                devices,
+                loaders,
             )
 
         raise SystemExit(_supervise(servers, loaders))
