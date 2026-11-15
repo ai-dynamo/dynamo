@@ -1129,13 +1129,11 @@ async fn assert_streaming_completions_observe_empty_chunk_metrics(
     .await;
 }
 
-/// Streaming `/v1/completions` with one prompt (`completions_single`).
 #[tokio::test]
 async fn test_streaming_completions_observes_empty_chunk_metrics() {
     assert_streaming_completions_observe_empty_chunk_metrics(serde_json::json!("hi"), 1).await;
 }
 
-/// Streaming `/v1/completions` with a prompt batch (`completions_batch`).
 #[tokio::test]
 async fn test_streaming_completions_batch_observes_empty_chunk_metrics() {
     assert_streaming_completions_observe_empty_chunk_metrics(serde_json::json!(["hi", "hi"]), 2)
