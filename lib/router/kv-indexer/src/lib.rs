@@ -161,6 +161,7 @@ pub use local::LocalKvIndexer;
 pub use lookup::HashInput;
 pub use lower_tier::{
     KvTransferExtensions, LowerTierContinuation, LowerTierIndexer, LowerTierMatchDetails,
+    order_lower_tier_dump,
 };
 pub use lower_tier_indexers::{
     LowerTierIndexers, LowerTierQueryOptions, TieredMatchDetails, TieredMatchProvider,

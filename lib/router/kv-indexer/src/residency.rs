@@ -18,8 +18,8 @@ use crate::kv_hints::CacheOwnerKvTransferKeys;
 /// Compact mutation-path identity for an exact residency owner.
 ///
 /// Lower-tier edges carry this fixed-size value instead of embedding the full
-/// [`CacheOwnerId`] in every ownership entry. The full owner remains in the
-/// reverse index once per logical owner so dumps can round-trip it exactly.
+/// [`CacheOwnerId`] in every ownership entry. The full owner remains in its
+/// event lane's state once per logical owner so dumps can round-trip it exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResidencyOwnerKey([u8; 16]);
 

@@ -500,6 +500,16 @@ fn print_open_loop_result(result: &OpenLoopResult) {
                 tier.stored_events_by_blocks,
             );
         }
+        let runs = &lower.runs;
+        println!(
+            "Lower-tier runs: {} runs | {} blocks stored, {} held | {} owner segments | longest {} | of 1 / 2-15 / 16-255 / 256+ blocks: {:?}",
+            runs.runs,
+            runs.stored_blocks,
+            runs.held_blocks,
+            runs.segments,
+            runs.longest_run,
+            runs.runs_by_length,
+        );
     }
     if !result.backend_timing_report.is_empty() {
         println!("{}", result.backend_timing_report);

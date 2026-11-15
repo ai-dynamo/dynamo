@@ -26,7 +26,7 @@ use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_kv_indexer::host::{
     ConcurrentRadixTreeCompressed, KvIndexerInterface, KvIndexerMetrics, LowerTierIndexers,
     LowerTierQueryOptions, MatchDetails, ResidencyProjection, ResidencyRoutingSnapshot,
-    RouterHintSourceMetadata,
+    RouterHintSourceMetadata, RunCensus,
 };
 use dynamo_router_protocol::identity::{
     CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
@@ -453,11 +453,12 @@ fn heap_allocated() -> anyhow::Result<Option<(Allocator, u64)>> {
 pub(crate) struct Footprint {
     pub(crate) cpu_tier_memberships: usize,
     pub(crate) kvcr_memberships: usize,
+    pub(crate) runs: RunCensus,
     pub(crate) heap: Option<(Allocator, u64)>,
 }
 
-/// Counts the lower tier's (block, owner) memberships by domain from its dump, then measures its
-/// heap as the drop in allocated bytes when it is dropped.
+/// Counts the lower tier's (block, owner) memberships by domain from its dump, sizes its run
+/// storage, then measures its heap as the drop in allocated bytes when it is dropped.
 pub(crate) async fn footprint<T>(run: LowerTierRun<T>) -> anyhow::Result<Footprint> {
     let tier = run.indexers.get_or_create(StorageTier::HostPinned);
     let (mut cpu_tier_memberships, mut kvcr_memberships) = (0, 0);
@@ -469,6 +470,7 @@ pub(crate) async fn footprint<T>(run: LowerTierRun<T>) -> anyhow::Result<Footpri
             }
         }
     }
+    let runs = tier.backend().run_census();
     drop(tier);
     let loaded = heap_allocated()?;
     drop(run);
@@ -476,6 +478,7 @@ pub(crate) async fn footprint<T>(run: LowerTierRun<T>) -> anyhow::Result<Footpri
     Ok(Footprint {
         cpu_tier_memberships,
         kvcr_memberships,
+        runs,
         heap: loaded
             .zip(dropped)
             .map(|((allocator, loaded), (_, dropped))| (allocator, loaded.saturating_sub(dropped))),

@@ -20,6 +20,7 @@ use dynamo_kv_events::residency::{ResetScope, ResidencyDomain, StorageTier};
 use dynamo_kv_indexer::host::{
     KvStateAgentIdentity, KvStateAgentStatus, KvStateProtocolVersion, ResidencyProjection,
     ResidencyRoutingSnapshot, RouterHintSourceMetadata, WorkerKvQueryResponse,
+    order_lower_tier_dump,
 };
 use dynamo_router_protocol::identity::CacheOwnerId;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
@@ -2248,7 +2249,7 @@ async fn apply_recovery_response(
                     }
                 }
             }
-            for event in events {
+            for event in order_lower_tier_dump(events) {
                 indexer.try_apply_event(event).await?;
             }
             Ok(receipt.recovered_through_cursor.max(last_event_id))

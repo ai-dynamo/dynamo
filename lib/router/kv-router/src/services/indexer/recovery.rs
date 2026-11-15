@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use dynamo_kv_events::event::RouterEvent;
+use dynamo_kv_indexer::order_lower_tier_dump;
 use dynamo_router_protocol::identity::RoutingPartitionId;
 
 use super::registry::IndexRegistry;
@@ -70,7 +71,7 @@ async fn try_recover_from_peer(
 
         let indexer = registry.get_or_create_indexer(key, entry.block_size);
 
-        for event in entry.events {
+        for event in order_lower_tier_dump(entry.events) {
             // Use the tier-aware dispatcher so HostPinned/Disk events from the
             // peer's dump land in the matching lower-tier slot rather than the
             // device primary. The peer side retags lower-tier events in

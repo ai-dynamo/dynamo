@@ -884,6 +884,8 @@ pub struct LowerTierResult {
     pub kvcr: HostTierTotals,
     pub cpu_tier_indexed_memberships: usize,
     pub kvcr_indexed_memberships: usize,
+    /// The lower tier's run storage at the end of the run.
+    pub runs: dynamo_kv_indexer::host::RunCensus,
     /// The lower-tier part of each lookup.
     pub query_service: Distribution,
     /// Lookups whose lower-tier walk found blocks past the device prefix.
@@ -1499,6 +1501,7 @@ fn analyze_result(
             kvcr: totals.kvcr,
             cpu_tier_indexed_memberships: footprint.cpu_tier_memberships,
             kvcr_indexed_memberships: footprint.kvcr_memberships,
+            runs: footprint.runs,
             query_service: distribution(completions.clone().map(|c| c.lower_tier_ns).collect()),
             hit_queries: completions.filter(|c| c.lower_tier_hit).count(),
             drain_ns,

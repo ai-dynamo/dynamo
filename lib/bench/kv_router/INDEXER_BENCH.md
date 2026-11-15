@@ -255,13 +255,15 @@ cargo bench --package dynamo-bench --bench mooncake_bench \
 `lower_tier` in the result reports each host tier's events, blocks and live
 memberships against what the lower tier indexed, the lower-tier part of each
 lookup, the lookups that found blocks past the device prefix, the lower tier's
-drain, and its heap per membership. For each host tier it also reports the
-stores that arrived before their parent (neither of the worker's host tiers
-held it) and the stores by size: how much of the fill reached the lower tier
-child first. The `total_*` fields and throughputs stay device-only. Host
-offload changes the device stream too (blocks pinned during copies, prefixes
-restored from host), so compare device metrics only between runs with the same
-host settings.
+drain, its heap per membership, and the shape of its run storage (`runs`). For
+each host tier it also reports the stores that arrived before their parent
+(neither of the worker's host tiers held it) and the stores by size: how much
+of the fill reached the lower tier child first. A request's own host stores
+land while its lookup runs, so `hit_queries` grows with lookup time; do not
+compare it between builds. The `total_*` fields and throughputs stay
+device-only. Host offload changes the device stream too (blocks pinned during
+copies, prefixes restored from host), so compare device metrics only between
+runs with the same host settings.
 
 Not modelled: KVCR reads (onboarding from KVCR back to the GPU) and peer
 fetches, which would refresh KVCR recency; Disk/G3 tiers; the worker state
