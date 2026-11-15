@@ -20,7 +20,7 @@ use dynamo_worker_selection::conditional_disagg::ConditionalDisaggConfig;
 
 use dynamo_worker_selection::selection_config::{
     default_disk_cache_hit_weight, default_host_cache_hit_weight, validate_finite_non_negative,
-    validate_overlap_score_credit, validate_range,
+    validate_overlap_score_credit,
 };
 
 /// Why a [`RouterConfig`] is not valid.
@@ -210,7 +210,6 @@ struct RouterConfigOverrideSerde {
     router_temperature: Option<f64>,
     assume_kv_reuse: Option<bool>,
     track_prefill_tokens: Option<bool>,
-    shared_cache_multiplier: Option<f64>,
 }
 
 /// Override configuration for router settings that can be specified per-request
@@ -236,10 +235,6 @@ pub struct RouterConfigOverride {
 
     #[builder(default)]
     pub track_prefill_tokens: Option<bool>,
-
-    /// Per-request override of `shared_cache_multiplier`.
-    #[builder(default)]
-    pub shared_cache_multiplier: Option<f64>,
 }
 
 impl RouterConfigOverride {
@@ -252,9 +247,6 @@ impl RouterConfigOverride {
         }
         if let Some(value) = self.router_temperature {
             validate_finite_non_negative("router_temperature", value)?;
-        }
-        if let Some(value) = self.shared_cache_multiplier {
-            validate_range("shared_cache_multiplier", value, 0.0, 1.0)?;
         }
         Ok(())
     }
@@ -281,7 +273,6 @@ impl TryFrom<RouterConfigOverrideSerde> for RouterConfigOverride {
             router_temperature: compat.router_temperature,
             assume_kv_reuse: compat.assume_kv_reuse,
             track_prefill_tokens: compat.track_prefill_tokens,
-            shared_cache_multiplier: compat.shared_cache_multiplier,
         };
         config.validate()?;
         Ok(config)

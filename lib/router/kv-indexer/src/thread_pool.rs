@@ -20,8 +20,8 @@ use super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 use super::{
     ApproximateLruClient, ApproximateLruCommandSink, ApproximateLruIncarnation,
     ApproximateLruLease, ApproximateLruStats, ApproximateLruTask, ApproximateRetentionConfig,
-    KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer,
-    WorkerLookupStats, WorkerTask, panic_payload_message,
+    KvIndexerInterface, KvIndexerMetrics, KvRouterError, ResidentBlockCountsHandle,
+    ShardSizeSnapshot, SyncIndexer, WorkerLookupStats, WorkerTask, panic_payload_message,
 };
 #[cfg(feature = "bench")]
 use super::{
@@ -83,6 +83,12 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
 
     /// Handles to worker threads for joining on shutdown.
     thread_handles: Mutex<Vec<JoinHandle<()>>>,
+
+    /// Cancelled when the matching worker thread exits, including by panic.
+    thread_exited: Vec<tokio_util::sync::CancellationToken>,
+
+    /// Live per-rank block counts, once a policy reads them.
+    resident_blocks: std::sync::OnceLock<ResidentBlockCountsHandle>,
 
     /// Approximate-mode TTL pruning manager. None for normal event-driven mode.
     prune_manager: Option<WorkerPruneManager>,
@@ -305,17 +311,21 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         let backend = Arc::new(backend);
         let mut worker_event_senders = Vec::new();
         let mut thread_handles = Vec::new();
+        let mut thread_exited = Vec::new();
         let worker_assignments = Arc::new(DashMap::with_hasher(FxBuildHasher));
         let worker_assignment_count = Arc::new(AtomicUsize::new(0));
         let synthetic_event_id = Arc::new(AtomicU64::new(0));
         for worker_idx in 0..num_workers {
             let (event_sender, event_receiver) = flume::unbounded::<WorkerTask>();
             worker_event_senders.push(event_sender);
+            let exited = tokio_util::sync::CancellationToken::new();
+            thread_exited.push(exited.clone());
 
             let backend = Arc::clone(&backend);
             let metrics = metrics.clone();
 
             let handle = std::thread::spawn(move || {
+                let _exited = exited.drop_guard();
                 // This is observability, not recovery: if the worker panics, log
                 // through tracing and then preserve the panic for join().
                 let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -367,6 +377,8 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             num_workers,
             kv_block_size,
             thread_handles: Mutex::new(thread_handles),
+            thread_exited,
+            resident_blocks: std::sync::OnceLock::new(),
             prune_manager,
             prune_pump_cancel,
             synthetic_event_id,
@@ -630,25 +642,67 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         }
     }
 
+    /// Each worker thread's per-rank block counts, or `None` for a thread that has exited.
+    async fn lane_lookup_stats(&self) -> Vec<Option<WorkerLookupStats>> {
+        // Every request goes out before the first wait, so the threads answer in parallel and
+        // the wait is the slowest lane's, not their sum.
+        let pending: Vec<_> = self
+            .worker_event_channels
+            .iter()
+            .zip(&self.thread_exited)
+            .map(|(channel, exited)| {
+                let (resp_tx, resp_rx) = oneshot::channel();
+                channel
+                    .send(WorkerTask::Stats(resp_tx))
+                    .ok()
+                    .map(|()| (resp_rx, exited))
+            })
+            .collect();
+        let mut stats = Vec::with_capacity(pending.len());
+        for lane in pending {
+            let Some((resp_rx, exited)) = lane else {
+                stats.push(None);
+                continue;
+            };
+            // A thread that exits with this request queued neither answers nor drops it, since
+            // our own senders keep its queue alive.
+            stats.push(tokio::select! {
+                biased;
+                stats = resp_rx => stats.ok(),
+                _ = exited.cancelled() => None,
+            });
+        }
+        stats
+    }
+
     pub(crate) async fn worker_lookup_stats(&self) -> WorkerLookupStats {
-        let mut receivers = Vec::new();
-        for channel in &self.worker_event_channels {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            if channel.send(WorkerTask::Stats(resp_tx)).is_ok() {
-                receivers.push(resp_rx);
-            }
-        }
-
         let mut worker_blocks = BTreeMap::new();
-        for receiver in receivers {
-            if let Ok(stats) = receiver.await {
-                for (worker, block_count) in stats.worker_blocks {
-                    *worker_blocks.entry(worker).or_insert(0usize) += block_count;
-                }
+        for stats in self.lane_lookup_stats().await.into_iter().flatten() {
+            for (worker, block_count) in stats.worker_blocks {
+                *worker_blocks.entry(worker).or_insert(0usize) += block_count;
             }
         }
-
         WorkerLookupStats::from_worker_block_counts(worker_blocks)
+    }
+
+    /// [`Self::track_resident_blocks`], for benchmarking the event threads' cost of tracking.
+    #[cfg(feature = "bench")]
+    pub fn bench_track_resident_blocks(&self) -> ResidentBlockCountsHandle {
+        self.track_resident_blocks()
+    }
+
+    /// Live per-rank block counts, which every worker thread starts keeping on the first call.
+    pub(crate) fn track_resident_blocks(&self) -> ResidentBlockCountsHandle {
+        self.resident_blocks
+            .get_or_init(|| {
+                let counts = ResidentBlockCountsHandle::default();
+                for channel in &self.worker_event_channels {
+                    // An exited thread never sees this, and its ranks read None.
+                    let _ = channel.send(WorkerTask::TrackResidentBlocks(counts.clone()));
+                }
+                counts
+            })
+            .clone()
     }
 
     pub async fn get_workers(&self) -> Vec<WorkerId> {
@@ -1606,6 +1660,51 @@ mod tests {
         indexer.flush().await;
         assert_score(&indexer, &[10], rank0, 1).await;
         assert_score(&indexer, &[20], rank1, 1).await;
+    }
+
+    /// Holds each worker thread until the gate's sender drops, so a test can queue tasks behind
+    /// `Terminate`.
+    struct GatedBackend(flume::Receiver<()>);
+
+    impl SyncIndexer for GatedBackend {
+        fn worker(
+            &self,
+            tasks: flume::Receiver<WorkerTask>,
+            _metrics: Option<Arc<KvIndexerMetrics>>,
+        ) -> anyhow::Result<()> {
+            let _ = self.0.recv();
+            while let Ok(task) = tasks.recv() {
+                if let WorkerTask::Terminate = task {
+                    break;
+                }
+            }
+            Ok(())
+        }
+
+        fn find_matches(&self, _sequence: &[LocalBlockHash], _early_exit: bool) -> OverlapScores {
+            OverlapScores::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn stats_read_skips_a_thread_that_exits_with_it_queued() {
+        let (open_gate, gate) = flume::bounded::<()>(1);
+        let indexer = ThreadPoolIndexer::new(GatedBackend(gate), 1, 16);
+        indexer.worker_event_channels[0]
+            .send(WorkerTask::Terminate)
+            .unwrap();
+        // The request queues behind Terminate before the gate opens, so it is never answered.
+        let (read, ()) = tokio::join!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                indexer.worker_lookup_stats()
+            ),
+            async {
+                tokio::task::yield_now().await;
+                drop(open_gate);
+            },
+        );
+        assert_eq!(read.expect("stats read hung").worker_count(), 0);
     }
 
     #[tokio::test]

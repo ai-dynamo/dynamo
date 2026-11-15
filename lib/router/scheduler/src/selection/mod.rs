@@ -16,9 +16,9 @@ pub mod pending;
 pub mod types;
 
 pub use core::{
-    HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource, Selected,
-    SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation, SelectionOutcome,
-    SelectionPartition, SelectionRun, SelectionScheduler, SessionBinding,
+    HostCache, HostEligibility, HostHints, HostLoad, HostReplication, HostTelemetry, KvIndexSource,
+    Selected, SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation,
+    SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler, SessionBinding,
 };
 pub use error::SelectionError;
 pub use ingress::{KvEventIngress, LocalIndexIngress};
