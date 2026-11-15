@@ -19,9 +19,10 @@
 //! `services::selection`, and `test_utils` still exist and mount their blocks from their own
 //! files.
 //!
-//! Gone with no replacement here: the dummy shared-cache server (`services::shared_cache`) and
+//! Gone with no replacement here: the dummy shared-cache server (`services::shared_cache`);
 //! `protocols::ActiveLoad`, which lives in `dynamo_llm::kv_router::ActiveLoad` (this crate cannot
-//! depend on `dynamo-llm`).
+//! depend on `dynamo-llm`); and `protocols::RouterRequest` and `protocols::RouterResponse`, the
+//! wire of the removed `AsyncEngine` impl on `dynamo_llm::kv_router::KvRouter`.
 
 /// Pre-split `dynamo_kv_router::conditional_disagg`; its items live in `dynamo_worker_selection` now.
 pub mod conditional_disagg {
@@ -712,7 +713,7 @@ pub mod kv_hints {
 
 /// Pre-split `dynamo_kv_router::protocols`; its items live in `dynamo_kv_events`, `dynamo_kv_hashing`, `dynamo_slot_tracker`, `dynamo_scheduler`, `dynamo_kv_indexer`, `dynamo_worker_selection`, `dynamo_router_protocol`, `dynamo_kv_hints` and `dynamo_session_affinity` now.
 pub mod protocols {
-    // Owner: dynamo_kv_events (18), dynamo_kv_hashing (17), dynamo_slot_tracker (12), dynamo_scheduler (8), dynamo_kv_indexer (7), dynamo_worker_selection (4), dynamo_router_protocol (3), dynamo_kv_hints (2), dynamo_session_affinity (1)
+    // Owner: dynamo_kv_events (18), dynamo_kv_hashing (17), dynamo_slot_tracker (12), dynamo_scheduler (6), dynamo_kv_indexer (7), dynamo_worker_selection (4), dynamo_router_protocol (3), dynamo_kv_hints (2), dynamo_session_affinity (1)
     #[deprecated(
         since = "1.8.0",
         note = "moved to dynamo_slot_tracker::ActiveBlockEvent; removed in 1.10.0"
@@ -851,8 +852,6 @@ pub mod protocols {
         note = "moved to dynamo_kv_indexer::RouterHintSourceMetadata; removed in 1.10.0"
     )]
     pub type RouterHintSourceMetadata = dynamo_kv_indexer::RouterHintSourceMetadata;
-    pub use dynamo_scheduler::RouterRequest;
-    pub use dynamo_scheduler::RouterResponse;
     #[deprecated(
         since = "1.8.0",
         note = "moved to dynamo_scheduler::RoutingConstraints; removed in 1.10.0"
