@@ -448,14 +448,14 @@ def _select_launches(
 def _split_unschedulable(
     tests: list[_TestEntry], gpu_states: dict[int, _GpuState]
 ) -> tuple[list[_TestEntry], list[_TestEntry]]:
-    """Split off VRAM tests larger than every GPU's total memory.
+    """Split off VRAM tests that exceed the total memory of every detected GPU.
 
     Such a test can never pass the fit gates in ``_select_launches``; left in
     the queue it would hold a reservation forever and block every test behind it.
     """
-    largest = max(gs.total_gib for gs in gpu_states.values())
-    fits = [t for t in tests if t.profiled_gib <= largest]
-    too_big = [t for t in tests if t.profiled_gib > largest]
+    gpu_gib = max(gs.total_gib for gs in gpu_states.values())
+    fits = [t for t in tests if t.profiled_gib <= gpu_gib]
+    too_big = [t for t in tests if t.profiled_gib > gpu_gib]
     return fits, too_big
 
 
@@ -586,11 +586,11 @@ def run_parallel(
                 over_budget.append((nodeid, profiled))
 
     tests, too_big = _split_unschedulable(tests, gpu_states)
-    largest_gib = max(gs.total_gib for gs in gpu_states.values())
+    gpu_gib = max(gs.total_gib for gs in gpu_states.values())
     for test in too_big:
         test.skip_reason = (
-            f"profiled {test.profiled_gib:.1f} GiB exceeds the largest GPU "
-            f"({largest_gib:.1f} GiB)"
+            f"profiled {test.profiled_gib:.1f} GiB exceeds GPU memory "
+            f"({gpu_gib:.1f} GiB)"
         )
     skipped_tests = too_big + skipped_tests
 

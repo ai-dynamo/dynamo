@@ -193,11 +193,11 @@ def test_blocked_test_launches_once_occupant_frees():
 # --------------------------------------------------------------------------- #
 def test_tests_larger_than_every_gpu_are_split_off():
     gpus = {0: _gpu(0, 22.0), 1: _gpu(1, 24.0)}
-    tests = [_t("fits", 18.7), _t("largest", 24.0), _t("too_big", 24.1), _t("f", 0)]
+    tests = [_t("fits", 18.7), _t("exact_fit", 24.0), _t("too_big", 24.1), _t("f", 0)]
 
     fits, too_big = _split_unschedulable(tests, gpus)
 
-    assert [t.name for t in fits] == ["fits", "largest", "f"]
+    assert [t.name for t in fits] == ["fits", "exact_fit", "f"]
     assert [t.name for t in too_big] == ["too_big"]
 
 
