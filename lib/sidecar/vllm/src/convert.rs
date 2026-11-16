@@ -1529,7 +1529,7 @@ impl ResponseState {
         }
         mapped.disaggregated_params = finish
             .kv_transfer_params
-            .map(|value| struct_to_json_v14(value, PEER, KV_TRANSFER_PARAMS))
+            .map(|value| struct_to_json_v14(value, PEER, KV_TRANSFER_PARAMS).map(Box::new))
             .transpose()?;
         if self.mode.is_prefill() && mapped.disaggregated_params.is_none() {
             return Err(client::protocol_error(
@@ -1544,7 +1544,7 @@ impl ResponseState {
             })?;
             let params = mapped
                 .disaggregated_params
-                .as_mut()
+                .as_deref_mut()
                 .and_then(serde_json::Value::as_object_mut)
                 .ok_or_else(|| {
                     client::protocol_error("prefill kv_transfer_params is not a JSON object")
@@ -1561,7 +1561,7 @@ impl ResponseState {
         if !sampling_mask.is_empty() {
             mapped
                 .engine_data
-                .get_or_insert_with(|| serde_json::json!({}))["sampling_mask"] = serde_json::json!(
+                .get_or_insert_with(|| Box::new(serde_json::json!({})))["sampling_mask"] = serde_json::json!(
                 sampling_mask
                     .into_iter()
                     .map(|row| row.ids)
@@ -1576,7 +1576,7 @@ impl ResponseState {
         if let Some(prompt) = self.prompt_info.take() {
             output
                 .engine_data
-                .get_or_insert_with(|| serde_json::json!({}))["prompt_logprobs"] =
+                .get_or_insert_with(|| Box::new(serde_json::json!({})))["prompt_logprobs"] =
                 prompt_logprobs_to_json(prompt);
         }
     }

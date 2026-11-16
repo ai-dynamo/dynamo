@@ -321,6 +321,15 @@ def update_dynamo_config_with_engine(
         dynamo_config.endpoint = parsed_ep
 
     if dynamo_config.custom_jinja_template is not None:
+        if dynamo_config.use_vllm_tokenizer:
+            raise ValueError(
+                "Cannot use --custom-jinja-template with --use-vllm-tokenizer: "
+                "the worker renders with the model's own chat template. Remove "
+                "--use-vllm-tokenizer. Then keep --custom-jinja-template to apply "
+                "the template in Dynamo's preprocessor, or start the frontend with "
+                "--dyn-chat-processor vllm --chat-template <file> to render it in "
+                "vLLM."
+            )
         expanded_template_path = os.path.expanduser(
             os.path.expandvars(dynamo_config.custom_jinja_template)
         )
