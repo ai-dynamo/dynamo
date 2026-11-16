@@ -124,6 +124,10 @@ fn response_mux_config() -> Result<MuxConfig> {
         flush_policy: FlushPolicy::Auto(AutoFlush {
             on_admission: batch_ms == 0,
             max_linger: (batch_ms != 0).then(|| Duration::from_millis(batch_ms)),
+            // Flush once every live slot on the lane has data, subject to the
+            // lane's spacing from the last data write, so a lone stream's first
+            // token does not wait out the whole window.
+            on_complete: batch_ms != 0,
             ..Default::default()
         }),
         ..Default::default()
@@ -1054,10 +1058,15 @@ mod tests {
         {
             return;
         }
-        for (value, on_admission, max_linger) in [
-            (None, false, Some(Duration::from_millis(2))),
-            (Some("0"), true, None),
-            (Some("12"), false, Some(Duration::from_millis(12))),
+        // A window can also write early once every live slot has data,
+        // subject to spacing from the last data write, so a stream alone on
+        // its lane does not wait out the window. Without it, each request's
+        // first token waited the whole window: +3.1 ms TTFT against the tcp
+        // plane at sparse token spacing.
+        for (value, on_admission, max_linger, on_complete) in [
+            (None, false, Some(Duration::from_millis(2)), true),
+            (Some("0"), true, None, false),
+            (Some("12"), false, Some(Duration::from_millis(12)), true),
         ] {
             temp_env::with_var(DYN_VELO_RESPONSE_BATCH_MS, value, || {
                 let config = response_mux_config().unwrap();
@@ -1066,8 +1075,7 @@ mod tests {
                     FlushPolicy::Auto(AutoFlush {
                         on_admission,
                         max_linger,
-                        // Velo's early-write conditions stay off.
-                        on_complete: false,
+                        on_complete,
                         at_bytes: None,
                     })
                 );
