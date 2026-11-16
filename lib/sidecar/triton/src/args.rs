@@ -167,7 +167,7 @@ pub(crate) struct Args {
 
     /// Triton model to expose. Repeat to expose multiple models.
     ///
-    /// With no explicit model names, the sidecar registers every READY model returned by Triton's RepositoryIndex API.
+    /// With no `--export`, `--classify`, or `--embeddings` models, the sidecar registers every READY model returned by Triton's RepositoryIndex API.
     #[arg(
         long = "export",
         value_name = "MODEL",

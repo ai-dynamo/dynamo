@@ -86,7 +86,8 @@ Repeat `--classify <model>` and `--embeddings <model>` options, or pass a comma-
 A single Triton Server can serve tensor, classify, and embeddings models side-by-side.
 A model cannot be passed via both options; to do so will cause a failure during sidecar startup.
 The named models are served in addition to any `--export <model>` models.
-During auto-discovery, each named model must be reported as ready by Triton Server.
+When `--classify` or `--embeddings` is given without `--export`, only the named models are served; the sidecar does not auto-discover the other models.
+Each named model must be reported as ready by Triton Server.
 
 ```bash
 dynamo-triton-sidecar --grpc \
@@ -99,7 +100,7 @@ A classify or embeddings model must declare exactly one `TYPE_STRING` input with
 A named model that does not meet these requirements fails during sidecar startup; the model's name will be provided in the error message.
 
 - Each request's text prompts are sent to Triton as one `BYTES` tensor, shaped `[N, 1]` for a batching model and `[N]` otherwise, and Triton returns one `FP32` row per prompt.
-- Ensemble steps (tokenizer, encoder, and so on) that are not named are served as tensor models like any other model; pass `--export <model>` to register only the models you want.
+- Ensemble steps (tokenizer, encoder, and so on) that are not named are not registered; pass `--export <model>` to also serve one as a tensor model.
 - Token-ID input is rejected, as are request controls owned by the Triton model: `use_activation`, `add_special_tokens`, `truncate_prompt_tokens`, `truncation_side`, `mm_processor_kwargs`, `cache_salt`, and non-zero `priority` for classify; `dimensions`, `add_special_tokens`, and `truncate_prompt_tokens` for embeddings.
 - Classify labels come from the output's `label_filename`.
   Triton exposes labels only through its classification extension, which rounds scores, so the sidecar reads probabilities from the raw output and fetches the labels once per model with one extra classification request.

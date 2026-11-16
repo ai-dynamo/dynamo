@@ -4,7 +4,7 @@
 use dynamo_backend_common::DynamoError;
 use dynamo_llm::grpc::service::kserve::inference;
 use dynamo_llm::grpc::service::tensor::dynamo_param_to_kserve;
-use dynamo_llm::protocols::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
+use dynamo_llm::protocols::tensor::{NvCreateTensorRequest, NvCreateTensorResponse, Tensor};
 use validator::Validate;
 
 use dynamo_sidecar_common::{invalid_argument, protocol_error};
@@ -23,15 +23,9 @@ pub(crate) fn to_triton_request(
         )));
     }
 
-    let mut raw = inference::ModelInferResponse::default();
+    let raw_input_contents = raw_input_contents(&request.tensors)?;
     let mut inputs = Vec::with_capacity(request.tensors.len());
     for tensor in &request.tensors {
-        raw.add_raw_output_contents(tensor).map_err(|error| {
-            invalid_argument(format!(
-                "could not serialize input tensor '{}': {error}",
-                tensor.metadata.name
-            ))
-        })?;
         inputs.push(inference::model_infer_request::InferInputTensor {
             name: tensor.metadata.name.clone(),
             datatype: tensor.metadata.data_type.to_string(),
@@ -70,8 +64,23 @@ pub(crate) fn to_triton_request(
                 },
             )
             .collect(),
-        raw_input_contents: raw.raw_output_contents,
+        raw_input_contents,
     })
+}
+
+/// Serialize each tensor to the little-endian bytes of a KServe `raw_input_contents` entry.
+fn raw_input_contents(tensors: &[Tensor]) -> Result<Vec<Vec<u8>>, DynamoError> {
+    // Request inputs and response outputs share the raw byte layout, so reuse the response-side serializer.
+    let mut raw = inference::ModelInferResponse::default();
+    for tensor in tensors {
+        raw.add_raw_output_contents(tensor).map_err(|error| {
+            invalid_argument(format!(
+                "could not serialize input tensor '{}': {error}",
+                tensor.metadata.name
+            ))
+        })?;
+    }
+    Ok(raw.raw_output_contents)
 }
 
 pub(crate) fn from_triton_response(

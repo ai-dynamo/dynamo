@@ -4,7 +4,7 @@
 //! OpenAI `/v1/classify` on top of a Triton classifier, mirroring the Python worker's `classify_handler.py`.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use dynamo_backend_common::DynamoError;
@@ -23,32 +23,56 @@ use super::{
 /// Class labels by class index, learned from Triton once per model.
 type Labels = Arc<Vec<Option<String>>>;
 
+/// How long to serve without labels after a failed fetch before trying again.
+const LABEL_RETRY_DELAY: Duration = Duration::from_secs(30);
+
+#[derive(Default)]
+struct LabelCache {
+    /// Labels from the last successful fetch.
+    labels: Option<Labels>,
+    /// After a failed fetch, no new attempt is made before this instant.
+    retry_after: Option<Instant>,
+}
+
 #[derive(Default)]
 pub(crate) struct Classify {
-    labels: Mutex<Option<Labels>>,
+    labels: Mutex<LabelCache>,
 }
 
 impl Classify {
     /// Labels for at least `class_count` classes.
     ///
     /// Triton keeps a model's `label_filename` server-side and exposes labels only through the KServe classification extension, whose scores are rounded to six decimals.
-    /// Probabilities therefore come from the raw FP32 output, and the labels are fetched once with a classification request for every class, then cached.
+    /// Probabilities therefore come from the raw FP32 output, and the labels are fetched with a classification request for every class and cached once the fetch succeeds.
     async fn labels(&self, model: &TextModel, prompt: &str, class_count: usize) -> Labels {
-        let mut cached = self.labels.lock().await;
-        if let Some(labels) = cached.as_ref().filter(|labels| labels.len() >= class_count) {
+        let mut cache = self.labels.lock().await;
+        if let Some(labels) = cache
+            .labels
+            .as_ref()
+            .filter(|labels| labels.len() >= class_count)
+        {
             return labels.clone();
         }
-        let labels = match model.classify(prompt, class_count).await {
-            Ok(classes) => parse_labels(&classes, class_count),
-            Err(error) => {
-                // Labels are optional in the response; keep serving without them rather than retrying on every request.
-                tracing::warn!(model = model.name(), %error, "Could not read Triton class labels");
-                vec![None; class_count]
+        if cache
+            .retry_after
+            .is_some_and(|retry_after| Instant::now() < retry_after)
+        {
+            return Arc::new(vec![None; class_count]);
+        }
+        match model.classify(prompt, class_count).await {
+            Ok(classes) => {
+                let labels = Arc::new(parse_labels(&classes, class_count));
+                cache.labels = Some(labels.clone());
+                cache.retry_after = None;
+                labels
             }
-        };
-        let labels = Arc::new(labels);
-        *cached = Some(labels.clone());
-        labels
+            Err(error) => {
+                // Labels are optional in the response; serve without them, and retry after a delay instead of on every request or never.
+                tracing::warn!(model = model.name(), %error, "Could not read Triton class labels");
+                cache.retry_after = Some(Instant::now() + LABEL_RETRY_DELAY);
+                Arc::new(vec![None; class_count])
+            }
+        }
     }
 }
 

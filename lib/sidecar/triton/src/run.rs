@@ -78,13 +78,49 @@ async fn bootstrap(
     let mut configs = Vec::with_capacity(models.len());
     for model in models {
         let config = client.model_config(&model).await?;
+        let named = args.model_names.contains(&model) || args.text_models().any(|m| *m == model);
+        if !serves_model(&model, is_decoupled(&config), named)? {
+            continue;
+        }
         configs.push((model, config));
     }
+    ensure!(
+        !configs.is_empty(),
+        "Triton has no models to register: every ready model is decoupled"
+    );
     Ok(Bootstrap {
         args,
         client,
         configs,
     })
+}
+
+/// Whether Triton streams a model's responses (decoupled transaction policy).
+fn is_decoupled(config: &inference::ModelConfig) -> bool {
+    config
+        .model_transaction_policy
+        .as_ref()
+        .is_some_and(|policy| policy.decoupled)
+}
+
+/// Decide whether to register a model.
+///
+/// The sidecar sends unary inference requests, which Triton rejects for decoupled models.
+/// A decoupled model named on the command line is an error; one found by auto-discovery is skipped with a warning.
+fn serves_model(model: &str, decoupled: bool, named: bool) -> anyhow::Result<bool> {
+    if !decoupled {
+        return Ok(true);
+    }
+    ensure!(
+        !named,
+        "Triton model '{model}' is decoupled, and the sidecar only supports unary inference; \
+         remove it from --export, --classify, and --embeddings"
+    );
+    tracing::warn!(
+        model,
+        "Skipping decoupled Triton model; unary inference is not supported"
+    );
+    Ok(false)
 }
 
 /// Serve every model in `bootstrap` until one model worker stops or `shutdown` is cancelled.
@@ -200,22 +236,12 @@ fn text_engine<T: TextTask>(
     Ok(Arc::new(TextEngine::new(task, model)))
 }
 
-/// Models to register: the explicit `--export` list plus every `--classify` and `--embeddings` model, or else every ready model in Triton.
+/// Models to register: the `--export`, `--classify`, and `--embeddings` models when any is given, or else every ready model in Triton.
+///
+/// Naming a classify or embeddings model without `--export` registers only the named models, so unnamed ensemble steps do not become public tensor endpoints.
 async fn discover_models(args: &Args, client: &TritonClient) -> anyhow::Result<Vec<String>> {
     if !args.model_names.is_empty() {
-        let models: Vec<String> = args
-            .model_names
-            .iter()
-            .chain(args.text_models())
-            .cloned()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        tracing::info!(
-            ?models,
-            "Using Triton models from --export, --classify, and --embeddings"
-        );
-        return Ok(models);
+        return Ok(named_models(args));
     }
 
     let models = client
@@ -233,7 +259,27 @@ async fn discover_models(args: &Args, client: &TritonClient) -> anyhow::Result<V
             }
         );
     }
+    if args.text_models().next().is_some() {
+        return Ok(named_models(args));
+    }
     Ok(models)
+}
+
+/// The sorted, de-duplicated union of the `--export`, `--classify`, and `--embeddings` models.
+fn named_models(args: &Args) -> Vec<String> {
+    let models: Vec<String> = args
+        .model_names
+        .iter()
+        .chain(args.text_models())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    tracing::info!(
+        ?models,
+        "Using Triton models from --export, --classify, and --embeddings"
+    );
+    models
 }
 
 fn endpoint_slug(model: &str) -> String {
@@ -260,7 +306,26 @@ fn endpoint_slug(model: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::endpoint_slug;
+    use super::{endpoint_slug, is_decoupled, serves_model};
+    use dynamo_llm::grpc::service::kserve::inference;
+
+    #[test]
+    fn decoupled_models_are_skipped_or_rejected() {
+        assert!(serves_model("m", false, true).unwrap());
+        assert!(serves_model("m", false, false).unwrap());
+        assert!(!serves_model("m", true, false).unwrap());
+        let error = serves_model("m", true, true).unwrap_err().to_string();
+        assert!(error.contains("'m' is decoupled"), "{error}");
+    }
+
+    #[test]
+    fn detects_decoupled_transaction_policy() {
+        let mut config = inference::ModelConfig::default();
+        assert!(!is_decoupled(&config));
+        config.model_transaction_policy =
+            Some(inference::ModelTransactionPolicy { decoupled: true });
+        assert!(is_decoupled(&config));
+    }
 
     #[test]
     fn endpoint_slug_is_safe_and_unique() {

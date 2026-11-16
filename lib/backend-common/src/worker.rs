@@ -1039,7 +1039,7 @@ impl Worker {
         } else {
             None
         };
-        let mut local_model = build_local_model_with_tensor_config(
+        let mut local_model = build_local_model(
             &self.config,
             engine_config,
             self.engine.is_raw(),
@@ -2183,16 +2183,7 @@ fn validate_model_input(model_input: ModelInput, engine: &EngineKind) -> Result<
     }
 }
 
-#[cfg(test)]
 async fn build_local_model(
-    config: &WorkerConfig,
-    engine_config: &EngineConfig,
-    name_only: bool,
-) -> Result<LocalModel, DynamoError> {
-    build_local_model_with_tensor_config(config, engine_config, name_only, None).await
-}
-
-async fn build_local_model_with_tensor_config(
     config: &WorkerConfig,
     engine_config: &EngineConfig,
     name_only: bool,
@@ -2618,7 +2609,7 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false)
+        let local_model = build_local_model(&config, &engine_config, false, None)
             .await
             .unwrap();
         let runtime_config = local_model.runtime_config();
@@ -2677,7 +2668,7 @@ mod tests {
             ..EngineConfig::default()
         };
         // name_only=true must succeed offline; name_only=false would fetch.
-        build_local_model(&config, &engine_config, true)
+        build_local_model(&config, &engine_config, true, None)
             .await
             .expect("name-only build must not fetch");
     }
@@ -2694,7 +2685,7 @@ mod tests {
             ..Default::default()
         };
 
-        let local_model = build_local_model_with_tensor_config(
+        let local_model = build_local_model(
             &WorkerConfig::default(),
             &engine_config,
             true,
@@ -2722,7 +2713,7 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, true)
+        let local_model = build_local_model(&config, &engine_config, true, None)
             .await
             .expect("name-only model with media config must build");
 
@@ -2979,7 +2970,7 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false)
+        let local_model = build_local_model(&config, &engine_config, false, None)
             .await
             .unwrap();
         assert!(local_model.runtime_config().enable_local_indexer);
@@ -2997,7 +2988,7 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false)
+        let local_model = build_local_model(&config, &engine_config, false, None)
             .await
             .unwrap();
         assert!(local_model.runtime_config().enable_local_indexer);
@@ -3023,7 +3014,7 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false)
+        let local_model = build_local_model(&config, &engine_config, false, None)
             .await
             .unwrap();
         let endpoint = local_model
@@ -3047,7 +3038,7 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false)
+        let local_model = build_local_model(&config, &engine_config, false, None)
             .await
             .unwrap();
         assert!(
