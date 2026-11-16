@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use dynamo_bench::kv_router_common::replay::WorkerReplayArtifacts;
 use dynamo_bench::kv_router_common::trace_gen::WorkerTimelines;
 
-use super::mooncake_lower_tier::derive_kvcr_layer;
+use super::mooncake_lower_tier::{derive_kvcr_layer, derive_write_back_layer};
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,6 +233,12 @@ pub struct HostTierTotals {
     pub stored_blocks: usize,
     pub removed_blocks: usize,
     pub live_memberships: usize,
+    /// Stores that arrived before their parent: neither of the worker's host tiers held it.
+    /// Such a store cannot extend what the lower tier has from that worker.
+    pub before_parent_events: usize,
+    pub before_parent_blocks: usize,
+    /// Stores of 1, 2-15, 16-255 and 256 or more blocks.
+    pub stored_events_by_blocks: [usize; 4],
 }
 
 impl HostTierTotals {
@@ -243,6 +249,9 @@ impl HostTierTotals {
             stored_blocks: self.stored_blocks * factor,
             removed_blocks: self.removed_blocks * factor,
             live_memberships: self.live_memberships * factor,
+            before_parent_events: self.before_parent_events * factor,
+            before_parent_blocks: self.before_parent_blocks * factor,
+            stored_events_by_blocks: self.stored_events_by_blocks.map(|events| events * factor),
         }
     }
 }
@@ -406,6 +415,24 @@ pub(crate) fn merge_worker_traces(
 }
 
 impl MergedMooncakeBenchmark {
+    /// Adds each worker's CPU tier as a write-back cache of `capacity` blocks.
+    pub(crate) fn with_write_back_layer(
+        self,
+        capacity: usize,
+        event_blocks: usize,
+    ) -> anyhow::Result<Self> {
+        let worker_traces = self
+            .worker_traces
+            .into_inner()
+            .into_iter()
+            .map(|timeline| derive_write_back_layer(timeline, capacity, event_blocks))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(Self {
+            worker_traces: WorkerTimelines::new(worker_traces),
+            block_size: self.block_size,
+        })
+    }
+
     pub(crate) fn with_kvcr_layer(self, capacity: usize) -> anyhow::Result<Self> {
         let worker_traces = self
             .worker_traces
@@ -449,6 +476,12 @@ pub(crate) fn prepare_scaled_benchmark(
                     storage_tier,
                     cache_owner,
                 } if !storage_tier.is_gpu() => {
+                    let before_parent = matches!(
+                        &event.data,
+                        KvCacheEventData::Stored(store) if store.parent_hash.is_some_and(|parent| {
+                            !cpu_tier_live.contains(&parent.0) && !kvcr_live.contains(&parent.0)
+                        })
+                    );
                     let (host, live) = if *cache_owner {
                         (&mut totals.kvcr, &mut kvcr_live)
                     } else {
@@ -456,8 +489,19 @@ pub(crate) fn prepare_scaled_benchmark(
                     };
                     match &event.data {
                         KvCacheEventData::Stored(store) => {
+                            let blocks = store.blocks.len();
                             host.stored_events += 1;
-                            host.stored_blocks += store.blocks.len();
+                            host.stored_blocks += blocks;
+                            host.stored_events_by_blocks[match blocks {
+                                0..=1 => 0,
+                                2..=15 => 1,
+                                16..=255 => 2,
+                                _ => 3,
+                            }] += 1;
+                            if before_parent {
+                                host.before_parent_events += 1;
+                                host.before_parent_blocks += blocks;
+                            }
                             live.extend(store.blocks.iter().map(|block| block.block_hash.0));
                         }
                         KvCacheEventData::Removed(remove) => {

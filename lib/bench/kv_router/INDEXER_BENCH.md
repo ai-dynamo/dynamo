@@ -211,9 +211,17 @@ service separately and require negligible queue depth and drain.
 the router's lower tier (`LowerTierIndexers`) that indexes them. It needs
 `concurrent-radix-tree-compressed`.
 
-- **vLLM's CPU offload tier**, owned by the worker. The mocker writes each
-  computed prompt block through to a host cache of `N` blocks per worker, which
-  evicts LRU. Its copy time comes from `--kv-cache-bytes-per-token`.
+- **The CPU offload tier**, owned by the worker: a host cache of `N` blocks per
+  worker, which evicts LRU. `--host-fill` chooses when a block reaches it:
+  - `write-through` (default) is vLLM's CPU offload. The mocker writes each
+    computed prompt block through, so a chain arrives parent first. Its copy
+    time comes from `--kv-cache-bytes-per-token`.
+  - `write-back` writes a block when the device evicts it, as SGLang HiCache's
+    `write_back` does. The mocker runs without host offload, and each device
+    eviction is followed by host stores for the evicted blocks the host does
+    not hold: tail first, at most `--write-back-event-blocks` (default 64)
+    blocks per store, standing in for one evicted radix node. So a chain
+    arrives child before parent.
 - **KVCR's DRAM tier**, owned by the worker's KVCR cache owner. Every completed
   CPU-tier store is copied into a tier of `--kvcr-blocks` blocks per worker
   (default `N`; `0` leaves it out), which evicts LRU, a chain's tail first. Each
@@ -247,15 +255,21 @@ cargo bench --package dynamo-bench --bench mooncake_bench \
 `lower_tier` in the result reports each host tier's events, blocks and live
 memberships against what the lower tier indexed, the lower-tier part of each
 lookup, the lookups that found blocks past the device prefix, the lower tier's
-drain, and its heap per membership. The `total_*` fields and throughputs stay
-device-only. Host offload changes the device stream too (blocks pinned during
-copies, prefixes restored from host), so compare device metrics only between
-runs with the same host settings.
+drain, and its heap per membership. For each host tier it also reports the
+stores that arrived before their parent (neither of the worker's host tiers
+held it) and the stores by size: how much of the fill reached the lower tier
+child first. The `total_*` fields and throughputs stay device-only. Host
+offload changes the device stream too (blocks pinned during copies, prefixes
+restored from host), so compare device metrics only between runs with the same
+host settings.
 
 Not modelled: KVCR reads (onboarding from KVCR back to the GPU) and peer
 fetches, which would refresh KVCR recency; Disk/G3 tiers; the worker state
 agent's coalescing of events into chains of up to 128 blocks; and KV-aware
-placement, since sessions are partitioned across workers at random.
+placement, since sessions are partitioned across workers at random. A
+write-back fill also leaves out restores from host to the device (the device
+computes an evicted prefix again), the copy time, and HiCache's reclaim of a
+host copy whose block is back on the device.
 
 ### Choosing a load for A/B comparisons
 
