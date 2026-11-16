@@ -160,6 +160,8 @@ pub async fn serve_direct_engines(
         }
     }
 
+    // Before any engine is published: routers check for this dispatch once,
+    // when the first model card builds them.
     let dispatch = Arc::new(DirectDispatch::default());
     drt.register_grpc_dispatch::<PreprocessedRequest, Annotated<LLMEngineOutput>>(dispatch.clone())
         .map_err(|register_error| {
@@ -730,7 +732,12 @@ mod tests {
     async fn routes_to_hosted_engines_and_follows_their_loss_and_return() {
         let frontend = Frontend::start("direct-membership", 0).await;
         assert_eq!(frontend.model, "direct-test-model");
-        assert!(frontend.drt.has_grpc_dispatch());
+        assert!(
+            frontend
+                .drt
+                .grpc_dispatch::<PreprocessedRequest, Annotated<LLMEngineOutput>>()
+                .is_some()
+        );
 
         // Round robin reaches both engines through the in-process final hop.
         frontend
