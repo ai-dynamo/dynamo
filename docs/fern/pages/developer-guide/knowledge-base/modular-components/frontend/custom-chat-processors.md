@@ -102,9 +102,9 @@ An exception your engine raises becomes the HTTP error response:
   a 4xx, 503 or 529, and 500 for any other 5xx, with the status's standard text; `message` is
   logged, not returned.
 - A worker's error reaches your engine from `routed_engine` as `InvalidArgument` for a rejected
-  request, and as `dynamo.llm.exceptions.RoutedEngineError`, a `ValueError`, for any other
-  classified error. Re-raise it, or let it escape, and the client gets the status the worker's
-  error maps to.
+  request, as `dynamo.llm.exceptions.Cancelled` for a cancelled request, and as
+  `dynamo.llm.exceptions.RoutedEngineError`, a `ValueError`, for any other classified error.
+  Re-raise it, or let it escape, and the client gets the status the worker's error maps to.
 
 ## Response headers
 
