@@ -12,6 +12,8 @@ use dynamo_kv_hints::{
     KvHintTransferWorkerMetadata, WorkerKvTransferKeys, WorkerKvTransferKeysCache,
 };
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_router_protocol::WorkerType;
 use dynamo_router_protocol::worker::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{LocalScheduler, WorkerConfigLike, WorkerKvTransferKeysExt};
@@ -163,29 +165,58 @@ pub(super) fn replay_slots(
 }
 
 pub(super) fn replay_selector(config: &KvRouterConfig) -> anyhow::Result<DefaultWorkerSelector> {
-    replay_selector_with_seed(config, None)
+    replay_selector_with_seed(config, WorkerType::Aggregated, None, None)
 }
 
+/// The selector of one replay worker pool. When `config` selects a worker-selection policy for
+/// `worker_type`, that policy is resolved from `router_plugins` (the policies Dynamo ships when
+/// `None`) and built by its registered factory, as for a live router. Otherwise the selector runs
+/// Dynamo's default, which `selector_seed` seeds.
 pub(super) fn replay_selector_with_seed(
     config: &KvRouterConfig,
+    worker_type: WorkerType,
+    router_plugins: Option<&RouterPluginRegistry>,
     selector_seed: Option<u64>,
 ) -> anyhow::Result<DefaultWorkerSelector> {
     if config.request_classifier_config()?.is_some() {
         anyhow::bail!("offline replay does not support request_classifier plugins");
     }
-    if let Some(instance) = config
-        .selected_worker_selection_policy_instance()
+    let selection_config = SelectionConfig::from(config);
+    if config
+        .selected_worker_selection_policy_instance_for(worker_type)
         .map_err(anyhow::Error::from)?
+        .is_some()
     {
-        anyhow::bail!("custom worker-selection policy {instance:?} is not supported by replay");
+        let builtin;
+        let registry = match router_plugins {
+            Some(registry) => registry,
+            None => {
+                builtin = builtin_router_plugins()?;
+                &builtin
+            }
+        };
+        let factory = registry
+            .resolve_for_worker_type(config, worker_type)?
+            .ok_or_else(|| anyhow::anyhow!("no worker-selection policy factory resolved"))?;
+        return Ok(DefaultWorkerSelector::with_policy_factory(
+            selection_config,
+            "replay",
+            factory,
+            worker_type,
+        ));
     }
 
     Ok(match selector_seed {
-        Some(seed) => {
-            DefaultWorkerSelector::new_seeded(Some(SelectionConfig::from(config)), "replay", seed)
-        }
-        None => DefaultWorkerSelector::new(Some(SelectionConfig::from(config)), "replay"),
+        Some(seed) => DefaultWorkerSelector::new_seeded(Some(selection_config), "replay", seed),
+        None => DefaultWorkerSelector::new(Some(selection_config), "replay"),
     })
+}
+
+/// The worker-selection policies Dynamo ships, for a replay whose host supplied no registry.
+fn builtin_router_plugins() -> anyhow::Result<RouterPluginRegistry> {
+    let mut registry = dynamo_router_policies::default_registry();
+    dynamo_router_policies::register(&mut registry)?;
+    Ok(registry)
 }
 
 pub(crate) fn replay_router_config(
@@ -202,6 +233,10 @@ pub(crate) fn replay_router_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_kv_router::plugins::prelude::{
+        OverlapSignals, RoutingConstraints, ScheduleMode, SchedulingRequest, WorkerLoadProjection,
+    };
+    use dynamo_scheduler::host::{WorkerSelectionInput, WorkerSelector};
 
     #[test]
     fn router_hint_metadata_covers_each_rank_and_keys_are_built_once() {
@@ -250,30 +285,92 @@ mod tests {
         );
     }
 
-    #[test]
-    fn replay_selector_rejects_custom_worker_selection() {
+    fn policy_config(yaml: &str) -> (tempfile::NamedTempFile, KvRouterConfig) {
         let policy_file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            policy_file.path(),
-            r#"
-worker_selection:
-  aggregated: test
-"#,
-        )
-        .unwrap();
+        std::fs::write(policy_file.path(), yaml).unwrap();
         let config = KvRouterConfig {
             router_policy_config: Some(policy_file.path().display().to_string()),
             ..Default::default()
         };
+        (policy_file, config)
+    }
 
-        let error = match replay_selector(&config) {
-            Err(error) => error,
-            Ok(_) => panic!("replay must reject a custom worker selector it cannot execute"),
+    /// Select between worker 0, which caches six of the request's ten blocks and carries forty
+    /// requests, and worker 1, which is idle and caches nothing.
+    fn select_cached_or_idle(selector: &DefaultWorkerSelector) -> WorkerId {
+        const BLOCK_SIZE: u32 = 16;
+        let workers = replay_workers_with_configs(&MockerConfig::default(), 2);
+        let mut request = SchedulingRequest {
+            accounting_attribution: Default::default(),
+            mode: ScheduleMode::QueryOnly { request_id: None },
+            token_seq: None,
+            isl_tokens: 10 * BLOCK_SIZE as usize,
+            lora_name: None,
+            expected_output_tokens: None,
+            affinity_target: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: RoutingConstraints::default(),
+            router_config_override: None,
+            track_prefill_tokens: true,
+            priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
+            session_context: None,
+            overlap: OverlapSignals::default(),
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
+            shared_cache_hits: None,
+            worker_loads: Default::default(),
+            resp_tx: None,
+        };
+        let cached = WorkerWithDpRank::from_worker_id(0);
+        request.overlap.tier_overlap_blocks.device.insert(cached, 6);
+        request.overlap.effective_overlap_blocks.insert(cached, 6.0);
+        for (worker_id, active_requests) in [(0, 40), (1, 0)] {
+            request.worker_loads.insert(
+                WorkerWithDpRank::from_worker_id(worker_id),
+                WorkerLoadProjection {
+                    active_requests,
+                    ..Default::default()
+                },
+            );
+        }
+        selector
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                BLOCK_SIZE,
+            ))
+            .unwrap()
+            .worker
+            .worker_id
+    }
+
+    #[test]
+    fn replay_selector_runs_the_configured_worker_selection_policy() {
+        // Dynamo's default credits the cached blocks and does not weigh request counts.
+        let default = replay_selector(&KvRouterConfig::default()).unwrap();
+        assert_eq!(select_cached_or_idle(&default), 0);
+
+        // Two-tier balances on request count once the gap passes its thresholds.
+        let (_policy_file, config) =
+            policy_config("worker_selection:\n  aggregated: dynamo-two-tier-cost-fn\n");
+        let two_tier = replay_selector(&config).unwrap();
+        assert_eq!(select_cached_or_idle(&two_tier), 1);
+    }
+
+    #[test]
+    fn replay_selector_reports_an_unknown_worker_selection_policy() {
+        let (_policy_file, config) = policy_config("worker_selection:\n  aggregated: test\n");
+        let Err(error) = replay_selector(&config) else {
+            panic!("an unregistered worker-selection policy was accepted")
         };
         assert!(
             error
                 .to_string()
-                .contains("custom worker-selection policy \"test\" is not supported by replay")
+                .contains("unknown worker-selection policy type \"test\"")
         );
     }
 }

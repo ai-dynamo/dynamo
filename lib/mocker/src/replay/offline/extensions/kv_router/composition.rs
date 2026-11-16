@@ -9,6 +9,7 @@ use aisimulate_core::replay::{
 };
 use anyhow::{Context, Result, bail};
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_router_protocol::WorkerType;
 use dynamo_scheduler::host::RouterPrefillLoadModel;
 use std::collections::HashSet;
@@ -115,6 +116,9 @@ pub(in crate::replay) struct KvReplayComposition {
     /// Captured from [`crate::replay::ReplayScope`] at construction. Each placement registers its
     /// selector control here under its worker type.
     router_controls: Option<ReplayRouterControls>,
+    /// Captured from [`crate::replay::ReplayScope`] at construction. A worker-selection policy
+    /// the router config selects resolves from it.
+    router_plugins: Option<RouterPluginRegistry>,
 }
 
 impl KvReplayComposition {
@@ -140,6 +144,7 @@ impl KvReplayComposition {
             determinism: ReplayDeterminism::Random,
             kv_event_lag_ms: scope.kv_event_lag_ms,
             router_controls: scope.router_controls,
+            router_plugins: scope.router_plugins,
         }
     }
 
@@ -169,6 +174,7 @@ impl KvReplayComposition {
             determinism: ReplayDeterminism::Random,
             kv_event_lag_ms: scope.kv_event_lag_ms,
             router_controls: scope.router_controls,
+            router_plugins: scope.router_plugins,
         }
     }
 }
@@ -212,12 +218,14 @@ impl ReplayComposition for KvReplayComposition {
             bail!("disaggregated Router composition used for aggregated replay");
         };
         validate_runtime_topology("aggregated", args, *num_workers, dp_size, &topology)?;
-        let placement = KvRouterPlacement::new_with_selector_seed(
+        let placement = KvRouterPlacement::new_for_worker_type(
             args,
             self.router_config.take(),
             self.prefill_load_estimator.take(),
             &topology,
             self.determinism.selector_seed(),
+            WorkerType::Aggregated,
+            self.router_plugins.as_ref(),
         )?
         .with_kv_event_lag_ms(self.kv_event_lag_ms)?
         .with_conversation_affinity(self.conversation_affinity)?;
@@ -256,7 +264,7 @@ impl ReplayComposition for KvReplayComposition {
             &decode_topology,
         )?;
         let router_config = self.router_config.take();
-        let prefill = KvRouterPlacement::new_with_selector_seed(
+        let prefill = KvRouterPlacement::new_for_worker_type(
             prefill_args,
             Some(derive_prefill_router_config(
                 prefill_args,
@@ -265,16 +273,20 @@ impl ReplayComposition for KvReplayComposition {
             self.prefill_load_estimator.take(),
             &prefill_topology,
             self.determinism.selector_seed(),
+            WorkerType::Prefill,
+            self.router_plugins.as_ref(),
         )
         .context("constructing prefill KV Router placement")?
         .with_kv_event_lag_ms(self.kv_event_lag_ms)?
         .with_conversation_affinity(self.conversation_affinity)?;
-        let decode = KvRouterPlacement::new_with_selector_seed(
+        let decode = KvRouterPlacement::new_for_worker_type(
             decode_args,
             Some(derive_decode_router_config(decode_args, router_config)),
             None,
             &decode_topology,
             self.determinism.selector_seed(),
+            WorkerType::Decode,
+            self.router_plugins.as_ref(),
         )
         .context("constructing decode KV Router placement")?
         .with_kv_event_lag_ms(self.kv_event_lag_ms)?

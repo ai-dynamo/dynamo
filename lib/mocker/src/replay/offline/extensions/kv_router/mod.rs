@@ -24,9 +24,11 @@ use dynamo_kv_indexer::host::{
 use dynamo_kv_indexer::host::{KvTransferCandidateSource, KvTransferCandidates};
 pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::plugins::worker_selection::WorkerCapacity;
 use dynamo_kv_router::scheduling::BusyThresholdsExt;
 use dynamo_kv_router::tracking_hash::tracking_hash_context;
+use dynamo_router_protocol::WorkerType;
 use dynamo_router_protocol::identity::RoutingPartitionRef;
 use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
@@ -519,7 +521,7 @@ pub(crate) struct OfflineReplayRouter {
     affinity_staged: HashMap<Uuid, (Hold, AffinityTarget)>,
     affinity_active: HashMap<Uuid, AffinityLease>,
     needs_drain: bool,
-    /// Fixed at startup, like production's index; see `new_with_selector_seed`.
+    /// Fixed at startup, like production's index; see `new_for_worker_type`.
     kv_transfer_chain_supported: bool,
     kv_transfer_gate_warned: bool,
 }
@@ -529,6 +531,7 @@ pub(in crate::replay) struct KvRouterPlacement {
 }
 
 impl KvRouterPlacement {
+    #[cfg(test)]
     pub(in crate::replay) fn new_with_selector_seed(
         args: &MockerConfig,
         router_config: Option<KvRouterConfig>,
@@ -536,14 +539,38 @@ impl KvRouterPlacement {
         topology: &[WorkerTopology],
         selector_seed: Option<u64>,
     ) -> Result<Self> {
+        Self::new_for_worker_type(
+            args,
+            router_config,
+            prefill_load_estimator,
+            topology,
+            selector_seed,
+            WorkerType::Aggregated,
+            None,
+        )
+    }
+
+    /// The placement of the `worker_type` pool: a worker-selection policy the router config
+    /// selects for that role resolves from `router_plugins`.
+    pub(in crate::replay) fn new_for_worker_type(
+        args: &MockerConfig,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        topology: &[WorkerTopology],
+        selector_seed: Option<u64>,
+        worker_type: WorkerType,
+        router_plugins: Option<&RouterPluginRegistry>,
+    ) -> Result<Self> {
         // Composition checks that `topology[i]` is worker `i`.
         let router_hints: Vec<bool> = topology.iter().map(|worker| worker.router_hint).collect();
-        let router = OfflineReplayRouter::new_with_selector_seed(
+        let router = OfflineReplayRouter::new_for_worker_type(
             args,
             router_config,
             prefill_load_estimator,
             &router_hints,
             selector_seed,
+            worker_type,
+            router_plugins,
         )?;
         Ok(Self { router })
     }
@@ -815,14 +842,36 @@ impl OfflineReplayRouter {
         )
     }
 
-    /// Worker `i` receives KV fetch hints and serves as their source when
-    /// `router_hints[i]` is set.
+    #[cfg(test)]
     pub(crate) fn new_with_selector_seed(
         args: &MockerConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         router_hints: &[bool],
         selector_seed: Option<u64>,
+    ) -> Result<Self> {
+        Self::new_for_worker_type(
+            args,
+            router_config,
+            prefill_load_estimator,
+            router_hints,
+            selector_seed,
+            WorkerType::Aggregated,
+            None,
+        )
+    }
+
+    /// The router of the `worker_type` pool. Worker `i` receives KV fetch hints and serves as
+    /// their source when `router_hints[i]` is set. A worker-selection policy the router config
+    /// selects for that role resolves from `router_plugins`.
+    pub(crate) fn new_for_worker_type(
+        args: &MockerConfig,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        router_hints: &[bool],
+        selector_seed: Option<u64>,
+        worker_type: WorkerType,
+        router_plugins: Option<&RouterPluginRegistry>,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
         let mut indexer = SyncReplayIndexer::new(args.block_size as u32);
@@ -843,7 +892,8 @@ impl OfflineReplayRouter {
             })
             .collect();
         let slots = replay_slots(args, &workers_with_configs);
-        let selector = replay_selector_with_seed(&config, selector_seed)?;
+        let selector =
+            replay_selector_with_seed(&config, worker_type, router_plugins, selector_seed)?;
         // As in production: the startup policy reads the KV index (a later retune
         // keeps the index it started with), and the index retains the chain.
         let kv_transfer_chain_supported =

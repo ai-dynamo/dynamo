@@ -350,6 +350,13 @@ hardware offload recipe.
   polynomial model.
 - `router.policy: kv_router` supports one or more routable workers. Set
   `router.prefill_load_model.type` to `none` or `aic`.
+- With `router.policy: kv_router`, `router.policy_config` names a router policy YAML file, the
+  same file the live router takes with `--router-policy-config`. A worker-selection policy it
+  selects, such as `dynamo-two-tier-cost-fn`, replaces the default cost function for that worker
+  role. See [Worker-Selection Policies](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#worker-selection-policies).
+  `predict` only. The policy runs as its registered factory builds it, so the replay seed does not
+  reach it and a policy that reads the clock reads wall time. `request_classifier` plugins are
+  not supported.
 - With `router.policy: kv_router`, each vLLM aggregated or prefill worker that sets
   `engine.workers.<role>.kv_cache.kvcr` gets the `kv.fetch` hint that the production
   [KV router](../../developer-guide/knowledge-base/modular-components/router/topology-aware-kv-transfer.md#kv-fetch-hints)
