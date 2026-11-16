@@ -108,7 +108,9 @@ ARG TARGETARCH
 # `pip --system`, sglang via `pip --break-system-packages`). Pick the matching
 # generator flag so it always finds the deps — passing an empty
 # `--venv ${VIRTUAL_ENV}` is what broke system-Python images.
-RUN {% if framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then PKG_ARG="--venv ${VIRTUAL_ENV}"; else PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
+{#- The enterprise variant has both: the NIM venv layers over system Python,
+    where Dynamo installs. #}
+RUN {% if framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% elif variant == "enterprise" %}PKG_ARG="--venv ${VIRTUAL_ENV} --site-packages $(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then PKG_ARG="--venv ${VIRTUAL_ENV}"; else PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
     python3 -m compliance.generators \
     --ecosystem {{ compliance_ecosystems }} \
     ${PKG_ARG} \
@@ -191,8 +193,9 @@ COPY --from=epp /sbom-rust-epp.cdx.json /tmp/sbom-rust-epp.cdx.json
 ARG ENABLE_SOURCE_ARCHIVAL=false
 ARG BASELINE_SBOM_FILE="{{ compliance_baseline_sbom }}"
 ARG TARGETARCH
+{#- Dynamo's Rust wheels are in system Python on the enterprise variant, not the NIM venv. #}
 RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
-        {% if framework == "sglang" %}RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then RUST_PKG_ARG="--rust-venv ${VIRTUAL_ENV}"; else RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
+        {% if framework == "sglang" %}RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% elif variant == "enterprise" %}RUST_PKG_ARG="--rust-site-packages $(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then RUST_PKG_ARG="--rust-venv ${VIRTUAL_ENV}"; else RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
         python3 -m compliance.collect_sources \
             {{ compliance_source_ecosystem_flags }} \
             --output-zip /sources.zip \
