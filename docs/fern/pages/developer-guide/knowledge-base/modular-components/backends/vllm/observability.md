@@ -61,6 +61,7 @@ spec:
 ```
 
 - On vLLM this only takes effect when `disable_log_stats` is false (the default); otherwise the engine-metrics path is not registered at all.
+- On vLLM, in the multiprocess conflict-fallback path (when the `.db` collector cannot merge into the global registry and two separate callbacks are used), only database-backed metrics — standard `Counter`/`Gauge`/`Histogram` types — are covered. Metrics from custom in-memory collectors are not exposed on that path. Normal multiprocess and single-process deployments are unaffected.
 
 ## Getting Started Quickly
 
