@@ -2225,7 +2225,7 @@ from dynamo.common.multimodal import VideoLoader
 VideoLoader(http_timeout: float = 60.0, num_frames: int = NUM_FRAMES_DEFAULT, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None) -> None
 ```
 
-[`components/src/dynamo/common/multimodal/video_loader.py#L122`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L122)
+[`components/src/dynamo/common/multimodal/video_loader.py#L171`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L171)
 
 **Public methods**
 
@@ -2237,7 +2237,7 @@ __init__(http_timeout: float = 60.0, num_frames: int = NUM_FRAMES_DEFAULT, enabl
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L125)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L174)
 
 <h4 id="api-dynamo-common-multimodal-video-loader-videoloader-load-video">load_video</h4>
 
@@ -2247,7 +2247,7 @@ load_video(video_url: str, media_io_kwargs: Dict[str, Any] | None = None) -> tup
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L266)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L324)
 
 <h4 id="api-dynamo-common-multimodal-video-loader-videoloader-load-video-batch">load_video_batch</h4>
 
@@ -2261,7 +2261,7 @@ Raises ``ValueError`` for malformed items or decoded items when frontend
 decoding is disabled. Validation happens before any load coroutine is
 created so an invalid item cannot leave earlier loads unawaited.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L365)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L431)
 </Accordion>
 
 <Accordion id="api-dynamo-common-forward-pass-metrics-welfordaccumulator" title="WelfordAccumulator (class)">
