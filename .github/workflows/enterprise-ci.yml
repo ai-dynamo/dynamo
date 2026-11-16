@@ -94,6 +94,8 @@ jobs:
       gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1 and not sidecar'
       gpu_test_timeout_minutes: 120
       run_gpu_parallel_tests: true
+      # Lower than the 24 used by post-merge: this image reserves VRAM for the
+      # PyNvVideoCodec decoder, pushing some multimodal tests past the L4's ~22 GiB.
       gpu_parallel_max_vram_gib: '22'
     secrets: inherit
 
