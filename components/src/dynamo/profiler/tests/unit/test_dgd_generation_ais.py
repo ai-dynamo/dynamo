@@ -5,6 +5,7 @@
 
 from pathlib import Path
 
+import pandas as pd
 import pytest
 import yaml
 
@@ -28,7 +29,10 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import (
     FeaturesSpec,
     MockerSpec,
 )
-from dynamo.profiler.utils.profile_common import needs_profile_data
+from dynamo.profiler.utils.profile_common import (
+    needs_profile_data,
+    picked_config_from_row,
+)
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -68,6 +72,18 @@ def test_aic_import_propagates_internal_or_unrelated_missing_module(
         _load_latest_database_version()
 
     assert exc_info.value.name == missing_module
+
+
+@pytest.mark.parametrize(
+    ("prefix", "row", "expected_cp"),
+    [
+        ("(p)", {"(p)tp": 1, "(p)dp": 1, "(p)moe_tp": 4, "(p)cp": 4}, 4),
+        ("(d)", {"(d)tp": 1, "(d)dp": 8, "(d)moe_tp": 8}, 1),
+        ("(p)", {"(p)tp": 2, "(p)cp": float("nan")}, 1),
+    ],
+)
+def test_picked_config_from_row_reads_selected_cp(prefix, row, expected_cp):
+    assert picked_config_from_row(prefix, pd.Series(row)).cp == expected_cp
 
 
 def _dgdr(
@@ -457,6 +473,52 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         assert cfg.ais_perf_model.roles["prefill"]["tp"] == prefill_pick.tp
         assert cfg.ais_perf_model.roles["decode"]["tp"] == decode_pick.tp
         assert resolved_versions == [("h200_sxm", "vllm")]
+        assert cfg.ais_perf_model.roles["prefill"]["cp_size"] is None
+        assert cfg.ais_perf_model.roles["decode"]["cp_size"] is None
+
+    @pytest.mark.parametrize(
+        ("model", "prefill_pick", "decode_pick", "prefill_cp"),
+        [
+            # DYN-5633: the SGLang MoE RAPID pick, prefill CP4 and decode without CP.
+            (
+                "Qwen/Qwen3-30B-A3B",
+                PickedParallelConfig(tp=1, dp=1, moe_tp=4, cp=4),
+                PickedParallelConfig(tp=1, dp=8, moe_tp=8),
+                4,
+            ),
+            (
+                "Qwen/Qwen3-32B",
+                PickedParallelConfig(tp=2, cp=2),
+                PickedParallelConfig(tp=2),
+                2,
+            ),
+        ],
+    )
+    def test_ais_perf_model_keeps_selected_prefill_cp(
+        self, monkeypatch, model, prefill_pick, decode_pick, prefill_cp
+    ):
+        monkeypatch.setattr(
+            "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
+            lambda **_: "0.5.15",
+        )
+        planner = PlannerConfig(
+            enable_throughput_scaling=True,
+            enable_load_scaling=False,
+            optimization_target="sla",
+            pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Rapid,
+        )
+
+        spec = build_ais_perf_model_spec(
+            _dgdr(planner=planner, model=model),
+            best_prefill_pick=prefill_pick,
+            best_decode_pick=decode_pick,
+            resolved_backend="sglang",
+            system="h100_sxm",
+        )
+
+        assert spec is not None
+        assert spec.roles["prefill"]["cp_size"] == prefill_cp
+        assert spec.roles["decode"]["cp_size"] is None
 
     def test_ais_perf_model_falls_back_when_database_is_unavailable(self, monkeypatch):
         monkeypatch.setattr(
@@ -818,6 +880,8 @@ def test_profiler_preserves_explicit_estimator_config(tmp_path):
             "h200_sxm",
             "moe_tp_size",
         ),
+        ({}, PickedParallelConfig(cp=4), "vllm", "h200_sxm", "cp_size"),
+        ({"cp_size": 2}, PickedParallelConfig(cp=4), "vllm", "h200_sxm", "cp_size"),
     ],
 )
 def test_profiler_rejects_estimator_identity_that_disagrees_with_deployment(

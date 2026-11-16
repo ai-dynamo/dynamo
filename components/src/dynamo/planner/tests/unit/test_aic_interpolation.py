@@ -137,7 +137,7 @@ class TestPickedToAicKwargs:
     The invariant AIC enforces for MoE models (aisimulate_core sdk/models/,
     ~8 assertion sites) is::
 
-        tp_size * attention_dp_size == moe_tp_size * moe_ep_size
+        tp_size * attention_dp_size * cp_size == moe_tp_size * moe_ep_size
 
     Each test case asserts both the expected kwargs and the identity.
     """
@@ -145,7 +145,7 @@ class TestPickedToAicKwargs:
     @staticmethod
     def _assert_identity(kw: dict) -> None:
         assert (
-            kw["tp_size"] * kw["attention_dp_size"]
+            kw["tp_size"] * kw["attention_dp_size"] * kw["cp_size"]
             == kw["moe_tp_size"] * kw["moe_ep_size"]
         ), f"AIC identity violated for {kw}"
 
@@ -161,6 +161,7 @@ class TestPickedToAicKwargs:
             "moe_tp_size": 1,
             "moe_ep_size": 1,
             "attention_dp_size": 1,
+            "cp_size": 1,
         }
 
     def test_tp_only_moe(self):
@@ -171,6 +172,15 @@ class TestPickedToAicKwargs:
         assert kw["moe_tp_size"] == 8
         assert kw["moe_ep_size"] == 1
         assert kw["attention_dp_size"] == 1
+        self._assert_identity(kw)
+
+    def test_prefill_cp(self):
+        # DYN-5633: SGLang MoE prefill CP4 on 4 GPUs.
+        p = PickedParallelConfig(tp=1, dp=1, moe_tp=4, moe_ep=1, cp=4)
+        kw = picked_to_aic_model_config_kwargs(p)
+        assert kw["tp_size"] == 1
+        assert kw["cp_size"] == 4
+        assert kw["moe_tp_size"] == 4
         self._assert_identity(kw)
 
     def test_tep(self):
@@ -189,6 +199,7 @@ class TestPickedToAicKwargs:
             "moe_tp_size": 1,
             "moe_ep_size": 8,
             "attention_dp_size": 8,
+            "cp_size": 1,
         }
         self._assert_identity(kw)
 
@@ -268,6 +279,12 @@ class TestAICInterpolationSpec:
         )
         roundtrip = AICInterpolationSpec.model_validate_json(spec.model_dump_json())
         assert roundtrip == spec
+
+    def test_pick_cp_roundtrips_and_defaults_to_one(self):
+        pick = PickedParallelConfig(tp=1, moe_tp=4, cp=4)
+        assert PickedParallelConfig.model_validate_json(pick.model_dump_json()).cp == 4
+        # ConfigMaps written before the field existed carry no ``cp``.
+        assert PickedParallelConfig.model_validate_json('{"tp": 1}').cp == 1
 
     def test_rejects_unknown_backend(self):
         with pytest.raises(ValueError):
