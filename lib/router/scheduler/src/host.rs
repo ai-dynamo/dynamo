@@ -24,9 +24,9 @@ pub use crate::replication::{
 };
 pub use crate::selection::SelectionError;
 pub use crate::selection::core::{
-    HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource, Selected,
-    SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation, SelectionOutcome,
-    SelectionPartition, SelectionRun, SelectionScheduler, SessionBinding,
+    HostCache, HostEligibility, HostHints, HostLoad, HostReplication, HostTelemetry, KvIndexSource,
+    Selected, SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation,
+    SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler, SessionBinding,
 };
 pub use crate::selection::ingress::{KvEventIngress, LocalIndexIngress};
 pub use crate::selection::input::{PromptRequest, PromptView};
@@ -55,10 +55,10 @@ pub use crate::types::{
     SchedulingRequest,
 };
 pub use crate::types::{RejectThresholdsProvider, WorkerSelectionPolicyFactory};
-pub use dynamo_admission::classifier::RequestLifecycle;
+pub use dynamo_admission::RequestLifecycle;
 pub use dynamo_kv_hints::{KvHintTransferWorkerMetadata, KvTransferEnforcement};
-pub use dynamo_kv_indexer::backend::IndexerPolicy;
-pub use dynamo_kv_indexer::registry::IndexRegistry;
+pub use dynamo_kv_indexer::IndexRegistry;
+pub use dynamo_kv_indexer::IndexerPolicy;
 
 // What the frontend host (lib/llm) names beyond the lists above.
 pub use crate::filter::{RoutingEligibility, WorkerEligibilityError};

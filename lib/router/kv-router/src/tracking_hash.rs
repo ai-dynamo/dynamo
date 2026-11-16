@@ -8,8 +8,8 @@ use anyhow::{Context, Result, bail};
 use zeroize::Zeroizing;
 
 use crate::config::KvRouterConfig;
-use dynamo_scheduler::tracking_hash::KEY_SIZE;
-pub use dynamo_scheduler::tracking_hash::{
+use dynamo_scheduler::KEY_SIZE;
+pub use dynamo_scheduler::{
     TrackingHashAlgorithm, TrackingHashConfig, TrackingHashContext, TrackingHashScope,
 };
 
