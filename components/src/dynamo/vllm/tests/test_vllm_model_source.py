@@ -103,6 +103,41 @@ async def test_hf_model_keeps_engine_and_registration_source(monkeypatch):
     assert config.model_source_path == model
 
 
+@pytest.mark.parametrize(
+    ("model", "revision", "expected"),
+    [
+        ("Qwen/Qwen3-0.6B", "v1.0", "v1.0"),
+        ("Qwen/Qwen3-0.6B", None, None),
+        ("ngc://example/team/model:1", "v1.0", None),
+    ],
+)
+def test_model_revision_is_the_engine_revision_for_hugging_face(
+    model, revision, expected
+):
+    config = vllm_args.Config()
+    config.model = model
+    config.engine_args = SimpleNamespace(model=model, revision=revision)
+
+    assert config.model_revision == expected
+
+
+@pytest.mark.asyncio
+async def test_hf_worker_prefetches_the_revision_vllm_loads(monkeypatch):
+    model = "Qwen/Qwen3-0.6B"
+    fetch = AsyncMock()
+    vllm_main = importlib.import_module("dynamo.vllm.main")
+    setup = AsyncMock(side_effect=RuntimeError("stop before engine setup"))
+    monkeypatch.setattr(vllm_main, "fetch_model", fetch)
+    monkeypatch.setattr(vllm_main, "prepare_snapshot_engine", setup)
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", False)
+
+    with pytest.raises(RuntimeError, match="stop before engine setup"):
+        await vllm_main.worker(["--model", model, "--revision", "main"])
+
+    fetch.assert_awaited_once_with(model, revision="main")
+    assert setup.call_args.args[0].model_revision == "main"
+
+
 @pytest.mark.parametrize("load_format", ["auto", "mx", "modelexpress"])
 async def test_ngc_worker_fetches_weights_before_engine_setup(
     monkeypatch, tmp_path, load_format

@@ -91,6 +91,18 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
             self.engine_args.model if needs_local_model_path(self.model) else self.model
         )
 
+    @property
+    def model_revision(self) -> Optional[str]:
+        """The Hugging Face revision (``--revision``) vLLM loads ``model`` at.
+
+        Dynamo fetches and registers the model at the same revision, so the
+        tokenizer and templates the frontend uses match the weights. ``None``
+        means the default branch; sources other than Hugging Face have none.
+        """
+        if needs_local_model_path(self.model):
+            return None
+        return getattr(self.engine_args, "revision", None)
+
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
         self._resolve_realtime_endpoint_type()
