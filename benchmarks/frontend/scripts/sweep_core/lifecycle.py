@@ -34,13 +34,3 @@ def needs_deploy_or_reset(
 
     # reuse_by_deploy_key: only reset when the deploy key changes
     return current.deploy_key != previous.deploy_key
-
-
-def deploy_key_changed(
-    current: RunSpec,
-    previous: Optional[RunSpec],
-) -> bool:
-    """Check if the deploy key has changed between consecutive runs."""
-    if previous is None:
-        return True
-    return current.deploy_key != previous.deploy_key

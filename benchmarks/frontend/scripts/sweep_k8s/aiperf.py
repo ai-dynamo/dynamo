@@ -260,24 +260,6 @@ def _print_job_logs(job_name: str, namespace: str, tail: int = 20) -> None:
             print(f"    {line}")
 
 
-def _get_job_pod_name(job_name: str, namespace: str) -> Optional[str]:
-    """Get the pod name for a Job."""
-    result = run_kubectl(
-        [
-            "get",
-            "pods",
-            "-l",
-            f"job-name={job_name}",
-            "-o",
-            "jsonpath={.items[0].metadata.name}",
-        ],
-        namespace=namespace,
-        check=False,
-    )
-    name = result.stdout.strip()
-    return name if name else None
-
-
 def _copy_artifacts_from_pvc(
     job_name: str,
     namespace: str,
