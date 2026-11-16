@@ -17,19 +17,18 @@ the very image it is meant to validate.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
-
-from dynamo.common.multimodal import nvdec_decoder as nd
 
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.post_merge,
     pytest.mark.gpu_1,
     pytest.mark.vllm,
-    pytest.mark.forked,
+    pytest.mark.multimodal,
 ]
 
 
@@ -39,20 +38,39 @@ _MEDIA_DIR = (
 
 # Committed fixtures, re-encoded from the VP9 240p_10.mp4 clip.
 _FIXTURES = {"h264": "240p_10_h264.mp4", "hevc": "240p_10_h265.mp4"}
+_WORKER_FLAG = "--nvdec-worker"
+_WORKER_SKIP = 77
+_WORKER_TIMEOUT_S = 60
 
 
-@pytest.mark.parametrize("codec", sorted(_FIXTURES))
-def test_nvdec_decodes_real_clip(codec):
+def _readable_output(output: str | bytes | None) -> str:
+    if isinstance(output, bytes):
+        return output.decode(errors="replace")
+    return output or ""
+
+
+def _decode_and_assert(codec: str) -> int:
+    """Decode one fixture; local imports keep parent pytest free of CUDA/NVDEC."""
+    import numpy as np
+
+    from dynamo.common.multimodal import nvdec_decoder as nd
+
     if not nd.nvdec_available():
-        pytest.skip("PyNvVideoCodec/NVDEC not available (needs the video capability)")
+        print(
+            "PyNvVideoCodec/NVDEC not available (needs the video capability)",
+            file=sys.stderr,
+        )
+        return _WORKER_SKIP
 
     path = _MEDIA_DIR / _FIXTURES[codec]
     if not path.is_file():
-        pytest.skip(f"fixture not available: {path}")
+        print(f"fixture not available: {path}", file=sys.stderr)
+        return _WORKER_SKIP
     data = path.read_bytes()
     # Guard against an unresolved Git LFS pointer masquerading as the clip.
     if data[:7] == b"version":
-        pytest.skip(f"fixture is an unresolved LFS pointer: {path}")
+        print(f"fixture is an unresolved LFS pointer: {path}", file=sys.stderr)
+        return _WORKER_SKIP
 
     # Sanity: the probe classifies the clip as an NVDEC-routed codec.
     assert nd.probe_video_codec(data) in nd.HW_ROUTED_CODECS
@@ -66,3 +84,97 @@ def test_nvdec_decodes_real_clip(codec):
     assert frames[:, :, :, :].max() > 0  # real pixels, not a black clip
     assert metadata["total_num_frames"] >= 8
     assert len(metadata["frames_indices"]) == 8
+
+    import PyNvVideoCodec as nvc
+    import torch
+
+    # Copy each reference frame before another decode can reuse its storage.
+    # Shape/nonzero assertions alone miss the bug where every returned frame
+    # aliases the last one; compare the actual pixels at each sampled index.
+    decoder = nvc.SimpleDecoder(
+        str(path),
+        gpu_id=nd._gpu_id(),
+        output_color_type=nvc.OutputColorType.RGB,
+        use_device_memory=False,
+    )
+    reference = [
+        torch.from_dlpack(decoder[index]).cpu().numpy().copy()
+        for index in metadata["frames_indices"]
+    ]
+    assert not np.array_equal(reference[0], reference[-1]), "fixture must vary"
+    np.testing.assert_array_equal(frames, np.stack(reference))
+    return 0
+
+
+def _assert_cuda_frame_conversion() -> None:
+    import numpy as np
+    import torch
+
+    from dynamo.common.multimodal import nvdec_decoder as nd
+
+    class CudaArrayOnly:
+        def __init__(self, tensor):
+            self.tensor = tensor
+
+        @property
+        def __cuda_array_interface__(self):
+            return self.tensor.__cuda_array_interface__
+
+    for dtype in (np.uint8, np.float32):
+        values = np.arange(72, dtype=dtype).reshape(4, 6, 3)
+        if dtype == np.float32:
+            values += 0.5
+        expected = values.astype(np.uint8)
+        for array_only in (False, True):
+            source = torch.from_numpy(values).to(f"cuda:{nd._gpu_id()}")
+            frame = CudaArrayOnly(source) if array_only else source
+            result = nd._frame_to_rgb_hwc(frame)
+            source.fill_(255)
+            torch.cuda.synchronize(source.device)
+
+            assert isinstance(result, np.ndarray)
+            assert result.dtype == np.uint8
+            np.testing.assert_array_equal(result, expected)
+
+
+def _run_worker() -> int:
+    for codec in sorted(_FIXTURES):
+        print(f"Validating NVDEC {codec}", file=sys.stderr, flush=True)
+        status = _decode_and_assert(codec)
+        if status != 0:
+            return status
+    _assert_cuda_frame_conversion()
+    return 0
+
+
+@pytest.mark.timeout(_WORKER_TIMEOUT_S + 15)
+def test_nvdec_decodes_real_clips():
+    try:
+        result = subprocess.run(
+            [sys.executable, __file__, _WORKER_FLAG],
+            capture_output=True,
+            text=True,
+            timeout=_WORKER_TIMEOUT_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(
+            f"NVDEC worker timed out after {_WORKER_TIMEOUT_S}s\n"
+            f"--- stdout ---\n{_readable_output(exc.stdout)}\n"
+            f"--- stderr ---\n{_readable_output(exc.stderr)}"
+        )
+
+    if result.returncode == _WORKER_SKIP:
+        pytest.skip(result.stderr.strip() or "NVDEC worker unavailable")
+    if result.returncode != 0:
+        pytest.fail(
+            f"NVDEC worker failed (rc={result.returncode})\n"
+            f"--- stdout ---\n{result.stdout}\n"
+            f"--- stderr ---\n{result.stderr}"
+        )
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] != [_WORKER_FLAG]:
+        sys.exit(f"usage: {sys.argv[0]} {_WORKER_FLAG}")
+    sys.exit(_run_worker())

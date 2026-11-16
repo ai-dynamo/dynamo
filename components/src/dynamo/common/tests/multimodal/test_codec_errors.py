@@ -5,7 +5,7 @@
 
 import pytest
 
-import dynamo.common.multimodal.codec_errors as codec_errors
+from dynamo.common.multimodal import codec_errors
 from dynamo.common.multimodal.codec_errors import (
     MissingMediaDecoderError,
     audio_decoder_missing,
@@ -16,7 +16,13 @@ from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
 
-def test_video_message_names_codec_spec_and_installer(monkeypatch):
+@pytest.fixture(autouse=True)
+def _carrier_absent(carrier_imports):
+    """Make missing-carrier messages independent of installed packages."""
+    carrier_imports()
+
+
+def test_video_message_names_codec_and_spec(monkeypatch):
     monkeypatch.setattr(codec_errors, "nvdec_available", lambda: True)
     err = video_decoder_missing("vllm", "opencv-python-headless", "cv2", "vp9")
 
@@ -30,6 +36,61 @@ def test_video_message_names_codec_spec_and_installer(monkeypatch):
     assert "install_media_decoders vllm" in msg
     # Non-hardware codec: the hardware alternative is re-encoding.
     assert "H.264/H.265" in msg
+
+
+def test_present_but_unusable_carrier_pins_the_installed_version(
+    monkeypatch, carrier_imports
+):
+    """Replacing codec-free OpenCV must preserve the installed version."""
+    carrier_imports(present=("cv2",))
+    monkeypatch.setattr(
+        codec_errors.importlib.metadata, "version", lambda p: "5.0.0.93"
+    )
+    msg = str(video_decoder_missing("vllm", "opencv-python-headless", "cv2", "vp9"))
+    assert "--force-reinstall" in msg
+    assert "--only-binary opencv-python-headless" in msg
+    assert "opencv-python-headless==5.0.0.93" in msg
+    assert VALIDATED_SPECS["opencv-python-headless"] not in msg
+
+
+def test_present_carrier_without_metadata_requests_its_version(
+    monkeypatch, carrier_imports
+):
+    """Without metadata, match the library version plus its packaging revision."""
+    carrier_imports(present=("cv2",))
+
+    def _missing(_package):
+        raise codec_errors.importlib.metadata.PackageNotFoundError
+
+    monkeypatch.setattr(codec_errors.importlib.metadata, "version", _missing)
+    msg = str(video_decoder_missing("vllm", "opencv-python-headless", "cv2", "vp9"))
+    assert "print(cv2.__version__)" in msg
+    assert "opencv-python-headless==<cv2-version>.*" in msg
+    assert VALIDATED_SPECS["opencv-python-headless"] not in msg
+    assert "--force-reinstall" in msg
+
+
+def test_broken_carrier_is_not_treated_as_the_source_build(carrier_imports):
+    """Broken imports need a reinstall, not a missing-video-backend diagnosis."""
+    carrier_imports(error=OSError("libGL.so.1: cannot open shared object file"))
+
+    msg = str(
+        video_decoder_missing(
+            "vllm",
+            "opencv-python-headless",
+            "cv2",
+            "vp9",
+            cause="libGL.so.1: cannot open shared object file",
+        )
+    )
+    assert "built without a video backend" not in msg
+    assert VALIDATED_SPECS["opencv-python-headless"] in msg
+    assert "--force-reinstall" in msg
+    # Without this, pip may rebuild the codec-free sdist the operator is
+    # trying to replace.
+    assert "--only-binary opencv-python-headless" in msg
+    # The carrier's own words are what identify the real fault.
+    assert "libGL.so.1" in msg
 
 
 def test_hw_codec_without_nvdec_points_at_driver_capability(monkeypatch):

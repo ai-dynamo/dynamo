@@ -28,6 +28,29 @@ spec:
           prometheus.io/port: "19090"
           prometheus.io/scrape: "true"
       extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: node.kubernetes.io/instance-type
+                  operator: In
+                  values:
+                  - p5.48xlarge
+                  - ml.p5.48xlarge
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - q32b-1p1d-cloud-provider
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values:
+                  - worker
+              topologyKey: topology.kubernetes.io/zone
         mainContainer:
           args:
           - |
@@ -49,7 +72,7 @@ spec:
           - -lc
           env:
           - name: KV_TRANSFER_CONFIG
-            value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+            value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
           - name: DYN_KVBM_NIXL_BACKEND_LIBFABRIC
             value: "true"
           - name: DYN_KVBM_NIXL_BACKEND_UCX
@@ -153,6 +176,29 @@ spec:
           prometheus.io/port: "19090"
           prometheus.io/scrape: "true"
       extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: node.kubernetes.io/instance-type
+                  operator: In
+                  values:
+                  - p5.48xlarge
+                  - ml.p5.48xlarge
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - q32b-1p1d-cloud-provider
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values:
+                  - worker
+              topologyKey: topology.kubernetes.io/zone
         mainContainer:
           args:
           - |
@@ -173,7 +219,7 @@ spec:
           - -lc
           env:
           - name: KV_TRANSFER_CONFIG
-            value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+            value: '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
           - name: DYN_KVBM_NIXL_BACKEND_LIBFABRIC
             value: "true"
           - name: DYN_KVBM_NIXL_BACKEND_UCX

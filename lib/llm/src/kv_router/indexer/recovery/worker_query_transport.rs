@@ -6,19 +6,19 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use dynamo_kv_router::{
-    indexer::{
-        KvStateAgentIdentity, KvStateAgentStatus, WorkerKvQueryKind, WorkerKvQueryRequest,
-        WorkerKvQueryResponse,
-    },
-    protocols::{DpRank, WorkerId},
+use dynamo_kv_indexer::host::{
+    KvStateAgentIdentity, KvStateAgentStatus, WorkerKvQueryKind, WorkerKvQueryRequest,
+    WorkerKvQueryResponse,
 };
+use dynamo_router_protocol::worker::{DpRank, WorkerId};
 use dynamo_runtime::{
     component::{Component, Instance},
     pipeline::{AddressedPushRouter, AddressedRequest, AsyncEngine, ManyOut, SingleIn},
     protocols::maybe_error::MaybeError,
 };
 use futures::StreamExt;
+
+use crate::kv_router::indexer::reply::WorkerKvQueryReply;
 
 #[async_trait]
 pub(crate) trait WorkerQueryTransport: Send + Sync {
@@ -43,9 +43,6 @@ impl RuntimeWorkerQueryTransport {
         })
     }
 
-    // Retained for the version-aware state-agent watcher that will activate
-    // residency-v2 consumption (DEP #13044).
-    #[allow(dead_code)]
     pub(crate) async fn query_status(
         &self,
         worker_id: WorkerId,
@@ -78,6 +75,31 @@ impl RuntimeWorkerQueryTransport {
         }
     }
 
+    pub(crate) async fn query_state_agent_recovery(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        target: Instance,
+        expected: KvStateAgentIdentity,
+        expected_attachment_generation: Option<u64>,
+        timeout: Duration,
+    ) -> Result<WorkerKvQueryResponse> {
+        let request = WorkerKvQueryRequest {
+            worker_id,
+            dp_rank,
+            start_event_id: None,
+            end_event_id: None,
+            supports_tree_dump_failed: true,
+            kind: WorkerKvQueryKind::StateAgentRecovery {
+                expected,
+                expected_attachment_generation,
+            },
+        };
+        tokio::time::timeout(timeout, self.query(target, request))
+            .await
+            .context("KV state-agent recovery timed out")?
+    }
+
     async fn query(
         &self,
         instance: Instance,
@@ -87,7 +109,7 @@ impl RuntimeWorkerQueryTransport {
         let endpoint_name = instance.endpoint.clone();
         let addressed_request =
             SingleIn::new(request).map(|req| AddressedRequest::for_instance(req, instance));
-        let mut stream: ManyOut<WorkerKvQueryResponse> = self
+        let mut stream: ManyOut<WorkerKvQueryReply> = self
             .addressed
             .generate(addressed_request)
             .await
@@ -96,14 +118,14 @@ impl RuntimeWorkerQueryTransport {
                     "Failed to send worker KV query via endpoint {endpoint_name} instance {instance_id}"
                 )
             })?;
-        let response = stream
+        let reply = stream
             .next()
             .await
             .context("Worker KV query returned an empty response stream")?;
-        if let Some(err) = response.err() {
+        if let Some(err) = reply.err() {
             return Err(err).context("Worker KV query response error");
         }
-        Ok(response)
+        Ok(reply.into())
     }
 }
 

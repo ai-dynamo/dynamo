@@ -108,3 +108,16 @@ For automated, metrics-driven redistribution between the pools, use the
 [Planner](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md). For a fresh topology search, rerun
 [AIConfigurator](../disaggregated-serving/sizing-with-aiconfigurator.mdx) with workload parameters that match the
 measured traffic.
+
+## Bound frontend host memory growth
+
+The frontend allocates host memory per request for tokenization, routing bookkeeping, and response
+assembly. Its Rust allocations use a built-in jemalloc that returns unused pages to the operating
+system over about 10 seconds, so after the load stops resident memory falls substantially, but not
+to the live heap: partly used pages stay resident, and CPython and C libraries keep the system
+allocator's high-water mark. This is allocator behavior rather than a leak. To change the settings,
+see [Host memory allocator](../../reference/components/frontend-configuration.mdx#host-memory-allocator).
+
+To verify a change, track the frontend container's `memory.current` (cgroup v2) or
+`memory.usage_in_bytes` (cgroup v1) across repeated runs of the same workload, and again after a
+minute or two of idle, because purging is time-based.

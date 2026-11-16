@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_mocker::common::protocols::{ForwardPassSnapshot, FpmPublisher, FpmSink};
+use dynamo_runtime::SystemHealth;
 use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
@@ -114,12 +115,13 @@ impl FpmEventRelay {
         let cancel_clone = cancel.clone();
 
         let trace = rt.block_on(init_fpm_trace(component));
+        let progress = EngineProgress::new(&endpoint);
 
         let publisher =
             rt.block_on(async { EventPublisher::for_endpoint(&endpoint, FPM_TOPIC).await })?;
 
         rt.spawn(async move {
-            Self::relay_loop(zmq_endpoint, publisher, cancel_clone, trace).await;
+            Self::relay_loop(zmq_endpoint, publisher, cancel_clone, trace, progress).await;
         });
 
         Ok(Self { cancel })
@@ -135,6 +137,7 @@ impl FpmEventRelay {
         publisher: EventPublisher,
         cancel: CancellationToken,
         trace: Option<crate::fpm_trace::FpmTrace>,
+        mut progress: EngineProgress,
     ) {
         let socket = match connect_sub_socket(&zmq_endpoint, None).await {
             Ok(socket) => socket,
@@ -160,6 +163,9 @@ impl FpmEventRelay {
                             // ZMQ multipart: [topic, seq, payload]
                             if frames.len() == 3 {
                                 let payload = bytes::Bytes::from(frames.swap_remove(2));
+                                // Before the publish, so a slow event plane does not
+                                // delay this frame's signal to the health check.
+                                progress.note_frame(&payload);
                                 tap_relay_fpm(&payload, trace.as_ref());
                                 if let Err(e) = publisher.publish_bytes_ref(&payload).await {
                                     tracing::warn!("FPM relay: event plane publish failed: {e}");
@@ -190,6 +196,84 @@ impl Drop for FpmEventRelay {
     fn drop(&mut self) {
         self.cancel.cancel();
     }
+}
+
+/// Tells an endpoint's health check that the engine completed a forward pass.
+///
+/// A canary sent during a long prefill is not answered until the prefill ends.
+/// While it waits, each completed pass restarts its timeout, so a busy engine is
+/// not mistaken for a stalled one. A pass never changes health status.
+struct EngineProgress {
+    system_health: Arc<parking_lot::Mutex<SystemHealth>>,
+    endpoint_name: String,
+    /// Whether canary health checks are on. Fixed for the life of the process.
+    enabled: bool,
+    /// Cached once the endpoint has registered its health check target.
+    notifier: Option<Arc<tokio::sync::Notify>>,
+    warned_unreadable: bool,
+}
+
+impl EngineProgress {
+    fn new(endpoint: &Endpoint) -> Self {
+        let system_health = endpoint.component().drt().system_health();
+        let enabled = system_health.lock().health_check_enabled();
+        Self {
+            system_health,
+            endpoint_name: endpoint.name().to_string(),
+            enabled,
+            notifier: None,
+            warned_unreadable: false,
+        }
+    }
+
+    /// Report a completed forward pass.
+    fn note(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        if self.notifier.is_none() {
+            self.notifier = self
+                .system_health
+                .lock()
+                .get_endpoint_progress_notifier(&self.endpoint_name);
+        }
+        if let Some(notifier) = &self.notifier {
+            notifier.notify_one();
+        }
+    }
+
+    /// Report a relayed frame if it is a completed forward pass.
+    fn note_frame(&mut self, payload: &[u8]) {
+        if !self.enabled {
+            return;
+        }
+        match is_completed_pass(payload) {
+            Ok(true) => self.note(),
+            Ok(false) => {}
+            Err(error) => {
+                if !self.warned_unreadable {
+                    self.warned_unreadable = true;
+                    tracing::warn!(
+                        %error,
+                        "FPM relay: cannot read wall_time from a frame; forward passes will not extend the canary timeout"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The field of a relayed frame that tells a completed forward pass from a
+/// heartbeat. Frames are msgpack maps, so the other fields are skipped.
+#[derive(serde::Deserialize)]
+struct FpmPassPeek {
+    wall_time: f64,
+}
+
+/// Whether `payload` reports a completed forward pass. A heartbeat carries
+/// `wall_time == 0.0`, including one sent while a long pass is still running.
+fn is_completed_pass(payload: &[u8]) -> Result<bool, rmp_serde::decode::Error> {
+    rmp_serde::from_slice::<FpmPassPeek>(payload).map(|frame| frame.wall_time > 0.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +417,7 @@ impl FpmDirectPublisher {
 
         let publisher = EventPublisher::for_endpoint(&endpoint, FPM_TOPIC).await?;
         let trace = init_fpm_trace(component).await;
+        let mut progress = EngineProgress::new(&endpoint);
 
         // Shared channel: per-dp_rank tasks send snapshots here. A single publisher task
         // serializes them into a reusable buffer and preserves event-plane publish ordering.
@@ -350,6 +435,9 @@ impl FpmDirectPublisher {
                     result = pub_rx.recv() => {
                         match result {
                             Some(pending) => {
+                                if pending.snapshot.wall_time_secs > 0.0 {
+                                    progress.note();
+                                }
                                 match serialize_fpm_into(
                                     &mut payload,
                                     &pending.snapshot,
@@ -458,7 +546,6 @@ impl Drop for FpmDirectPublisher {
 mod tests {
     use super::*;
     use serde::Deserialize;
-    use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
 
     #[test]
@@ -468,37 +555,40 @@ mod tests {
         assert!(report_fpm_trace_init(Err(anyhow::anyhow!("unwritable trace path"))).is_none());
     }
 
+    /// A completed pass extends a waiting canary. A stalled engine keeps sending
+    /// heartbeats, so a heartbeat must not look like one.
+    ///
+    /// The relay reads frames encoded by the Python `ForwardPassMetrics`
+    /// publisher, not by `serialize_fpm`. These bytes are
+    /// `forward_pass_metrics.encode()` output from msgspec 0.22.0: a 0.48 s pass
+    /// that prefilled 2048 tokens, and a heartbeat sent during a long pass, which
+    /// reports only the waiting queue.
     #[test]
-    fn relay_and_direct_paths_tap_each_payload_exactly_once() {
-        let relay_calls = Cell::new(0);
-        let relay_payload = bytes::Bytes::from_static(b"relay");
-        tap_relay_fpm_with(&relay_payload, |payload| {
-            assert_eq!(payload.as_ref(), b"relay");
-            relay_calls.set(relay_calls.get() + 1);
-        });
-        assert_eq!(relay_calls.get(), 1);
+    fn is_completed_pass_excludes_heartbeats() {
+        const PYTHON_PASS: &[u8] = b"\x87\xa7version\x01\xa9worker_id\xa1w\xa7dp_rank\x00\
+          \xaacounter_id\x01\xa9wall_time\xcb?\xde\xb8Q\xeb\x85\x1e\
+          \xb8\xb2scheduled_requests\x87\xb4num_prefill_requests\x01\
+          \xb2sum_prefill_tokens\xcd\x08\x00\xb2var_prefill_length\xcb\x00\x00\x00\x00\x00\x00\x00\x00\
+          \xb5sum_prefill_kv_tokens\x00\xb3num_decode_requests\x00\
+          \xb4sum_decode_kv_tokens\x00\xb4var_decode_kv_tokens\xcb\x00\x00\x00\x00\x00\x00\x00\x00\
+          \xafqueued_requests\x86\xb4num_prefill_requests\x00\
+          \xb2sum_prefill_tokens\x00\xb2var_prefill_length\xcb\x00\x00\x00\x00\x00\x00\x00\x00\
+          \xb3num_decode_requests\x00\xb4sum_decode_kv_tokens\x00\
+          \xb4var_decode_kv_tokens\xcb\x00\x00\x00\x00\x00\x00\x00\x00";
+        const PYTHON_HEARTBEAT: &[u8] = b"\x87\xa7version\x01\xa9worker_id\xa1w\xa7dp_rank\x00\
+          \xaacounter_id\x02\xa9wall_time\xcb\x00\x00\x00\x00\x00\x00\x00\x00\
+          \xb2scheduled_requests\x87\xb4num_prefill_requests\x00\
+          \xb2sum_prefill_tokens\x00\xb2var_prefill_length\xcb\x00\x00\x00\x00\x00\x00\x00\x00\
+          \xb5sum_prefill_kv_tokens\x00\xb3num_decode_requests\x00\
+          \xb4sum_decode_kv_tokens\x00\xb4var_decode_kv_tokens\xcb\x00\x00\x00\x00\x00\x00\x00\x00\
+          \xafqueued_requests\x86\xb4num_prefill_requests\x01\
+          \xb2sum_prefill_tokens\x01\xb2var_prefill_length\xcb\x00\x00\x00\x00\x00\x00\x00\x00\
+          \xb3num_decode_requests\x00\xb4sum_decode_kv_tokens\x00\
+          \xb4var_decode_kv_tokens\xcb\x00\x00\x00\x00\x00\x00\x00\x00";
 
-        let direct_calls = Cell::new(0);
-        tap_direct_fpm_with(b"direct", |payload| {
-            assert_eq!(payload.as_ref(), b"direct");
-            direct_calls.set(direct_calls.get() + 1);
-        });
-        assert_eq!(direct_calls.get(), 1);
-    }
-
-    #[test]
-    fn trace_tap_precedes_and_survives_event_plane_failure() {
-        let steps = RefCell::new(Vec::new());
-        let payload = bytes::Bytes::from_static(b"fpm");
-
-        tap_relay_fpm_with(&payload, |_| steps.borrow_mut().push("trace"));
-        let publish_result: anyhow::Result<()> = {
-            steps.borrow_mut().push("event-plane");
-            Err(anyhow::anyhow!("publish failed"))
-        };
-
-        assert!(publish_result.is_err());
-        assert_eq!(*steps.borrow(), ["trace", "event-plane"]);
+        assert!(is_completed_pass(PYTHON_PASS).unwrap());
+        assert!(!is_completed_pass(PYTHON_HEARTBEAT).unwrap());
+        assert!(is_completed_pass(b"not msgpack").is_err());
     }
 
     /// Verify that serialize_fpm produces valid msgpack that round-trips
@@ -639,197 +729,6 @@ mod tests {
         let partial: PartialFpm = rmp_serde::from_slice(&bytes).expect("partial decode failed");
         assert_eq!(partial.worker_id, "my-worker-id");
         assert_eq!(partial.dp_rank, 7);
-    }
-
-    /// Verify that the idle heartbeat fires when no FPM arrives within
-    /// IDLE_HEARTBEAT_INTERVAL. We replicate the per-dp_rank serialization
-    /// task logic with real channels to test the timeout behavior.
-    #[tokio::test]
-    async fn test_idle_heartbeat_emits_zeroed_snapshot() {
-        let (fpm_tx, mut fpm_rx) = mpsc::unbounded_channel::<ForwardPassSnapshot>();
-        let (pub_tx, mut pub_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let cancel = CancellationToken::new();
-        let cancel_clone = cancel.clone();
-        let worker_id = "test-worker".to_string();
-        let dp_rank: u32 = 0;
-
-        // Spawn the same task logic as FpmDirectPublisher
-        tokio::spawn(async move {
-            let mut counter: i64 = 0;
-            let heartbeat_sleep = tokio::time::sleep(IDLE_HEARTBEAT_INTERVAL);
-            tokio::pin!(heartbeat_sleep);
-
-            loop {
-                let snapshot = tokio::select! {
-                    biased;
-                    _ = cancel_clone.cancelled() => break,
-                    result = fpm_rx.recv() => {
-                        match result {
-                            Some(snapshot) => {
-                                heartbeat_sleep
-                                    .as_mut()
-                                    .reset(tokio::time::Instant::now() + IDLE_HEARTBEAT_INTERVAL);
-                                snapshot
-                            }
-                            None => break,
-                        }
-                    }
-                    _ = &mut heartbeat_sleep => {
-                        heartbeat_sleep
-                            .as_mut()
-                            .reset(tokio::time::Instant::now() + IDLE_HEARTBEAT_INTERVAL);
-                        ForwardPassSnapshot::default()
-                    }
-                };
-
-                counter += 1;
-                if let Ok(bytes) = serialize_fpm(&snapshot, &worker_id, dp_rank, counter) {
-                    let _ = pub_tx.send(bytes);
-                }
-            }
-        });
-
-        // 1) Send an active snapshot first
-        let active = ForwardPassSnapshot {
-            num_prefill_requests: 2,
-            sum_prefill_tokens: 100,
-            wall_time_secs: 0.05,
-            ..Default::default()
-        };
-        fpm_tx.send(active).unwrap();
-
-        // Receive the active snapshot
-        let bytes = tokio::time::timeout(Duration::from_secs(2), pub_rx.recv())
-            .await
-            .expect("timed out waiting for active FPM")
-            .expect("channel closed");
-
-        #[derive(Deserialize)]
-        struct FpmWallTime {
-            wall_time: f64,
-        }
-        let decoded: FpmWallTime = rmp_serde::from_slice(&bytes).expect("active FPM decode failed");
-        assert!(
-            decoded.wall_time > 0.0,
-            "active snapshot should have wall_time > 0"
-        );
-
-        // 2) Now wait for the idle heartbeat (should arrive within ~1s)
-        let heartbeat_bytes = tokio::time::timeout(Duration::from_secs(3), pub_rx.recv())
-            .await
-            .expect("timed out waiting for idle heartbeat")
-            .expect("channel closed");
-
-        #[derive(Deserialize)]
-        #[allow(dead_code)]
-        struct HeartbeatDe {
-            wall_time: f64,
-            counter_id: i64,
-            worker_id: String,
-        }
-        let heartbeat: HeartbeatDe =
-            rmp_serde::from_slice(&heartbeat_bytes).expect("heartbeat decode failed");
-        assert_eq!(
-            heartbeat.wall_time, 0.0,
-            "idle heartbeat should have wall_time=0.0"
-        );
-        assert_eq!(heartbeat.counter_id, 2, "heartbeat is the second message");
-        assert_eq!(heartbeat.worker_id, "test-worker");
-
-        cancel.cancel();
-    }
-
-    /// Verify that active snapshots reset the heartbeat timer so heartbeats
-    /// only fire after a period of true inactivity.
-    #[tokio::test]
-    async fn test_active_snapshots_suppress_heartbeat() {
-        let (fpm_tx, mut fpm_rx) = mpsc::unbounded_channel::<ForwardPassSnapshot>();
-        let (pub_tx, mut pub_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let cancel = CancellationToken::new();
-        let cancel_clone = cancel.clone();
-
-        tokio::spawn(async move {
-            let mut counter: i64 = 0;
-            let heartbeat_sleep = tokio::time::sleep(IDLE_HEARTBEAT_INTERVAL);
-            tokio::pin!(heartbeat_sleep);
-
-            loop {
-                let snapshot = tokio::select! {
-                    biased;
-                    _ = cancel_clone.cancelled() => break,
-                    result = fpm_rx.recv() => {
-                        match result {
-                            Some(snapshot) => {
-                                heartbeat_sleep
-                                    .as_mut()
-                                    .reset(tokio::time::Instant::now() + IDLE_HEARTBEAT_INTERVAL);
-                                snapshot
-                            }
-                            None => break,
-                        }
-                    }
-                    _ = &mut heartbeat_sleep => {
-                        heartbeat_sleep
-                            .as_mut()
-                            .reset(tokio::time::Instant::now() + IDLE_HEARTBEAT_INTERVAL);
-                        ForwardPassSnapshot::default()
-                    }
-                };
-
-                counter += 1;
-                if let Ok(bytes) = serialize_fpm(&snapshot, "w", 0, counter) {
-                    let _ = pub_tx.send(bytes);
-                }
-            }
-        });
-
-        // Send active snapshots every 500ms for 2 seconds — heartbeat should
-        // NOT fire during this time since each send resets the timer.
-        for _ in 0..4 {
-            let active = ForwardPassSnapshot {
-                num_decode_requests: 1,
-                wall_time_secs: 0.01,
-                ..Default::default()
-            };
-            fpm_tx.send(active).unwrap();
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-
-        // Drain all active snapshots
-        let mut active_count = 0;
-        while let Ok(Some(bytes)) =
-            tokio::time::timeout(Duration::from_millis(100), pub_rx.recv()).await
-        {
-            #[derive(Deserialize)]
-            struct Wt {
-                wall_time: f64,
-            }
-            let wt: Wt = rmp_serde::from_slice(&bytes).unwrap();
-            assert!(
-                wt.wall_time > 0.0,
-                "all messages during active period should have wall_time > 0"
-            );
-            active_count += 1;
-        }
-        assert_eq!(
-            active_count, 4,
-            "should have received exactly 4 active snapshots"
-        );
-
-        // Now wait for the heartbeat (should fire ~1s after last active send)
-        let heartbeat_bytes = tokio::time::timeout(Duration::from_secs(3), pub_rx.recv())
-            .await
-            .expect("timed out waiting for heartbeat after active period")
-            .expect("channel closed");
-
-        #[derive(Deserialize)]
-        struct Wt2 {
-            wall_time: f64,
-        }
-        let hb: Wt2 = rmp_serde::from_slice(&heartbeat_bytes).unwrap();
-        assert_eq!(hb.wall_time, 0.0, "heartbeat should have wall_time=0.0");
-
-        cancel.cancel();
     }
 
     /// Verify all 7 expected field names appear in scheduled_requests and

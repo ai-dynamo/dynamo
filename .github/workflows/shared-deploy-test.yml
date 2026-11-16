@@ -5,7 +5,16 @@ name: Shared Deploy Test
 
 on:
   workflow_call:
+    secrets:
+      DD_API_KEY:
+        description: 'Datadog API key for Test Optimization. Optional.'
+        required: false
     inputs:
+      dd_env:
+        description: 'Datadog env tag for test sessions (DD_ENV). Datadog Test Optimization settings (auto test retries, PR comments, etc.) are scoped per (service, env), so use a distinct value (e.g. "nightly", "post-merge") to configure those workflows independently of PR/pre-merge.'
+        required: false
+        type: string
+        default: 'ci'
       framework:
         description: 'Framework to test (vllm, sglang, trtllm)'
         type: string
@@ -18,6 +27,10 @@ on:
         description: 'Runtime image tag'
         type: string
         required: true
+      frontend_tag:
+        description: 'Standalone frontend image tag'
+        type: string
+        default: ''
       namespace:
         description: 'Host namespace where the vCluster lives'
         type: string
@@ -44,17 +57,26 @@ jobs:
         profile: ${{ fromJSON(inputs.profiles) }}
     name: ${{ matrix.profile }}
     steps:
+      - name: Validate runtime image tag
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          if [[ -z "${IMAGE_TAG//[[:space:]]/}" ]]; then
+            echo "::error::Runtime image tag is empty; the image build/copy job must succeed before deployment."
+            exit 1
+          fi
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Check if vCluster exists
         id: vcluster-check
-        uses: ./.github/actions/check-vcluster-exists
+        uses: $/.github/actions/check-vcluster-exists
         with:
           vcluster_name: ${{ inputs.vcluster_name }}
           vcluster_namespace: ${{ inputs.namespace }}
       - name: Self-bootstrap vCluster (rerun)
         if: steps.vcluster-check.outputs.exists != 'true'
-        uses: ./.github/actions/setup-dynamo-operator
+        uses: $/.github/actions/setup-dynamo-operator
         with:
           vcluster_name: ${{ inputs.vcluster_name }}
           vcluster_namespace: ${{ inputs.namespace }}
@@ -68,14 +90,16 @@ jobs:
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
-        uses: ./.github/actions/connect-vcluster
+        uses: $/.github/actions/connect-vcluster
         with:
           vcluster_name: ${{ inputs.vcluster_name }}
           vcluster_namespace: ${{ inputs.namespace }}
       - name: Run Dynamo Deploy Test
         id: deploy-test
-        uses: ./.github/actions/dynamo-deploy-test
+        uses: $/.github/actions/dynamo-deploy-test
         with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: ${{ inputs.dd_env }}
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -85,6 +109,7 @@ jobs:
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.image_tag }}
           platform_arch: amd64
+          frontend_image: ${{ inputs.frontend_tag != '' && format('{0}/{1}:{2}', secrets.AZURE_ACR_HOSTNAME, vars.ACR_REPOSITORY, inputs.frontend_tag) || '' }}
           extra_pytest_args: -m framework_only
           # Mount the shared model cache only when both endpoint vars are set
           # (matches the PV/PVC creation gate); otherwise workers download from HF.

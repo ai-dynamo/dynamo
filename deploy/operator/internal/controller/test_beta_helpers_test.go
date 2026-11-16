@@ -86,15 +86,6 @@ func betaDGDWorkersSpecHash(t testing.TB, dgd *v1beta1.DynamoGraphDeployment) st
 	return hash
 }
 
-func legacyDGDWorkersSpecHash(t testing.TB, dgd *v1beta1.DynamoGraphDeployment) string {
-	t.Helper()
-	hash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
-	if err != nil {
-		t.Fatalf("compute v1alpha1-compatible DGD worker hash: %v", err)
-	}
-	return hash
-}
-
 func betaRestartStatus(src *v1alpha1.RestartStatus) *v1beta1.RestartStatus {
 	if src == nil {
 		return nil

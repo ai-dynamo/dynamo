@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+include LICENSE
+include README.md
+include pyproject.toml
+recursive-include configs *.json *.yaml
+recursive-include docs *.md
+recursive-include scripts *.py *.sh
+recursive-include tests *.py

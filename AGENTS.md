@@ -5,155 +5,226 @@ SPDX-License-Identifier: Apache-2.0
 
 # Dynamo — Agent Guide
 
-## Overview
-
-Dynamo is NVIDIA's open-source, datacenter-scale distributed inference framework. It is
-the orchestration layer **above** inference engines (SGLang, TensorRT-LLM, vLLM), not a
-replacement for them: it turns a cluster of GPUs into one coordinated inference system.
-Core capabilities are disaggregated prefill/decode serving, KV-aware routing, multi-tier
-KV cache management (KVBM: GPU → CPU → SSD → remote), SLA-driven autoscaling (Planner),
-in-flight fault tolerance, and a Kubernetes operator for deployment.
-
-The stack is deliberately layered and large. A **Rust core** (a Cargo workspace of
-twenty-plus crates, mostly under `lib/`) holds the runtime, LLM, routing, and
-KV-block-manager engines. A **Python
-extensibility layer** (the `ai-dynamo` wheel, bound to the Rust core through PyO3/maturin)
-holds the frontend, backends, planner, and profiler. A **Kubernetes layer** (`deploy/`)
-holds the operator, Helm charts, and gateway integration. Treat any change that crosses
-these boundaries as non-trivial. Dynamo also sits inside a wider `ai-dynamo` ecosystem of
-sibling repos (below) that it integrates with rather than vendors.
-
-## Skills
-
-Skills live canonically in `.agents/skills/`; `skills/` and `.claude/skills/` are symlinks
-to it — edit only the canonical copy. Reach for the right group first:
-
-**For developing Dynamo:**
-
-- `debug-session` — structured bug investigation with a persistent worklog
-- `dep-create` — create or update Dynamo Enhancement Proposals as GitHub issues
-- `dep-status` — check DEP status and list DEPs by lifecycle state or area
-- `dep-update` — advance DEP lifecycle: triage, PIC assignment, review, approval
-- `dynamo-clone-hotpath-audit` — audit Rust hot-path `.clone()` calls
-- `dynamo-docs` — Fern docs-site content per the style guide
-- `dynamo-frontend-benchmark` — benchmark/profile the frontend against mock workers
-- `fern-components` — Fern MDX component library and usage guidance
-- `fern-navigation` — Fern navigation and site-structure configuration guidance
-- `dynamo-kv-replay-parity` — validate offline KV replay parity and performance
-- `dynamo-agent-harness` — drive persistent Claude Code, Codex, or OpenCode sessions through Dynamo over ACP
-- `graham-code-review` — strict Rust/systems review in Graham King's style
-- `pr-monitor` — CI health check, failure root-cause, and skip analysis
-- `visual-review` — interactive HTML code-review dashboards with diagrams and annotated diffs
-
-**For deploying and operating Dynamo:**
-
-- `dynamo-recipe-runner` — select, patch, and deploy Kubernetes recipes
-- `dynamo-router-starter` — start/patch router modes with smoke checks
-- `dynamo-interconnect-check` — validate NIXL/UCX/NCCL readiness for disaggregation
-- `dynamo-troubleshoot` — diagnose failed or unhealthy deployments
-
-**Adding a skill:** the folder name must equal the frontmatter `name` (kebab-case); the
-`description` is third person, states what the skill does and when to use it, and is at
-most 1024 characters; include `license: Apache-2.0` and a `metadata:` block with `author`
-and `tags`. List the skill in this section — the index must match `.agents/skills/`
-exactly. All of this is enforced by `scripts/validate_skills.py` (pre-commit hook
-`validate-skills`). Changes under `.agents/skills/` are also validated by NVSkills CI —
-a maintainer comments `/nvskills-ci` on the PR.
-
-## Ecosystem
-
-Sibling repositories this repo integrates with:
-
-| Repo | Role |
-|------|------|
-| [NIXL](https://github.com/ai-dynamo/nixl) | High-throughput inference data-transfer library (KV-cache transfer over RDMA/NVLink) that underpins disaggregated serving |
-| [AIPerf](https://github.com/ai-dynamo/aiperf) | Benchmarking and load-generation tool used by the benchmarking guides |
-| [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator) | Simulates thousands of deployment configs to find an optimal serving config before spending GPU-hours |
-| [ModelExpress](https://github.com/ai-dynamo/modelexpress) | Streams model weights GPU-to-GPU via NIXL for fast replica cold-start |
-| [Grove](https://github.com/ai-dynamo/grove) | Kubernetes operator for topology-aware gang scheduling |
+[`README.md`](README.md) explains what Dynamo is and what it supports.
 
 ## Repository Map
 
 | Path | Contents |
 |------|----------|
-| `lib/` | Rust workspace crates: `runtime`, `llm`, `kv-router`, `kvbm-*`, `mocker`, and more (see the root [`Cargo.toml`](Cargo.toml) `[workspace] members`), plus `bindings/python` — the PyO3 extension crate, built via maturin and deliberately excluded from the workspace |
-| `components/src/dynamo/` | Python packages: `frontend`, `planner`, `router`, `vllm`/`sglang`/`trtllm` backends, `mocker`, `profiler`, and more |
+| `lib/` | Rust crates, including `runtime`, `llm`, `kv-router`, `kvbm-*`, `mocker`, `sidecar/*` (engine gRPC sidecars), and `bindings/python` (the PyO3 extension, built with maturin, outside the Cargo workspace) |
+| `components/src/dynamo/` | Python packages: `frontend`, `planner`, `router`, `vllm`/`sglang`/`trtllm`/`tokenspeed` backends, `mocker`, `profiler`, and more |
 | `deploy/` | Kubernetes `operator`, Helm charts, `inference-gateway` ext-proc, `observability` |
 | `container/` | Dockerfiles and build scripts for runtime and dev images |
-| `docs/`, `fern/` | Documentation sources and the Fern docs-site config — read [`docs/AGENTS.md`](docs/fern/AGENTS.md) before editing |
-| `examples/`, `recipes/` | Runnable examples and deployment recipes — also covered by [`docs/AGENTS.md`](docs/fern/AGENTS.md) |
+| `docs/fern/` | Fern docs site; pages are in `pages/` |
+| `examples/`, `recipes/` | Runnable examples and deployment recipes |
 | `benchmarks/`, `tests/` | Benchmark harnesses and the top-level pytest suite |
-| `.ai/` | Agent topic guidelines: `bash-launch-guidelines.md`, `ci-guidelines.md`, `linear-ticket-refs.md`, `pytest-guidelines.md`, `python-guidelines.md`, `test-model-size-guardrails.md` |
+| `.ai/` | Topic guidelines for agents (pytest, Python, CI, launch scripts, AISimulate, and metrics, logs, and traces); read the matching one before writing that kind of code |
 | `.agents/skills/` | Agent skills (see [Skills](#skills)) |
+| `agents/`, `agent-docs/` | Role contracts, guides, and rules for the recipe optimization loop |
 
-## Build
+## Ecosystem
 
-System prerequisites (Rust toolchain, `uv`, system libraries) and the VS Code / Cursor
-devcontainer are covered in [`docs/contribution-guide.md`](docs/fern/pages/community/contributing/overview.md).
+Dynamo serves [vLLM](https://github.com/vllm-project/vllm),
+[SGLang](https://github.com/sgl-project/sglang),
+[TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), and
+[TokenSpeed](https://github.com/lightseekorg/tokenspeed). Related projects:
+[NIXL](https://github.com/ai-dynamo/nixl) (KV-cache transfer),
+[AIPerf](https://github.com/ai-dynamo/aiperf) (load generation),
+[AISimulate](https://pypi.org/project/aisimulate/) (offline configuration search),
+[ModelExpress](https://github.com/ai-dynamo/modelexpress) (GPU-to-GPU weight streaming), and
+[Grove](https://github.com/ai-dynamo/grove) (Kubernetes gang scheduling).
+
+## Skills
+
+Skills live canonically in `.agents/skills/`; `skills/` and `.claude/skills/` are symlinks
+to it — edit only the canonical copy.
+
+**Build, debug, and measure:**
+
+- `debug-session` — investigate a bug with a persistent worklog: capture the environment, rebuild, reproduce
+- `dynamo-frontend-benchmark` — benchmark and profile the frontend against `dynamo.mocker` workers
+- `dynamo-kv-replay-parity` — byte-parity and paired performance campaigns for offline KV-aware replay
+- `dynamo-clone-hotpath-audit` — audit Rust hot-path `.clone()` calls
+- `dynamo-agent-harness` — drive Claude Code, Codex, or OpenCode sessions through a Dynamo endpoint over ACP
+
+**Pull requests, review, and CI:**
+
+- `pr-checklist` — check a PR for design fit, tests, code quality, and description, when making or reviewing one
+- `dynamo-perf-best-practices` — check hot-path changes in a PR against Dynamo's performance practices; pr-checklist runs it
+- `graham-code-review` — strict Rust/systems review in Graham King's style
+- `visual-review` — interactive HTML review dashboard for a PR or diff
+- `pr-monitor` — a PR's CI status, why full CI has or has not triggered, and failure root cause against `main`
+- `dynamo-issue-first` — start work from a tracked issue and reference it from the PR
+- `repo-codeowners` — who reviews a change, fixing the `codeowners` check, changing review routing
+- `dynamo-release-cherry-pick` — land a fix on a release branch: cherry-pick, release-only fix, or external Cherry-Pick Request
+
+**Design proposals (DEPs):**
+
+- `dep-create` — propose a feature or architecture change as a Dynamo Enhancement Proposal issue
+- `dep-status` — check where a DEP stands, or list DEPs by lifecycle state or area
+- `dep-update` — move a DEP through triage, PIC assignment, review, and approval
+
+**Docs** (any change under `docs/`, `examples/`, or `recipes/`):
+
+- `dynamo-docs` — add, update, move, or remove docs-site content per the style guide
+- `fern-components` — pick and use Fern MDX components on a page
+- `fern-navigation` — Fern site navigation and structure in `docs.yml`
+
+**Deploy and operate:**
+
+- `find-serving-recipe` — find the best known serving configuration for a model, hardware, and workload, with provenance
+- `dynamo-router-starter` — start or patch router modes and smoke-test the endpoint
+- `dynamo-interconnect-check` — validate NIXL/UCX/NCCL readiness for disaggregated serving
+- `troubleshoot-dynamo` — diagnose failed or unhealthy deployments
+- `profile-with-nsight-operator` — profile chosen components with Nsight Systems through Nsight Operator and verify every report arrived
+
+**Recipe optimization loop** — start from
+[`agent-docs/guides/optimization/optimize-loop.md`](agent-docs/guides/optimization/optimize-loop.md),
+which sequences these skills:
+
+- `synthesize-user-workload` — interview the user, capture their baseline DGD, and write the workload contract
+- `author-baseline-dgd` — draft a baseline DGD when no recipe matches, for the user's confirmation
+- `deploy-dynamo-recipe` — deploy one assigned DGD and smoke-test its API
+- `configure-aiperf-benchmark` — freeze a comparable AIPerf workload for a deployed candidate
+- `run-aiperf-benchmark` — run and collect one AIPerf Kubernetes benchmark
+- `analyze-aiperf-results` — validate AIPerf results and compare them against SLOs and prior runs
+- `consult-perf-knowledge` — select one evidence-backed optimization proposal
+- `create-optimization-hypothesis` — turn a proposal into a challenger-ready DGD draft
+- `perform-adversarial-review` — challenge a DGD draft before it consumes GPU time
+- `report-skillpack-issue` — file a sanitized, operator-approved issue for a defect in these skills or guides
+
+## Build and Test
+
+### Published builds
+
+Use a published build when you do not need to change it. Nightly CI builds `main` and
+publishes the artifacts below; see
+[Nightly Releases](docs/fern/pages/reference/general/nightly-releases.md) for details.
+
+| Artifact | Where |
+|----------|-------|
+| Runtime images | `nvcr.io/nvidia/ai-dynamo/{vllm,sglang,tensorrtllm}-runtime-nightly`, tag `latest` or `YYYYMMDD-<shortsha>`; add `-efa` to either tag for the AWS EFA build |
+| Component images | `nvcr.io/nvidia/ai-dynamo/{kubernetes-operator,dynamo-frontend,dynamo-planner}-nightly` |
+| Python wheels | `ai-dynamo` and `ai-dynamo-runtime` (Python 3.11+) on `https://pypi.nvidia.com/`: `uv pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo` |
+| Helm chart | `dynamo-platform-nightly` on NGC |
+| Stable and prerelease builds, Rust crates | [Release Artifacts](docs/fern/pages/reference/general/release-artifacts.mdx) |
+
+Pin the dated tag to reproduce a result; `latest` moves every night. To see the engine
+version in an image, run `docker run --rm <image> pip show vllm`.
+
+### Build from source
+
+Install the system packages, Rust, and `uv` from
+[Building from Source](docs/fern/pages/developer-guide/advanced-customizations/building-from-source.md),
+plus:
+
+- protoc 3.15 or newer (CI uses 30.2 from the
+  [protobuf releases](https://github.com/protocolbuffers/protobuf/releases))
+- Python 3.11 or newer (`uv venv` can download one)
 
 Python dev build (bindings + wheel, editable):
 
 ```bash
 uv venv .venv && source .venv/bin/activate
 uv pip install pip 'maturin[patchelf]'
-cd lib/bindings/python && maturin develop --uv && cd -
+cd lib/bindings/python
+maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3
+cd -
 uv pip install -e lib/gpu_memory_service
 uv pip install -e .
 python3 -m dynamo.frontend --help   # verify
 ```
 
-Rust-only:
+The features match the CI wheel. Without `kv-indexer`, router tests that start a standalone
+indexer fail. Python edits under `components/src/` take effect without a rebuild. After a
+Rust change that Python uses, rerun the `maturin develop` command.
+
+To work against an engine, build a `local-dev` image and mount your worktree into it.
+[`container/README.md`](container/README.md) describes every target.
 
 ```bash
-cargo build                 # whole workspace
-cargo build -p dynamo-llm   # one crate
+container/render.py --framework vllm --target local-dev --output-short-filename
+docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) \
+  -t dynamo:latest-vllm-local-dev -f container/rendered.Dockerfile .
+container/run.sh --mount-workspace -it --image dynamo:latest-vllm-local-dev
 ```
 
-## Test
+### Rust: build and test efficiently
+
+Times on a 24-core workstation (October 2026, rustc 1.96.1), for relative cost:
+
+| After you edit | Command | Time |
+|----------------|---------|------|
+| `dynamo-kv-router` | `cargo check -p dynamo-kv-router` | 2 s |
+| `dynamo-kv-router` | `cargo test -p dynamo-kv-router --lib scheduling::` (277 tests) | 11 s |
+| a sidecar | `cargo build` with the sidecar `-p` set below | 10–15 s |
+| `dynamo-llm` | `cargo check -p dynamo-llm` | 17 s |
+| `dynamo-llm` | `cargo test -p dynamo-llm --test http-service`, build and run | 39 s |
+| `dynamo-llm` | `cargo test -p dynamo-llm --lib`: build, then run 3,731 tests | 70 s + 22 s |
+| `dynamo-llm` | `cargo test -p dynamo-llm`: build all 44 test targets, before running any | 97 s |
+| `dynamo-llm` | `maturin develop --uv` in `lib/bindings/python` | 94 s |
+| nothing, in a new worktree | first `dynamo-llm` test build / sidecar set / bindings | 4 / 5.5 / 5.6 min |
+
+The edit loop:
 
 ```bash
-cargo test                  # Rust
-pytest -m unit tests/       # Python unit tests
+# 1. Type-check only the crate you are editing, until it compiles.
+cargo check -p dynamo-kv-router
+
+# 2. Run only the tests you need: name one target, then filter by test path.
+cargo test -p dynamo-kv-router --lib scheduling::
+cargo test -p dynamo-llm --test http-service
+cargo test -p dynamo-llm --lib -- <name> <other_name>   # several filters at once
+
+# 3. Before you push, format and lint the crates you touched as CI does.
+cargo fmt --all
+cargo clippy --locked --no-deps -p dynamo-kv-router --all-targets -- -D warnings
 ```
 
-Markers are strict (`--strict-markers`); the full marker list lives in
-[`pyproject.toml`](pyproject.toml) `[tool.pytest.ini_options]`, including GPU gating
-(`gpu_0` … `gpu_8`). Read [`.ai/pytest-guidelines.md`](.ai/pytest-guidelines.md) and
-[`.ai/test-model-size-guardrails.md`](.ai/test-model-size-guardrails.md) before writing
-tests.
+- **Name the test target** (`--lib` or `--test <name>`). Plain `cargo test -p dynamo-llm`
+  builds all 44 test binaries.
+- **Don't set `RUSTFLAGS`.** It replaces the flags in [`.cargo/config.toml`](.cargo/config.toml)
+  and rebuilds every dependency, and unsetting it rebuilds them again.
+- **Build the sidecars with one `-p` set:**
+  `-p dynamo-vllm-sidecar -p dynamo-sglang-sidecar -p dynamo-trtllm-sidecar -p dynamo-lpx-sidecar -p dynamo-sidecar-testkit`.
+  A different set changes features and rebuilds `dynamo-llm`.
+- **Reuse your worktree.** A new one starts with an empty build cache (last row of the table).
+- **Profiling:** `--profile profiling` is release with symbols; `-p dynamo-llm --features nvtx`
+  adds NVTX ranges.
+- CI's non-default feature checks are in [`pre-merge.yml`](.github/workflows/pre-merge.yml).
+  Each is a separate cold build (about 4 min), so run only the one you touched.
 
-## Lint
+On macOS, build and test `dynamo-llm` with `--no-default-features` unless you need `block-manager`.
+
+### Python tests
+
+Run the tests that cover your change, by file or test ID; leave marker sweeps to CI.
+Use `python3 -m pytest` so the venv's pytest and packages are used.
 
 ```bash
-pre-commit run --all-files            # all hooks (run `pre-commit install` first; it also installs the DCO commit-msg hook)
-cargo fmt --all && cargo clippy --workspace
+# One test while you iterate, then the related tests in its file.
+python3 -m pytest "tests/router/test_router_e2e_with_mockers.py::test_router_decisions[local_indexer-tcp]" -q
+python3 -m pytest tests/router/test_router_e2e_with_mockers.py -k "test_router_decisions and not disagg" -q
+
+# GPU end to end: the same, on the backend's serve tests.
+python3 -m pytest tests/serve/test_vllm.py -k guided_decoding -s
 ```
 
-## PR and Commit Conventions
+`dynamo.mocker` stands in for an engine, so router, planner, and frontend changes can be
+tested end to end without a GPU. Outside the dev containers, install the test plugins with
+`uv pip install -r container/deps/requirements.test.txt`, and put `etcd` and `nats-server` on
+`PATH`: integration fixtures start their own instances. Tests download their Hugging Face
+model unless you pass `--models-dir`. Before writing tests, read
+[`tests/README.md`](tests/README.md), [`.ai/pytest-guidelines.md`](.ai/pytest-guidelines.md),
+and [`.ai/test-model-size-guardrails.md`](.ai/test-model-size-guardrails.md).
 
-- Keep changes focused and reviewable.
-- Use Conventional Commit PR titles: `type(scope): summary`. Accepted types:
-  `feat`, `fix`, `docs`, `test`, `ci`, `refactor`, `perf`, `chore`, `revert`,
-  `style`, and `build`.
-- PR descriptions must include `Summary` and `Validation`.
-- Sign every commit with DCO: `git commit -s`.
-- Do not hand-edit the root `CODEOWNERS` — it is generated. To change review
-  routing, edit `.github/codeowners/areas.yaml` and regenerate; CI gates 100%
-  coverage and `CODEOWNERS`↔`areas.yaml` drift. See
-  `.github/codeowners/README.md` (use `who_owns.py` to check who reviews a path).
-- Full CI on a PR runs only after a maintainer comments `/ok to test <sha>` with the short
-  SHA of the latest commit; copy-pr-bot then creates the `pull-request/N` branch that
-  triggers it. Fix failures before requesting human review.
-- Architecture changes require a Dynamo Enhancement Proposal (DEP), filed as a GitHub
-  issue on `ai-dynamo/dynamo` with `dep:*` labels (the `dep-create` skill automates this).
+### Lint
 
-See [`docs/contribution-guide.md`](docs/fern/pages/community/contributing/overview.md) for the full workflow
-(issue sizing, CODEOWNERS, review process).
+Run `pre-commit install` once; the hooks, including the DCO sign-off check, then run on every
+commit. To check before committing, run `pre-commit run --files <changed files>`.
 
-## Docs, Examples, Recipes
+## Pull Requests
 
-Any change under `docs/`, `examples/`, or `recipes/` must follow
-[`docs/AGENTS.md`](docs/fern/AGENTS.md) and the
-[documentation style guide](docs/fern/pages/community/contributing/documentation/documentation-style-guide.md): SPDX headers, Fern
-frontmatter (no body `# H1`), GitHub-style admonitions, and backend casing
-(vLLM / SGLang / TensorRT-LLM). The deterministic subset is enforced pre-merge.
+Run the `pr-checklist` skill when you make or review a pull request.
+[`CONTRIBUTING.md`](CONTRIBUTING.md) covers DCO sign-off, commit titles, and how full CI is
+triggered.

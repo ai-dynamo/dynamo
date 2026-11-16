@@ -194,6 +194,37 @@ def test_cleanup_callback_runs_after_drain():
     assert call_order == ["drain", "cleanup", "shutdown"]
 
 
+def test_pre_shutdown_callback_withdraws_before_worker_teardown():
+    """Lease-owned records disappear before the worker shutdown event is set."""
+    call_order = []
+    mock_runtime = MagicMock()
+    mock_runtime.shutdown = MagicMock(side_effect=lambda: call_order.append("runtime"))
+
+    async def withdraw():
+        assert not shutdown_event.is_set()
+        call_order.append("withdraw")
+
+    async def cleanup():
+        assert shutdown_event.is_set()
+        call_order.append("engine")
+
+    async def _run():
+        mock_endpoint = AsyncMock()
+        mock_endpoint.unregister_endpoint_instance = AsyncMock(return_value=None)
+        await graceful_shutdown_with_discovery(
+            runtime=mock_runtime,
+            endpoints=[mock_endpoint],
+            shutdown_event=shutdown_event,
+            grace_period_s=0,
+            pre_shutdown_callback=withdraw,
+            cleanup_callback=cleanup,
+        )
+
+    shutdown_event = asyncio.Event()
+    asyncio.run(_run())
+    assert call_order == ["withdraw", "engine", "runtime"]
+
+
 def test_cleanup_callback_exception_does_not_block_shutdown():
     """A cleanup failure must not prevent runtime shutdown."""
     mock_runtime = MagicMock()

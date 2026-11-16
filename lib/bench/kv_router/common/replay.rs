@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #[allow(unused_imports)]
-pub use dynamo_kv_router::NoopSequencePublisher;
-use dynamo_kv_router::protocols::KvCacheEventData;
-use dynamo_mocker::common::protocols::MockEngineArgs;
+use dynamo_kv_events::event::KvCacheEventData;
+use dynamo_mocker::common::protocols::MockerConfig;
 use dynamo_mocker::loadgen::{SessionPartitionSpec, Trace};
 use dynamo_mocker::replay::ReplayKvEventVisibility;
 pub use dynamo_mocker::replay::ReplayWorkerArtifacts as WorkerReplayArtifacts;
+pub use dynamo_slot_tracker::host::NoopSequencePublisher;
 use indicatif::ProgressBar;
 
 use super::progress::make_progress_bar;
@@ -40,46 +40,46 @@ pub fn maybe_rescale_ready_span(
     }
 }
 
-/// Build default MockEngineArgs suitable for event generation.
+fn mock_engine_json(num_gpu_blocks: usize, block_size: usize) -> serde_json::Value {
+    serde_json::json!({
+        "engine": {
+            "num_gpu_blocks": num_gpu_blocks,
+            "block_size": block_size,
+            "speedup_ratio": 10.0,
+            "enable_prefix_caching": true,
+            "max_num_batched_tokens": usize::MAX,
+            "max_num_seqs": usize::MAX
+        }
+    })
+}
+
+/// Build default MockerConfig suitable for event generation.
 pub fn default_mock_engine_args(
     num_gpu_blocks: usize,
     block_size: usize,
-) -> anyhow::Result<MockEngineArgs> {
-    Ok(MockEngineArgs::builder()
-        .num_gpu_blocks(num_gpu_blocks)
-        .block_size(block_size)
-        .speedup_ratio(10.0)
-        .enable_prefix_caching(true)
-        .max_num_batched_tokens(None)
-        .max_num_seqs(None)
-        .build()?)
+) -> anyhow::Result<MockerConfig> {
+    MockerConfig::from_value(mock_engine_json(num_gpu_blocks, block_size))
 }
 
-#[cfg(feature = "mocker-kvbm-offload")]
-#[allow(dead_code)]
-pub fn g2_mock_engine_args(
+/// The default engine with vLLM's CPU offload tier of `num_host_blocks` per worker: computed
+/// prompt blocks are written through to host, which evicts LRU and publishes host-tier events.
+/// `kv_cache_bytes_per_token` sizes host blocks and so sets the device-to-host copy time.
+pub fn host_offload_mock_engine_args(
     num_gpu_blocks: usize,
     block_size: usize,
-    num_g2_blocks: usize,
-) -> anyhow::Result<MockEngineArgs> {
-    Ok(MockEngineArgs::builder()
-        .num_gpu_blocks(num_gpu_blocks)
-        .block_size(block_size)
-        .speedup_ratio(10.0)
-        .enable_prefix_caching(true)
-        .max_num_batched_tokens(None)
-        .max_num_seqs(None)
-        .num_g2_blocks(Some(num_g2_blocks))
-        .kv_bytes_per_token(Some(1))
-        .offload_batch_size(Some(32))
-        .bandwidth_g1_to_g2_gbps(Some(14.0))
-        .bandwidth_g2_to_g1_gbps(Some(14.0))
-        .build()?)
+    num_host_blocks: usize,
+    kv_cache_bytes_per_token: usize,
+) -> anyhow::Result<MockerConfig> {
+    let mut config = mock_engine_json(num_gpu_blocks, block_size);
+    config["engine"]["kv_cache_bytes_per_token"] = kv_cache_bytes_per_token.into();
+    config["engine"]["native_host_offload"] =
+        serde_json::json!({ "num_host_blocks": num_host_blocks });
+    MockerConfig::from_value(config)
 }
 
 fn replay_worker_trace(
     trace: Trace,
-    sched_args: MockEngineArgs,
+    sched_args: MockerConfig,
     trace_simulation_duration_ms: Option<u64>,
     kv_event_visibility_override: Option<ReplayKvEventVisibility>,
     progress: ProgressBar,
@@ -103,7 +103,7 @@ fn replay_worker_trace(
 
 pub async fn generate_replay_artifacts_with_args_and_visibility(
     traces: &[Trace],
-    sched_args: MockEngineArgs,
+    sched_args: MockerConfig,
     trace_simulation_duration_ms: Option<u64>,
     kv_event_visibility_override: Option<ReplayKvEventVisibility>,
 ) -> anyhow::Result<Vec<WorkerReplayArtifacts>> {
@@ -184,7 +184,7 @@ pub async fn generate_replay_artifacts_with_args_and_visibility(
 
 pub async fn generate_replay_artifacts_with_args(
     traces: &[Trace],
-    sched_args: MockEngineArgs,
+    sched_args: MockerConfig,
     trace_simulation_duration_ms: Option<u64>,
 ) -> anyhow::Result<Vec<WorkerReplayArtifacts>> {
     generate_replay_artifacts_with_args_and_visibility(
@@ -203,18 +203,5 @@ pub async fn generate_replay_artifacts(
     trace_simulation_duration_ms: Option<u64>,
 ) -> anyhow::Result<Vec<WorkerReplayArtifacts>> {
     let sched_args = default_mock_engine_args(num_gpu_blocks, block_size as usize)?;
-    generate_replay_artifacts_with_args(traces, sched_args, trace_simulation_duration_ms).await
-}
-
-#[cfg(feature = "mocker-kvbm-offload")]
-#[allow(dead_code)]
-pub async fn generate_g2_replay_artifacts_with_capacity(
-    traces: &[Trace],
-    num_gpu_blocks: usize,
-    num_g2_blocks: usize,
-    block_size: u32,
-    trace_simulation_duration_ms: Option<u64>,
-) -> anyhow::Result<Vec<WorkerReplayArtifacts>> {
-    let sched_args = g2_mock_engine_args(num_gpu_blocks, block_size as usize, num_g2_blocks)?;
     generate_replay_artifacts_with_args(traces, sched_args, trace_simulation_duration_ms).await
 }

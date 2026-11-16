@@ -28,16 +28,22 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+const (
+	profilerEntrypoint        = "python"
+	profilerOverrideImage     = "custom-profiler:v2"
+	outputCopierShell         = "/bin/sh"
+	outputCopierScriptStub    = "echo sidecar-script"
+	outputCopierOverrideImage = "internal-registry/kubectl:1.29"
+)
+
 func baseJob() *batchv1.Job {
 	return &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "profile-test",
-			Namespace: "default",
-			Labels: map[string]string{
-				nvidiacomv1beta1.LabelApp:       nvidiacomv1beta1.LabelValueDynamoProfiler,
-				nvidiacomv1beta1.LabelDGDR:      "my-dgdr",
-				nvidiacomv1beta1.LabelManagedBy: nvidiacomv1beta1.LabelValueDynamoOperator,
-			},
+		Name:      "profile-test",
+		Namespace: "default",
+		Labels: map[string]string{
+			nvidiacomv1beta1.LabelApp:       nvidiacomv1beta1.LabelValueDynamoProfiler,
+			nvidiacomv1beta1.LabelDGDR:      "my-dgdr",
+			nvidiacomv1beta1.LabelManagedBy: nvidiacomv1beta1.LabelValueDynamoOperator,
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: ptr.To[int32](3),
@@ -56,7 +62,7 @@ func baseJob() *batchv1.Job {
 						{
 							Name:    "profiler",
 							Image:   "profiler:latest",
-							Command: []string{"python", "-m", "dynamo.profiler"},
+							Command: []string{profilerEntrypoint, "-m", "dynamo.profiler"},
 							Env: []corev1.EnvVar{
 								{Name: "OUTPUT_DIR", Value: "/output"},
 							},
@@ -70,7 +76,7 @@ func baseJob() *batchv1.Job {
 						},
 					},
 					Volumes: []corev1.Volume{
-						{Name: "profiling-output", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+						{Name: "profiling-output", EmptyDir: &corev1.EmptyDirVolumeSource{}},
 					},
 					ImagePullSecrets: []corev1.LocalObjectReference{
 						{Name: "nvcr-imagepullsecret"},
@@ -143,7 +149,7 @@ func TestApplyProfilingJobOverrides_Parallelism(t *testing.T) {
 func TestApplyProfilingJobOverrides_Suspend(t *testing.T) {
 	job := baseJob()
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
-		Suspend: ptr.To(true),
+		Suspend: new(true),
 	})
 	if job.Spec.Suspend == nil || !*job.Spec.Suspend {
 		t.Error("expected Suspend=true")
@@ -324,7 +330,7 @@ func TestApplyProfilingJobOverrides_RuntimeClassName(t *testing.T) {
 	job := baseJob()
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
 		Template: corev1.PodTemplateSpec{
-			Spec: corev1.PodSpec{RuntimeClassName: ptr.To("nvidia")},
+			Spec: corev1.PodSpec{RuntimeClassName: new("nvidia")},
 		},
 	})
 	if job.Spec.Template.Spec.RuntimeClassName == nil || *job.Spec.Template.Spec.RuntimeClassName != "nvidia" {
@@ -392,7 +398,7 @@ func TestApplyProfilingJobOverrides_AutomountServiceAccountToken(t *testing.T) {
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
 		Template: corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
-				AutomountServiceAccountToken: ptr.To(false),
+				AutomountServiceAccountToken: new(false),
 			},
 		},
 	})
@@ -406,7 +412,7 @@ func TestEnsureOutputCopierKubeAPIAccess_AutomountServiceAccountTokenFalse(t *te
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
 		Template: corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
-				AutomountServiceAccountToken: ptr.To(false),
+				AutomountServiceAccountToken: new(false),
 			},
 		},
 	})
@@ -459,10 +465,10 @@ func TestEnsureOutputCopierKubeAPIAccess_ProtectsTokenVolumeFromOverrides(t *tes
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
 		Template: corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
-				AutomountServiceAccountToken: ptr.To(false),
+				AutomountServiceAccountToken: new(false),
 				Volumes: []corev1.Volume{{
-					Name:         VolumeNameOutputCopierKubeAPIAccess,
-					VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+					Name:     VolumeNameOutputCopierKubeAPIAccess,
+					EmptyDir: &corev1.EmptyDirVolumeSource{},
 				}},
 				Containers: []corev1.Container{{
 					VolumeMounts: []corev1.VolumeMount{{
@@ -504,10 +510,8 @@ func TestEnsureDGDOverrideTool_ProtectsDeliveryFromOverrides(t *testing.T) {
 		Template: corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
 				Volumes: []corev1.Volume{{
-					Name: VolumeNameDGDOverrideTool,
-					VolumeSource: corev1.VolumeSource{
-						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "unexpected"},
-					},
+					Name:                  VolumeNameDGDOverrideTool,
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "unexpected"},
 				}},
 				InitContainers: []corev1.Container{
 					{
@@ -667,10 +671,9 @@ func TestApplyProfilingJobOverrides_VolumesDedup(t *testing.T) {
 		Template: corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
 				Volumes: []corev1.Volume{
-					{Name: "profiling-output", VolumeSource: corev1.VolumeSource{
-						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "user-pvc"},
-					}},
-					{Name: "extra-config", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+					{Name: "profiling-output",
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "user-pvc"}},
+					{Name: "extra-config", EmptyDir: &corev1.EmptyDirVolumeSource{}},
 				},
 			},
 		},
@@ -759,13 +762,13 @@ func TestApplyProfilingJobOverrides_ContainerImage(t *testing.T) {
 		Template: corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
-					{Image: "custom-profiler:v2"},
+					{Image: profilerOverrideImage},
 				},
 			},
 		},
 	})
-	if job.Spec.Template.Spec.Containers[0].Image != "custom-profiler:v2" {
-		t.Errorf("expected image=custom-profiler:v2, got %s", job.Spec.Template.Spec.Containers[0].Image)
+	if job.Spec.Template.Spec.Containers[0].Image != profilerOverrideImage {
+		t.Errorf("expected image=%s, got %s", profilerOverrideImage, job.Spec.Template.Spec.Containers[0].Image)
 	}
 }
 
@@ -842,7 +845,7 @@ func TestApplyProfilingJobOverrides_ContainerEnvFrom(t *testing.T) {
 					{
 						EnvFrom: []corev1.EnvFromSource{
 							{ConfigMapRef: &corev1.ConfigMapEnvSource{
-								LocalObjectReference: corev1.LocalObjectReference{Name: "profiler-env"},
+								Name: "profiler-env",
 							}},
 						},
 					},
@@ -858,7 +861,7 @@ func TestApplyProfilingJobOverrides_ContainerEnvFrom(t *testing.T) {
 func TestApplyProfilingJobOverrides_ContainerSecurityContext(t *testing.T) {
 	job := baseJob()
 	sc := &corev1.SecurityContext{
-		Privileged: ptr.To(false),
+		Privileged: new(false),
 		RunAsUser:  ptr.To[int64](2000),
 	}
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
@@ -879,13 +882,13 @@ func TestApplyProfilingJobOverrides_PodSecurityContext(t *testing.T) {
 	job := baseJob()
 	// Seed a default pod-level security context (mimics what the controller sets).
 	job.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{
-		RunAsNonRoot: ptr.To(true),
+		RunAsNonRoot: new(true),
 		RunAsUser:    ptr.To[int64](1000),
 		RunAsGroup:   ptr.To[int64](1000),
 		FSGroup:      ptr.To[int64](1000),
 	}
 	override := &corev1.PodSecurityContext{
-		RunAsNonRoot: ptr.To(false),
+		RunAsNonRoot: new(false),
 	}
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
 		Template: corev1.PodTemplateSpec{
@@ -926,7 +929,7 @@ func TestApplyProfilingJobOverrides_CommandAndArgsPreserved(t *testing.T) {
 		},
 	})
 	c := job.Spec.Template.Spec.Containers[0]
-	if len(c.Command) == 0 || c.Command[0] != "python" {
+	if len(c.Command) == 0 || c.Command[0] != profilerEntrypoint {
 		t.Error("command was unexpectedly overwritten")
 	}
 }
@@ -953,6 +956,330 @@ func TestApplyProfilingJobOverrides_SidecarUntouched(t *testing.T) {
 	}
 }
 
+func TestApplyProfilingJobOverrides_OutputCopierImage(t *testing.T) {
+	job := baseJob()
+	job.Spec.Template.Spec.Containers[1].Command = []string{outputCopierShell, "-c"}
+	job.Spec.Template.Spec.Containers[1].Args = []string{outputCopierScriptStub}
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  ContainerNameOutputCopier,
+						Image: outputCopierOverrideImage,
+					},
+				},
+			},
+		},
+	})
+	sidecar := job.Spec.Template.Spec.Containers[1]
+	if sidecar.Image != outputCopierOverrideImage {
+		t.Errorf("expected output-copier image override, got %s", sidecar.Image)
+	}
+	if len(sidecar.Command) == 0 || sidecar.Command[0] != outputCopierShell {
+		t.Error("output-copier command was unexpectedly overwritten")
+	}
+	if len(sidecar.Args) == 0 || sidecar.Args[0] != outputCopierScriptStub {
+		t.Error("output-copier args were unexpectedly overwritten")
+	}
+}
+
+func TestApplyProfilingJobOverrides_OutputCopierDoesNotOverrideProfiler(t *testing.T) {
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  ContainerNameOutputCopier,
+						Image: outputCopierOverrideImage,
+					},
+				},
+			},
+		},
+	})
+	if job.Spec.Template.Spec.Containers[0].Image != "profiler:latest" {
+		t.Errorf("profiler image should be unchanged, got %s", job.Spec.Template.Spec.Containers[0].Image)
+	}
+}
+
+func TestApplyProfilingJobOverrides_OutputCopierOnlyImageAndResources(t *testing.T) {
+	job := baseJob()
+	job.Spec.Template.Spec.Containers[1].Command = []string{outputCopierShell, "-c"}
+	job.Spec.Template.Spec.Containers[1].Args = []string{outputCopierScriptStub}
+	job.Spec.Template.Spec.Containers[1].Env = []corev1.EnvVar{{
+		Name:  "SIDECAR_MODE",
+		Value: "baseline",
+	}}
+	job.Spec.Template.Spec.Containers[1].VolumeMounts = []corev1.VolumeMount{{
+		Name:      VolumeNameProfilingOutput,
+		MountPath: ProfilingOutputPath,
+		ReadOnly:  true,
+	}}
+	job.Spec.Template.Spec.Containers[1].SecurityContext = &corev1.SecurityContext{
+		RunAsNonRoot: new(true),
+	}
+
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  ContainerNameOutputCopier,
+						Image: outputCopierOverrideImage,
+						Env: []corev1.EnvVar{{
+							Name:  "SIDECAR_MODE",
+							Value: "custom",
+						}},
+						EnvFrom: []corev1.EnvFromSource{{
+							ConfigMapRef: &corev1.ConfigMapEnvSource{
+								Name: "sidecar-env",
+							},
+						}},
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      VolumeNameProfilingOutput,
+								MountPath: "/elsewhere",
+							},
+							{
+								Name:      "extra-logs",
+								MountPath: "/var/log/sidecar",
+							},
+						},
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+						},
+						SecurityContext: &corev1.SecurityContext{
+							RunAsNonRoot: new(false),
+						},
+						Command: []string{"/bin/bash"},
+						Args:    []string{"-c", "echo overridden"},
+					},
+				},
+			},
+		},
+	})
+
+	sidecar := findContainer(job.Spec.Template.Spec.Containers, ContainerNameOutputCopier)
+	if sidecar == nil {
+		t.Fatal("output-copier container not found")
+	}
+	if sidecar.Image != outputCopierOverrideImage {
+		t.Errorf("expected output-copier image override, got %s", sidecar.Image)
+	}
+	if sidecar.Resources.Limits.Cpu().Cmp(resource.MustParse("500m")) != 0 {
+		t.Errorf("expected output-copier CPU limit override, got %v", sidecar.Resources.Limits)
+	}
+	mode := findEnv(sidecar.Env, "SIDECAR_MODE")
+	if mode == nil || mode.Value != "baseline" {
+		t.Errorf("output-copier env overrides should be ignored, got %+v", mode)
+	}
+	if len(sidecar.EnvFrom) != 0 {
+		t.Errorf("output-copier EnvFrom overrides should be ignored, got %v", sidecar.EnvFrom)
+	}
+	if len(sidecar.VolumeMounts) != 1 {
+		t.Fatalf("expected controller-owned volume mounts only, got %v", sidecar.VolumeMounts)
+	}
+	mount := sidecar.VolumeMounts[0]
+	if mount.Name != VolumeNameProfilingOutput || mount.MountPath != ProfilingOutputPath || !mount.ReadOnly {
+		t.Errorf("controller-owned profiling-output mount was changed: %+v", mount)
+	}
+	if sidecar.SecurityContext == nil || sidecar.SecurityContext.RunAsNonRoot == nil || !*sidecar.SecurityContext.RunAsNonRoot {
+		t.Errorf("output-copier securityContext overrides should be ignored, got %+v", sidecar.SecurityContext)
+	}
+	if len(sidecar.Command) != 2 || sidecar.Command[0] != outputCopierShell {
+		t.Errorf("output-copier command was unexpectedly overwritten: %v", sidecar.Command)
+	}
+	if len(sidecar.Args) != 1 || sidecar.Args[0] != outputCopierScriptStub {
+		t.Errorf("output-copier args were unexpectedly overwritten: %v", sidecar.Args)
+	}
+}
+
+func TestApplyProfilingJobOverrides_NamedProfilerAndOutputCopierOverrides(t *testing.T) {
+	job := baseJob()
+	job.Spec.Template.Spec.Containers[1].Command = []string{outputCopierShell, "-c"}
+	job.Spec.Template.Spec.Containers[1].Args = []string{outputCopierScriptStub}
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  ContainerNameOutputCopier,
+						Image: outputCopierOverrideImage,
+					},
+					{
+						Name:  ContainerNameProfiler,
+						Image: "custom-profiler:v3",
+					},
+				},
+			},
+		},
+	})
+
+	profiler := findContainer(job.Spec.Template.Spec.Containers, ContainerNameProfiler)
+	if profiler == nil {
+		t.Fatal("profiler container not found")
+	}
+	if profiler.Image != "custom-profiler:v3" {
+		t.Errorf("profiler image: want custom-profiler:v3, got %s", profiler.Image)
+	}
+	if len(profiler.Command) == 0 || profiler.Command[0] != profilerEntrypoint {
+		t.Error("profiler command was unexpectedly overwritten")
+	}
+
+	sidecar := findContainer(job.Spec.Template.Spec.Containers, ContainerNameOutputCopier)
+	if sidecar == nil {
+		t.Fatal("output-copier container not found")
+	}
+	if sidecar.Image != outputCopierOverrideImage {
+		t.Errorf("output-copier image: want %s, got %s", outputCopierOverrideImage, sidecar.Image)
+	}
+	if len(sidecar.Command) == 0 || sidecar.Command[0] != outputCopierShell {
+		t.Error("output-copier command was unexpectedly overwritten")
+	}
+	if len(sidecar.Args) == 0 || sidecar.Args[0] != outputCopierScriptStub {
+		t.Error("output-copier args were unexpectedly overwritten")
+	}
+}
+
+func TestApplyProfilingJobOverrides_MergesByContainerNameNotIndex(t *testing.T) {
+	sidecarCPU := resource.MustParse("250m")
+	profilerCPU := resource.MustParse("2")
+	tests := []struct {
+		name      string
+		overrides []corev1.Container
+	}{
+		{
+			name: "sidecar-first named profiler",
+			overrides: []corev1.Container{
+				{
+					Name: ContainerNameOutputCopier,
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{corev1.ResourceCPU: sidecarCPU},
+					},
+				},
+				{
+					Name:  ContainerNameProfiler,
+					Image: profilerOverrideImage,
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{corev1.ResourceCPU: profilerCPU},
+					},
+				},
+			},
+		},
+		{
+			name: "sidecar-first unnamed profiler",
+			overrides: []corev1.Container{
+				{
+					Name: ContainerNameOutputCopier,
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{corev1.ResourceCPU: sidecarCPU},
+					},
+				},
+				{
+					Name:  "",
+					Image: profilerOverrideImage,
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{corev1.ResourceCPU: profilerCPU},
+					},
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Build a generated job whose profiler is not at index 0")
+			job := baseJob()
+			spec := &job.Spec.Template.Spec
+			spec.Containers[0], spec.Containers[1] = spec.Containers[1], spec.Containers[0]
+
+			t.Log("Apply sidecar-first container overrides")
+			applyProfilingJobOverrides(job, &batchv1.JobSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: test.overrides},
+				},
+			})
+
+			t.Log("Verify profiler got the named profiler override, not Containers[0]")
+			profiler := findContainer(job.Spec.Template.Spec.Containers, ContainerNameProfiler)
+			if profiler == nil {
+				t.Fatal("profiler container not found")
+			}
+			if profiler.Image != profilerOverrideImage {
+				t.Errorf("profiler image: want %s, got %s", profilerOverrideImage, profiler.Image)
+			}
+			if profiler.Resources.Limits.Cpu().Cmp(profilerCPU) != 0 {
+				t.Errorf("profiler CPU: want %s, got %v", profilerCPU.String(), profiler.Resources.Limits)
+			}
+
+			t.Log("Verify output-copier received its own resources, not the profiler budget")
+			sidecar := findContainer(job.Spec.Template.Spec.Containers, ContainerNameOutputCopier)
+			if sidecar == nil {
+				t.Fatal("output-copier container not found")
+			}
+			if sidecar.Resources.Limits.Cpu().Cmp(sidecarCPU) != 0 {
+				t.Errorf("output-copier CPU: want %s, got %v", sidecarCPU.String(), sidecar.Resources.Limits)
+			}
+		})
+	}
+}
+
+func TestApplyProfilingJobOverrides_UnnamedOverrideTargetsProfiler(t *testing.T) {
+	t.Log("Apply a legacy unnamed container override")
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "", Image: profilerOverrideImage},
+				},
+			},
+		},
+	})
+
+	t.Log("Verify the unnamed override still targets the profiler")
+	profiler := findContainer(job.Spec.Template.Spec.Containers, ContainerNameProfiler)
+	if profiler == nil {
+		t.Fatal("profiler container not found")
+	}
+	if profiler.Image != profilerOverrideImage {
+		t.Errorf("profiler image: want %s, got %s", profilerOverrideImage, profiler.Image)
+	}
+}
+
+func TestApplyProfilingJobOverrides_UnknownNameDoesNotOverrideProfiler(t *testing.T) {
+	t.Log("Apply an override whose only container has an unknown name")
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "extra-tools",
+						Image: profilerOverrideImage,
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	t.Log("Verify the profiler image and resources are unchanged")
+	profiler := findContainer(job.Spec.Template.Spec.Containers, ContainerNameProfiler)
+	if profiler == nil {
+		t.Fatal("profiler container not found")
+	}
+	if profiler.Image != "profiler:latest" {
+		t.Errorf("profiler image should be unchanged, got %s", profiler.Image)
+	}
+	if len(profiler.Resources.Limits) != 0 || len(profiler.Resources.Requests) != 0 {
+		t.Errorf("profiler resources should be unchanged, got %+v", profiler.Resources)
+	}
+}
+
 func TestApplyProfilingJobOverrides_Combined(t *testing.T) {
 	job := baseJob()
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
@@ -970,7 +1297,7 @@ func TestApplyProfilingJobOverrides_Combined(t *testing.T) {
 				PriorityClassName:  "batch",
 				ServiceAccountName: "custom-sa",
 				Volumes: []corev1.Volume{
-					{Name: "scratch", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+					{Name: "scratch", EmptyDir: &corev1.EmptyDirVolumeSource{}},
 				},
 				Containers: []corev1.Container{
 					{
@@ -1034,7 +1361,7 @@ func TestApplyProfilingJobOverrides_Combined(t *testing.T) {
 	if profiler.Image != "profiler:v2" {
 		t.Errorf("image: want profiler:v2, got %s", profiler.Image)
 	}
-	if profiler.Command[0] != "python" {
+	if profiler.Command[0] != profilerEntrypoint {
 		t.Error("command was overwritten")
 	}
 	if profiler.Resources.Limits.Cpu().String() != "8" {

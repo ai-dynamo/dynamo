@@ -3,13 +3,35 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import copy
 import re
+import sys
 from pathlib import Path
 
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 _VALID_ARCHS = {"amd64", "arm64"}
+
+_PYTHON_PACKAGE_DOWNLOAD_RE = re.compile(
+    r"\buv\s+(?:build|lock|sync|pip\s+(?:compile|install|sync))\b"
+    r"|(?:^|[\s;&|])(?:\S*/)?pip3?\s+(?:install|wheel)\b"
+    r"|(?:^|[\s;&|])(?:\S*/)?python3?(?:\.\d+)?\s+-m\s+pip\s+(?:install|wheel)\b"
+    # vLLM Omni installs packages inside this mounted script.
+    r"|(?:^|[\s;&|])bash\s+/tmp/install_vllm_omni\.sh\b"
+    # NIXL's Meson build resolves Python build dependencies through uv.
+    r"|github\.com/ai-dynamo/nixl\.git",
+    re.MULTILINE,
+)
+
+_PYPI_RUN_PREFIX = (
+    "RUN --mount=type=secret,id=pip-index-url,env=PIP_INDEX_URL \\\n"
+    "    --mount=type=secret,id=uv-default-index,env=UV_DEFAULT_INDEX \\\n"
+    "    --mount=type=secret,id=pypi-netrc,target=/run/secrets/pypi-netrc,mode=0444 \\\n"
+    "    "
+)
+
+_PYPI_ENV = "export NETRC=/run/secrets/pypi-netrc && \\\n    "
 
 
 def parse_platform(platform_str: str) -> str:
@@ -44,7 +66,7 @@ def parse_args():
         "--framework",
         type=str,
         default="vllm",
-        choices=["dynamo", "vllm", "sglang", "trtllm"],
+        choices=["dynamo", "vllm", "sglang", "trtllm", "triton"],
         help="Dockerfile framework to use",
     )
 
@@ -80,9 +102,23 @@ def parse_args():
         type=str,
         default="13.0",
         choices=["13.0", "13.1"],
-        help="CUDA version to use. [13.0 for vllm and sglang, 13.1 for trtllm].  Not required for non-cuda devices.",
+        help=(
+            "CUDA version to use. [13.0 for vllm and sglang, 13.1 for trtllm].\n"
+            "Not required for non-cuda devices.\n"
+            "Not supported by Triton - CUDA version is predefined by its release image."
+        ),
     )
     parser.add_argument("--make-efa", action="store_true", help="Enable AWS EFA")
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default="",
+        choices=["", "enterprise"],
+        help=(
+            "Optional runtime variant from context.yaml's <framework>.variants.\n"
+            "  enterprise  vllm cuda runtime on the NIM vLLM enterprise base"
+        ),
+    )
     parser.add_argument(
         "--output-short-filename",
         action="store_true",
@@ -132,6 +168,16 @@ def validate_args(args):
             ],
             "cuda_version": ["13.0"],
         },
+        "triton": {
+            "device": ["cuda"],
+            # Triton is runtime-only: Dynamo is installed from prebuilt PyPI wheels
+            # on top of the upstream Triton release image, so the from-source targets
+            # (dev/local-dev/wheel_builder/base) do not apply.
+            "target": [
+                "runtime",
+            ],
+            "cuda_version": ["13.4"],
+        },
         "dynamo": {
             "device": ["cuda"],
             "target": [
@@ -146,6 +192,30 @@ def validate_args(args):
             "cuda_version": ["13.0"],
         },
     }
+
+    # Triton's CUDA family is fixed by its release image, so it cannot be chosen
+    # by the user: reject an explicitly-passed --cuda-version (detected from argv
+    # since the arg has a default) and pin it to Triton's single valid value.
+    if args.framework == "triton":
+        if any(
+            a == "--cuda-version" or a.startswith("--cuda-version=") for a in sys.argv
+        ):
+            raise ValueError(
+                "--cuda-version cannot be specified for triton: its CUDA family is "
+                "fixed by the Triton release image."
+            )
+        args.cuda_version = valid_inputs["triton"]["cuda_version"][0]
+
+    if args.variant == "enterprise" and not (
+        args.framework == "vllm"
+        and args.device == "cuda"
+        and args.target == "runtime"
+        and not args.make_efa
+    ):
+        raise ValueError(
+            "--variant enterprise requires --framework vllm --device cuda "
+            "--target runtime without --make-efa"
+        )
 
     if args.framework in valid_inputs:
         cuda_version_valid = (
@@ -183,6 +253,27 @@ def _make_jinja_env(script_dir):
     )
 
 
+def _inject_python_index_mounts(dockerfile: str) -> str:
+    """Mount optional PyPI configuration in every Python package install layer."""
+    instructions = re.split(r"(?=^[A-Z]+\b)", dockerfile, flags=re.MULTILINE)
+    for index, instruction in enumerate(instructions):
+        # BuildKit strips full-line comments before parsing RUN flags; ignore them here too.
+        code = re.sub(r"(?m)^[ \t]*#[^\n]*$", "", instruction)
+        if not instruction.startswith("RUN ") or not _PYTHON_PACKAGE_DOWNLOAD_RE.search(
+            code
+        ):
+            continue
+
+        instructions[index] = re.sub(
+            r"^RUN (?P<mounts>(?:(?:--mount=[^\n]*\\|#[^\n]*)\n[ \t]+)*)",
+            lambda match: _PYPI_RUN_PREFIX + match.group("mounts") + _PYPI_ENV,
+            instruction,
+            count=1,
+        )
+
+    return "".join(instructions)
+
+
 def _render_context(args, context=None):
     # device_key is the lookup key into context.yaml's per-device dict
     # (e.g. "cuda12.9", "xpu"). Computed here so it's available to every
@@ -209,6 +300,7 @@ def _render_context(args, context=None):
         platform=args.platform,
         cuda_version=args.cuda_version,
         make_efa=args.make_efa,
+        variant=args.variant,
         compliance_base_stage=compliance_base_stage,
         compliance_baseline_sbom=compliance_baseline_sbom,
         compliance_ecosystems=compliance_ecosystems,
@@ -246,13 +338,11 @@ def _resolve_compliance_inputs(framework, target, device_key, context):
     if target == "frontend":
         # frontend is framework-agnostic (its ubuntu base is shared across
         # frameworks), so it carries its own baseline stem under `dynamo`.
-        # It additionally attributes EPP's Go modules (`go`): compliance.Dockerfile
-        # feeds the EPP-emitted CycloneDX SBOM in via --go-sbom for this target.
         return (
             "pre_frontend",
             context.get("dynamo", {}).get("frontend_baseline_sbom", ""),
-            "python,rust,dpkg,go,native",
-            "--ecosystem dpkg --ecosystem rust --ecosystem native --ecosystem go",
+            full_ecosystems,
+            full_source_flags,
         )
     # runtime / dev / local-dev / wheel_builder / base / framework
     return (
@@ -269,11 +359,13 @@ def render(args, context, script_dir):
     rendered = template.render(context=context, **_render_context(args, context))
     # Replace all instances of 3+ newlines with 2 newlines
     cleaned = re.sub(r"\n{3,}", "\n\n", rendered)
+    cleaned = _inject_python_index_mounts(cleaned)
 
     if args.output_short_filename:
         filename = "rendered.Dockerfile"
     else:
-        filename = f"{args.framework}-{args.target}-{args.device}{args.cuda_version}-{args.platform}-rendered.Dockerfile"
+        variant = f"-{args.variant}" if args.variant else ""
+        filename = f"{args.framework}-{args.target}{variant}-{args.device}{args.cuda_version}-{args.platform}-rendered.Dockerfile"
 
     with open(f"{script_dir}/{filename}", "w") as f:
         f.write(cleaned)
@@ -288,6 +380,21 @@ def render(args, context, script_dir):
     print(f"INFO: Generated Dockerfile written to {script_dir}/{filename}")
 
 
+def apply_variant(context, framework, device_key, variant):
+    """Overlay <framework>.variants.<variant>.<device_key> onto the device block."""
+    if not variant:
+        return context
+    try:
+        overlay = context[framework]["variants"][variant][device_key]
+    except KeyError:
+        raise ValueError(
+            f"context.yaml has no {framework}.variants.{variant}.{device_key} block"
+        ) from None
+    context = copy.deepcopy(context)
+    context[framework][device_key].update(overlay)
+    return context
+
+
 def main():
     args = parse_args()
     # Normalize platform to template variable ('amd64', 'arm64', or 'multi')
@@ -300,6 +407,10 @@ def main():
     script_dir = Path(__file__).parent
     with open(f"{script_dir}/context.yaml", "r") as f:
         context = yaml.safe_load(f)
+    device_key = (
+        args.device + args.cuda_version if args.device == "cuda" else args.device
+    )
+    context = apply_variant(context, args.framework, device_key, args.variant)
 
     render(args, context, script_dir)
 

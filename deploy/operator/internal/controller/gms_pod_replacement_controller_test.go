@@ -10,6 +10,7 @@ import (
 	"errors"
 	"testing"
 
+	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -27,11 +28,30 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
 func TestGMSPodReplacementPredicate(t *testing.T) {
 	pred := gmsPodReplacementPredicate()
+
+	t.Run("retains terminal restore failures after a GMS restart", func(t *testing.T) {
+		for _, reason := range []string{
+			podcontract.RestoreReasonFailed,
+			podcontract.RestoreReasonPartiallySucceeded,
+		} {
+			t.Run(reason, func(t *testing.T) {
+				t.Log("Build an owned native restore Pod with a terminal outcome and a GMS restart")
+				pod := gmsPodReplacementTestPod("pod-uid", 1)
+				pod.Status.Conditions = []corev1.PodCondition{{
+					Type:   corev1.PodConditionType(podcontract.RestoredCondition),
+					Status: corev1.ConditionFalse,
+					Reason: reason,
+				}}
+
+				t.Log("Verify the terminal failure remains visible instead of causing an identical retry")
+				assert.False(t, pred.Create(event.CreateEvent{Object: pod}))
+			})
+		}
+	})
 
 	t.Run("admits restart transition", func(t *testing.T) {
 		oldPod := gmsPodReplacementTestPod("pod-uid", 0)
@@ -52,10 +72,16 @@ func TestGMSPodReplacementPredicate(t *testing.T) {
 	t.Run("rejects ineligible Pods", func(t *testing.T) {
 		tests := map[string]func(*corev1.Pod){
 			"not a restore target": func(pod *corev1.Pod) {
-				delete(pod.Labels, snapshotprotocol.RestoreTargetLabel)
+				delete(pod.Annotations, podcontract.RestoreFromAnnotation)
 			},
 			"ownerless": func(pod *corev1.Pod) {
 				pod.OwnerReferences = nil
+			},
+			"missing Dynamo component identity": func(pod *corev1.Pod) {
+				delete(pod.Labels, consts.KubeLabelDynamoComponent)
+			},
+			"missing Dynamo namespace identity": func(pod *corev1.Pod) {
+				delete(pod.Labels, consts.KubeLabelDynamoNamespace)
 			},
 			"ordinary init container": func(pod *corev1.Pod) {
 				pod.Spec.InitContainers[0].RestartPolicy = nil
@@ -102,7 +128,15 @@ func TestGMSPodReplacementReconcile(t *testing.T) {
 			name:      "ineligible Pod is retained",
 			podExists: true,
 			mutate: func(pod *corev1.Pod) {
-				pod.Labels[snapshotprotocol.RestoreTargetLabel] = "false"
+				delete(pod.Annotations, podcontract.RestoreFromAnnotation)
+			},
+		},
+		{
+			name:      "unrelated native restore Pod is retained",
+			podExists: true,
+			mutate: func(pod *corev1.Pod) {
+				delete(pod.Labels, consts.KubeLabelDynamoComponent)
+				delete(pod.Labels, consts.KubeLabelDynamoNamespace)
 			},
 		},
 		{
@@ -176,7 +210,7 @@ func TestGMSPodReplacementErrors(t *testing.T) {
 		reconciler := &gmsPodReplacementReconciler{Client: c}
 
 		_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-			NamespacedName: types.NamespacedName{Namespace: "inference", Name: "restore-worker"},
+			Namespace: "inference", Name: "restore-worker",
 		})
 		require.ErrorIs(t, err, retryErr)
 		assert.ErrorContains(t, err, "get GMS Pod replacement candidate")
@@ -222,21 +256,21 @@ func gmsPodReplacementErrorClient(t *testing.T, pod *corev1.Pod, deleteErr error
 
 func gmsPodReplacementTestPod(uid types.UID, restartCount int32) *corev1.Pod {
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "restore-worker",
-			Namespace: "inference",
-			UID:       uid,
-			Labels: map[string]string{
-				snapshotprotocol.RestoreTargetLabel: consts.KubeLabelValueTrue,
-			},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "apps/v1",
-				Kind:       "Deployment",
-				Name:       "restore-worker",
-				UID:        "owner-uid",
-				Controller: ptr.To(true),
-			}},
+		Name:      "restore-worker",
+		Namespace: "inference",
+		UID:       uid,
+		Labels: map[string]string{
+			consts.KubeLabelDynamoComponent: "worker",
+			consts.KubeLabelDynamoNamespace: "inference-graph",
 		},
+		Annotations: map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "apps/v1",
+			Kind:       "Deployment",
+			Name:       "restore-worker",
+			UID:        "owner-uid",
+			Controller: new(true),
+		}},
 		Spec: corev1.PodSpec{
 			InitContainers: []corev1.Container{{
 				Name:          gms.ServerContainerName,

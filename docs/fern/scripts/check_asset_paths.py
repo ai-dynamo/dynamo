@@ -77,6 +77,10 @@ DEFAULT_GLOBS = (
     "components/**/*.md",
     "pages/**/*.mdx",
     "pages/**/*.md",
+    # Templates are copied into published pages, so validate their asset paths
+    # before a bad example propagates into the site.
+    "templates/**/*.mdx",
+    "templates/**/*.md",
     "translations/**/*.mdx",
     "translations/**/*.md",
     "main.css",

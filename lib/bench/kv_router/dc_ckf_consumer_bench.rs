@@ -21,23 +21,25 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, ensure};
 use clap::{Parser, ValueEnum};
 use dynamo_bench::kv_router_common::dc_ckf_metadata::DcCkfCorpusMetadata;
-use dynamo_kv_router::identity::{
-    CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
+    RouterEvent,
 };
-use dynamo_kv_router::indexer::cuckoo::{
+use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_kv_indexer::cuckoo::{
     CkfConfig, ConsumerDrainMarker, ConsumerInstanceId, DcCkfDelta, DcCkfDeltaSink, DcCkfPublisher,
     DcCkfSnapshot, DcCkfState, GlobalCkfIndexer, GlobalCkfIngestOutcome, GlobalCkfIngestionPool,
     GlobalCkfIngestionPoolConfig, GlobalCkfManifest, LaneLease, PrefixSearchConfig,
     ProducerIdentity,
 };
-use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerWithDpRank,
-    compute_seq_hash_for_block,
+use dynamo_router_protocol::identity::{
+    CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
 };
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use serde::{Deserialize, Serialize};
 
-const CORPUS_SCHEMA_VERSION: u32 = 3;
+const CORPUS_SCHEMA_VERSION: u32 = 4;
 const RESULT_SCHEMA_VERSION: u32 = 2;
 const MAX_LANES: usize = 16;
 const DEFAULT_EXPECTED_BLOCKS_PER_LANE: usize = 4_096;
@@ -390,7 +392,7 @@ fn generate_corpus(
     }
     let format = generated[0].snapshot.identity().format();
     let pools: [Option<PoolId>; MAX_LANES] = std::array::from_fn(|lane| {
-        (lane < args.lanes).then(|| PoolId::new(domain, DcId::new(lane as u64 + 1)))
+        (lane < args.lanes).then(|| PoolId::new(domain, ClusterId::new(lane as u64 + 1)))
     });
     let manifest = GlobalCkfManifest::new(consumer, domain, format, pools)?;
     let mut lanes = Vec::with_capacity(args.lanes);
@@ -485,6 +487,7 @@ fn generate_lane_state(
         let outcome = state.apply_event(stored_event(
             member,
             hash_offset as u64 + 1,
+            (!hash_offset.is_multiple_of(query_depth)).then(|| sequence_hashes[hash_offset - 1]),
             sequence_hash,
             local_hash,
         ));
@@ -495,7 +498,7 @@ fn generate_lane_state(
         );
     }
     let identity = ProducerIdentity::new(
-        PoolId::new(domain, DcId::new(lane as u64 + 1)),
+        PoolId::new(domain, ClusterId::new(lane as u64 + 1)),
         1,
         1,
         state.format(),
@@ -528,6 +531,7 @@ fn generate_lane_state(
         let store = state.apply_event(stored_event(
             member,
             baseline_hashes as u64 + frame_pair as u64 * 2 + 2,
+            (!hash_offset.is_multiple_of(query_depth)).then(|| sequence_hashes[hash_offset - 1]),
             hash,
             local_hashes[hash_offset],
         ));
@@ -571,18 +575,21 @@ fn lane_hash_base(lane: usize) -> anyhow::Result<u64> {
 fn stored_event(
     member: WorkerWithDpRank,
     event_id: u64,
+    parent_sequence_hash: Option<u64>,
     sequence_hash: u64,
     local_hash: LocalBlockHash,
 ) -> RouterEvent {
+    const EXTERNAL_MASK: u64 = 0x8E11_6E5E_3A7A_2026;
     RouterEvent::new(
         member.worker_id,
         KvCacheEvent {
             event_id,
             data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: None,
+                parent_hash: parent_sequence_hash
+                    .map(|hash| ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK)),
                 start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
-                    block_hash: ExternalSequenceBlockHash(sequence_hash),
+                    block_hash: ExternalSequenceBlockHash(sequence_hash ^ EXTERNAL_MASK),
                     tokens_hash: local_hash,
                     mm_extra_info: None,
                 }],
@@ -593,12 +600,13 @@ fn stored_event(
 }
 
 fn removed_event(member: WorkerWithDpRank, event_id: u64, hash: u64) -> RouterEvent {
+    const EXTERNAL_MASK: u64 = 0x8E11_6E5E_3A7A_2026;
     RouterEvent::new(
         member.worker_id,
         KvCacheEvent {
             event_id,
             data: KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: vec![ExternalSequenceBlockHash(hash)],
+                block_hashes: vec![ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK)],
             }),
             dp_rank: member.dp_rank,
         },
@@ -1266,7 +1274,7 @@ fn read_consumer_corpus(path: &Path) -> anyhow::Result<FrozenConsumerCorpus> {
         .context("consumer corpus is missing numeric schema_version")?;
     if version == 2 {
         anyhow::bail!(
-            "consumer corpus schema v2 uses retired endpoint/cache-domain identity; regenerate it as v3"
+            "consumer corpus schema v2 uses retired endpoint/cache-domain identity; regenerate it as v4"
         );
     }
     ensure!(
@@ -1350,7 +1358,27 @@ mod tests {
         let error = read_consumer_corpus(&path).unwrap_err();
         let _ = std::fs::remove_file(path);
 
-        assert!(error.to_string().contains("regenerate it as v3"));
+        assert!(error.to_string().contains("regenerate it as v4"));
+        Ok(())
+    }
+
+    #[test]
+    fn v3_corpus_requires_regeneration() -> anyhow::Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "dynamo-dc-ckf-v3-corpus-{}.json",
+            std::process::id()
+        ));
+        let file = File::create(&path)?;
+        serde_json::to_writer(file, &serde_json::json!({ "schema_version": 3 }))?;
+
+        let error = read_consumer_corpus(&path).unwrap_err();
+        let _ = std::fs::remove_file(path);
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported consumer corpus schema version 3; expected 4")
+        );
         Ok(())
     }
 

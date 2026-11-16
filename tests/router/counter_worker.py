@@ -38,7 +38,6 @@ HF_MODEL_NAME = "Qwen/Qwen3-0.6B"
 _ROUTER_MODE_MAP = {
     "round-robin": "RoundRobin",
     "random": "Random",
-    "power-of-two": "PowerOfTwoChoices",
     "kv": "KV",
     "direct": "Direct",
     "least-loaded": "LeastLoaded",
@@ -84,7 +83,12 @@ class CounterWorkerArgGroup(ArgGroup):
             default="tcp",
             help="Request plane.",
         )
-        RouterArgGroup().add_arguments(parser)
+        # A worker, but one whose whole purpose is to advertise a per-worker
+        # config, so it opts into a concrete default rather than inheriting.
+        # Values stated explicitly to preserve this worker's prior behavior.
+        RouterArgGroup(
+            default_router_mode="round-robin", include_frontend_only=True
+        ).add_arguments(parser)
         KvRouterArgGroup().add_arguments(parser)
 
 

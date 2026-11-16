@@ -3,9 +3,7 @@
 
 //! Pickers for prefill and decode routing partitions.
 
-use dynamo_kv_router::{
-    WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 /// Finds the candidate row with the lowest accumulated scorer cost.
 fn lowest_cost_row(input: WorkerInputView<'_>) -> Result<usize, WorkerSelectionPolicyError> {
@@ -24,7 +22,7 @@ pub(crate) struct PrefillPicker;
 impl WorkerPicker for PrefillPicker {
     /// Returns the prefill candidate row with the lowest cost.
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -38,10 +36,34 @@ pub(crate) struct DecodePicker;
 impl WorkerPicker for DecodePicker {
     /// Returns the decode candidate row with the lowest cost.
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         lowest_cost_row(input)
+    }
+}
+
+/// Rejects worker-pool roles that this disaggregated example does not support.
+pub(crate) struct UnsupportedWorkerTypePicker {
+    worker_type: WorkerType,
+}
+
+impl UnsupportedWorkerTypePicker {
+    pub(crate) fn new(worker_type: WorkerType) -> Self {
+        Self { worker_type }
+    }
+}
+
+impl WorkerPicker for UnsupportedWorkerTypePicker {
+    fn pick(
+        &self,
+        _context: &WorkerSelectionContext<'_>,
+        _input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        Err(WorkerSelectionPolicyError::failed(format!(
+            "disagg-filter-score-pick does not support worker type {:?}; expected prefill or decode",
+            self.worker_type.as_str()
+        )))
     }
 }

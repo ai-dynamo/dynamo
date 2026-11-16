@@ -30,8 +30,8 @@ configuration. Never tune the revisions separately.
 | SGLang aggregated | 4 workers; engine/page block 512; G1 blocks 1,536; max sequences 256; batch tokens 32,768 | 1 retraction; 1,024 produced 8 and 2,048 produced 0 |
 | SGLang disaggregated | 2 prefill + 2 decode; engine/page block 512; G1 blocks 11,264; max sequences 256; batch tokens 32,768; KV bytes/token 262,144; 100 GB/s full-prompt transfer | 14 fully readmitted retractions; 10 fresh-process repetitions produced one digest and identical counters; nearby probes produced 11 at 10,752, 7 at 11,776, 6 at 12,288, and 33 at 10,240 |
 
-The vLLM configurations rely on native/default G1 selection. An experiment-only
-`--g1-backend` switch is not required to reproduce the native seeds.
+The configurations use the framework-local native G1 implementation. The removed
+`--g1-backend` switch is not part of the current replay contract.
 
 At the vLLM disaggregated seed, ten fresh processes completed all requests with exact
 totals of 46,542,297 input and 922,544 output tokens, 14 fully readmitted preemptions,

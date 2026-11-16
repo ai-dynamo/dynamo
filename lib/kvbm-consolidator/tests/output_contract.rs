@@ -31,7 +31,8 @@ fn bs(hash: u64, parent: Option<u64>, tokens: Vec<u32>, block_size: usize) -> Ra
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
-        source_kind: None,
+        ownership: None,
+        session_id: None,
     }
 }
 
@@ -50,7 +51,8 @@ fn bs_lora(hash: u64, tokens: Vec<u32>, lora_name: String) -> RawKvEvent {
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
-        source_kind: None,
+        ownership: None,
+        session_id: None,
     }
 }
 

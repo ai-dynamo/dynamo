@@ -30,14 +30,16 @@ import re
 import sys
 from pathlib import Path
 
+from helm_chart_version import set_chart_versions as _set_chart_versions
+
 # token -> Chart.yaml files; the operator subchart rides the platform token.
+# Snapshot is an external OCI dependency of the platform chart
+# (github.com/ai-dynamo/snapshot), pinned in
+# deploy/helm/charts/platform/Chart.yaml, not rewritten here.
 CHART_TARGETS: dict[str, list[str]] = {
     "platform": [
         "deploy/helm/charts/platform/Chart.yaml",
         "deploy/helm/charts/platform/components/operator/Chart.yaml",
-    ],
-    "snapshot": [
-        "deploy/helm/charts/snapshot/Chart.yaml",
     ],
 }
 
@@ -46,7 +48,6 @@ CHART_TARGETS: dict[str, list[str]] = {
 # operator subchart keeps its name (values keys reference it).
 NIGHTLY_CHART_NAMES: dict[str, tuple[str, str]] = {
     "platform": ("deploy/helm/charts/platform/Chart.yaml", "dynamo-platform-nightly"),
-    "snapshot": ("deploy/helm/charts/snapshot/Chart.yaml", "snapshot-nightly"),
 }
 
 # token -> (values.yaml path, repository in the file, nightly repository).
@@ -61,13 +62,6 @@ IMAGE_SITES: dict[str, list[tuple[str, str, str]]] = {
             "deploy/helm/charts/platform/components/operator/values.yaml",
             "nvcr.io/nvidia/ai-dynamo/kubernetes-operator",
             "nvcr.io/nvidia/ai-dynamo/kubernetes-operator-nightly",
-        ),
-    ],
-    "snapshot": [
-        (
-            "deploy/helm/charts/snapshot/values.yaml",
-            "nvcr.io/nvidia/ai-dynamo/snapshot-agent",
-            "nvcr.io/nvidia/ai-dynamo/snapshot-agent-nightly",
         ),
     ],
 }
@@ -86,35 +80,7 @@ _TAG_HOP = r"(?:(?![^\n]*repository:)[^\n]*\n)*?"
 
 
 def set_chart_versions(path: Path, new: str, expect_operator_pin: bool) -> None:
-    text = path.read_text()
-
-    # Top-level version/appVersion, line-start anchored (platform has no appVersion).
-    top = re.compile(
-        r'^(?P<pre>(?:appVersion|version)\s*:\s*)(?P<q>"?)[^"\n]*(?P=q)(?P<post>\s*)$',
-        re.MULTILINE,
-    )
-    text, n_top = top.subn(
-        lambda m: f"{m.group('pre')}{m.group('q')}{new}{m.group('q')}{m.group('post')}",
-        text,
-    )
-    if n_top == 0:
-        raise RuntimeError(f"no top-level version/appVersion in {path}")
-
-    # dynamo-operator exact pin; hop bounded so third-party pins stay untouched.
-    dep = re.compile(
-        r"(?m)^(\s*-\s+name:\s*dynamo-operator\s*\n"
-        r"(?:(?!\s*-\s)[^\n]*\n)*?"
-        r'\s*version\s*:\s*)("?)[^"\n]*\2(\s*)$'
-    )
-    text, n_dep = dep.subn(
-        lambda m: f"{m.group(1)}{m.group(2)}{new}{m.group(2)}{m.group(3)}", text
-    )
-    if expect_operator_pin and n_dep != 1:
-        raise RuntimeError(
-            f"expected exactly one dynamo-operator dependency pin in {path}, found {n_dep}"
-        )
-
-    path.write_text(text)
+    _set_chart_versions(path, new, expect_operator_pin)
     print(f"  {path}: version -> {new}")
 
 
@@ -181,7 +147,7 @@ def main() -> int:
     parser.add_argument(
         "--charts",
         required=True,
-        help="Comma-separated chart tokens to rewrite (subset of: platform,snapshot).",
+        help="Comma-separated chart tokens to rewrite (subset of: platform).",
     )
     parser.add_argument("--root", default=".", help="Repository root (default: cwd).")
     args = parser.parse_args()

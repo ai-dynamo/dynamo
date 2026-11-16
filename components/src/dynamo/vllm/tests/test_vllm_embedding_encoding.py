@@ -12,10 +12,17 @@ clients -- fails fast in unit CI.
 
 import base64
 import struct
+from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
+import torch
 
-from dynamo.vllm.handlers import _encode_floats_to_base64
+from dynamo.vllm.handlers import (
+    _encode_floats_to_base64,
+    _flatten_pooling_tensor,
+    _pooling_output_to_base64,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -72,3 +79,47 @@ def test_encode_helper_handles_large_vector():
     encoded = _encode_floats_to_base64(floats)
     decoded = _decode_base64_floats(encoded, 1024)
     assert decoded == pytest.approx(floats)
+
+
+def test_pooling_tensor_base64_matches_struct_pack():
+    tensor = torch.tensor([[0.0, 1.0, -1.0, 3.14]], dtype=torch.float32)
+    encoded = _pooling_output_to_base64(tensor)
+    expected = base64.b64encode(struct.pack("<4f", 0.0, 1.0, -1.0, 3.14)).decode(
+        "ascii"
+    )
+    assert encoded == expected
+
+
+def test_pooling_tensor_normalization_enforces_little_endian():
+    """Exercise the endian conversion independently of the test host.
+
+    A real torch tensor exposes a native-endian NumPy view. Returning a
+    simulated big-endian view here proves the normalization emits the
+    little-endian bytes required by the wire format even on such a host.
+    """
+    native_view = np.array([0.25, -1.5, 3.0], dtype=">f4")
+    tensor = MagicMock()
+    detached = tensor.detach.return_value
+    cpu_tensor = detached.cpu.return_value
+    flattened = cpu_tensor.flatten.return_value
+    float_tensor = flattened.to.return_value
+    contiguous = float_tensor.contiguous.return_value
+    contiguous.numpy.return_value = native_view
+
+    normalized = _flatten_pooling_tensor(tensor)
+
+    assert normalized.dtype.str == "<f4"
+    assert normalized.tobytes() == struct.pack("<3f", 0.25, -1.5, 3.0)
+
+
+def test_pooling_tensor_base64_serializes_full_tensor():
+    tensor = torch.arange(8, dtype=torch.float32)
+    encoded = _pooling_output_to_base64(tensor)
+    assert _decode_base64_floats(encoded, 8) == pytest.approx(
+        [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+    )
+
+
+def test_pooling_list_base64_fallback_serializes_full_list():
+    encoded = _pooling_output_to_base64([[0.5, 1.5], [2.5, 3.5]])
+    assert _decode_base64_floats(encoded, 4) == pytest.approx([0.5, 1.5, 2.5, 3.5])

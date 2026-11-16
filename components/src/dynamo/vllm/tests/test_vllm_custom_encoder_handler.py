@@ -2,11 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import torch
 
+from dynamo.llm.exceptions import InvalidArgument
+from dynamo.vllm import handlers
+from dynamo.vllm.args import Config
 from dynamo.vllm.handlers import DecodeWorkerHandler
 from dynamo.vllm.multimodal_utils.custom_encoder import (
     Qwen3VLImageEncoding,
@@ -63,6 +66,54 @@ def _qwen_adapter():
     )
 
 
+@pytest.mark.parametrize("model", ["ngc://example/team/model:1", "example/model"])
+def test_multimodal_handler_loads_model_source_and_preserves_identity(
+    monkeypatch, tmp_path, model
+):
+    """NGC consumers load resolved files while HF and public names stay unchanged."""
+    config = Config()
+    config.model = model
+    config.engine_args = SimpleNamespace(
+        model=str(tmp_path),
+        load_format="auto",
+        trust_remote_code=False,
+        enable_prompt_embeds=True,
+    )
+    config.custom_encoder_class = f"{__name__}._Backend"
+    model_config = SimpleNamespace(
+        dtype=torch.bfloat16,
+        get_hidden_size=lambda: 4,
+        is_multimodal_model=False,
+    )
+    engine = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                data_parallel_external_lb=True, data_parallel_rank=0
+            )
+        )
+    )
+    processor = Mock()
+    encoder = Mock()
+    monkeypatch.setattr(handlers, "VllmEngineMonitor", Mock())
+    monkeypatch.setattr(handlers, "VllmMultimodalRequestProcessor", processor)
+    monkeypatch.setattr(handlers, "AsyncVisionEncoder", Mock(return_value=encoder))
+
+    handler = DecodeWorkerHandler(
+        runtime=Mock(),
+        config=config,
+        engine=engine,
+        default_sampling_params=None,
+        model_config=model_config,
+        enable_multimodal=True,
+    )
+
+    expected_source = str(tmp_path) if model.startswith("ngc://") else model
+    assert processor.call_args.kwargs["model"] == expected_source
+    encoder.load.assert_called_once_with(expected_source)
+    assert handler._served_model_name == model
+    assert config.model == model
+
+
 async def test_custom_encoder_handler_returns_adapter_prepared_prompt():
     handler = object.__new__(DecodeWorkerHandler)
     handler._custom_encoder_adapter = _adapter()
@@ -70,7 +121,7 @@ async def test_custom_encoder_handler_returns_adapter_prepared_prompt():
         encode=AsyncMock(return_value=[torch.ones((2, 4), dtype=torch.bfloat16)])
     )
 
-    prompt, error = await handler._assemble_custom_encoder_prompt(
+    prompt = await handler._assemble_custom_encoder_prompt(
         {
             "token_ids": [1, 99, 2],
             "multi_modal_data": {
@@ -80,20 +131,16 @@ async def test_custom_encoder_handler_returns_adapter_prepared_prompt():
         "request-id",
     )
 
-    assert error is None
     assert prompt is not None
     assert tuple(prompt["prompt_embeds"].shape) == (4, 4)
     assert prompt["prompt_token_ids"] == [1, 99, 99, 2]
 
 
-async def test_custom_encoder_handler_preserves_string_error_contract():
+async def _assemble_with_encoder_error(exc: Exception):
     handler = object.__new__(DecodeWorkerHandler)
     handler._custom_encoder_adapter = _adapter()
-    handler._custom_encoder = SimpleNamespace(
-        encode=AsyncMock(side_effect=RuntimeError("encoder failed"))
-    )
-
-    prompt, error = await handler._assemble_custom_encoder_prompt(
+    handler._custom_encoder = SimpleNamespace(encode=AsyncMock(side_effect=exc))
+    return await handler._assemble_custom_encoder_prompt(
         {
             "token_ids": [99],
             "multi_modal_data": {
@@ -103,9 +150,76 @@ async def test_custom_encoder_handler_preserves_string_error_contract():
         "request-id",
     )
 
+
+async def test_custom_encoder_input_fault_propagates_as_value_error():
+    """An input fault stays a `ValueError`, which the bindings already map to
+    `Backend(InvalidArgument)` — HTTP 400 carrying the message. The adapters
+    raise `ValueError`/`TypeError` for every validation failure, so the
+    actionable case needs no conversion here."""
+    with pytest.raises(ValueError) as excinfo:
+        await _assemble_with_encoder_error(ValueError("placeholder tokens (0) != 1"))
+
+    assert "placeholder tokens (0) != 1" in str(excinfo.value)
+
+
+async def test_custom_encoder_engine_fault_keeps_its_own_type():
+    """The complement, and the point of not converting: an engine fault must
+    not be relabelled a client error. Doing so would answer 400 and suppress
+    retries for timeouts, CUDA faults and batcher shutdown — and since
+    `encode()` is co-batched, could blame a caller for another request's
+    failure."""
+    with pytest.raises(RuntimeError) as excinfo:
+        await _assemble_with_encoder_error(RuntimeError("CUDA error: out of memory"))
+
+    assert not isinstance(excinfo.value, InvalidArgument)
+    assert "out of memory" in str(excinfo.value)
+
+
+async def test_custom_encoder_timeout_keeps_its_own_type():
+    with pytest.raises(TimeoutError):
+        await _assemble_with_encoder_error(TimeoutError("encoder timed out"))
+
+
+async def test_custom_encoder_handler_rejects_unsupported_modality():
+    handler = object.__new__(DecodeWorkerHandler)
+    handler._custom_encoder_adapter = _adapter()
+    handler._custom_encoder = SimpleNamespace(encode=AsyncMock())
+
+    with pytest.raises(InvalidArgument) as excinfo:
+        await handler._assemble_custom_encoder_prompt(
+            {"token_ids": [1], "multi_modal_data": {"video_url": [{"Url": "v"}]}},
+            "request-id",
+        )
+
+    assert "image inputs only" in str(excinfo.value)
+    assert "video_url" in str(excinfo.value)
+
+
+async def test_custom_encoder_handler_rejects_image_item_without_url():
+    handler = object.__new__(DecodeWorkerHandler)
+    handler._custom_encoder_adapter = _adapter()
+    handler._custom_encoder = SimpleNamespace(encode=AsyncMock())
+
+    with pytest.raises(InvalidArgument) as excinfo:
+        await handler._assemble_custom_encoder_prompt(
+            {"token_ids": [1], "multi_modal_data": {"image_url": [{"Decoded": "x"}]}},
+            "request-id",
+        )
+
+    assert "'Url'" in str(excinfo.value)
+
+
+async def test_custom_encoder_handler_returns_none_for_text_only_request():
+    handler = object.__new__(DecodeWorkerHandler)
+    handler._custom_encoder_adapter = _adapter()
+    handler._custom_encoder = SimpleNamespace(encode=AsyncMock())
+
+    prompt = await handler._assemble_custom_encoder_prompt(
+        {"token_ids": [1, 2], "multi_modal_data": {}},
+        "request-id",
+    )
+
     assert prompt is None
-    assert error is not None
-    assert error["finish_reason"] == "error: CustomEncoder failed: encoder failed"
 
 
 async def test_custom_encoder_handler_returns_native_qwen3_vl_prompt():
@@ -121,7 +235,7 @@ async def test_custom_encoder_handler_returns_native_qwen3_vl_prompt():
         )
     )
 
-    prompt, error = await handler._assemble_custom_encoder_prompt(
+    prompt = await handler._assemble_custom_encoder_prompt(
         {
             "token_ids": [100, 101, 102],
             "multi_modal_data": {
@@ -131,7 +245,6 @@ async def test_custom_encoder_handler_returns_native_qwen3_vl_prompt():
         "request-id",
     )
 
-    assert error is None
     assert prompt is not None
     assert prompt["prompt_token_ids"] == [100, 101, 102]
     image = prompt["multi_modal_data"]["image"]

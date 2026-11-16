@@ -1,0 +1,169 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: minimax-m3-1
+title: MiniMax M3.1
+page: pages/recipes/model-recipes/minimax-m3-1.mdx
+provider: minimax
+model:
+  name: MiniMax-M3.1-Flash
+  precision: NVFP4 MoE experts
+status: experimental
+targets:
+- id: vllm-agg-gb300
+  recommended: true
+  hardware:
+    gpu: GB300
+    count: 4
+  runtime:
+    framework: vLLM
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-minimax-m3.1-flash-dev.1
+  topology: aggregated
+  techniques:
+  - tp4
+  - expert-parallel
+  - cuda-graphs
+  - multimodal
+  - shared-model-cache
+  - kv-aware-routing
+  - prefix-caching
+  - fp8-kv-cache
+  workload:
+    type: agentic
+    traffic: 'Chat and agentic requests; 1M context, up to 256 concurrent requests'
+  deploy:
+    asset: recipes/minimax-m3.1/vllm/agg-gb300/deploy.yaml
+  expected_performance:
+    available: false
+    summary: 'Functional profile; no performance results published.'
+- id: vllm-agg-b200
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 4
+  runtime:
+    framework: vLLM
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-minimax-m3.1-flash-dev.1
+  topology: aggregated
+  techniques:
+  - tp4
+  - expert-parallel
+  - cuda-graphs
+  - multimodal
+  - shared-model-cache
+  - kv-aware-routing
+  - prefix-caching
+  - fp8-kv-cache
+  workload:
+    type: agentic
+    traffic: 'Chat and agentic requests; 1M context, up to 256 concurrent requests'
+  deploy:
+    asset: recipes/minimax-m3.1/vllm/agg-b200/deploy.yaml
+  expected_performance:
+    available: false
+    summary: 'Functional profile; no performance results published.'
+- id: sglang-agg-gb300
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 4
+  runtime:
+    framework: SGLang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-minimax-m3.1-flash-dev.1
+  topology: aggregated
+  techniques:
+  - tp4
+  - expert-parallel
+  - megamoe
+  - multimodal
+  - shared-model-cache
+  - kv-aware-routing
+  - prefix-caching
+  - fp8-kv-cache
+  workload:
+    type: agentic
+    traffic: 'Chat and agentic requests; 1M context, up to 256 concurrent requests'
+  deploy:
+    asset: recipes/minimax-m3.1/sglang/agg-gb300/deploy.yaml
+  expected_performance:
+    available: false
+    summary: 'Functional profile; no performance results published.'
+- id: sglang-agg-b200
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 4
+  runtime:
+    framework: SGLang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-minimax-m3.1-flash-dev.1
+  topology: aggregated
+  techniques:
+  - tp4
+  - expert-parallel
+  - megamoe
+  - multimodal
+  - shared-model-cache
+  - kv-aware-routing
+  - prefix-caching
+  - fp8-kv-cache
+  workload:
+    type: agentic
+    traffic: 'Chat and agentic requests; 1M context, up to 256 concurrent requests'
+  deploy:
+    asset: recipes/minimax-m3.1/sglang/agg-b200/deploy.yaml
+  expected_performance:
+    available: false
+    summary: 'Functional profile; no performance results published.'
+- id: trtllm-agg-gb300
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 4
+  runtime:
+    framework: TensorRT-LLM
+    image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.0-minimax-m3.1-flash-dev.1
+  topology: aggregated
+  techniques:
+  - tp4
+  - expert-parallel
+  - sparse-attention
+  - multimodal
+  - shared-model-cache
+  - prefix-caching
+  workload:
+    type: agentic
+    traffic: 'Chat and agentic requests; 1M context, up to 256 concurrent requests'
+  deploy:
+    asset: recipes/minimax-m3.1/trtllm/agg-gb300/deploy.yaml
+  expected_performance:
+    available: false
+    summary: 'Functional profile; no performance results published.'
+- id: trtllm-agg-b200
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 4
+  runtime:
+    framework: TensorRT-LLM
+    image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.0-minimax-m3.1-flash-dev.1
+  topology: aggregated
+  techniques:
+  - tp4
+  - expert-parallel
+  - sparse-attention
+  - multimodal
+  - shared-model-cache
+  - prefix-caching
+  workload:
+    type: agentic
+    traffic: 'Chat and agentic requests; 1M context, up to 256 concurrent requests'
+  deploy:
+    asset: recipes/minimax-m3.1/trtllm/agg-b200/deploy.yaml
+  expected_performance:
+    available: false
+    summary: 'Functional profile; no performance results published.'
+related_benchmarks: []
+maintainer: null
+gaps:
+- maintainer unknown
+- no performance benchmark; functional profiles only

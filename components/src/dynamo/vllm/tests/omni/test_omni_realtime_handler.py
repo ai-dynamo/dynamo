@@ -22,7 +22,12 @@ try:
     # logic itself is vllm-free, but the package import is not.
     from vllm_omni.outputs.mm_outputs import MultimodalPayload
 
-    from dynamo.vllm.omni.realtime_handler import RealtimeOmniHandler, Turn
+    from dynamo.vllm.omni.realtime_handler import (
+        MAX_AUDIO_CHUNK_BYTES,
+        RealtimeOmniHandler,
+        Turn,
+        decode_pcm16,
+    )
 except (ImportError, ModuleNotFoundError):
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
@@ -477,3 +482,101 @@ def test_concurrent_turns_capped():
     assert engine.peak == cap  # never more than the cap in flight at once
     done = [e for e in out if e["type"] == "response.done"]
     assert len(done) == 4 and all(e["response"]["status"] == "completed" for e in done)
+
+
+class TestDecodePcm16:
+    """decode_pcm16 never raises: a chunk it cannot use is dropped, not fatal."""
+
+    def test_valid_chunk_round_trips(self):
+        pcm16 = np.linspace(-8000, 8000, 64, dtype=np.int16)
+        waveform = decode_pcm16(base64.b64encode(pcm16.tobytes()).decode())
+        assert waveform is not None and waveform.size == 64
+
+    def test_drops_malformed_base64(self):
+        assert decode_pcm16("a") is None
+
+    def test_drops_whitespace_wrapped_base64(self):
+        # Pins validate=True: permissive b64decode strips the newlines and
+        # returns an 8-sample waveform, so dropping the flag fails this.
+        wrapped = base64.encodebytes(b"\x00\x01" * 8).decode()
+        assert decode_pcm16(wrapped) is None
+
+    @pytest.mark.parametrize("audio", [123, {"a": 1}, [1, 2], 1.5])
+    def test_drops_non_string_audio(self, audio):
+        # b64decode raises TypeError for these, which `except ValueError` does
+        # not catch -- unguarded it escapes handle_event and kills the session.
+        assert decode_pcm16(audio) is None
+
+    @pytest.mark.parametrize("audio", ["", None, 0])
+    def test_falsy_payloads_are_not_audio(self, audio):
+        assert decode_pcm16(audio) is None
+
+    def test_drops_odd_length_chunk(self):
+        assert decode_pcm16(base64.b64encode(b"\x00\x01\x02").decode()) is None
+
+    def test_drops_oversized_chunk(self):
+        oversized = base64.b64encode(b"\x00" * (MAX_AUDIO_CHUNK_BYTES + 2)).decode()
+        assert decode_pcm16(oversized) is None
+
+    def test_accepts_a_chunk_at_the_cap(self):
+        at_cap = base64.b64encode(b"\x00" * MAX_AUDIO_CHUNK_BYTES).decode()
+        waveform = decode_pcm16(at_cap)
+        assert waveform is not None and waveform.size == MAX_AUDIO_CHUNK_BYTES // 2
+
+
+class TestRejectedAudioReporting:
+    """A rejected chunk is reported to the client and leaves the session alive."""
+
+    @pytest.mark.parametrize(
+        "audio, reason",
+        [
+            (123, "non-string"),
+            ("a", "malformed base64"),
+            (base64.encodebytes(b"\x00\x01" * 8).decode(), "whitespace-wrapped"),
+            (base64.b64encode(b"\x00\x01\x02").decode(), "odd-length"),
+        ],
+    )
+    def test_rejected_chunk_emits_an_error_and_completes(self, audio, reason):
+        handler = _make_handler(_FakeEngine())
+        events = [
+            {"type": "input_audio_buffer.append", "audio": audio, "event_id": "evt_1"},
+            {"type": "input_audio_buffer.commit"},
+        ]
+
+        out = asyncio.run(_drive(handler, events, _FakeContext()))
+        types = [e["type"] for e in out]
+
+        errors = [e for e in out if e["type"] == "error"]
+        assert len(errors) == 1, f"{reason} chunk was dropped silently"
+        assert errors[0]["error"]["code"] == "invalid_audio"
+        assert errors[0]["error"]["event_id"] == "evt_1"
+        # The session survives: one bad frame must not tear down the connection.
+        assert "response.done" in types
+
+    def test_valid_chunk_emits_no_error(self):
+        pcm16 = np.linspace(-8000, 8000, 64, dtype=np.int16).tobytes()
+        handler = _make_handler(_FakeEngine())
+        events = [
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(pcm16).decode(),
+            },
+            {"type": "input_audio_buffer.commit"},
+        ]
+
+        out = asyncio.run(_drive(handler, events, _FakeContext()))
+
+        assert not [e for e in out if e["type"] == "error"]
+        assert out[-1]["type"] == "response.done"
+
+    def test_empty_payload_is_not_reported_as_an_error(self):
+        # An empty append carries no audio but is not a client mistake.
+        handler = _make_handler(_FakeEngine())
+        events = [
+            {"type": "input_audio_buffer.append", "audio": ""},
+            {"type": "input_audio_buffer.commit"},
+        ]
+
+        out = asyncio.run(_drive(handler, events, _FakeContext()))
+
+        assert not [e for e in out if e["type"] == "error"]

@@ -97,6 +97,7 @@ where
 
     tokio::spawn(async move {
         let mut state: HashMap<K, V> = HashMap::new();
+        let mut is_established = false;
 
         loop {
             tokio::select! {
@@ -139,12 +140,23 @@ where
                             }
 
                             state = rebuilt;
-                            tracing::warn!(
-                                prefix = %prefix_str,
-                                old_count,
-                                new_count = state.len(),
-                                "TypedPrefixWatcher rebuilt state from etcd watch resync"
-                            );
+                            // The first resync is the initial snapshot; a later one means the
+                            // watch reconnected.
+                            if is_established {
+                                tracing::warn!(
+                                    prefix = %prefix_str,
+                                    old_count,
+                                    new_count = state.len(),
+                                    "TypedPrefixWatcher rebuilt state from etcd watch resync"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    prefix = %prefix_str,
+                                    count = state.len(),
+                                    "TypedPrefixWatcher built state from the initial snapshot"
+                                );
+                            }
+                            is_established = true;
 
                             if watch_tx.send(state.clone()).is_err() {
                                 tracing::error!("Failed to send update; receiver dropped");

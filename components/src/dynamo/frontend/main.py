@@ -24,26 +24,25 @@ import os
 import signal
 import sys
 from argparse import Namespace
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import uvloop
 
 from dynamo.common.config_dump import dump_config
+from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.llm import (
-    AicPerfConfig,
+    AisPerfConfig,
     EngineType,
     EntrypointArgs,
     FrontendRoute,
-    KvRouterConfig,
-    RouterConfig,
-    RouterMode,
     make_engine,
     run_input,
 )
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .frontend_args import FrontendArgGroup, FrontendConfig
+from .cpu_affinity import warn_if_frontend_cpu_affinity_spans_numa_nodes
+from .frontend_args import BUILTIN_CHAT_PROCESSORS, FrontendArgGroup, FrontendConfig
 
 if TYPE_CHECKING:
     from .vllm_processor import EngineFactory
@@ -52,7 +51,9 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
+SESSION_AFFINITY_MAX_ENTRIES_ENV = "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES"
 FRONTEND_ROUTE_ENTRYPOINT_GROUP = "dynamo.frontend.routes"
+CHAT_PROCESSOR_ENTRYPOINT_GROUP = "dynamo.frontend.chat_processors"
 
 # The frontend's TCP listener can exhaust the default soft RLIMIT_NOFILE (1024 on
 # most distros) under high concurrency (see the accept() loop in
@@ -133,12 +134,10 @@ def setup_sglang_engine_factory(
     )
 
 
-def _frontend_route_extension_entry_points() -> list[importlib.metadata.EntryPoint]:
-    """Return the entry points registered under the frontend-route group."""
+def _entry_points(group: str) -> list[importlib.metadata.EntryPoint]:
+    """Return the entry points registered under ``group``."""
     # `EntryPoints.select` is the supported API on the Python >= 3.10 floor.
-    return list(
-        importlib.metadata.entry_points().select(group=FRONTEND_ROUTE_ENTRYPOINT_GROUP)
-    )
+    return list(importlib.metadata.entry_points().select(group=group))
 
 
 def _normalize_frontend_routes(
@@ -169,48 +168,43 @@ def _normalize_frontend_routes(
     return routes
 
 
-def _resolve_frontend_route_provider(extension_name: str, entry_points: list) -> Any:
-    """Resolve a ``--frontend-route-extension`` value to its provider callable.
+def _resolve_provider(name: str, entry_points: list, *, group: str, kind: str) -> Any:
+    """Resolve a ``--frontend-route-extension`` or ``--dyn-chat-processor`` value.
 
-    A registered entry-point name (in the ``dynamo.frontend.routes`` group)
-    takes precedence. If the value is not a registered name and is unambiguously
-    a ``module:function`` path (contains ``:``), it is imported directly. Gating
-    the fallback on ``:`` keeps a mistyped name from silently turning into an
-    import attempt, and still surfaces the ``Available: ...`` list otherwise.
+    A registered entry-point name (in ``group``) takes precedence. If the value
+    is not a registered name and is unambiguously a ``module:function`` path
+    (contains ``:``), it is imported directly. Gating the fallback on ``:`` keeps
+    a mistyped name from silently turning into an import attempt, and still
+    surfaces the ``Available: ...`` list otherwise. ``kind`` names the flag's
+    subject in error messages.
     """
-    matches = [ep for ep in entry_points if ep.name == extension_name]
+    matches = [ep for ep in entry_points if ep.name == name]
     if len(matches) > 1:
-        raise ValueError(
-            f"Ambiguous frontend route extension '{extension_name}' in entry point "
-            f"group '{FRONTEND_ROUTE_ENTRYPOINT_GROUP}'"
-        )
+        raise ValueError(f"Ambiguous {kind} '{name}' in entry point group '{group}'")
     if matches:
         return matches[0].load()
 
-    if ":" in extension_name:
-        module_path, _, attr = extension_name.partition(":")
+    if ":" in name:
+        module_path, _, attr = name.partition(":")
         try:
             obj: Any = importlib.import_module(module_path)
         except ImportError as exc:
             raise ValueError(
-                f"Could not import module '{module_path}' for frontend route "
-                f"extension '{extension_name}'"
+                f"Could not import module '{module_path}' for {kind} '{name}': {exc}"
             ) from exc
         try:
             for part in attr.split("."):
                 obj = getattr(obj, part)
         except AttributeError as exc:
             raise ValueError(
-                f"Module '{module_path}' has no attribute '{attr}' for frontend "
-                f"route extension '{extension_name}'"
+                f"Module '{module_path}' has no attribute '{attr}' for {kind} '{name}'"
             ) from exc
         return obj
 
     available = ", ".join(sorted(ep.name for ep in entry_points)) or "<none>"
     raise ValueError(
-        f"Unknown frontend route extension '{extension_name}' in entry point "
-        f"group '{FRONTEND_ROUTE_ENTRYPOINT_GROUP}'. Available: {available}. "
-        f"Pass a registered name or a 'module:function' path."
+        f"Unknown {kind} '{name}' in entry point group '{group}'. "
+        f"Available: {available}. Pass a registered name or a 'module:function' path."
     )
 
 
@@ -229,10 +223,15 @@ def load_frontend_route_extensions(extension_names: list[str]) -> list[FrontendR
     # routes appended only once, preserving first-seen order.
     unique_names = list(dict.fromkeys(extension_names))
 
-    entry_points = _frontend_route_extension_entry_points()
+    entry_points = _entry_points(FRONTEND_ROUTE_ENTRYPOINT_GROUP)
     routes: list[FrontendRoute] = []
     for extension_name in unique_names:
-        provider = _resolve_frontend_route_provider(extension_name, entry_points)
+        provider = _resolve_provider(
+            extension_name,
+            entry_points,
+            group=FRONTEND_ROUTE_ENTRYPOINT_GROUP,
+            kind="frontend route extension",
+        )
         if not callable(provider):
             raise TypeError(
                 f"Frontend route extension '{extension_name}' must resolve to a callable"
@@ -242,11 +241,53 @@ def load_frontend_route_extensions(extension_names: list[str]) -> list[FrontendR
     return routes
 
 
-def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespace]]:
+def setup_custom_chat_engine_factory(
+    config: FrontendConfig, provider: Callable[..., Any]
+) -> Callable[..., Any]:
+    """Build the chat engine factory of a custom ``--dyn-chat-processor``.
+
+    ``provider`` is the callable ``parse_args`` resolved. It is called once,
+    inside the event loop, as ``provider(config, options)``, where ``options``
+    is the ``--dyn-chat-processor-config`` object. It returns the async
+    ``chat_engine_factory(instance_id, mdc, routed_engine)`` the frontend calls
+    for each worker set.
+    """
+    factory = provider(config, config.chat_processor_config or {})
+    if not callable(factory):
+        raise TypeError(
+            f"Chat processor '{config.chat_processor}' must return a callable "
+            "chat engine factory"
+        )
+    return factory
+
+
+def _fold_vllm_default_chat_template_kwargs(
+    config: FrontendConfig, vllm_flags: Namespace
+) -> None:
+    # vLLM's parser also takes the underscore and dotted spellings. Its value always comes
+    # from the command line, so it wins over DYN_DEFAULT_CHAT_TEMPLATE_KWARGS.
+    vllm_defaults = getattr(vllm_flags, "default_chat_template_kwargs", None) or {}
+    if vllm_defaults:
+        config.default_chat_template_kwargs = {
+            **(config.default_chat_template_kwargs or {}),
+            **vllm_defaults,
+        }
+        config.validate_default_chat_template_kwargs()
+
+
+def parse_args() -> (
+    tuple[
+        FrontendConfig,
+        Optional[Namespace],
+        Optional[Namespace],
+        Optional[Callable[..., Any]],
+    ]
+):
     """Parse command-line arguments for the Dynamo frontend.
 
     Returns:
-        Tuple of (FrontendConfig, vllm_flags, sglang_flags).
+        Tuple of (FrontendConfig, vllm_flags, sglang_flags, chat_processor_provider).
+        The last is the resolved provider of a custom ``--dyn-chat-processor``.
     """
 
     parser = argparse.ArgumentParser(
@@ -260,6 +301,29 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
 
     config = FrontendConfig.from_cli_args(args)
     config.validate()
+
+    # Resolve a custom processor before any other argument is rejected, so a
+    # mistyped name is reported as such and not as that processor's unknown flags.
+    chat_processor_provider = None
+    if config.chat_processor not in BUILTIN_CHAT_PROCESSORS:
+        try:
+            chat_processor_provider = _resolve_provider(
+                config.chat_processor,
+                _entry_points(CHAT_PROCESSOR_ENTRYPOINT_GROUP),
+                group=CHAT_PROCESSOR_ENTRYPOINT_GROUP,
+                kind="chat processor",
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+
+    if config.chat_processor != "dynamo" and (
+        config.interactive or config.kserve_grpc_server
+    ):
+        mode_flag = "--interactive" if config.interactive else "--kserve-grpc-server"
+        parser.error(
+            f"--dyn-chat-processor {config.chat_processor} is only supported by the "
+            f"HTTP frontend, so it cannot be combined with {mode_flag}"
+        )
 
     vllm_flags = None
     sglang_flags = None
@@ -293,7 +357,7 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
 
         try:
             from vllm.engine.arg_utils import AsyncEngineArgs
-            from vllm.entrypoints.openai.cli_args import FrontendArgs
+            from vllm.entrypoints.common.cli_args import FrontendArgs
         except ModuleNotFoundError:
             logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
             sys.exit(1)
@@ -303,6 +367,7 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
         vllm_parser = AsyncEngineArgs.add_cli_args(vllm_parser)
         # the result is returned as Namespace object rather than AsyncEngineArgs object to avoid import error for non-vllm users.
         vllm_flags = vllm_parser.parse_args(unknown)
+        _fold_vllm_default_chat_template_kwargs(config, vllm_flags)
     elif config.chat_processor == "sglang":
         sglang_parser = argparse.ArgumentParser(add_help=False)
         sglang_parser.add_argument("--tool-call-parser", default=None)
@@ -316,7 +381,42 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
         if unknown:
             logger.error(f"Unknown arguments specified: {unknown}")
             sys.exit(1)
-    return config, vllm_flags, sglang_flags
+    return config, vllm_flags, sglang_flags, chat_processor_provider
+
+
+def _export_transport_tls_env(config: FrontendConfig) -> None:
+    """Propagate transport TLS/mTLS CLI flags to the env vars the Rust runtime
+    reads. Must run before ``DistributedRuntime`` is constructed: it connects to
+    NATS eagerly, so NATS settings applied afterwards are ignored. The TCP
+    request/response planes dial lazily, so they only need the vars set before
+    the first connection, but exporting everything up front keeps it consistent.
+    """
+    if config.tcp_tls_cert_path:
+        os.environ["DYN_TCP_TLS_CERT_PATH"] = config.tcp_tls_cert_path
+    if config.tcp_tls_key_path:
+        os.environ["DYN_TCP_TLS_KEY_PATH"] = config.tcp_tls_key_path
+    if config.tcp_tls_ca_cert_path:
+        os.environ["DYN_TCP_TLS_CA_CERT_PATH"] = config.tcp_tls_ca_cert_path
+    if config.tcp_tls_client_cert_path:
+        os.environ["DYN_TCP_TLS_CLIENT_CERT_PATH"] = config.tcp_tls_client_cert_path
+    if config.tcp_tls_client_key_path:
+        os.environ["DYN_TCP_TLS_CLIENT_KEY_PATH"] = config.tcp_tls_client_key_path
+    if config.tcp_tls_client_ca_cert_path:
+        os.environ[
+            "DYN_TCP_TLS_CLIENT_CA_CERT_PATH"
+        ] = config.tcp_tls_client_ca_cert_path
+    if config.nats_tls_ca_cert_path:
+        os.environ["NATS_TLS_CA_CERT_PATH"] = config.nats_tls_ca_cert_path
+    if config.nats_tls_insecure:
+        os.environ["NATS_TLS_INSECURE"] = "1"
+    else:
+        # Clear any inherited NATS_TLS_INSECURE so --no-nats-tls-insecure can
+        # override it before the Rust runtime reads the env var.
+        os.environ.pop("NATS_TLS_INSECURE", None)
+    if config.nats_tls_client_cert_path:
+        os.environ["NATS_TLS_CLIENT_CERT_PATH"] = config.nats_tls_client_cert_path
+    if config.nats_tls_client_key_path:
+        os.environ["NATS_TLS_CLIENT_KEY_PATH"] = config.nats_tls_client_key_path
 
 
 async def async_main():
@@ -332,7 +432,7 @@ async def async_main():
     # bind that port before the worker, causing port conflicts and/or scraping the
     # wrong metrics endpoint.
     os.environ.pop("DYN_SYSTEM_PORT", None)
-    config, vllm_flags, sglang_flags = parse_args()
+    config, vllm_flags, sglang_flags, chat_processor_provider = parse_args()
     dump_config(config.dump_config_to, config)
     max_seq_info = (
         f", max_seq_len: {config.migration_max_seq_len}"
@@ -354,11 +454,17 @@ async def async_main():
         )
 
     loop = asyncio.get_running_loop()
+    # Export transport TLS/mTLS settings BEFORE constructing DistributedRuntime:
+    # it connects to NATS eagerly, so NATS (m)TLS env vars must already be set or
+    # the CLI flags are silently ignored (unlike the lazily-dialed TCP planes).
+    _export_transport_tls_env(config)
+    warn_if_frontend_cpu_affinity_spans_numa_nodes(logger)
     runtime = DistributedRuntime(
         loop,
         config.discovery_backend,
         config.request_plane,
         event_plane=config.event_plane,
+        response_plane=config.response_plane,
     )
 
     def signal_handler():
@@ -367,32 +473,14 @@ async def async_main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
-    if config.router_mode == "kv":
-        router_mode = RouterMode.KV
-        kv_router_config = KvRouterConfig(**config.kv_router_kwargs())
-    elif config.router_mode == "random":
-        router_mode = RouterMode.Random
-        kv_router_config = None
-    elif config.router_mode == "direct":
-        router_mode = RouterMode.Direct
-        kv_router_config = None
-    elif config.router_mode == "power-of-two":
-        router_mode = RouterMode.PowerOfTwoChoices
-        kv_router_config = None
-    elif config.router_mode == "least-loaded":
-        router_mode = RouterMode.LeastLoaded
-        kv_router_config = None
-    elif config.router_mode == "device-aware-weighted":
-        router_mode = RouterMode.DeviceAwareWeighted
-        kv_router_config = None
-    else:
-        router_mode = RouterMode.RoundRobin
-        kv_router_config = None
-
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
-    router_config = RouterConfig(
-        router_mode, kv_router_config, **config.router_kwargs()
+    os.environ[SESSION_AFFINITY_MAX_ENTRIES_ENV] = str(
+        config.session_affinity_max_entries
     )
+    # Shared with the backends so a worker's advertised config is built from the
+    # same flags and semantics. --router-mode always has a default here, so this
+    # never returns None.
+    router_config = build_router_config(config)
 
     metrics_prefix = (
         config.metrics_prefix
@@ -402,17 +490,22 @@ async def async_main():
     kwargs: dict[str, Any] = {
         "http_host": config.http_host,
         "http_port": config.http_port,
+        "batch_gateway_url": config.batch_gateway_url,
         "kv_cache_block_size": config.kv_cache_block_size,
         "router_config": router_config,
         "migration_limit": config.migration_limit,
         "metrics_prefix": metrics_prefix,
         "enable_anthropic_api": config.enable_anthropic_api,
+        "enable_systemone_api": config.enable_systemone_api,
         "strip_anthropic_preamble": config.strip_anthropic_preamble,
+        "reject_media": config.reject_media,
+        "reject_media_status_code": config.reject_media_status_code,
         "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
         "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,
         "reasoning_field_name": config.reasoning_field_name,
         "tokenizer_backend": config.tokenizer_backend,
         "tokenizer_fallback": config.tokenizer_fallback,
+        "default_chat_template_kwargs": config.default_chat_template_kwargs,
     }
     if config.migration_max_seq_len is not None:
         kwargs["migration_max_seq_len"] = config.migration_max_seq_len
@@ -425,12 +518,8 @@ async def async_main():
         kwargs["tls_cert_path"] = config.tls_cert_path
     if config.tls_key_path:
         kwargs["tls_key_path"] = config.tls_key_path
-    if config.tcp_tls_cert_path:
-        os.environ["DYN_TCP_TLS_CERT_PATH"] = config.tcp_tls_cert_path
-    if config.tcp_tls_key_path:
-        os.environ["DYN_TCP_TLS_KEY_PATH"] = config.tcp_tls_key_path
-    if config.tcp_tls_ca_cert_path:
-        os.environ["DYN_TCP_TLS_CA_CERT_PATH"] = config.tcp_tls_ca_cert_path
+    if config.tls_client_ca_cert_path:
+        kwargs["tls_client_ca_cert_path"] = config.tls_client_ca_cert_path
     if config.namespace:
         kwargs["namespace"] = config.namespace
     if config.namespace_prefix:
@@ -451,20 +540,16 @@ async def async_main():
             config, sglang_flags
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
+    elif chat_processor_provider is not None:
+        kwargs["chat_engine_factory"] = setup_custom_chat_engine_factory(
+            config, chat_processor_provider
+        )
 
-    if config.router_prefill_load_model == "aic":
-        kwargs["aic_perf_config"] = AicPerfConfig(**config.aic_perf_kwargs())
+    if config.router_prefill_load_model == "ais":
+        kwargs["ais_perf_config"] = AisPerfConfig(**config.ais_perf_kwargs())
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
-    # Validate mode compatibility before loading extensions, so an incompatible
-    # mode fails fast without importing/executing third-party provider code.
-    if config.frontend_route_extensions and (
-        config.interactive or config.kserve_grpc_server
-    ):
-        raise ValueError(
-            "frontend route extensions are only supported by HTTP frontend mode"
-        )
     frontend_route_extensions = load_frontend_route_extensions(
         config.frontend_route_extensions
     )

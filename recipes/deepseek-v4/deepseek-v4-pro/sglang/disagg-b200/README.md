@@ -70,5 +70,5 @@ Some clusters expose `mlx5_bond_0` with LID=0. Setting `UCX_NET_DEVICES=mlx5_0:1
 
 ## Related
 
-- [Disagg Communication Guide](../../../../../docs/fern/pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/disagg-communication.md) — Full RDMA transport reference
+- [RDMA Setup](../../../../../docs/fern/pages/kubernetes/installation/rdma-setup/overview.md) — Kubernetes RDMA requirements and platform guides
 - [GB200 Disagg Recipe](../disagg-gb200/) — Multi-node disagg on GB200 with ComputeDomain

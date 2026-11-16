@@ -19,13 +19,19 @@ package modelendpoint
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"github.com/go-logr/zapr"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 )
@@ -140,10 +146,8 @@ func TestLoadLoRA(t *testing.T) {
 			}
 
 			model := &v1alpha1.DynamoModel{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-model",
-					Namespace: "default",
-				},
+				Name:      "test-model",
+				Namespace: "default",
 				Spec: v1alpha1.DynamoModelSpec{
 					ModelName: "test-model",
 					ModelType: tt.modelType,
@@ -215,7 +219,7 @@ func TestLoadLoRAAllowsLegacyUnavailableVLLMPrefill(t *testing.T) {
 	defer incapableServer.Close()
 
 	model := &v1alpha1.DynamoModel{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-lora", Namespace: "default"},
+		Name: "test-lora", Namespace: "default",
 		Spec: v1alpha1.DynamoModelSpec{
 			ModelName: "test-lora",
 			ModelType: "lora",
@@ -357,7 +361,7 @@ func TestLoadLoRAIncludesCapablePrefill(t *testing.T) {
 	defer server.Close()
 
 	model := &v1alpha1.DynamoModel{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-lora", Namespace: "default"},
+		Name: "test-lora", Namespace: "default",
 		Spec: v1alpha1.DynamoModelSpec{
 			ModelName: "test-lora",
 			ModelType: "lora",
@@ -393,7 +397,7 @@ func TestLoadLoRALegacyFallbackRequiresKubernetesReadiness(t *testing.T) {
 	defer server.Close()
 
 	model := &v1alpha1.DynamoModel{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-lora", Namespace: "default"},
+		Name: "test-lora", Namespace: "default",
 		Spec: v1alpha1.DynamoModelSpec{
 			ModelName: "test-lora",
 			ModelType: "lora",
@@ -547,7 +551,7 @@ func TestUnloadLoRA(t *testing.T) {
 				{Address: failingServer.URL, PodName: "pod-2"},
 			},
 			modelName:   "test-model",
-			expectError: true, // workerpool returns error on any failure
+			expectError: true,
 		},
 		{
 			name: "legacy unavailable worker uses cleanup fallback",
@@ -580,5 +584,58 @@ func TestUnloadLoRA(t *testing.T) {
 	}
 	if got := notApplicableUnloads.Load(); got != 1 {
 		t.Errorf("expected one compatibility-probed unload request to vLLM prefill, got %d", got)
+	}
+}
+
+func TestUnloadLoRARetainsQueuedEndpointAfterCancellation(t *testing.T) {
+	started := make(chan struct{})
+	var startedOnce sync.Once
+	var startedCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		startedCount.Add(1)
+		startedOnce.Do(func() { close(started) })
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	candidates := make([]Candidate, MaxConcurrentOperations+1)
+	for index := range candidates {
+		candidates[index] = Candidate{
+			Address: fmt.Sprintf("%s/endpoint-%d", server.URL, index),
+			PodName: fmt.Sprintf("pod-%d", index),
+		}
+	}
+
+	core, observed := observer.New(zapcore.InfoLevel)
+	ctx, cancel := context.WithCancel(log.IntoContext(context.Background(), zapr.NewLogger(zap.New(core))))
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- NewClient().UnloadLoRA(ctx, candidates, "test-model")
+	}()
+
+	<-started
+	cancel()
+	if err := <-errCh; err == nil {
+		t.Fatal("expected cancellation to fail the unload batch")
+	}
+	if got := startedCount.Load(); got >= int32(len(candidates)) {
+		t.Fatalf("expected cancellation while candidates remained queued, but all %d requests started", got)
+	}
+
+	entries := observed.FilterMessage("Completed parallel LoRA unload").All()
+	if len(entries) != 1 {
+		t.Fatalf("expected one unload summary log, got %d", len(entries))
+	}
+	failedEndpoints, ok := entries[0].ContextMap()["failedEndpoints"].([]any)
+	if !ok {
+		t.Fatalf("expected failedEndpoints in unload summary, got %#v", entries[0].ContextMap())
+	}
+	if len(failedEndpoints) != len(candidates) {
+		t.Fatalf("expected all %d canceled endpoints in summary, got %v", len(candidates), failedEndpoints)
+	}
+	for index, endpoint := range failedEndpoints {
+		if endpoint != candidates[index].Address {
+			t.Fatalf("failed endpoint %d: expected %q, got %q", index, candidates[index].Address, endpoint)
+		}
 	}
 }

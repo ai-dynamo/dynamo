@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Dynamo Rust EPP Makefile
-# Builds the pure-Rust ext_proc EPP image (no Go, no CGO)
+# Dynamo EPP Makefile
+# Builds the native Rust ext_proc EPP image
 
 # Image configuration
 DOCKER_SERVER ?= dynamo
-IMAGE_NAME := dynamo-rust-epp
+IMAGE_NAME := dynamo-epp
 GIT_COMMIT_SHA ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
 GIT_TAG ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo "dev")
 IMAGE_REPO ?= $(DOCKER_SERVER)/$(IMAGE_NAME)
@@ -34,8 +34,11 @@ SCCACHE_REGION ?=
 
 DOCKER_BUILDX_CMD ?= docker buildx
 IMAGE_BUILD_CMD ?= $(DOCKER_BUILDX_CMD) build
-RUST_IMAGE ?= $(DOCKER_PROXY)rust:1.96.1
-BASE_IMAGE ?= $(DOCKER_PROXY)ubuntu:24.04
+# Docker Hub official images are mirrored under the library/ namespace (e.g.
+# ${DOCKER_PROXY}library/rust), so keep library/ in the defaults or the ECR
+# Docker Hub mirror fails to resolve the base images.
+RUST_IMAGE ?= $(DOCKER_PROXY)library/rust:1.96.1
+BASE_IMAGE ?= $(DOCKER_PROXY)library/ubuntu:24.04
 
 # Container tool
 CONTAINER_TOOL ?= docker
@@ -145,6 +148,12 @@ image-local-push: image-local-build
 .PHONY: image-local-load
 image-local-load: LOAD=--load ## Build and load using local buildx builder
 image-local-load: image-local-build
+
+.PHONY: all
+all: image-load ## Build Docker image and load locally
+
+.PHONY: all-push
+all-push: image-push ## Build Docker image and push to registry
 
 ##@ Clean
 

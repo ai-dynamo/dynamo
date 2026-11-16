@@ -61,7 +61,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         gpu_marker="xpu_1",
         topologies={
             "agg": TopologyConfig(
-                marks=[pytest.mark.post_merge, pytest.mark.xpu_1],
+                marks=[
+                    pytest.mark.skip(
+                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false; see #15417"
+                    ),
+                    pytest.mark.post_merge,
+                    pytest.mark.xpu_1,
+                ],
                 # TODO: re-enable XPU-parallel scheduling with
                 # profiled_vram_gib=9.6 once this has a bounded --kv-bytes profile.
                 timeout_s=300,
@@ -115,7 +121,14 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # assertions live in tests/mm_router/test_router_rust_mm_router_e2e.py
             # (post_merge).
             "agg_router": TopologyConfig(
-                marks=[pytest.mark.pre_merge, pytest.mark.xpu_2],
+                health_check_workers=True,
+                marks=[
+                    pytest.mark.skip(
+                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false; see #15417"
+                    ),
+                    pytest.mark.pre_merge,
+                    pytest.mark.xpu_2,
+                ],
                 gpu_marker="xpu_2",
                 timeout_s=400,
                 profiled_vram_gib=18.7,
@@ -133,7 +146,14 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # SINGLE_GPU=true packs both workers onto GPU 0 to match the
             # single-GPU CI environment.
             "agg_router_chat_processor": TopologyConfig(
-                marks=[pytest.mark.post_merge, pytest.mark.xpu_2],
+                health_check_workers=True,
+                marks=[
+                    pytest.mark.skip(
+                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false; see #15417"
+                    ),
+                    pytest.mark.post_merge,
+                    pytest.mark.xpu_2,
+                ],
                 gpu_marker="xpu_2",
                 timeout_s=400,
                 profiled_vram_gib=18.7,
@@ -151,7 +171,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # CI; the content-hash correctness assertion lives in
             # tests/mm_router/test_router_rust_mm_frontend_decode_e2e.py.
             "agg_router_frontend_decode": TopologyConfig(
-                marks=[pytest.mark.post_merge, pytest.mark.xpu_2],
+                marks=[
+                    pytest.mark.skip(
+                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false; see #15417"
+                    ),
+                    pytest.mark.post_merge,
+                    pytest.mark.xpu_2,
+                ],
                 gpu_marker="xpu_2",
                 timeout_s=400,
                 profiled_vram_gib=18.7,
@@ -177,7 +203,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen2.5-vl-3b",
         topologies={
             "agg_router": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                health_check_workers=True,
+                marks=[
+                    pytest.mark.skip(
+                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false; see #15417"
+                    ),
+                    pytest.mark.post_merge,
+                ],
                 timeout_s=500,
                 gpu_marker="xpu_2",
                 profiled_vram_gib=19.0,
@@ -192,7 +224,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen2-vl-2b",
         topologies={
             "agg_router": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                health_check_workers=True,
+                marks=[
+                    pytest.mark.skip(
+                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false; see #15417"
+                    ),
+                    pytest.mark.post_merge,
+                ],
                 timeout_s=500,
                 gpu_marker="xpu_2",
                 profiled_vram_gib=16.0,

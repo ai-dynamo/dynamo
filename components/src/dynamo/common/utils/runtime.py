@@ -47,6 +47,7 @@ def create_runtime(
     request_plane: str,
     event_plane: Optional[str] = None,
     use_kv_events: Optional[bool] = None,
+    response_plane: str = "tcp",
 ) -> Tuple[DistributedRuntime, asyncio.AbstractEventLoop]:
     """Create a DistributedRuntime.
 
@@ -54,11 +55,12 @@ def create_runtime(
         discovery_backend: Discovery backend type (kubernetes, etcd, file, mem).
         request_plane: Request distribution method (nats, tcp).
         event_plane: Event publishing method (nats, zmq). When None, the Rust
-            runtime auto-detects from the discovery backend (ZMQ for file/mem,
-            NATS for etcd/kubernetes).
+            runtime reads DYN_EVENT_PLANE and defaults to ZMQ.
         use_kv_events: Deprecated. NATS enablement is now determined automatically
             from the event-plane configuration. This parameter is accepted for
             backwards compatibility but will be removed in a future release.
+        response_plane: Response transport (tcp, quic, or velo). Frontend and workers
+            must use the same value.
 
     Returns:
         Tuple of (runtime, event_loop).
@@ -72,6 +74,9 @@ def create_runtime(
             stacklevel=2,
         )
 
+    if response_plane not in {"tcp", "quic", "velo"}:
+        raise ValueError("response_plane must be 'tcp', 'quic', or 'velo'")
+
     loop = asyncio.get_running_loop()
 
     runtime = DistributedRuntime(
@@ -79,6 +84,7 @@ def create_runtime(
         discovery_backend,
         request_plane,
         event_plane=event_plane,
+        response_plane=response_plane,
     )
 
     return runtime, loop

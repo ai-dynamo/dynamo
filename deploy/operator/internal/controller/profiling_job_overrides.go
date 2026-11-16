@@ -20,6 +20,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"maps"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -99,10 +100,8 @@ func ensureDGDOverrideTool(
 	spec.Volumes = mergeNamedSlice(
 		spec.Volumes,
 		[]corev1.Volume{{
-			Name: VolumeNameDGDOverrideTool,
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
-			},
+			Name:     VolumeNameDGDOverrideTool,
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		}},
 		func(volume corev1.Volume) string { return volume.Name },
 	)
@@ -120,9 +119,9 @@ func ensureDGDOverrideTool(
 		Command:         []string{"/dgd-apply-overrides"},
 		Args:            []string{"--install-to", DGDOverrideToolPath},
 		SecurityContext: &corev1.SecurityContext{
-			AllowPrivilegeEscalation: ptr.To(false),
-			ReadOnlyRootFilesystem:   ptr.To(true),
-			RunAsNonRoot:             ptr.To(true),
+			AllowPrivilegeEscalation: new(false),
+			ReadOnlyRootFilesystem:   new(true),
+			RunAsNonRoot:             new(true),
 			RunAsUser:                ptr.To[int64](1000),
 			RunAsGroup:               ptr.To[int64](1000),
 			Capabilities: &corev1.Capabilities{
@@ -177,36 +176,32 @@ func outputCopierKubeAPIAccessVolume() corev1.Volume {
 	expirationSeconds := int64(ServiceAccountTokenExpirationSeconds)
 	return corev1.Volume{
 		Name: VolumeNameOutputCopierKubeAPIAccess,
-		VolumeSource: corev1.VolumeSource{
-			Projected: &corev1.ProjectedVolumeSource{
-				Sources: []corev1.VolumeProjection{
-					{
-						ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
-							Path:              "token",
-							ExpirationSeconds: &expirationSeconds,
-						},
+		Projected: &corev1.ProjectedVolumeSource{
+			Sources: []corev1.VolumeProjection{
+				{
+					ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+						Path:              "token",
+						ExpirationSeconds: &expirationSeconds,
 					},
-					{
-						ConfigMap: &corev1.ConfigMapProjection{
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: ConfigMapNameKubeRootCA,
+				},
+				{
+					ConfigMap: &corev1.ConfigMapProjection{
+						Name: ConfigMapNameKubeRootCA,
+						Items: []corev1.KeyToPath{{
+							Key:  "ca.crt",
+							Path: "ca.crt",
+						}},
+					},
+				},
+				{
+					DownwardAPI: &corev1.DownwardAPIProjection{
+						Items: []corev1.DownwardAPIVolumeFile{{
+							Path: "namespace",
+							FieldRef: &corev1.ObjectFieldSelector{
+								APIVersion: "v1",
+								FieldPath:  "metadata.namespace",
 							},
-							Items: []corev1.KeyToPath{{
-								Key:  "ca.crt",
-								Path: "ca.crt",
-							}},
-						},
-					},
-					{
-						DownwardAPI: &corev1.DownwardAPIProjection{
-							Items: []corev1.DownwardAPIVolumeFile{{
-								Path: "namespace",
-								FieldRef: &corev1.ObjectFieldSelector{
-									APIVersion: "v1",
-									FieldPath:  "metadata.namespace",
-								},
-							}},
-						},
+						}},
 					},
 				},
 			},
@@ -295,9 +290,7 @@ func mergeAnnotations(tmpl *corev1.PodTemplateSpec, userAnnotations map[string]s
 	if tmpl.Annotations == nil {
 		tmpl.Annotations = make(map[string]string, len(userAnnotations))
 	}
-	for k, v := range userAnnotations {
-		tmpl.Annotations[k] = v
-	}
+	maps.Copy(tmpl.Annotations, userAnnotations)
 }
 
 // mergeImagePullSecrets combines base and override secrets, deduplicating by name.
@@ -369,12 +362,49 @@ func applyPodSpecOverrides(spec *corev1.PodSpec, overrides *corev1.PodSpec) {
 	spec.Volumes = mergeNamedSlice(spec.Volumes, overrides.Volumes, func(v corev1.Volume) string { return v.Name })
 	spec.InitContainers = mergeNamedSlice(spec.InitContainers, overrides.InitContainers, func(c corev1.Container) string { return c.Name })
 
-	if len(overrides.Containers) > 0 && len(spec.Containers) > 0 {
-		applyContainerOverrides(&spec.Containers[0], &overrides.Containers[0])
+	if profilerOverride := profilerContainerOverride(overrides.Containers); profilerOverride != nil {
+		if idx := findContainerIndex(spec.Containers, ContainerNameProfiler); idx >= 0 {
+			applyContainerOverrides(&spec.Containers[idx], profilerOverride)
+		}
+	}
+	if outputCopierOverride := findContainerOverride(overrides.Containers, ContainerNameOutputCopier); outputCopierOverride != nil {
+		if idx := findContainerIndex(spec.Containers, ContainerNameOutputCopier); idx >= 0 {
+			applyOutputCopierOverrides(&spec.Containers[idx], outputCopierOverride)
+		}
 	}
 }
 
-// applyContainerOverrides merges fields from the user's first container override
+// findContainerOverride returns the first override container with the given name.
+func findContainerOverride(containers []corev1.Container, name string) *corev1.Container {
+	for i := range containers {
+		if containers[i].Name == name {
+			return &containers[i]
+		}
+	}
+	return nil
+}
+
+// findContainerIndex returns the index of the container with the given name, or -1.
+func findContainerIndex(containers []corev1.Container, name string) int {
+	for i := range containers {
+		if containers[i].Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// profilerContainerOverride selects the override entry for the profiler container.
+// Prefers name:profiler, then a leftover unnamed entry. Unknown names are not
+// aliases for the profiler.
+func profilerContainerOverride(overrides []corev1.Container) *corev1.Container {
+	if override := findContainerOverride(overrides, ContainerNameProfiler); override != nil {
+		return override
+	}
+	return findContainerOverride(overrides, "")
+}
+
+// applyContainerOverrides merges fields from the user's container override
 // into the controller-generated profiler container.
 func applyContainerOverrides(container *corev1.Container, overrides *corev1.Container) {
 	if overrides.Image != "" {
@@ -392,6 +422,19 @@ func applyContainerOverrides(container *corev1.Container, overrides *corev1.Cont
 
 	if len(overrides.EnvFrom) > 0 {
 		container.EnvFrom = append(container.EnvFrom, overrides.EnvFrom...)
+	}
+}
+
+// applyOutputCopierOverrides merges a narrow allowlist into the output-copier
+// sidecar: only image and resources. Other fields (env, envFrom, volumeMounts,
+// securityContext, command/args) are ignored so controller-owned mounts and
+// script wiring stay intact.
+func applyOutputCopierOverrides(container *corev1.Container, overrides *corev1.Container) {
+	if overrides.Image != "" {
+		container.Image = overrides.Image
+	}
+	if len(overrides.Resources.Requests) > 0 || len(overrides.Resources.Limits) > 0 || len(overrides.Resources.Claims) > 0 {
+		container.Resources = overrides.Resources
 	}
 }
 

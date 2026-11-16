@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any
+
+from dynamo.common.utils.env import env_bool as common_env_bool
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +64,14 @@ def require_lora_load_request(request: Mapping[str, Any] | None) -> tuple[str, s
     lora_name = request.get("lora_name")
     if not isinstance(lora_name, str) or not lora_name:
         raise RLAdminValidationError("'lora_name' is required and must be a string")
+    if re.fullmatch(r"dyn-lora-[0-9a-f]{32}", lora_name):
+        raise RLAdminValidationError(
+            "'dyn-lora-' names are reserved for request-time adapters"
+        )
+    if common_env_bool("DYN_LORA_RUNTIME_LOAD_ENABLED") and "|" in lora_name:
+        raise RLAdminValidationError(
+            "'|' in lora_name is reserved for request-time adapter identifiers"
+        )
 
     source = request.get("source")
     if not source or not isinstance(source, Mapping):
@@ -81,7 +92,10 @@ def require_lora_unload_request(request: Mapping[str, Any] | None) -> str:
     lora_name = request.get("lora_name")
     if not isinstance(lora_name, str) or not lora_name:
         raise RLAdminValidationError("'lora_name' is required and must be a string")
-
+    if re.fullmatch(r"dyn-lora-[0-9a-f]{32}", lora_name):
+        raise RLAdminValidationError(
+            "'dyn-lora-' names are reserved for request-time adapters"
+        )
     return lora_name
 
 
@@ -93,9 +107,17 @@ class RLRouteRegistry:
         runtime: Any,
         *,
         logger_: logging.Logger | None = None,
+        world_size: int | None = None,
     ) -> None:
+        if world_size is not None and (
+            isinstance(world_size, bool)
+            or not isinstance(world_size, int)
+            or world_size < 1
+        ):
+            raise ValueError("world_size must be a positive integer")
         self._runtime = runtime
         self._logger = logger_ or logger
+        self._world_size = world_size
         self.routes: dict[str, RLRouteHandler] = {}
 
     def add_route(self, name: str, handler: RLRouteHandler) -> None:
@@ -116,6 +138,9 @@ class RLRouteRegistry:
             system_url = system_url_fn()
             if system_url:
                 response["system_url"] = system_url
+
+        if self._world_size is not None:
+            response["world_size"] = self._world_size
 
         return response
 

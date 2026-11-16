@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use dynamo_kv_router::protocols::WorkerId;
+use dynamo_router_protocol::worker::WorkerId;
 use dynamo_runtime::protocols::EndpointId;
 use tokio::{sync::oneshot, time::Instant};
 use tokio_util::sync::CancellationToken;
@@ -195,6 +195,15 @@ fn reconcile_worker(
         .collect::<Vec<_>>();
     if !missing_ranks.is_empty() {
         return missing_source(worker_id, missing_ranks, previous, now);
+    }
+
+    if statuses
+        .iter()
+        .any(|(_, status)| matches!(status, KvSourceStatus::Suppressed))
+    {
+        // Suppression hands this worker to the V2 controller. Clear any legacy
+        // warning state without claiming that the replacement source recovered.
+        return (None, None);
     }
 
     let previous_warning = match previous {
@@ -410,7 +419,7 @@ pub(super) fn spawn(
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::protocols::WorkerWithDpRank;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
 
     use super::*;
     use crate::discovery::{KvEventSource, KvStateEndpointResolution};
@@ -434,6 +443,7 @@ mod tests {
             endpoint_resolution: KvStateEndpointResolution::Resolved(endpoint),
             recovery_expected: HashMap::new(),
             kv_event_publishing_enabled: capabilities.into_iter().collect(),
+            kv_event_source_mode: HashMap::new(),
             sources,
         }
     }
@@ -578,6 +588,26 @@ mod tests {
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].code, DiagnosticCode::SourceRecovered);
         assert!(state.reconcile(&active, now + SOURCE_JOIN_GRACE).is_empty());
+    }
+
+    #[test]
+    fn suppressing_a_missing_legacy_source_does_not_report_recovery() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let missing = view([(7, Some(true))], [missing(7, 0)]);
+        let suppressed = view([(7, Some(true))], [(worker, KvSourceStatus::Suppressed)]);
+        let now = Instant::now();
+        let mut state = required_state();
+
+        assert!(state.reconcile(&missing, now).is_empty());
+        let warning = state.reconcile(&missing, now + SOURCE_JOIN_GRACE);
+        assert_eq!(warning[0].code, DiagnosticCode::SourceNotObserved);
+
+        assert!(
+            state
+                .reconcile(&suppressed, now + SOURCE_JOIN_GRACE)
+                .is_empty()
+        );
+        assert!(state.next_deadline().is_none());
     }
 
     #[test]

@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+search_space:
+  model_name: openai/gpt-oss-120b
+  deployment_mode: [agg]
+  backend: [trtllm]
+workload:
+  isl: 128
+  osl: 1000
+  request_rate: 16
+  num_request_ratio: 10
+goal:
+  target: goodput_per_gpu
+  sla:
+    ttft_ms: 2000
+    itl_ms: 25
+sweep:
+  max_rounds: 1
+  candidates_per_round: 2
+  parallel_evals: 1
+  max_eval_seconds: 120

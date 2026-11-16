@@ -3,22 +3,35 @@
 
 """GMS server entry point.
 
-Launches one GMS server process per GPU serving every production GMS tag,
-then supervises them: terminates the rest if any child exits, and propagates
-the first non-zero exit code. Runs until SIGTERM (pod termination kills it)
-or until a child exits.
+Launches one GMS server process per GPU, then supervises them. Each V1 process
+is pinned to its GPU, can open no other GPU when the kernel has Landlock (see
+v1.landlock), and with
+--enable-loader loads its GPU's weights in a thread. V0 can start one loader
+process per GPU. Device discovery uses NVML without initializing the CUDA
+driver.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import subprocess
 import sys
 import time
+from contextlib import closing
 
+from gpu_memory_service.cli.snapshot import start_per_device
+from gpu_memory_service.client.session import _GMSClientSession as v0_session
+from gpu_memory_service.common.locks import RequestedLockType
+from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
+from gpu_memory_service.v1 import landlock, ranks
+from gpu_memory_service.v1.client.session import _GMSClientSession as v1_session
+from gpu_memory_service.v1.device import Gpu
+from gpu_memory_service.v1.device import get_socket_path as v1_get_socket_path
+from gpu_memory_service.v1.device import node_gpus
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,45 +39,113 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+_PROBE_TIMEOUT_SECONDS = 0.5
+# How long stopped children get to exit before SIGKILL; below Kubernetes'
+# default 30 s termination grace period.
+_STOP_GRACE_SECONDS = 10.0
 
-def _child_command(device: int, device_type: str, use_v1: bool = False) -> list[str]:
-    """Command for one child process serving every production tag on one GPU."""
-    command = [sys.executable, "-m", "gpu_memory_service"]
-    if use_v1:
-        command.append("--use-v1")
-    command.extend(["--device", str(device)])
-    if not use_v1:
-        command.extend(["--device-type", device_type])
-    return command
+
+def _v1_gpus() -> list[Gpu]:
+    gpus = node_gpus()
+    if not gpus:
+        raise SystemExit("GMS V1 found no GPU that this container can open")
+    return gpus
 
 
 def _terminate_all(processes: list[subprocess.Popen]) -> None:
+    """SIGTERM the processes, SIGKILL any still running after the grace period,
+    and reap them all."""
     for process in processes:
         if process.poll() is None:
             process.terminate()
+    deadline = time.monotonic() + _STOP_GRACE_SECONDS
+    for process in processes:
+        try:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "GMS process pid=%d did not stop within %ss; killing it",
+                process.pid,
+                _STOP_GRACE_SECONDS,
+            )
+            process.kill()
+            process.wait()
 
 
-def _supervise(processes: list[subprocess.Popen]) -> int:
-    """Block until any child exits, terminate the rest, and return its exit code."""
-    while processes:
-        for process in processes:
-            exit_code = process.poll()
+def _ignore_stop_signals() -> None:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def _exit_on_signal(*_args) -> None:
+    # Leave stopping to the caller's finally: this may interrupt Popen.poll()
+    # holding its non-reentrant waitpid lock. Ignore repeats to protect that stop.
+    _ignore_stop_signals()
+    raise SystemExit(0)
+
+
+def _supervise(
+    servers: list[subprocess.Popen],
+    loaders: list[subprocess.Popen] | None = None,
+) -> int:
+    """Supervise persistent servers and optional one-shot loaders."""
+    pending_loaders = list(loaders or ())
+    while servers:
+        for server in servers:
+            exit_code = server.poll()
             if exit_code is not None:
-                _terminate_all(processes)
-                return exit_code
+                _terminate_all([*servers, *pending_loaders])
+                return exit_code or 1
+
+        for loader in list(pending_loaders):
+            exit_code = loader.poll()
+            if exit_code is not None:
+                if exit_code:
+                    _terminate_all([*servers, *pending_loaders])
+                    return exit_code
+                pending_loaders.remove(loader)
+
         time.sleep(1)
     return 0
 
 
+def _run_v1_ranks(loader_argv: list[str] | None, confine: bool) -> int:
+    """Run one V1 server process per GPU until one exits."""
+    if confine:
+        try:
+            landlock.abi_version()
+        except OSError as exc:
+            logger.warning(
+                "GMS V1 cannot confine each device's process to its GPU (%s). "
+                "Running them unconfined: each starts CUDA on every visible "
+                "GPU, which is slower.",
+                exc,
+            )
+            confine = False
+
+    def command(device: int, gpu: Gpu) -> list[str]:
+        argv = [sys.executable, "-m", "gpu_memory_service", "--device", str(device)]
+        argv += ["--gpu-uuid", gpu.uuid]
+        if loader_argv is not None:
+            argv += ["--enable-loader", *loader_argv]
+        return argv
+
+    processes: list[subprocess.Popen] = []
+    signal.signal(signal.SIGTERM, _exit_on_signal)
+    signal.signal(signal.SIGINT, _exit_on_signal)
+    try:
+        processes.extend(ranks.start_ranks(_v1_gpus(), command, confine=confine))
+        return _supervise(processes)
+    finally:
+        # A signal must not cut the stop short, even when an exception got us here.
+        _ignore_stop_signals()
+        _terminate_all(processes)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        description="GPU Memory Service supervisor (one server per (device, tag)).",
+        description="GPU Memory Service supervisor (one server process per device).",
         allow_abbrev=False,
-    )
-    parser.add_argument(
-        "--use-v1",
-        action="store_true",
-        help="Launch the CUDA-only V1 server for both rank-local domains.",
     )
     parser.add_argument(
         "--device-type",
@@ -73,35 +154,104 @@ def main(argv: list[str] | None = None) -> None:
         choices=[d.value for d in VMMDeviceType],
         help="VMM device type forwarded to server (default: cuda).",
     )
+    parser.add_argument(
+        "--probe-restore-ready",
+        action="store_true",
+        help=(
+            "One-shot: try bounded RO admission on every weights socket and "
+            "exit. Does not start servers or loaders."
+        ),
+    )
+    parser.add_argument(
+        "--no-isolation",
+        action="store_true",
+        help=(
+            "V1: do not confine each GPU's server process to its own GPU with "
+            "Landlock. Each process then starts CUDA on every visible GPU, which "
+            "is slower. Without Landlock in the kernel, the processes run "
+            "unconfined anyway."
+        ),
+    )
+    parser.add_argument(
+        "--enable-loader",
+        nargs=argparse.REMAINDER,
+        metavar="ARG",
+        help=(
+            "Load checkpoint weights into the servers at start-up. All later "
+            "arguments, including --checkpoint-dir, go to the loader. V0 starts "
+            "one loader process per GPU that exits once that GPU is loaded; pass "
+            "--device N to load only GPU N. V1 loads each GPU in a thread of "
+            "that GPU's server process."
+        ),
+    )
+    raw = argv if argv is not None else sys.argv[1:]
+    if "--probe-restore-ready" in raw and "--enable-loader" in raw:
+        parser.error(
+            "--probe-restore-ready is one-shot and cannot start servers or loaders"
+        )
     args = parser.parse_args(argv)
-    if args.use_v1 and args.device_type != VMMDeviceType.CUDA.value:
-        parser.error("--use-v1 only supports --device-type=cuda")
+    use_v1 = os.environ.get("DYN_GMS_USE_V1") == "true"
+    if use_v1 and args.device_type != VMMDeviceType.CUDA.value:
+        parser.error("DYN_GMS_USE_V1=true only supports --device-type=cuda")
+    if use_v1 and not args.probe_restore_ready:
+        raise SystemExit(_run_v1_ranks(args.enable_loader, not args.no_isolation))
+    if use_v1:
+        for gpu in _v1_gpus():
+            with closing(
+                v1_session(
+                    v1_get_socket_path(gpu.uuid, "weights"),
+                    RequestedLockType.RO,
+                    connect_timeout=_PROBE_TIMEOUT_SECONDS,
+                    admission_timeout=_PROBE_TIMEOUT_SECONDS,
+                )
+            ):
+                pass
+        return
 
     init_vmm(VMMDeviceType.from_str(args.device_type))
     vmm = get_vmm()
-    vmm.ensure_initialized()
     devices = vmm.list_devices()
-    processes = []
-    for device in devices:
-        proc = subprocess.Popen(
-            _child_command(device, args.device_type, use_v1=args.use_v1)
-        )
-        logger.info(
-            "Started GMS%s device=%d pid=%d",
-            " V1" if args.use_v1 else "",
-            device,
-            proc.pid,
-        )
-        processes.append(proc)
+    if args.probe_restore_ready:
+        timeout_ms = int(_PROBE_TIMEOUT_SECONDS * 1000)
+        for device in devices:
+            with closing(
+                v0_session(
+                    get_socket_path(device, "weights"),
+                    RequestedLockType.RO,
+                    timeout_ms,
+                )
+            ):
+                pass
+        return
 
-    def terminate(*_args) -> None:
-        _terminate_all(processes)
-        raise SystemExit(0)
+    servers: list[subprocess.Popen] = []
+    loaders: list[subprocess.Popen] = []
+    signal.signal(signal.SIGTERM, _exit_on_signal)
+    signal.signal(signal.SIGINT, _exit_on_signal)
 
-    signal.signal(signal.SIGTERM, terminate)
-    signal.signal(signal.SIGINT, terminate)
+    try:
+        for device in devices:
+            command = [sys.executable, "-m", "gpu_memory_service"]
+            command.extend(["--device", str(device)])
+            command.extend(["--device-type", args.device_type])
+            process = subprocess.Popen(command)
+            logger.info("Started GMS device=%d pid=%d", device, process.pid)
+            servers.append(process)
 
-    raise SystemExit(_supervise(processes))
+        if args.enable_loader is not None:
+            loader_argv = list(args.enable_loader)
+            loaders.extend(
+                start_per_device(
+                    "gpu_memory_service.cli.snapshot.loader",
+                    loader_argv,
+                    devices,
+                )
+            )
+
+        raise SystemExit(_supervise(servers, loaders))
+    finally:
+        _ignore_stop_signals()
+        _terminate_all([*servers, *loaders])
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ import pytest
 
 from dynamo.planner.errors import (
     DuplicateSubComponentError,
+    GPUShapeUnavailableError,
     PowerAnnotationInvalidError,
     PowerAnnotationMissingError,
     SubComponentNotFoundError,
@@ -69,7 +70,30 @@ def _worker(
 
 
 def _dgd(*components):
-    return {"spec": {"components": list(components)}}
+    statuses = {}
+    for component in components:
+        status = {}
+        template = component.get("podTemplate", {})
+        annotations = template.get("metadata", {}).get("annotations", {})
+        if POWER_ANNOTATION_KEY in annotations:
+            status["gpuPowerLimitWatts"] = annotations[POWER_ANNOTATION_KEY]
+        container = template.get("spec", {}).get("containers", [{}])[0]
+        gpu = container.get("resources", {}).get("limits", {}).get("nvidia.com/gpu")
+        if gpu is not None:
+            try:
+                replica_gpu = int(gpu) * int(
+                    component.get("multinode", {}).get("nodeCount", 1)
+                )
+            except (TypeError, ValueError):
+                replica_gpu = gpu
+            status["gpusPerEngine"] = replica_gpu
+            status["gpusPerReplica"] = replica_gpu
+        statuses[component["name"]] = status
+    return {
+        "metadata": {"generation": 1},
+        "spec": {"components": list(components)},
+        "status": {"observedGeneration": 1, "components": statuses},
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -79,25 +103,25 @@ def _dgd(*components):
 
 def test_reads_positive_integer_watts():
     svc = Service(name="P", service=_worker("P", comp_type="prefill", watts="350"))
-    assert svc.get_gpu_power_limit_watts() == 350
+    assert svc.get_gpu_power_limit_watts(_dgd(svc.service)) == 350
 
 
 def test_missing_annotation_raises_missing():
     svc = Service(name="P", service=_worker("P", comp_type="prefill", watts=None))
     with pytest.raises(PowerAnnotationMissingError):
-        svc.get_gpu_power_limit_watts()
+        svc.get_gpu_power_limit_watts(_dgd(svc.service))
 
 
 @pytest.mark.parametrize("bad", ["", "   ", "abc", "3.5", "0", "-1", "-300"])
 def test_malformed_or_nonpositive_raises_invalid(bad):
     svc = Service(name="P", service=_worker("P", comp_type="prefill", watts=bad))
     with pytest.raises(PowerAnnotationInvalidError):
-        svc.get_gpu_power_limit_watts()
+        svc.get_gpu_power_limit_watts(_dgd(svc.service))
 
 
 def test_surrounding_whitespace_is_tolerated():
     svc = Service(name="P", service=_worker("P", comp_type="prefill", watts=" 300 "))
-    assert svc.get_gpu_power_limit_watts() == 300
+    assert svc.get_gpu_power_limit_watts(_dgd(svc.service)) == 300
 
 
 # --------------------------------------------------------------------------- #
@@ -122,20 +146,20 @@ def test_watts_per_replica_multiplies_gpus():
 
 def test_resolves_disagg_prefill_and_decode():
     dgd = _dgd(
-        _worker("VllmPrefillWorker", comp_type="prefill", watts="350", gpus="2"),
-        _worker("VllmDecodeWorker", comp_type="decode", watts="300", gpus="4"),
+        _worker("prefill", comp_type="prefill", watts="350", gpus="2"),
+        _worker("decode", comp_type="decode", watts="300", gpus="4"),
     )
     prefill, decode = resolve_component_power_configs(
         dgd, require_prefill=True, require_decode=True
     )
     assert prefill == ComponentPowerConfig(
-        component_name="VllmPrefillWorker",
+        component_name="prefill",
         role="prefill",
         gpu_power_limit_watts=350,
         gpus_per_replica=2,
     )
     assert decode == ComponentPowerConfig(
-        component_name="VllmDecodeWorker",
+        component_name="decode",
         role="decode",
         gpu_power_limit_watts=300,
         gpus_per_replica=4,
@@ -169,20 +193,20 @@ def test_asymmetric_caps_are_independent():
 
 
 def test_agg_generic_worker_resolves_decode_only():
-    dgd = _dgd(_worker("VllmWorker", comp_type="worker", watts="300", gpus="4"))
+    dgd = _dgd(_worker("worker", comp_type="worker", watts="300", gpus="4"))
     prefill, decode = resolve_component_power_configs(
         dgd, require_prefill=False, require_decode=True
     )
     assert prefill is None
     assert decode is not None
-    assert decode.component_name == "VllmWorker"
+    assert decode.component_name == "worker"
     # role reflects the DGD component's actual generic type.
     assert decode.role == "worker"
     assert decode.watts_per_replica == 1200
 
 
 def test_agg_does_not_manufacture_prefill_config():
-    dgd = _dgd(_worker("VllmWorker", comp_type="worker", watts="300", gpus="4"))
+    dgd = _dgd(_worker("worker", comp_type="worker", watts="300", gpus="4"))
     prefill, decode = resolve_component_power_configs(
         dgd, require_prefill=False, require_decode=True
     )
@@ -267,9 +291,9 @@ def test_missing_annotation_on_required_role_raises():
         resolve_component_power_configs(dgd, require_prefill=True, require_decode=True)
 
 
-def test_invalid_gpu_count_raises_value_error():
+def test_invalid_operator_gpu_shape_raises_error():
     dgd = _dgd(_worker("D", comp_type="decode", watts="300", gpus="notanint"))
-    with pytest.raises(ValueError):
+    with pytest.raises(GPUShapeUnavailableError):
         resolve_component_power_configs(dgd, require_prefill=False, require_decode=True)
 
 
@@ -278,22 +302,11 @@ def test_invalid_gpu_count_raises_value_error():
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("bad_gpus", ["0", "-1", "-4"])
-def test_zero_or_negative_gpu_count_rejected(bad_gpus):
-    svc = Service(name="D", service=_worker("D", comp_type="decode", gpus=bad_gpus))
-    with pytest.raises(ValueError):
-        svc.get_gpu_count()
-
-
 @pytest.mark.parametrize("bad_nodes", [0, -1, -3])
 def test_zero_or_negative_node_count_rejected(bad_nodes):
-    svc = Service(
-        name="D", service=_worker("D", comp_type="decode", node_count=bad_nodes)
-    )
-    with pytest.raises(ValueError):
-        svc.get_node_count()
-    with pytest.raises(ValueError):
-        svc.get_total_gpu_count()
+    dgd = _dgd(_worker("D", comp_type="decode", node_count=bad_nodes, watts="300"))
+    with pytest.raises((ValueError, GPUShapeUnavailableError)):
+        resolve_component_power_configs(dgd, require_prefill=False, require_decode=True)
 
 
 @pytest.mark.parametrize("bad_gpus", ["0", "-2"])
@@ -301,5 +314,5 @@ def test_zero_or_negative_gpu_count_fails_resolution(bad_gpus):
     # A zero/negative topology must not silently pass through the resolver and
     # produce a watts_per_replica of 0 that disables enforcement for the role.
     dgd = _dgd(_worker("D", comp_type="decode", watts="300", gpus=bad_gpus))
-    with pytest.raises(ValueError):
+    with pytest.raises((ValueError, GPUShapeUnavailableError)):
         resolve_component_power_configs(dgd, require_prefill=False, require_decode=True)

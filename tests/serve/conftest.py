@@ -3,6 +3,7 @@
 
 import os
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from pytest_httpserver import HTTPServer
@@ -10,6 +11,37 @@ from pytest_httpserver import HTTPServer
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.serve.lora_utils import MinioLoraConfig, MinioService
 from tests.utils.port_utils import allocate_port, deallocate_port
+
+
+def pytest_collection_modifyitems(config, items):
+    """Collect decision qualification only for explicitly provisioned services.
+
+    This lane requires explicit provisioning and opt-in, even for a supported
+    version. Deselect before any service or model fixture runs.
+    """
+    gates = {
+        Path(__file__).with_name("test_systemone_sglang.py"): (
+            os.environ.get("DYNAMO_DECISION_RUN_PINNED_SGLANG") == "1",
+            "Set DYNAMO_DECISION_RUN_PINNED_SGLANG=1 for pinned SGLang qualification",
+        ),
+        Path(__file__).with_name("test_decisions_external.py"): (
+            bool(os.environ.get("DYNAMO_DECISION_TEST_URL", "").strip()),
+            "Set DYNAMO_DECISION_TEST_URL for an explicitly provisioned server",
+        ),
+    }
+    excluded = [item for item in items if not gates.get(item.path, (True, ""))[0]]
+    if excluded:
+        items[:] = [item for item in items if gates.get(item.path, (True, ""))[0]]
+        config.hook.pytest_deselected(items=excluded)
+        reporter = config.pluginmanager.get_plugin("terminalreporter")
+        if reporter:
+            for path, (_, reason) in gates.items():
+                count = sum(item.path == path for item in excluded)
+                if count:
+                    reporter.write_line(
+                        f"Decision qualification: {count} deselected. {reason}"
+                    )
+
 
 # Shared constants for multimodal testing
 IMAGE_SERVER_PORT = allocate_port(8765)
@@ -93,11 +125,20 @@ MULTIMODAL_MEDIA_DIR = _MEDIA_DIR
 MULTIMODAL_VIDEO_EXPECTED = ["triangle"]
 
 
-def get_multimodal_test_image_bytes() -> bytes:
-    """Return a deterministic PNG with an obvious green square."""
+def get_multimodal_test_image_bytes(color: str = "green") -> bytes:
+    """Return a deterministic PNG with an obvious green or red square."""
 
     # Lazy import so conftest loads in environments that don't have Pillow (e.g. pre-commit).
     from PIL import Image, ImageDraw
+
+    palette = {
+        "green": ((0, 180, 0), (0, 90, 0)),
+        "red": ((220, 30, 30), (130, 0, 0)),
+    }
+    try:
+        fill, outline = palette[color]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported multimodal test image color: {color}") from exc
 
     buf = BytesIO()
     # Keep this synthetic so CI never depends on Git LFS media. The white
@@ -105,8 +146,8 @@ def get_multimodal_test_image_bytes() -> bytes:
     # an edge-to-edge flat color.
     img = Image.new("RGB", (512, 512), color="white")
     draw = ImageDraw.Draw(img)
-    draw.rectangle((96, 96, 416, 416), fill=(0, 180, 0), outline=(0, 90, 0), width=8)
-    draw.text((214, 444), "GREEN", fill=(0, 90, 0))
+    draw.rectangle((96, 96, 416, 416), fill=fill, outline=outline, width=8)
+    draw.text((214, 444), color.upper(), fill=outline)
     img.save(buf, format="PNG")
     return buf.getvalue()
 

@@ -136,12 +136,17 @@ def assert_lifecycle_logs(req_logs, expected_status="success"):
 
 
 def assert_cancellation(req_logs):
-    """Assert error completion with cancelled error_type is logged."""
+    """Assert cancelled completion with cancelled error_type is logged.
+
+    Client cancellation is an expected outcome, not a server error, so the
+    completion line reports `status="cancelled"` at INFO. The Prometheus
+    contract still labels it `status="error", error_type="cancelled"`.
+    """
     completed = [
         e
         for e in req_logs
         if e.get("message") == "request completed"
-        and e.get("status") == "error"
+        and e.get("status") == "cancelled"
         and e.get("error_type") == "cancelled"
     ]
     msgs = [(e.get("message"), e.get("status"), e.get("error_type")) for e in req_logs]
@@ -376,11 +381,10 @@ def test_agg_404_error(tracing_services) -> None:
 
 
 def test_agg_invalid_uuid_warn(tracing_services) -> None:
-    """Invalid x-dynamo-request-id: WARN logged, request proceeds with generated ID."""
+    """Deprecated x-dynamo-request-id is ignored: WARN logged, request uses a generated ID."""
     port = tracing_services["frontend_port"]
 
-    # Send deprecated x-dynamo-request-id with invalid value to test deprecation warning
-    # Send both x-request-id (for log filtering) and deprecated x-dynamo-request-id (invalid)
+    # Send both x-request-id (for log filtering) and the deprecated x-dynamo-request-id
     rid = str(uuid.uuid4())
     resp = requests.post(
         f"http://localhost:{port}/v1/chat/completions",
@@ -401,15 +405,15 @@ def test_agg_invalid_uuid_warn(tracing_services) -> None:
 
     req_logs = get_request_logs(tracing_services["frontend"], rid)
 
-    # A WARN log should be emitted about the invalid UUID
     warn_logs = [
         e
         for e in req_logs
-        if e.get("level") == "WARN" and "must be a valid UUID" in e.get("message", "")
+        if e.get("level") == "WARN"
+        and "deprecated request id header ignored" in e.get("message", "")
+        and e.get("header") == "x-dynamo-request-id"
     ]
     assert len(warn_logs) == 1
 
-    # Request still gets a valid request_id (generated, not the invalid one)
     received = [e for e in req_logs if e.get("message") == "request received"]
     assert len(received) == 1
     request_id = received[0].get("request_id", "")

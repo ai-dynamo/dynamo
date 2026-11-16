@@ -93,6 +93,17 @@ pub fn load_and_validate_tensors(
 
 fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
     let agent = NixlAgent::new(&format!("kvbm-worker-{}", worker_id))?;
+    // POSIX and GDS_MT only serve files. Host and device layouts need a backend
+    // that covers DRAM and VRAM, so create UCX first, matching the v2 default
+    // backend set in v2/physical/transfer/nixl_agent.
+    match agent.get_plugin_params("UCX") {
+        Ok((_, ucx_params)) => {
+            agent.create_backend("UCX", &ucx_params)?;
+        }
+        Err(_) => {
+            tracing::warn!("No UCX plugin found; host and device NIXL registration will fail");
+        }
+    }
     if use_gds {
         let (_, gds_params) = agent.get_plugin_params("GDS_MT")?;
         agent.create_backend("GDS_MT", &gds_params)?;

@@ -3,12 +3,11 @@
 
 mod support;
 
-#[cfg(feature = "mocker-kvbm-offload")]
-#[path = "support/mooncake_g2_lower_tier.rs"]
-mod g2_lower_tier;
-
 #[path = "../kv_router/common/dc_ckf_parity.rs"]
 mod dc_ckf_parity;
+#[allow(dead_code)]
+#[path = "../kv_router/mooncake_lower_tier.rs"]
+mod mooncake_lower_tier;
 #[allow(dead_code)]
 #[path = "../kv_router/mooncake_open_loop.rs"]
 mod mooncake_open_loop;
@@ -21,26 +20,30 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use clap::Parser;
 use dc_ckf_parity::{DirectCkfParityConfig, DirectCkfParityIndexer, DirectCkfParityMatchMode};
-#[cfg(feature = "mocker-kvbm-offload")]
-use dynamo_bench::kv_router_common::replay::generate_g2_replay_artifacts_with_capacity;
+use dynamo_bench::kv_router_common::args::CommonArgs;
 use dynamo_bench::kv_router_common::replay::{
     WorkerReplayArtifacts, generate_replay_artifacts, generate_replay_artifacts_with_args,
-    process_mooncake_trace,
+    host_offload_mock_engine_args, process_mooncake_trace,
 };
-use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::indexer::pruning::PruneConfig;
-use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics};
-use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-    KvCacheStoredBlockData, OverlapScores, StorageTier, TokensWithHashes, WorkerWithDpRank,
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
 };
-use dynamo_kv_router::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
-use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, SglangArgs};
+use dynamo_kv_events::residency::StorageTier;
+use dynamo_kv_hashing::routing::TokensWithHashes;
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_kv_indexer::host::{
+    ConcurrentRadixTreeCompressed, KvIndexerInterface, KvIndexerMetrics, OverlapScores,
+    PruneConfig, ThreadPoolIndexer,
+};
+use dynamo_mocker::common::protocols::{EngineType, MockerConfig};
 use dynamo_mocker::loadgen::{ReplayRequestHashes, SessionTrace, Trace, TurnTrace};
 use dynamo_mocker::replay::{
     ReplayTimedKvEvent, ReplayTimedRequest, ReplayWorkerArtifacts, native_g1_parent_chain_artifact,
 };
+use dynamo_router_protocol::worker::WorkerWithDpRank;
+use mooncake_lower_tier::LowerTierRun;
 use mooncake_open_loop::{
     MooncakeOperationPayload, OpenLoopConfig, PreparedMooncakeCorpus, prepare_mooncake_corpus,
     prepare_open_loop_trial, run_open_loop,
@@ -53,6 +56,8 @@ use tempfile::NamedTempFile;
 use uuid::Uuid;
 
 const BLOCK_SIZE: u32 = 128;
+// mooncake_trace_1000.jsonl records one hash per 512-token trace block.
+const TRACE_BLOCK_SIZE: u32 = 512;
 const NUM_GPU_BLOCKS: usize = 16384;
 const NUM_UNIQUE_INFERENCE_WORKERS: usize = 10;
 const CKF_PARITY_WORKERS: usize = 16;
@@ -60,11 +65,6 @@ const BENCHMARK_DURATION_MS: u64 = 2000;
 const NUM_EVENT_WORKERS: usize = 4;
 const PARITY_NUM_GPU_BLOCKS: usize = NUM_GPU_BLOCKS;
 const SGLANG_PARITY_PREFILL_TOKENS: usize = PARITY_NUM_GPU_BLOCKS * BLOCK_SIZE as usize;
-#[cfg(feature = "mocker-kvbm-offload")]
-const G2_TEST_NUM_GPU_BLOCKS: usize = 512;
-#[cfg(feature = "mocker-kvbm-offload")]
-const G2_TEST_NUM_G2_BLOCKS: usize = 16_384;
-
 type NormalizedOverlapScores = BTreeMap<WorkerWithDpRank, u32>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,70 +114,26 @@ impl MockEngineParityKind {
         }
     }
 
-    fn mock_engine_args(self) -> anyhow::Result<MockEngineArgs> {
-        let mut builder = MockEngineArgs::builder()
-            .engine_type(self.engine_type())
-            .num_gpu_blocks(PARITY_NUM_GPU_BLOCKS)
-            .block_size(BLOCK_SIZE as usize)
-            .speedup_ratio(10.0)
-            .enable_prefix_caching(true)
-            .max_num_batched_tokens(None)
-            .max_num_seqs(None);
-
+    fn mock_engine_args(self) -> anyhow::Result<MockerConfig> {
+        let mut config = serde_json::json!({
+            "engine": {
+                "backend": self.engine_type(),
+                "num_gpu_blocks": PARITY_NUM_GPU_BLOCKS,
+                "block_size": BLOCK_SIZE as usize,
+                "speedup_ratio": 10.0,
+                "enable_prefix_caching": true,
+                "max_num_batched_tokens": usize::MAX,
+                "max_num_seqs": usize::MAX
+            }
+        });
         if matches!(self, Self::Sglang) {
-            builder = builder.sglang(Some(SglangArgs {
-                page_size: Some(BLOCK_SIZE as usize),
-                max_prefill_tokens: Some(SGLANG_PARITY_PREFILL_TOKENS),
-                chunked_prefill_size: Some(SGLANG_PARITY_PREFILL_TOKENS),
-                ..Default::default()
-            }));
+            config["engine"]["sglang"] = serde_json::json!({
+                "max_prefill_tokens":SGLANG_PARITY_PREFILL_TOKENS,
+                "chunked_prefill_size":SGLANG_PARITY_PREFILL_TOKENS
+            });
         }
-
-        builder.build()?.normalized()
+        MockerConfig::from_value(config)
     }
-}
-
-#[cfg(feature = "mocker-kvbm-offload")]
-#[derive(Clone)]
-enum KvEventReplayEntryKind {
-    Request(Vec<LocalBlockHash>),
-    Event {
-        event: KvCacheEvent,
-        storage_tier: StorageTier,
-    },
-}
-
-#[cfg(feature = "mocker-kvbm-offload")]
-#[derive(Clone)]
-struct KvEventReplayEntry {
-    timestamp_us: u64,
-    worker_id: u64,
-    kind_rank: u8,
-    kind: KvEventReplayEntryKind,
-}
-
-#[cfg(feature = "mocker-kvbm-offload")]
-fn collect_kv_event_replay_entries(artifacts: &[WorkerReplayArtifacts]) -> Vec<KvEventReplayEntry> {
-    let mut entries = Vec::new();
-    for (worker_id, artifact) in artifacts.iter().enumerate() {
-        entries.extend(artifact.requests.iter().map(|request| KvEventReplayEntry {
-            timestamp_us: request.timestamp_us,
-            worker_id: worker_id as u64,
-            kind_rank: 0,
-            kind: KvEventReplayEntryKind::Request(request.replay_hashes.local_block_hashes.clone()),
-        }));
-        entries.extend(artifact.kv_events.iter().map(|event| KvEventReplayEntry {
-            timestamp_us: event.timestamp_us,
-            worker_id: worker_id as u64,
-            kind_rank: 1,
-            kind: KvEventReplayEntryKind::Event {
-                event: event.event.clone(),
-                storage_tier: event.storage_tier,
-            },
-        }));
-    }
-    entries.sort_by_key(|entry| (entry.timestamp_us, entry.kind_rank, entry.worker_id));
-    entries
 }
 
 fn count_removed_kv_events(artifacts: &[WorkerReplayArtifacts]) -> usize {
@@ -403,50 +359,6 @@ fn collect_direct_ckf_overlap_scores(
     Ok(scores)
 }
 
-#[cfg(feature = "mocker-kvbm-offload")]
-async fn collect_device_only_overlap_scores(
-    config: &MooncakeIndexerConfig,
-    artifacts: &[WorkerReplayArtifacts],
-) -> anyhow::Result<Vec<NormalizedOverlapScores>> {
-    let indexer = config.build(BLOCK_SIZE, Arc::new(KvIndexerMetrics::new_unregistered()))?;
-    let entries = collect_kv_event_replay_entries(artifacts);
-    let mut scores = Vec::new();
-    let mut idx = 0;
-
-    while idx < entries.len() {
-        let timestamp_us = entries[idx].timestamp_us;
-        while idx < entries.len() && entries[idx].timestamp_us == timestamp_us {
-            match &entries[idx].kind {
-                KvEventReplayEntryKind::Request(request) => {
-                    let overlap = indexer.find_matches(request.clone()).await?;
-                    scores.push(overlap.scores.into_iter().collect());
-                }
-                KvEventReplayEntryKind::Event {
-                    event,
-                    storage_tier,
-                } => {
-                    if storage_tier.is_gpu() {
-                        indexer
-                            .apply_event(
-                                dynamo_kv_router::protocols::RouterEvent::with_storage_tier(
-                                    entries[idx].worker_id,
-                                    event.clone(),
-                                    *storage_tier,
-                                ),
-                            )
-                            .await;
-                    }
-                }
-            }
-            idx += 1;
-        }
-        indexer.flush().await;
-    }
-
-    indexer.shutdown();
-    Ok(scores)
-}
-
 async fn assert_overlap_score_parity(
     variants: &[MooncakeIndexerConfig],
     artifact_sets: &[MockEngineReplayArtifacts],
@@ -494,7 +406,7 @@ async fn assert_overlap_score_parity(
             assert_eq!(
                 warning_count.load(Ordering::Relaxed),
                 0,
-                "{} parity replay emitted warn/error logs from dynamo_kv_router::indexer or dynamo_mocker",
+                "{} parity replay emitted warn/error logs from dynamo_kv_indexer or dynamo_mocker",
                 config.short_name()
             );
         }
@@ -858,30 +770,6 @@ async fn route_approx_writes(
     Ok(())
 }
 
-#[cfg(feature = "mocker-kvbm-offload")]
-#[derive(Clone, Copy, Debug, Default)]
-struct HostPinnedEventCounts {
-    stored: usize,
-    removed: usize,
-}
-
-#[cfg(feature = "mocker-kvbm-offload")]
-fn count_host_pinned_events(artifacts: &[WorkerReplayArtifacts]) -> HostPinnedEventCounts {
-    let mut counts = HostPinnedEventCounts::default();
-    for event in artifacts
-        .iter()
-        .flat_map(|artifact| artifact.kv_events.iter())
-        .filter(|event| event.storage_tier == StorageTier::HostPinned)
-    {
-        match &event.event.data {
-            KvCacheEventData::Stored(_) => counts.stored += 1,
-            KvCacheEventData::Removed(_) => counts.removed += 1,
-            KvCacheEventData::Cleared => {}
-        }
-    }
-    counts
-}
-
 #[test]
 fn process_mooncake_trace_expands_and_duplicates_hash_space() -> anyhow::Result<()> {
     let mut file = NamedTempFile::new()?;
@@ -946,6 +834,38 @@ fn process_mooncake_trace_expands_and_duplicates_hash_space() -> anyhow::Result<
     Ok(())
 }
 
+#[derive(Parser)]
+struct CommonArgsCli {
+    #[clap(flatten)]
+    common: CommonArgs,
+}
+
+#[test]
+fn default_cli_args_load_the_canonical_512_token_fixture() -> anyhow::Result<()> {
+    let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
+    let parse = |extra: &[&str]| {
+        let mut argv = vec![
+            "mooncake_bench",
+            fixture.as_str(),
+            "--num-unique-inference-workers",
+            "2",
+        ];
+        argv.extend_from_slice(extra);
+        CommonArgsCli::try_parse_from(argv).map(|cli| cli.common)
+    };
+
+    // The Mooncake, Active Sequences, and approximate-LRU benches all load traces
+    // through `load_mooncake_trace`; default arguments must expand 512-token hash_ids.
+    assert!(!parse(&[])?.load_mooncake_trace(&fixture)?.is_empty());
+    // The 128-token engine block size cannot expand this fixture's prompts.
+    assert!(
+        parse(&["--trace-block-size", "128"])?
+            .load_mooncake_trace(&fixture)
+            .is_err()
+    );
+    Ok(())
+}
+
 #[test]
 fn removed_legacy_branch_sharded_name_is_rejected() {
     let removed_name = format!("{}-{}-branch-sharded-crtc", "anchor", "aware");
@@ -978,7 +898,7 @@ fn open_loop_preparation_preserves_query_first_ties_and_removed_blocks() -> anyh
             input_length: 2,
             output_length: 1,
             replay_hashes: ReplayRequestHashes {
-                local_block_hashes: vec![LocalBlockHash(1), LocalBlockHash(2)],
+                local_block_hashes: vec![1, 2],
                 sequence_hashes: Vec::new(),
             },
         }],
@@ -1066,7 +986,7 @@ fn mooncake_preparation_normalizes_each_workers_first_entry_before_rescaling() -
                 input_length: 1,
                 output_length: 1,
                 replay_hashes: ReplayRequestHashes {
-                    local_block_hashes: vec![LocalBlockHash(timestamp_us)],
+                    local_block_hashes: vec![timestamp_us],
                     sequence_hashes: Vec::new(),
                 },
             })
@@ -1146,7 +1066,7 @@ async fn generate_replay_artifacts_waits_for_completion_delay() -> anyhow::Resul
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mooncake_open_loop_smoke_completes_exact_ids_and_drains() -> anyhow::Result<()> {
     let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
-    let traces = process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, 2, 42)?;
+    let traces = process_mooncake_trace(&fixture, TRACE_BLOCK_SIZE, 1, 1, 2, 42)?;
     let artifacts = generate_replay_artifacts(&traces, NUM_GPU_BLOCKS, BLOCK_SIZE, None).await?;
     let benchmark = MooncakeBenchmarkConfig {
         benchmark_duration_ms: 5_000,
@@ -1165,6 +1085,7 @@ async fn mooncake_open_loop_smoke_completes_exact_ids_and_drains() -> anyhow::Re
     let result = run_open_loop(
         "concurrent-radix-tree-compressed",
         indexer,
+        None,
         trial,
         OpenLoopConfig {
             query_lanes: 2,
@@ -1191,6 +1112,172 @@ async fn mooncake_open_loop_smoke_completes_exact_ids_and_drains() -> anyhow::Re
     Ok(())
 }
 
+fn host_store(
+    event_id: u64,
+    parent: Option<u64>,
+    start: u32,
+    hashes: &[u64],
+    timestamp_us: u64,
+) -> ReplayTimedKvEvent {
+    ReplayTimedKvEvent {
+        event: KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: parent.map(ExternalSequenceBlockHash),
+                start_position: Some(start),
+                blocks: hashes
+                    .iter()
+                    .map(|&hash| KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(hash),
+                        tokens_hash: LocalBlockHash(hash + 100),
+                        mm_extra_info: None,
+                    })
+                    .collect(),
+            }),
+            dp_rank: 0,
+        },
+        storage_tier: StorageTier::HostPinned,
+        timestamp_us,
+    }
+}
+
+#[test]
+fn kvcr_layer_copies_cpu_tier_stores_and_evicts_tails_first() -> anyhow::Result<()> {
+    // A KVCR tier of 3 blocks behind four CPU-tier stores: [1, 2, 3], then [4] after 3, then
+    // [1, 5], then [1, 5, 6, 7]. Copies touch tail to head, so 3 (the tail of the first chain)
+    // goes before 1, and the last store, longer than the tier, copies only [1, 5, 6].
+    let artifacts = vec![ReplayWorkerArtifacts {
+        requests: Vec::new(),
+        output_signals: Vec::new(),
+        kv_events: vec![
+            host_store(0, None, 0, &[1, 2, 3], 10),
+            host_store(1, Some(3), 3, &[4], 20),
+            host_store(2, None, 0, &[1, 5], 30),
+            host_store(3, None, 0, &[1, 5, 6, 7], 40),
+        ],
+    }];
+    let merged = merge_worker_traces(artifacts, BLOCK_SIZE)?.with_kvcr_layer(3)?;
+    let prepared = prepare_scaled_benchmark(merged, 1_000);
+
+    let kvcr: Vec<(u64, KvCacheEventData)> = prepared
+        .worker_traces
+        .iter()
+        .next()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| match &entry.entry {
+            WorkerTraceEntry::Event {
+                event,
+                cache_owner: true,
+                ..
+            } => Some((event.event_id, event.data.clone())),
+            _ => None,
+        })
+        .collect();
+    let stored = |parent: Option<u64>, start: u32, hashes: &[u64]| {
+        let KvCacheEventData::Stored(store) = host_store(0, parent, start, hashes, 0).event.data
+        else {
+            unreachable!()
+        };
+        KvCacheEventData::Stored(store)
+    };
+    let removed = |hash: u64| {
+        KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: vec![ExternalSequenceBlockHash(hash)],
+        })
+    };
+    assert_eq!(
+        kvcr,
+        vec![
+            (0, stored(None, 0, &[1, 2, 3])),
+            (1, removed(3)),
+            (2, stored(Some(3), 3, &[4])),
+            (3, removed(2)),
+            (4, stored(Some(1), 1, &[5])),
+            (5, removed(4)),
+            (6, stored(Some(5), 2, &[6])),
+        ]
+    );
+    let (cpu_tier, kvcr) = (prepared.totals.cpu_tier, prepared.totals.kvcr);
+    assert_eq!(
+        (
+            cpu_tier.stored_events,
+            cpu_tier.stored_blocks,
+            cpu_tier.live_memberships
+        ),
+        (4, 10, 7)
+    );
+    assert_eq!(
+        (
+            kvcr.stored_blocks,
+            kvcr.removed_blocks,
+            kvcr.live_memberships
+        ),
+        (6, 3, 3)
+    );
+    assert_eq!(
+        prepared.totals.events(),
+        0,
+        "host-tier events stay out of the device totals"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mooncake_lower_tier_open_loop_routes_both_host_streams() -> anyhow::Result<()> {
+    let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
+    let traces = process_mooncake_trace(&fixture, TRACE_BLOCK_SIZE, 1, 1, 2, 42)?;
+    // Small device and KVCR tiers, so both evict.
+    let engine = host_offload_mock_engine_args(1024, BLOCK_SIZE as usize, 2048, 131072)?;
+    let artifacts = generate_replay_artifacts_with_args(&traces, engine, None).await?;
+    let merged = merge_worker_traces(artifacts, BLOCK_SIZE)?.with_kvcr_layer(1024)?;
+    let prepared = prepare_scaled_benchmark(merged, 1_000);
+    let corpus = prepare_mooncake_corpus(prepared, 1)?;
+    let trial = prepare_open_loop_trial(corpus, 2)?;
+    let indexer = Arc::new(ThreadPoolIndexer::new(
+        ConcurrentRadixTreeCompressed::new(),
+        2,
+        BLOCK_SIZE,
+    ));
+
+    let result = run_open_loop(
+        "concurrent-radix-tree-compressed",
+        indexer,
+        Some(LowerTierRun::crtc(2, BLOCK_SIZE, None, true)),
+        trial,
+        OpenLoopConfig {
+            query_lanes: 2,
+            issuer_threads: 3,
+            spin_us: 50,
+            issue_lag_diagnostic_threshold_us: 250,
+            pre_run_quiescence_ms: 0,
+            issuer_cpus: Vec::new(),
+            query_issuer_cpu: None,
+            backend_cpus: Vec::new(),
+        },
+    )
+    .await?;
+
+    assert!(
+        result.failure_reasons.is_empty(),
+        "{:?}",
+        result.failure_reasons
+    );
+    assert!(result.total_events > 0 && result.update_scheduled_to_finished.max_ns > 0);
+    let lower = result
+        .lower_tier
+        .expect("a lower-tier run reports its lower tier");
+    assert!(lower.cpu_tier.stored_events > 0 && lower.kvcr.removed_events > 0);
+    // Each stream lands in its own domain: the worker's, or its KVCR cache owner's.
+    assert_eq!(
+        lower.cpu_tier_indexed_memberships,
+        lower.cpu_tier.live_memberships
+    );
+    assert_eq!(lower.kvcr_indexed_memberships, lower.kvcr.live_memberships);
+    assert!(lower.query_service.max_ns > 0);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_g1_parent_chain_replays_across_indexer_variants() -> anyhow::Result<()> {
     let artifacts = vec![native_g1_parent_chain_artifact(BLOCK_SIZE as usize)];
@@ -1212,7 +1299,6 @@ async fn native_g1_parent_chain_replays_across_indexer_variants() -> anyhow::Res
     let variants = [
         MooncakeIndexerConfig::radix_tree(),
         MooncakeIndexerConfig::nested_map(8, NUM_EVENT_WORKERS),
-        MooncakeIndexerConfig::concurrent_radix_tree(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::branch_sharded_crtc(2, NUM_EVENT_WORKERS, 2),
     ];
@@ -1241,12 +1327,11 @@ async fn native_g1_parent_chain_replays_across_indexer_variants() -> anyhow::Res
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mooncake_approx_ttl_drain_leaves_indexer_dumps_empty() -> anyhow::Result<()> {
-    let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
+    let warning_count = support::warning_counter(&["dynamo_kv_indexer", "dynamo_mocker"]);
     let ttl = Duration::from_millis(250);
     let variants = [
         MooncakeIndexerConfig::radix_tree(),
         MooncakeIndexerConfig::nested_map(8, NUM_EVENT_WORKERS),
-        MooncakeIndexerConfig::concurrent_radix_tree(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
     ];
 
@@ -1281,7 +1366,7 @@ async fn mooncake_approx_ttl_drain_leaves_indexer_dumps_empty() -> anyhow::Resul
         assert_eq!(
             warning_count.load(Ordering::Relaxed),
             0,
-            "{label} emitted warn/error logs from dynamo_kv_router::indexer or dynamo_mocker"
+            "{label} emitted warn/error logs from dynamo_kv_indexer or dynamo_mocker"
         );
     }
 
@@ -1290,17 +1375,22 @@ async fn mooncake_approx_ttl_drain_leaves_indexer_dumps_empty() -> anyhow::Resul
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> anyhow::Result<()> {
-    let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
+    let warning_count = support::warning_counter(&["dynamo_kv_indexer", "dynamo_mocker"]);
 
     let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
-    let traces =
-        process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, NUM_UNIQUE_INFERENCE_WORKERS, 42)?;
+    let traces = process_mooncake_trace(
+        &fixture,
+        TRACE_BLOCK_SIZE,
+        1,
+        1,
+        NUM_UNIQUE_INFERENCE_WORKERS,
+        42,
+    )?;
     let artifact_sets = generate_mock_engine_parity_artifacts(&traces).await?;
 
     let variants = [
         MooncakeIndexerConfig::radix_tree(),
         MooncakeIndexerConfig::nested_map(8, NUM_EVENT_WORKERS),
-        MooncakeIndexerConfig::concurrent_radix_tree(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::branch_sharded_crtc(2, NUM_EVENT_WORKERS, 2),
     ];
@@ -1326,7 +1416,7 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
             assert_eq!(
                 warning_count.load(Ordering::Relaxed),
                 0,
-                "{label} emitted warn/error logs from dynamo_kv_router::indexer or dynamo_mocker"
+                "{label} emitted warn/error logs from dynamo_kv_indexer or dynamo_mocker"
             );
             assert_eq!(
                 support::duplicate_store_warning_count(metrics.as_ref()),
@@ -1343,9 +1433,9 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mooncake_trace_replays_through_fixed_d16_ckf() -> anyhow::Result<()> {
-    let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
+    let warning_count = support::warning_counter(&["dynamo_kv_indexer", "dynamo_mocker"]);
     let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
-    let traces = process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, CKF_PARITY_WORKERS, 42)?;
+    let traces = process_mooncake_trace(&fixture, TRACE_BLOCK_SIZE, 1, 1, CKF_PARITY_WORKERS, 42)?;
     let mut artifact_sets = generate_mock_engine_parity_artifacts(&traces).await?;
     make_ckf_parity_corpus_quiescent(&mut artifact_sets);
     let stats = measure_ckf_parity(&artifact_sets, &warning_count, true, 1).await?;
@@ -1363,9 +1453,9 @@ async fn mooncake_trace_replays_through_fixed_d16_ckf() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "authoritative CKF false-positive tolerance measurement"]
 async fn mooncake_trace_measures_fixed_d16_ckf_tolerance() -> anyhow::Result<()> {
-    let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
+    let warning_count = support::warning_counter(&["dynamo_kv_indexer", "dynamo_mocker"]);
     let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
-    let traces = process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, CKF_PARITY_WORKERS, 42)?;
+    let traces = process_mooncake_trace(&fixture, TRACE_BLOCK_SIZE, 1, 1, CKF_PARITY_WORKERS, 42)?;
     let mut artifact_sets = generate_mock_engine_parity_artifacts(&traces).await?;
     make_ckf_parity_corpus_quiescent(&mut artifact_sets);
     let stats = measure_ckf_parity(&artifact_sets, &warning_count, false, 1).await?;
@@ -1381,8 +1471,14 @@ async fn mooncake_trace_measures_fixed_d16_ckf_tolerance() -> anyhow::Result<()>
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mooncake_trace_branch_sharded_depth4_matches_baseline() -> anyhow::Result<()> {
     let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
-    let traces =
-        process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, NUM_UNIQUE_INFERENCE_WORKERS, 42)?;
+    let traces = process_mooncake_trace(
+        &fixture,
+        TRACE_BLOCK_SIZE,
+        1,
+        1,
+        NUM_UNIQUE_INFERENCE_WORKERS,
+        42,
+    )?;
     let artifact_sets = generate_mock_engine_parity_artifacts(&traces).await?;
     let variants = [
         MooncakeIndexerConfig::radix_tree(),
@@ -1390,77 +1486,4 @@ async fn mooncake_trace_branch_sharded_depth4_matches_baseline() -> anyhow::Resu
     ];
 
     assert_overlap_score_parity(&variants, &artifact_sets, None).await
-}
-
-#[cfg(feature = "mocker-kvbm-offload")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mooncake_trace_g2_events_replay_through_host_pinned_lower_tier() -> anyhow::Result<()> {
-    let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
-    support::reset_warning_count(&warning_count);
-
-    let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
-    let traces = process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, 1, 42)?;
-    let artifacts = generate_g2_replay_artifacts_with_capacity(
-        &traces,
-        G2_TEST_NUM_GPU_BLOCKS,
-        G2_TEST_NUM_G2_BLOCKS,
-        BLOCK_SIZE,
-        None,
-    )
-    .await?;
-    let counts = count_host_pinned_events(&artifacts);
-
-    assert!(
-        counts.stored > 0,
-        "mooncake G2 artifact generation should capture HostPinned Stored events; counts={counts:?}"
-    );
-    let (reference_scores, crtc_scores, host_pinned_dumped_events) =
-        g2_lower_tier::collect_tiered_replay_scores(&artifacts).await?;
-    let device_only_scores = collect_device_only_overlap_scores(
-        &MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
-        &artifacts,
-    )
-    .await?;
-
-    assert!(
-        host_pinned_dumped_events > 0,
-        "HostPinned lower-tier indexer should retain replayed G2 state"
-    );
-    assert_eq!(
-        crtc_scores.len(),
-        reference_scores.len(),
-        "CRTC lower-tier replay produced a different request count than the reference replay"
-    );
-    assert_eq!(
-        crtc_scores.len(),
-        device_only_scores.len(),
-        "tiered replay produced a different request count than device-only replay"
-    );
-    assert!(
-        crtc_scores
-            .iter()
-            .zip(device_only_scores.iter())
-            .any(|(tiered, device_only)| {
-                g2_lower_tier::score_sum(tiered) > g2_lower_tier::score_sum(device_only)
-            }),
-        "HostPinned lower-tier replay should improve at least one mooncake request over device-only replay"
-    );
-
-    for (request_idx, (actual, expected)) in
-        crtc_scores.iter().zip(reference_scores.iter()).enumerate()
-    {
-        assert_eq!(
-            actual, expected,
-            "CRTC lower-tier additive overlap diverged from reference at replay request {request_idx}"
-        );
-    }
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(
-        warning_count.load(Ordering::Relaxed),
-        0,
-        "G2 HostPinned lower-tier replay emitted warn/error logs from dynamo_kv_router::indexer or dynamo_mocker"
-    );
-
-    Ok(())
 }

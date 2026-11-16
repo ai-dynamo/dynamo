@@ -34,11 +34,11 @@ pytestmark = [
 ]
 
 _DGD = {
-    "metadata": {"name": "power-aware-example"},
+    "metadata": {"name": "power-aware-example", "generation": 1},
     "spec": {
         "components": [
             {
-                "name": "VllmPrefillWorker",
+                "name": "prefill",
                 "type": "prefill",
                 "replicas": 2,
                 "podTemplate": {
@@ -56,7 +56,7 @@ _DGD = {
                 },
             },
             {
-                "name": "VllmDecodeWorker",
+                "name": "decode",
                 "type": "decode",
                 "replicas": 2,
                 "podTemplate": {
@@ -74,6 +74,21 @@ _DGD = {
                 },
             },
         ]
+    },
+    "status": {
+        "observedGeneration": 1,
+        "components": {
+            "prefill": {
+                "gpuPowerLimitWatts": 350,
+                "gpusPerEngine": 2,
+                "gpusPerReplica": 2,
+            },
+            "decode": {
+                "gpuPowerLimitWatts": 300,
+                "gpusPerEngine": 4,
+                "gpusPerReplica": 4,
+            },
+        },
     },
 }
 

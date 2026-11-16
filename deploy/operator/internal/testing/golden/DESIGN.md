@@ -47,6 +47,17 @@ Scalar string directives are:
 | `$notexists` | The containing mapping must not have the field. |
 | `$glob:<glob>` | The scalar string must match the glob. |
 | `$pattern:<regexp>` | The scalar string must match the regular expression. |
+| `$var:<name>` | The caller-provided variable value must match exactly. |
+
+Pass variables to `EventuallyMatchManifestsWithVariables`:
+
+```go
+golden.EventuallyMatchManifestsWithVariables(t, client, namespace, "output.yaml", golden.Variables{
+    "worker-hash": workerHash,
+})
+```
+
+Variables replace an entire scalar only; they do not interpolate into arbitrary strings.
 
 For mapping values, the existence directives use a one-key mapping such as
 `{$ignore: true}` or `{$notexists: true}`. Directives do not apply to sequence

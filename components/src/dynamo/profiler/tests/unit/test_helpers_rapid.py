@@ -85,7 +85,9 @@ class TestRunNaiveFallback:
                 return_value={},
             ),
         ):
-            result = _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm")
+            result = _run_naive_fallback(
+                dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm", 4000, 1000
+            )
 
         assert set(result) >= {
             "best_config_df",
@@ -117,7 +119,9 @@ class TestRunNaiveFallback:
                 return_value={},
             ),
         ):
-            result = _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm")
+            result = _run_naive_fallback(
+                dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm", 4000, 1000
+            )
         assert result["dgd_config"] is None
 
     @pytest.mark.pre_merge
@@ -136,7 +140,7 @@ class TestRunNaiveFallback:
             ),
             caplog.at_level(logging.WARNING),
         ):
-            _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm")
+            _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm", 4000, 1000)
 
         assert "SLA is unverified (ttft=1.0ms, itl=1.0ms)" in caplog.text
         assert "model=Qwen/Qwen3-32B, system=l40s, backend=vllm" in caplog.text
@@ -158,7 +162,7 @@ class TestRunNaiveFallback:
             ),
             caplog.at_level(logging.WARNING),
         ):
-            _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm")
+            _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm", 4000, 1000)
 
         assert "SLA is unverified (e2eLatency=35000.0ms)" in caplog.text
         assert "ttft=" not in caplog.text
@@ -180,7 +184,7 @@ class TestRunNaiveFallback:
             ),
             caplog.at_level(logging.WARNING),
         ):
-            _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm")
+            _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm", 4000, 1000)
 
         assert "SLA is unverified (requested SLA)" in caplog.text
         assert "ttft=" not in caplog.text
@@ -215,7 +219,7 @@ class TestRunNaiveFallback:
                 side_effect=fake_generate,
             ),
         ):
-            _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm")
+            _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm", 4000, 1000)
 
         k8s = captured_params.get("K8sConfig", {})
         assert k8s.get("k8s_pvc_name") == "model-cache"
@@ -254,7 +258,9 @@ class TestRunNaiveFallback:
                 side_effect=fake_generate,
             ),
         ):
-            _run_naive_fallback(dgdr, "Qwen/Qwen3-0.6B", 4, "a100_pcie", "vllm")
+            _run_naive_fallback(
+                dgdr, "Qwen/Qwen3-0.6B", 4, "a100_pcie", "vllm", 4000, 1000
+            )
 
         k8s = captured_params.get("K8sConfig", {})
         assert k8s.get("k8s_pvc_mount_path") == "/opt/models"
@@ -291,7 +297,9 @@ class TestRunNaiveFallback:
                 side_effect=fake_generate,
             ),
         ):
-            _run_naive_fallback(dgdr, "Qwen/Qwen3-0.6B", 4, "a100_pcie", "vllm")
+            _run_naive_fallback(
+                dgdr, "Qwen/Qwen3-0.6B", 4, "a100_pcie", "vllm", 4000, 1000
+            )
 
         k8s = captured_params.get("K8sConfig", {})
         assert k8s.get("k8s_pvc_name") == "model-cache"
@@ -321,11 +329,94 @@ class TestRunNaiveFallback:
                 side_effect=fake_generate,
             ),
         ):
-            _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm")
+            _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm", 4000, 1000)
 
         k8s = captured_params.get("K8sConfig", {})
         assert "k8s_pvc_name" not in k8s
         assert "k8s_pvc_mount_path" not in k8s
+
+
+class TestRunNaiveFallbackWorkloadForwarding:
+    """The declared workload must reach the naive generator as an input.
+
+    ``build_naive_generator_params`` seeds its own ``SlaConfig`` with
+    ``isl=4000`` / ``osl=1000`` and the backend rule plugin derives
+    ``max_seq_len`` from that section *during* generation. A declared workload
+    that never reaches the generator therefore produces a worker sized for the
+    generator's defaults, which cannot hold the requested sequence — the
+    defect this class guards against.
+    """
+
+    @staticmethod
+    def _run(dgdr, isl, osl):
+        """Invoke the fallback, returning the generator's kwargs and params."""
+        captured_kwargs: dict = {}
+        captured_params: dict = {}
+
+        def fake_build(**kwargs):
+            captured_kwargs.update(kwargs)
+            return copy.deepcopy(_FAKE_GENERATOR_PARAMS)
+
+        def fake_generate(params, backend, use_dynamo_generator=False):
+            captured_params.update(params)
+            return {
+                "k8s_deploy.yaml": "kind: DGD\nmetadata:\n  name: test\nspec:\n  services: {}"
+            }
+
+        with (
+            patch(
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                side_effect=fake_build,
+            ),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                side_effect=fake_generate,
+            ),
+        ):
+            result = _run_naive_fallback(
+                dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm", isl, osl
+            )
+        return result, captured_kwargs, captured_params
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_declared_workload_is_forwarded_to_generator(self, caplog):
+        """A non-default declared workload reaches the generator's SlaConfig."""
+        dgdr = _make_dgdr(workload=WorkloadSpec(isl=7200, osl=2000))
+        with caplog.at_level(logging.WARNING):
+            _, captured_kwargs, _ = self._run(dgdr, 7200, 2000)
+
+        assert captured_kwargs.get("generator_overrides") == {
+            "SlaConfig": {"isl": 7200, "osl": 2000}
+        }
+        assert "Declared workload (isl=7200, osl=2000)" in caplog.text
+        assert "defaults (isl=4000, osl=1000)" in caplog.text
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_default_workload_forwards_defaults_without_warning(self, caplog):
+        """Default workload is forwarded without a substitution warning."""
+        dgdr = _make_dgdr(workload=WorkloadSpec(isl=4000, osl=1000))
+        with caplog.at_level(logging.WARNING):
+            _, captured_kwargs, _ = self._run(dgdr, 4000, 1000)
+
+        assert captured_kwargs.get("generator_overrides") == {
+            "SlaConfig": {"isl": 4000, "osl": 1000}
+        }
+        assert "Declared workload" not in caplog.text
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_absent_workload_lengths_fall_back_to_generator_defaults(self, caplog):
+        """An explicit null sequence length must not override the defaults."""
+        dgdr = _make_dgdr(workload=WorkloadSpec(isl=None, osl=None))
+        with caplog.at_level(logging.WARNING):
+            _, captured_kwargs, _ = self._run(dgdr, None, None)
+
+        assert captured_kwargs.get("generator_overrides") == {
+            "SlaConfig": {"isl": 4000, "osl": 1000}
+        }
+        assert "Declared workload" not in caplog.text
 
 
 # ---------------------------------------------------------------------------

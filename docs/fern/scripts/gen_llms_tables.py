@@ -35,7 +35,7 @@ It also emits three machine-readable outputs from the same parse:
   * assets/releases.json — a stable-schema JSON serialization of the parsed
     data (current, mainTot, releases, cudaHistory, features, artifacts,
     modelEaBuilds, platform, releaseStats, ...). Human dates gain ISO-8601
-    ``dateIso`` twins.
+    ``dateIso`` twins (``enterpriseIso`` for a release's ``enterprise`` date).
   * assets/releases-atom.xml — an Atom 1.0 feed, one entry per RELEASES item,
     newest first. Entry links resolve notesHref against the canonical prod
     base (https://docs.nvidia.com/dynamo), falling back to the GitHub release
@@ -44,8 +44,9 @@ It also emits three machine-readable outputs from the same parse:
 
 Usage (from any cwd; paths resolve relative to this file):
 
-    python3 gen_llms_tables.py            # write/refresh all outputs
-    python3 gen_llms_tables.py --check    # exit 1 if any output is stale, no writes
+    python3 gen_llms_tables.py               # write/refresh all outputs
+    python3 gen_llms_tables.py --check       # check marker-spliced pages, no writes
+    python3 gen_llms_tables.py --assets-only # write/refresh only JSON and Atom
 
 Re-run at every release bump, after editing releases.data.ts.
 
@@ -115,6 +116,7 @@ REQUIRED_EXPORTS = [
     "KNOWN_ARTIFACT_ISSUES",
     "CRATES_FIRST_PUBLISHED",
     "RELEASE_STATS",
+    "ENTERPRISE_ARTIFACTS",
 ]
 
 
@@ -336,8 +338,8 @@ DECL_RE = re.compile(
 )
 
 
-def parse_data_module(path: Path) -> dict:
-    """Parse every top-level const in releases.data.ts into a dict."""
+def parse_literal_module(path: Path, required_exports: list[str]) -> dict:
+    """Parse a disciplined TypeScript literal module into a dict."""
     try:
         src = strip_comments(path.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -356,10 +358,33 @@ def parse_data_module(path: Path) -> dict:
         if parser.peek() == ";":
             parser.i += 1
 
-    missing = [n for n in REQUIRED_EXPORTS if n not in env]
+    missing = [n for n in required_exports if n not in env]
     if missing:
         raise TSParseError(f"missing required exports: {', '.join(missing)}")
     return env
+
+
+def parse_data_module(path: Path) -> dict:
+    """Parse every top-level const in releases.data.ts into a dict."""
+    return parse_literal_module(path, REQUIRED_EXPORTS)
+
+
+def load_nightly_builds(path: Path) -> list[dict]:
+    """Load generated ledger rows for a docs-publish run."""
+    builds = parse_literal_module(path, ["NIGHTLY_BUILDS"])["NIGHTLY_BUILDS"]
+    if not isinstance(builds, list):
+        raise TSParseError("NIGHTLY_BUILDS must be an array")
+    for build in builds:
+        if not isinstance(build, dict) or not all(
+            isinstance(build.get(field), expected)
+            for field, expected in (("version", str), ("date", str), ("packages", list))
+        ):
+            raise TSParseError(
+                "NIGHTLY_BUILDS rows require version, date, and packages"
+            )
+        if not all(isinstance(package, str) for package in build["packages"]):
+            raise TSParseError("NIGHTLY_BUILDS packages must be strings")
+    return builds
 
 
 # ---------------------------------------------------------------------------
@@ -820,6 +845,10 @@ def render_release_artifacts(data: dict) -> str:
     if data.get("NIGHTLY_BUILDS"):
         parts.append("**Recent nightly wheel builds**")
         parts.append(nightlies_table(data))
+    # The note covers the channel itself, not the rows: it holds the install
+    # pattern and the container tags, so it stays whether or not this run
+    # resolved ledger rows. releases-machine-readable.mdx already does this.
+    if data.get("NIGHTLIES_NOTE"):
         parts.append(data["NIGHTLIES_NOTE"])
 
     parts.append("**Crates: first published version on crates.io**")
@@ -833,6 +862,25 @@ def render_model_ea_builds(data: dict) -> str:
     parts.append("**Model early-access builds**")
     parts.append(ea_table(data))
     return "\n\n".join(parts)
+
+
+def render_enterprise_artifacts(data: dict) -> str:
+    """Mirror of <EnterpriseArtifacts />: the newest release with an enterprise date."""
+    release = next(r for r in data["RELEASES"] if r.get("enterprise"))
+    tag = release["version"].removeprefix("v")
+    line = ".".join(tag.split(".")[:2])
+    rows = [
+        [a["component"], f"`{a['ref'].replace('{tag}', tag)}`"]
+        for a in data["ENTERPRISE_ARTIFACTS"]
+    ]
+    return "\n\n".join(
+        [
+            f"The Dynamo {line} release line is the current supported release. "
+            "The following artifacts are published for it. "
+            "Commercial support is limited to this exact set.",
+            md_table(["Component", "Artifact"], rows),
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1083,6 +1131,8 @@ def build_json(data: dict) -> str:
         out = dict(rel)
         if rel.get("date"):
             out["dateIso"] = iso_date(rel["date"])
+        if rel.get("enterprise"):
+            out["enterpriseIso"] = iso_date(rel["enterprise"])
         link = release_link(rel)
         if link:
             out["notesUrl"] = link
@@ -1217,7 +1267,7 @@ class Block(NamedTuple):
     append_if_missing: bool
 
 
-# The three component-backed pages get <llms-only> twins (humans see the React
+# The component-backed pages get <llms-only> twins (humans see the React
 # components); releases-machine-readable.mdx IS the page body, human-viewable
 # and machine-consumable alike.
 PAGES: dict[str, tuple[Block, ...]] = {
@@ -1240,6 +1290,9 @@ PAGES: dict[str, tuple[Block, ...]] = {
     ),
     "releases/release-history.mdx": (
         Block("release-stats", render_release_stats, False, False),
+    ),
+    "enterprise-supported-artifacts.mdx": (
+        Block("llms-tables", render_enterprise_artifacts, True, False),
     ),
 }
 
@@ -1293,10 +1346,21 @@ def apply_block(page_text: str, block: Block, rendered: str) -> str:
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument(
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument(
         "--check",
         action="store_true",
-        help="exit 1 if regeneration would change any page; write nothing",
+        help="exit 1 if regeneration would change a marker-spliced page; write nothing",
+    )
+    mode.add_argument(
+        "--assets-only",
+        action="store_true",
+        help="write only assets/releases.json and assets/releases-atom.xml",
+    )
+    ap.add_argument(
+        "--nightly-data",
+        type=Path,
+        help="generated nightly-selector module to use for nightly ledger rows",
     )
     args = ap.parse_args(argv)
 
@@ -1305,22 +1369,32 @@ def main(argv: list[str]) -> int:
     except TSParseError as exc:
         print(f"error: failed to parse {DATA_TS}: {exc}", file=sys.stderr)
         return 2
+    if args.nightly_data:
+        # Its own handler: the generated nightly module is a separate input, and
+        # blaming releases.data.ts for it sends the reader to the wrong file.
+        try:
+            data["NIGHTLY_BUILDS"] = load_nightly_builds(args.nightly_data)
+        except TSParseError as exc:
+            print(f"error: failed to parse {args.nightly_data}: {exc}", file=sys.stderr)
+            return 2
 
-    # Render everything up front so a failure on any output emits nothing.
+    # Render every selected output up front so a rendering failure emits nothing.
     try:
         rendered: dict[Path, str] = {}
-        for page_name, blocks in PAGES.items():
-            page_path = REFERENCE_DIR / page_name
-            if not page_path.is_file():
-                print(f"error: page not found: {page_path}", file=sys.stderr)
-                return 2
-            text = page_path.read_text(encoding="utf-8")
-            for block in blocks:
-                body = build_block(block, block.renderer(data))
-                text = apply_block(text, block, body)
-            rendered[page_path] = text
-        for asset_path, builder in ASSET_OUTPUTS.items():
-            rendered[asset_path] = builder(data)
+        if not args.assets_only:
+            for page_name, blocks in PAGES.items():
+                page_path = REFERENCE_DIR / page_name
+                if not page_path.is_file():
+                    print(f"error: page not found: {page_path}", file=sys.stderr)
+                    return 2
+                text = page_path.read_text(encoding="utf-8")
+                for block in blocks:
+                    body = build_block(block, block.renderer(data))
+                    text = apply_block(text, block, body)
+                rendered[page_path] = text
+        if not args.check:
+            for asset_path, builder in ASSET_OUTPUTS.items():
+                rendered[asset_path] = builder(data)
     except (TSParseError, KeyError) as exc:
         print(f"error: rendering failed: {exc!r}", file=sys.stderr)
         return 2
@@ -1334,16 +1408,20 @@ def main(argv: list[str]) -> int:
             if path.is_relative_to(REFERENCE_DIR)
             else path.name
         )
-        old_text = path.read_text(encoding="utf-8") if path.is_file() else None
-        if new_text == old_text:
+        # Compare and write raw bytes: read_text() would normalize CRLF away,
+        # letting a wrongly-encoded output pass as "unchanged" (and --check
+        # as fresh) without ever being healed.
+        old_bytes = path.read_bytes() if path.is_file() else None
+        new_bytes = new_text.encode("utf-8")
+        if new_bytes == old_bytes:
             print(f"{name}: unchanged")
             continue
         stale.append(name)
         if args.check:
             print(f"{name}: STALE (regeneration would change it)")
         else:
-            path.write_text(new_text, encoding="utf-8")
-            print(f"{name}: wrote {len(new_text.encode('utf-8'))} bytes")
+            path.write_bytes(new_bytes)
+            print(f"{name}: wrote {len(new_bytes)} bytes")
 
     if args.check and stale:
         print(

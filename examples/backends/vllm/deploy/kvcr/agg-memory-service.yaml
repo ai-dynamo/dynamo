@@ -1,0 +1,256 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  annotations:
+    nvidia.com/dynamo-discovery-backend: kubernetes
+    nvidia.com/dynamo-kube-discovery-mode: container
+  name: vllm-agg-kvcr-memory-service
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+          - name: DYN_ROUTER_WORKER_SELECTION_POLICY
+            value: kvcr
+          image: ${DYNAMO_VLLM_IMAGE}
+          name: main
+    replicas: 1
+    type: frontend
+  - name: worker
+    podTemplate:
+      spec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component
+                  operator: In
+                  values:
+                  - worker
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - vllm-agg-kvcr-memory-service
+              topologyKey: kubernetes.io/hostname
+        containers:
+        - args:
+          - |
+            set -euo pipefail
+            source /opt/kvcr-startup/launch_utils.sh
+            if [ -f /opt/kvcr-startup/kvcr.whl ]; then
+              export PYTHONPATH="/opt/kvcr-startup/kvcr.whl${PYTHONPATH:+:$PYTHONPATH}"
+            fi
+            wait_for_ready http://127.0.0.1:9092/ready "${KVCR_READY_TIMEOUT_SECONDS}"
+
+            kv_transfer_config=$(
+              python3 - <<'PY'
+            import json
+            import os
+
+            def cache_owner_id():
+                raw_slot = os.environ["KVCR_CACHE_SLOT"]
+                raw_count = os.environ["KVCR_CACHE_SLOT_COUNT"]
+                if not raw_slot.isdecimal() or not raw_count.isdecimal():
+                    raise SystemExit("KVCR cache slot and count must be decimal integers")
+                slot = int(raw_slot)
+                slot_count = int(raw_count)
+                if slot_count <= 0 or slot >= slot_count:
+                    raise SystemExit(
+                        f"KVCR cache slot {slot} is outside [0, {slot_count})"
+                    )
+                return (
+                    "01010101010101010101010101010101:"
+                    "02020202020202020202020202020202/"
+                    f"0303030303030303/{slot:032x}"
+                )
+
+            print(json.dumps({
+                "kv_connector": "OffloadingConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "cpu_bytes_to_use": 2147483648,
+                    "spec_name": "TieringOffloadingSpec",
+                    "self_describing_kv_events": True,
+                    "dynamo_state_agent": {
+                        "raw_advertise_host": os.environ["POD_IP"],
+                        "cache_owner_ids": {"0": cache_owner_id()},
+                    },
+                    "secondary_tiers": [{
+                        "type": "kvcr",
+                        "kvcr_service_socket_path": "/run/kvcr/memory.sock",
+                        "compatibility_digest": "${DYNAMO_KVCR_COMPATIBILITY_DIGEST}",
+                        "router_capabilities": ["router_hint"],
+                        "control_host": "0.0.0.0",
+                        "control_ports": [23280],
+                        "control_advertise_host": os.environ["POD_IP"],
+                        "enable_telemetry": True,
+                    }],
+                },
+            }))
+            PY
+            )
+            exec python3 -m dynamo.vllm \
+              --model Qwen/Qwen3-0.6B \
+              --kv-transfer-config "$kv_transfer_config" \
+              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:23080","enable_kv_cache_events":true}'
+          command:
+          - /bin/bash
+          - -c
+          env:
+          - name: CONTAINER_NAME
+            value: main
+          - name: DYN_KUBE_DISCOVERY_MODE
+            value: container
+          - name: DYN_SYSTEM_PORT
+            value: "9090"
+          - name: KVCR_CACHE_SLOT
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['grove.io/podclique-pod-index']
+          - name: KVCR_CACHE_SLOT_COUNT
+            value: "2"
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: POD_INDEX
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['grove.io/podclique-pod-index']
+          - name: PYTHONHASHSEED
+            value: "0"
+          - name: UCX_TLS
+            value: rc_x,cuda
+          - name: UCX_NET_DEVICES
+            value: ${DYNAMO_UCX_NET_DEVICES}
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: ${DYNAMO_VLLM_IMAGE}
+          name: main
+          resources:
+            limits:
+              ${DYNAMO_RDMA_RESOURCE}: "1"
+              nvidia.com/gpu: "1"
+            requests:
+              ${DYNAMO_RDMA_RESOURCE}: "1"
+              ephemeral-storage: 2Gi
+              nvidia.com/gpu: "1"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          volumeMounts:
+          - mountPath: /opt/kvcr-startup
+            name: kvcr-startup
+            readOnly: true
+          - mountPath: /run/kvcr
+            name: kvcr-socket
+          workingDir: /workspace/examples/backends/vllm
+        - args:
+          - /opt/kvcr-startup/services.sh
+          command:
+          - /bin/bash
+          env:
+          - name: DYNAMO_KVCR_COMPATIBILITY_DIGEST
+            value: "${DYNAMO_KVCR_COMPATIBILITY_DIGEST}"
+          - name: KVCR_POOL_SIZE_GIB
+            value: "${KVCR_POOL_SIZE_GIB}"
+          - name: KVCR_GUARD_STARTUP_TIMEOUT_SECONDS
+            value: "${KVCR_GUARD_STARTUP_TIMEOUT_SECONDS}"
+          - name: CONTAINER_NAME
+            value: kvcr-services
+          - name: DYN_COMPONENT
+            value: kv_state_agent
+          - name: DYN_DISCOVERY_BACKEND
+            value: kubernetes
+          - name: DYN_KUBE_DISCOVERY_MODE
+            value: container
+          - name: DYN_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['nvidia.com/dynamo-namespace']
+          - name: DYN_NAMESPACE_WORKER_SUFFIX
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['nvidia.com/dynamo-worker-hash']
+          - name: DYN_SYSTEM_PORT
+            value: "9091"
+          - name: KVCR_CACHE_SLOT_COUNT
+            value: "2"
+          - name: POD_INDEX
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['grove.io/podclique-pod-index']
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          - name: UCX_TLS
+            value: rc_x,cuda
+          - name: UCX_NET_DEVICES
+            value: ${DYNAMO_UCX_NET_DEVICES}
+          image: ${DYNAMO_VLLM_IMAGE}
+          name: kvcr-services
+          # Readiness observes failures without triggering an unsafe sidecar-only
+          # restart. A deployment controller must coordinate Pod/group replacement.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 9092
+            failureThreshold: 3
+            periodSeconds: 5
+            timeoutSeconds: 4
+          resources:
+            limits:
+              ${DYNAMO_RDMA_RESOURCE}: "1"
+              memory: ${KVCR_MEMORY_LIMIT_GIB}Gi
+            requests:
+              ${DYNAMO_RDMA_RESOURCE}: "1"
+              cpu: "1"
+              memory: ${KVCR_MEMORY_REQUEST_GIB}Gi
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          volumeMounts:
+          - mountPath: /opt/kvcr-startup
+            name: kvcr-startup
+            readOnly: true
+          - mountPath: /run/kvcr
+            name: kvcr-socket
+          - mountPath: /dev/shm/kvcr
+            name: kvcr-memory
+        terminationGracePeriodSeconds: ${KVCR_TERMINATION_GRACE_PERIOD_SECONDS}
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+        volumes:
+        - configMap:
+            name: ${KVCR_STARTUP_CONFIG_MAP}
+          name: kvcr-startup
+        - emptyDir: {}
+          name: kvcr-socket
+        - emptyDir:
+            medium: Memory
+            sizeLimit: ${KVCR_SHM_SIZE_GIB}Gi
+          name: kvcr-memory
+    replicas: 2
+    type: worker

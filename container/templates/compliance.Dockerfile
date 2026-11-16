@@ -56,6 +56,10 @@
 #   - sglang uses `--site-packages "$(... sysconfig ...)"` because the
 #     upstream image installs into system Python via
 #     `pip install --break-system-packages`, not a venv.
+{%- if framework == "sglang" and device == "xpu" %}
+#     sglang XPU is excluded: its lmsysorg/sglang:*-xpu base installs into
+#     /opt/venv, so it takes the VIRTUAL_ENV branch like vllm xpu/cpu.
+{%- endif %}
 #   - native always runs (image filter "{framework}-{target}[-efa]"), attributing
 #     the from-source binaries the python/rust/dpkg scanners miss (ffmpeg, libvpx,
 #     UCX, NIXL, gdrcopy, libfabric, etcd, nats-server) per native_packages.yaml's
@@ -74,18 +78,22 @@ ENV PYTHONPATH=/opt
 # creates the dir, so this COPY never fails even for wheel-less targets.
 COPY --from=wheel_builder /opt/dynamo/rust-licenses /tmp/rust-licenses
 {% if target == "frontend" %}
-# EPP's Go compliance SBOM + harvested module LICENSE files, read from the build
-# CONTEXT (.epp-sbom/) rather than COPY --from the EPP image. The CI EPP-build
-# step exports them there via `make sbom-export` while the build cache is warm
-# (see deploy/inference-gateway/epp/Dockerfile sbom-export stage). This avoids
-# re-pulling the pushed EPP image — whose runtime layer could be served from a
-# stale cache and miss these files after the BuildKit builder is refreshed. The
-# SBOM is exported once on amd64; EPP's Go module set doesn't vary by GOARCH
-# (linux only), so the amd64 export is authoritative for all frontend arches.
-COPY .epp-sbom/sbom-go.cdx.json /tmp/sbom-go-epp.cdx.json
-# Real Go module LICENSE files so the go generator inlines upstream license text
-# instead of canonical SPDX fallback.
-COPY .epp-sbom/sbom-go-licenses /tmp/go-licenses
+# The frontend copies /epp out of the EPP image (see frontend.Dockerfile), so
+# that binary ships here without going through a wheel and the rust generator's
+# site-packages scan cannot see it. Take its SBOM + harvested crate LICENSE
+# texts from the same stage the binary itself came from, so the two cannot
+# drift: a layer missing the SBOM fails this COPY rather than silently
+# producing NOTICES that omit every crate linked into /epp.
+#
+# ext-proc is a member of the ROOT cargo workspace while lib/bindings/python is
+# deliberately outside it, so the two resolve their shared crates against
+# different lockfiles. Attributing /epp from the wheel's SBOM would therefore
+# record the wrong VERSION for dozens of crates even where the name matches --
+# hence a separate SBOM rather than reuse of the wheel's.
+COPY --from=epp /sbom-rust-epp.cdx.json /tmp/sbom-rust-epp.cdx.json
+# Merges into the wheel_builder harvest above; same "<name>-<version>" keying,
+# so it only adds the crate versions unique to /epp.
+COPY --from=epp /rust-licenses /tmp/rust-licenses
 {% endif %}
 
 # BASELINE_SBOM_FILE: the per-arch baseline SBOM *stem* (e.g.
@@ -94,8 +102,8 @@ COPY .epp-sbom/sbom-go-licenses /tmp/go-licenses
 # its OWN-arch floor — the amd64 baseline would otherwise under-attribute a
 # package present in the amd64 base but not the arm64 base that we install on
 # arm64. Rendered from context.yaml's baseline_sbom by render.py; empty when no
-# baseline is captured (NOTICES then cover the full image — correct but
-# unfiltered).
+# baseline is captured, which leaves the whole base image attributed and fails
+# the policy gate below on any denied license the base carries.
 ARG BASELINE_SBOM_FILE="{{ compliance_baseline_sbom }}"
 ARG TARGETARCH
 # Resolve where this image's Python packages live at runtime rather than per
@@ -104,12 +112,13 @@ ARG TARGETARCH
 # `pip --system`, sglang via `pip --break-system-packages`). Pick the matching
 # generator flag so it always finds the deps — passing an empty
 # `--venv ${VIRTUAL_ENV}` is what broke system-Python images.
-RUN {% if framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then PKG_ARG="--venv ${VIRTUAL_ENV}"; else PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
+{#- The enterprise variant has both: the NIM venv layers over system Python,
+    where Dynamo installs. #}
+RUN {% if framework == "sglang" and device != "xpu" %}PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% elif variant == "enterprise" %}PKG_ARG="--venv ${VIRTUAL_ENV} --site-packages $(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then PKG_ARG="--venv ${VIRTUAL_ENV}"; else PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
     python3 -m compliance.generators \
     --ecosystem {{ compliance_ecosystems }} \
     ${PKG_ARG} \
-{% if target == "frontend" %}    --go-sbom /tmp/sbom-go-epp.cdx.json \
-    --go-licenses-dir /tmp/go-licenses \
+{% if target == "frontend" %}    --rust-sbom /tmp/sbom-rust-epp.cdx.json \
 {% endif %}    --rust-licenses-dir /tmp/rust-licenses \
     --output-dir /legal \
     --policy /opt/compliance/policy/licenses.toml \
@@ -175,20 +184,30 @@ RUN mkdir -p /sources /opt/compliance /opt/native-sources /opt/dynamo-vendor-ful
 COPY --chown=root:0 container/compliance /opt/compliance
 ENV PYTHONPATH=/opt
 COPY --from=wheel_builder /tmp/native-sources/ /opt/native-sources/
+COPY --from=go_tools_builder /out/native-sources/ /opt/native-sources/
 COPY --from=wheel_builder /tmp/dynamo-vendor-full/ /opt/dynamo-vendor-full/
+{% if target == "frontend" %}
+# Same SBOM the licenses stage uses, here to select /epp's crates out of the
+# vendor tree. They are already vendored -- wheel_builder runs `cargo vendor`
+# over the whole root workspace, of which ext-proc is a member -- so without
+# this the sources are present but never picked.
+COPY --from=epp /sbom-rust-epp.cdx.json /tmp/sbom-rust-epp.cdx.json
+{% endif %}
 
 ARG ENABLE_SOURCE_ARCHIVAL=false
 ARG BASELINE_SBOM_FILE="{{ compliance_baseline_sbom }}"
 ARG TARGETARCH
+{#- Dynamo's Rust wheels are in system Python on the enterprise variant, not the NIM venv. #}
 RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
-        {% if framework == "sglang" %}RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then RUST_PKG_ARG="--rust-venv ${VIRTUAL_ENV}"; else RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
+        {% if framework == "sglang" and device != "xpu" %}RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% elif variant == "enterprise" %}RUST_PKG_ARG="--rust-site-packages $(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then RUST_PKG_ARG="--rust-venv ${VIRTUAL_ENV}"; else RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
         python3 -m compliance.collect_sources \
             {{ compliance_source_ecosystem_flags }} \
             --output-zip /sources.zip \
             --sources-root /sources \
             --native-source-dir /opt/native-sources \
             ${RUST_PKG_ARG} \
-            --rust-vendor-full /opt/dynamo-vendor-full \
+{% if target == "frontend" %}            --rust-sbom /tmp/sbom-rust-epp.cdx.json \
+{% endif %}            --rust-vendor-full /opt/dynamo-vendor-full \
             ${BASELINE_SBOM_FILE:+--baseline-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
             -v ; \
     else \

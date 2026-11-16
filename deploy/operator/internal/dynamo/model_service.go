@@ -28,7 +28,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -88,6 +87,8 @@ func ReconcileModelServicesForComponents(
 			func(ctx context.Context) (*corev1.Service, bool, error) {
 				return headlessService, false, nil
 			},
+			// Components that serve the same base model share this Service.
+			commonController.WithSharedOwnership(),
 		)
 		if err != nil {
 			logger.Error(err, "Failed to sync headless service for model",
@@ -124,6 +125,13 @@ func ReconcileModelServicesForComponents(
 	return nil
 }
 
+// GenerateModelServiceForGraph returns a model Service private to one graph.
+// Graph-scoped callers must use this identity because the Service is owned by
+// the graph deployment. The legacy model-only helper remains for DCD/Grove.
+func GenerateModelServiceForGraph(namespace, baseModelName, graphName string, annotations map[string]string) *corev1.Service {
+	return generateHeadlessServiceForGraph(namespace, baseModelName, graphName, annotations)
+}
+
 // GenerateHeadlessServiceForModel creates a headless service for model endpoint discovery
 // Service name is generated deterministically from the base model name using a hash
 // The base model name hash is stored as a label for efficient discovery
@@ -149,15 +157,13 @@ func generateHeadlessServiceForModel(
 	serviceAnnotations[commonconsts.KubeAnnotationDynamoBaseModel] = baseModelName
 
 	service := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      serviceName,
-			Namespace: namespace,
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoBaseModelHash: modelHash,
-				"nvidia.com/managed-by":                   "dynamo-operator",
-			},
-			Annotations: serviceAnnotations,
+		Name:      serviceName,
+		Namespace: namespace,
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoBaseModelHash: modelHash,
+			"nvidia.com/managed-by":                   "dynamo-operator",
 		},
+		Annotations: serviceAnnotations,
 		Spec: corev1.ServiceSpec{
 			// Headless service - no ClusterIP, no load balancing
 			ClusterIP: corev1.ClusterIPNone,
@@ -182,6 +188,16 @@ func generateHeadlessServiceForModel(
 		},
 	}
 
+	return service
+}
+
+func generateHeadlessServiceForGraph(namespace, baseModelName, graphName string, annotations map[string]string) *corev1.Service {
+	service := generateHeadlessServiceForModel(namespace, baseModelName, annotations)
+	modelHash := HashModelName(baseModelName)
+	graphHash := HashModelName(graphName)
+	service.Name = fmt.Sprintf("dynamo-model-%s-%s", modelHash, graphHash)
+	service.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = graphName
+	service.Spec.Selector[commonconsts.KubeLabelDynamoGraphDeploymentName] = graphName
 	return service
 }
 

@@ -16,7 +16,7 @@ from dynamo.common.constants import DisaggregationMode
 from .publisher import KvEventSource
 
 if TYPE_CHECKING:
-    from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
+    from dynamo._core import backend as _backend
     from dynamo.logits_processing import BaseLogitsProcessor
 
     from .worker import WorkerConfig
@@ -44,11 +44,13 @@ class GenerateRequest(TypedDict, total=False):
 
     Multimodal keys (``multi_modal_data``, ``mm_processor_kwargs``,
     ``mm_routing_info``) are populated by the frontend preprocessor when
-    the request carries media. ``encoder_result`` is set by the
-    frontend when forwarding a request from an Encode worker
-    to a downstream Prefill/Aggregated peer; engines read it via
-    :func:`dynamo.common.backend.multimodal.require_encoder_result`. All
-    four are object-shaped (``dict``) by contract.
+    the request carries media. ``encoder_result`` may be set by the frontend
+    when forwarding a request from an Encode worker or by an application
+    orchestrator before calling an Aggregated peer; engines read it via
+    :func:`dynamo.common.backend.multimodal.require_encoder_result`.
+    ``encoder_result`` is deliberately opaque at this common layer; its
+    producer and consuming engine own the concrete schema. All four are
+    object-shaped (``dict``) by contract.
 
     ``model`` carries the requested model name (set by the Rust
     preprocessor). Engines that support dynamic LoRA read it to route a
@@ -115,6 +117,7 @@ class LlmRegistration:
 
     context_length: Optional[int] = None
     kv_cache_block_size: Optional[int] = None
+    # Physical KV capacity per router-visible DP rank, never a process aggregate.
     total_kv_blocks: Optional[int] = None
     max_num_seqs: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
@@ -130,6 +133,8 @@ class LlmRegistration:
     # them so the frontend's PrefillRouter can take its bootstrap path.
     bootstrap_host: Optional[str] = None
     bootstrap_port: Optional[int] = None
+    enable_eagle: bool = False
+    max_gpu_lora_count: Optional[int] = None
 
 
 @dataclass
@@ -257,7 +262,7 @@ class BaseEngine(ABC):
         """
         ...
 
-    async def register_prometheus(self, metrics: "EngineMetrics") -> None:
+    async def register_prometheus(self, metrics: _backend.EngineMetrics) -> None:
         """Bridge a vendor-prefixed Prometheus registry into the runtime's
         ``/metrics`` output via :func:`metrics.add_expfmt_callback`. Default
         no-op. See :mod:`dynamo.common.backend.metrics` for helpers. Do not

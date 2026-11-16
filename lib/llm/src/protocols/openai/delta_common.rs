@@ -10,6 +10,7 @@ use dynamo_protocols::types::{ChatCompletionStreamOptions, CompletionUsage};
 
 use crate::protocols::common::{
     extensions::{NvExt, NvExtResponseFieldSelection},
+    llm_backend::BackendOutput,
     timing::RequestTracker,
 };
 
@@ -46,30 +47,139 @@ impl DeltaGeneratorOptions {
     }
 }
 
-/// Initial state for DeltaGenerator
-pub(crate) fn initial_state() -> (u32, CompletionUsage, Arc<RequestTracker>) {
-    let now_time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap() // cannot fail because UNIX_EPOCH is in the past
-        .as_secs();
-    // Casting from `u64` to `u32` could lead to precision loss after `u32::MAX`,
-    // but this will not be an issue until 2106.
-    let now: u32 = now_time.try_into().expect("timestamp exceeds u32::MAX");
+/// State and lifecycle behavior shared by the chat and text completion delta generators.
+pub(crate) struct DeltaGeneratorState {
+    id: String,
+    object: String,
+    created: u32,
+    model: String,
+    system_fingerprint: Option<String>,
+    usage: CompletionUsage,
+    options: DeltaGeneratorOptions,
+    tracker: Arc<RequestTracker>,
+}
 
-    let usage = dynamo_protocols::types::CompletionUsage {
-        completion_tokens: 0,
-        prompt_tokens: 0,
-        total_tokens: 0,
-        completion_tokens_details: None,
-        prompt_tokens_details: None,
-    };
+impl DeltaGeneratorState {
+    pub(crate) fn new(
+        id: String,
+        object: String,
+        model: String,
+        options: DeltaGeneratorOptions,
+    ) -> Self {
+        let now_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap() // cannot fail because UNIX_EPOCH is in the past
+            .as_secs();
+        // Casting from `u64` to `u32` could lead to precision loss after `u32::MAX`,
+        // but this will not be an issue until 2106.
+        let created: u32 = now_time.try_into().expect("timestamp exceeds u32::MAX");
 
-    // Always create request tracker for per-worker metrics (TTFT, ITL per worker_id).
-    // `response_fields` only controls which nvext fields are returned to the client;
-    // the tracker still records timing/ITL internally for metrics.
-    let tracker = Arc::new(RequestTracker::new());
+        let usage = CompletionUsage {
+            completion_tokens: 0,
+            prompt_tokens: 0,
+            total_tokens: 0,
+            completion_tokens_details: None,
+            prompt_tokens_details: None,
+        };
 
-    (now, usage, tracker)
+        // Always create request tracker for per-worker metrics (TTFT, ITL per worker_id).
+        // `response_fields` only controls which nvext fields are returned to the client;
+        // the tracker still records timing/ITL internally for metrics.
+        let tracker = Arc::new(RequestTracker::new());
+
+        Self {
+            id,
+            object,
+            created,
+            model,
+            system_fingerprint: None,
+            usage,
+            options,
+            tracker,
+        }
+    }
+
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) fn object(&self) -> &str {
+        &self.object
+    }
+
+    pub(crate) fn created(&self) -> u32 {
+        self.created
+    }
+
+    pub(crate) fn model(&self) -> &str {
+        &self.model
+    }
+
+    pub(crate) fn system_fingerprint(&self) -> Option<&String> {
+        self.system_fingerprint.as_ref()
+    }
+
+    pub(crate) fn options(&self) -> &DeltaGeneratorOptions {
+        &self.options
+    }
+
+    pub(crate) fn tracker(&self) -> Arc<RequestTracker> {
+        self.tracker.clone()
+    }
+
+    pub(crate) fn tracker_ref(&self) -> &Arc<RequestTracker> {
+        &self.tracker
+    }
+
+    pub(crate) fn update_isl(&mut self, isl: u32) {
+        self.usage.prompt_tokens = isl;
+    }
+
+    pub(crate) fn update_usage_from_backend_output(&mut self, output: &BackendOutput) {
+        // Aggregate token usage even if usage tracking is disabled for metrics tracking.
+        // SAFETY: Casting from `usize` to `u32` could lead to precision loss after `u32::MAX`,
+        // but this will not be an issue until context lengths exceed 4_294_967_295.
+        let token_length: u32 = output
+            .token_ids
+            .len()
+            .try_into()
+            .expect("token_ids length exceeds u32::MAX");
+
+        self.usage.completion_tokens += token_length;
+
+        // If the backend provides completion_usage, use it to update usage stats.
+        // This is critical for prompt embeddings where prompt_tokens comes from
+        // the embedding sequence length computed by the worker.
+        if let Some(completion_usage) = output.completion_usage.as_ref() {
+            self.usage.prompt_tokens = completion_usage.prompt_tokens;
+
+            if let Some(prompt_details) = completion_usage.prompt_tokens_details.as_ref() {
+                self.usage.prompt_tokens_details = Some(prompt_details.clone());
+            }
+
+            if let Some(completion_details) = completion_usage.completion_tokens_details.as_ref() {
+                self.usage.completion_tokens_details = Some(completion_details.clone());
+            }
+        }
+    }
+
+    pub(crate) fn get_isl(&self) -> u32 {
+        self.usage.prompt_tokens
+    }
+
+    pub(crate) fn get_usage(&self) -> CompletionUsage {
+        let mut usage = self.usage.clone();
+        usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
+        usage
+    }
+
+    pub(crate) fn is_usage_enabled(&self) -> bool {
+        self.options.enable_usage
+    }
+
+    pub(crate) fn is_continuous_usage_enabled(&self) -> bool {
+        self.options.continuous_usage_stats
+    }
 }
 
 /// Enables usage tracking for non-streaming requests to comply with OpenAI API specification.
@@ -106,6 +216,60 @@ pub(crate) fn force_include_usage(stream_options: &mut Option<ChatCompletionStre
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_backend_usage_preserves_metadata_and_counts_interleaved_tokens() {
+        let mut state = DeltaGeneratorState::new(
+            "request".into(),
+            "chat.completion.chunk".into(),
+            "model".into(),
+            DeltaGeneratorOptions {
+                enable_usage: true,
+                continuous_usage_stats: true,
+                ..Default::default()
+            },
+        );
+        let chunks = [
+            serde_json::json!({
+                "index": 0, "token_ids": [1], "tokens": ["a"],
+                "completion_usage": {
+                    "prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4,
+                    "prompt_tokens_details": {"cached_tokens": 0}
+                }
+            }),
+            serde_json::json!({"index": 1, "token_ids": [2, 3], "tokens": ["b", "c"]}),
+            serde_json::json!({
+                "index": 0, "token_ids": [4], "tokens": ["d"],
+                "completion_usage": {
+                    "prompt_tokens": 4, "completion_tokens": 4, "total_tokens": 8,
+                    "prompt_tokens_details": {"cached_tokens": 2}
+                }
+            }),
+            serde_json::json!({"index": 1, "token_ids": [5], "tokens": ["e"]}),
+            serde_json::json!({
+                "index": 0, "token_ids": [], "tokens": [], "finish_reason": "stop",
+                "completion_usage": {
+                    "prompt_tokens": 4, "completion_tokens": 5, "total_tokens": 9
+                }
+            }),
+        ];
+        for (chunk, (prompt_tokens, completion_tokens, cached_tokens)) in
+            chunks
+                .into_iter()
+                .zip([(3, 1, 0), (3, 3, 0), (4, 4, 2), (4, 5, 2), (4, 5, 2)])
+        {
+            let output: BackendOutput = serde_json::from_value(chunk).unwrap();
+            state.update_usage_from_backend_output(&output);
+            let usage = state.get_usage();
+            assert_eq!(usage.prompt_tokens, prompt_tokens);
+            assert_eq!(usage.completion_tokens, completion_tokens);
+            assert_eq!(usage.total_tokens, prompt_tokens + completion_tokens);
+            assert_eq!(
+                usage.prompt_tokens_details.unwrap().cached_tokens,
+                Some(cached_tokens)
+            );
+        }
+    }
 
     #[test]
     fn force_include_usage_inserts_missing_options() {
