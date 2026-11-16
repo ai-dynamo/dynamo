@@ -4887,10 +4887,10 @@ class EmbeddingWorkerHandler:
         subject to the engine's media limits and allowed media sources.
 
         Input vLLM rejects is a client error rather than a 500. vLLM's typed
-        client errors go through ``vllm_client_error_to_http_error``, as on the
-        other vLLM request paths: the worker raises their status (422 for
-        media that can't be loaded), and the frontend maps it to its error
-        class and keeps the message private, since it can name the media URL.
+        client errors go through ``vllm_client_error_to_public_error``: a 400
+        raises ``InvalidArgument`` with vLLM's message. Other statuses keep
+        their message private, including 422 for media that can't be loaded,
+        since that message can name the media URL.
         Other validation failures (a text-only model given media, a malformed
         message) raise ``InvalidArgument``, a 400 with vLLM's message.
         """
@@ -4902,7 +4902,7 @@ class EmbeddingWorkerHandler:
         from vllm.renderers.chat_utils import load_chat_template
         from vllm.utils.mistral import is_mistral_tokenizer
 
-        from .errors import vllm_client_error_to_http_error
+        from .errors import vllm_client_error_to_public_error
 
         messages = request["messages"]
         batched = (
@@ -4941,7 +4941,7 @@ class EmbeddingWorkerHandler:
                 chat_request.build_tok_params(model_config),
             )
         except VLLMClientError as e:
-            raise vllm_client_error_to_http_error(e) from e
+            raise vllm_client_error_to_public_error(e) from e
         # The other errors vLLM's server answers with 400 (pydantic's
         # ValidationError is a ValueError).
         except (ValueError, TypeError) as e:
