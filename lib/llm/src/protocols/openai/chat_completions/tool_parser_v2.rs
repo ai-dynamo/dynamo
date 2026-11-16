@@ -1836,9 +1836,9 @@ mod tests {
             ),
             (
                 ParserVersion::V2,
-                Some("hermes"),
+                Some("unknown_parser"),
                 None,
-                "--dyn-tool-call-parser=\"hermes\", --dyn-reasoning-parser=unset",
+                "--dyn-tool-call-parser=\"unknown_parser\", --dyn-reasoning-parser=unset",
             ),
         ] {
             let error = validate_parser_version_for_mode(version, tool, reasoning)
@@ -1901,7 +1901,10 @@ mod tests {
             )
             .is_err()
         );
-        assert!(validate_parser_version_for_mode(ParserVersion::V2, Some("hermes"), None).is_err());
+        assert!(
+            validate_parser_version_for_mode(ParserVersion::V2, Some("unknown_parser"), None)
+                .is_err()
+        );
         assert!(validate_tool_request_mode(ParserVersion::V2, None, None, true).is_err());
         for alias in ["deepseek_v4", "deepseek-v4", "deepseekv4"] {
             assert!(validate_parser_version_for_mode(ParserVersion::V2, Some(alias), None).is_ok());
@@ -1998,7 +2001,7 @@ mod tests {
     // Unregistered families stay on their existing route.
     #[test]
     fn unified_family_returns_none_for_other_families() {
-        for other in ["hermes", "nemotron_deci"] {
+        for other in ["unknown_parser", "nemotron_deci"] {
             assert_eq!(unified_family(Some(other), None), None, "{other} tool");
             assert_eq!(unified_family(None, Some(other)), None, "{other} reasoning");
         }

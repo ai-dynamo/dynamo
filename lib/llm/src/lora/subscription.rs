@@ -73,13 +73,14 @@ async fn subscribe_to_events(
 mod tests {
     use super::*;
     use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
-    use dynamo_kv_router::protocols::{
-        ActiveSequenceEvent, ActiveSequenceEventBatch, ActiveSequenceEventData, WorkerWithDpRank,
-    };
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use dynamo_runtime::config::environment_names::zmq_broker as broker_env;
     use dynamo_runtime::distributed::DistributedConfig;
     use dynamo_runtime::transports::event_plane::EventPublisher;
     use dynamo_runtime::{DistributedRuntime, Runtime};
+    use dynamo_slot_tracker::host::{
+        ActiveSequenceEvent, ActiveSequenceEventBatch, ActiveSequenceEventData,
+    };
     fn lora_event(
         request_id: &str,
         lora_name: Option<&str>,

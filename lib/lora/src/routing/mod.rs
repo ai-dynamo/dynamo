@@ -7,7 +7,7 @@
 //! and is not yet wired into the per-LoRA allocator path. It is not exposed
 //! as a config value until that integration lands.
 
-use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use std::collections::HashMap;
 use std::str::FromStr;
 
