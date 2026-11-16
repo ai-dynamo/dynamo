@@ -16,6 +16,13 @@ serve but also extends it to all multimodal content (URL, embeddings, and
 base64 data).
 </Warning>
 
+<Note>
+Embedding workers are the exception. A vLLM `--embedding-worker` accepts
+image, video, and audio in chat-style `messages` without
+`--enable-multimodal`, and cannot be combined with it. See
+[Embedding](../../../../../reference/backends/vllm-configuration.mdx#embedding).
+</Note>
+
 ## Support Matrix
 
 | Modality | Aggregated | P/D | Separate encode worker |
