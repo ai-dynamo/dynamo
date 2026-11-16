@@ -10,7 +10,7 @@ with per-URL caching support.
 
 import json
 import logging
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 from tensorrt_llm.llmapi import DisaggregatedParams
@@ -39,7 +39,7 @@ async def fetch_embeddings_from_encoder(
     encode_client: Any,
     encoder_cache: Optional[MultimodalEmbeddingCacheManager] = None,
     trace_context=None,
-) -> Union[List[torch.Tensor], DisaggregatedParams]:
+) -> Union[List[Union[torch.Tensor, Dict[str, Any]]], DisaggregatedParams]:
     """
     Fetch embeddings from remote encode worker.
 
@@ -51,7 +51,8 @@ async def fetch_embeddings_from_encoder(
         trace_context: Optional Dynamo context for OTel trace propagation
 
     Returns:
-        - List[torch.Tensor]: When using cache (CPU tensors from cache)
+        - List: When using cache, one CPU embedding per image (see
+          _embedding_inputs)
         - DisaggregatedParams: When not using cache (contains CUDA IPC handles)
 
     Raises:
@@ -137,7 +138,7 @@ async def _fetch_embeddings_with_cache(
     request: Dict[str, Any],
     cache: MultimodalEmbeddingCacheManager,
     encode_fn: Callable[[Dict[str, Any]], DisaggregatedParams],
-) -> List[torch.Tensor]:
+) -> List[Union[torch.Tensor, Dict[str, Any]]]:
     """
     Encode image URLs with per-URL caching and partial cache usage.
 
@@ -154,13 +155,13 @@ async def _fetch_embeddings_with_cache(
                    Should accept a modified request dict with subset of URLs
 
     Returns:
-        List of embedding tensors for all images in original order
+        One embedding per image in original order (see _embedding_inputs)
     """
     if not image_urls:
         raise ValueError("image_urls list is empty")
 
     # Check cache for each URL
-    embeddings_with_index = []  # List of (original_index, tensor)
+    embeddings_with_index = []  # List of (original_index, CachedEmbedding)
     uncached_urls = []
     uncached_indices = []
     uncached_hashes = []
@@ -205,7 +206,7 @@ async def _fetch_embeddings_with_cache(
         url_hash = _cache_key(url)
         cached = cache.get(url_hash) if url_hash is not None else None
         if cached is not None:
-            embeddings_with_index.append((i, cached.tensor))
+            embeddings_with_index.append((i, cached))
         else:
             uncached_urls.append(url)
             uncached_indices.append(i)
@@ -213,9 +214,7 @@ async def _fetch_embeddings_with_cache(
 
     # If all cached, return immediately
     if not uncached_urls:
-        embeddings_with_index.sort(key=lambda x: x[0])
-        tensors = [t for _, t in embeddings_with_index]
-        return tensors
+        return _embedding_inputs(embeddings_with_index)
 
     # Create modified request with only uncached URLs
     modified_request = _create_request_with_urls(request, uncached_urls)
@@ -234,22 +233,41 @@ async def _fetch_embeddings_with_cache(
             "fetch_embeddings_with_cache: No multimodal_embedding_handles in ep_disaggregated_params"
         )
 
+    # The encoder may put each image's grid on its handle; read it before the
+    # handles are used up
+    grids = [(handle.get("metadata") or {}).get("image_grid_thw") for handle in handles]
+
     # Extract tensors from CUDA IPC handles
     new_tensors = await extract_embeddings_from_handles(handles)
 
-    # Cache new tensors (reuse hashes computed during cache lookup)
-    for url_hash, tensor in zip(uncached_hashes, new_tensors):
+    # Cache new embeddings with their grids (reuse hashes computed during
+    # cache lookup) and add them with their original indices
+    for idx, url_hash, tensor, grid in zip(
+        uncached_indices, uncached_hashes, new_tensors, grids
+    ):
+        entry = CachedEmbedding(tensor=tensor, image_grid_thw=grid)
         if url_hash is not None:
-            cache.set(url_hash, CachedEmbedding(tensor=tensor))
+            cache.set(url_hash, entry)
+        embeddings_with_index.append((idx, entry))
 
-    # Add new tensors to our list with their original indices
-    for idx, tensor in zip(uncached_indices, new_tensors):
-        embeddings_with_index.append((idx, tensor))
+    return _embedding_inputs(embeddings_with_index)
 
-    # Sort by original order and return list
+
+def _embedding_inputs(
+    embeddings_with_index: List[Tuple[int, CachedEmbedding]],
+) -> List[Union[torch.Tensor, Dict[str, Any]]]:
+    """Return each image's embedding in request order, with its grid if known.
+
+    TRT-LLM needs each image's grid to set its mRoPE positions. When the
+    encoder gave no grid, the embedding goes as a bare tensor, as before.
+    """
     embeddings_with_index.sort(key=lambda x: x[0])
-    tensors = [t for _, t in embeddings_with_index]
-    return tensors
+    return [
+        entry.tensor
+        if entry.image_grid_thw is None
+        else {"mm_embeddings": entry.tensor, "image_grid_thw": entry.image_grid_thw}
+        for _, entry in embeddings_with_index
+    ]
 
 
 def _create_request_with_urls(

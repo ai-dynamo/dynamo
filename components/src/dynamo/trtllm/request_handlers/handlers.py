@@ -196,7 +196,7 @@ class PrefillHandler(HandlerBase):
                         trace_context=context,
                     )
                     if isinstance(result, list):
-                        # Cache path: got List[torch.Tensor]
+                        # Cache path: got one embedding per image
                         embeddings_tensor = result
                     else:
                         # No-cache path: got DisaggregatedParams
