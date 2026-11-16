@@ -41,6 +41,7 @@ use crate::prelude::{
     WorkerWithDpRank,
 };
 
+mod blocks;
 mod coverage;
 mod dump_order;
 #[cfg(test)]

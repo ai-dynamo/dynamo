@@ -198,6 +198,25 @@ fn random_event(rng: &mut fastrand::Rng, forest: &Forest, owner: ResidencyOwner)
     }
 }
 
+/// The last blocks of a root path, cut into pieces of one to three blocks and
+/// stored last piece first, as a write-back cache fills a tier.
+fn tail_first_burst(
+    rng: &mut fastrand::Rng,
+    forest: &Forest,
+    owners: &[ResidencyOwner],
+) -> Vec<RouterEvent> {
+    let path = forest.root_path(rng.usize(..forest.nodes.len()));
+    let mut rest = &path[path.len() - rng.usize(1..=path.len().min(40))..];
+    let mut events = Vec::new();
+    while !rest.is_empty() {
+        let (before, piece) = rest.split_at(rest.len() - rng.usize(1..=rest.len().min(3)));
+        let owner = owners[rng.usize(..owners.len())];
+        events.push(store_event(forest, owner, piece));
+        rest = before;
+    }
+    events
+}
+
 fn hint_source() -> RouterHintSourceMetadata {
     RouterHintSourceMetadata {
         source_control_endpoint: "tcp://owner:23280".to_string(),
@@ -430,7 +449,7 @@ impl Both {
 #[test]
 fn matches_the_flat_reference_on_random_streams() {
     let owners = residency_owners(4);
-    let mut reached = [0usize; 6];
+    let mut reached = [0usize; 10];
     let mut head_kinds = [0usize; 4];
     let mut shared_edges = 0;
     for seed in 0..24 {
@@ -441,6 +460,11 @@ fn matches_the_flat_reference_on_random_streams() {
             match rng.u32(..150) {
                 0 => both.remove_worker(100, false),
                 1 => both.remove_worker(102, true),
+                2..=7 => {
+                    for event in tail_first_burst(&mut rng, &forest, &owners) {
+                        both.apply(event);
+                    }
+                }
                 _ => {
                     let owner = owners[rng.usize(..owners.len())];
                     both.apply(random_event(&mut rng, &forest, owner));
@@ -472,6 +496,10 @@ fn matches_the_flat_reference_on_random_streams() {
             &store.cursor_hops,
             &store.looked_again,
             &store.stale,
+            &store.prepended,
+            &store.follower_full,
+            &store.bridged,
+            &store.head_moved,
         ]) {
             *total += counter.load(Ordering::Relaxed);
         }
@@ -485,6 +513,10 @@ fn matches_the_flat_reference_on_random_streams() {
         cursor_hops,
         looked_again,
         stale,
+        prepended,
+        follower_full,
+        bridged,
+        head_moved,
     ] = reached;
     assert!(freed > 0, "no run was freed");
     assert!(trimmed > 0, "no trailing holes were trimmed");
@@ -494,10 +526,13 @@ fn matches_the_flat_reference_on_random_streams() {
     );
     assert!(cursor_hops > 0, "no walk crossed from one run to the next");
     assert_eq!(
-        (looked_again, stale),
-        (0, 0),
+        (looked_again, stale, head_moved),
+        (0, 0, 0),
         "single-threaded writes cannot race"
     );
+    assert!(prepended > 0, "no store went in front of the run after it");
+    assert!(follower_full > 0, "no store found the run after it full");
+    assert!(bridged > 0, "no store landed between two runs");
     let [roots, absent_parent, branches, continued] = head_kinds;
     assert!(roots > 0 && absent_parent > 0 && branches > 0 && continued > 0);
     assert!(shared_edges > 0, "no edge had three or more owners");
@@ -506,10 +541,11 @@ fn matches_the_flat_reference_on_random_streams() {
 /// Event lanes with disjoint owners write to shared chains while queries
 /// run. A worker whose blocks nobody else touches must read exactly, a worker
 /// with no blocks must read zero, and the final state must be what the same
-/// streams give when applied one after another.
+/// streams give when applied one after another. That worker holds the ends of
+/// chains whose beginnings the lanes store later, in front of its runs.
 #[test]
 fn concurrent_lanes_match_the_sequential_result() {
-    let mut reached = [0usize; 2];
+    let mut reached = [0usize; 3];
     for seed in 0..6 {
         let mut rng = fastrand::Rng::with_seed(1_000 + seed);
         let forest = Forest::random(&mut rng, 120);
@@ -518,12 +554,17 @@ fn concurrent_lanes_match_the_sequential_result() {
         let pinned = WorkerWithDpRank::new(900, 0);
         let absent = WorkerWithDpRank::new(999, 0);
         let mut pinned_lane = WorkerBlockIndex::default();
-        let pinned_paths: Vec<Vec<usize>> = (0..3)
-            .map(|_| forest.root_path(rng.usize(..forest.nodes.len())))
+        // Each path with where the pinned worker's part of it starts.
+        let pinned_paths: Vec<(Vec<usize>, usize)> = (0..3)
+            .map(|_| {
+                let path = forest.root_path(rng.usize(..forest.nodes.len()));
+                let cut = rng.usize(..path.len());
+                (path, cut)
+            })
             .collect();
         let pinned_events: Vec<RouterEvent> = pinned_paths
             .iter()
-            .map(|path| store_event(&forest, ResidencyOwner::worker(pinned), path))
+            .map(|(path, cut)| store_event(&forest, ResidencyOwner::worker(pinned), &path[*cut..]))
             .collect();
         for event in &pinned_events {
             index.apply_event(&mut pinned_lane, event.clone()).unwrap();
@@ -536,9 +577,13 @@ fn concurrent_lanes_match_the_sequential_result() {
                     ResidencyOwner::cache_owner(cache_owner(10 + lane as u8)),
                 ];
                 (0..3_000)
-                    .map(|_| {
-                        let owner = owners[rng.usize(..2)];
-                        random_event(&mut rng, &forest, owner)
+                    .flat_map(|_| {
+                        if rng.u32(..20) == 0 {
+                            tail_first_burst(&mut rng, &forest, &owners)
+                        } else {
+                            let owner = owners[rng.usize(..2)];
+                            vec![random_event(&mut rng, &forest, owner)]
+                        }
                     })
                     .collect()
             })
@@ -557,8 +602,8 @@ fn concurrent_lanes_match_the_sequential_result() {
                     scope.spawn(move || {
                         let mut rng = fastrand::Rng::with_seed(reader);
                         loop {
-                            let path = &paths[rng.usize(..paths.len())];
-                            let start = rng.usize(..path.len());
+                            let (path, cut) = &paths[rng.usize(..paths.len())];
+                            let start = rng.usize(*cut..path.len());
                             let mut continuations = FxHashMap::default();
                             continuations.insert(
                                 pinned,
@@ -626,12 +671,16 @@ fn concurrent_lanes_match_the_sequential_result() {
         assert_lane_counts(&edges, &all_lanes);
 
         let store = &index.store.reached;
-        for (total, counter) in reached.iter_mut().zip([&store.freed, &store.trimmed]) {
+        for (total, counter) in
+            reached
+                .iter_mut()
+                .zip([&store.freed, &store.trimmed, &store.prepended])
+        {
             *total += counter.load(Ordering::Relaxed);
         }
     }
-    let [freed, trimmed] = reached;
-    assert!(freed > 0 && trimmed > 0);
+    let [freed, trimmed, prepended] = reached;
+    assert!(freed > 0 && trimmed > 0 && prepended > 0);
 }
 
 /// A legacy all-domain clear that names a cache owner is applied on the

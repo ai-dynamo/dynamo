@@ -17,6 +17,14 @@
 //! `parent`'s block inside a run, or at the head of a run. A branch never
 //! splits a run; the diverging edge heads a new one.
 //!
+//! A run grows at both ends. Blocks stored after their parent extend the run
+//! that ends with it. Blocks stored before their child, as a write-back cache
+//! sends them, go in front of the run that starts after them, and that run's
+//! head edge moves inside it. An edge only ever moves that way, from a head
+//! to inside the same run. Two runs are never joined: a block that arrives
+//! between a run that ends at its parent and a run that starts after it
+//! extends the first.
+//!
 //! A position nobody holds is a hole. It reads as a missing edge, but stays in
 //! the run so that storing the block again only changes coverage. A run is
 //! freed when nothing in it is held, and its trailing holes are trimmed once
@@ -24,26 +32,32 @@
 //!
 //! # Locking
 //!
-//! - `structure` serializes every change to which blocks exist: appending
-//!   blocks, creating a run, trimming, freeing. Queries and coverage changes
-//!   never take it.
+//! - `structure` serializes every change to which blocks exist: adding blocks
+//!   at either end of a run, creating a run, trimming, freeing. Queries and
+//!   coverage changes never take it. It owns the map that finds the run to
+//!   grow at the front.
 //! - A store or remove first works without `structure`. When it finds that it
 //!   has to change the structure, it takes `structure` and looks again.
 //! - Order: `structure`, then one run lock, then a `heads` shard, then a
 //!   `blocks` shard. No run lock is taken while a map guard is held, and a
 //!   thread holds one run lock at a time.
 //! - A run reference read from a map is checked after locking: the run must
-//!   not be dead and must hold the expected block at that position.
-//! - A new run enters `heads` before its lock is first released, so a scan of
-//!   `heads` sees every run a write has touched.
+//!   not be dead and must hold the expected block at that place.
+//! - A reader looks an edge up in `heads` first and in `blocks` second. A
+//!   run's head moves inside it only after `blocks` names the new blocks, so
+//!   that order finds an edge that existed throughout.
+//! - A new run enters `heads` before its lock is first released, and a run's
+//!   head is moved under its lock. A scan copies `heads` under `structure`, so
+//!   it sees every run a write has touched exactly once.
 
 use std::sync::Arc;
 
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry as MapEntry;
 use parking_lot::{ArcRwLockReadGuard, Mutex, RawRwLock, RwLock, RwLockUpgradableReadGuard};
-use rustc_hash::FxBuildHasher;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 
+use super::blocks::Blocks;
 use super::coverage::Coverage;
 use super::{
     EdgeCursor, EdgeLookup, EdgeRef, IndexedResidencyOwner, OwnerId, OwnerSet, OwnerTable,
@@ -57,6 +71,10 @@ use crate::prelude::{ExternalSequenceBlockHash, KvCacheStoredBlockData, LocalBlo
 /// and one store or remove moves up to all of them. Tests use a short limit
 /// so that small chains span several runs.
 const MAX_RUN_BLOCKS: usize = if cfg!(test) { 16 } else { 512 };
+
+/// Offset of a new run's first block. Offsets fall as a run grows at the front
+/// and wrap; tests start low so that they do.
+const FIRST_OFFSET: u32 = if cfg!(test) { 2 } else { 1 << 31 };
 
 /// How often tests reached the paths that are rare or need a race.
 #[cfg(test)]
@@ -74,6 +92,14 @@ pub(super) struct Reached {
     pub(super) stale: std::sync::atomic::AtomicUsize,
     /// A walk moved from one run to the next.
     pub(super) cursor_hops: std::sync::atomic::AtomicUsize,
+    /// A store put blocks in front of the run that follows them.
+    pub(super) prepended: std::sync::atomic::AtomicUsize,
+    /// The run that follows a store's blocks had no room for them.
+    pub(super) follower_full: std::sync::atomic::AtomicUsize,
+    /// A store extended a run up to the start of another.
+    pub(super) bridged: std::sync::atomic::AtomicUsize,
+    /// A walk found an edge inside the run whose head it had been.
+    pub(super) head_moved: std::sync::atomic::AtomicUsize,
 }
 
 macro_rules! reached {
@@ -89,11 +115,15 @@ macro_rules! reached {
 type Run = RwLock<RunState>;
 
 struct RunState {
-    /// Sequence hash before `blocks[0]`; fixed for the run's life.
+    /// Sequence hash before `blocks[0]`. It changes when the run grows at the
+    /// front.
     parent: ExternalSequenceBlockHash,
+    /// Offset of `blocks[0]`. A block keeps its offset while it is in the
+    /// run, so growing at the front lowers this instead.
+    front: u32,
     /// Edge `i` is `(blocks[i - 1].1, blocks[i].0) -> blocks[i].1`, with
     /// `parent` standing in before the first block.
-    blocks: Vec<(LocalBlockHash, ExternalSequenceBlockHash)>,
+    blocks: Blocks,
     coverage: Coverage,
     /// Set when the run is unlinked from the maps.
     dead: bool,
@@ -102,22 +132,30 @@ struct RunState {
 /// How a caller reached a run.
 #[derive(Clone, Copy)]
 enum Entry {
-    /// Through `blocks`: the block at this position should have this hash.
+    /// Through `blocks`: the block at this offset should have this hash.
     After(u32, ExternalSequenceBlockHash),
     /// Through `heads`, under this key.
     Head(TransitionKey),
 }
 
 impl RunState {
+    /// Index of the block at `off`. Past the end for an offset the run does
+    /// not hold, including one before its front.
+    fn index_of(&self, off: u32) -> usize {
+        off.wrapping_sub(self.front) as usize
+    }
+
     /// Index of the edge `entry` leads to, or `None` when the reference is
-    /// stale: the run died, or the block is no longer where the map said.
+    /// stale: the run died, the block is no longer where the map said, or the
+    /// run's head moved.
     fn entry_index(&self, entry: Entry) -> Option<usize> {
         if self.dead {
             return None;
         }
         match entry {
-            Entry::After(pos, hash) => {
-                (self.blocks.get(pos as usize)?.1 == hash).then_some(pos as usize + 1)
+            Entry::After(off, hash) => {
+                let index = self.index_of(off);
+                (self.blocks.get(index)?.1 == hash).then_some(index + 1)
             }
             Entry::Head(key) => (self.parent == key.parent_hash
                 && self.blocks.first()?.0 == key.local_hash)
@@ -133,18 +171,14 @@ impl RunState {
 
     /// Drops the blocks at and past `len` and returns their hashes.
     fn truncate(&mut self, len: usize) -> Vec<ExternalSequenceBlockHash> {
-        let dropped = self.blocks.drain(len..).map(|block| block.1).collect();
         self.coverage.truncate(len as u32);
-        if self.blocks.capacity() > 4 * self.blocks.len().max(4) {
-            self.blocks.shrink_to_fit();
-        }
-        dropped
+        self.blocks.truncate(len)
     }
 }
 
 struct BlockRef {
     run: Arc<Run>,
-    pos: u32,
+    off: u32,
 }
 
 // One per stored block.
@@ -172,10 +206,15 @@ struct Progress {
 /// Hashes whose ownership changed, collected only when someone listens.
 type Changed<'a> = Option<&'a mut Vec<ExternalSequenceBlockHash>>;
 
+/// One head run that follows each sequence hash: its `parent`. Blocks stored
+/// before their child go in front of that run. Runs that share a parent keep
+/// the first of them here, and runs at the root none.
+type Followers = FxHashMap<ExternalSequenceBlockHash, Arc<Run>>;
+
 pub(super) struct RunStore {
     heads: DashMap<TransitionKey, Arc<Run>, FxBuildHasher>,
     blocks: DashMap<ExternalSequenceBlockHash, BlockRef, FxBuildHasher>,
-    structure: Mutex<()>,
+    structure: Mutex<Followers>,
     #[cfg(test)]
     pub(super) reached: Reached,
 }
@@ -185,26 +224,31 @@ impl RunStore {
         Self {
             heads: DashMap::with_hasher(FxBuildHasher),
             blocks: DashMap::with_hasher(FxBuildHasher),
-            structure: Mutex::new(()),
+            structure: Mutex::new(Followers::default()),
             #[cfg(test)]
             reached: Reached::default(),
         }
     }
 
-    /// The run and position `blocks` gives for `hash`. The caller validates it
+    /// The run and offset `blocks` gives for `hash`. The caller validates it
     /// after locking the run.
     fn locate(&self, hash: ExternalSequenceBlockHash) -> Option<(Arc<Run>, u32)> {
         self.blocks
             .get(&hash)
-            .map(|block| (block.run.clone(), block.pos))
+            .map(|block| (block.run.clone(), block.off))
     }
 
     fn head(&self, key: &TransitionKey) -> Option<Arc<Run>> {
         self.heads.get(key).map(|run| run.value().clone())
     }
 
+    /// Every run. `heads` is copied under `structure`: a head that moves
+    /// while the copy is made could otherwise be missed at both its keys.
     fn runs(&self) -> Vec<Arc<Run>> {
-        self.heads.iter().map(|run| run.value().clone()).collect()
+        let mut runs = Vec::with_capacity(self.heads.len());
+        let _structure = self.structure.lock();
+        runs.extend(self.heads.iter().map(|run| run.value().clone()));
+        runs
     }
 
     /// Stores `blocks` after `parent` for `who`, up to the first conflict.
@@ -220,8 +264,8 @@ impl RunStore {
         let mut next = 0;
         let mut added = 0;
         // Whether the edge after `parent` may sit inside the run holding
-        // `parent`. After a step that made progress it cannot: the step ended
-        // where that run stopped matching.
+        // `parent`. After a `cover` step that made progress it cannot: the
+        // step ended where that run stopped matching.
         let mut look_inside = true;
         while next < blocks.len() {
             let rest = &blocks[next..];
@@ -239,15 +283,18 @@ impl RunStore {
             {
                 progress = self.cover(&run, Entry::Head(key), who, rest, &mut changed);
             }
+            let covered = progress.is_some();
             let progress = progress.unwrap_or_else(|| self.place(who, parent, rest, &mut changed));
 
             added += progress.added;
             if progress.conflict {
                 break;
             }
-            // Only `place` reports no progress without a conflict: the edge
-            // appeared while it waited, so look again.
-            look_inside = progress.matched == 0;
+            // `place` can leave the next edge inside the run it grew: it puts
+            // blocks in front of the run that starts with that edge. It also
+            // reports no progress, without a conflict, when the edge appeared
+            // while it waited.
+            look_inside = !covered;
             if progress.matched > 0 {
                 next += progress.matched;
                 parent = Some(rest[progress.matched - 1].block_hash);
@@ -311,8 +358,9 @@ impl RunStore {
     }
 
     /// Creates the edge for `blocks[0]` after `parent`, and as many of the
-    /// following blocks as belong in the same run. Reports no progress when
-    /// the edge exists by now.
+    /// following blocks as belong in the same run: at the end of the run that
+    /// ends with `parent`, else in front of the run that starts after them,
+    /// else in a new run. Reports no progress when the edge exists by now.
     fn place(
         &self,
         who: Owner<'_>,
@@ -320,7 +368,7 @@ impl RunStore {
         blocks: &[KvCacheStoredBlockData],
         changed: &mut Changed<'_>,
     ) -> Progress {
-        let _structure = self.structure.lock();
+        let mut followers = self.structure.lock();
         let key = TransitionKey::new(parent, blocks[0].tokens_hash);
 
         // The run to extend, when `parent` is its last block.
@@ -351,31 +399,32 @@ impl RunStore {
             return Progress::default();
         }
 
-        let (run, len) = match tail {
-            Some(run) => {
-                let len = run.read().blocks.len();
-                if len < MAX_RUN_BLOCKS {
-                    (run, len)
-                } else {
-                    (self.new_run(key), 0)
-                }
-            }
-            None => (self.new_run(key), 0),
-        };
+        let tail = tail.and_then(|run| {
+            let (len, end) = {
+                let state = run.read();
+                let len = state.blocks.len();
+                (len, state.front.wrapping_add(len as u32))
+            };
+            (len < MAX_RUN_BLOCKS).then_some((run, len, end))
+        });
+        // A new run, unless the blocks go in front of the run after them.
+        let (run, len, end) = tail.unwrap_or_else(|| (self.new_run(key), 0, FIRST_OFFSET));
 
-        // Claim the hashes first. Until the run holds the blocks, a reader
-        // that finds one of these entries sees a position past the run's end
-        // and treats the block as absent.
+        // Claim the hashes first. Until a run holds the blocks, a reader that
+        // finds one of these entries sees an offset outside the run and
+        // treats the block as absent.
         let mut progress = Progress::default();
+        // The run that starts at the edge the claim stopped at.
+        let mut next_run = None;
         for (offset, block) in blocks.iter().enumerate().take(MAX_RUN_BLOCKS - len) {
-            if offset > 0
-                && self.heads.contains_key(&TransitionKey::new(
-                    Some(blocks[offset - 1].block_hash),
-                    block.tokens_hash,
-                ))
-            {
-                // A run already starts at this edge; the caller continues there.
-                break;
+            if offset > 0 {
+                let next =
+                    TransitionKey::new(Some(blocks[offset - 1].block_hash), block.tokens_hash);
+                next_run = self.head(&next);
+                if next_run.is_some() {
+                    // A run already starts at this edge; the caller continues there.
+                    break;
+                }
             }
             match self.blocks.entry(block.block_hash) {
                 MapEntry::Occupied(_) => {
@@ -386,7 +435,7 @@ impl RunStore {
                 MapEntry::Vacant(slot) => {
                     slot.insert(BlockRef {
                         run: run.clone(),
-                        pos: (len + offset) as u32,
+                        off: end.wrapping_add(offset as u32),
                     });
                 }
             }
@@ -397,18 +446,36 @@ impl RunStore {
         }
 
         let placed = &blocks[..progress.matched];
+        let last = placed[placed.len() - 1].block_hash;
+        #[cfg(test)]
         {
+            if len > 0 && (next_run.is_some() || followers.contains_key(&last)) {
+                reached!(self, bridged);
+            }
+        }
+        // Blocks that start a run go in front of the run after them instead.
+        let prepended = len == 0
+            && next_run
+                .or_else(|| followers.get(&last).cloned())
+                .is_some_and(|follower| self.prepend(&mut followers, &follower, key, placed, who));
+        if !prepended {
             let mut state = run.write();
             state.blocks.extend(
                 placed
                     .iter()
                     .map(|block| (block.tokens_hash, block.block_hash)),
+                MAX_RUN_BLOCKS,
             );
             state
                 .coverage
                 .push(placed.len() as u32, Some(OwnerSet::Single(who.id)));
             if len == 0 {
                 self.heads.insert(key, run.clone());
+                if key.parent_hash != ROOT_PARENT {
+                    followers
+                        .entry(key.parent_hash)
+                        .or_insert_with(|| run.clone());
+                }
             }
         }
         progress.added = placed.len() as u32;
@@ -418,10 +485,83 @@ impl RunStore {
         progress
     }
 
+    /// Puts `placed`, already claimed in `blocks`, in front of `follower`,
+    /// the run that starts after them, and moves its head to `key`. False
+    /// when the run is not that one any more or has no room.
+    fn prepend(
+        &self,
+        followers: &mut Followers,
+        follower: &Arc<Run>,
+        key: TransitionKey,
+        placed: &[KvCacheStoredBlockData],
+        who: Owner<'_>,
+    ) -> bool {
+        let last = placed[placed.len() - 1].block_hash;
+        // Only a holder of `structure` changes what is read here, so it holds
+        // until the write below.
+        let front = {
+            let state = follower.read();
+            if state.dead || state.parent != last {
+                return false;
+            }
+            if state.blocks.len() + placed.len() > MAX_RUN_BLOCKS {
+                reached!(self, follower_full);
+                return false;
+            }
+            state.front.wrapping_sub(placed.len() as u32)
+        };
+        // Name the blocks' places before the run holds them: their offsets
+        // fall before its front until then. A reader that finds the head gone
+        // looks here next, and waits on the run's lock for the rest.
+        for (index, block) in placed.iter().enumerate() {
+            self.blocks.insert(
+                block.block_hash,
+                BlockRef {
+                    run: follower.clone(),
+                    off: front.wrapping_add(index as u32),
+                },
+            );
+        }
+        let mut state = follower.write();
+        let old = TransitionKey {
+            parent_hash: state.parent,
+            local_hash: state.blocks[0].0,
+        };
+        state.blocks.push_front(
+            placed
+                .iter()
+                .map(|block| (block.tokens_hash, block.block_hash)),
+            MAX_RUN_BLOCKS,
+        );
+        state
+            .coverage
+            .push_front(placed.len() as u32, Some(OwnerSet::Single(who.id)));
+        state.front = front;
+        state.parent = key.parent_hash;
+        self.heads.insert(key, follower.clone());
+        self.heads
+            .remove_if(&old, |_, head| Arc::ptr_eq(head, follower));
+        drop(state);
+        if followers
+            .get(&last)
+            .is_some_and(|run| Arc::ptr_eq(run, follower))
+        {
+            followers.remove(&last);
+        }
+        if key.parent_hash != ROOT_PARENT {
+            followers
+                .entry(key.parent_hash)
+                .or_insert_with(|| follower.clone());
+        }
+        reached!(self, prepended);
+        true
+    }
+
     fn new_run(&self, key: TransitionKey) -> Arc<Run> {
         Arc::new(RwLock::new(RunState {
             parent: key.parent_hash,
-            blocks: Vec::new(),
+            front: FIRST_OFFSET,
+            blocks: Blocks::default(),
             coverage: Coverage::default(),
             dead: false,
         }))
@@ -440,17 +580,17 @@ impl RunStore {
         while next < hashes.len() {
             let hash = hashes[next];
             next += 1;
-            let Some((run, pos)) = self.locate(hash) else {
+            let Some((run, off)) = self.locate(hash) else {
                 continue;
             };
             let state = run.upgradable_read();
-            if state.entry_index(Entry::After(pos, hash)).is_none() {
+            let Some(after) = state.entry_index(Entry::After(off, hash)) else {
                 continue;
-            }
+            };
             // Take the event's following hashes while they are this block's
             // neighbours, in either direction.
-            let pos = pos as usize;
-            let (mut low, mut high) = (pos, pos + 1);
+            let pos = after - 1;
+            let (mut low, mut high) = (pos, after);
             while next < hashes.len()
                 && state
                     .blocks
@@ -524,7 +664,7 @@ impl RunStore {
     /// Frees `run` when nothing in it is held, or trims its trailing holes
     /// when they outnumber the held blocks.
     fn reclaim(&self, run: &Arc<Run>) {
-        let _structure = self.structure.lock();
+        let mut followers = self.structure.lock();
         let mut state = run.write();
         if state.dead || !state.needs_reclaim() {
             return;
@@ -540,7 +680,13 @@ impl RunStore {
             };
             drop(state);
             self.heads.remove_if(&key, |_, head| Arc::ptr_eq(head, run));
-            self.forget(run, blocks.into_iter().map(|block| block.1));
+            if followers
+                .get(&key.parent_hash)
+                .is_some_and(|follower| Arc::ptr_eq(follower, run))
+            {
+                followers.remove(&key.parent_hash);
+            }
+            self.forget(run, blocks.iter().map(|block| block.1));
         } else {
             reached!(self, trimmed);
             let live_end = state.coverage.live_end() as usize;
@@ -602,7 +748,7 @@ impl RunStore {
             census.stored_blocks += len;
             census.held_blocks += state.coverage.live() as usize;
             census.unheld_trailing_blocks += len - state.coverage.live_end() as usize;
-            census.spare_slots += state.blocks.capacity() - len;
+            census.spare_slots += state.blocks.spare_slots();
             census.segments += state.coverage.segments().count();
             census.longest_run = census.longest_run.max(len);
             census.runs_by_length[match len {
@@ -620,12 +766,12 @@ impl RunStore {
             } else {
                 match self.locate(parent) {
                     None => 1,
-                    Some((before, pos)) => {
-                        let before = before.read().blocks.len();
-                        if pos as usize + 1 < before {
+                    Some((before, off)) => {
+                        let before = before.read();
+                        if before.index_of(off) + 1 < before.blocks.len() {
                             2
                         } else {
-                            if before + len <= MAX_RUN_BLOCKS {
+                            if before.blocks.len() + len <= MAX_RUN_BLOCKS {
                                 census.joinable_runs += 1;
                             }
                             3
@@ -700,6 +846,36 @@ pub(super) struct RunCursor<'a> {
 }
 
 impl RunCursor<'_> {
+    /// Stands on the edge `(parent, local_hash)`, given what `heads` held for
+    /// it. An edge moves from a head to inside that run and never back, and
+    /// `blocks` names its new place first, so looking there second finds an
+    /// edge that existed throughout.
+    fn find(
+        &mut self,
+        head: Option<Arc<Run>>,
+        parent: Option<ExternalSequenceBlockHash>,
+        local_hash: LocalBlockHash,
+    ) -> bool {
+        let key = TransitionKey::new(parent, local_hash);
+        #[cfg(test)]
+        let was_head = head.is_some();
+        if head.is_some_and(|run| self.enter(run, Entry::Head(key), local_hash)) {
+            return true;
+        }
+        let entered = parent.is_some_and(|hash| {
+            self.store
+                .locate(hash)
+                .is_some_and(|(run, off)| self.enter(run, Entry::After(off, hash), local_hash))
+        });
+        #[cfg(test)]
+        {
+            if was_head && entered {
+                reached!(self.store, head_moved);
+            }
+        }
+        entered
+    }
+
     /// Locks `run` and stands on the edge `entry` leads to when that edge is
     /// for `local_hash`. Leaves the cursor outside any run otherwise.
     fn enter(&mut self, run: Arc<Run>, entry: Entry, local_hash: LocalBlockHash) -> bool {
@@ -749,25 +925,21 @@ impl EdgeCursor for RunCursor<'_> {
             }
         }
         if !inside {
+            // The edge heads a run, or follows its parent's block in that
+            // block's run. Read `heads` before letting go of the current run:
+            // while it is locked its blocks stay, so an edge that neither
+            // follows the parent there nor heads a run does not exist.
+            let head = self.store.head(&TransitionKey::new(parent, local_hash));
             // Release the run before locking another.
             self.run = None;
-            // The edge follows its parent's block in that block's run, or
-            // heads a run.
-            let entered = !looked_inside
-                && parent.is_some_and(|hash| {
-                    self.store.locate(hash).is_some_and(|(run, pos)| {
-                        self.enter(run, Entry::After(pos, hash), local_hash)
-                    })
-                });
-            if !entered {
-                let key = TransitionKey::new(parent, local_hash);
-                let run = self.store.head(&key)?;
-                if !self.enter(run, Entry::Head(key), local_hash) {
-                    return None;
-                }
-                if looked_inside {
-                    reached!(self.store, cursor_hops);
-                }
+            if looked_inside && head.is_none() {
+                return None;
+            }
+            if !self.find(head, parent, local_hash) {
+                return None;
+            }
+            if looked_inside {
+                reached!(self.store, cursor_hops);
             }
         }
         let state = self.run.as_ref()?;
@@ -801,13 +973,13 @@ impl RunStore {
             state.coverage.assert_invariants();
             assert!(!state.needs_reclaim(), "run left unreclaimed");
             for (pos, block) in state.blocks.iter().enumerate() {
-                let (indexed, indexed_pos) =
+                let (indexed, indexed_off) =
                     self.locate(block.1).expect("block missing from index");
                 assert!(
                     Arc::ptr_eq(&indexed, run),
                     "block indexed under another run"
                 );
-                assert_eq!(indexed_pos as usize, pos);
+                assert_eq!(state.index_of(indexed_off), pos);
                 if pos > 0 {
                     let inner = TransitionKey::new(Some(state.blocks[pos - 1].1), block.0);
                     assert!(
@@ -819,6 +991,24 @@ impl RunStore {
             stored += state.blocks.len();
         }
         assert_eq!(self.blocks.len(), stored, "stale block index entries");
+
+        let mut distinct: Vec<*const Run> = heads.iter().map(|(_, run)| Arc::as_ptr(run)).collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), heads.len(), "run under two head keys");
+
+        for (parent, follower) in self.structure.lock().iter() {
+            assert_ne!(*parent, ROOT_PARENT);
+            let state = follower.read();
+            assert!(!state.dead, "dead run among followers");
+            assert_eq!(state.parent, *parent, "follower does not follow its key");
+            let key = TransitionKey {
+                parent_hash: *parent,
+                local_hash: state.blocks[0].0,
+            };
+            let head = self.head(&key).expect("follower is not a head");
+            assert!(Arc::ptr_eq(&head, follower));
+        }
     }
 
     /// Every held edge: its key, child hash and owners.
@@ -886,5 +1076,320 @@ mod tests {
         assert_eq!(store.reached.stale.load(Ordering::Relaxed), 1);
         assert_eq!(store.store(who(1), Some(first), &blocks[1..], None), 2);
         store.assert_invariants();
+    }
+
+    /// A chain of `len` blocks; block `i` has local and sequence hash `base + i`.
+    fn chain(base: u64, len: usize) -> Vec<KvCacheStoredBlockData> {
+        let hashes: Vec<u64> = (0..len as u64).map(|i| base + i).collect();
+        let locals: Vec<_> = hashes.iter().copied().map(LocalBlockHash).collect();
+        stored_blocks_with_sequence_hashes(&locals, &hashes)
+    }
+
+    /// Stores `chain[range]` after the block before it in the chain.
+    fn store_piece(
+        store: &RunStore,
+        who: Owner<'_>,
+        chain: &[KvCacheStoredBlockData],
+        range: std::ops::Range<usize>,
+    ) -> u32 {
+        let parent = range.start.checked_sub(1).map(|i| chain[i].block_hash);
+        store.store(who, parent, &chain[range], None)
+    }
+
+    /// Run lengths, longest first.
+    fn run_lengths(store: &RunStore) -> Vec<usize> {
+        let mut lengths: Vec<_> = store
+            .runs()
+            .iter()
+            .map(|run| run.read().blocks.len())
+            .collect();
+        lengths.sort_unstable_by(|a, b| b.cmp(a));
+        lengths
+    }
+
+    fn reached(counter: &std::sync::atomic::AtomicUsize) -> usize {
+        counter.load(Ordering::Relaxed)
+    }
+
+    /// A chain stored last block first, as a write-back cache sends it, builds
+    /// the runs a parent-first store builds, whatever the size of each store.
+    #[test]
+    fn child_first_stores_build_whole_runs() {
+        let table = OwnerTable::default();
+        let owner = indexed_owners(1)[0];
+        let who = Owner {
+            id: table.intern(owner),
+            owner,
+            table: &table,
+        };
+        let blocks = chain(1_000, 40);
+        let reference = RunStore::new();
+        assert_eq!(reference.store(who, None, &blocks, None), 40);
+        let edges = |store: &RunStore| -> FxHashMap<TransitionKey, ExternalSequenceBlockHash> {
+            store
+                .held_edges()
+                .into_iter()
+                .map(|(key, (hash, _))| (key, hash))
+                .collect()
+        };
+
+        // Tests cap a run at 16 blocks. A run that is full when a store
+        // arrives in front of it stays as it is, and the store starts another.
+        for (piece, lengths, prepended) in [(1, [16, 16, 8], 37), (3, [15, 15, 10], 11)] {
+            let store = RunStore::new();
+            let mut end = blocks.len();
+            while end > 0 {
+                let start = end.saturating_sub(piece);
+                assert_eq!(
+                    store_piece(&store, who, &blocks, start..end),
+                    (end - start) as u32
+                );
+                end = start;
+            }
+            store.assert_invariants();
+            assert_eq!(run_lengths(&store), lengths);
+            assert_eq!(reached(&store.reached.prepended), prepended);
+            assert_eq!(reached(&store.reached.follower_full), 2);
+            let census = store.census();
+            assert_eq!(census.runs_by_start, [1, 0, 0, 2]);
+            assert_eq!(edges(&store), edges(&reference));
+
+            // A walk from the root crosses all three runs.
+            let mut cursor = store.cursor();
+            let mut parent = None;
+            for block in &blocks {
+                let edge = cursor
+                    .edge(parent, block.tokens_hash)
+                    .expect("a stored edge");
+                assert_eq!(edge.child_hash, block.block_hash);
+                parent = Some(block.block_hash);
+            }
+        }
+    }
+
+    /// What growing at the front leaves as separate runs, and what it joins.
+    #[test]
+    fn a_store_between_two_runs_extends_the_first() {
+        let table = OwnerTable::default();
+        let owner = indexed_owners(1)[0];
+        let who = Owner {
+            id: table.intern(owner),
+            owner,
+            table: &table,
+        };
+
+        // A store that lands between a run ending at its parent and a run
+        // starting after it extends the first; the two stay apart.
+        let store = RunStore::new();
+        let blocks = chain(1_000, 3);
+        store_piece(&store, who, &blocks, 0..1);
+        store_piece(&store, who, &blocks, 2..3);
+        store_piece(&store, who, &blocks, 1..2);
+        store.assert_invariants();
+        assert_eq!(run_lengths(&store), [2, 1]);
+        assert_eq!(reached(&store.reached.bridged), 1);
+        let census = store.census();
+        assert_eq!(
+            (census.runs_by_start, census.joinable_runs),
+            ([1, 0, 0, 1], 1)
+        );
+
+        // Of two runs that start after the same block, the first one stored
+        // takes the blocks in front, and the other becomes a branch off it.
+        let store = RunStore::new();
+        let blocks = chain(2_000, 3);
+        let sibling = chain(2_100, 1);
+        store_piece(&store, who, &blocks, 2..3);
+        store.store(who, Some(blocks[1].block_hash), &sibling, None);
+        store_piece(&store, who, &blocks, 1..2);
+        store.assert_invariants();
+        assert_eq!(run_lengths(&store), [2, 1]);
+        assert_eq!(store.census().runs_by_start, [0, 1, 1, 0]);
+        store_piece(&store, who, &blocks, 0..1);
+        store.assert_invariants();
+        assert_eq!(run_lengths(&store), [3, 1]);
+        assert_eq!(store.census().runs_by_start, [1, 0, 1, 0]);
+
+        // A run that started after a full run keeps its place as the run to
+        // grow when that block is trimmed away and stored again.
+        let store = RunStore::new();
+        let blocks = chain(3_000, 17);
+        store_piece(&store, who, &blocks, 0..17);
+        assert_eq!(run_lengths(&store), [16, 1]);
+        let hashes: Vec<_> = blocks.iter().map(|block| block.block_hash).collect();
+        assert_eq!(store.remove(who, &hashes[7..16], None), 9);
+        assert_eq!(reached(&store.reached.trimmed), 1);
+        assert_eq!(run_lengths(&store), [7, 1]);
+        store_piece(&store, who, &blocks, 15..16);
+        store.assert_invariants();
+        assert_eq!(run_lengths(&store), [7, 2]);
+        assert_eq!(reached(&store.reached.prepended), 1);
+    }
+
+    /// A run's head edge moves inside it when blocks go in front. Whoever
+    /// read the head before that finds the edge after its parent's block.
+    #[test]
+    fn an_edge_that_moved_inside_its_run_is_still_found() {
+        let table = OwnerTable::default();
+        let owners = indexed_owners(2);
+        let who = |n: usize| Owner {
+            id: table.intern(owners[n]),
+            owner: owners[n],
+            table: &table,
+        };
+        let blocks = chain(1_000, 3);
+        let (middle, last) = (&blocks[1], &blocks[2]);
+        let key = TransitionKey::new(Some(middle.block_hash), last.tokens_hash);
+
+        let store = RunStore::new();
+        store_piece(&store, who(0), &blocks, 2..3);
+        let head = store.head(&key).expect("the last block heads a run");
+        let (_, off) = store.locate(last.block_hash).unwrap();
+        store_piece(&store, who(0), &blocks, 1..2);
+        assert_eq!(reached(&store.reached.prepended), 1);
+
+        // The head reference is stale; the block keeps its offset.
+        assert!(store.head(&key).is_none());
+        assert_eq!(head.read().entry_index(Entry::Head(key)), None);
+        let after_last = head.read().entry_index(Entry::After(off, last.block_hash));
+        assert_eq!(after_last, Some(2));
+        let covered = store.cover(&head, Entry::Head(key), who(1), &blocks[2..], &mut None);
+        assert!(covered.is_none());
+        assert_eq!(reached(&store.reached.stale), 1);
+
+        let mut cursor = store.cursor();
+        assert!(cursor.find(Some(head), Some(middle.block_hash), last.tokens_hash));
+        assert_eq!(reached(&store.reached.head_moved), 1);
+        let state = cursor.run.as_ref().unwrap();
+        assert_eq!(state.blocks[cursor.index].1, last.block_hash);
+        drop(cursor);
+
+        // A store that ends at an existing head goes in front of that run and
+        // carries on inside it, without taking `structure` again.
+        let store = RunStore::new();
+        store_piece(&store, who(0), &blocks, 2..3);
+        assert_eq!(store.store(who(1), None, &blocks, None), 3);
+        store.assert_invariants();
+        assert_eq!(run_lengths(&store), [3]);
+        assert_eq!(reached(&store.reached.looked_again), 0);
+    }
+
+    /// One lane stores chains last block first while walks ask for the edge
+    /// at the front of the growing run: the edge whose place is changing.
+    #[test]
+    fn a_walk_finds_the_edge_at_the_front_of_a_growing_run() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+        const LEN: usize = 24;
+        let table = OwnerTable::default();
+        let owner = indexed_owners(1)[0];
+        let who = Owner {
+            id: table.intern(owner),
+            owner,
+            table: &table,
+        };
+        let chains: Vec<_> = (1..=2_000).map(|n| chain(n * 1_000, LEN)).collect();
+        let store = RunStore::new();
+        // The chain and block last stored, or `usize::MAX` before any.
+        let front = AtomicUsize::new(usize::MAX);
+        let done = AtomicBool::new(false);
+
+        std::thread::scope(|scope| {
+            for _ in 0..3 {
+                scope.spawn(|| {
+                    while !done.load(Ordering::Relaxed) {
+                        let at = front.load(Ordering::Acquire);
+                        if at == usize::MAX {
+                            continue;
+                        }
+                        let (blocks, at) = (&chains[at / LEN], at % LEN);
+                        let parent = at.checked_sub(1).map(|i| blocks[i].block_hash);
+                        let mut cursor = store.cursor();
+                        let edge = cursor
+                            .edge(parent, blocks[at].tokens_hash)
+                            .expect("a stored edge");
+                        assert_eq!(edge.child_hash, blocks[at].block_hash);
+                    }
+                });
+            }
+            for (n, blocks) in chains.iter().enumerate() {
+                for at in (0..LEN).rev() {
+                    assert_eq!(store_piece(&store, who, blocks, at..at + 1), 1);
+                    front.store(n * LEN + at, Ordering::Release);
+                }
+            }
+            done.store(true, Ordering::Relaxed);
+        });
+        store.assert_invariants();
+        assert_eq!(reached(&store.reached.prepended), chains.len() * (LEN - 2));
+    }
+
+    /// An owner clears, and a scan counts another owner's blocks, while a
+    /// second lane stores blocks in front of both owners' runs, moving their
+    /// heads. Neither may miss a run or see one twice.
+    #[test]
+    fn a_clear_and_a_scan_see_every_run_while_heads_move() {
+        use std::sync::Barrier;
+        use std::sync::atomic::AtomicBool;
+
+        const CHAINS: usize = 256;
+        const LEN: usize = 4;
+        let table = OwnerTable::default();
+        let owners = indexed_owners(3);
+        let who = |n: usize| Owner {
+            id: table.intern(owners[n]),
+            owner: owners[n],
+            table: &table,
+        };
+        let (cleared, pinned, other) = (who(0), who(1), who(2));
+        let store = RunStore::new();
+        let mut base = 0;
+        let mut new_chains = || -> Vec<_> {
+            (0..CHAINS)
+                .map(|_| {
+                    base += 1_000;
+                    chain(base, LEN)
+                })
+                .collect()
+        };
+
+        for round in 1..=8 {
+            // Each owner holds the last block of its chains.
+            let (cleared_chains, pinned_chains) = (new_chains(), new_chains());
+            for (owner, chains) in [(cleared, &cleared_chains), (pinned, &pinned_chains)] {
+                for blocks in chains {
+                    assert_eq!(store_piece(&store, owner, blocks, LEN - 1..LEN), 1);
+                }
+            }
+            let barrier = Barrier::new(3);
+            let done = AtomicBool::new(false);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    for blocks in cleared_chains.iter().chain(&pinned_chains) {
+                        for at in (0..LEN - 1).rev() {
+                            store_piece(&store, other, blocks, at..at + 1);
+                        }
+                    }
+                    done.store(true, Ordering::Relaxed);
+                });
+                scope.spawn(|| {
+                    barrier.wait();
+                    while !done.load(Ordering::Relaxed) {
+                        let mut held = 0;
+                        store.for_each_held(|owners, _, blocks| {
+                            if owners.contains(pinned.id, pinned.owner) {
+                                held += blocks.len();
+                            }
+                        });
+                        assert_eq!(held, round * CHAINS);
+                    }
+                });
+                barrier.wait();
+                assert_eq!(store.remove_owner(cleared, None) as usize, CHAINS);
+            });
+        }
+        store.assert_invariants();
+        assert!(reached(&store.reached.prepended) > 0);
     }
 }

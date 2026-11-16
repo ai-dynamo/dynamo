@@ -11,9 +11,9 @@ use crate::prelude::{KvCacheEventData, KvCacheStoreData, RouterEvent};
 /// block's store comes after its parent's. No store moves past an event of
 /// another kind or tier, so the replay ends in the same state.
 ///
-/// The lower tier stores consecutive blocks together only when a block arrives
-/// after its parent. Senders through v1.7 list a lower tier's blocks in hash
-/// order, which would rebuild a chain as runs of about two blocks.
+/// The lower tier adds a block to a run at either end but never joins two
+/// runs. Senders through v1.7 list a lower tier's blocks in hash order, which
+/// would rebuild a chain as runs of about three blocks.
 ///
 /// Compatibility with v1.6 and v1.7 senders during rolling upgrades.
 /// TODO(v1.10): Remove when v1.7 falls outside the N-2 compatibility window.

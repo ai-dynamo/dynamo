@@ -682,6 +682,13 @@ mod tests {
             lower.cpu_tier.live_memberships
         );
         assert_eq!(lower.kvcr_indexed_memberships, lower.kvcr.live_memberships);
+        // Stores of 8 blocks that arrive before their parents still build long runs: each
+        // goes in front of the run that starts after it.
+        assert!(
+            lower.runs.stored_blocks > 16 * lower.runs.runs,
+            "{:?}",
+            lower.runs
+        );
         Ok(())
     }
 }

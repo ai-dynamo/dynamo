@@ -145,6 +145,24 @@ impl Coverage {
         self.len += count;
     }
 
+    /// Inserts `count` positions held by `owners` before position 0.
+    pub(super) fn push_front(&mut self, count: u32, owners: Option<OwnerSet>) {
+        if count == 0 {
+            return;
+        }
+        if owners.is_some() {
+            self.live += count;
+        }
+        for segment in &mut self.segments {
+            segment.start += count;
+        }
+        match self.segments.first_mut() {
+            Some(first) if same(&first.owners, &owners) => first.start = 0,
+            _ => self.segments.insert(0, Segment { start: 0, owners }),
+        }
+        self.len += count;
+    }
+
     /// Drops every position at or past `len`.
     pub(super) fn truncate(&mut self, len: u32) {
         if len >= self.len {
@@ -321,16 +339,22 @@ mod tests {
                 let which = rng.usize(..owners.len());
                 let (id, owner) = (ids[which], owners[which]);
                 match rng.u32(..10) {
-                    0 | 1 => {
+                    kind @ (0 | 1) => {
                         let count = rng.u32(1..6);
                         let held = rng.bool();
-                        coverage.push(count, held.then_some(OwnerSet::Single(id)));
+                        let owners = held.then_some(OwnerSet::Single(id));
                         let set = if held {
                             BTreeSet::from([id.0])
                         } else {
                             BTreeSet::new()
                         };
-                        model.extend(std::iter::repeat_n(set, count as usize));
+                        if kind == 0 {
+                            coverage.push(count, owners);
+                            model.extend(std::iter::repeat_n(set, count as usize));
+                        } else {
+                            coverage.push_front(count, owners);
+                            model.splice(..0, std::iter::repeat_n(set, count as usize));
+                        }
                     }
                     2 if len > 0 => {
                         let keep = rng.u32(..=len);
