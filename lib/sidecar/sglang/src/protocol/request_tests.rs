@@ -152,7 +152,7 @@ fn request_refusal_is_public() {
     .unwrap_err();
     assert_eq!(
         error.public_message(),
-        Some("multimodal payloads are not supported by SGLang's native Generate RPC")
+        Some("mm_processor_kwargs are not supported by SGLang's native Generate RPC")
     );
 
     let mut embeds = request();
@@ -250,6 +250,28 @@ fn sampling_and_stopping_fields_preserve_native_values() {
 }
 
 #[test]
+fn visible_stop_tokens_stop_in_engine_and_return_only_ids() {
+    let mut request = request();
+    request.stop_conditions.stop_token_ids = Some(vec![19]);
+    request.stop_conditions.stop_token_ids_hidden = Some(vec![200002, 199999]);
+    request.stop_conditions.stop_token_ids_visible = Some(vec![200012, 19]);
+    let mapped = build_generate_request(
+        &request,
+        "visible",
+        DisaggregationMode::Aggregated,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        mapped.sampling_params.unwrap().stop_token_ids,
+        vec![19, 200002, 199999, 200012]
+    );
+    // SGLang text trims the stop token.
+    assert_eq!(mapped.return_text, None);
+}
+
+#[test]
 fn optional_controls_distinguish_absence_from_explicit_zero_or_false() {
     for explicit in [false, true] {
         let mut request = request();
@@ -334,6 +356,7 @@ fn values_outside_native_signed_fields_are_rejected() {
         ("token", "token ids must fit in i32"),
         ("stop", "stop token ids must fit in i32"),
         ("hidden_stop", "stop token ids must fit in i32"),
+        ("visible_stop", "stop token ids must fit in i32"),
         ("max_tokens", "max_tokens does not fit in i32"),
         ("min_tokens", "min_tokens does not fit in i32"),
         ("logprobs", "requested logprobs does not fit in i32"),
@@ -346,6 +369,7 @@ fn values_outside_native_signed_fields_are_rejected() {
             "token" => request.token_ids = vec![overflow].into(),
             "stop" => request.stop_conditions.stop_token_ids = Some(vec![overflow]),
             "hidden_stop" => request.stop_conditions.stop_token_ids_hidden = Some(vec![overflow]),
+            "visible_stop" => request.stop_conditions.stop_token_ids_visible = Some(vec![overflow]),
             "max_tokens" => request.stop_conditions.max_tokens = Some(overflow),
             "min_tokens" => request.stop_conditions.min_tokens = Some(overflow),
             "logprobs" => request.output_options.logprobs = Some(overflow),
@@ -411,6 +435,13 @@ fn unsupported_sampling_controls_are_rejected() {
             },
             "include_stop_str_in_output",
         ),
+        (
+            SamplingOptions {
+                logit_bias: Some(std::collections::HashMap::from([(18, -10.0)])),
+                ..Default::default()
+            },
+            "logit_bias",
+        ),
     ] {
         let mut request = request();
         request.sampling_options = options;
@@ -426,9 +457,9 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
     for field in [
         "token_ids",
         "prompt_embeds",
-        "multimodal",
         "mm_processor_kwargs",
-        "visible",
+        "multi_modal_uuids",
+        "encoder_result",
     ] {
         let mut request = request();
         let message = match field {
@@ -440,17 +471,20 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
                 request.prompt_embeds = Some("encoded".to_string());
                 "prompt_embeds"
             }
-            "multimodal" => {
-                request.multi_modal_data = Some(Default::default());
-                "multimodal"
-            }
             "mm_processor_kwargs" => {
                 request.mm_processor_kwargs = Some(json!({}));
-                "multimodal"
+                "mm_processor_kwargs"
             }
-            "visible" => {
-                request.stop_conditions.stop_token_ids_visible = Some(vec![42]);
-                "visible stop-token"
+            "multi_modal_uuids" => {
+                request.multi_modal_uuids = Some(HashMap::from([(
+                    "image_url".to_string(),
+                    vec![None, Some("image-a".to_string())],
+                )]));
+                "media uuids"
+            }
+            "encoder_result" => {
+                request.encoder_result = Some(json!({}));
+                "encoder_result"
             }
             _ => unreachable!(),
         };
@@ -458,6 +492,159 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
             build_generate_request(&request, field, DisaggregationMode::Aggregated, None, None)
                 .unwrap_err();
         assert_invalid(error, message);
+    }
+}
+
+fn url(source: &str) -> MultimodalData {
+    MultimodalData::Url(url::Url::parse(source).unwrap())
+}
+
+fn with_media(key: &str, items: Vec<MultimodalData>) -> PreprocessedRequest {
+    let mut request = request();
+    request.multi_modal_data = Some(HashMap::from([(key.to_string(), items)]));
+    request
+}
+
+fn aggregated(request: &PreprocessedRequest) -> Result<pb::GenerateRequest, DynamoError> {
+    build_generate_request(
+        request,
+        "rid-mm",
+        DisaggregationMode::Aggregated,
+        None,
+        None,
+    )
+}
+
+#[test]
+fn media_maps_to_sglang_fields_in_request_order() {
+    let mut request = request();
+    request.multi_modal_data = Some(HashMap::from([
+        (
+            "image_url".to_string(),
+            vec![
+                url("https://example.com/a.png"),
+                MultimodalData::RawUrl("data:image/png;base64,AAAA".to_string()),
+            ],
+        ),
+        (
+            "video_url".to_string(),
+            vec![url("http://example.com/v.mp4")],
+        ),
+        (
+            "audio_url".to_string(),
+            vec![MultimodalData::RawUrl(
+                "data:audio/wav;base64,UklGRg==".to_string(),
+            )],
+        ),
+    ]));
+    // Empty uuid slots carry no cache identity, and the sidecar ignores mm_hashes in extra_args.
+    request.multi_modal_uuids = Some(HashMap::from([("image_url".to_string(), vec![None, None])]));
+    request.extra_args = Some(json!({"mm_hashes": ["00112233aabbccdd", "ffeeddcc44332211"]}));
+
+    let mapped = aggregated(&request).unwrap();
+    assert_eq!(
+        mapped.image_data,
+        ["https://example.com/a.png", "data:image/png;base64,AAAA"]
+    );
+    assert_eq!(mapped.video_data, ["http://example.com/v.mp4"]);
+    assert_eq!(mapped.audio_data, ["data:audio/wav;base64,UklGRg=="]);
+}
+
+#[test]
+fn unsupported_media_is_refused_publicly() {
+    let decoded: MultimodalData = serde_json::from_value(json!({"Decoded": {
+        "nixl_metadata": "",
+        "nixl_descriptor": {"addr": 0, "size": 3, "mem_type": "Dram", "device_id": 0},
+        "shape": [1, 1, 3],
+        "dtype": "UINT8",
+        "metadata": null,
+    }}))
+    .unwrap();
+    let scheme = "the SGLang sidecar accepts media only as http://, https://, or data: URLs";
+    for (key, item, message) in [
+        (
+            "image_url",
+            decoded,
+            "the SGLang sidecar cannot read frontend-decoded media; configure URL passthrough",
+        ),
+        (
+            "image_url",
+            MultimodalData::UuidOnly("cached-image".to_string()),
+            "the SGLang sidecar needs a media URL and cannot resolve UUID-only media",
+        ),
+        ("image_url", url("file:///etc/hosts"), scheme),
+        (
+            "video_url",
+            MultimodalData::RawUrl("/tmp/clip.mp4".to_string()),
+            scheme,
+        ),
+        ("audio_url", url("s3://bucket/a.wav"), scheme),
+        (
+            "vision_chunk",
+            url("https://example.com/a.png"),
+            "SGLang's native Generate RPC accepts only image, video, and audio media",
+        ),
+    ] {
+        let error = aggregated(&with_media(key, vec![item])).unwrap_err();
+        assert_eq!(error.public_message(), Some(message), "{key}");
+    }
+}
+
+#[test]
+fn media_io_kwargs_are_refused_only_with_media() {
+    let mut text = request();
+    text.media_io_kwargs = Some(json!({"video": {"fps": 1}}));
+    assert!(aggregated(&text).is_ok());
+
+    let mut video = with_media("video_url", vec![url("https://example.com/v.mp4")]);
+    video.media_io_kwargs = text.media_io_kwargs;
+    assert_eq!(
+        aggregated(&video).unwrap_err().public_message(),
+        Some("media_io_kwargs are not supported by SGLang's native Generate RPC")
+    );
+}
+
+#[test]
+fn media_needs_server_support_for_its_kind() {
+    let media = |kind| aggregated(&with_media(kind, vec![url("https://example.com/m")])).unwrap();
+    let image_only = MediaSupport {
+        image: true,
+        ..Default::default()
+    };
+    let image_and_video = MediaSupport {
+        video: true,
+        ..image_only
+    };
+    let audio_only = MediaSupport {
+        audio: true,
+        ..Default::default()
+    };
+    require_media_support(&media("image_url"), image_only).unwrap();
+    require_media_support(&media("video_url"), image_and_video).unwrap();
+    require_media_support(&media("audio_url"), audio_only).unwrap();
+    for (kind, support, message) in [
+        (
+            "image_url",
+            audio_only,
+            "this SGLang server does not accept image inputs over gRPC; serve an image model with an SGLang version that supports gRPC media",
+        ),
+        (
+            "video_url",
+            image_only,
+            "this SGLang server does not accept video inputs over gRPC; serve a video model with an SGLang version that supports gRPC media",
+        ),
+        (
+            "audio_url",
+            image_and_video,
+            "this SGLang server does not accept audio inputs over gRPC; serve an audio model with an SGLang version that supports gRPC media",
+        ),
+    ] {
+        let error = require_media_support(&media(kind), support).unwrap_err();
+        assert_eq!(error.public_message(), Some(message), "{kind}");
+    }
+
+    for text in [request(), with_media("image_url", Vec::new())] {
+        require_media_support(&aggregated(&text).unwrap(), MediaSupport::default()).unwrap();
     }
 }
 

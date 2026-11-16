@@ -1,0 +1,1091 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Per-tier registry of [`LowerTierIndexer`] instances and helpers for walking
+//! the device → host → disk continuation chain.
+//!
+//! The primary KV indexer (radix tree) handles device-tier overlap scoring.
+//! When a request arrives, we want to extend the per-worker match by walking
+//! whichever lower tiers a worker has registered. [`LowerTierIndexers`] holds
+//! one [`ThreadPoolIndexer<LowerTierIndexer>`] per non-device [`StorageTier`]
+//! and lazily allocates each tier on first event arrival.
+//!
+//! Both the request-plane indexer (`dynamo-llm`) and the standalone HTTP
+//! indexer (this crate's `services::indexer` module) share this implementation
+//! so tier semantics stay aligned across the two surfaces.
+
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
+use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
+use crate::prelude::{
+    LocalBlockHash, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent, StorageTier,
+};
+use crate::{
+    KvIndexerMetrics, KvRouterError, LowerTierContinuation, LowerTierIndexer,
+    LowerTierMatchDetails, MatchDetails, ThreadPoolIndexer, WireTieredMatchDetails,
+    record_unsupported_residency_event,
+};
+use arc_swap::ArcSwap;
+use async_trait::async_trait;
+use rustc_hash::FxHashMap;
+
+/// Holds one per-tier [`ThreadPoolIndexer<LowerTierIndexer>`] for every
+/// non-device [`StorageTier`] that has received at least one event.
+#[derive(Clone)]
+pub struct LowerTierIndexers {
+    metrics: Option<Arc<KvIndexerMetrics>>,
+    num_threads: usize,
+    block_size: u32,
+    routing_snapshot: Arc<ArcSwap<ResidencyRoutingSnapshot>>,
+    indexers: Arc<RwLock<HashMap<StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>>>>,
+}
+
+impl LowerTierIndexers {
+    /// Metrics-less constructor for call sites without a `KvIndexerMetrics` handle.
+    /// Router production assembly should use [`new_with_metrics`](Self::new_with_metrics)
+    /// so lower-tier traffic is included in `kv_cache_events_applied`.
+    pub fn new(num_threads: usize, block_size: u32) -> Self {
+        Self::new_with_metrics(num_threads, block_size, None)
+    }
+
+    /// Same as [`new`](Self::new) but wires `kv_cache_events_applied`
+    /// counters into every lazily created per-tier indexer, matching the
+    /// observability of the device-tier path.
+    pub fn new_with_metrics(
+        num_threads: usize,
+        block_size: u32,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+    ) -> Self {
+        assert!(
+            num_threads > 0,
+            "lower-tier indexer threads must be non-zero"
+        );
+        Self {
+            num_threads,
+            block_size,
+            metrics,
+            routing_snapshot: Arc::new(ArcSwap::from_pointee(ResidencyRoutingSnapshot::default())),
+            indexers: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Replace the immutable owner-to-worker projection used by future
+    /// lookups. Discovery and liveness reconciliation happen outside this
+    /// crate; the indexer only consumes the already-resolved snapshot.
+    pub fn set_residency_projection(&self, projection: ResidencyProjection) {
+        self.set_residency_routing_snapshot(ResidencyRoutingSnapshot::from_projection(projection));
+    }
+
+    pub fn set_residency_routing_snapshot(&self, snapshot: ResidencyRoutingSnapshot) {
+        self.routing_snapshot.store(Arc::new(snapshot));
+    }
+
+    /// Return the per-tier indexer for `storage_tier`, lazily allocating it
+    /// the first time a non-device tier is seen.
+    pub fn get_or_create(
+        &self,
+        storage_tier: StorageTier,
+    ) -> Arc<ThreadPoolIndexer<LowerTierIndexer>> {
+        debug_assert!(!storage_tier.is_gpu());
+        if let Some(indexer) = self.indexers.read().unwrap().get(&storage_tier).cloned() {
+            return indexer;
+        }
+        self.indexers
+            .write()
+            .unwrap()
+            .entry(storage_tier)
+            .or_insert_with(|| {
+                Arc::new(ThreadPoolIndexer::new_with_metrics(
+                    LowerTierIndexer::new(),
+                    self.num_threads,
+                    self.block_size,
+                    self.metrics.clone(),
+                ))
+            })
+            .clone()
+    }
+
+    /// All currently allocated lower-tier indexers, in unspecified order.
+    pub fn all(&self) -> Vec<Arc<ThreadPoolIndexer<LowerTierIndexer>>> {
+        self.indexers.read().unwrap().values().cloned().collect()
+    }
+
+    /// All currently allocated lower-tier indexers paired with the
+    /// [`StorageTier`] each one indexes. Used by callers that need to retag
+    /// per-tier dumps (e.g. peer-recovery).
+    pub fn entries(&self) -> Vec<(StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>)> {
+        self.indexers
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(tier, indexer)| (*tier, indexer.clone()))
+            .collect()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.indexers.read().unwrap().is_empty()
+    }
+
+    /// Lookup without allocation; returns `None` if the tier is unseen.
+    pub fn get(
+        &self,
+        storage_tier: StorageTier,
+    ) -> Option<Arc<ThreadPoolIndexer<LowerTierIndexer>>> {
+        self.indexers.read().unwrap().get(&storage_tier).cloned()
+    }
+
+    pub fn record_unsupported_residency_event(&self, event: &RouterEvent) {
+        record_unsupported_residency_event(self.metrics.as_deref(), event);
+    }
+}
+
+/// Native tiered-match container: the device-tier match plus a per-tier map
+/// of lower-tier hits. Wire-friendly representations live in
+/// [`WireTieredMatchDetails`]; conversions in both directions are provided.
+#[derive(Debug, Clone, Default)]
+pub struct TieredMatchDetails {
+    pub device: MatchDetails,
+    pub lower_tier: HashMap<StorageTier, LowerTierMatchDetails>,
+}
+
+impl TieredMatchDetails {
+    pub fn kv_transfer_candidates(&self) -> Option<&KvTransferCandidates> {
+        self.lower_tier
+            .get(&StorageTier::HostPinned)
+            .and_then(|details| details.kv_transfer_candidates.as_ref())
+            .or(self.device.kv_transfer_candidates.as_ref())
+    }
+
+    pub fn into_kv_transfer_candidates(mut self) -> Option<KvTransferCandidates> {
+        self.lower_tier
+            .get_mut(&StorageTier::HostPinned)
+            .and_then(|details| details.kv_transfer_candidates.take())
+            .or(self.device.kv_transfer_candidates)
+    }
+}
+
+impl From<&TieredMatchDetails> for WireTieredMatchDetails {
+    fn from(d: &TieredMatchDetails) -> Self {
+        Self {
+            device: d.device.overlap_scores.clone().into(),
+            lower_tier: d
+                .lower_tier
+                .iter()
+                .map(|(tier, details)| (*tier, details.into()))
+                .collect(),
+        }
+    }
+}
+
+impl From<WireTieredMatchDetails> for TieredMatchDetails {
+    fn from(w: WireTieredMatchDetails) -> Self {
+        // `last_matched_hashes` is only needed server-side to seed the tier walk,
+        // so we leave it empty on the inbound side.
+        let mut lower_tier = HashMap::with_capacity(w.lower_tier.len());
+        for (tier, details) in w.lower_tier {
+            if lower_tier.insert(tier, details.into()).is_some() {
+                tracing::warn!(
+                    ?tier,
+                    "Duplicate StorageTier in WireTieredMatchDetails; keeping last entry"
+                );
+            }
+        }
+        Self {
+            device: MatchDetails {
+                overlap_scores: w.device.into(),
+                ..Default::default()
+            },
+            lower_tier,
+        }
+    }
+}
+
+/// The order in which lower tiers are walked when extending a match. Device
+/// → HostPinned → Disk → External.
+pub fn lower_tier_query_order() -> [StorageTier; 3] {
+    [
+        StorageTier::HostPinned,
+        StorageTier::Disk,
+        StorageTier::External,
+    ]
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LowerTierQueryOptions {
+    pub retain_kv_transfer_chain: bool,
+}
+
+#[async_trait]
+pub trait TieredMatchProvider: Send + Sync {
+    async fn find_tiered_matches(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Result<TieredMatchDetails, KvRouterError>;
+
+    async fn find_tiered_matches_with_options(
+        &self,
+        sequence: &[LocalBlockHash],
+        options: LowerTierQueryOptions,
+    ) -> Result<TieredMatchDetails, KvRouterError> {
+        let _ = options;
+        self.find_tiered_matches(sequence).await
+    }
+}
+
+fn merge_kv_transfer_tier_candidates(
+    device_candidates: Option<&KvTransferCandidates>,
+    tier_matches: &mut LowerTierMatchDetails,
+    routing_snapshot: Arc<ResidencyRoutingSnapshot>,
+) -> Option<KvTransferCandidates> {
+    let mut block_hashes = device_candidates
+        .map(|candidates| candidates.block_hashes.clone())
+        .unwrap_or_default();
+    let mut owner_prefix_blocks: FxHashMap<KvTransferCandidateSource, usize> = FxHashMap::default();
+
+    if let Some(candidates) = device_candidates {
+        owner_prefix_blocks.extend(candidates.owner_prefix_blocks.iter().copied());
+    }
+
+    let Some(extensions) = tier_matches.kv_transfer_extensions.as_mut() else {
+        return device_candidates.cloned();
+    };
+
+    // KV transfer hints intentionally retain one compact root-aligned chain. The
+    // lower-tier walk records each matched child hash once at its request-block
+    // position and tracks per-owner depths separately, avoiding per-worker hash
+    // copies on the lookup hot path. Positional equality assumes
+    // ExternalSequenceBlockHash is stable across workers and tiers for the same
+    // request-prefix position.
+    for (pos, hash) in &extensions.block_hashes {
+        if block_hashes.len() < *pos {
+            break;
+        }
+
+        if *pos < block_hashes.len() {
+            if block_hashes[*pos] != *hash {
+                break;
+            }
+        } else {
+            block_hashes.push(*hash);
+        }
+    }
+
+    owner_prefix_blocks.extend(
+        extensions
+            .owner_prefix_blocks
+            .iter()
+            .filter(|(_, blocks)| **blocks <= block_hashes.len())
+            .map(|(worker, blocks)| (*worker, *blocks)),
+    );
+
+    let mut owner_prefix_blocks = owner_prefix_blocks
+        .into_iter()
+        .filter(|(_, blocks)| *blocks > 0)
+        .collect::<Vec<_>>();
+    let mut source_intervals = std::mem::take(&mut extensions.source_intervals);
+    source_intervals.retain(|interval| interval.end <= block_hashes.len());
+    if block_hashes.is_empty() || (owner_prefix_blocks.is_empty() && source_intervals.is_empty()) {
+        return None;
+    }
+    owner_prefix_blocks.sort_unstable_by_key(|(worker, _)| *worker);
+
+    Some(KvTransferCandidates {
+        block_hashes,
+        owner_prefix_blocks,
+        source_intervals,
+        routing_snapshot: Some(routing_snapshot),
+    })
+}
+
+/// Walk every allocated lower tier in [`lower_tier_query_order`] and build a
+/// per-tier match map seeded from `device_matches`. Per-worker continuations
+/// flow forward: a worker that matched N device blocks starts the host walk
+/// at block N (anchored on its last device hash), and so on.
+pub fn query_lower_tiers_with_options(
+    indexers: &LowerTierIndexers,
+    sequence: &[LocalBlockHash],
+    device_matches: &MatchDetails,
+    options: LowerTierQueryOptions,
+) -> HashMap<StorageTier, LowerTierMatchDetails> {
+    if indexers.is_empty() {
+        return HashMap::new();
+    }
+    let snapshot = indexers.routing_snapshot.load_full();
+    query_lower_tiers_with_options_and_snapshot(
+        indexers,
+        sequence,
+        device_matches,
+        options,
+        snapshot,
+    )
+}
+
+pub fn query_lower_tiers_with_options_and_snapshot(
+    indexers: &LowerTierIndexers,
+    sequence: &[LocalBlockHash],
+    device_matches: &MatchDetails,
+    options: LowerTierQueryOptions,
+    snapshot: Arc<ResidencyRoutingSnapshot>,
+) -> HashMap<StorageTier, LowerTierMatchDetails> {
+    let projection = snapshot.projection();
+    let mut continuations = LowerTierMatchDetails::default().next_continuations;
+    for (worker, matched_blocks) in &device_matches.overlap_scores.scores {
+        let Some(last_hash) = device_matches.last_matched_hashes.get(worker).copied() else {
+            debug_assert!(
+                false,
+                "device match result missing last matched hash for worker {worker:?}"
+            );
+            continue;
+        };
+
+        continuations.insert(
+            *worker,
+            LowerTierContinuation::new(*matched_blocks as usize, last_hash),
+        );
+    }
+
+    let mut lower_tier_matches = HashMap::new();
+
+    for storage_tier in lower_tier_query_order() {
+        let Some(indexer) = indexers.get(storage_tier) else {
+            continue;
+        };
+
+        if let Some(&first_hash) = sequence.first() {
+            let root_workers: Vec<_> = indexer.backend().root_workers(first_hash, projection);
+            for worker in root_workers.iter() {
+                continuations
+                    .entry(*worker)
+                    .or_insert_with(|| LowerTierContinuation::from_root(0));
+            }
+        }
+
+        let retain_kv_transfer_chain =
+            options.retain_kv_transfer_chain && storage_tier == StorageTier::HostPinned;
+        let mut tier_matches = indexer
+            .backend()
+            .query_match_details_with_options_and_snapshot(
+                sequence,
+                &continuations,
+                retain_kv_transfer_chain,
+                &snapshot,
+            );
+        if retain_kv_transfer_chain {
+            tier_matches.kv_transfer_candidates = merge_kv_transfer_tier_candidates(
+                device_matches.kv_transfer_candidates.as_ref(),
+                &mut tier_matches,
+                snapshot.clone(),
+            );
+        }
+        let matched_workers = tier_matches.hits.values().filter(|&&hits| hits > 0).count();
+        tracing::debug!(
+            ?storage_tier,
+            queried_workers = continuations.len(),
+            matched_workers,
+            "Queried lower-tier indexer"
+        );
+        continuations = tier_matches.next_continuations.clone();
+        lower_tier_matches.insert(storage_tier, tier_matches);
+    }
+
+    lower_tier_matches
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::KvIndexerInterface;
+    use crate::prelude::{
+        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+        LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
+    };
+    use crate::testing::{router_event, stored_blocks_with_sequence_hashes};
+    use dynamo_router_protocol::identity::{
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
+    };
+
+    #[test]
+    fn tiered_matches_json_round_trip_preserves_device_and_lower_tier_scores() {
+        let worker = WorkerWithDpRank::new(7, 1);
+        let mut original = TieredMatchDetails::default();
+        original.device.overlap_scores.scores.insert(worker, 2);
+        original.device.overlap_scores.frequencies = vec![1, 1];
+        let mut lower = LowerTierMatchDetails::default();
+        lower.hits.insert(worker, 1);
+        original.lower_tier.insert(StorageTier::HostPinned, lower);
+
+        let json = serde_json::to_vec(&WireTieredMatchDetails::from(&original)).unwrap();
+        let wire: WireTieredMatchDetails = serde_json::from_slice(&json).unwrap();
+        let restored = TieredMatchDetails::from(wire);
+
+        assert_eq!(
+            restored.device.overlap_scores.scores,
+            original.device.overlap_scores.scores
+        );
+        assert_eq!(
+            restored.device.overlap_scores.frequencies,
+            original.device.overlap_scores.frequencies
+        );
+        assert_eq!(restored.lower_tier.len(), 1);
+        assert_eq!(
+            restored.lower_tier[&StorageTier::HostPinned].hits,
+            original.lower_tier[&StorageTier::HostPinned].hits
+        );
+    }
+
+    fn local_hashes(values: &[u64]) -> Vec<LocalBlockHash> {
+        values.iter().copied().map(LocalBlockHash).collect()
+    }
+
+    fn cache_owner_id(slot: u8) -> CacheOwnerId {
+        CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                ClusterId::new(3),
+            ),
+            StableDpSlotId::new([slot; 16], IdentitySource::Explicit),
+        )
+    }
+
+    fn store_event(
+        worker_id: u64,
+        dp_rank: u32,
+        event_id: u64,
+        parent_hash: Option<u64>,
+        local_values: &[u64],
+        external_hashes: &[u64],
+    ) -> crate::prelude::RouterEvent {
+        router_event(
+            worker_id,
+            event_id,
+            dp_rank,
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: parent_hash.map(ExternalSequenceBlockHash),
+                start_position: None,
+                blocks: stored_blocks_with_sequence_hashes(
+                    &local_hashes(local_values),
+                    external_hashes,
+                ),
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn cache_owner_lane_survives_worker_reprojection_and_clears_once() {
+        let owner = cache_owner_id(4);
+        let indexers = LowerTierIndexers::new(2, 4);
+        let lower = indexers.get_or_create(StorageTier::HostPinned);
+        let store =
+            |worker_id: u64, event_id: u64, parent_hash: Option<u64>, local: u64, external: u64| {
+                RouterEvent::with_cache_owner(
+                    worker_id,
+                    KvCacheEvent {
+                        event_id,
+                        dp_rank: 3,
+                        data: KvCacheEventData::Stored(KvCacheStoreData {
+                            parent_hash: parent_hash.map(ExternalSequenceBlockHash),
+                            start_position: None,
+                            blocks: stored_blocks_with_sequence_hashes(
+                                &[LocalBlockHash(local)],
+                                &[external],
+                            ),
+                        }),
+                    },
+                    StorageTier::HostPinned,
+                    owner,
+                )
+            };
+
+        lower
+            .apply_event_and_wait(store(17, 1, None, 11, 101))
+            .await
+            .unwrap();
+        lower
+            .apply_event_and_wait(store(29, 2, Some(101), 12, 102))
+            .await
+            .unwrap();
+
+        let dumped = lower.dump_events().await.unwrap();
+        assert!(dumped.iter().all(|event| event.state_source == Some(owner)));
+
+        let replacement = WorkerWithDpRank::new(29, 3);
+        let projection = ResidencyProjection::new([(owner, replacement)]).unwrap();
+        assert_eq!(
+            lower
+                .backend()
+                .root_workers(LocalBlockHash(11), &projection),
+            vec![replacement]
+        );
+
+        lower
+            .apply_event_and_wait(RouterEvent::with_cache_owner(
+                replacement.worker_id,
+                KvCacheEvent {
+                    event_id: 3,
+                    dp_rank: replacement.dp_rank,
+                    data: KvCacheEventData::Cleared,
+                },
+                StorageTier::HostPinned,
+                owner,
+            ))
+            .await
+            .unwrap();
+        assert!(
+            lower
+                .backend()
+                .root_workers(LocalBlockHash(11), &projection)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn query_lower_tiers_returns_empty_when_no_tiers_allocated() {
+        let indexers = LowerTierIndexers::new(1, 4);
+
+        // Mismatched device_matches: a score entry with no paired
+        // `last_matched_hashes` entry. Would `debug_assert!`-panic in the
+        // old body; the early-return must skip the seeding loop entirely.
+        let mut overlap_scores = OverlapScores::new();
+        overlap_scores
+            .scores
+            .insert(WorkerWithDpRank::new(99, 0), 3);
+        let device_matches = MatchDetails {
+            overlap_scores,
+            last_matched_hashes: Default::default(),
+            kv_transfer_candidates: None,
+        };
+
+        let sequence = vec![LocalBlockHash(1), LocalBlockHash(2)];
+        let result = query_lower_tiers_with_options(
+            &indexers,
+            &sequence,
+            &device_matches,
+            LowerTierQueryOptions::default(),
+        );
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn query_lower_tiers_extends_kv_transfer_chain_from_device_prefix() {
+        let indexers = LowerTierIndexers::new(1, 4);
+        let worker = WorkerWithDpRank::new(7, 0);
+        let lower_tier = indexers.get_or_create(StorageTier::HostPinned);
+        lower_tier
+            .apply_event(store_event(7, 0, 0, Some(101), &[12], &[102]))
+            .await;
+        let _ = lower_tier.dump_events().await.unwrap();
+
+        let mut overlap_scores = OverlapScores::new();
+        overlap_scores.scores.insert(worker, 1);
+        let mut last_matched_hashes = FxHashMap::default();
+        last_matched_hashes.insert(worker, ExternalSequenceBlockHash(101));
+        let device_matches = MatchDetails {
+            overlap_scores,
+            last_matched_hashes,
+            kv_transfer_candidates: Some(KvTransferCandidates {
+                block_hashes: vec![ExternalSequenceBlockHash(101)],
+                owner_prefix_blocks: vec![(worker.into(), 1)],
+                source_intervals: Vec::new(),
+                routing_snapshot: None,
+            }),
+        };
+
+        let sequence = local_hashes(&[11, 12, 13]);
+        let result = query_lower_tiers_with_options(
+            &indexers,
+            &sequence,
+            &device_matches,
+            LowerTierQueryOptions {
+                retain_kv_transfer_chain: true,
+            },
+        );
+        let candidates = result
+            .get(&StorageTier::HostPinned)
+            .and_then(|details| details.kv_transfer_candidates.as_ref())
+            .unwrap();
+
+        assert_eq!(
+            candidates.block_hashes,
+            vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+            ]
+        );
+        assert_eq!(candidates.owner_prefix_blocks, vec![(worker.into(), 2)]);
+    }
+
+    #[tokio::test]
+    async fn query_lower_tiers_keeps_divergent_hint_source_at_shared_prefix() {
+        let indexers = LowerTierIndexers::new(1, 4);
+        let worker_1 = WorkerWithDpRank::new(7, 0);
+        let worker_2 = WorkerWithDpRank::new(8, 0);
+        let lower_tier = indexers.get_or_create(StorageTier::HostPinned);
+        lower_tier
+            .apply_event(store_event(7, 0, 0, Some(101), &[12], &[102]))
+            .await;
+        lower_tier
+            .apply_event(store_event(8, 0, 1, Some(101), &[12], &[202]))
+            .await;
+        let _ = lower_tier.dump_events().await.unwrap();
+
+        let mut overlap_scores = OverlapScores::new();
+        overlap_scores.scores.insert(worker_1, 1);
+        overlap_scores.scores.insert(worker_2, 1);
+        let mut last_matched_hashes = FxHashMap::default();
+        last_matched_hashes.insert(worker_1, ExternalSequenceBlockHash(101));
+        last_matched_hashes.insert(worker_2, ExternalSequenceBlockHash(101));
+        let device_matches = MatchDetails {
+            overlap_scores,
+            last_matched_hashes,
+            kv_transfer_candidates: Some(KvTransferCandidates {
+                block_hashes: vec![ExternalSequenceBlockHash(101)],
+                owner_prefix_blocks: vec![(worker_1.into(), 1), (worker_2.into(), 1)],
+                source_intervals: Vec::new(),
+                routing_snapshot: None,
+            }),
+        };
+
+        let sequence = local_hashes(&[11, 12, 13]);
+        let result = query_lower_tiers_with_options(
+            &indexers,
+            &sequence,
+            &device_matches,
+            LowerTierQueryOptions {
+                retain_kv_transfer_chain: true,
+            },
+        );
+        let candidates = result
+            .get(&StorageTier::HostPinned)
+            .and_then(|details| details.kv_transfer_candidates.as_ref())
+            .unwrap();
+
+        assert_eq!(
+            candidates.block_hashes,
+            vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+            ]
+        );
+        assert_eq!(
+            candidates.owner_prefix_blocks,
+            vec![(worker_1.into(), 2), (worker_2.into(), 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn query_lower_tiers_retains_kv_transfer_chain_when_enabled() {
+        let indexers = LowerTierIndexers::new(1, 4);
+        let lower_tier = indexers.get_or_create(StorageTier::HostPinned);
+        lower_tier
+            .apply_event(store_event(7, 0, 0, None, &[11, 12], &[101, 102]))
+            .await;
+        let _ = lower_tier.dump_events().await.unwrap();
+
+        let sequence = local_hashes(&[11, 12, 13]);
+        let result = query_lower_tiers_with_options(
+            &indexers,
+            &sequence,
+            &MatchDetails::default(),
+            LowerTierQueryOptions {
+                retain_kv_transfer_chain: true,
+            },
+        );
+        let candidates = result
+            .get(&StorageTier::HostPinned)
+            .and_then(|details| details.kv_transfer_candidates.as_ref())
+            .unwrap();
+
+        assert_eq!(
+            candidates.block_hashes,
+            vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102)
+            ]
+        );
+        assert_eq!(
+            candidates.owner_prefix_blocks,
+            vec![(WorkerWithDpRank::new(7, 0).into(), 2)]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_continuations_require_a_reachable_local_frontier() {
+        use crate::kv_hints::KvTransferSourceInterval;
+
+        let indexers = LowerTierIndexers::new(1, 4);
+        let host = indexers.get_or_create(StorageTier::HostPinned);
+        let full = WorkerWithDpRank::new(7, 0);
+        let suffix = WorkerWithDpRank::new(8, 0);
+        let target = WorkerWithDpRank::new(9, 0);
+        host.apply_event_and_wait(store_event(
+            7,
+            0,
+            1,
+            None,
+            &[11, 12, 13, 14],
+            &[101, 102, 103, 104],
+        ))
+        .await
+        .unwrap();
+        host.apply_event_and_wait(store_event(8, 0, 1, Some(102), &[13, 14], &[103, 104]))
+            .await
+            .unwrap();
+        let sequence = local_hashes(&[11, 12, 13, 14]);
+
+        // The absent target can fetch the root prefix even when every recorded
+        // destination is fully cached. A detached suffix cannot serve it.
+        for depth in [0, 1, 2, 3, 4] {
+            let mut device = MatchDetails::default();
+            if depth > 0 {
+                device.overlap_scores.scores.insert(target, depth as u32);
+                device
+                    .last_matched_hashes
+                    .insert(target, ExternalSequenceBlockHash(100 + depth as u64));
+                device.retain_kv_transfer_candidates(
+                    (101..=100 + depth as u64)
+                        .map(ExternalSequenceBlockHash)
+                        .collect(),
+                );
+            }
+            let result = query_lower_tiers_with_options(
+                &indexers,
+                &sequence,
+                &device,
+                LowerTierQueryOptions {
+                    retain_kv_transfer_chain: true,
+                },
+            );
+            let candidates = result[&StorageTier::HostPinned]
+                .kv_transfer_candidates
+                .as_ref()
+                .unwrap();
+            assert!(candidates.owner_prefix_blocks.contains(&(full.into(), 4)));
+            assert_eq!(
+                candidates.block_hashes,
+                (101..=104)
+                    .map(ExternalSequenceBlockHash)
+                    .collect::<Vec<_>>()
+            );
+            let expected = if (2..4).contains(&depth) {
+                vec![KvTransferSourceInterval {
+                    source: suffix.into(),
+                    start: depth,
+                    end: 4,
+                }]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(candidates.source_intervals, expected, "depth={depth}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_continuation_coverage_matches_owner_inventory() {
+        use crate::residency::{ResidencyOwnerKeyExt, RouterHintSourceMetadata};
+        use dynamo_kv_events::event::KvCacheRemoveData;
+        use dynamo_kv_events::residency::ResidencyOwner;
+
+        let mut rng = fastrand::Rng::with_seed(42);
+        let workers = [WorkerWithDpRank::new(7, 0), WorkerWithDpRank::new(8, 0)];
+        let owners = [cache_owner_id(4), cache_owner_id(5), cache_owner_id(6)];
+        let local: Vec<u64> = (11..19).collect();
+        let hashes: Vec<u64> = (101..109).collect();
+        for _ in 0..64 {
+            let indexers = LowerTierIndexers::new(2, 4);
+            let host = indexers.get_or_create(StorageTier::HostPinned);
+            // Two exact owners alias one local worker. Local continuation sees
+            // their union, but each fetch source must cover its own whole suffix.
+            let snapshot = Arc::new(ResidencyRoutingSnapshot::new(
+                ResidencyProjection::new([(owners[0], workers[0]), (owners[1], workers[0])])
+                    .unwrap(),
+                owners.iter().map(|&owner| {
+                    (
+                        owner,
+                        RouterHintSourceMetadata {
+                            source_control_endpoint: "tcp://source:9000".to_string(),
+                            worker_type: "prefill".to_string(),
+                            topology_domains: HashMap::new(),
+                        },
+                        None,
+                    )
+                }),
+            ));
+            let inventory: Vec<Vec<bool>> = owners
+                .iter()
+                .map(|_| (0..8).map(|_| rng.bool()).collect())
+                .collect();
+            for (&owner, present) in owners.iter().zip(&inventory) {
+                let store = store_event(9, 0, 1, None, &local, &hashes);
+                host.apply_event_and_wait(RouterEvent::with_cache_owner(
+                    9,
+                    store.event,
+                    StorageTier::HostPinned,
+                    owner,
+                ))
+                .await
+                .unwrap();
+                host.apply_event_and_wait(RouterEvent::with_cache_owner(
+                    9,
+                    KvCacheEvent {
+                        event_id: 2,
+                        dp_rank: 0,
+                        data: KvCacheEventData::Removed(KvCacheRemoveData {
+                            block_hashes: hashes
+                                .iter()
+                                .zip(present)
+                                .filter_map(|(&hash, &keep)| {
+                                    (!keep).then_some(ExternalSequenceBlockHash(hash))
+                                })
+                                .collect(),
+                        }),
+                    },
+                    StorageTier::HostPinned,
+                    owner,
+                ))
+                .await
+                .unwrap();
+            }
+            let mut device = MatchDetails::default();
+            let depths = [rng.usize(0..=8), rng.usize(0..=8)];
+            for (&worker, &depth) in workers.iter().zip(&depths) {
+                if depth > 0 {
+                    device.overlap_scores.scores.insert(worker, depth as u32);
+                    device
+                        .last_matched_hashes
+                        .insert(worker, ExternalSequenceBlockHash(hashes[depth - 1]));
+                }
+            }
+            device.retain_kv_transfer_candidates(
+                hashes[..*depths.iter().max().unwrap()]
+                    .iter()
+                    .copied()
+                    .map(ExternalSequenceBlockHash)
+                    .collect(),
+            );
+            let result = query_lower_tiers_with_options_and_snapshot(
+                &indexers,
+                &local_hashes(&local),
+                &device,
+                LowerTierQueryOptions {
+                    retain_kv_transfer_chain: true,
+                },
+                snapshot,
+            );
+            let host_matches = &result[&StorageTier::HostPinned];
+            let local_depths = [
+                (depths[0]..8)
+                    .find(|&p| !inventory[0][p] && !inventory[1][p])
+                    .unwrap_or(8),
+                depths[1],
+            ];
+            for (&worker, &depth) in workers.iter().zip(&local_depths) {
+                assert_eq!(
+                    host_matches
+                        .next_continuations
+                        .get(&worker)
+                        .map_or(0, |c| c.start_pos),
+                    depth
+                );
+            }
+            let candidates = host_matches.kv_transfer_candidates.as_ref();
+            if let Some(candidates) = candidates {
+                assert_eq!(
+                    candidates.block_hashes,
+                    hashes[..candidates.block_hashes.len()]
+                        .iter()
+                        .copied()
+                        .map(ExternalSequenceBlockHash)
+                        .collect::<Vec<_>>()
+                );
+            }
+            for (&owner, present) in owners.iter().zip(&inventory) {
+                let source = KvTransferCandidateSource::CacheOwner(
+                    ResidencyOwner::cache_owner(owner).compact_key(),
+                );
+                for depth in local_depths {
+                    let end = (depth..8).find(|&p| !present[p]).unwrap_or(8);
+                    let expected = (end > depth).then_some(end);
+                    let actual = candidates.and_then(|c| {
+                        c.owner_prefix_blocks
+                            .iter()
+                            .filter(|&&(s, end)| s == source && end > depth)
+                            .map(|&(_, end)| end)
+                            .chain(
+                                c.source_intervals
+                                    .iter()
+                                    .filter(|i| {
+                                        i.source == source && i.start <= depth && depth < i.end
+                                    })
+                                    .map(|i| i.end),
+                            )
+                            .max()
+                    });
+                    assert_eq!(actual, expected, "depth={depth}, inventory={inventory:?}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_continuation_preserves_source_gaps_and_dump_replay() {
+        use crate::kv_hints::KvTransferSourceInterval;
+        use crate::residency::{ResidencyOwnerKeyExt, RouterHintSourceMetadata};
+        use dynamo_kv_events::event::KvCacheRemoveData;
+        use dynamo_kv_events::residency::ResidencyOwner;
+
+        let indexers = LowerTierIndexers::new(2, 4);
+        let host = indexers.get_or_create(StorageTier::HostPinned);
+        let owners = [cache_owner_id(4), cache_owner_id(5), cache_owner_id(6)];
+        let snapshot = Arc::new(ResidencyRoutingSnapshot::new(
+            ResidencyProjection::default(),
+            owners.iter().map(|&owner| {
+                (
+                    owner,
+                    RouterHintSourceMetadata {
+                        source_control_endpoint: "tcp://source:9000".to_string(),
+                        worker_type: "prefill".to_string(),
+                        topology_domains: HashMap::new(),
+                    },
+                    None,
+                )
+            }),
+        ));
+        // Shared runs exercise the owner-set skip; the hole must split every
+        // source even though its owner set is identical on both sides.
+        for &owner in &owners {
+            let store = store_event(9, 0, 1, Some(102), &[13, 14, 15, 16], &[103, 104, 105, 106]);
+            host.apply_event_and_wait(RouterEvent::with_cache_owner(
+                9,
+                store.event,
+                StorageTier::HostPinned,
+                owner,
+            ))
+            .await
+            .unwrap();
+            host.apply_event_and_wait(RouterEvent::with_cache_owner(
+                9,
+                KvCacheEvent {
+                    event_id: 2,
+                    dp_rank: 0,
+                    data: KvCacheEventData::Removed(KvCacheRemoveData {
+                        block_hashes: vec![ExternalSequenceBlockHash(104)],
+                    }),
+                },
+                StorageTier::HostPinned,
+                owner,
+            ))
+            .await
+            .unwrap();
+        }
+
+        let mut device = MatchDetails::default();
+        let worker = WorkerWithDpRank::new(7, 0);
+        device.overlap_scores.scores.insert(worker, 4);
+        device
+            .last_matched_hashes
+            .insert(worker, ExternalSequenceBlockHash(104));
+        let shorter = WorkerWithDpRank::new(8, 0);
+        device.overlap_scores.scores.insert(shorter, 2);
+        device
+            .last_matched_hashes
+            .insert(shorter, ExternalSequenceBlockHash(102));
+        device.retain_kv_transfer_candidates((101..=104).map(ExternalSequenceBlockHash).collect());
+        let sequence = local_hashes(&[11, 12, 13, 14, 15, 16]);
+        let query = |indexers, retain_kv_transfer_chain| {
+            query_lower_tiers_with_options_and_snapshot(
+                indexers,
+                &sequence,
+                &device,
+                LowerTierQueryOptions {
+                    retain_kv_transfer_chain,
+                },
+                snapshot.clone(),
+            )
+        };
+        let off = query(&indexers, false);
+        let on = query(&indexers, true);
+        assert_eq!(
+            off[&StorageTier::HostPinned].hits,
+            on[&StorageTier::HostPinned].hits
+        );
+        assert_eq!(
+            off[&StorageTier::HostPinned].next_continuations,
+            on[&StorageTier::HostPinned].next_continuations
+        );
+        assert!(
+            off[&StorageTier::HostPinned]
+                .kv_transfer_candidates
+                .is_none()
+        );
+        let candidates = on[&StorageTier::HostPinned]
+            .kv_transfer_candidates
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            candidates.block_hashes,
+            (101..=106)
+                .map(ExternalSequenceBlockHash)
+                .collect::<Vec<_>>()
+        );
+        let normalize = |candidates: &KvTransferCandidates| {
+            let mut candidates = candidates.clone();
+            candidates
+                .source_intervals
+                .sort_unstable_by_key(|interval| (interval.source, interval.start));
+            candidates
+        };
+        let mut expected: Vec<_> = owners
+            .iter()
+            .flat_map(|&owner| {
+                let source = KvTransferCandidateSource::CacheOwner(
+                    ResidencyOwner::cache_owner(owner).compact_key(),
+                );
+                [(2, 3), (4, 6)].map(|(start, end)| KvTransferSourceInterval { source, start, end })
+            })
+            .collect();
+        expected.sort_unstable_by_key(|interval| (interval.source, interval.start));
+        assert_eq!(normalize(candidates).source_intervals, expected);
+
+        let replay = LowerTierIndexers::new(1, 4);
+        let replay_host = replay.get_or_create(StorageTier::HostPinned);
+        for mut event in host.dump_events().await.unwrap() {
+            event.storage_tier = StorageTier::HostPinned;
+            replay_host.apply_event_and_wait(event).await.unwrap();
+        }
+        assert_eq!(
+            query(&replay, true)[&StorageTier::HostPinned]
+                .kv_transfer_candidates
+                .as_ref()
+                .map(normalize),
+            Some(normalize(candidates))
+        );
+
+        for owner in owners {
+            host.apply_event_and_wait(RouterEvent::with_cache_owner(
+                9,
+                KvCacheEvent {
+                    event_id: 3,
+                    dp_rank: 0,
+                    data: KvCacheEventData::Cleared,
+                },
+                StorageTier::HostPinned,
+                owner,
+            ))
+            .await
+            .unwrap();
+        }
+        assert!(
+            query(&indexers, true)[&StorageTier::HostPinned]
+                .kv_transfer_candidates
+                .as_ref()
+                .unwrap()
+                .source_intervals
+                .is_empty()
+        );
+    }
+}

@@ -50,7 +50,6 @@ func (r *DynamoGraphDeploymentReconciler) newComponentProgram() *componentProgra
 			r.RestConfig,
 			r.DockerSecretRetriever,
 			r.SSHKeyManager,
-			r.RBACManager,
 		),
 		rollout:         rollout,
 		restart:         newDGDRestartReconciler(),
@@ -177,29 +176,68 @@ func (p *componentProgram) reconcileWorkerRollout(
 	return p.reconcileMultinodeWorkerRollout(ctx, dgd)
 }
 
-// reconcileMultinodeWorkerRollout gates hash projection on informer observation of the target DCD.
+// reconcileMultinodeWorkerRollout retires drained old DCDs once replacements are ready,
+// then advances the worker hash after their deletion is observed. Requires non-nil dgd.
 func (p *componentProgram) reconcileMultinodeWorkerRollout(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
+	// Plan the hash transition without marking an unfinished generation as current.
 	transition, err := p.rollout.planUnsupportedWorkerHashTransition(dgd)
 	if err != nil {
 		return failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
-	if !transition.needsCommit() {
-		return nil
-	}
 
-	observed, err := p.rollout.dcdObservesWorkerHash(ctx, dgd, transition.next.v2)
+	// Cleanup remains level-based after the hash annotation has already advanced.
+	desired, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
-	if !observed {
+	newWorkerHash := activeWorkerHashForDCDGeneration(dgd, desired)
+	oldDCDs, err := p.rollout.listOldWorkerDCDs(ctx, dgd, newWorkerHash)
+	if err != nil {
+		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
+
+	// Require each replacement's full DGD desired count, not its temporary rollout target.
+	if len(oldDCDs) > 0 || transition.hashChanged {
+		newInfo, err := p.rollout.getWorkerInfoForWorkerHash(ctx, dgd, newWorkerHash)
+		if err != nil {
+			return failWorkloadProgram(reasonRollingUpdateFailed, err)
+		}
+		updatedComponents, totalWorkerComponents := completedWorkerComponents(dgd, nil, newInfo)
+		if len(updatedComponents) != totalWorkerComponents {
+			return nil
+		}
+	}
+
+	// Wait for scale-to-zero observation and all old pods to terminate before deletion.
+	if len(oldDCDs) > 0 {
+		drained, err := p.rollout.oldWorkerDCDsDrained(ctx, dgd, oldDCDs)
+		if err != nil {
+			return failWorkloadProgram(reasonRollingUpdateFailed, err)
+		}
+		if !drained {
+			return nil
+		}
+		if err := p.rollout.deleteWorkerDCDs(ctx, oldDCDs); err != nil {
+			return failWorkloadProgram(reasonRollingUpdateFailed, err)
+		}
 		return nil
 	}
 
-	if err := p.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, transition, false); err != nil {
-		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+	// Commit only after old deletions are observed; first deployment only needs DCD visibility.
+	if transition.needsCommit() {
+		observed, err := p.rollout.dcdObservesWorkerHash(ctx, dgd, transition.next.v2)
+		if err != nil {
+			return failWorkloadProgram(reasonRollingUpdateFailed, err)
+		}
+		if !observed {
+			return nil
+		}
+		if err := p.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, transition, false); err != nil {
+			return failWorkloadProgram(reasonRollingUpdateFailed, err)
+		}
 	}
 	return nil
 }

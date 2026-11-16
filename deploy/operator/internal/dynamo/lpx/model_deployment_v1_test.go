@@ -6,15 +6,15 @@
 package lpx
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
-	modelpb "github.com/ai-dynamo/modelexpress/modelexpress_client/go/gen/modelexpress/model"
-
 	"capnproto.org/go/capnp/v3"
 	commoncapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/common/v1"
 	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/testfixture"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -48,6 +48,187 @@ func newDeploymentV1ContractFixture(t *testing.T) deploymentcapnpv1.Deployment {
 	detail.SetNumChips(8)
 	detail.SetDevicesPerNode(8)
 	return deployment
+}
+
+// testUnitBundle describes a deployment.v1 contract with compiler-owned LPU units.
+type testUnitBundle struct {
+	architecture   deploymentcapnpv1.LpuArchitecture
+	devicesPerNode uint32
+	ioFPGACount    uint32
+	ioFanoutFactor uint32
+	// hybrid compiles in lpx mode and adds one CUDA partition after the LPU partitions.
+	hybrid  bool
+	lpxMode bool
+	// cpuEmbeddings sets supportsCpuEmbeddings and standaloneTokenEmbeddings.
+	cpuEmbeddings bool
+	partitions    []testUnitPartition
+	chains        [][]uint32
+	// partSelect lists the selected LPU partitions; nil writes a full build.
+	partSelect []uint32
+	// units is written as config.lpuUnits; nil leaves the field unset.
+	units []testLPUUnit
+}
+
+type testUnitPartition struct {
+	id       uint32
+	numChips uint32
+	// shape is the HX16x8x2 partitionShape; nil omits topologyMetadata.
+	shape []uint32
+	// topology names the compiled topology; empty uses registryTestTopology.
+	topology string
+}
+
+type testLPUUnit = testfixture.Unit
+type testLPUReservation = testfixture.Reservation
+type testLPUConnector = testfixture.Connector
+
+// testUnitPartitions returns LPU partitions that share one geometry.
+func testUnitPartitions(numChips uint32, shape []uint32, ids ...uint32) []testUnitPartition {
+	partitions := make([]testUnitPartition, len(ids))
+	for index, id := range ids {
+		partitions[index] = testUnitPartition{id: id, numChips: numChips, shape: shape}
+	}
+	return partitions
+}
+
+func testNodesReservation(nodes uint32, ids ...uint32) testLPUReservation {
+	return testLPUReservation{IDs: ids, Nodes: nodes}
+}
+
+func testHXReservation(traysPerHemisphere, hemispheres, racks uint8, ids ...uint32) testLPUReservation {
+	return testLPUReservation{IDs: ids, HX: []uint8{traysPerHemisphere, hemispheres, racks}}
+}
+
+// testSingleUnits places each reservation in its own unit.
+func testSingleUnits(reservations ...testLPUReservation) []testLPUUnit {
+	units := make([]testLPUUnit, len(reservations))
+	for index, reservation := range reservations {
+		units[index] = testLPUUnit{Reservations: []testLPUReservation{reservation}}
+	}
+	return units
+}
+
+// testHXConventionConnector joins a source reservation's last host, device by
+// device, to the destination's first host, with lanes [4, 2, 1].
+func testHXConventionConnector(sourceHosts, devicesPerNode uint32) testLPUConnector {
+	connector := testLPUConnector{HX: true}
+	for device := range devicesPerNode {
+		connector.Pairs = append(connector.Pairs, [2]uint32{(sourceHosts-1)*devicesPerNode + device, device})
+	}
+	return connector
+}
+
+// encodeTestUnitBundle serializes the bundle as deployment.v1.capnp.bin bytes.
+func encodeTestUnitBundle(t *testing.T, bundle testUnitBundle) []byte {
+	t.Helper()
+	message, segment := capnp.NewSingleSegmentMessage(nil)
+	deployment, err := deploymentcapnpv1.NewRootDeployment(segment)
+	require.NoError(t, err)
+	deployment.SetContractRevision(deploymentcapnpv1.CurrentContractRevision)
+
+	t.Log("Encode the program, runtime I/O and selected chains")
+	config, err := deployment.NewConfig()
+	require.NoError(t, err)
+	config.SetCompilationMode(deploymentcapnpv1.CompilationMode_lpuOnly)
+	if bundle.hybrid || bundle.lpxMode {
+		config.SetCompilationMode(deploymentcapnpv1.CompilationMode_lpx)
+	}
+	program, err := config.NewProgram()
+	require.NoError(t, err)
+	program.SetSupportsCpuEmbeddings(bundle.cpuEmbeddings)
+	program.SetStandaloneTokenEmbeddings(bundle.cpuEmbeddings)
+	runtimeIO, err := config.NewRuntimeIo()
+	require.NoError(t, err)
+	runtimeIO.SetIoFpgaCount(max(1, bundle.ioFPGACount))
+	runtimeIO.SetFanoutFactor(max(1, bundle.ioFanoutFactor))
+	if bundle.chains != nil {
+		chains, err := config.NewSelectedPropSyncChains(int32(len(bundle.chains)))
+		require.NoError(t, err)
+		for chainIndex, chain := range bundle.chains {
+			ids, err := chains.At(chainIndex).NewPartitionIds(int32(len(chain)))
+			require.NoError(t, err)
+			for index, id := range chain {
+				ids.Set(index, id)
+			}
+		}
+	}
+
+	t.Log("Encode the compiler-owned units")
+	if bundle.units != nil {
+		testfixture.WriteUnits(t, config, bundle.units)
+	}
+
+	t.Log("Encode the partition selection, the LPU partitions and the hybrid CUDA partition")
+	if bundle.partSelect != nil {
+		selection, err := deployment.NewPartSelect()
+		require.NoError(t, err)
+		selected, err := selection.NewPartitions(int32(len(bundle.partSelect)))
+		require.NoError(t, err)
+		for index, id := range bundle.partSelect {
+			selected.At(index).SetDeviceType(commoncapnpv1.DeviceType_lpu)
+			selected.At(index).SetPartitionId(id)
+		}
+	}
+	count := len(bundle.partitions)
+	if bundle.hybrid {
+		count++
+	}
+	partitions, err := deployment.NewPartitions(int32(count))
+	require.NoError(t, err)
+	lastID := uint32(0)
+	for index, partition := range bundle.partitions {
+		ref, err := partitions.At(index).NewPartition()
+		require.NoError(t, err)
+		ref.SetDeviceType(commoncapnpv1.DeviceType_lpu)
+		ref.SetPartitionId(partition.id)
+		lastID = max(lastID, partition.id)
+		detail, err := partitions.At(index).Detail().NewLpu()
+		require.NoError(t, err)
+		require.NoError(t, detail.SetPath(fmt.Sprintf("part-%d", partition.id)))
+		topology := partition.topology
+		if topology == "" {
+			topology = registryTestTopology
+		}
+		require.NoError(t, detail.SetTopology(topology))
+		detail.SetArchitecture(bundle.architecture)
+		if len(bundle.units) == 0 {
+			detail.SetNumChips(partition.numChips)
+		}
+		detail.SetDevicesPerNode(bundle.devicesPerNode)
+		if partition.shape != nil {
+			metadata, err := detail.NewTopologyMetadata()
+			require.NoError(t, err)
+			require.NoError(t, metadata.SetTopologyFamily(hxTopologyFamily))
+			shape, err := metadata.NewPartitionShape(int32(len(partition.shape)))
+			require.NoError(t, err)
+			for dimension, extent := range partition.shape {
+				shape.Set(dimension, extent)
+			}
+		}
+	}
+	if bundle.hybrid {
+		ref, err := partitions.At(len(bundle.partitions)).NewPartition()
+		require.NoError(t, err)
+		ref.SetDeviceType(commoncapnpv1.DeviceType_cuda)
+		ref.SetPartitionId(lastID + 1)
+		_, err = partitions.At(len(bundle.partitions)).Detail().NewCuda()
+		require.NoError(t, err)
+	}
+
+	data, err := message.Marshal()
+	require.NoError(t, err)
+	return data
+}
+
+// acquireTestUnitBundle publishes the bundle in a fresh build directory and
+// acquires it through the model registry.
+func acquireTestUnitBundle(t *testing.T, bundle testUnitBundle) (*Build, error) {
+	t.Helper()
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, gbuildDeploymentV1CapnpFile), encodeTestUnitBundle(t, bundle), 0o600))
+	registry, err := NewModelRegistry("", nil)
+	require.NoError(t, err)
+	return registry.AcquireBuild(t.Context(), root)
 }
 
 func TestDeploymentContractSelectsOneFormat(t *testing.T) {
@@ -112,8 +293,8 @@ func TestDeploymentContractPreservesNormalizedBuild(t *testing.T) {
 			build, err := buildFromGbuildDeploymentV1("gs://models/build", decoded)
 			require.NoError(t, err)
 			require.Equal(t, legacy, build)
-			require.EqualValues(t, test.devicesPerNode, build.Partitions[0].DevicesPerNode)
-			require.Equal(t, test.wantNodes, build.Partitions[0].effectiveNodeCount())
+			require.EqualValues(t, test.devicesPerNode, build.partitions[0].devicesPerNode)
+			require.Equal(t, test.wantNodes, build.partitions[0].effectiveNodeCount())
 		})
 	}
 }
@@ -226,25 +407,24 @@ func TestDeploymentContractAcquisitionAndRuntimePath(t *testing.T) {
 			require.NoError(t, err)
 
 			t.Log("Acquire and normalize exactly the scheduler contract")
-			snapshot, err := registry.AcquireBuildSnapshot(t.Context(), root)
+			snapshot, err := registry.AcquireBuild(t.Context(), root)
 			require.NoError(t, err)
-			require.Equal(t, payload, snapshot.manifestBytes)
-			require.Equal(t, buildContractDeploymentV1, snapshot.format)
-			normalized, err := normalizeBuildSnapshot(snapshot)
+			require.Equal(t, buildContractDeploymentV1, snapshot.contractFormat)
+			normalized := snapshot
 			require.NoError(t, err)
-			require.Equal(t, buildContractDeploymentV1, normalized.format)
-			require.EqualValues(t, 4, normalized.build.IOFPGACount)
-			require.Equal(t, test.family, normalized.build.Family)
+			require.Equal(t, buildContractDeploymentV1, normalized.contractFormat)
+			require.EqualValues(t, 4, normalized.ioFPGACount)
+			require.Equal(t, test.family, normalized.family)
 
 			t.Log("Pass the selected deployment file to Cyborg before authored environment references")
 			projections, err := appendModelProjections(nil, ModelProjectionInput{
-				Pipeline: PipelineLPX, Models: []string{"default"}, BuildSnapshot: normalized,
+				Pipeline: PipelineHybrid, Models: []string{"default"}, Build: normalized,
 			})
 			require.NoError(t, err)
 			require.Len(t, projections, 1)
 			projection := projections[0]
 			require.Equal(t, buildContractDeploymentV1, projection.contractFormat)
-			require.Equal(t, test.family, projection.configuredBuild.Family)
+			require.Equal(t, test.family, projection.configuredBuild.family)
 			container := corev1.Container{Env: []corev1.EnvVar{{Name: "MODEL_PATH", Value: "$(GBUILD_MANIFEST_PATH)"}}}
 			require.NoError(t, applyCyborgManifestPath(&container, projection, "/models"))
 			require.Equal(t, []corev1.EnvVar{
@@ -259,7 +439,7 @@ func TestDeploymentContractAcquisitionAndRuntimePath(t *testing.T) {
 			changed, err := deployment.Message().Marshal()
 			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(filepath.Join(root, gbuildDeploymentV1CapnpFile), changed, 0o600))
-			second, err := registry.AcquireBuildSnapshot(t.Context(), root)
+			second, err := registry.AcquireBuild(t.Context(), root)
 			require.NoError(t, err)
 			require.NotEqual(t, snapshot.contentID, second.contentID)
 		})
@@ -283,36 +463,31 @@ func TestDeploymentContractCorruptionNeverUsesLegacy(t *testing.T) {
 			require.NoError(t, err)
 
 			t.Log("Reject ambiguous publication before any legacy decoder can accept it")
-			_, err = registry.AcquireBuildSnapshot(t.Context(), root)
-			require.ErrorIs(t, err, ErrBuildSnapshotInconsistent)
+			_, err = registry.AcquireBuild(t.Context(), root)
+			require.ErrorIs(t, err, errInvalidBuildManifest)
 			require.ErrorContains(t, err, "ambiguous")
 		})
 	}
 }
 
-func TestDeploymentContractFencesRemoteBytes(t *testing.T) {
-	t.Log("Serve differing deployment reads with a stable inventory")
+func TestDeploymentContractReadsRemoteBytesOnce(t *testing.T) {
+	t.Log("Serve one deployment contract with a separate opaque execution artifact")
+	payload, err := newDeploymentV1ContractFixture(t).Message().Marshal()
+	require.NoError(t, err)
 	client := &fakeModelServiceClient{
-		list: &modelpb.ModelFileList{Files: []*modelpb.ModelFileInfo{
-			{RelativePath: gbuildDeploymentV1CapnpFile}, {RelativePath: "execution.v1.capnp.bin"},
-		}},
-		fileStreams: []*fakeModelFileStream{
-			{chunks: modelFileChunks(gbuildDeploymentV1CapnpFile, "first")},
-			{chunks: modelFileChunks(gbuildDeploymentV1CapnpFile, "second")},
+		files: map[string]*fakeModelFileStream{
+			gbuildDeploymentV1CapnpFile: {chunks: modelFileChunks(gbuildDeploymentV1CapnpFile, string(payload))},
 		},
 	}
 	registry, err := NewModelRegistry("gs://bucket/registry", client)
 	require.NoError(t, err)
-
-	t.Log("Reject changes between the two bounded reads")
-	_, err = registry.AcquireBuildSnapshot(t.Context(), "model/build")
-	require.ErrorIs(t, err, ErrBuildSnapshotInconsistent)
-	require.ErrorContains(t, err, "compiler metadata deployment.v1.capnp.bin changed while acquiring")
-	require.Len(t, client.listRequests, 2)
+	snapshot, err := registry.AcquireBuild(t.Context(), "model/build")
+	require.NoError(t, err)
+	require.Equal(t, buildContractDeploymentV1, snapshot.contractFormat)
+	require.Empty(t, client.listRequests)
 	require.Len(t, client.filesRequests, 2)
-	for _, request := range client.filesRequests {
-		require.Equal(t, []string{gbuildDeploymentV1CapnpFile}, request.GetFileSelector().GetPaths())
-	}
+	require.Equal(t, []string{gbuildManifestV2CapnpFile}, client.filesRequests[0].GetFileSelector().GetPaths())
+	require.Equal(t, []string{gbuildDeploymentV1CapnpFile}, client.filesRequests[1].GetFileSelector().GetPaths())
 }
 
 func TestDeploymentContractBoundsAcquisition(t *testing.T) {
@@ -326,8 +501,7 @@ func TestDeploymentContractBoundsAcquisition(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Log("Reject oversized metadata before a decoder or runtime sees it")
-	_, err = registry.AcquireBuildSnapshot(t.Context(), root)
-	require.ErrorIs(t, err, ErrBuildSnapshotInconsistent)
+	_, err = registry.AcquireBuild(t.Context(), root)
 	require.ErrorIs(t, err, errBuildFileTooLarge)
 }
 
@@ -410,15 +584,15 @@ func TestDeploymentContractSupportedGeometry(t *testing.T) {
 			t.Log("Preserve scheduler geometry while excluding non-LPU execution details")
 			build, err := buildFromGbuildDeploymentV1("gs://models/build", deployment)
 			require.NoError(t, err)
-			require.Equal(t, wantFamily, build.Family)
-			require.Equal(t, wantIO, build.IOFPGACount)
-			require.Equal(t, name == "CPU embeddings", build.SupportsCPUEmbeddings)
-			require.Equal(t, name == hybridCUDA, build.HasCUDAPartitions)
-			require.Len(t, build.Partitions, 1)
+			require.Equal(t, wantFamily, build.family)
+			require.Equal(t, wantIO, build.ioFPGACount)
+			require.Equal(t, name == "CPU embeddings", build.supportsCPUEmbeddings)
+			require.Equal(t, name == hybridCUDA, build.hasCUDAPartitions)
+			require.Len(t, build.partitions, 1)
 			if wantFamily == BuildFamilyHX {
-				require.Equal(t, []int64{16, int64(wantNodes), 1, 1}, build.Partitions[0].HXExtent)
+				require.Equal(t, []int64{16, int64(wantNodes), 1, 1}, build.partitions[0].hxExtent)
 			} else {
-				require.Equal(t, wantNodes, build.Partitions[0].effectiveNodeCount())
+				require.Equal(t, wantNodes, build.partitions[0].effectiveNodeCount())
 			}
 		})
 	}
@@ -430,10 +604,122 @@ func TestDeploymentContractRejectsCorruptNewOnly(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, gbuildDeploymentV1CapnpFile), []byte("corrupt"), 0o600))
 	registry, err := NewModelRegistry("", nil)
 	require.NoError(t, err)
-	snapshot, err := registry.AcquireBuildSnapshot(t.Context(), root)
+	_, err = registry.AcquireBuild(t.Context(), root)
+	require.ErrorContains(t, err, "parsing deployment.v1.capnp.bin")
+}
+
+func TestDeploymentContractTopologyFamilies(t *testing.T) {
+	t.Log("Accept canonical topology metadata and reject unsupported family names")
+	for _, family := range []string{"HX16x8x2", "16x8x2x3", " HX16x8x2 ", " 16x8x2x3 ", "", "hx16x8x2", "HX16x8x2x3", "unknown"} {
+		for _, geometry := range []struct {
+			name    string
+			chips   uint32
+			shape   []uint32
+			want    []int64
+			wantErr string
+		}{
+			{"cross hemisphere", 32, []uint32{16, 1, 2, 1}, []int64{16, 1, 2, 1}, ""},
+			{"subnode", 8, []uint32{8, 1, 1, 1}, []int64{16, 1, 1, 1}, ""},
+			{"cross rack", 32, []uint32{16, 1, 1, 2}, nil, "unsupported HX extent"},
+			{"count mismatch", 16, []uint32{8, 1, 1, 1}, nil, "contains 8 chips, want numChips 16"},
+		} {
+			t.Run(family+"/"+geometry.name, func(t *testing.T) {
+				t.Log("Encode a split deployment contract with explicit LP30 geometry")
+				deployment := newDeploymentV1ContractFixture(t)
+				partitions, err := deployment.Partitions()
+				require.NoError(t, err)
+				detail, err := partitions.At(0).Detail().Lpu()
+				require.NoError(t, err)
+				detail.SetArchitecture(deploymentcapnpv1.LpuArchitecture_lp30)
+				detail.SetDevicesPerNode(16)
+				detail.SetNumChips(geometry.chips)
+				metadata, err := detail.NewTopologyMetadata()
+				require.NoError(t, err)
+				require.NoError(t, metadata.SetTopologyFamily(family))
+				shape, err := metadata.NewPartitionShape(int32(len(geometry.shape)))
+				require.NoError(t, err)
+				for i, value := range geometry.shape {
+					shape.Set(i, value)
+				}
+				data, err := deployment.Message().Marshal()
+				require.NoError(t, err)
+
+				t.Log("Decode through the split reader and preserve family and shape rejection")
+				decoded, err := decodeGbuildDeploymentV1(data)
+				require.NoError(t, err)
+				build, err := buildFromGbuildDeploymentV1("gs://models/build", decoded)
+				switch family {
+				case "HX16x8x2", " HX16x8x2 ":
+					if geometry.wantErr != "" {
+						require.ErrorContains(t, err, geometry.wantErr)
+						return
+					}
+				default:
+					require.ErrorContains(t, err, "topologyMetadata.topologyFamily")
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, geometry.want, build.partitions[0].hxExtent)
+				require.EqualValues(t, geometry.chips, build.partitions[0].numChips)
+			})
+		}
+	}
+}
+
+func TestUnitsPlacementIgnoresClearedLegacyFields(t *testing.T) {
+	t.Parallel()
+	t.Log("Decode a units chain while all legacy placement fields remain populated")
+	bundle := testUnitBundle{architecture: deploymentcapnpv1.LpuArchitecture_lp30, devicesPerNode: 16, lpxMode: true,
+		chains: [][]uint32{{0, 1}}, partitions: testUnitPartitions(16, []uint32{16, 1, 1, 1}, 0, 1),
+		units: []testLPUUnit{{Reservations: []testLPUReservation{testHXReservation(1, 1, 1, 0), testHXReservation(1, 1, 1, 1)}, Connectors: []testLPUConnector{testHXConventionConnector(1, 16)}}}}
+	message, err := capnp.Unmarshal(encodeTestUnitBundle(t, bundle))
+	require.NoError(t, err)
+	original, err := deploymentcapnpv1.ReadRootDeployment(message)
+	require.NoError(t, err)
+	writable, _ := capnp.NewSingleSegmentMessage(nil)
+	require.NoError(t, writable.SetRoot(original.ToPtr()))
+	deployment, err := deploymentcapnpv1.ReadRootDeployment(writable)
+	require.NoError(t, err)
+	config, err := deployment.Config()
+	require.NoError(t, err)
+	config.SetNumLpuNodes(2)
+	before, err := buildFromGbuildDeploymentV1("fixture", deployment)
+	require.NoError(t, err)
+	beforeProjection, err := projectTestUnits(before, nil)
 	require.NoError(t, err)
 
-	t.Log("Reject the selected deployment during normalization")
-	_, err = normalizeBuildSnapshot(snapshot)
-	require.ErrorContains(t, err, "parsing deployment.v1.capnp.bin")
+	t.Log("Clear every legacy placement field without changing units or partition execution artifacts")
+	config.SetNumLpuNodes(0)
+	require.NoError(t, config.SetSelectedPropSyncChains(deploymentcapnpv1.PropSyncChain_List{}))
+	partitions, err := deployment.Partitions()
+	require.NoError(t, err)
+	for i := 0; i < partitions.Len(); i++ {
+		detail, err := partitions.At(i).Detail().Lpu()
+		require.NoError(t, err)
+		require.NoError(t, detail.SetTopologyMetadata(deploymentcapnpv1.TopologyMetadata{}))
+	}
+	after, err := buildFromGbuildDeploymentV1("fixture", deployment)
+	require.NoError(t, err)
+	afterProjection, err := projectTestUnits(after, nil)
+	require.NoError(t, err)
+
+	t.Log("Keep the complete scheduler request and Agent count unchanged")
+	require.Empty(t, after.selectedPropSyncChains)
+	require.Equal(t, beforeProjection[0].AgentReplicas(), afterProjection[0].AgentReplicas())
+	require.Equal(t, beforeProjection[0].RequestSpec(&MaterializationPlan{}, "agents"), afterProjection[0].RequestSpec(&MaterializationPlan{}, "agents"))
+
+	t.Log("Ignore a populated legacy chain that conflicts with the units")
+	chains, err := config.NewSelectedPropSyncChains(1)
+	require.NoError(t, err)
+	ids, err := chains.At(0).NewPartitionIds(2)
+	require.NoError(t, err)
+	ids.Set(0, 99)
+	ids.Set(1, 99)
+	conflicting, err := buildFromGbuildDeploymentV1("fixture", deployment)
+	require.NoError(t, err)
+	conflictingProjection, err := projectTestUnits(conflicting, nil)
+	require.NoError(t, err)
+	require.Empty(t, conflicting.selectedPropSyncChains)
+	require.Equal(t, afterProjection[0].AgentReplicas(), conflictingProjection[0].AgentReplicas())
+	require.Equal(t, afterProjection[0].RequestSpec(&MaterializationPlan{}, "agents"), conflictingProjection[0].RequestSpec(&MaterializationPlan{}, "agents"))
 }

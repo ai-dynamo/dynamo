@@ -38,12 +38,10 @@ func TestLeaseWatcher_HandleLeaseAdd(t *testing.T) {
 		{
 			name: "adds namespace for valid marker lease",
 			lease: &coordinationv1.Lease{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      LeaseName,
-					Namespace: "test-ns",
-				},
+				Name:      LeaseName,
+				Namespace: "test-ns",
 				Spec: coordinationv1.LeaseSpec{
-					HolderIdentity:       ptr.To("namespace-restricted-operator-v1.0.0"),
+					HolderIdentity:       new("namespace-restricted-operator-v1.0.0"),
 					LeaseDurationSeconds: ptr.To[int32](30),
 					RenewTime:            &metav1.MicroTime{Time: time.Now()},
 				},
@@ -54,10 +52,8 @@ func TestLeaseWatcher_HandleLeaseAdd(t *testing.T) {
 		{
 			name: "ignores lease with wrong name",
 			lease: &coordinationv1.Lease{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "other-lease",
-					Namespace: "test-ns",
-				},
+				Name:      "other-lease",
+				Namespace: "test-ns",
 			},
 			shouldExclude:     false,
 			excludedNamespace: "test-ns",
@@ -71,7 +67,7 @@ func TestLeaseWatcher_HandleLeaseAdd(t *testing.T) {
 					// No labels - still identified by name
 				},
 				Spec: coordinationv1.LeaseSpec{
-					HolderIdentity:       ptr.To("namespace-restricted-operator-v1.0.0"),
+					HolderIdentity:       new("namespace-restricted-operator-v1.0.0"),
 					LeaseDurationSeconds: ptr.To[int32](30),
 					RenewTime:            &metav1.MicroTime{Time: time.Now()},
 				},
@@ -109,12 +105,10 @@ func TestLeaseWatcher_HandleLeaseUpdate(t *testing.T) {
 	}
 
 	lease := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      LeaseName,
-			Namespace: "test-ns",
-		},
+		Name:      LeaseName,
+		Namespace: "test-ns",
 		Spec: coordinationv1.LeaseSpec{
-			HolderIdentity:       ptr.To("namespace-restricted-operator-v1.0.0"),
+			HolderIdentity:       new("namespace-restricted-operator-v1.0.0"),
 			LeaseDurationSeconds: ptr.To[int32](30),
 			RenewTime:            &metav1.MicroTime{Time: time.Now()},
 		},
@@ -145,12 +139,10 @@ func TestLeaseWatcher_HandleLeaseDelete(t *testing.T) {
 	}
 
 	lease := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      LeaseName,
-			Namespace: "test-ns",
-		},
+		Name:      LeaseName,
+		Namespace: "test-ns",
 		Spec: coordinationv1.LeaseSpec{
-			HolderIdentity:       ptr.To("operator-v1.0.0"),
+			HolderIdentity:       new("operator-v1.0.0"),
 			LeaseDurationSeconds: ptr.To[int32](30),
 			RenewTime:            &metav1.MicroTime{Time: time.Now()},
 		},
@@ -188,10 +180,8 @@ func TestLeaseWatcher_ExtractLease(t *testing.T) {
 		{
 			name: "extracts regular lease object",
 			obj: &coordinationv1.Lease{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-lease",
-					Namespace: "test-ns",
-				},
+				Name:      "test-lease",
+				Namespace: "test-ns",
 			},
 			wantNil:  false,
 			wantName: "test-lease",
@@ -201,10 +191,8 @@ func TestLeaseWatcher_ExtractLease(t *testing.T) {
 			obj: k8sCache.DeletedFinalStateUnknown{
 				Key: "test-ns/test-lease",
 				Obj: &coordinationv1.Lease{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-lease",
-						Namespace: "test-ns",
-					},
+					Name:      "test-lease",
+					Namespace: "test-ns",
 				},
 			},
 			wantNil:  false,
@@ -254,40 +242,32 @@ func TestLeaseWatcher_IsNamespaceScopeMarker(t *testing.T) {
 		{
 			name: "returns true for lease with correct name",
 			lease: &coordinationv1.Lease{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      LeaseName,
-					Namespace: "test-ns",
-				},
+				Name:      LeaseName,
+				Namespace: "test-ns",
 			},
 			want: true,
 		},
 		{
 			name: "returns true for lease with correct name and no labels",
 			lease: &coordinationv1.Lease{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      LeaseName,
-					Namespace: "test-ns",
-				},
+				Name:      LeaseName,
+				Namespace: "test-ns",
 			},
 			want: true,
 		},
 		{
 			name: "returns false for lease with wrong name",
 			lease: &coordinationv1.Lease{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "other-lease",
-					Namespace: "test-ns",
-				},
+				Name:      "other-lease",
+				Namespace: "test-ns",
 			},
 			want: false,
 		},
 		{
 			name: "returns false for lease with wrong name even if other metadata exists",
 			lease: &coordinationv1.Lease{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "wrong-name",
-					Namespace: "test-ns",
-				},
+				Name:      "wrong-name",
+				Namespace: "test-ns",
 			},
 			want: false,
 		},
@@ -314,12 +294,10 @@ func TestLeaseWatcher_MultipleNamespaces(t *testing.T) {
 	namespaces := []string{"test-ns", "staging", "dev"}
 	for _, ns := range namespaces {
 		lease := &coordinationv1.Lease{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      LeaseName,
-				Namespace: ns,
-			},
+			Name:      LeaseName,
+			Namespace: ns,
 			Spec: coordinationv1.LeaseSpec{
-				HolderIdentity:       ptr.To("operator-v1.0.0"),
+				HolderIdentity:       new("operator-v1.0.0"),
 				LeaseDurationSeconds: ptr.To[int32](30),
 				RenewTime:            &metav1.MicroTime{Time: time.Now()},
 			},
@@ -336,10 +314,8 @@ func TestLeaseWatcher_MultipleNamespaces(t *testing.T) {
 
 	// Delete one namespace
 	deleteLease := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      LeaseName,
-			Namespace: "staging",
-		},
+		Name:      LeaseName,
+		Namespace: "staging",
 	}
 	lw.handleLeaseDelete(deleteLease)
 

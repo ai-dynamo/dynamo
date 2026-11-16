@@ -263,3 +263,94 @@ def wait_for_kv_event_diagnostics(
                 f"observed {len(diagnostics)}"
             )
         time.sleep(poll_interval_s)
+
+
+WorkerRoutingEvent = Literal["worker_overloaded", "worker_inhibited"]
+
+WORKER_ROUTING_EVENTS = frozenset(get_args(WorkerRoutingEvent))
+
+
+@dataclass(frozen=True)
+class WorkerRoutingRecord:
+    """A router client's change to one worker's routability, decoded from the
+    runtime JSONL log stream: marked overloaded for a bounded lease, or
+    inhibited as down."""
+
+    routing_event: WorkerRoutingEvent
+    instance_id: int
+
+
+def parse_worker_routing_events(log_content: str) -> list[WorkerRoutingRecord]:
+    """Parse worker routing events, ignoring unrelated or partial log lines."""
+
+    records = []
+    for line_number, raw_line in enumerate(log_content.splitlines(), start=1):
+        json_start = raw_line.find("{")
+        if json_start < 0:
+            continue
+
+        try:
+            record = json.loads(raw_line[json_start:])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict) or "routing_event" not in record:
+            continue
+
+        routing_event = _require_string(record, "routing_event", line_number)
+        if routing_event not in WORKER_ROUTING_EVENTS:
+            raise ValueError(
+                f"router log line {line_number} has unknown "
+                f"routing_event={routing_event!r}"
+            )
+        records.append(
+            WorkerRoutingRecord(
+                routing_event=cast(WorkerRoutingEvent, routing_event),
+                instance_id=_require_int(record, "instance_id", line_number),
+            )
+        )
+    return records
+
+
+def worker_routing_events(
+    process: LogReadable,
+    *,
+    instance_id: int,
+    routing_event: WorkerRoutingEvent,
+) -> list[WorkerRoutingRecord]:
+    """The routing events of one kind a process has logged for one worker."""
+
+    return [
+        record
+        for record in parse_worker_routing_events(process.read_logs())
+        if record.routing_event == routing_event and record.instance_id == instance_id
+    ]
+
+
+def wait_for_worker_routing_events(
+    process: LogReadable,
+    *,
+    instance_id: int,
+    routing_event: WorkerRoutingEvent,
+    expected_count: int = 1,
+    timeout_s: float = 10.0,
+    poll_interval_s: float = 0.1,
+) -> list[WorkerRoutingRecord]:
+    """Poll a process JSONL log until at least ``expected_count`` routing events
+    of one kind appear for one worker."""
+
+    if expected_count < 1:
+        raise ValueError("expected_count must be at least one")
+
+    deadline = time.monotonic() + timeout_s
+    while True:
+        records = worker_routing_events(
+            process, instance_id=instance_id, routing_event=routing_event
+        )
+        if len(records) >= expected_count:
+            return records
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"timed out waiting for {expected_count} {routing_event!r} event(s) "
+                f"for worker {instance_id}; observed {len(records)}"
+            )
+        time.sleep(poll_interval_s)

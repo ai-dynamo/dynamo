@@ -25,7 +25,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -44,12 +43,10 @@ func (r *modelServiceTestReconciler) GetRecorder() events.EventRecorder {
 func TestModelServiceReconciliationCharacterization(t *testing.T) {
 	t.Log("Arrange a DGD with two components sharing one model reference")
 	dgd := &v1beta1.DynamoGraphDeployment{
-		TypeMeta: metav1.TypeMeta{APIVersion: v1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "graph",
-			Namespace: "inference",
-			UID:       "graph-uid",
-		},
+		APIVersion: v1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment",
+		Name:      "graph",
+		Namespace: "inference",
+		UID:       "graph-uid",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Annotations: map[string]string{"example.com/graph": "true"},
 		},

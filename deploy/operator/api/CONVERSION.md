@@ -168,6 +168,38 @@ Allowed local helpers:
   as conversion inputs, but remain scrubbed from converted metadata. Do not
   reintroduce per-field compatibility annotations.
 
+## DGDR v1beta2 Envelope
+
+DGDR `v1beta1` and `v1beta2` have incompatible native schemas and result models.
+They do not use semantic field conversion. Each version instead exposes an
+explicit, complete foreign-version payload under `spec.v1beta1` or
+`spec.v1beta2`, and likewise under `status`.
+
+- Each served version defines carrier-free `DynamoGraphDeploymentRequestNativeSpec`
+  and `DynamoGraphDeploymentRequestNativeStatus` types. The public `Spec` and
+  `Status` types embed those native payloads and add only the opposite-version
+  envelope.
+- Marshal and unmarshal only the carrier-free native types. Never serialize a
+  public outer `Spec` or `Status` into an envelope, because that would permit
+  recursive foreign-version envelopes.
+- Native fields and a foreign-version envelope are mutually exclusive.
+- A foreign-version spec envelope is a read-only conversion view. Its presence
+  and content are immutable on update; clients change a request through the
+  API version that owns its native representation.
+- Validating admission rejects direct creation through a foreign-version
+  envelope. Conversion is the only producer of envelope content, after the
+  native request has passed its versioned schema validation and pruning.
+- Conversion unwraps the matching envelope when returning to its native version.
+- Otherwise conversion moves the complete native spec and status into the
+  target version's envelope without mutating the source.
+- The still-served `v1alpha1` spoke exposes the same public `v1beta2` spec and
+  status envelopes. It carries those envelopes structurally and must not project
+  their payloads into profiler fields. Annotation-backed envelopes written by
+  earlier development revisions are accepted only as migration input and become
+  structural on the next conversion.
+- Controllers may branch on these public envelope fields to select the native
+  runtime path. The private sparse annotations remain conversion-only.
+
 ## API Changes
 
 For every added, removed, renamed, or semantically changed API field, choose one

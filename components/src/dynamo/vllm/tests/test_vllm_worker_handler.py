@@ -1432,6 +1432,73 @@ async def test_artifact_authority_unavailable_returns_typed_error(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("code", "client_error"),
+    [
+        ("destination_denied", True),
+        ("invalid_target", True),
+        ("expired", True),
+        ("unsupported", False),
+    ],
+)
+async def test_artifact_destination_rejection_is_invalid_argument(
+    monkeypatch, code, client_error
+):
+    from dynamo.artifacts.storage import ArtifactStorageError
+    from dynamo.artifacts.vllm import capture as artifact_capture
+
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler.artifact_router_profile = ()
+    handler.engine_args = handler.config.engine_args
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    request = {
+        "model": "test-model",
+        "token_ids": [10, 11],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 1},
+        "output_options": {},
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "object_store",
+                    "contents": [],
+                    "destination": {"kind": "managed_store"},
+                }
+            }
+        },
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[10, 11])
+    )
+    authority = SimpleNamespace(
+        validate=MagicMock(side_effect=ArtifactStorageError(code, "policy says no")),
+        submit=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "dynamo.artifacts.runtime.configured_artifact_runtime", lambda: authority
+    )
+    budget = artifact_capture.CaptureBudget(1 << 20)
+    monkeypatch.setattr(artifact_capture, "process_capture_budget", lambda: budget)
+    handler.engine_client = SimpleNamespace(generate=MagicMock(), tokenizer=None)
+
+    expected = mod.InvalidArgument if client_error else ArtifactStorageError
+    with pytest.raises(expected, match="policy says no"):
+        async for _ in handler.generate(request, MagicMock()):
+            pass
+    handler.engine_client.generate.assert_not_called()
+    authority.submit.assert_not_called()
+    assert budget.used == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("worker_mode", "message"),
     [
         ("text", "token-in/token-out"),
@@ -2524,36 +2591,36 @@ class TestClassifyEmbeddingInput:
         assert result == [[1, 2], [3, 4, 5]]
 
     def test_mixed_str_and_int_rejected(self):
-        with pytest.raises(TypeError, match="mixes str and non-str"):
+        with pytest.raises(mod.InvalidArgument, match="mixes str and non-str"):
             mod._classify_embedding_input(["hello", 42])
 
     def test_mixed_int_and_str_rejected(self):
-        with pytest.raises(TypeError, match="mixes int and non-int"):
+        with pytest.raises(mod.InvalidArgument, match="mixes int and non-int"):
             mod._classify_embedding_input([1, "two"])
 
     def test_mixed_list_of_lists_with_str_rejected(self):
-        with pytest.raises(TypeError, match="must be a list of"):
+        with pytest.raises(mod.InvalidArgument, match="must be a list of"):
             mod._classify_embedding_input([[1, 2], "three"])
 
     def test_inner_list_with_non_int_rejected(self):
-        with pytest.raises(TypeError, match="must be a list of"):
+        with pytest.raises(mod.InvalidArgument, match="must be a list of"):
             mod._classify_embedding_input([[1, 2], [3.5, 4]])
 
     def test_bool_is_not_treated_as_int(self):
         # `bool` is a subclass of `int`; token ids must be real ints.
-        with pytest.raises(TypeError):
+        with pytest.raises(mod.InvalidArgument):
             mod._classify_embedding_input([True, False])
 
     def test_empty_list_rejected(self):
-        with pytest.raises(ValueError, match="must be non-empty"):
+        with pytest.raises(mod.InvalidArgument, match="must be non-empty"):
             mod._classify_embedding_input([])
 
     def test_unsupported_top_level_type_rejected(self):
-        with pytest.raises(TypeError, match="Invalid 'input' type"):
+        with pytest.raises(mod.InvalidArgument, match="Invalid 'input' type"):
             mod._classify_embedding_input({"text": "hi"})
 
     def test_unsupported_element_type_rejected(self):
-        with pytest.raises(TypeError, match="Unsupported 'input' element"):
+        with pytest.raises(mod.InvalidArgument, match="Unsupported 'input' element"):
             mod._classify_embedding_input([3.14, 2.71])
 
 
@@ -2745,7 +2812,9 @@ class TestEmbeddingWorkerHandlerCancellation:
         handler = self._make_embedding_handler()
         context = self._make_context()
 
-        with pytest.raises(ValueError, match="Invalid 'encoding_format' value"):
+        with pytest.raises(
+            mod.InvalidArgument, match="Invalid 'encoding_format' value"
+        ):
             async for _ in handler.generate(
                 {
                     "token_ids": [[11, 12, 13]],
@@ -2928,7 +2997,9 @@ class TestEmbeddingWorkerHandlerCancellation:
             "model": "test-model",
             "add_special_tokens": value,
         }
-        with pytest.raises(TypeError, match="Invalid 'add_special_tokens' type"):
+        with pytest.raises(
+            mod.InvalidArgument, match="Invalid 'add_special_tokens' type"
+        ):
             async for _ in handler.generate(request, context):
                 pass
 
@@ -2961,17 +3032,17 @@ class TestEmbeddingWorkerHandlerCancellation:
         ]
 
     @pytest.mark.parametrize(
-        ("truncate_prompt_tokens", "error_type", "match"),
+        ("truncate_prompt_tokens", "match"),
         [
-            ("2048", TypeError, "Invalid 'truncate_prompt_tokens' type"),
-            (True, TypeError, "Invalid 'truncate_prompt_tokens' type"),
-            (-2, ValueError, "truncate_prompt_tokens must be >= -1"),
+            ("2048", "Invalid 'truncate_prompt_tokens' type"),
+            (True, "Invalid 'truncate_prompt_tokens' type"),
+            (-2, "truncate_prompt_tokens must be >= -1"),
         ],
     )
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
     async def test_truncate_prompt_tokens_rejects_invalid_values(
-        self, truncate_prompt_tokens, error_type, match
+        self, truncate_prompt_tokens, match
     ):
         """Invalid truncation values fail before the request reaches vLLM."""
         handler = self._make_embedding_handler()
@@ -2982,7 +3053,7 @@ class TestEmbeddingWorkerHandlerCancellation:
             "model": "test-model",
             "truncate_prompt_tokens": truncate_prompt_tokens,
         }
-        with pytest.raises(error_type, match=match):
+        with pytest.raises(mod.InvalidArgument, match=match):
             async for _ in handler.generate(request, context):
                 pass
 
@@ -3040,7 +3111,9 @@ class TestEmbeddingWorkerHandlerCancellation:
         handler.engine_client.encode = fake_encode
 
         request = {"input": ["hello"], "model": "test-model", "dimensions": 2048}
-        with pytest.raises(ValueError, match="exceeds model embedding dimension"):
+        with pytest.raises(
+            mod.InvalidArgument, match="exceeds model embedding dimension"
+        ):
             async for _ in handler.generate(request, context):
                 pass
 

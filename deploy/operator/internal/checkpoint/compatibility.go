@@ -15,6 +15,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -58,6 +59,7 @@ var snapshotRestoreEnvironmentNames = map[string]struct{}{
 	"DYN_PARENT_DGD_K8S_NAME":               {},
 	"DYN_PARENT_DGD_K8S_NAMESPACE":          {},
 	"DYN_REQUEST_PLANE":                     {},
+	"DYN_SERVED_MODEL_NAME":                 {},
 	"DYN_SYSTEM_HEALTH_PATH":                {},
 	"DYN_SYSTEM_HOST":                       {},
 	"DYN_SYSTEM_LIVE_PATH":                  {},
@@ -139,7 +141,7 @@ func ComputeSnapshotCompatibilityHash(
 		BackendFramework:      backendFramework,
 		GMSMode:               gmsMode,
 		GMSDeviceClassName:    gmsDeviceClassName,
-		CUDASharedMemory:      podTemplate.Annotations[consts.CUDASharedMemorySupportAnnotation],
+		CUDASharedMemory:      podTemplate.Annotations[podcontract.CuInterposeAnnotation],
 		TargetContainer:       canonicalSnapshotContainer(*target, false),
 		HostNetwork:           podTemplate.Spec.HostNetwork,
 		HostPID:               podTemplate.Spec.HostPID,
