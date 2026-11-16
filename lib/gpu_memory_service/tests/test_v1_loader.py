@@ -31,6 +31,9 @@ from gpu_memory_service.snapshot.transfer import (
 )
 from gpu_memory_service.v1.snapshot import loader, mx_source
 
+if HAS_TORCH:
+    import torch
+
 try:
     from modelexpress import p2p_pb2
     from modelexpress.adapter import StrategyFailed
@@ -232,8 +235,6 @@ def test_mx_source_stops_advertising_before_releasing_its_weights(
 ):
     import threading
 
-    import torch
-
     events = []
     ctx = SimpleNamespace(
         mx_client=None,
@@ -329,8 +330,6 @@ class _FakeAgent:
     reason="modelexpress and torch required",
 )
 def test_mx_restore_retries_the_next_source_on_its_listen_port(monkeypatch):
-    import torch
-
     agents: list[_FakeAgent] = []
 
     def start_agent(_rank, _device, port):
@@ -398,8 +397,6 @@ def test_mx_restore_retries_the_next_source_on_its_listen_port(monkeypatch):
     reason="modelexpress and torch required",
 )
 def test_mx_restore_requires_the_peer_to_name_every_allocation(monkeypatch):
-    import torch
-
     # By default ModelExpress fills only the tensors both sides name. GMS must
     # ask it to reject a peer whose allocations differ.
     exact = []
