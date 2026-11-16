@@ -12,6 +12,7 @@ import torch
 
 import dynamo.vllm.handlers as base_handlers
 import dynamo.vllm.pooling_handlers as mod
+from dynamo.llm.exceptions import InvalidArgument
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -424,6 +425,39 @@ class TestPoolingBatchExecution:
 
         assert all(event.is_set() for event in started.values())
         assert cancelled == {0, 2, 3}
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    @pytest.mark.parametrize("handler_kind", ["embedding", "classify"])
+    async def test_vllm_validation_error_is_public_invalid_argument(self, handler_kind):
+        # vLLM rejects a bad pooling request (for example, dimensions on a
+        # model without Matryoshka support) with a VLLMValidationError raised
+        # from encode; its reason must reach the client.
+        from vllm.exceptions import VLLMValidationError
+
+        message = "Model 'test-model' does not support Matryoshka embeddings"
+        if handler_kind == "classify":
+            handler = _make_handler()
+        else:
+            with patch.object(base_handlers, "VllmEngineMonitor"):
+                handler = base_handlers.EmbeddingWorkerHandler(
+                    runtime=MagicMock(),
+                    engine=MagicMock(),
+                    config=MagicMock(served_model_name="test-model"),
+                )
+            handler.engine_client = MagicMock()
+            handler.engine_client.abort = AsyncMock()
+
+        async def fake_encode(prompt, pooling_params, request_id, **kwargs):
+            raise VLLMValidationError(message)
+            yield
+
+        handler.engine_client.encode = fake_encode
+        with pytest.raises(InvalidArgument, match="does not support Matryoshka"):
+            async for _ in handler.generate(
+                {"input": ["a"], "model": "test-model"}, _make_context()
+            ):
+                pass
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)

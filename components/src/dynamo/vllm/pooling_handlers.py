@@ -24,7 +24,7 @@ from vllm.inputs import TextPrompt, TokensPrompt
 from dynamo._core import Context
 
 from .args import Config
-from .handlers import EmbeddingWorkerHandler
+from .handlers import EmbeddingWorkerHandler, _translate_vllm_client_errors
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +173,9 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
                 if tokenization_kwargs is not None and isinstance(prompt, str):
                     encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
 
-                async for output in self.engine_client.encode(**encode_kwargs):
+                async for output in _translate_vllm_client_errors(
+                    self.engine_client.encode(**encode_kwargs)
+                ):
                     final_output = output
 
             if final_output is None:
