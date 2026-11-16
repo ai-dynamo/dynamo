@@ -609,7 +609,7 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     )
 
 
-# Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
+# Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-events/src/zmq_wire/extra_keys.rs.
 _DYNAMO_CACHE_SALT_PREFIX = "dynamo-cache-salt:"
 
 
@@ -3292,7 +3292,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         Raises:
             InvalidArgument: If the payload is not valid base64 or the loader
                 rejects it as a client input fault.
-            ValueError: If the input is not a string (internal contract)
+            ValueError: If the input is not a string (internal contract), or
+                any other decoding failure on the caller's payload, including
+                `.encode()` failures before the load and tensor operation
+                failures after it.
             RuntimeError: If ModelConfig is unavailable.
         """
         from vllm.exceptions import VLLMClientError
@@ -3337,8 +3340,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             - tensor: The decoded tensor (for logging shape/dtype)
 
         Raises:
-            InvalidArgument: If decoding fails
-            ValueError: If the input is not a string or the tensor is invalid
+            ValueError: If the decoded tensor is not 2-D (internal contract).
+            Exception: whatever `_decode_prompt_embeds` raised, unchanged.
         """
         embeddings_tensor = self._decode_prompt_embeds(prompt_embeds_base64)
         if embeddings_tensor.dim() != 2:

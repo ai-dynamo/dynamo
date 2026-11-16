@@ -53,7 +53,7 @@ The publisher keeps a `deque` of the last `buffer_steps` (default 10,000) serial
 
 ### Dynamo: Buffer + Indexer with Tree Dump Fallback
 
-Dynamo's `LocalKvIndexer` (in `lib/kv-router/src/indexer/local.rs`) wraps a `KvIndexer` (backed by a `RadixTree`) with a circular event buffer:
+Dynamo's `LocalKvIndexer` (in `lib/router/kv-indexer/src/local.rs`) wraps a `KvIndexer` (backed by a `RadixTree`) with a circular event buffer:
 
 ```text
 LocalKvIndexer
@@ -114,7 +114,7 @@ For deployments using Dynamo's KV-aware routing, the local indexer is used autom
 
 ## See Also
 
-- **[KV Router Index Data Structures](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/indexer/README.md)**: `RadixTree`, `ConcurrentRadixTreeCompressed`, and `PositionalIndexer` internals
+- **[KV Router Index Data Structures](https://github.com/ai-dynamo/dynamo/blob/main/lib/router/kv-indexer/src/README.md)**: `RadixTree`, `ConcurrentRadixTreeCompressed`, and `PositionalIndexer` internals
 - **[Router Guide](router-guide.md)**: Deployment topologies and worker-set configuration
 - **[Configuration and Tuning](configuration-and-tuning.md)**: Router flags and tuning details
 - **[Router Design](router-design.md)**: Architecture details and event transport modes

@@ -24,7 +24,8 @@ use crate::protocols::TokenIdType;
 use crate::protocols::common::FinishReason;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use anyhow::{Context, Result, bail};
-use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
+use dynamo_kv_events::event::KvCacheEvent;
+use dynamo_kv_events::residency::StorageTier;
 use dynamo_mocker::common::handoff::HandoffId;
 use dynamo_mocker::common::protocols::{
     DirectRequest, EngineType, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEvent,
@@ -1249,7 +1250,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         // final chunk repeats cumulative totals (OpenAI convention).
                         let output = LLMEngineOutput {
                             token_ids,
-                            disaggregated_params: is_prefill.then(|| serde_json::json!("dummy")),
+                            disaggregated_params: is_prefill.then(|| Box::new(serde_json::json!("dummy"))),
                             completion_usage: signal.cached_tokens.map(|cached| {
                                 usage_with_cached_tokens(prompt_tokens_count, token_count, cached)
                             }),
