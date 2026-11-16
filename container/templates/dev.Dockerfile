@@ -192,7 +192,6 @@ COPY --chmod=755 container/dev/50-framework-paths.sh /etc/profile.d/50-framework
 #   vLLM/TRTLLM runtime images may only have Python in /opt/dynamo/venv/bin/{python,python3};
 #   SGLang runtime images typically have /usr/bin/python3 already;
 #   framework=none runtime stage now installs /usr/bin/python3.
-# - Install the NIXL SDK material described above.
 # - Set umask for group-writable files in dev stage (runs as root).
 # - Stash the pre-tools python3 (see the dynamo_tools copy below).
 RUN --mount=from=wheel_builder,target=/wheel_builder \
