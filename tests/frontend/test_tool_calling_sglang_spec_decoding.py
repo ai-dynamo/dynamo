@@ -34,6 +34,7 @@ from tests.utils.port_utils import allocate_port, deallocate_ports
 DRAFT_MODEL_NAME = "GavinLucky/SGLang-EAGLE3-Qwen3-0.6B-SpecForge"
 
 pytestmark = [
+    pytest.mark.pre_merge,
     pytest.mark.sglang,
     pytest.mark.core,
     pytest.mark.e2e,
