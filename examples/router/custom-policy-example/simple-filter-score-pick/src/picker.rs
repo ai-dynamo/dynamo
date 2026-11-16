@@ -3,10 +3,7 @@
 
 //! Request-aware picker for the `simple-filter-score-pick` policy.
 
-use dynamo_kv_router::{
-    WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext,
-    WorkerSelectionInputTrigger, WorkerSelectionPolicyError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 /// Uses device affinity for tool results and total cost for other requests.
 pub(crate) struct RequestAwarePicker;
@@ -17,7 +14,7 @@ impl WorkerPicker for RequestAwarePicker {
     }
 
     fn pick(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {

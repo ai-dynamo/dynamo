@@ -51,6 +51,10 @@ class VMMDevice(ABC):
         """Return ``(free_bytes, total_bytes)`` for ``device``."""
 
     @abstractmethod
+    def total_memory(self, device: int) -> int:
+        """Total memory in bytes of ``device``, by this process's ordinal."""
+
+    @abstractmethod
     def get_allocation_granularity(self, device: int) -> int:
         """Minimum allocation granularity in bytes for ``device``."""
 
@@ -76,7 +80,7 @@ class VMMDevice(ABC):
         """Return a POSIX FD that can be passed cross-process via SCM_RIGHTS."""
 
     @abstractmethod
-    def import_shareable_handle_close_fd(self, fd: int) -> int:
+    def import_shareable_handle_close_fd(self, fd: int, import_size: int = 0) -> int:
         """Import a shareable FD into a local physical-memory handle.
 
         The FD is closed on success or failure (matches the existing CUDA

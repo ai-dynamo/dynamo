@@ -1,0 +1,429 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Deterministic SGLang response metadata shared by Mocker transports.
+
+use serde_json::{Map, Value, json};
+
+pub const MAX_TOP_LOGPROBS: usize = 20;
+const MAX_OUTPUT_CANDIDATE_ENTRIES: usize = 65_536;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LogprobOptions {
+    return_logprob: bool,
+    top_logprobs_num: usize,
+    /// Prompt offset the caller wants input logprobs from. `None` is SGLang's
+    /// `-1`, meaning it wants none.
+    prompt_start: Option<usize>,
+}
+
+impl LogprobOptions {
+    pub fn new(
+        return_logprob: bool,
+        top_logprobs_num: i64,
+        logprob_start_len: i64,
+    ) -> Result<Self, String> {
+        if !(0..=MAX_TOP_LOGPROBS as i64).contains(&top_logprobs_num) {
+            return Err(format!(
+                "top_logprobs_num must be between 0 and {MAX_TOP_LOGPROBS}"
+            ));
+        }
+        if logprob_start_len < -1 {
+            return Err("logprob_start_len must be -1 or greater".to_string());
+        }
+        Ok(Self {
+            return_logprob,
+            top_logprobs_num: top_logprobs_num as usize,
+            prompt_start: usize::try_from(logprob_start_len).ok(),
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct ResponseMetadata {
+    request_id: String,
+    prompt_tokens: usize,
+    /// The requested slice of the prompt, kept only when the caller wants prompt
+    /// logprobs on the terminal response.
+    prompt_logprob_tokens: Option<Vec<u32>>,
+    logprob_options: LogprobOptions,
+    candidate_token_ids: Option<Vec<u32>>,
+}
+
+impl ResponseMetadata {
+    pub fn new(
+        request_id: impl Into<String>,
+        prompt_tokens: &[u32],
+        logprob_options: LogprobOptions,
+    ) -> Self {
+        let prompt_logprob_tokens = logprob_options
+            .return_logprob
+            .then_some(logprob_options.prompt_start)
+            .flatten()
+            .map(|start| prompt_tokens[start.min(prompt_tokens.len())..].to_vec());
+        Self {
+            request_id: request_id.into(),
+            prompt_tokens: prompt_tokens.len(),
+            prompt_logprob_tokens,
+            logprob_options,
+            candidate_token_ids: None,
+        }
+    }
+
+    pub fn with_candidate_token_ids(mut self, token_ids: Vec<u32>) -> Self {
+        self.candidate_token_ids = Some(token_ids);
+        self
+    }
+
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub fn validate_candidate_output_budget(&self, max_output_tokens: usize) -> Result<(), String> {
+        let Some(ids) = self
+            .candidate_token_ids
+            .as_ref()
+            .filter(|ids| !ids.is_empty())
+        else {
+            return Ok(());
+        };
+        // Reserve one scored position for an empty terminal frame, including zero-output scoring.
+        let entries = max_output_tokens
+            .checked_add(1)
+            .and_then(|positions| positions.checked_mul(ids.len()));
+        if entries.is_none_or(|entries| entries > MAX_OUTPUT_CANDIDATE_ENTRIES) {
+            return Err(format!(
+                "token_ids_logprob and output length exceed the {MAX_OUTPUT_CANDIDATE_ENTRIES} output candidate-entry budget"
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn response(
+        &self,
+        output_ids: &[u32],
+        completion_tokens: usize,
+        finish_reason: Option<Value>,
+    ) -> Value {
+        json!({
+            "output_ids": output_ids,
+            "meta_info": self.meta_info(output_ids, completion_tokens, finish_reason),
+        })
+    }
+
+    pub fn meta_info(
+        &self,
+        output_ids: &[u32],
+        completion_tokens: usize,
+        finish_reason: Option<Value>,
+    ) -> Map<String, Value> {
+        let terminal = finish_reason.is_some();
+        let is_zero_output_scoring = completion_tokens == 0
+            && finish_reason
+                .as_ref()
+                .and_then(|reason| reason.get("type"))
+                .and_then(Value::as_str)
+                == Some("length");
+        let mut meta_info = Map::from_iter([
+            ("id".to_string(), Value::String(self.request_id.clone())),
+            (
+                "finish_reason".to_string(),
+                finish_reason.unwrap_or(Value::Null),
+            ),
+            ("prompt_tokens".to_string(), Value::from(self.prompt_tokens)),
+            (
+                "completion_tokens".to_string(),
+                Value::from(completion_tokens),
+            ),
+        ]);
+
+        if self.logprob_options.return_logprob {
+            meta_info.insert(
+                "output_token_logprobs".to_string(),
+                Value::Array(output_ids.iter().copied().map(logprob_entry).collect()),
+            );
+            if self.logprob_options.top_logprobs_num > 0 {
+                meta_info.insert(
+                    "output_top_logprobs".to_string(),
+                    Value::Array(
+                        output_ids
+                            .iter()
+                            .copied()
+                            .map(|token| {
+                                top_logprob_entries(token, self.logprob_options.top_logprobs_num)
+                            })
+                            .collect(),
+                    ),
+                );
+            }
+            if let Some(candidate_token_ids) = self.candidate_token_ids.as_deref() {
+                let scored_positions = output_ids.len().max(usize::from(is_zero_output_scoring));
+                meta_info.insert(
+                    "output_token_ids_logprobs".to_string(),
+                    Value::Array(
+                        (0..scored_positions)
+                            .map(|position| {
+                                let sampled = output_ids.get(position).copied();
+                                Value::Array(
+                                    candidate_token_ids
+                                        .iter()
+                                        .map(|&token_id| candidate_logprob_entry(token_id, sampled))
+                                        .collect(),
+                                )
+                            })
+                            .collect(),
+                    ),
+                );
+            }
+            if terminal {
+                self.insert_prompt_logprobs(&mut meta_info);
+            }
+        }
+
+        meta_info
+    }
+
+    fn insert_prompt_logprobs(&self, meta_info: &mut Map<String, Value>) {
+        let Some(prompt_tokens) = self.prompt_logprob_tokens.as_deref() else {
+            return;
+        };
+        let mut input_token_logprobs = Vec::with_capacity(prompt_tokens.len());
+        let mut input_top_logprobs = Vec::with_capacity(prompt_tokens.len());
+        if let Some((first, remaining)) = prompt_tokens.split_first() {
+            // Native SGLang retains the first token ID but uses a null
+            // logprob because no preceding token predicts it.
+            input_token_logprobs.push(json!([null, first, null]));
+            input_token_logprobs.extend(remaining.iter().copied().map(logprob_entry));
+            if self.logprob_options.top_logprobs_num > 0 {
+                input_top_logprobs.push(Value::Null);
+                input_top_logprobs.extend(remaining.iter().copied().map(|token| {
+                    top_logprob_entries(token, self.logprob_options.top_logprobs_num)
+                }));
+            }
+        }
+        meta_info.insert(
+            "input_token_logprobs".to_string(),
+            Value::Array(input_token_logprobs),
+        );
+        if self.logprob_options.top_logprobs_num > 0 {
+            meta_info.insert(
+                "input_top_logprobs".to_string(),
+                Value::Array(input_top_logprobs),
+            );
+        }
+    }
+}
+
+fn selected_logprob(token_id: u32) -> f64 {
+    -0.1 * f64::from((token_id % 10) + 1)
+}
+
+fn logprob_entry(token_id: u32) -> Value {
+    json!([selected_logprob(token_id), token_id, null])
+}
+
+fn candidate_logprob_entry(token_id: u32, sampled: Option<u32>) -> Value {
+    // Leave room for up to 255 candidates while preserving the sampled token's logprob.
+    let offset = if sampled == Some(token_id) { 0.0 } else { 10.0 };
+    json!([selected_logprob(token_id) - offset, token_id, null])
+}
+
+fn top_logprob_entries(token_id: u32, count: usize) -> Value {
+    Value::Array(
+        (0..count)
+            .map(|offset| {
+                let candidate = token_id.saturating_add(offset as u32);
+                json!([
+                    selected_logprob(candidate) - (offset as f64 * 0.01),
+                    candidate,
+                    null
+                ])
+            })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_logprob_controls() {
+        assert!(LogprobOptions::new(false, -1, -1).is_err());
+        assert!(LogprobOptions::new(false, 21, -1).is_err());
+        assert!(LogprobOptions::new(false, 0, -2).is_err());
+    }
+
+    #[test]
+    fn candidate_output_budget_rejects_overflow_without_restricting_ordinary_output() {
+        let metadata = ResponseMetadata::new("bounded", &[], LogprobOptions::default());
+        assert!(
+            metadata
+                .validate_candidate_output_budget(usize::MAX)
+                .is_ok()
+        );
+        let metadata = metadata.with_candidate_token_ids(vec![17]);
+        assert!(metadata.validate_candidate_output_budget(65_535).is_ok());
+        assert!(metadata.validate_candidate_output_budget(65_536).is_err());
+        assert!(
+            metadata
+                .validate_candidate_output_budget(usize::MAX)
+                .is_err()
+        );
+        let metadata = metadata.with_candidate_token_ids(vec![17, 4]);
+        assert!(
+            metadata
+                .validate_candidate_output_budget(usize::MAX / 2)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn emits_incremental_native_metadata_and_logprobs() {
+        let options = LogprobOptions::new(true, 2, 1).unwrap();
+        let metadata = ResponseMetadata::new("request-1", &[10, 11, 12], options);
+        let response = metadata.response(&[42], 3, Some(json!({"type": "length"})));
+
+        assert_eq!(response["output_ids"], json!([42]));
+        assert_eq!(response["meta_info"]["id"], "request-1");
+        assert_eq!(response["meta_info"]["prompt_tokens"], 3);
+        assert_eq!(response["meta_info"]["completion_tokens"], 3);
+        assert_eq!(
+            response["meta_info"]["finish_reason"],
+            json!({"type": "length"})
+        );
+        let selected = &response["meta_info"]["output_token_logprobs"][0];
+        assert!((selected[0].as_f64().unwrap() + 0.3).abs() < f64::EPSILON);
+        assert_eq!(selected[1], 42);
+        assert!(selected[2].is_null());
+        let output_top_logprobs = response["meta_info"]["output_top_logprobs"][0]
+            .as_array()
+            .unwrap();
+        assert_eq!(output_top_logprobs.len(), 2);
+        assert!(output_top_logprobs.iter().all(|entry| entry[2].is_null()));
+        assert_eq!(
+            response["meta_info"]["input_token_logprobs"][0],
+            json!([null, 11, null])
+        );
+        assert_eq!(response["meta_info"]["input_token_logprobs"][1][1], 12);
+        assert!(response["meta_info"]["input_token_logprobs"][1][2].is_null());
+        assert_eq!(response["meta_info"]["input_top_logprobs"][0], Value::Null);
+        assert!(
+            response["meta_info"]["input_top_logprobs"][1]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry[2].is_null())
+        );
+
+        // Prompt logprobs belong to the terminal response only.
+        let incremental = metadata.response(&[42], 1, None);
+        assert!(
+            incremental["meta_info"]
+                .get("input_token_logprobs")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn emits_requested_candidate_logprobs_in_order() {
+        let options = LogprobOptions::new(true, 0, -1).unwrap();
+        let metadata = ResponseMetadata::new("candidate-request", &[10, 11], options)
+            .with_candidate_token_ids(vec![17, 4]);
+        let response = metadata.response(&[42], 1, Some(json!({"type": "length"})));
+
+        assert_eq!(
+            response["meta_info"]["output_token_ids_logprobs"],
+            json!([[[-10.8, 17, null], [-10.5, 4, null]]])
+        );
+    }
+
+    #[test]
+    fn sampled_candidate_matches_output_logprob_at_each_position() {
+        let options = LogprobOptions::new(true, 0, -1).unwrap();
+        let metadata =
+            ResponseMetadata::new("sampled", &[], options).with_candidate_token_ids(vec![42, 17]);
+        let response = metadata.response(&[42, 17], 2, Some(json!({"type": "length"})));
+        let meta = &response["meta_info"];
+        for position in 0..2 {
+            assert_eq!(
+                meta["output_token_ids_logprobs"][position][position],
+                meta["output_token_logprobs"][position]
+            );
+            let mass: f64 = meta["output_token_ids_logprobs"][position]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry[0].as_f64().unwrap().exp())
+                .sum();
+            assert!(mass <= 1.0);
+        }
+    }
+
+    #[test]
+    fn emits_next_token_candidate_logprobs_for_zero_output_scoring() {
+        let options = LogprobOptions::new(true, 0, -1).unwrap();
+        let metadata = ResponseMetadata::new("score", &[10, 11], options)
+            .with_candidate_token_ids(vec![17, 4]);
+        let response = metadata.response(&[], 0, Some(json!({"type": "length"})));
+
+        assert_eq!(response["output_ids"], json!([]));
+        assert_eq!(
+            response["meta_info"]["output_token_ids_logprobs"],
+            json!([[[-10.8, 17, null], [-10.5, 4, null]]])
+        );
+    }
+
+    #[test]
+    fn empty_frames_do_not_fabricate_candidate_scores() {
+        let options = LogprobOptions::new(true, 0, -1).unwrap();
+        let metadata = ResponseMetadata::new("score", &[10, 11], options)
+            .with_candidate_token_ids(vec![17, 4]);
+        for (completion_tokens, finish_reason) in [
+            (0, None),
+            (0, Some(json!({"type": "abort"}))),
+            (2, Some(json!({"type": "cancel"}))),
+            (2, Some(json!({"type": "error"}))),
+            (2, Some(json!({"type": "length"}))),
+            (0, Some(json!({"type": "stop"}))),
+        ] {
+            let response = metadata.response(&[], completion_tokens, finish_reason);
+            assert_eq!(
+                response["meta_info"]["output_token_ids_logprobs"],
+                json!([]),
+                "{response}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_error_preserves_scores_for_actual_output_tokens() {
+        let options = LogprobOptions::new(true, 0, -1).unwrap();
+        let metadata = ResponseMetadata::new("score", &[10, 11], options)
+            .with_candidate_token_ids(vec![17, 4]);
+        let response = metadata.response(&[42, 43], 2, Some(json!({"type": "abort"})));
+        assert_eq!(
+            response["meta_info"]["output_token_ids_logprobs"],
+            json!([
+                [[-10.8, 17, null], [-10.5, 4, null]],
+                [[-10.8, 17, null], [-10.5, 4, null]]
+            ])
+        );
+    }
+
+    #[test]
+    fn candidate_scores_have_valid_full_vocabulary_mass() {
+        let options = LogprobOptions::new(true, 0, -1).unwrap();
+        let metadata = ResponseMetadata::new("score", &[10, 11], options)
+            .with_candidate_token_ids((0..255).collect());
+        let response = metadata.response(&[], 0, Some(json!({"type": "length"})));
+        let entries = response["meta_info"]["output_token_ids_logprobs"][0]
+            .as_array()
+            .unwrap();
+        let mass: f64 = entries
+            .iter()
+            .map(|entry| entry[0].as_f64().unwrap().exp())
+            .sum();
+        assert!(mass > 0.0 && mass <= 1.0);
+    }
+}

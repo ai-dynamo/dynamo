@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+tensor_parallel_size: 1
+max_batch_size: 1
+max_input_len: 1500
+max_num_tokens: 1500
+backend: pytorch
+disable_overlap_scheduler: true
+enable_chunked_prefill: false
+
+scheduler_config:
+  use_python_scheduler: true
+
+kv_cache_config:
+  enable_block_reuse: false
+  free_gpu_memory_fraction: 0.2
+  cross_kv_cache_fraction: 0.5
+  use_kv_cache_manager_v2: true
+guided_decoding_backend: null

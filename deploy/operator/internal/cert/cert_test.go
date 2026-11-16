@@ -22,12 +22,13 @@ import (
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // fakeCertProvisioner captures the rotator config passed to AddRotator and
@@ -114,11 +115,9 @@ func TestCreatePlaceholderSecretIfNotExists_CreatesWhenMissing(t *testing.T) {
 
 func TestCreatePlaceholderSecretIfNotExists_NoopWhenExists(t *testing.T) {
 	existing := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: testNamespace,
-			Name:      testSecretName,
-		},
-		Type: corev1.SecretTypeTLS,
+		Namespace: testNamespace,
+		Name:      testSecretName,
+		Type:      corev1.SecretTypeTLS,
 		Data: map[string][]byte{
 			defaultCertName:   []byte("existing-cert"),
 			defaultKeyName:    []byte("existing-key"),
@@ -289,10 +288,8 @@ func TestWaitForMountedCertificate_WaitsWhenKeyPairIsMissing(t *testing.T) {
 
 func TestInjectIntoValidatingWebhooks(t *testing.T) {
 	wc := &admissionregistrationv1.ValidatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "test-validating",
-			Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
-		},
+		Name:   "test-validating",
+		Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
 		Webhooks: []admissionregistrationv1.ValidatingWebhook{
 			{
 				Name:                    "test.webhook.io",
@@ -324,10 +321,8 @@ func TestInjectIntoValidatingWebhooks(t *testing.T) {
 
 func TestInjectIntoValidatingWebhooks_SkipsNonMatchingLabels(t *testing.T) {
 	wc := &admissionregistrationv1.ValidatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "other-validating",
-			Labels: map[string]string{"app.kubernetes.io/part-of": "other-operator"},
-		},
+		Name:   "other-validating",
+		Labels: map[string]string{"app.kubernetes.io/part-of": "other-operator"},
 		Webhooks: []admissionregistrationv1.ValidatingWebhook{
 			{
 				Name:                    "other.webhook.io",
@@ -363,10 +358,8 @@ func TestInjectIntoValidatingWebhooks_SkipsNonMatchingLabels(t *testing.T) {
 
 func TestInjectIntoValidatingWebhooks_SkipsDifferentNamespace(t *testing.T) {
 	wc := &admissionregistrationv1.ValidatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "other-ns-validating",
-			Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: "other-ns"},
-		},
+		Name:   "other-ns-validating",
+		Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: "other-ns"},
 		Webhooks: []admissionregistrationv1.ValidatingWebhook{
 			{
 				Name:                    "test.webhook.io",
@@ -402,10 +395,8 @@ func TestInjectIntoValidatingWebhooks_SkipsDifferentNamespace(t *testing.T) {
 
 func TestInjectIntoMutatingWebhooks(t *testing.T) {
 	wc := &admissionregistrationv1.MutatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "test-mutating",
-			Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
-		},
+		Name:   "test-mutating",
+		Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
 		Webhooks: []admissionregistrationv1.MutatingWebhook{
 			{
 				Name:                    "mutate.webhook.io",
@@ -435,75 +426,140 @@ func TestInjectIntoMutatingWebhooks(t *testing.T) {
 	}
 }
 
-func TestInjectAdmissionDoesNotPatchCRDConversion(t *testing.T) {
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testSecretName},
-		Data:       map[string][]byte{defaultCACertName: []byte("admission-ca")},
-	}
-	validating := &admissionregistrationv1.ValidatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "test-validating",
-			Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
+func TestInjectHonorsNamespaceScope(t *testing.T) {
+	tests := []struct {
+		name                 string
+		mode                 configv1alpha1.CertProvisionMode
+		restrictedNamespace  string
+		wantAdmissionCA      string
+		wantConversionCA     string
+		wantCRDReadCount     int
+		wantCRDMutationCount int
+	}{
+		{
+			name:                 "cluster-wide auto mode owns admission and conversion",
+			mode:                 configv1alpha1.CertProvisionModeAuto,
+			wantAdmissionCA:      "operator-ca",
+			wantConversionCA:     "operator-ca",
+			wantCRDReadCount:     len(convertibleCRDs),
+			wantCRDMutationCount: 1,
 		},
-		Webhooks: []admissionregistrationv1.ValidatingWebhook{{
-			Name:         "validate.webhook.io",
-			ClientConfig: admissionregistrationv1.WebhookClientConfig{},
-		}},
-	}
-	mutating := &admissionregistrationv1.MutatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "test-mutating",
-			Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
+		{
+			name:                "namespace-restricted auto mode owns admission only",
+			mode:                configv1alpha1.CertProvisionModeAuto,
+			restrictedNamespace: testNamespace,
+			wantAdmissionCA:     "operator-ca",
+			wantConversionCA:    "cluster-ca",
 		},
-		Webhooks: []admissionregistrationv1.MutatingWebhook{{
-			Name:         "mutate.webhook.io",
-			ClientConfig: admissionregistrationv1.WebhookClientConfig{},
-		}},
-	}
-	crd := newDGDConversionCRD()
-
-	cfg := &configv1alpha1.OperatorConfiguration{}
-	cfg.Server.Webhook.SecretName = testSecretName
-	injector := newTestInjector(
-		fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(secret, validating, mutating, crd),
-		cfg,
-	)
-	ctx := context.Background()
-	if err := injector.InjectAdmission(ctx); err != nil {
-		t.Fatalf("injecting admission CA: %v", err)
-	}
-
-	updatedValidating := &admissionregistrationv1.ValidatingWebhookConfiguration{}
-	if err := injector.client.Get(ctx, types.NamespacedName{Name: validating.Name}, updatedValidating); err != nil {
-		t.Fatalf("getting validating webhook: %v", err)
-	}
-	if string(updatedValidating.Webhooks[0].ClientConfig.CABundle) != "admission-ca" {
-		t.Fatalf("validating webhook CA = %q, want admission-ca", updatedValidating.Webhooks[0].ClientConfig.CABundle)
+		{
+			name:                 "cluster-wide manual mode owns conversion only",
+			mode:                 configv1alpha1.CertProvisionModeManual,
+			wantAdmissionCA:      "existing-admission-ca",
+			wantConversionCA:     "operator-ca",
+			wantCRDReadCount:     len(convertibleCRDs),
+			wantCRDMutationCount: 1,
+		},
+		{
+			name:                "namespace-restricted manual mode owns neither",
+			mode:                configv1alpha1.CertProvisionModeManual,
+			restrictedNamespace: testNamespace,
+			wantAdmissionCA:     "existing-admission-ca",
+			wantConversionCA:    "cluster-ca",
+		},
 	}
 
-	updatedMutating := &admissionregistrationv1.MutatingWebhookConfiguration{}
-	if err := injector.client.Get(ctx, types.NamespacedName{Name: mutating.Name}, updatedMutating); err != nil {
-		t.Fatalf("getting mutating webhook: %v", err)
-	}
-	if string(updatedMutating.Webhooks[0].ClientConfig.CABundle) != "admission-ca" {
-		t.Fatalf("mutating webhook CA = %q, want admission-ca", updatedMutating.Webhooks[0].ClientConfig.CABundle)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Seed webhook resources with distinct operator and cluster CA bundles")
+			secret := &corev1.Secret{
+				Namespace: testNamespace, Name: testSecretName,
+				Data: map[string][]byte{defaultCACertName: []byte("operator-ca")},
+			}
+			validating := &admissionregistrationv1.ValidatingWebhookConfiguration{
+				Name:   "test-validating",
+				Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
+				Webhooks: []admissionregistrationv1.ValidatingWebhook{{
+					Name: "validate.webhook.io",
+					ClientConfig: admissionregistrationv1.WebhookClientConfig{
+						CABundle: []byte("existing-admission-ca"),
+					},
+				}},
+			}
+			crd := newDGDConversionCRD()
+			crd.Spec.Conversion.Webhook.ClientConfig.CABundle = []byte("cluster-ca")
+			originalService := crd.Spec.Conversion.Webhook.ClientConfig.Service.DeepCopy()
 
-	updatedCRD := &apiextensionsv1.CustomResourceDefinition{}
-	if err := injector.client.Get(ctx, types.NamespacedName{Name: crd.Name}, updatedCRD); err != nil {
-		t.Fatalf("getting CRD: %v", err)
-	}
-	if updatedCRD.Spec.Conversion.Webhook.ClientConfig.CABundle != nil {
-		t.Fatalf("CRD conversion CA was modified: %q", updatedCRD.Spec.Conversion.Webhook.ClientConfig.CABundle)
+			t.Log("Record every attempted CRD read, patch, or update")
+			crdReadCount := 0
+			crdMutationCount := 0
+			builder := fake.NewClientBuilder().
+				WithScheme(newScheme()).
+				WithObjects(secret, validating, crd).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, reader client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						if _, ok := obj.(*apiextensionsv1.CustomResourceDefinition); ok {
+							crdReadCount++
+						}
+						return reader.Get(ctx, key, obj, opts...)
+					},
+					Patch: func(ctx context.Context, writer client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						if _, ok := obj.(*apiextensionsv1.CustomResourceDefinition); ok {
+							crdMutationCount++
+						}
+						return writer.Patch(ctx, obj, patch, opts...)
+					},
+					Update: func(ctx context.Context, writer client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+						if _, ok := obj.(*apiextensionsv1.CustomResourceDefinition); ok {
+							crdMutationCount++
+						}
+						return writer.Update(ctx, obj, opts...)
+					},
+				})
+			cfg := &configv1alpha1.OperatorConfiguration{}
+			cfg.Server.Webhook.SecretName = testSecretName
+			cfg.Server.Webhook.CertProvisionMode = tt.mode
+			cfg.Namespace.Restricted = tt.restrictedNamespace
+			injector := newTestInjector(builder, cfg)
+			ctx := context.Background()
+
+			t.Log("Inject CA bundles according to the operator scope and certificate mode")
+			if err := injector.Inject(ctx); err != nil {
+				t.Fatalf("injecting CA bundles: %v", err)
+			}
+			if crdReadCount != tt.wantCRDReadCount {
+				t.Fatalf("CRD read count = %d, want %d", crdReadCount, tt.wantCRDReadCount)
+			}
+
+			t.Log("Verify admission and conversion ownership boundaries")
+			updatedValidating := &admissionregistrationv1.ValidatingWebhookConfiguration{}
+			if err := injector.client.Get(ctx, types.NamespacedName{Name: validating.Name}, updatedValidating); err != nil {
+				t.Fatalf("getting validating webhook: %v", err)
+			}
+			if got := string(updatedValidating.Webhooks[0].ClientConfig.CABundle); got != tt.wantAdmissionCA {
+				t.Fatalf("admission CA = %q, want %q", got, tt.wantAdmissionCA)
+			}
+
+			updatedCRD := &apiextensionsv1.CustomResourceDefinition{}
+			if err := injector.client.Get(ctx, types.NamespacedName{Name: crd.Name}, updatedCRD); err != nil {
+				t.Fatalf("getting CRD: %v", err)
+			}
+			if got := string(updatedCRD.Spec.Conversion.Webhook.ClientConfig.CABundle); got != tt.wantConversionCA {
+				t.Fatalf("conversion CA = %q, want %q", got, tt.wantConversionCA)
+			}
+			if got := updatedCRD.Spec.Conversion.Webhook.ClientConfig.Service; !reflect.DeepEqual(got, originalService) {
+				t.Fatalf("conversion service = %#v, want %#v", got, originalService)
+			}
+			if crdMutationCount != tt.wantCRDMutationCount {
+				t.Fatalf("CRD mutation count = %d, want %d", crdMutationCount, tt.wantCRDMutationCount)
+			}
+		})
 	}
 }
 
 func newConversionCRD(name, plural, singular, kind string) *apiextensionsv1.CustomResourceDefinition {
 	path := testManifestPath
 	return &apiextensionsv1.CustomResourceDefinition{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
+		Name: name,
 		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
 			Group: "nvidia.com",
 			Names: apiextensionsv1.CustomResourceDefinitionNames{
@@ -544,10 +600,8 @@ func newDGDConversionCRD() *apiextensionsv1.CustomResourceDefinition {
 
 func TestInjectCRDConversionCA_ReadsCABundleAndPatchesOnlyCABundle(t *testing.T) {
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: testNamespace,
-			Name:      testSecretName,
-		},
+		Namespace: testNamespace,
+		Name:      testSecretName,
 		Data: map[string][]byte{
 			defaultCertName:   []byte("cert-data"),
 			defaultKeyName:    []byte("key-data"),
@@ -561,7 +615,7 @@ func TestInjectCRDConversionCA_ReadsCABundleAndPatchesOnlyCABundle(t *testing.T)
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(secret, crd), cfg)
 	ctx := context.Background()
 
-	if err := injector.InjectCRDConversionCA(ctx); err != nil {
+	if err := injector.injectCRDConversionCA(ctx); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -615,7 +669,7 @@ func TestInjectCRDConversionCA_WaitsWhenSecretNotFound(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancel()
 
-	err := injector.InjectCRDConversionCA(ctx)
+	err := injector.injectCRDConversionCA(ctx)
 	if err == nil {
 		t.Fatal("expected context timeout while waiting for missing secret")
 	}
@@ -636,10 +690,8 @@ func TestEnsureCRDConversionCA_SkipsWhenCRDNotFound(t *testing.T) {
 
 func TestReadCABundle(t *testing.T) {
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: testNamespace,
-			Name:      testSecretName,
-		},
+		Namespace: testNamespace,
+		Name:      testSecretName,
 		Data: map[string][]byte{
 			defaultCertName:   []byte("cert-data"),
 			defaultKeyName:    []byte("key-data"),
@@ -661,10 +713,8 @@ func TestReadCABundle(t *testing.T) {
 
 func TestReadCABundle_ErrorOnMissingCA(t *testing.T) {
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: testNamespace,
-			Name:      testSecretName,
-		},
+		Namespace: testNamespace,
+		Name:      testSecretName,
 		Data: map[string][]byte{
 			defaultCertName: []byte("cert-data"),
 			defaultKeyName:  []byte("key-data"),

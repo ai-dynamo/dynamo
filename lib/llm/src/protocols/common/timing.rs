@@ -43,13 +43,20 @@ pub enum RequestPhase {
     Aggregated,
 }
 
+impl RequestPhase {
+    /// Stable label value, shared by every metric labelled `phase`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RequestPhase::Prefill => "prefill",
+            RequestPhase::Decode => "decode",
+            RequestPhase::Aggregated => "aggregated",
+        }
+    }
+}
+
 impl std::fmt::Display for RequestPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RequestPhase::Prefill => write!(f, "prefill"),
-            RequestPhase::Decode => write!(f, "decode"),
-            RequestPhase::Aggregated => write!(f, "aggregated"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -208,6 +215,19 @@ pub struct RoutingData {
 }
 
 impl RequestTracker {
+    /// Apply metadata forwarded by a standalone router to this request's tracker.
+    pub(crate) fn ingest_routing_data(&self, data: RoutingData) {
+        if let Some(timing) = data.timing {
+            self.set_external_timing(timing);
+        }
+        if let Some(worker_id) = data.worker_id {
+            self.set_external_worker_info(worker_id);
+        }
+        if let Some(token_ids) = data.token_ids {
+            self.set_external_query_token_ids(token_ids);
+        }
+    }
+
     /// Create a new request tracker, capturing the current time as request received.
     pub fn new() -> Self {
         let now = Instant::now();
@@ -264,6 +284,12 @@ impl RequestTracker {
 
     pub fn record_finish(&self) {
         *self.request_finish_time.lock() = Some(Instant::now());
+    }
+
+    pub(crate) fn record_finish_if_missing(&self) {
+        self.request_finish_time
+            .lock()
+            .get_or_insert_with(Instant::now);
     }
 
     /// Record KV cache hit information. Returns true if this was the first call.

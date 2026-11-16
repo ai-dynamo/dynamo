@@ -3,9 +3,7 @@
 
 //! Uncached-block cost for the stacked scorer stage.
 
-use dynamo_kv_router::{
-    WorkerCandidate, WorkerInputs, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicyError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 pub(crate) struct UncachedBlocksScorer;
 
@@ -15,13 +13,17 @@ impl WorkerScorer for UncachedBlocksScorer {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        let cache = candidate
-            .cache()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
-        Ok((context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0))
+        candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            let cache = candidate
+                .cache()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
+            *cost = (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
+        }
+        Ok(())
     }
 }

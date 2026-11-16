@@ -109,22 +109,28 @@ unredacted allowlisted values.
 ## Active Worker Health Checks
 
 HTTP `/live` and `/health` endpoints are passive: they report current process and runtime state when
-an external system queries them. Canary checks are active: Dynamo sends a real request through an
-idle worker endpoint to verify that the inference path still completes.
+an external system queries them. For LLM workers, active canary checks send a minimal inference
+request through an idle worker endpoint, following the lifecycle below. vLLM-Omni workers use a
+different default; see
+[vLLM-Omni Health Checks](../../../reference/observability/health-checks.mdx#vllm-omni-health-checks).
 
-1. **Observe successful activity.** A successful response chunk marks the endpoint ready and resets
-   its idle timer.
+1. **Observe successful activity.** A response chunk without an error, or a clean end of stream,
+   marks the endpoint ready and resets its idle timer.
 2. **Wait for the endpoint to become idle.** If no successful activity arrives for
    `DYN_CANARY_WAIT_TIME`, the endpoint's timer expires.
 3. **Send the backend canary payload.** Dynamo sends the backend's minimal health-check payload
-   through the registered endpoint. Unified backends can override that payload with
+   through the registered endpoint.
+   [Unified backends](../../advanced-customizations/writing-custom-backends/writing-unified-backends.md)
+   can override that payload with
    `DYN_HEALTH_CHECK_PAYLOAD`.
-4. **Apply the result.** A successful response restores or retains `ready`. If no response arrives
-   within `DYN_HEALTH_CHECK_REQUEST_TIMEOUT`, Dynamo marks the endpoint `notready`.
+4. **Apply the result.** The runtime marks the endpoint `ready` when the first response has no error.
+   A failed request, an empty stream, an error in the first response, or no first response within
+   `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` marks the endpoint `notready`.
 
-Normal traffic suppresses unnecessary canaries because it already proves that the endpoint can
-serve requests. Active checks are disabled by default and should be enabled only where this extra
-failure-detection path is required.
+Normal traffic suppresses unnecessary canaries because response activity shows engine progress;
+it does not establish completion of every request or successful client delivery. Active checks are
+disabled by default. Set `DYN_HEALTH_CHECK_ENABLED=true` where this extra failure-detection path is
+required.
 
 ## Related Documentation
 

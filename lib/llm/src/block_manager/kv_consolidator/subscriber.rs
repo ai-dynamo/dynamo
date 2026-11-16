@@ -12,8 +12,8 @@ use serde::Deserialize;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_kv_router::protocols::StorageTier as RouterStorageTier;
-use dynamo_kv_router::zmq_wire::{KvEventOwnership, Locality, RawKvEvent};
+use dynamo_kv_events::residency::StorageTier as RouterStorageTier;
+use dynamo_kv_events::zmq_wire::{KvEventOwnership, Locality, RawKvEvent};
 
 use super::SharedCacheStatusTracker;
 use super::tracker::{
@@ -280,7 +280,7 @@ fn process_event(
 mod tests {
     use super::super::tracker::{ConsolidatedEvent, PassthroughCacheStatusTracker, StorageTier};
     use super::*;
-    use dynamo_kv_router::zmq_wire::BlockHashValue;
+    use dynamo_kv_events::zmq_wire::BlockHashValue;
 
     fn stored_event(medium: Option<&str>, locality: Option<Locality>) -> RawKvEvent {
         RawKvEvent::BlockStored {
@@ -298,6 +298,7 @@ mod tests {
             kv_cache_spec_sliding_window: None,
             locality,
             ownership: None,
+            session_id: None,
         }
     }
 

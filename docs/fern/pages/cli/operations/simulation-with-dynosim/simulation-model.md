@@ -6,13 +6,12 @@ subtitle: Engine behavior, timing sources, KV movement, and fidelity boundaries
 ---
 
 DynoSim builds a distributed serving simulation from Mocker engine cores. Each core owns
-engine-specific scheduler and KV-cache state. Offline prediction and the retained internal worker
-runtime drive the same core through virtual-time and wall-clock execution, respectively.
+engine-specific scheduler and KV-cache state. Offline prediction and live Mocker workers drive the
+same core through virtual-time and wall-clock execution, respectively.
 
-> [!WARNING]
-> The public online Mocker CLI is temporarily unavailable. The internal online behavior described
-> here remains an implementation detail and will return through the unified AISimulate CLI in a
-> future release.
+Run `python3 -m dynamo.mocker` to launch live workers. This worker launcher is separate from the
+former public Replay online CLI, which remains unavailable in the unified AISimulate CLI. The
+Python replay SDK retains online mode for programmatic callers.
 
 ## Engine Behavior
 
@@ -43,9 +42,9 @@ events. The SGLang core uses its own token-pool and radix-cache implementation.
 Scheduler state determines the batch and cache-hit inputs to the timing source. Choose one timing
 source for each worker role with `engine.workers.<role>.timing.type`.
 
-The removed public Mocker CLI options for profile-derived interpolation and direct `--aic-*`
-configuration are not part of the unified CLI. Use only the timing types accepted by the
-AISimulate YAML schema.
+The live Mocker CLI options for profile-derived interpolation and direct `--ais-*` configuration
+are separate from the unified CLI. In AISimulate configurations, use only the timing types accepted
+by the AISimulate YAML schema.
 
 ### AISimulate Performance Model
 
@@ -87,7 +86,7 @@ kv_transfer:
   timing_mode: destination_missing
 ```
 
-The offline simulation uses a per-request line-rate model:
+The offline simulation prices each transfer with a line-rate model:
 
 ```text
 transfer time = transferred KV bytes / kv_transfer_bandwidth
@@ -96,7 +95,12 @@ transferred KV bytes = charged tokens * kv_bytes_per_token
 
 `timing_mode: full_prompt` charges the full logical prompt. `destination_missing` charges only the
 prompt footprint absent from the destination and can produce zero delay on a full destination hit.
-Concurrent requests do not contend for a shared link.
+
+That time applies to a transfer alone on its links. In offline prediction, each prefill rank sends
+over one link and each decode rank receives over one link, both at the configured bandwidth.
+Transfers in flight at the same time share these links max-min fairly, so concurrent handoffs from
+one prefill rank, or into one decode rank, take longer than a lone transfer. Live Mocker workers do
+not share links: each transfer waits its own fixed delay.
 
 Set `bytes_per_token: auto` to derive the value from model metadata and parallelism, or provide a
 positive integer. Set a positive `bandwidth_gb_per_second` to apply the transfer delay. TensorRT-LLM
@@ -129,5 +133,5 @@ Interpret simulation results within these boundaries:
 - Mocker simulates text-token processing; it does not model multimodal encoder or cross-attention
   compute.
 
-Use offline prediction for broad algorithm and configuration exploration. Validate the distributed
-path with focused GPU benchmarks until online simulation returns.
+Use offline prediction for broad algorithm and configuration exploration. Use live Mocker workers
+to exercise the distributed path, and validate performance conclusions with focused GPU benchmarks.

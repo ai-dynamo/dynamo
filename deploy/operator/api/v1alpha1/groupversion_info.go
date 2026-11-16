@@ -38,8 +38,14 @@ var (
 	// DynamoGraphDeploymentGVK is the v1alpha1 DynamoGraphDeployment kind.
 	DynamoGraphDeploymentGVK = GroupVersion.WithKind("DynamoGraphDeployment")
 
+	// LPXGraphDeploymentGVK identifies the operator-generated LPX child.
+	LPXGraphDeploymentGVK = GroupVersion.WithKind("LPXGraphDeployment")
+
 	// DynamoGraphDeploymentRequestGVK is the v1alpha1 DynamoGraphDeploymentRequest kind.
 	DynamoGraphDeploymentRequestGVK = GroupVersion.WithKind("DynamoGraphDeploymentRequest")
+
+	// DynamoPoolRelayGVK is the v1alpha1 DynamoPoolRelay kind.
+	DynamoPoolRelayGVK = GroupVersion.WithKind("DynamoPoolRelay")
 
 	// SchemeBuilder is used to add go types to the GroupVersionKind scheme
 	SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes)
@@ -50,18 +56,20 @@ var (
 
 func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(GroupVersion,
-		&DynamoCheckpoint{},
-		&DynamoCheckpointList{},
 		&DynamoComponentDeployment{},
 		&DynamoComponentDeploymentList{},
 		&DynamoGraphDeployment{},
 		&DynamoGraphDeploymentList{},
+		&LPXGraphDeployment{},
+		&LPXGraphDeploymentList{},
 		&DynamoGraphDeploymentRequest{},
 		&DynamoGraphDeploymentRequestList{},
 		&DynamoGraphDeploymentScalingAdapter{},
 		&DynamoGraphDeploymentScalingAdapterList{},
 		&DynamoModel{},
 		&DynamoModelList{},
+		&DynamoPoolRelay{},
+		&DynamoPoolRelayList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil

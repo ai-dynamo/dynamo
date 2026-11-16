@@ -23,14 +23,13 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
 func TestBugDGD_IntermediateHubAddsMainOnlyPodTemplateRoundTrips(t *testing.T) {
 	alpha := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "main-only-pod-template", Namespace: "ns"},
+		Name: "main-only-pod-template", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -65,7 +64,7 @@ func TestBugDGD_IntermediateHubAddsMainOnlyPodTemplateRoundTrips(t *testing.T) {
 
 func TestBugDGD_BetaPrefillDecodeConvertFromUsesAlphaSubComponentType(t *testing.T) {
 	hub := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "disaggregated", Namespace: "ns"},
+		Name: "disaggregated", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
@@ -103,5 +102,51 @@ func TestBugDGD_BetaPrefillDecodeConvertFromUsesAlphaSubComponentType(t *testing
 	}
 	if diff := cmp.Diff(hub.Spec.Components, restored.Spec.Components, cmpopts.EquateEmpty()); diff != "" {
 		t.Fatalf("components mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestBugDGD_LegacyServiceMapKeysSurviveConversion(t *testing.T) {
+	legacyNames := map[string]v1beta1.ComponentType{
+		"VllmDecodeWorker":  v1beta1.ComponentTypeDecode,
+		"VllmPrefillWorker": v1beta1.ComponentTypePrefill,
+	}
+	alpha := &DynamoGraphDeployment{
+		Name: "legacy-service-names", Namespace: "ns",
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"VllmDecodeWorker": {
+					ComponentType:    string(v1beta1.ComponentTypeWorker),
+					SubComponentType: string(v1beta1.ComponentTypeDecode),
+				},
+				"VllmPrefillWorker": {
+					ComponentType:    string(v1beta1.ComponentTypeWorker),
+					SubComponentType: string(v1beta1.ComponentTypePrefill),
+				},
+			},
+		},
+	}
+
+	t.Log("convert legacy v1alpha1 service-map keys to v1beta1 component names")
+	hub := &v1beta1.DynamoGraphDeployment{}
+	if err := alpha.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	convertedNames := make(map[string]v1beta1.ComponentType, len(hub.Spec.Components))
+	for _, component := range hub.Spec.Components {
+		convertedNames[component.ComponentName] = component.ComponentType
+	}
+	if diff := cmp.Diff(legacyNames, convertedNames); diff != "" {
+		t.Fatalf("converted component names mismatch (-want +got):\n%s", diff)
+	}
+
+	t.Log("convert back to v1alpha1 without normalizing the legacy map keys")
+	restored := &DynamoGraphDeployment{}
+	if err := restored.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	for legacyName := range legacyNames {
+		if _, ok := restored.Spec.Services[legacyName]; !ok {
+			t.Fatalf("legacy service key %q missing after round trip: %#v", legacyName, restored.Spec.Services)
+		}
 	}
 }

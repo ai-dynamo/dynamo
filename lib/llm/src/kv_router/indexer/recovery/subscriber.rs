@@ -4,7 +4,7 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
-use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, RouterEvent};
+use dynamo_kv_events::event::{KV_EVENT_SUBJECT, RouterEvent};
 use dynamo_runtime::{
     component::{Component, Endpoint},
     discovery::EventTransportKind,
@@ -17,8 +17,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    IndexerRecoveryTarget, RecoveryTarget, direct_zmq::run_direct_zmq_supervisor, source_health,
-    start_state_agent_router, worker_query::WorkerQueryClient,
+    IndexerRecoveryTarget, RecoveryTarget, broker_zmq::run_broker_zmq_supervisor,
+    direct_zmq::run_direct_zmq_supervisor, source_health, start_state_agent_router,
+    worker_query::WorkerQueryClient,
 };
 use crate::{
     discovery::{KvSourceMembershipView, KvSourceMembershipWatch, KvSourceStatus},
@@ -306,7 +307,7 @@ fn legacy_mismatch_count(view: &KvSourceMembershipView) -> usize {
 
 fn source_status_is_mismatch(
     view: &KvSourceMembershipView,
-    worker: &dynamo_kv_router::protocols::WorkerWithDpRank,
+    worker: &dynamo_router_protocol::worker::WorkerWithDpRank,
     status: &KvSourceStatus,
 ) -> bool {
     match status {
@@ -378,6 +379,7 @@ impl KvEventSubscriptionHandle {
         self.task_guard = Some(task_guard);
     }
 
+    #[cfg(test)]
     pub(crate) async fn shutdown(mut self) {
         self.cancel.cancel();
         for completion in self.completions.drain(..) {
@@ -459,6 +461,38 @@ pub async fn start_subscriber(
         cancel.child_token(),
     );
     let metric_scope = MismatchMetricScope::Router(source_requirement);
+
+    if transport_kind == EventTransportKind::Zmq && !direct_zmq {
+        tracing::info!("Using brokered-ZMQ KV event ingress on the application runtime");
+        let (startup_tx, startup_rx) = oneshot::channel();
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let task_cancel = cancel.clone();
+        tokio::spawn(async move {
+            run_broker_zmq_supervisor(
+                endpoint.component().clone(),
+                endpoint.id(),
+                client,
+                membership_watch,
+                model,
+                worker_type,
+                metric_scope,
+                task_cancel,
+                Some(startup_tx),
+            )
+            .await;
+            let _ = completion_tx.send(());
+        });
+        startup_rx.await.map_err(|_| {
+            anyhow::anyhow!("Brokered-ZMQ ingress supervisor exited before reporting readiness")
+        })?;
+        let cancel = cancellation_guard.disarm();
+        return Ok(KvEventSubscriptionHandle {
+            cancel,
+            completions: vec![completion_rx, health_completion, state_completion],
+            runtime,
+            task_guard: None,
+        });
+    }
 
     if !direct_zmq {
         tracing::info!(
@@ -604,7 +638,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use dynamo_kv_router::protocols::WorkerWithDpRank;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
 
     use crate::discovery::{KvEventSource, KvStateEndpointResolution};
 

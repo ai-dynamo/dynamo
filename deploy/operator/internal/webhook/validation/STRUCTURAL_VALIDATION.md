@@ -13,8 +13,9 @@ Keep this table current whenever a resource validator is migrated.
 | `DynamoGraphDeployment` | Structural | `dynamographdeployment.go`, `dynamographdeployment_v1alpha1.go` |
 | `DynamoComponentDeployment` | Structural | `dynamocomponentdeployment.go`, `dynamocomponentdeployment_v1alpha1.go` |
 | `DynamoGraphDeploymentRequest` | Structural | `dynamographdeploymentrequest.go` |
+| `DynamoGraphDeploymentRun` | Structural | `dynamographdeploymentrun.go`, shared `NativeSearchInput` in `shared_v1beta2.go` |
+| `DynamoGraphDeploymentCandidate` | Structural | `dynamographdeploymentcandidate.go` |
 | `DynamoModel` | Structural | `dynamomodel.go` |
-| `DynamoCheckpoint` | Structural | `dynamocheckpoint.go` |
 
 ## Contract
 

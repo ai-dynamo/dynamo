@@ -202,7 +202,7 @@ if [ "$USE_MOCKERS" = true ]; then
     fi
     MOCKER_ARGS+=("${EXTRA_ARGS[@]}")
 
-    python -m dynamo.mocker._worker "${MOCKER_ARGS[@]}" &
+    python -m dynamo.mocker "${MOCKER_ARGS[@]}" &
     PIDS+=($!)
     echo "Started mocker with $NUM_WORKERS workers (PID: $!)"
 else

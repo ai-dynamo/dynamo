@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+- phase: pending
+  observedGeneration: 7
+  diagnostics: &diagnostics
+  - code: ExactDiagnostic
+    subject: requests/current
+    detail: the exact scheduler detail
+- phase: noFit
+  observedGeneration: 7
+  diagnostics: *diagnostics
+- phase: unsupported
+  observedGeneration: 7
+  diagnostics: *diagnostics
+- phase: planned
+  observedGeneration: 7
+  diagnostics: *diagnostics
+- phase: reserving
+  observedGeneration: 7
+  diagnostics: *diagnostics
+- phase: binding
+  observedGeneration: 7
+  diagnostics: *diagnostics
+- phase: degraded
+  observedGeneration: 7
+  diagnostics: *diagnostics
+- phase: releasing
+  observedGeneration: 7
+  diagnostics: *diagnostics
+- phase: released
+  observedGeneration: 7
+  diagnostics: *diagnostics
+- phase: future
+  observedGeneration: 7
+  diagnostics: *diagnostics

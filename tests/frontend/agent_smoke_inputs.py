@@ -12,8 +12,11 @@ LIST_DIRECTORY_PROMPT = (
 )
 
 CODEX_LIST_DIRECTORY_PROMPT = (
-    'Call exec_command exactly once with the complete argument object {"cmd":"ls"}. '
-    "Do not add justification, sandbox_permissions, or any other field. Then report "
+    'Call exec_command with the complete argument object {"cmd":"ls"}. '
+    "Use the default sandbox permissions; do not request escalated permissions. "
+    "Do not add justification, sandbox_permissions, or any other field. If the "
+    "tool refuses a call because you requested escalated permissions, call it "
+    'again with only {"cmd":"ls"}, without escalated permissions. Then report '
     "each filename verbatim from the output."
 )
 
@@ -35,6 +38,9 @@ non_code_mode_only = false
     (codex_home / "config.toml").write_text(
         f"""
 model_max_output_tokens = 4096
+# Dynamo's Responses adapter supports function tools, not hosted web search.
+# Disable Codex's default web-search tool for both parent and child smokes.
+web_search = "disabled"
 
 {multi_agent_config}
 

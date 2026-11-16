@@ -10,9 +10,12 @@ SPDX-License-Identifier: Apache-2.0
   Shared Components selected by multiple recipes live under
   `recipes/kustomize/components/`; that directory has no base or overlays and
   never renders by itself. The copy-and-fill beta cluster scaffold lives under
-  `recipes/templates/kustomize/`; it uses guarded JSON 6902 patches against
-  canonical `nvidia.com/v1beta1` component positions, requires standalone
-  Kustomize v5.8.1, and does not include the central OpenAPI Component. Keep
+  `recipes/templates/kustomize/`; its structural Components use guarded JSON
+  6902 patches against canonical `nvidia.com/v1beta1` component positions, its
+  networking Components and hook patches use strategic merge patches addressed
+  by component name, it requires standalone Kustomize v5.8.1, and its root
+  Kustomization selects a generated copy of the OpenAPI Component under
+  `components/dynamo-openapi/` first. Keep
   filled site values outside the repository. Portable templates omit
   credential Secret references and probe structs. They use the canonical
   `shared-model-cache` bundle, exec-form runtime commands, and
@@ -30,10 +33,11 @@ SPDX-License-Identifier: Apache-2.0
   base with backend-neutral `PrefillWorker` and `DecodeWorker` service keys.
   A recipe matrix at `.kustomize-matrix.yaml` has an explicit `source`, a
   `nameTemplate`, and a `matrix` mapping whose values contain a `name` and may
-  provide `components`, `templates`, and `values`. The matrix, recipe-local base
-  and Components, and shared Components are source. Each template selection
-  has a source relative to the matrix and a generated `path` under the
-  overlay's `components/` directory. Generated paths
+  provide `components`, `templates`, `values`, and `sortOptions`. The matrix,
+  recipe-local base and Components, and shared Components are source.
+  `sortOptions` orders the resources in that value's generated overlay. Each
+  template selection has a source relative to the matrix and a generated `path`
+  under the overlay's `components/` directory. Generated paths
   selected by one variant must be unique and non-overlapping. Shared
   template sources live in `recipes/kustomize/templates/`. A selected template
   directory extends the direct `*.yaml` and `*.yaml.j2` files in its parent

@@ -30,7 +30,7 @@ X-Dynamo-Session-ID: rollout-run42-sample7
 X-Dynamo-Parent-Session-ID: rollout-run42-parent2
 ```
 
-Use `x-request-id` for cross-component logs and distributed traces. Native SGLang `/generate` gives a body `rid` precedence over that header, so use one stable `rid` or omit it.
+Use `x-request-id` for cross-component logs and distributed traces. Dynamo always generates its own internal request ID, so concurrent requests can reuse the same client value. Client-supplied IDs are correlation values only: native SGLang `/generate` returns the body `rid` (or `x-request-id` when `rid` is omitted) in the response, and `/inference/v1/generate` returns `x-request-id` (or the body `request_id`) as the response `request_id`. Native SGLang session requests are the exception: when the body has `session_params`, SGLang keys the session continuation by `rid` (or `x-request-id` when `rid` is omitted), so that value must stay unique and stable and must not be reused by concurrent requests.
 
 Dynamo does not define typed RL rollout, trainer-step, or policy-version fields. Keep those values in the framework and join them through opaque request or session identity. Session identity supports correlation; it does not enable affinity unless the router is configured for it and does not validate policy freshness.
 
@@ -60,7 +60,7 @@ python3 benchmarks/request_trace/convert_to_perfetto.py \
   --output /tmp/rl-run/request-trace.perfetto.json
 ```
 
-Open the result in the [Perfetto UI](https://ui.perfetto.dev/). The timeline shows request, prefill, and decode slices; agentic workloads can also include inferred or explicitly reported tool spans. Use the framework's rollout and attempt records alongside the timeline to distinguish serving time from environment, tool, reward, and trainer time. See [Agent Tracing](../agents/agent-tracing.md) for tool-event capture and detailed Perfetto guidance.
+Open the result in the [Perfetto UI](https://ui.perfetto.dev/). The timeline shows request, prefill, and decode slices; agentic workloads can also include inferred or explicitly reported tool spans. Use the framework's rollout and attempt records alongside the timeline to distinguish serving time from environment, tool, reward, and trainer time. See [Trace an Agent Run](../agents/agent-tracing.md) for tool-event capture and detailed Perfetto guidance.
 
 Use the overview to scan concurrent rollouts for long-tail environment or tool behavior.
 
@@ -116,15 +116,36 @@ A validated `request_end` trace preserves request schedule, input and output len
 | Live replay | Measure serving latency, throughput, cache behavior, and regressions on real workers | Synthetic requests do not rerun training, rewards, tools, or original model decisions. |
 | Offline DynoSim | Compare worker counts, routing, cache capacity, topology, and planner choices | Results are directional until calibrated against a matching live run. |
 
-Run DynoSim directly on the captured trace:
+Save an offline prediction config as `/tmp/rl-run/dynosim.yaml`. Set the `engine` identity to match
+the deployment that produced the trace, and list every trace shard explicitly under `paths`:
+
+```yaml
+traffic:
+  source:
+    type: trace
+    format: dynamo
+    paths:
+    - /tmp/rl-run/request-trace.000000.jsonl.gz
+  load: {type: trace_timestamps, speedup: 1.0}
+engine:
+  mode: aggregated
+  model: Qwen/Qwen3-0.6B
+  hardware: h200_sxm
+  backend: vllm
+  workers:
+    aggregated:
+      parallelism: {replicas: 4, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
+router:
+  policy: kv_router
+```
+
+Run DynoSim on the captured trace:
 
 ```bash
-python -m dynamo.replay /tmp/rl-run/request-trace.*.jsonl.gz \
-  --trace-format dynamo \
-  --replay-mode offline \
-  --router-mode kv_router \
-  --num-workers 4 \
-  --report-json /tmp/rl-run/dynosim-report.json
+aisimulate predict \
+  --stack dynamo \
+  --config /tmp/rl-run/dynosim.yaml \
+  --output-dir /tmp/rl-run/dynosim-output
 ```
 
 Change one serving factor at a time. Use [DynoSim](../../cli/operations/simulation-with-dynosim/overview.md) for the complete workflow and [Agent Trace Replay](../agents/agent-simulation.mdx) for the live synthetic replay path.
