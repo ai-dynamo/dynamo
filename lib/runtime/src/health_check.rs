@@ -104,11 +104,14 @@ impl HealthCheckManager {
             let startup_retry = STARTUP_CANARY_RETRY_INTERVAL.min(canary_wait);
             let mut wait = Duration::ZERO;
             let mut ever_ready = false;
+            // The canary in flight. The timer is off until it finishes, so canaries
+            // never overlap, but activity is still handled meanwhile.
+            let mut canary: Option<JoinHandle<()>> = None;
 
             loop {
-                // Wait for either timeout or activity notification
+                // Wait for timeout, the canary in flight, or activity notification
                 tokio::select! {
-                    _ = tokio::time::sleep(wait) => {
+                    _ = tokio::time::sleep(wait), if canary.is_none() => {
                         // Timeout - send health check for this specific endpoint
                         debug!("Canary timer expired for {}, sending health check", endpoint_subject);
 
@@ -116,8 +119,9 @@ impl HealthCheckManager {
                         let target = manager.drt.system_health().lock().get_health_check_target(&endpoint_subject);
 
                         if let Some(target) = target {
-                            if let Err(e) = manager.send_health_check_request(&endpoint_subject, &target.payload).await {
-                                error!("Failed to send health check for {}: {}", endpoint_subject, e);
+                            match manager.send_health_check_request(&endpoint_subject, &target.payload) {
+                                Ok(check) => canary = Some(check),
+                                Err(e) => error!("Failed to send health check for {}: {}", endpoint_subject, e),
                             }
                         } else {
                             // This should never happen - targets are registered at startup and never removed
@@ -126,6 +130,13 @@ impl HealthCheckManager {
                                 endpoint_subject
                             );
                             break;
+                        }
+                    }
+
+                    result = async { canary.as_mut().unwrap().await }, if canary.is_some() => {
+                        canary = None;
+                        if let Err(e) = result {
+                            error!("Health check task for {} failed: {}", endpoint_subject, e);
                         }
                     }
 
@@ -222,11 +233,11 @@ impl HealthCheckManager {
     }
 
     /// Send a health check request via the local endpoint registry (in-process).
-    async fn send_health_check_request(
+    fn send_health_check_request(
         &self,
         endpoint_subject: &str,
         payload: &serde_json::Value,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<JoinHandle<()>> {
         debug!(
             "Sending health check to {} via local registry",
             endpoint_subject
@@ -249,9 +260,8 @@ impl HealthCheckManager {
         let payload = payload.clone();
         let timeout = self.config.request_timeout;
 
-        // Send the health check on its own task and wait for it, so the next
-        // canary is only scheduled after this one finishes and canaries never
-        // overlap.
+        // Send the health check on its own task. The caller holds the handle and
+        // schedules the next canary only after this one finishes.
         let check = tokio::spawn(async move {
             let result = tokio::time::timeout(timeout, async {
                 let request = SingleIn::new(payload);
@@ -317,9 +327,7 @@ impl HealthCheckManager {
 
             debug!("Health check completed for {}", endpoint_subject_owned);
         });
-        check.await?;
-
-        Ok(())
+        Ok(check)
     }
 }
 
@@ -813,6 +821,45 @@ mod push_handler_notify_tests {
             engine.calls.load(std::sync::atomic::Ordering::SeqCst),
             2,
             "one failed canary and one successful retry; no idle canary yet",
+        );
+    }
+
+    /// A mock engine that never responds, so its canary stays pending until the
+    /// request timeout.
+    struct HangingEngine;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error> for HangingEngine {
+        async fn generate(
+            &self,
+            _input: SingleIn<TestRequest>,
+        ) -> anyhow::Result<ManyOut<TestResponse>> {
+            std::future::pending().await
+        }
+    }
+
+    // =================================================================
+    // Test 8: Activity sets Ready while a canary is pending
+    // =================================================================
+    #[tokio::test]
+    async fn test_activity_sets_ready_while_canary_pending() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.activity_during_canary";
+
+        let notifier = register_endpoint(&drt, endpoint, Arc::new(HangingEngine));
+
+        // The first canary fires at registration and hangs until the 1s request timeout
+        start_manager(&drt, 60_000).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_status(&drt, endpoint, HealthStatus::NotReady, "canary pending");
+
+        notifier.notify_one();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::Ready,
+            "activity should set Ready without waiting for the pending canary",
         );
     }
 }
