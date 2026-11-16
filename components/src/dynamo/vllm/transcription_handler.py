@@ -177,6 +177,9 @@ class TranscriptionWorkerHandler:
             # handlers.py; otherwise a VLLMClientError is reported as a 500.
             raise InvalidArgument(str(error)) from error
         if ErrorResponse is not None and isinstance(result, ErrorResponse):
+            # A 400 reason is written for the caller; HttpError text stays private.
+            if result.error.code == 400:
+                raise InvalidArgument(result.error.message)
             raise HttpError(result.error.code, result.error.message)
         if not hasattr(result, "model_dump"):
             raise TypeError(

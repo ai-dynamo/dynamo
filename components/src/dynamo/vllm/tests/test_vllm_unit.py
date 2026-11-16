@@ -18,6 +18,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 import dynamo.llm as dynamo_llm
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm import envs
 from dynamo.vllm.args import (
     _connector_to_kv_transfer_json,
@@ -1715,7 +1716,6 @@ def test_vllm_validation_error_is_public_invalid_argument():
 async def test_worker_translates_vllm_validation_error_to_invalid_argument():
     from vllm.exceptions import VLLMValidationError
 
-    from dynamo.llm.exceptions import InvalidArgument
     from dynamo.vllm.handlers import _translate_vllm_client_errors
 
     message = "The decoder prompt is longer than the maximum model length."
