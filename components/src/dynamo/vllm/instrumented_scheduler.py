@@ -126,7 +126,16 @@ from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import MambaSpec
+
+try:
+    # vLLM <= 0.34.0rc1.dev5xx: one spec class per attention allocation policy.
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
+except ImportError:
+    # Newer vLLM: the allocation policy moved from the spec class to the group's
+    # manager (KVCacheGroup.manager_cls / manager_config), and a group holds a
+    # per-layer spec dict instead of one kv_cache_spec.
+    FullAttentionSpec = SlidingWindowSpec = None
 from vllm.v1.request import Request, RequestStatus
 
 from dynamo.common.forward_pass_metrics import (
@@ -287,6 +296,42 @@ def _bench_engine_attention(attention_config: Any, hf_config: Any) -> dict[str, 
     return block
 
 
+def _kv_group_specs(group: Any) -> list[Any]:
+    """The distinct layer specs of one KV cache group, on either vLLM KV API."""
+    spec = getattr(group, "kv_cache_spec", None)
+    if spec is not None:
+        return [spec]
+    distinct = getattr(group, "distinct_specs", None)
+    if distinct is not None:
+        return list(distinct)
+    return list(dict.fromkeys((getattr(group, "kv_cache_specs", None) or {}).values()))
+
+
+def _kv_group_is_state(group: Any) -> bool:
+    """Recurrent (Mamba/KDA) state group."""
+    return any(
+        isinstance(spec, MambaSpec) or "Mamba" in type(spec).__name__
+        for spec in _kv_group_specs(group)
+    )
+
+
+def _kv_group_policy(group: Any) -> str:
+    """'full', 'window' (a finite window), 'state' or 'other' for one group."""
+    if _kv_group_is_state(group):
+        return "state"
+    spec = getattr(group, "kv_cache_spec", None)
+    if spec is not None and FullAttentionSpec is not None:
+        if isinstance(spec, SlidingWindowSpec):
+            return "window" if spec.sliding_window > 0 else "other"
+        return "full" if isinstance(spec, FullAttentionSpec) else "other"
+    manager = getattr(getattr(group, "manager_cls", None), "__name__", "")
+    if manager == "FullAttentionManager":
+        return "full"
+    if manager in ("SlidingWindowManager", "CircularBufferManager"):
+        return "window" if getattr(group, "sliding_window_reach", 0) > 0 else "other"
+    return "other"
+
+
 def _bench_engine_kv_cache_spec(spec: Any) -> dict[str, Any]:
     """One kv_cache_spec's identity, geometry and observed attention retention."""
     entry: dict[str, Any] = {
@@ -319,9 +364,12 @@ def _bench_engine_kv_cache(cache_config: Any, kv_cache_config: Any) -> dict[str,
     """
     groups: list[dict[str, Any]] = []
     for group in getattr(kv_cache_config, "kv_cache_groups", None) or []:
-        spec = getattr(group, "kv_cache_spec", None)
-        if spec is None:
+        specs = _kv_group_specs(group)
+        if not specs:
             continue
+        spec = specs[0] if len(specs) == 1 else SimpleNamespace(
+            kv_cache_specs={str(i): s for i, s in enumerate(specs)}
+        )
         entry = _bench_engine_kv_cache_spec(spec)
         # vLLM's UniformTypeKVCacheSpecs wraps several same-kind specs that
         # differ in per-layer attributes; its own dtype/head_size/
@@ -4131,7 +4179,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 getattr(self, "kv_cache_manager", None), "kv_cache_config", None
             )
             return any(
-                self._kvwarm_is_state_spec(getattr(group, "kv_cache_spec", None))
+                _kv_group_is_state(group)
                 for group in getattr(config, "kv_cache_groups", None) or []
             )
         return False
@@ -5749,9 +5797,15 @@ class InstrumentedScheduler(AsyncScheduler):
         groups = getattr(config, "kv_cache_groups", None) or []
         names = []
         for group in groups:
-            spec_name = type(getattr(group, "kv_cache_spec", None)).__name__
-            if "Mamba" in spec_name:
-                names.append(spec_name)
+            if _kv_group_is_state(group):
+                names.append(
+                    next(
+                        type(spec).__name__
+                        for spec in _kv_group_specs(group)
+                        if "Mamba" in type(spec).__name__
+                        or isinstance(spec, MambaSpec)
+                    )
+                )
         return names
 
     @staticmethod
@@ -5768,26 +5822,14 @@ class InstrumentedScheduler(AsyncScheduler):
         Native allocation and forward execution build both exactly. Necessary,
         not sufficient: the gate also requires experts or state layers.
         """
-        specs = [
-            group.kv_cache_spec
+        policies = [
+            _kv_group_policy(group)
             for group in self.kv_cache_manager.kv_cache_config.kv_cache_groups
         ]
-
-        def finite_window(spec) -> bool:
-            return isinstance(spec, SlidingWindowSpec) and spec.sliding_window > 0
-
         return (
             not self._bench_random_kda
-            and any(
-                finite_window(spec) or self._kvwarm_is_state_spec(spec)
-                for spec in specs
-            )
-            and all(
-                isinstance(spec, FullAttentionSpec)
-                or finite_window(spec)
-                or self._kvwarm_is_state_spec(spec)
-                for spec in specs
-            )
+            and any(p in ("window", "state") for p in policies)
+            and all(p in ("full", "window", "state") for p in policies)
         )
 
     def _kvwarm_seed_regime(self, point) -> str:
