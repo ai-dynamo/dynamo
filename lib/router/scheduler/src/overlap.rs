@@ -375,7 +375,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::test_utils::SimpleWorkerConfig;
-    use dynamo_kv_indexer::overlap::OverlapScores;
+    use dynamo_kv_indexer::OverlapScores;
     use dynamo_kv_indexer::{LowerTierMatchDetails, MatchDetails};
     use dynamo_router_protocol::worker::WorkerWithDpRank;
     use dynamo_worker_selection::SharedCacheHits;

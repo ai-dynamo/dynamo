@@ -1,12 +1,6 @@
 # lib/router/scheduler
 
-`dynamo-scheduler` is the router's scheduler kernel: it runs the stages (index lookup, slot tracking, session affinity, worker selection, admission) atomically for one request and owns the request and response vocabulary, eligibility, the queue actor and `LocalScheduler`, the overlap and prefill-load analysis, the selection kernel, the validated kernel configuration, and the tracking hash. `protocols` holds the kernel's own types and re-exports nothing.
-
-- Depends on (Dynamo crates): `dynamo-admission`, `dynamo-kv-events`, `dynamo-kv-hashing`, `dynamo-kv-hints`, `dynamo-kv-indexer`, `dynamo-router-protocol`, `dynamo-session-affinity`, `dynamo-slot-tracker`, `dynamo-tokens`, `dynamo-worker-selection`.
-- Must not depend on: kv-router, the runtime, any transport (axum, hyper, reqwest, zmq, prometheus); `dynamo-kv-router` composes it with those adapters.
-- Hosts import this crate through its `host` module.
-- Check: `bash scripts/router_layering_check.sh` (and `--host`).
-- Design: `lib/router/README.md`; the kernel's invariants, lock order, and actor rules are in `README.md` under "Working rules".
+`dynamo-scheduler` is the router's kernel: it runs the stages for one request and owns the request and response types, the queue actor, and `SelectionCore`. Hosts outside `lib/router` import through `host`. Modules are private except `host` and `test_utils`: the root list in `src/lib.rs` is the in-router contract, `host` is the subset promised to hosts outside `lib/router`, and a type another crate owns is imported from that crate, not re-exported here.
 
 ## Queue actor: due times and controlled delay
 
@@ -22,8 +16,10 @@ Costing, classification, queue placement, readiness and selection share the same
 work and capacity checks; an ineligible target permits fallback within the original
 constraints. Exact pins remain exact. Prepared rows keep main's configuration,
 availability and overload freshness checks. Callers may project loads and fill rows;
-the actor repairs ranks it wrote since, or projects again. Configured reject thresholds
-keep the full load and eligibility pass on the actor.
+the actor repairs ranks it wrote since, or projects again. Record every actor-side
+write to a rank's load in `ActorWriteLog` after the write, or a prepared projection
+misses it. Configured reject thresholds keep the full load and eligibility pass on
+the actor.
 
 Affinity lanes wake on target capacity changes, matching arrivals, or a 100 ms
 `AFFINITY_RECHECK_INTERVAL` while affinity backlog exists. This is a recheck cadence,
