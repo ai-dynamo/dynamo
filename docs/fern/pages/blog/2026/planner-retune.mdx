@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 title: "Planner Retune: Staying on the Pareto Frontier as Traffic Drifts"
 subtitle: "[Hongkuan Zhou](https://developer.nvidia.com/blog/author/hongkuanz/) — November 2026"
-description: "Planner Retune replays recent traffic in AISim, picks better KV-router and Planner settings, and applies them to a running Dynamo deployment: +13 % goodput per GPU on H200 with router retune, +4.6 % with router and Planner retune under autoscaling."
+description: "Planner Retune replays recent traffic in AISim, picks better KV-router and Planner settings, and applies them to a running Dynamo deployment: +13% goodput per GPU on H200 with router retune, +4.6% with router and Planner retune under autoscaling."
 keywords: Dynamo, Planner, Router, retune, AISim, autoscaling, goodput, Kubernetes
 last-updated: November 9, 2026
 hide-page-actions: true
@@ -32,13 +32,13 @@ fleet at night. The settings that were optimal at deploy time quietly drift away
 most recent window in AISim for a grid of KV-router and Planner settings, and switches the running deployment to
 the winner, with no restart. Here is what it buys:
 
-- **Real H200, router retune:** **+13.1 % goodput per GPU** after the first decision, with SLA attainment up from 51 %
-  to 58 % and median time to first token down 17 %.
-- **Real H200, router and Planner retune with autoscaling:** **+4.6 % goodput per GPU** and **+6.1 points** more
+- **Real H200, router retune:** **+13.1% goodput per GPU** after the first decision, with SLA attainment up from 51%
+  to 58% and median time to first token down 17%.
+- **Real H200, router and Planner retune with autoscaling:** **+4.6% goodput per GPU** and **+6.1 points** more
   requests within SLA, on about the same number of GPUs.
-- **Simulation, traffic switches:** after the traffic changes, retune catches up in one window and gains **+11 to 12 %**
+- **Simulation, traffic switches:** after the traffic changes, retune catches up in one window and gains **+11 to 12%**
   goodput per GPU on the next one.
-- **Simulation, router and Planner together:** **+10.8 %** over a day by fixing a router setting that only breaks once
+- **Simulation, router and Planner together:** **+10.8%** over a day by fixing a router setting that only breaks once
   the Planner autoscales.
 - **Fast:** **5 to 7 minutes** from the end of a window to the new settings serving traffic.<sup>1</sup>
 
@@ -67,13 +67,13 @@ traffic type.
 </Info>
 
 On the router side (Figure 1a), RAG traffic wants strong cache affinity: `prefill_load_scale` 64 is best. The same
-setting loses **33 %** on single-tenant reasoning traffic, where long decodes pile up on the few workers that hold the
+setting loses **33%** on single-tenant reasoning traffic, where long decodes pile up on the few workers that hold the
 hot prefixes; there, a much lighter `prefill_load_scale` 4 wins. Agentic traffic lands in between, at 16. The default
-(credit 1, scale 1) is never the best and gives up 2 to 14 %.
+(credit 1, scale 1) is never the best and gives up 2 to 14%.
 
 The Planner shows the same pattern (Figure 1b). On reasoning traffic and bursty waves, scaling down conservatively
-(sensitivity 90) is best and the default sensitivity of 80 loses up to 9 %. On coding traffic it is the reverse:
-aggressive scale-down (sensitivity 70) is best and the conservative setting loses 12 %. Agentic traffic prefers a
+(sensitivity 90) is best and the default sensitivity of 80 loses up to 9%. On coding traffic it is the reverse:
+aggressive scale-down (sensitivity 70) is best and the conservative setting loses 12%. Agentic traffic prefers a
 slower 10-second load step.
 
 No single setting wins everywhere, so any setting tuned once at deploy time leaves goodput on the table as soon as the
@@ -100,14 +100,14 @@ were live at 4:50 and 5:04.
 3. **Sweep.** The Planner replays that window in AISim once for every candidate router and Planner setting. On
    Kubernetes the replays run as DynamoGraphDeploymentRequests, in parallel, next to the deployment.
 4. **Decide.** Each candidate is scored on goodput per GPU: requests that meet the time-to-first-token and
-   inter-token-latency SLA, per GPU. The best candidate replaces the current settings only if it is more than 3 % better
+   inter-token-latency SLA, per GPU. The best candidate replaces the current settings only if it is more than 3% better
    on the same window. The decision is written to a Kubernetes Lease before anything changes.
 5. **Apply.** The Planner pushes the router settings to every frontend and applies its own new settings in place.
    Traffic keeps flowing; nothing restarts.
 
 Three properties make the loop safe to leave on. All candidates replay with the same random seed, so a setting that
 changes no routing or scaling decision scores exactly like the current one and is never picked by chance; together
-with the 3 % threshold, this keeps retune from switching back and forth on noise. Decisions are written to a Lease
+with the 3% threshold, this keeps retune from switching back and forth on noise. Decisions are written to a Lease
 before they act, and windows are aligned to wall-clock time, so a restarted Planner continues the same windows. And
 `advisory` mode records every decision without applying it, so you can watch what retune would do first.
 
@@ -181,24 +181,24 @@ window is one day. Dashed lines mark decisions.
 </Info>
 
 In both orders, retune switches as soon as it has seen one window of the new traffic, and the next day gains
-**+11.5 %** and **+10.9 %** goodput per GPU, with SLA attainment rising from 58 % to 64 %. When nothing is clearly
-better, it keeps the current settings: on the two RAG days of the first sequence, every sweep found less than 3 %, so
+**+11.5%** and **+10.9%** goodput per GPU, with SLA attainment rising from 58% to 64%. When nothing is clearly
+better, it keeps the current settings: on the two RAG days of the first sequence, every sweep found less than 3%, so
 nothing changed and nothing was lost. Carrying reasoning-tuned settings into the first RAG day did not hurt either
-(+1.8 %).
+(+1.8%).
 
-The last RAG day gains +12.7 % in a different way: retune switched the router to credit 2, scale 1 and the Planner's
-load predictor from ARIMA to Kalman, and the deployment ran 26 % fewer GPUs while SLA attainment fell from 75 % to
-62 %. Goodput per GPU rewards that trade. This is a recovery rather than a better RAG setting: after two reasoning
+The last RAG day gains +12.7% in a different way: retune switched the router to credit 2, scale 1 and the Planner's
+load predictor from ARIMA to Kalman, and the deployment ran 26% fewer GPUs while SLA attainment fell from 75% to
+62%. Goodput per GPU rewards that trade. This is a recovery rather than a better RAG setting: after two reasoning
 days the deployment without retune, whose load predictor was fitted to reasoning traffic, stays at about 32 GPUs
 through both RAG days, and retune brings the fleet back to where the starting settings run when RAG comes first (about
-22 GPUs on the same day, with goodput per GPU within 1 % of the retuned run). If SLA attainment matters more than GPU
+22 GPUs on the same day, with goodput per GPU within 1% of the retuned run). If SLA attainment matters more than GPU
 count for your service, keep an eye on it when choosing the objective.
 
 ### Tuning the router and the Planner together
 
 The router and the Planner also interact. A router setting that is ideal for a fixed fleet can hurt once the Planner
 starts adding and removing workers: with SLA Planner autoscaling on a day of RAG traffic, the fixed-fleet favorite
-`prefill_load_scale` 64 loses 14 % to the default.
+`prefill_load_scale` 64 loses 14% to the default.
 
 The traffic here is one day of the same RAGPulse trace at four times the scale: 1,024 copies, 1.08 million requests.
 The requests look the same all day (about 2,700 input tokens, 300 output tokens, a third of the input reusable), but
@@ -221,12 +221,12 @@ windows. A line breaks where 15 minutes pass without a request.
 <Info icon="hand-point-up" className="fig-caption">
 Simulation (AISim replay). DeepSeek-V4-Pro on up to 128 B300 GPUs with SLA Planner autoscaling, one day of RAG
 traffic, retune every 6 hours. Black ticks mark the best fixed setting, found in hindsight. Both runs use the same
-settings in the first window, so the −1.8 % gap there is run-to-run randomness.
+settings in the first window, so the −1.8% gap there is run-to-run randomness.
 </Info>
 
 Starting from that setting, retune searches router and Planner settings together. Its first decision switches the
 router back to `prefill_load_scale` 1 and the Planner's load predictor from ARIMA to Prophet. Every window after it
-gains 16 to 51 % and stays within 4 % of the best fixed setting: **+10.8 %** goodput per GPU over the day. Because
+gains 16 to 51% and stays within 4% of the best fixed setting: **+10.8%** goodput per GPU over the day. Because
 every candidate replays with the Planner in the loop, retune sees an interaction that a router sweep on a fixed fleet
 misses.
 
@@ -238,15 +238,15 @@ Kubernetes cluster and replays the same two-hour trace into both with AIPerf on 
 has retune on. For the first hour both run the same settings, and retune only records traffic, so the first hour also
 measures how much two identical deployments differ by chance.
 
-### Router retune: +13 % goodput per GPU
+### Router retune: +13% goodput per GPU
 
 The first experiment keeps four H200 GPUs per deployment and lets retune search 108 router settings.
 
 The traffic is the conversation trace published with [Mooncake](https://github.com/kvcache-ai/Mooncake) (FAST '25):
 one hour of online conversation requests, multi-turn chats that carry their history with them. To fit four GPUs we
-replay it at 0.4 times its rate and drop the 5 % of requests that exceed the model's 40,960-token context. We play the
+replay it at 0.4 times its rate and drop the 5% of requests that exceed the model's 40,960-token context. We play the
 hour twice, the second time with new prefixes for everything except the most widely shared ones. The result is 9,477
-requests at a steady 1.3 requests per second, about 9,400 input tokens and 340 output tokens each, with 39 % of the
+requests at a steady 1.3 requests per second, about 9,400 input tokens and 340 output tokens each, with 39% of the
 input repeating an earlier prefix.
 
 <Frame caption="Figure 5a — The traffic: two hours of steady conversation traffic">
@@ -264,15 +264,15 @@ retune window.
 
 <Info icon="hand-point-up" className="fig-caption">
 Measured on H200. Top: goodput per GPU in 5-minute bins. Bottom: retune on versus off. In the first hour both
-deployments run the same settings, so the +0.4 % difference is run-to-run randomness.
+deployments run the same settings, so the +0.4% difference is run-to-run randomness.
 </Info>
 
 Seven minutes after the first hour ended, retune changed one setting, `prefill_load_scale` from 1 to 16, chosen from
-108 candidates. From then on the retuned deployment was ahead in every 5-minute bin: **+13.1 % goodput per GPU**, SLA
-attainment up from 51 % to 58 %, and median time to first token down 17 %. An hour later the next sweep found nothing
-more than 3 % better and kept the setting, as it should when the traffic has not changed.
+108 candidates. From then on the retuned deployment was ahead in every 5-minute bin: **+13.1% goodput per GPU**, SLA
+attainment up from 51% to 58%, and median time to first token down 17%. An hour later the next sweep found nothing
+more than 3% better and kept the setting, as it should when the traffic has not changed.
 
-### Router and Planner retune with autoscaling: +4.6 %
+### Router and Planner retune with autoscaling: +4.6%
 
 The second experiment lets the Planner scale each deployment between one and four H200 GPUs as traffic rises and falls
 in waves, and lets retune search router and Planner settings together. Fast scaling matters here, so new workers
@@ -281,7 +281,7 @@ for a cold start.
 
 The traffic is the same conversation trace, reshaped into waves: we keep or drop whole conversations so that the
 request rate rises and falls twice per hour, between about 0.2 and 0.9 requests per second. Each request still looks
-like those of the first experiment: about 9,800 input tokens and 330 output tokens, with 41 % of the input reusable.
+like those of the first experiment: about 9,800 input tokens and 330 output tokens, with 41% of the input reusable.
 The second hour repeats the conversations of the first hour with new prefixes, so both hours offer the same load:
 3,472 requests in total.
 
@@ -300,13 +300,13 @@ retune window.
 
 <Info icon="hand-point-up" className="fig-caption">
 Measured on H200. Top: requests per 5 minutes, the same waves in both hours. Middle: GPUs in use. Bottom: share of
-requests within SLA. In the first hour both deployments run the same settings, so the −0.9 % difference is run-to-run
+requests within SLA. In the first hour both deployments run the same settings, so the −0.9% difference is run-to-run
 randomness.
 </Info>
 
 Five minutes after the first hour ended, retune changed two settings at once: the router's `prefill_load_scale` from 1
 to 16 and the Planner's scale-down sensitivity from 80 to 70. In the second hour the retuned deployment served
-**+4.6 % goodput per GPU** and kept **68.6 %** of requests within SLA versus 62.5 % without retune, on about the same
+**+4.6% goodput per GPU** and kept **68.6%** of requests within SLA versus 62.5% without retune, on about the same
 GPUs (3.08 versus 2.93 on average).
 
 ## Try it
