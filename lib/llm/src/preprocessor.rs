@@ -9038,6 +9038,15 @@ mod token_data_tests {
         "content":"<x>","special":false,"single_word":false,"lstrip":false,"rstrip":false,
         "normalized":false}],
         "model":{"type":"WordLevel","vocab":{"<unk>":0,"a":1},"unk_token":"<unk>"}}"#;
+    /// A template that writes [`ADDED_TOKEN_TOKENIZER`]'s `<x>` before each message.
+    const ADDED_TOKEN_TEMPLATE: &str = "{% for m in messages %}<x>{{ m.content }}{% endfor %}";
+    /// Declared as in GLM-5.3, whose `tokenizer.json` alone lists them: the role
+    /// marker `<|user|>` is special (id 2), `<think>` is `special: false` (id 3).
+    const GLM_MARKERS_TOKENIZER: &str = r#"{"version":"1.0","added_tokens":[{"id":2,
+        "content":"<|user|>","special":true,"single_word":false,"lstrip":false,"rstrip":false,
+        "normalized":false},{"id":3,"content":"<think>","special":false,"single_word":false,
+        "lstrip":false,"rstrip":false,"normalized":false}],
+        "model":{"type":"WordLevel","vocab":{"<unk>":0,"a":1},"unk_token":"<unk>"}}"#;
 
     /// TinyLlama's card with the given `config.json` and, if set, `tokenizer.json`.
     fn tinyllama_card(
@@ -9059,6 +9068,46 @@ mod token_data_tests {
             ));
         }
         (mdc, dir)
+    }
+
+    /// [`tinyllama_card`] with the given `tokenizer.json` and chat template.
+    fn tinyllama_card_with_template(
+        tokenizer: &str,
+        template: &str,
+    ) -> (ModelDeploymentCard, tempfile::TempDir) {
+        let (mut mdc, dir) = tinyllama_card(NO_VOCAB_SIZE, Some(tokenizer));
+        let path = dir.path().join("chat_template.jinja");
+        std::fs::write(&path, template).unwrap();
+        mdc.chat_template_file = Some(PromptFormatterArtifact::HfChatTemplateJinja {
+            is_custom: true,
+            file: CheckedFile::from_disk(&path).unwrap(),
+        });
+        (mdc, dir)
+    }
+
+    fn user_request(content: &str) -> NvCreateChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": content}]
+        }))
+        .unwrap()
+    }
+
+    /// Token ids of the prompt `formatter` renders for `request`, encoded as the
+    /// preprocessor encodes it.
+    fn prompt_token_ids(
+        formatter: PromptFormatter,
+        mdc: &ModelDeploymentCard,
+        request: &NvCreateChatCompletionRequest,
+    ) -> Vec<u32> {
+        let PromptFormatter::OAI(formatter) = formatter;
+        let prompt = formatter.render_prompt(request).unwrap();
+        let tokenizer = mdc.tokenizer().unwrap();
+        let encoding = match prompt.encode_segments() {
+            Some(segments) => tokenizer.encode_segments(&segments),
+            None => tokenizer.encode(prompt.as_str()),
+        };
+        encoding.unwrap().token_ids().to_vec()
     }
 
     /// TinyLlama's tokenizer with the given `config.json`.
@@ -9148,22 +9197,8 @@ mod token_data_tests {
         // Only tokenizer.json lists `<x>`, as `special: false` like DeepSeek-R1's
         // `<｜User｜>`, and the template writes it. With the setting off, the
         // prompt is one piece; with it on, the default, the user's `<x>` is text.
-        let (mut mdc, dir) = tinyllama_card(NO_VOCAB_SIZE, Some(ADDED_TOKEN_TOKENIZER));
-        let path = dir.path().join("chat_template.jinja");
-        std::fs::write(
-            &path,
-            "{% for m in messages %}<x>{{ m.content }}{% endfor %}",
-        )
-        .unwrap();
-        mdc.chat_template_file = Some(PromptFormatterArtifact::HfChatTemplateJinja {
-            is_custom: true,
-            file: CheckedFile::from_disk(&path).unwrap(),
-        });
-        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
-            "model": "test-model",
-            "messages": [{"role": "user", "content": "a<x>"}]
-        }))
-        .unwrap();
+        let (mdc, _dir) = tinyllama_card_with_template(ADDED_TOKEN_TOKENIZER, ADDED_TOKEN_TEMPLATE);
+        let request = user_request("a<x>");
         let PromptFormatter::OAI(formatter) =
             prompt::prompt_formatter_from_mdc_with(&mdc, false).unwrap();
         assert!(
@@ -9174,13 +9209,58 @@ mod token_data_tests {
                 .is_none()
         );
 
-        let PromptFormatter::OAI(formatter) =
-            prompt::prompt_formatter_from_mdc_with(&mdc, true).unwrap();
-        let prompt = formatter.render_prompt(&request).unwrap();
-        let segments = prompt.encode_segments().unwrap();
-        let encoding = mdc.tokenizer().unwrap().encode_segments(&segments).unwrap();
+        let formatter = prompt::prompt_formatter_from_mdc_with(&mdc, true).unwrap();
         // The template's `<x>` is id 2; the user's is unknown text, `<unk>` (0).
-        assert_eq!(encoding.token_ids(), [2, 1, 0]);
+        assert_eq!(prompt_token_ids(formatter, &mdc, &request), [2, 1, 0]);
+    }
+
+    #[test]
+    fn glm_markers_in_tokenizer_json_encode_as_ordinary_text() {
+        // As in GLM-5.3's template, `<|user|>` opens the user's turn and `<think>`
+        // opens the reply. The user's message spells both.
+        let (mdc, _dir) = tinyllama_card_with_template(
+            GLM_MARKERS_TOKENIZER,
+            "{% for m in messages %}<|user|>{{ m.content }}{% endfor %}<think>",
+        );
+        let request = user_request("a<|user|>a<think>");
+        // Setting off: the user's spellings are the added tokens too.
+        let formatter = prompt::prompt_formatter_from_mdc_with(&mdc, false).unwrap();
+        assert_eq!(
+            prompt_token_ids(formatter, &mdc, &request),
+            [2, 1, 2, 1, 3, 3]
+        );
+        // Setting on: only the template's are; the user's are unknown text, `<unk>` (0).
+        let formatter = prompt::prompt_formatter_from_mdc_with(&mdc, true).unwrap();
+        assert_eq!(
+            prompt_token_ids(formatter, &mdc, &request),
+            [2, 1, 0, 1, 0, 3]
+        );
+    }
+
+    #[test]
+    fn request_control_tokens_as_text_follows_the_variable() {
+        // The variable is read once per process, so each value gets a process of
+        // its own. Unset, the user's `<x>` is text; `0` leaves it the added token.
+        const CHILD: &str = "DYNAMO_REQUEST_CONTROL_TOKENS_AS_TEXT_CHILD";
+        let Ok(user_marker) = std::env::var(CHILD) else {
+            for (value, user_marker) in [(None, "0"), (Some("0"), "2")] {
+                let mut command = crate::test_utils::isolated_command(
+                    "preprocessor::token_data_tests::request_control_tokens_as_text_follows_the_variable",
+                );
+                command.env(CHILD, user_marker);
+                if let Some(value) = value {
+                    command.env(env_llm::DYN_REQUEST_CONTROL_TOKENS_AS_TEXT, value);
+                }
+                crate::test_utils::assert_isolated_success(&command.output().unwrap());
+            }
+            return;
+        };
+        let (mdc, _dir) = tinyllama_card_with_template(ADDED_TOKEN_TOKENIZER, ADDED_TOKEN_TEMPLATE);
+        let formatter = prompt::prompt_formatter_from_mdc(&mdc).unwrap();
+        assert_eq!(
+            prompt_token_ids(formatter, &mdc, &user_request("a<x>")),
+            [2, 1, user_marker.parse::<u32>().unwrap()]
+        );
     }
 
     fn completion(prompt: serde_json::Value) -> NvCreateCompletionRequest {
