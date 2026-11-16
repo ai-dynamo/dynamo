@@ -84,6 +84,17 @@ def _profile_decode_helper(
                 z_itl.append(itl)
                 z_thpt_per_gpu.append(thpt_per_gpu)
 
+    if not z_itl:
+        raise RuntimeError("Decode profiling produced no valid measurements")
+
+    if len(set(y_context_length)) == 1:
+        logger.warning(
+            "Decode profiling collected measurements at only one context length "
+            "(%s tokens). Planner decode predictions at other context lengths "
+            "may be unreliable; consider widening the profiling sweep.",
+            y_context_length[0],
+        )
+
     # Save the data points to a .npz file
     save_path = f"{work_dir}/raw_data.npz"
     np.savez(
@@ -95,9 +106,6 @@ def _profile_decode_helper(
         max_kv_tokens=np.array([max_kv_tokens]),
     )
     logger.info(f"Saved data points to {save_path}")
-
-    if not z_itl:
-        raise RuntimeError("Decode profiling produced no valid measurements")
 
     # Plot 3D surface
     plot_decode_3d_surface(

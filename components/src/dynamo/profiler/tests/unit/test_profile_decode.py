@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import logging
 
 import numpy as np
 import pytest
@@ -20,8 +21,23 @@ pytestmark = [
 ]
 
 
-@pytest.mark.parametrize("sparse", [False, True], ids=["full", "collinear"])
-def test_decode_profile_data_reaches_planner(tmp_path, monkeypatch, sparse):
+@pytest.mark.parametrize(
+    "sparse,max_kv_tokens,expected_samples,single_context",
+    [
+        pytest.param(False, 100_000, 36, False, id="full"),
+        pytest.param(True, 100_000, 6, True, id="collinear"),
+        pytest.param(False, 800, 1, True, id="small-kv-cache"),
+    ],
+)
+def test_decode_profile_data_reaches_planner(
+    tmp_path,
+    monkeypatch,
+    caplog,
+    sparse,
+    max_kv_tokens,
+    expected_samples,
+    single_context,
+):
     def measure_decode(isl, _osl, concurrency, *args, **kwargs):
         if sparse and isl != 100:
             return None, None
@@ -38,11 +54,23 @@ def test_decode_profile_data_reaches_planner(tmp_path, monkeypatch, sparse):
         tokenizer="tokenizer",
         url="http://unused",
         num_gpus=1,
-        max_kv_tokens=100_000,
+        max_kv_tokens=max_kv_tokens,
         max_context_length=2_048,
         interpolation_granularity=6,
         attention_dp_size=1,
     )
+
+    context_warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == profile_decode.logger.name
+        and record.levelno == logging.WARNING
+        and "only one context length" in record.getMessage()
+    ]
+    assert len(context_warnings) == int(single_context)
+    if single_context:
+        assert "350.0 tokens" in context_warnings[0]
+        assert "may be unreliable" in context_warnings[0]
 
     config_map = add_profile_data_to_config({"spec": {"components": []}}, str(tmp_path))
     assert config_map is not None
@@ -61,13 +89,13 @@ def test_decode_profile_data_reaches_planner(tmp_path, monkeypatch, sparse):
         )
     )
     with np.load(decode_dir / "raw_data.npz") as data:
-        assert len(fpms) == len(data["z_itl"]) == (6 if sparse else 36)
+        assert len(fpms) == len(data["z_itl"]) == expected_samples
         assert [fpm.wall_time for fpm in fpms] == pytest.approx(data["z_itl"] / 1000)
     for filename in (
         "decode_itl_interpolation.png",
         "decode_throughput_interpolation.png",
     ):
-        assert (decode_dir / filename).exists() == (not sparse)
+        assert (decode_dir / filename).exists() == (not single_context)
 
 
 def test_decode_profiling_fails_without_valid_measurements(tmp_path):
@@ -83,3 +111,4 @@ def test_decode_profiling_fails_without_valid_measurements(tmp_path):
             get_itl_and_thpt_per_gpu=lambda *_: (None, None),
             attention_dp_size=1,
         )
+    assert not (tmp_path / "raw_data.npz").exists()
