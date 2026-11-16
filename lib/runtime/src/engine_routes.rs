@@ -81,11 +81,15 @@ impl EngineRouteRegistry {
     /// Register a handler for `/engine/{name}/...` without changing legacy callbacks.
     pub fn register_http(&self, name: String, callback: EngineHttpCallback) -> anyhow::Result<()> {
         anyhow::ensure!(
-            !name.is_empty()
-                && name
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'),
-            "handler name must be a nonempty URL segment"
+            name.split('/').all(|segment| {
+                !segment.is_empty()
+                    && segment != "."
+                    && segment != ".."
+                    && segment
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.'))
+            }),
+            "handler name must contain nonempty URL segments"
         );
         let mut routes = self.routes.write();
         let prefix = format!("{name}/");
@@ -108,7 +112,11 @@ impl EngineRouteRegistry {
 
     fn get_http(&self, path: &str) -> Option<(EngineHttpCallback, String)> {
         let (name, suffix) = path.split_once('/').unwrap_or((path, ""));
-        match self.routes.read().get(name) {
+        let routes = self.routes.read();
+        if let Some(Handler::Http(callback)) = routes.get(path) {
+            return Some((Arc::clone(callback), String::new()));
+        }
+        match routes.get(name) {
             Some(Handler::Http(callback)) => Some((Arc::clone(callback), suffix.to_owned())),
             _ => None,
         }
@@ -369,6 +377,33 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
+    #[tokio::test]
+    async fn status_aware_engine_route_can_use_a_nested_path() {
+        let registry = EngineRouteRegistry::new();
+        registry
+            .register_http(
+                "control/pause".into(),
+                Arc::new(|request| {
+                    Box::pin(async move {
+                        assert!(request.path.is_empty());
+                        Ok(EngineHttpResponse {
+                            status: 409,
+                            body: Value::Null,
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+        let response = dispatch(
+            &registry,
+            "control/pause".into(),
+            Method::POST,
+            Bytes::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
     #[tokio::test]
     async fn legacy_payloads_are_not_interpreted_as_http_envelopes() {
         let registry = EngineRouteRegistry::new();
