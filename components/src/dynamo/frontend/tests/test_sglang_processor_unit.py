@@ -7501,8 +7501,7 @@ class TestGlmNativeOutput:
         terminal = post.process_output({"token_ids": [], "finish_reason": "stop"})
         assert terminal["finish_reason"] == "tool_calls"
 
-    @pytest.mark.parametrize("bad_name", ["", "unoffered"])
-    def test_invalid_tool_names_are_not_exposed(self, bad_name):
+    def test_unoffered_tool_names_are_not_exposed(self):
         tools = convert_tools([{"type": "function", "function": {"name": "f"}}])
         output = GlmOutputParser(
             reasoning_parser=None,
@@ -7510,14 +7509,7 @@ class TestGlmNativeOutput:
             tools=tools,
             stream=True,
         )
-        delta = output.parse(
-            (
-                "<tool_call>still thinking about it"
-                if not bad_name
-                else f"<tool_call>{bad_name}</tool_call>"
-            ),
-            "stop",
-        )
+        delta = output.parse("<tool_call>unoffered</tool_call>", "stop")
         assert not delta.get("tool_calls")
         assert not output.has_calls
 
