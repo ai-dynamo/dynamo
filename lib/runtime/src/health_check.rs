@@ -20,6 +20,8 @@ pub struct HealthCheckConfig {
     pub canary_wait_time: Duration,
     /// Timeout for health check requests
     pub request_timeout: Duration,
+    /// How long a busy endpoint (requests in flight) may show no progress before NotReady
+    pub busy_stall_timeout: Duration,
 }
 
 impl Default for HealthCheckConfig {
@@ -29,7 +31,39 @@ impl Default for HealthCheckConfig {
             request_timeout: Duration::from_secs(
                 crate::config::DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS,
             ),
+            busy_stall_timeout: Duration::from_secs(
+                crate::config::DEFAULT_HEALTH_CHECK_BUSY_STALL_SECS,
+            ),
         }
+    }
+}
+
+/// What the canary timer does when it expires for an endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanaryAction {
+    /// Idle endpoint: send the canary generate (the only way to verify an idle engine).
+    SendCanary,
+    /// Busy endpoint that progressed within the budget: Ready, no canary (it would only
+    /// queue behind the work it is meant to check — a long prefill or a first-shape stall).
+    BusyProgressing,
+    /// Busy endpoint with no progress for the whole budget: NotReady.
+    BusyStalled,
+}
+
+/// Pure decision: `inflight` = requests in flight (None = no ingress registered a counter),
+/// `since_progress` = time since the last observed progress (None = never), `budget` = the
+/// busy stall budget.
+pub fn canary_action(
+    inflight: Option<u64>,
+    since_progress: Option<Duration>,
+    budget: Duration,
+) -> CanaryAction {
+    match inflight {
+        None | Some(0) => CanaryAction::SendCanary,
+        Some(_) => match since_progress {
+            Some(elapsed) if elapsed <= budget => CanaryAction::BusyProgressing,
+            _ => CanaryAction::BusyStalled,
+        },
     }
 }
 
@@ -80,6 +114,7 @@ impl HealthCheckManager {
     fn spawn_endpoint_health_check_task(self: &Arc<Self>, endpoint_subject: String) {
         let manager = self.clone();
         let canary_wait = self.config.canary_wait_time;
+        let busy_stall = self.config.busy_stall_timeout;
         let endpoint_subject_clone = endpoint_subject.clone();
 
         // Get the endpoint-specific notifier
@@ -98,7 +133,43 @@ impl HealthCheckManager {
                 // Wait for either timeout or activity notification
                 tokio::select! {
                     _ = tokio::time::sleep(canary_wait) => {
-                        // Timeout - send health check for this specific endpoint
+                        // A busy endpoint is judged by progress, not probed: a canary would
+                        // queue behind the work it is meant to check (long prefill, first-shape
+                        // compile) and time out while the engine is fine.
+                        let (inflight, since_progress) = {
+                            let sh = manager.drt.system_health();
+                            let sh = sh.lock();
+                            (
+                                sh.endpoint_inflight(&endpoint_subject),
+                                sh.endpoint_last_progress(&endpoint_subject).map(|t| t.elapsed()),
+                            )
+                        };
+                        match canary_action(inflight, since_progress, busy_stall) {
+                            CanaryAction::BusyProgressing => {
+                                debug!(
+                                    "{} busy ({} in flight, progress {:?} ago): skipping canary",
+                                    endpoint_subject, inflight.unwrap_or(0), since_progress
+                                );
+                                manager.drt.system_health().lock().set_endpoint_health_status(
+                                    &endpoint_subject,
+                                    crate::config::HealthStatus::Ready,
+                                );
+                                continue;
+                            }
+                            CanaryAction::BusyStalled => {
+                                warn!(
+                                    "{} stalled: {} request(s) in flight and no progress for {:?} (budget {:?}); marking NotReady",
+                                    endpoint_subject, inflight.unwrap_or(0), since_progress, busy_stall
+                                );
+                                manager.drt.system_health().lock().set_endpoint_health_status(
+                                    &endpoint_subject,
+                                    crate::config::HealthStatus::NotReady,
+                                );
+                                continue;
+                            }
+                            CanaryAction::SendCanary => {}
+                        }
+                        // Idle endpoint - send health check for this specific endpoint
                         debug!("Canary timer expired for {}, sending health check", endpoint_subject);
 
                         // Get the health check payload for this endpoint
@@ -124,10 +195,15 @@ impl HealthCheckManager {
                         // stream completion, even for an empty stream. Neither path
                         // requires a successful publish.
                         debug!("Activity detected for {}, resetting health check timer", endpoint_subject);
-                        manager.drt.system_health().lock().set_endpoint_health_status(
-                            &endpoint_subject,
-                            crate::config::HealthStatus::Ready,
-                        );
+                        {
+                            let sh = manager.drt.system_health();
+                            let sh = sh.lock();
+                            sh.set_endpoint_health_status(
+                                &endpoint_subject,
+                                crate::config::HealthStatus::Ready,
+                            );
+                            sh.note_endpoint_progress(&endpoint_subject);
+                        }
                     }
                 }
             }
@@ -349,6 +425,54 @@ pub async fn get_health_check_status(
         "endpoints_checked": endpoint_subjects.len(),
         "endpoint_statuses": endpoint_statuses,
     }))
+}
+
+#[cfg(test)]
+mod canary_action_tests {
+    use super::*;
+
+    const BUDGET: Duration = Duration::from_secs(60);
+
+    #[test]
+    fn idle_endpoint_is_probed() {
+        assert_eq!(canary_action(None, None, BUDGET), CanaryAction::SendCanary);
+        assert_eq!(
+            canary_action(Some(0), Some(Duration::from_secs(500)), BUDGET),
+            CanaryAction::SendCanary
+        );
+    }
+
+    #[test]
+    fn busy_endpoint_with_recent_progress_is_ready_without_a_canary() {
+        // the 528-token first-shape stall: one request in flight, engine silent for ~6 s
+        assert_eq!(
+            canary_action(Some(1), Some(Duration::from_secs(6)), BUDGET),
+            CanaryAction::BusyProgressing
+        );
+        // a queued long prefill: many in flight, last forward pass 20 s ago
+        assert_eq!(
+            canary_action(Some(48), Some(Duration::from_secs(20)), BUDGET),
+            CanaryAction::BusyProgressing
+        );
+        assert_eq!(
+            canary_action(Some(1), Some(BUDGET), BUDGET),
+            CanaryAction::BusyProgressing
+        );
+    }
+
+    #[test]
+    fn busy_endpoint_without_progress_for_the_budget_is_stalled() {
+        // a SIGSTOPped scheduler: requests in flight, nothing has moved for longer than the budget
+        assert_eq!(
+            canary_action(Some(3), Some(Duration::from_secs(61)), BUDGET),
+            CanaryAction::BusyStalled
+        );
+        // in flight but progress never recorded at all
+        assert_eq!(
+            canary_action(Some(1), None, BUDGET),
+            CanaryAction::BusyStalled
+        );
+    }
 }
 
 // ============================================================

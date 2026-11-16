@@ -53,6 +53,9 @@ impl PushEndpoint {
         system_health
             .lock()
             .set_endpoint_registered(endpoint_name_local.as_str());
+        system_health
+            .lock()
+            .register_endpoint_inflight(endpoint_name_local.as_str(), inflight.clone());
 
         loop {
             let req = tokio::select! {
@@ -91,6 +94,8 @@ impl PushEndpoint {
                 inflight.fetch_add(1, Ordering::SeqCst);
                 let inflight_clone = inflight.clone();
                 let notify_clone = notify.clone();
+                let system_health_task = system_health.clone();
+                let endpoint_name_task: Arc<String> = Arc::clone(&endpoint_name_local);
 
                 // Handle headers here for tracing
                 let span = if let Some(headers) = req.message.headers.as_ref() {
@@ -137,8 +142,11 @@ impl PushEndpoint {
                         }
                     }
 
-                    // decrease the inflight counter
+                    // decrease the inflight counter; a finished request is engine progress
                     inflight_clone.fetch_sub(1, Ordering::SeqCst);
+                    system_health_task
+                        .lock()
+                        .note_endpoint_progress(endpoint_name_task.as_ref());
                     notify_clone.notify_one();
                 });
             } else {
