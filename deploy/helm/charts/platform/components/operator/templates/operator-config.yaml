@@ -218,3 +218,12 @@ data:
       {{- with .Values.lpx.modelRegistryURL }}
       modelRegistryURL: {{ . | quote }}
       {{- end }}
+    {{- if or .Values.rdmaAuth.ibvAuthPlugin .Values.rdmaAuth.nixlAuthPlugin }}
+    security:
+      {{- if .Values.rdmaAuth.ibvAuthPlugin }}
+      ibvAuthPlugin: {{ .Values.rdmaAuth.ibvAuthPlugin | quote }}
+      {{- end }}
+      {{- if .Values.rdmaAuth.nixlAuthPlugin }}
+      nixlAuthPlugin: {{ .Values.rdmaAuth.nixlAuthPlugin | quote }}
+      {{- end }}
+    {{- end }}
