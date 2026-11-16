@@ -37,7 +37,7 @@ spec:
         containers:
         # Dynamo frontend; operator adds the command.
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20261013-2210b07
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20261113-b43cd4a
   - name: TRTLLMWorker
     type: worker
     replicas: 1
@@ -46,7 +46,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007@sha256:14aa63789ee878885c55200c5ae8f44e4d15b90fe84bd869315ae13ef1299ac3
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc4.dev202611130009@sha256:b210fb5baf50a5513f5ab9aebeae8c0794aeccf900862fd447dc2593c6f26147
           # Readiness via the OpenEngine Control.Health RPC, which reports the
           # engine's own state (grpc + model, plus kv_connector when configured)
           # rather than just a connectable socket.
@@ -145,7 +145,7 @@ spec:
         # Dynamo runtime starts first and receives discovery env and probes.
         # Replace this nightly image with a matching release when available.
         - name: runtime
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-nightly:20261013-2210b07
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-nightly:20261113-b43cd4a
           restartPolicy: Always
           command:
           - python3
