@@ -6,7 +6,7 @@
 vLLM and TRT-LLM expose logprobs through ``CompletionOutput.logprobs``
 (list aligned with ``token_ids``, dicts of ``token_id -> LogprobInfo``).
 SGLang exposes them through ``meta_info["output_token_logprobs"]`` as
-cumulative tuples ``(logprob, token_id, text_or_None)``.
+incremental tuples ``(logprob, token_id, text_or_None)``.
 
 Both paths emit the same Dynamo wire format on ``GenerateChunk``:
 ``log_probs`` is a flat ``list[float]``, ``top_logprobs`` is
@@ -16,7 +16,6 @@ Both paths emit the same Dynamo wire format on ``GenerateChunk``:
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -76,7 +75,11 @@ def extract_from_completion_output(
     by position, so emitting a shorter array would misalign every later
     token. Bail on the whole chunk instead.
     """
-    if getattr(output, "logprobs", None) is None:
+    # An empty list here means the client asked for no logprobs -- TRT-LLM leaves
+    # the field at `[]` rather than None. Testing `is None` would miss that case
+    # and run on to the `token_ids` copy below, which grows with the request and
+    # is discarded a few lines later.
+    if not getattr(output, "logprobs", None):
         return None, None
 
     token_ids = list(getattr(output, "token_ids", None) or [])
@@ -154,7 +157,7 @@ def extract_prompt_logprobs_from_completion_output(
     Returns ``None`` if the engine didn't compute prompt logprobs.
     """
     prompt_logprobs = getattr(output, "prompt_logprobs", None)
-    if prompt_logprobs is None:
+    if not prompt_logprobs:
         return None
 
     payload: list[Optional[dict[str, dict[str, Any]]]] = []
@@ -188,13 +191,17 @@ def extract_prompt_logprobs_from_completion_output(
 
 def extract_prompt_logprobs_from_sglang_meta(
     meta: dict[str, Any],
+    *,
+    prompt_logprobs_count: int | None = None,
 ) -> Optional[list[Optional[dict[str, dict[str, Any]]]]]:
     """Extract prompt logprobs from an SGLang ``meta_info`` dict.
 
     Reads ``input_token_logprobs`` (tuples ``(logprob, token_id, decoded
-    or None)``, starting at prompt position 1) and merges any
-    ``input_top_logprobs`` alternatives. Prepends ``None`` at index 0
-    so the result aligns with Rust's BOS=None ``PromptLogprobs`` shape.
+    or None)``) and merges any ``input_top_logprobs`` alternatives. The pinned
+    SGLang release and its N-1 predecessor both include the leading
+    ``None``-logprob prompt position, which is preserved as Dynamo's BOS=None
+    ``PromptLogprobs`` entry. Limit alternatives to ``prompt_logprobs_count``
+    when provided, always retaining the actual input token.
     """
     input_logprobs = meta.get("input_token_logprobs")
     if not input_logprobs:
@@ -202,9 +209,12 @@ def extract_prompt_logprobs_from_sglang_meta(
 
     input_top_logprobs = meta.get("input_top_logprobs") or []
 
-    payload: list[Optional[dict[str, dict[str, Any]]]] = [None]
+    payload: list[Optional[dict[str, dict[str, Any]]]] = []
     for idx, item in enumerate(input_logprobs):
         logprob, tok_id, decoded_token = item
+        if logprob is None:
+            payload.append(None)
+            continue
         position_map: dict[str, dict[str, Any]] = {}
         selected_entry: dict[str, Any] = {"logprob": float(logprob)}
         if decoded_token is not None:
@@ -214,6 +224,9 @@ def extract_prompt_logprobs_from_sglang_meta(
         if idx < len(input_top_logprobs):
             top_at_pos = input_top_logprobs[idx]
             if top_at_pos:
+                # SGLang shares top-k with completion logprobs.
+                if prompt_logprobs_count is not None:
+                    top_at_pos = top_at_pos[:prompt_logprobs_count]
                 for top_lp, top_tok_id, top_decoded in top_at_pos:
                     key = str(top_tok_id)
                     if key in position_map:
@@ -226,63 +239,30 @@ def extract_prompt_logprobs_from_sglang_meta(
     return payload
 
 
-_SGLANG_TOP_LOGPROBS_UNSUPPORTED_MSG = (
-    "Dynamo's SGLang backend does not currently support logprobs >= 1 due to "
-    "an O(N) per-position detokenization in the upstream sglang tokenizer "
-    "manager. Use logprobs=0 for chosen-token logprobs, or set "
-    "DYN_SGL_ALLOW_TOP_LOGPROBS=1 to override at your own risk. "
-    "Track the upstream fix at https://github.com/sgl-project/sglang/pull/24447."
-)
-
-DYN_SGL_ALLOW_TOP_LOGPROBS_ENV = "DYN_SGL_ALLOW_TOP_LOGPROBS"
-
-
-def sglang_top_logprobs_allowed() -> bool:
-    """Read the ``DYN_SGL_ALLOW_TOP_LOGPROBS`` env-var gate."""
-    return os.environ.get(DYN_SGL_ALLOW_TOP_LOGPROBS_ENV, "").lower() not in (
-        "",
-        "0",
-        "false",
-    )
-
-
-def build_sglang_logprob_kwargs(
-    output_options: dict[str, Any],
-    *,
-    allow_top_logprobs: bool,
-) -> dict[str, Any]:
+def build_sglang_logprob_kwargs(output_options: dict[str, Any]) -> dict[str, Any]:
     """Map ``output_options`` to SGLang's
     ``return_logprob`` / ``top_logprobs_num`` / ``logprob_start_len`` kwargs.
 
-    Raises ``ValueError`` for ``logprobs >= 1`` when
-    ``allow_top_logprobs`` is ``False``. SGLang's tokenizer manager
-    detokenizes top-k tokens serially (O(N) per generated token), so
-    enabling it without a batched detokenize path degrades latency
-    badly.
+    Top-k values (``logprobs >= 1``) are passed through. Dynamo never sets
+    ``return_text_in_logprobs``, so SGLang returns top-k token ids without
+    text and skips its per-position top-k detokenization; the frontend
+    fills candidate text.
     """
     if not output_options:
         return {}
 
     kwargs: dict[str, Any] = {}
 
-    def _parse(name: str, value: Any) -> Optional[int]:
-        parsed = _parse_non_negative_int(value, name)
-        if parsed is None:
-            return None
-        if parsed >= 1 and not allow_top_logprobs:
-            raise ValueError(_SGLANG_TOP_LOGPROBS_UNSUPPORTED_MSG)
-        return parsed
-
     logprobs_value = output_options.get("logprobs")
     if logprobs_value is not None:
-        parsed = _parse("logprobs", logprobs_value)
+        parsed = _parse_non_negative_int(logprobs_value, "logprobs")
         if parsed is not None:
             kwargs["return_logprob"] = True
             kwargs["top_logprobs_num"] = parsed
 
     prompt_logprobs_value = output_options.get("prompt_logprobs")
     if prompt_logprobs_value is not None:
-        parsed = _parse("prompt_logprobs", prompt_logprobs_value)
+        parsed = _parse_non_negative_int(prompt_logprobs_value, "prompt_logprobs")
         if parsed is not None:
             kwargs["return_logprob"] = True
             kwargs["top_logprobs_num"] = max(kwargs.get("top_logprobs_num", 0), parsed)
@@ -295,51 +275,48 @@ def build_sglang_logprob_kwargs(
 
 def extract_from_sglang_meta(
     meta_info: dict[str, Any],
-    num_output_logprobs_so_far: int,
     *,
     return_tokens_as_token_ids: bool = False,
-) -> tuple[Optional[list[float]], Optional[list[list[dict[str, Any]]]], int]:
+    top_logprobs_num: Optional[int] = None,
+) -> tuple[Optional[list[float]], Optional[list[list[dict[str, Any]]]]]:
     """Extract logprobs from SGLang's ``meta_info`` dict.
 
-    SGLang's ``output_token_logprobs`` / ``output_top_logprobs`` are
-    cumulative across stream chunks even though ``output_ids`` is
-    disjoint — the caller passes the running count to slice the new
-    entries, and the returned third element is the updated count.
+    Dynamo enables SGLang's incremental streaming output, so
+    ``output_token_logprobs`` and ``output_top_logprobs`` already align with
+    the current disjoint ``output_ids`` chunk. ``top_logprobs_num`` limits
+    completion alternatives independently of the engine's shared prompt/output
+    top-k; ``None`` preserves all alternatives.
     """
     output_token_logprobs = meta_info.get("output_token_logprobs")
     if not output_token_logprobs:
-        return None, None, num_output_logprobs_so_far
+        return None, None
 
-    new_logprobs = output_token_logprobs[num_output_logprobs_so_far:]
-    if not new_logprobs:
-        return None, None, num_output_logprobs_so_far
-
-    log_probs = [float(entry[0]) for entry in new_logprobs]
+    log_probs = [float(entry[0]) for entry in output_token_logprobs]
 
     top_logprobs: Optional[list[list[dict[str, Any]]]] = None
     output_top = meta_info.get("output_top_logprobs")
     if output_top:
-        new_top = output_top[num_output_logprobs_so_far:]
-        if new_top:
-            top_logprobs = []
-            for position_entries in new_top:
-                if position_entries is None:
-                    top_logprobs.append([])
-                    continue
-                position_list: list[dict[str, Any]] = []
-                for rank_idx, entry in enumerate(position_entries):
-                    tok_id = entry[1]
-                    token_str = (
-                        f"token_id:{tok_id}" if return_tokens_as_token_ids else entry[2]
-                    )
-                    position_list.append(
-                        {
-                            "rank": rank_idx + 1,
-                            "token_id": tok_id,
-                            "token": token_str,
-                            "logprob": float(entry[0]),
-                        }
-                    )
-                top_logprobs.append(position_list)
+        top_logprobs = []
+        for position_entries in output_top:
+            if position_entries is None:
+                top_logprobs.append([])
+                continue
+            if top_logprobs_num is not None:
+                position_entries = position_entries[:top_logprobs_num]
+            position_list: list[dict[str, Any]] = []
+            for rank_idx, entry in enumerate(position_entries):
+                tok_id = entry[1]
+                token_str = (
+                    f"token_id:{tok_id}" if return_tokens_as_token_ids else entry[2]
+                )
+                position_list.append(
+                    {
+                        "rank": rank_idx + 1,
+                        "token_id": tok_id,
+                        "token": token_str,
+                        "logprob": float(entry[0]),
+                    }
+                )
+            top_logprobs.append(position_list)
 
-    return log_probs, top_logprobs, len(output_token_logprobs)
+    return log_probs, top_logprobs

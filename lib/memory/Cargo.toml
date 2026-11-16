@@ -27,7 +27,7 @@ dynamo-truthy = { workspace = true }
 
 anyhow = { workspace = true }
 cudarc = { workspace = true }
-nixl-sys = { version = "=1.0.1" }
+nixl-sys = { version = "=1.3.2" }
 serde = { workspace = true}
 thiserror = { workspace = true }
 tracing = { workspace = true }

@@ -26,8 +26,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from kr8s.objects import Pod
 
+from tests.deploy.dgd_utils import ManagedDeployment
 from tests.utils.client import wait_for_model_availability
-from tests.utils.managed_deployment import ManagedDeployment
 
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"

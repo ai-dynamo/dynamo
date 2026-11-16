@@ -11,7 +11,7 @@ requests. It wraps Dynamo's native KV router and adds a program-level scheduler
 with tool-boundary pause/resume, porting the scheduler from the ThunderAgent
 paper.
 
-**Conceptual docs live in [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-program-scheduler.md)** — the scheduler model, tool-boundary pause/resume semantics, the utilization-driven control loop, and observability. This README contains the source build and the complete Harbor/Pi A/B walkthrough.
+**Conceptual docs live in [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-python-router.md)** — the scheduler model, tool-boundary pause/resume semantics, the utilization-driven control loop, and observability. This README contains the source build and the complete Harbor/Pi A/B walkthrough.
 
 ## Install
 
@@ -58,9 +58,15 @@ chat/completions surface; if the wrapped backend also advertises that surface
 for the same model, the frontend may route requests directly to the backend and
 bypass ThunderAgent lifecycle handling such as `x-dynamo-session-final`.
 
+For clients that require SGLang's native `/generate` API, add
+`--publish-sglang-generate` to ThunderAgent. This advertises the existing
+SGLang-native frontend route through ThunderAgent while the wrapped worker
+continues to use `--endpoint-types none`. This option requires `--model-name`
+so ThunderAgent can register the native capability for that model.
+
 The control-loop knobs (`--pause-threshold`, `--pause-target`,
 `--resume-hysteresis`, `--scheduler-interval-seconds`, …) and their defaults are
-documented in [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-program-scheduler.md#utilization-driven-control-loop).
+documented in [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-python-router.md#utilization-driven-control-loop).
 All `KvRouter` flags from `dynamo.router` (`--router-temperature`,
 `--use-kv-events`, `--router-track-output-blocks`, …) are also accepted and
 forwarded.
@@ -74,6 +80,12 @@ request so it can group turns under the same program. Custom harnesses can send
 Requests without session identity are passed through as one-off (no program
 admission, no pause/resume). This is the safe fallback for non-agentic traffic
 sharing the same workers.
+
+Admission is a transaction. A request cancelled while it is queued for capacity
+— a client disconnect, for instance — leaves the program table as it found it:
+a program the admission attempt created is removed, and one that already existed
+keeps the session history of its previous turn. Cancelled requests therefore do
+not hold capacity, and do not queue other programs behind them.
 
 ### SGLang HiCache retention budget
 
@@ -90,7 +102,7 @@ socket with `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` when the harness
 publishes explicit tool spans. Override sink behavior with
 `DYN_REQUEST_TRACE_SINKS` (e.g. `jsonl`, `stderr`) and
 `DYN_REQUEST_TRACE_OUTPUT_PATH`.
-See [Agent Tracing](../../../../docs/fern/pages/use-cases/agents/agent-tracing.md) for the record schema.
+See [Trace an Agent Run](../../../../docs/fern/pages/use-cases/agents/agent-tracing.md) for the record schema.
 
 Every LLM call then lands a `request_end` record carrying `session_id`,
 `input_tokens`, `output_tokens`, `cached_tokens`,
@@ -243,7 +255,7 @@ ThunderAgent paper:
 
 ## References
 
-- Conceptual docs: [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-program-scheduler.md)
+- Conceptual docs: [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-python-router.md)
 - ThunderAgent paper: <https://arxiv.org/abs/2602.13692>
 - Upstream ThunderAgent reference: <https://github.com/HaoKang-Timmy/ThunderAgent>
 - Pi Dynamo provider: <https://github.com/ai-dynamo/agent-plugins/tree/main/pi-plugin>

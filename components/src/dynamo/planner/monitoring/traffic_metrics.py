@@ -116,8 +116,16 @@ class PrometheusAPIClient:
         ssl_verify: bool = False,
         extra_query_params: Optional[Dict[str, str]] = None,
         ca_bundle: Optional[str] = None,
+        request_timeout_seconds: float = 10.0,
     ):
-        self.prom = PrometheusConnect(url=url, disable_ssl=not ssl_verify)
+        self.prom = PrometheusConnect(
+            url=url,
+            disable_ssl=not ssl_verify,
+            retry=0,
+            # prometheus-api-client annotates this as int but forwards it unchanged
+            # to Requests, which supports floating-point timeouts.
+            timeout=request_timeout_seconds,  # type: ignore[arg-type]
+        )
         if bearer_token:
             self.prom._session.headers["Authorization"] = f"Bearer {bearer_token}"
         if bearer_token_file:
@@ -168,9 +176,8 @@ class PrometheusAPIClient:
         use underscores, so dashes are normalized before building the PromQL filter.
 
         When model_name is provided (frontend source): queries per-model metrics
-        via increase(metric_sum)/increase(metric_count), filtered by model and
-        dynamo_namespace labels. The dynamo_frontend_ prefix is prepended
-        automatically if absent.
+        by summing histogram increases per model and dynamo_namespace before
+        dividing. The dynamo_frontend_ prefix is prepended automatically if absent.
 
         Returns:
             Average metric value, or 0 if no data/error.
@@ -205,7 +212,13 @@ class PrometheusAPIClient:
                     full_metric_name = (
                         f"{prometheus_names.name_prefix.FRONTEND}_{full_metric_name}"
                     )
-                query = f"increase({full_metric_name}_sum[{interval}])/increase({full_metric_name}_count[{interval}])"
+                # Aggregate observations, not per-instance averages: idle
+                # instances contribute zero count increases, and busy instances
+                # retain their weight. Keep model/namespace labels for filtering.
+                query = (
+                    f"sum by (model, dynamo_namespace) (increase({full_metric_name}_sum[{interval}])) / "
+                    f"sum by (model, dynamo_namespace) (increase({full_metric_name}_count[{interval}]))"
+                )
                 result = self.prom.custom_query(query=query)
                 if not result:
                     logger.warning(
@@ -213,7 +226,6 @@ class PrometheusAPIClient:
                     )
                     return 0
                 metrics_containers = parse_frontend_metric_containers(result)
-                values = []
                 for container in metrics_containers:
                     # Frontend lowercases model names for Prometheus labels so we need to do case-insensitive comparison
                     if (
@@ -221,13 +233,15 @@ class PrometheusAPIClient:
                         and container.metric.model.lower() == model_name.lower()
                         and container.metric.dynamo_namespace == self.dynamo_namespace
                     ):
-                        values.append(container.value[1])
-                if not values:
-                    logger.warning(
-                        f"No prometheus metric data available for {full_metric_name} with model {model_name} and dynamo namespace {self.dynamo_namespace}, use 0 instead"
-                    )
-                    return 0
-                return sum(values) / len(values)
+                        return container.value[1]
+                logger.warning(
+                    "No prometheus metric data available for %s with model %s "
+                    "and dynamo namespace %s, use 0 instead",
+                    full_metric_name,
+                    model_name,
+                    self.dynamo_namespace,
+                )
+                return 0
         except Exception as e:
             logger.error(f"Error getting {operation_name}: {e}")
             return 0
@@ -306,7 +320,17 @@ class PrometheusAPIClient:
                 )
                 if request_result:
                     router_request_count = float(request_result[0]["value"][1])
-                    if not math.isnan(router_request_count):
+                    if math.isfinite(router_request_count):
+                        if router_request_count == 0:
+                            # A completed-only series can hide requests still in flight.
+                            completed_only = self.prom.custom_query(
+                                query=(
+                                    f"{router_requests_total}{{{ns_filter}}} "
+                                    "unless ignoring(__name__) "
+                                    f"increase({router_requests_started}{{{ns_filter}}}[{interval}])"
+                                )
+                            )
+                            return None if completed_only else 0.0
                         return router_request_count
             except (
                 PrometheusApiClientException,
@@ -338,13 +362,16 @@ class PrometheusAPIClient:
                 completed_result = self.prom.custom_query(query=completed_query)
                 if not completed_result:
                     logger.warning(
-                        "No Prometheus metric data available for %s; using 0",
+                        "No Prometheus metric data available for %s; demand is unavailable",
                         router_requests_total,
                     )
-                    return 0
+                    return None
                 router_completed_count = float(completed_result[0]["value"][1])
                 return (
-                    0 if math.isnan(router_completed_count) else router_completed_count
+                    router_completed_count
+                    if math.isfinite(router_completed_count)
+                    and router_completed_count > 0
+                    else None
                 )
             except (
                 PrometheusApiClientException,
@@ -352,7 +379,7 @@ class PrometheusAPIClient:
                 RequestsTimeout,
             ) as e:
                 logger.error("Error getting completed router request count: %s", e)
-                return 0
+                return None
             except Exception:
                 logger.exception("Unexpected error parsing completed router requests")
                 raise
@@ -383,10 +410,27 @@ class PrometheusAPIClient:
                 query=f"increase({requests_total_metric}[{interval}])"
             )
             completed_count = self._sum_frontend_metric(completed_res, model_name)
-            return completed_count or 0
-        except Exception as e:
-            logger.error(f"Error getting avg request count: {e}")
-            return 0
+            if completed_count is None:
+                logger.warning(
+                    "No prometheus metric data available for %s or %s with model "
+                    "%s and dynamo namespace %s; demand is UNKNOWN, not zero",
+                    requests_started_metric,
+                    requests_total_metric,
+                    model_name,
+                    self.dynamo_namespace,
+                )
+                return None
+            return (
+                completed_count
+                if math.isfinite(completed_count) and completed_count > 0
+                else None
+            )
+        except Exception:
+            # Never propagate: the tick loop catches only GPUShapeUnavailableError
+            # (core/base.py:1042), so anything else here shuts the planner down.
+            # An unreadable metric must degrade to unknown demand, not to no planner.
+            logger.exception("Error getting avg request count; demand is UNKNOWN")
+            return None
 
     def get_avg_input_sequence_tokens(self, interval: str, model_name: str):
         if self.metrics_source == "router":
@@ -416,7 +460,9 @@ class PrometheusAPIClient:
             model_name,
         )
 
-    def get_avg_kv_hit_rate(self, interval: str, model_name: str) -> Optional[float]:
+    def get_avg_kv_hit_rate(
+        self, interval: str, model_name: str, namespace: Optional[str] = None
+    ) -> Optional[float]:
         """Average predicted KV cache hit rate (0.0-1.0) from the router.
 
         The histogram lives on the router component, but it can be exposed on
@@ -436,24 +482,50 @@ class PrometheusAPIClient:
             f"{prometheus_names.name_prefix.COMPONENT}_"
             f"{prometheus_names.router.KV_HIT_RATE}"
         )
+        # Which namespace labels these series depends on which router publishes
+        # them, and the planner is not told which one the deployment has. An
+        # embedded KV router builds its metrics from the worker Component, so
+        # they carry the worker suffix the operator injects. A standalone
+        # LocalRouter registers under the base namespace and never receives that
+        # suffix. Try the worker namespace first, then the base one, so both
+        # topologies resolve without changing what the runtime emits.
+        candidates = []
+        if namespace:
+            candidates.append(namespace)
+        if self.dynamo_namespace not in candidates:
+            candidates.append(self.dynamo_namespace)
+
         try:
-            ns = self.dynamo_namespace.replace("-", "_")
-            ns_filter = f'{prometheus_names.labels.NAMESPACE}="{ns}"'
-            query = (
-                f"sum(increase({full_metric_name}_sum{{{ns_filter}}}[{interval}])) / "
-                f"sum(increase({full_metric_name}_count{{{ns_filter}}}[{interval}]))"
-            )
-            result = self.prom.custom_query(query=query)
-            if not result:
-                logger.info(
-                    f"No prometheus data for {full_metric_name}, returning None"
+            for candidate in candidates:
+                ns = candidate.replace("-", "_")
+                ns_filter = f'{prometheus_names.labels.NAMESPACE}="{ns}"'
+                query = (
+                    f"sum(increase({full_metric_name}_sum{{{ns_filter}}}[{interval}])) / "
+                    f"sum(increase({full_metric_name}_count{{{ns_filter}}}[{interval}]))"
                 )
-                return None
-            value = float(result[0]["value"][1])
-            return None if math.isnan(value) else value
-        except Exception as e:
-            logger.warning(f"Error getting avg kv hit rate: {e}")
+                result = self.prom.custom_query(query=query)
+                if not result:
+                    # No series under this namespace. Try the next candidate.
+                    continue
+                value = float(result[0]["value"][1])
+                # NaN means the series exist and the window was idle. That is an
+                # answer, so stop here: falling through would read a different
+                # router's traffic.
+                return None if math.isnan(value) else value
+            logger.info("No prometheus data for %s, returning None", full_metric_name)
             return None
+        except (
+            PrometheusApiClientException,
+            RequestsConnectionError,
+            RequestsTimeout,
+        ) as e:
+            logger.warning("Error getting avg kv hit rate: %s", e)
+            return None
+        except Exception:
+            # A malformed response is a broken query contract, not missing data.
+            # Reporting it as absent would silently suppress the KV discount.
+            logger.exception("Unexpected error getting avg kv hit rate")
+            raise
 
     @staticmethod
     def _quote_label_value(value: str) -> str:
@@ -556,12 +628,14 @@ class PrometheusAPIClient:
             result = self.prom.custom_query(query=f"absent({metric}{{{ns_filter}}})")
             if result:
                 logger.warning(
-                    f"[throughput_metrics_source=router] No '{metric}' series found "
-                    f"for namespace '{ns}' in Prometheus. "
-                    "Router metrics will read as zero until scraping is working. "
+                    "[throughput_metrics_source=router] No '%s' series found "
+                    "for namespace '%s' in Prometheus. "
+                    "Router demand is unavailable until scraping is working. "
                     "Check: (1) PodMonitor 'dynamo-router' is installed in the operator namespace, "
                     "(2) LocalRouter pods have DYN_SYSTEM_PORT=9090, "
-                    "(3) pods have label nvidia.com/metrics-enabled=true."
+                    "(3) pods have label nvidia.com/metrics-enabled=true.",
+                    metric,
+                    ns,
                 )
         except Exception as e:
             logger.warning(f"Could not check router scraping status: {e}")

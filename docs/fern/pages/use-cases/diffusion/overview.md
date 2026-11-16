@@ -12,8 +12,9 @@ Dynamo serves diffusion models for text-to-image, text-to-video, image-to-video,
 
 The built-in backends expose OpenAI-compatible endpoints for images (`/v1/images/generations`), videos (`/v1/videos`), audio (`/v1/audio/speech`), and text generation.
 
-> [!IMPORTANT]
-> Built-in diffusion backends currently use Dynamo CLI launch scripts and `python -m dynamo.*` entrypoints. Dynamo does not yet ship prebuilt Kubernetes recipes for these backends. FastVideo is the exception and includes a Kubernetes deployment path.
+<Info>
+Built-in diffusion backends currently use Dynamo CLI launch scripts and `python -m dynamo.*` entrypoints. Dynamo does not yet ship prebuilt Kubernetes recipes for these backends. FastVideo is the exception and includes a Kubernetes deployment path.
+</Info>
 
 <Steps toc={true} tocDepth={2}>
   <Step title="Choose a Workflow" id="choose-a-workflow">
@@ -38,7 +39,7 @@ The built-in backends expose OpenAI-compatible endpoints for images (`/v1/images
       <Card title="Text-to-Audio">
         Generate speech from text.
 
-        **Backend:** [vLLM-Omni](workflows/text-to-audio.md)
+        **Backend:** [vLLM-Omni](../speech/text-to-speech.md)
       </Card>
       <Card title="Text-to-Text">
         Generate text through iterative diffusion rather than autoregressive decoding.
@@ -77,7 +78,7 @@ The built-in backends expose OpenAI-compatible endpoints for images (`/v1/images
 
         **Supports:** Text-to-image and text-to-video.
 
-        **Main limitation:** Not recommended for production. Video output requires an NVENC-capable NVIDIA GPU.
+        **Main limitation:** Not recommended for production.
       </Card>
       <Card title="FastVideo">
         <Badge intent="success" minimal>Kubernetes</Badge>
@@ -165,7 +166,15 @@ The built-in backends expose OpenAI-compatible endpoints for images (`/v1/images
 
         <AccordionGroup>
           <Accordion title="Configure MP4 video encoding">
-            Text-to-video output requires `imageio`, ffmpeg, and an NVENC-capable NVIDIA GPU. Dynamo's TensorRT-LLM runtime image includes an ffmpeg build with `h264_nvenc`.
+            Text-to-video output requires `imageio` and ffmpeg. Dynamo's runtime images include an ffmpeg build that encodes VP9 (`libvpx-vp9`), so `.mp4` output is a VP9 stream in an MP4 container and no GPU encoder is needed.
+
+            <Info>
+            **Changed:** `output_format: "mp4"` previously returned H.264 and now returns VP9. The file extension is unchanged, so a client that passes the bytes straight to a player may fail without an error from Dynamo. VP9-in-MP4 plays in Chrome, Firefox and ffmpeg, but not in Safari or QuickTime.
+
+            VP9 is used on every GPU because NVIDIA omits the hardware H.264 encoder (NVENC) from the datacenter line — A100, H100, H200, B200 and GB200 have none — so a hardware H.264 path would work only on L4/L40S/RTX-class parts. The alternative, a software H.264 encoder, is what the codec-compliant images deliberately exclude.
+
+            To get H.264, transcode on the client: `ffmpeg -i output.mp4 -c:v libx264 output-h264.mp4`.
+            </Info>
 
             Outside the container, install the Python wrapper without its bundled binary and point it to your ffmpeg:
 

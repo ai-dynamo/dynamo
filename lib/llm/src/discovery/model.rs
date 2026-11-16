@@ -6,15 +6,19 @@
 //!
 //! Requests are routed to a WorkerSet selected by weighted random (proportional to worker count).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use arc_swap::ArcSwap;
 use rand::Rng;
 use serde::Serialize;
 
 use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
+use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
+use crate::model_card::ModelDeploymentCard;
+use crate::preprocessor::OpenAIPreprocessor;
 use crate::protocols::openai::ParsingOptions;
 
 use crate::types::{
@@ -23,11 +27,16 @@ use crate::types::{
     openai::{
         audios::OpenAIAudiosStreamingEngine,
         chat_completions::OpenAIChatCompletionsStreamingEngine,
-        completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
-        generate::GenerateStreamingEngine, images::OpenAIImagesStreamingEngine,
+        classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
+        embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
+        images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
+        rerank::OpenAIRerankStreamingEngine, transcriptions::OpenAITranscriptionsStreamingEngine,
         videos::OpenAIVideosStreamingEngine,
     },
 };
+
+const SYSTEMONE_MAX_QUESTIONS: usize = 128;
+const SYSTEMONE_MAX_CANDIDATES: usize = 255;
 
 /// Emit a one-time deprecation warning when serving-readiness falls back to
 /// the legacy path because a namespace still contains a legacy card (a
@@ -76,24 +85,76 @@ pub struct ModelReadiness {
     pub namespaces: std::collections::BTreeMap<String, NamespaceReadiness>,
 }
 
-/// More than one endpoint leaf for a P/D role is trying to use the
-/// namespace-level prefill rendezvous.
-///
-/// DynamoGraphDeployment convention gives one model topology a namespace and
-/// advertises one prefill endpoint plus one decode endpoint within it.
-/// [`EndpointId`](dynamo_runtime::protocols::EndpointId) identifies each leaf;
-/// it is deliberately not also treated as implicit pairing metadata. Multiple
-/// endpoint leaves for either role are therefore ambiguous, rather than being
-/// paired by discovery arrival order.
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "model {model:?} namespace {namespace:?} has ambiguous endpoint-scoped P/D topology (prefill={prefill_endpoints:?}, decode={decode_endpoints:?})"
-)]
-pub(crate) struct AmbiguousPrefillRouterTopology {
-    model: String,
-    namespace: String,
-    prefill_endpoints: Vec<String>,
-    decode_endpoints: Vec<String>,
+/// A generate engine and the routing metadata advertised by the same WorkerSet.
+#[derive(Clone)]
+pub(crate) struct GenerateEngineSelection {
+    pub(crate) engine: GenerateStreamingEngine,
+    pub(crate) kv_cache_block_size: u32,
+    pub(crate) lora_name: Option<String>,
+    pub(crate) tower_connector_lora_enabled: bool,
+}
+
+/// Aggregate SGLang engine and model assets selected from one WorkerSet snapshot.
+#[derive(Clone)]
+pub(crate) struct SystemOneExecutionSelection {
+    pub(crate) canonical_model: String,
+    pub(crate) engine: GenerateStreamingEngine,
+    pub(crate) card: ModelDeploymentCard,
+    pub(crate) preprocessor: Arc<OpenAIPreprocessor>,
+    pub(crate) admitted_ids: Option<tokio::sync::watch::Receiver<Vec<u64>>>,
+    pub(crate) lifecycle_cancellation: Option<tokio_util::sync::CancellationToken>,
+}
+
+impl SystemOneExecutionSelection {
+    pub(crate) fn validate_dispatch(
+        &self,
+        pinned_worker: Option<u64>,
+    ) -> Result<(), SystemOneSelectionError> {
+        if self
+            .lifecycle_cancellation
+            .as_ref()
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            return Err(SystemOneSelectionError::Unavailable);
+        }
+        let Some(admitted) = &self.admitted_ids else {
+            // In-process engines have one trusted local worker and no discovery watcher.
+            return Ok(());
+        };
+        if admitted.has_changed().is_err() {
+            return Err(SystemOneSelectionError::Unavailable);
+        }
+        let workers = admitted.borrow();
+        if workers.is_empty() || pinned_worker.is_some_and(|worker| !workers.contains(&worker)) {
+            return Err(SystemOneSelectionError::Unavailable);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn decision_capabilities(&self) -> dynamo_decisions::Capabilities {
+        // The serialized SGLang capability pins the zero-decode requested-ID
+        // contract, including vocabulary logprobs and meta_info.cached_tokens.
+        // Tokenizer-specific candidate limits are checked during preflight.
+        dynamo_decisions::Capabilities {
+            max_questions: SYSTEMONE_MAX_QUESTIONS,
+            max_candidates: SYSTEMONE_MAX_CANDIDATES,
+            supports_predicate: true,
+            supports_choice: true,
+            supports_score: true,
+            measured_cache_reads: true,
+            prompt_format_version: 1,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub(crate) enum SystemOneSelectionError {
+    #[error("model is not registered")]
+    NotFound,
+    #[error("model does not support aggregate SGLang scoring")]
+    Unsupported,
+    #[error("SGLang scoring worker is unavailable")]
+    Unavailable,
 }
 
 /// Readiness facts for one namespace, from [`Model::evaluate_namespace`].
@@ -104,20 +165,36 @@ struct NamespaceReadinessEval {
     legacy_live_workers: usize,
     present: std::collections::HashSet<crate::worker_type::WorkerType>,
     missing: std::collections::HashSet<crate::worker_type::WorkerType>,
+    ambiguous: std::collections::HashSet<crate::worker_type::WorkerType>,
 }
+
+type WorkerSetMap = HashMap<String, Arc<WorkerSet>>;
 
 /// A named model backed by one or more WorkerSets.
 pub struct Model {
     name: String,
-    worker_sets: DashMap<String, Arc<WorkerSet>>,
+    /// Copy-on-write membership. Membership changes only on discovery events, while the
+    /// request path reads it several times per request, so readers load the current map
+    /// without writing shared state and writers publish a modified copy.
+    worker_sets: ArcSwap<WorkerSetMap>,
+    update_lock: parking_lot::Mutex<()>,
 }
 
 impl Model {
     pub fn new(name: String) -> Self {
         Self {
             name,
-            worker_sets: DashMap::new(),
+            worker_sets: ArcSwap::from_pointee(WorkerSetMap::new()),
+            update_lock: parking_lot::Mutex::new(()),
         }
+    }
+
+    fn update_worker_sets<R>(&self, update: impl FnOnce(&mut WorkerSetMap) -> R) -> R {
+        let _guard = self.update_lock.lock();
+        let mut worker_sets = WorkerSetMap::clone(&self.worker_sets.load());
+        let result = update(&mut worker_sets);
+        self.worker_sets.store(Arc::new(worker_sets));
+        result
     }
 
     pub fn name(&self) -> &str {
@@ -131,25 +208,28 @@ impl Model {
             namespace = %namespace,
             "Adding worker set to model"
         );
-        self.worker_sets.insert(namespace, worker_set);
+        self.update_worker_sets(|worker_sets| {
+            worker_sets.insert(namespace, worker_set);
+        });
     }
 
     /// Check whether a candidate checksum is compatible with an existing WorkerSet
     /// identified by `ws_key`.
     pub fn is_checksum_compatible(&self, ws_key: &str, candidate_checksum: &str) -> bool {
-        match self.worker_sets.get(ws_key) {
+        match self.worker_sets.load().get(ws_key) {
             Some(existing_ws) => existing_ws.mdcsum() == candidate_checksum,
             None => true,
         }
     }
 
     pub fn remove_worker_set(&self, namespace: &str) -> Option<Arc<WorkerSet>> {
-        let removed = self.worker_sets.remove(namespace).map(|(_, ws)| ws);
+        let (removed, remaining_sets) = self
+            .update_worker_sets(|worker_sets| (worker_sets.remove(namespace), worker_sets.len()));
         if removed.is_some() {
             tracing::info!(
                 model = %self.name,
                 namespace = %namespace,
-                remaining_sets = self.worker_sets.len(),
+                remaining_sets,
                 "Removed worker set from model"
             );
         }
@@ -157,219 +237,166 @@ impl Model {
     }
 
     pub fn has_worker_set(&self, namespace: &str) -> bool {
-        self.worker_sets.contains_key(namespace)
+        self.worker_sets.load().contains_key(namespace)
     }
 
     pub fn get_worker_set(&self, namespace: &str) -> Option<Arc<WorkerSet>> {
-        self.worker_sets
-            .get(namespace)
-            .map(|entry| entry.value().clone())
-    }
-
-    /// Return the decode WorkerSet for the only complete typed P/D topology in
-    /// a namespace.
-    ///
-    /// The rendezvous remains intentionally keyed by `(model, namespace)`: a
-    /// namespace denotes one P/D topology, while exact EndpointIds denote its
-    /// leaves. More than one typed Prefill endpoint or more than one
-    /// typed Decode endpoint is ambiguous, whether or not its prefill router
-    /// has already been attached. Aggregated and Encode WorkerSets do not
-    /// participate and continue serving normally.
-    pub(crate) fn unique_prefill_routed_worker_set_in_namespace(
-        &self,
-        namespace: &str,
-    ) -> Result<Option<Arc<WorkerSet>>, AmbiguousPrefillRouterTopology> {
-        self.prefill_router_topology_in_namespace(namespace, None)
-    }
-
-    pub(crate) fn prefill_router_topology_with_decode_candidate(
-        &self,
-        namespace: &str,
-        decode_endpoint: &dynamo_runtime::protocols::EndpointId,
-    ) -> Result<Option<Arc<WorkerSet>>, AmbiguousPrefillRouterTopology> {
-        self.prefill_router_topology_in_namespace(namespace, Some(decode_endpoint))
-    }
-
-    fn prefill_router_topology_in_namespace(
-        &self,
-        namespace: &str,
-        decode_candidate: Option<&dynamo_runtime::protocols::EndpointId>,
-    ) -> Result<Option<Arc<WorkerSet>>, AmbiguousPrefillRouterTopology> {
-        use crate::worker_type::WorkerType;
-
-        let mut prefill_endpoints = self
-            .worker_sets
-            .iter()
-            .filter(|entry| {
-                entry.value().namespace() == namespace
-                    && entry.value().card().worker_type == Some(WorkerType::Prefill)
-            })
-            .map(|entry| Self::worker_set_identity(entry.key(), entry.value()))
-            .collect::<Vec<_>>();
-        prefill_endpoints.sort();
-
-        let mut decode_worker_sets = self
-            .worker_sets
-            .iter()
-            .filter(|entry| {
-                entry.value().namespace() == namespace
-                    && entry.value().card().worker_type == Some(WorkerType::Decode)
-            })
-            .map(|entry| {
-                let identity = Self::worker_set_identity(entry.key(), entry.value());
-                (identity, entry.value().clone())
-            })
-            .collect::<Vec<_>>();
-        decode_worker_sets.sort_by(|(left, _), (right, _)| left.cmp(right));
-
-        let mut decode_endpoints = decode_worker_sets
-            .iter()
-            .map(|(identity, _)| identity.clone())
-            .collect::<Vec<_>>();
-        if let Some(candidate) = decode_candidate
-            && !decode_endpoints
-                .iter()
-                .any(|identity| identity == &candidate.to_string())
-        {
-            decode_endpoints.push(candidate.to_string());
-        }
-        decode_endpoints.sort();
-
-        if prefill_endpoints.len() > 1 || decode_endpoints.len() > 1 {
-            return Err(AmbiguousPrefillRouterTopology {
-                model: self.name.clone(),
-                namespace: namespace.to_string(),
-                prefill_endpoints,
-                decode_endpoints,
-            });
-        }
-
-        if prefill_endpoints.len() == 1 && decode_endpoints.len() == 1 {
-            Ok(decode_worker_sets.pop().and_then(|(_, worker_set)| {
-                worker_set.prefill_router.is_some().then_some(worker_set)
-            }))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn worker_set_identity(key: &str, worker_set: &WorkerSet) -> String {
-        worker_set
-            .endpoint_id()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| format!("worker-set-key={key}"))
-    }
-
-    pub(crate) fn prefill_routed_decode_worker_sets_in_namespace(
-        &self,
-        namespace: &str,
-    ) -> Vec<Arc<WorkerSet>> {
-        use crate::worker_type::WorkerType;
-
-        self.worker_sets
-            .iter()
-            .filter(|entry| {
-                entry.value().namespace() == namespace
-                    && entry.value().card().worker_type == Some(WorkerType::Decode)
-                    && entry.value().prefill_router.is_some()
-            })
-            .map(|entry| entry.value().clone())
-            .collect()
+        self.worker_sets.load().get(namespace).cloned()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.worker_sets.is_empty()
+        self.worker_sets.load().is_empty()
     }
 
     pub fn worker_set_count(&self) -> usize {
-        self.worker_sets.len()
+        self.worker_sets.load().len()
     }
 
     /// Snapshot all WorkerSets. Used by cross-role lifecycle coordination
     /// where storage keys include role/surface suffixes but deployment
     /// matching is based on `WorkerSet::namespace()`.
     pub(crate) fn worker_sets(&self) -> Vec<Arc<WorkerSet>> {
-        self.worker_sets
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect()
+        self.worker_sets.load().values().cloned().collect()
+    }
+
+    /// Build an immutable membership snapshot for request-plane publication.
+    ///
+    /// WorkerSets themselves are shared because their engines and routing lifecycle are
+    /// long-lived. The membership map is shared too: discovery mutations publish a new map,
+    /// so they cannot leak through an older published catalog.
+    pub(crate) fn snapshot(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            worker_sets: ArcSwap::new(self.worker_sets.load_full()),
+            update_lock: parking_lot::Mutex::new(()),
+        }
     }
 
     /// Check if this model has any decode engine (chat or completions) across any WorkerSet.
     pub fn has_decode_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_decode_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_decode_engine())
     }
 
     /// Check if this model tracks prefill (any WorkerSet is a prefill set).
     pub fn has_prefill(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().is_prefill_set())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.is_prefill_set())
     }
 
     /// Check if any WorkerSet has a chat engine.
     pub fn has_chat_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_chat_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_chat_engine())
     }
 
     /// Check if any WorkerSet has a completions engine.
     pub fn has_completions_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_completions_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_completions_engine())
     }
 
     /// Check if any WorkerSet has an embeddings engine.
     pub fn has_embeddings_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_embeddings_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_embeddings_engine())
+    }
+
+    /// Check if any WorkerSet has a classify engine.
+    pub fn has_classify_engine(&self) -> bool {
+        self.worker_sets
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_classify_engine())
+    }
+
+    /// Check if any WorkerSet has a pooling engine.
+    pub fn has_pooling_engine(&self) -> bool {
+        self.worker_sets
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_pooling_engine())
+    }
+
+    /// Check if any WorkerSet has a rerank engine.
+    pub fn has_rerank_engine(&self) -> bool {
+        self.worker_sets
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_rerank_engine())
     }
 
     /// Check if any WorkerSet has a tensor engine.
     pub fn has_tensor_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_tensor_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_tensor_engine())
     }
 
     /// Check if any WorkerSet has an images engine.
     pub fn has_images_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_images_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_images_engine())
     }
 
     /// Check if any WorkerSet has a videos engine.
     pub fn has_videos_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_videos_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_videos_engine())
     }
 
     /// Check if any WorkerSet has an audios engine.
     pub fn has_audios_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_audios_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_audios_engine())
+    }
+
+    /// Check if any WorkerSet has a transcriptions engine.
+    pub fn has_transcriptions_engine(&self) -> bool {
+        self.worker_sets
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_transcriptions_engine())
     }
 
     /// Check if any WorkerSet has a realtime engine.
     pub fn has_realtime_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_realtime_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_realtime_engine())
     }
 
     /// Check if any WorkerSet has a generate engine.
     pub fn has_generate_engine(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_generate_engine())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_generate_engine())
+    }
+
+    /// Check whether a Generate worker also advertises `capability`.
+    pub fn has_generate_engine_for_capability(&self, capability: &str) -> bool {
+        self.worker_sets.load().values().any(|worker_set| {
+            worker_set.has_generate_engine() && worker_set.supports_runtime_capability(capability)
+        })
     }
 
     // -- Model serving readiness --
@@ -385,14 +412,25 @@ impl Model {
     /// Distinct namespaces represented by this model's WorkerSets, sorted.
     /// Each namespace identifies one deployment of the model.
     pub fn distinct_namespaces_sorted(&self) -> Vec<String> {
-        let mut ns: Vec<String> = self
-            .worker_sets
-            .iter()
-            .map(|entry| entry.value().namespace().to_string())
-            .collect();
-        ns.sort();
-        ns.dedup();
-        ns
+        Self::sorted_namespaces(&self.worker_sets.load())
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn sorted_namespaces(worker_sets: &WorkerSetMap) -> Vec<&str> {
+        let mut namespaces: Vec<&str> = worker_sets.values().map(|ws| ws.namespace()).collect();
+        namespaces.sort_unstable();
+        namespaces.dedup();
+        namespaces
+    }
+
+    fn sets_in_namespace<'a>(worker_sets: &'a WorkerSetMap, namespace: &str) -> Vec<&'a WorkerSet> {
+        worker_sets
+            .values()
+            .map(Arc::as_ref)
+            .filter(|ws| ws.namespace() == namespace)
+            .collect()
     }
 
     /// Return `(worker_type, needs)` for this WorkerSet, or `None` if the
@@ -423,16 +461,17 @@ impl Model {
     /// and old aggregated workers are indistinguishable on the wire. Rather than
     /// hide the model, we fall back to legacy behavior and report ready as long
     /// as some worker is live. Strict worker-type readiness gating resumes automatically once
-    /// every worker in the namespace carries a `worker_type`. Remove this branch
-    /// when the compat shim is retired.
+    /// every worker in the namespace carries a `worker_type`.
+    ///
+    /// TODO(v1.5): Remove this branch with the legacy MDC topology shims after
+    /// the v1.2 compatibility window expires.
     pub fn is_workers_ready(&self, namespace: &str) -> bool {
-        let wsets: Vec<Arc<WorkerSet>> = self
-            .worker_sets
-            .iter()
-            .filter(|entry| entry.value().namespace() == namespace)
-            .map(|entry| entry.value().clone())
-            .collect();
-        self.evaluate_namespace(&wsets).ready
+        self.namespace_ready(&self.worker_sets.load(), namespace)
+    }
+
+    fn namespace_ready(&self, worker_sets: &WorkerSetMap, namespace: &str) -> bool {
+        self.evaluate_namespace(&Self::sets_in_namespace(worker_sets, namespace))
+            .ready
     }
 
     /// Evaluate readiness for one namespace's WorkerSets — the shared check
@@ -444,90 +483,44 @@ impl Model {
     /// WorkerSet's needs are ignored (a live sibling of the same type carries
     /// the same `needs`). A legacy card (no `worker_type`) bypasses the strict
     /// check: ready iff any worker is live. Empty `wsets` is not ready.
-    fn evaluate_namespace(&self, wsets: &[Arc<WorkerSet>]) -> NamespaceReadinessEval {
-        let mut present: std::collections::HashSet<crate::worker_type::WorkerType> =
-            std::collections::HashSet::new();
-        let mut missing: std::collections::HashSet<crate::worker_type::WorkerType> =
-            std::collections::HashSet::new();
-        let mut has_legacy = false;
-        let mut legacy_live_workers = 0usize;
-        let mut has_live_worker = false;
-
-        // First pass: which worker types have a live worker (+ legacy detection).
-        for ws in wsets {
-            let count = ws.worker_count();
-            if count > 0 {
-                has_live_worker = true;
-            }
-            match Self::ws_type_and_needs(ws) {
-                Some((wt, _needs)) => {
-                    if count > 0 {
-                        present.insert(wt);
-                    }
-                }
-                // No declared worker_type → legacy card.
-                None => {
-                    has_legacy = true;
-                    legacy_live_workers += count;
-                }
-            }
-        }
-
-        // COMPAT branch: a legacy card disables strict gating; the disaggregated
-        // worker types can't be reconstructed, so ready iff any worker is live.
-        if has_legacy {
+    fn evaluate_namespace(&self, wsets: &[&WorkerSet]) -> NamespaceReadinessEval {
+        let units = wsets
+            .iter()
+            .map(|ws| match Self::ws_type_and_needs(ws) {
+                Some((worker_type, needs)) => super::readiness::ReadinessUnit {
+                    worker_type: Some(worker_type),
+                    live_count: ws.worker_count(),
+                    needs,
+                },
+                None => super::readiness::ReadinessUnit {
+                    worker_type: None,
+                    live_count: ws.worker_count(),
+                    needs: Vec::new(),
+                },
+            })
+            .collect::<Vec<_>>();
+        let eval = super::readiness::evaluate_readiness(&units);
+        if eval.has_legacy {
             warn_legacy_readiness_once(&self.name, wsets[0].namespace());
-            return NamespaceReadinessEval {
-                ready: has_live_worker,
-                has_legacy,
-                legacy_live_workers,
-                present,
-                missing,
-            };
         }
-
-        // Strict path: a registered worker type with no live worker anywhere is
-        // missing; a *live* WorkerSet whose `needs` DNF is unsatisfied flags its
-        // absent peers.
-        for ws in wsets {
-            let Some((wt, needs)) = Self::ws_type_and_needs(ws) else {
-                continue;
-            };
-            if !present.contains(&wt) {
-                missing.insert(wt);
-            }
-            if ws.worker_count() == 0 || needs.is_empty() {
-                continue;
-            }
-            let satisfied = needs
-                .iter()
-                .any(|alt| alt.iter().all(|t| present.contains(t)));
-            if !satisfied {
-                for alt in &needs {
-                    for t in alt {
-                        if !present.contains(t) {
-                            missing.insert(*t);
-                        }
-                    }
-                }
-            }
-        }
-
         NamespaceReadinessEval {
-            ready: has_live_worker && missing.is_empty(),
-            has_legacy,
-            legacy_live_workers,
-            present,
-            missing,
+            ready: eval.ready,
+            has_legacy: eval.has_legacy,
+            legacy_live_workers: eval.legacy_live_workers,
+            present: eval.present,
+            missing: eval.missing,
+            ambiguous: eval.ambiguous,
         }
     }
 
     /// Return the namespace identifier of the first ready set of workers (in
     /// sorted order), or `None` if none are ready.
     pub fn first_ready_workers(&self) -> Option<String> {
-        self.distinct_namespaces_sorted()
+        let worker_sets = self.worker_sets.load();
+        Self::sorted_namespaces(&worker_sets)
             .into_iter()
-            .find(|ns| self.is_workers_ready(ns))
+            .find(|ns| self.namespace_ready(&worker_sets, ns))
+            .map(str::to_string)
     }
 
     /// Whether at least one namespace's worker set in this model is ready to
@@ -539,19 +532,15 @@ impl Model {
     /// Structured per-namespace worker readiness for this model — the data
     /// behind the `GET /v1/models/{model}/ready` observability endpoint.
     ///
-    /// Built on the same [`Self::evaluate_namespace`] facts the serving gate
+    /// Built on the same `Self::evaluate_namespace` facts the serving gate
     /// uses, so the reported `ready`/`missing` can never disagree with routing;
     /// this method only layers display data (per-type counts, reason strings).
     pub fn namespace_readiness(&self) -> ModelReadiness {
         let mut namespaces = std::collections::BTreeMap::new();
+        let worker_sets = self.worker_sets.load();
 
-        for ns in self.distinct_namespaces_sorted() {
-            let wsets: Vec<Arc<WorkerSet>> = self
-                .worker_sets
-                .iter()
-                .filter(|entry| entry.value().namespace() == ns)
-                .map(|entry| entry.value().clone())
-                .collect();
+        for ns in Self::sorted_namespaces(&worker_sets) {
+            let wsets = Self::sets_in_namespace(&worker_sets, ns);
 
             // Authoritative readiness facts (shared with the serving gate).
             let eval = self.evaluate_namespace(&wsets);
@@ -601,12 +590,20 @@ impl Model {
                 }
             } else if eval.has_legacy {
                 Some("legacy worker(s) present but no live worker".to_string())
+            } else if !eval.ambiguous.is_empty() {
+                let mut roles = eval
+                    .ambiguous
+                    .iter()
+                    .map(|worker_type| worker_type.as_str())
+                    .collect::<Vec<_>>();
+                roles.sort_unstable();
+                Some(format!("ambiguous worker types: {}", roles.join(", ")))
             } else {
                 Some(format!("missing worker types: {}", missing_vec.join(", ")))
             };
 
             namespaces.insert(
-                ns.clone(),
+                ns.to_string(),
                 NamespaceReadiness {
                     ready: eval.ready,
                     reason,
@@ -639,7 +636,7 @@ impl Model {
     /// where a `ModelDeploymentCard` is registered before its WorkerSet has
     /// been wired up.
     ///
-    /// Delegates to [`Self::select_worker_set_with`] so readiness reports
+    /// Delegates to `Self::select_worker_set_with` so readiness reports
     /// exactly what request routing would accept — including the namespace
     /// completeness gate. Without that, a live decode-only WorkerSet with a
     /// chat engine but no prefill peer would report ready while every request
@@ -651,13 +648,12 @@ impl Model {
 
     /// Whether this model should be visible in /v1/models.
     pub fn is_displayable(&self) -> bool {
-        let any_set_has_engine = self
-            .worker_sets
-            .iter()
-            .any(|entry| entry.value().has_any_serving_engine());
+        let worker_sets = self.worker_sets.load();
+        let any_set_has_engine = worker_sets
+            .values()
+            .any(|worker_set| worker_set.has_any_serving_engine());
 
-        self.worker_sets.iter().any(|entry| {
-            let ws = entry.value();
+        worker_sets.values().any(|ws| {
             if ws.worker_count() == 0 {
                 return false;
             }
@@ -688,9 +684,53 @@ impl Model {
             .ok_or_else(|| self.engine_error(self.has_embeddings_engine()))
     }
 
+    pub fn get_classify_engine(&self) -> Result<OpenAIClassifyStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.classify_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_classify_engine()))
+    }
+
+    pub fn get_pooling_engine(&self) -> Result<OpenAIPoolingStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.pooling_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_pooling_engine()))
+    }
+
+    pub fn get_rerank_engine(&self) -> Result<OpenAIRerankStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.rerank_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_rerank_engine()))
+    }
+
     pub fn get_images_engine(&self) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.images_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_images_engine()))
+    }
+
+    /// Choose a ready WorkerSet whose admitted members all accept the reference count.
+    /// Return `None` for an unsupported count, but retain errors for unavailable models.
+    pub(crate) fn select_image_edit_engine(
+        &self,
+        count: usize,
+    ) -> Result<Option<super::image_edits::ImageEngineSelection>, ModelManagerError> {
+        let selection = self.select_worker_set_with(|ws| {
+            let snapshot = ws
+                .image_edit_admission
+                .as_ref()
+                .map(|admission| admission.snapshot());
+            let limit = snapshot.as_ref().map_or_else(
+                || super::image_edits::advertised_limit(ws.card()),
+                |snapshot| snapshot.max_input_images,
+            );
+            if count > limit {
+                return None;
+            }
+            ws.images_engine
+                .clone()
+                .map(|engine| super::image_edits::ImageEngineSelection { engine, snapshot })
+        });
+        if selection.is_none() {
+            // Distinguish an unsupported count from an unavailable model.
+            self.get_images_engine()?;
+        }
+        Ok(selection)
     }
 
     pub fn get_videos_engine(&self) -> Result<OpenAIVideosStreamingEngine, ModelManagerError> {
@@ -701,6 +741,13 @@ impl Model {
     pub fn get_audios_engine(&self) -> Result<OpenAIAudiosStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.audios_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_audios_engine()))
+    }
+
+    pub fn get_transcriptions_engine(
+        &self,
+    ) -> Result<OpenAITranscriptionsStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.transcriptions_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_transcriptions_engine()))
     }
 
     pub fn get_tensor_engine(&self) -> Result<TensorStreamingEngine, ModelManagerError> {
@@ -716,6 +763,82 @@ impl Model {
     pub fn get_generate_engine(&self) -> Result<GenerateStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.generate_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_generate_engine()))
+    }
+    /// Get a Generate engine from a worker advertising `capability`.
+    pub fn get_generate_engine_for_capability(
+        &self,
+        capability: &str,
+    ) -> Result<GenerateStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|worker_set| {
+            worker_set
+                .supports_runtime_capability(capability)
+                .then(|| worker_set.generate_engine.clone())
+                .flatten()
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
+    }
+
+    /// Select a generate engine and its routing metadata atomically from the
+    /// same WorkerSet. Request-side KV hashing must use the block size and LoRA
+    /// identity advertised by the worker set that will route the request.
+    pub(crate) fn get_generate_engine_for_capability_with_routing(
+        &self,
+        capability: &str,
+    ) -> Result<GenerateEngineSelection, ModelManagerError> {
+        self.select_worker_set_with(|ws| {
+            ws.supports_runtime_capability(capability)
+                .then(|| ws.generate_engine.clone())
+                .flatten()
+                .map(|engine| GenerateEngineSelection {
+                    engine,
+                    kv_cache_block_size: ws.card().kv_cache_block_size,
+                    lora_name: ws.card().lora.as_ref().map(|lora| lora.name.clone()),
+                    tower_connector_lora_enabled: ws
+                        .card()
+                        .runtime_config
+                        .runtime_flag_enabled(VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY),
+                })
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
+    }
+
+    pub(crate) fn get_systemone_execution_selection(
+        &self,
+    ) -> Result<SystemOneExecutionSelection, SystemOneSelectionError> {
+        self.select_worker_set_with_worker_count(
+            |ws| self.systemone_execution_inputs(ws),
+            WorkerSet::decision_worker_count,
+        )
+        .ok_or_else(|| {
+            if self
+                .worker_sets
+                .load()
+                .values()
+                .any(|worker_set| worker_set.card().is_systemone_serial_eligible())
+            {
+                SystemOneSelectionError::Unavailable
+            } else {
+                SystemOneSelectionError::Unsupported
+            }
+        })
+    }
+
+    fn systemone_execution_inputs(
+        &self,
+        worker_set: &WorkerSet,
+    ) -> Option<SystemOneExecutionSelection> {
+        let card = worker_set.card();
+        if !card.is_systemone_serial_eligible() {
+            return None;
+        }
+        Some(SystemOneExecutionSelection {
+            canonical_model: self.name.clone(),
+            engine: worker_set.generate_engine.clone()?,
+            card: card.clone(),
+            preprocessor: worker_set.systemone_preprocessor.clone()?,
+            admitted_ids: worker_set.decision_admissions().cloned(),
+            lifecycle_cancellation: worker_set.lifecycle_cancellation(),
+        })
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -751,31 +874,44 @@ impl Model {
 
     // -- Worker monitoring (aggregated across WorkerSets) --
 
-    /// Get load threshold config from the first WorkerSet that has a monitor.
-    /// When `config` is Some, updates ALL monitors (each WorkerSet has its own).
+    /// Get load threshold config from the first WorkerSet with a threshold handle,
+    /// preferring an enabled one. When `config` is Some, updates every handle.
+    /// WorkerSets may share a handle.
     pub fn load_threshold_config(
         &self,
         config: Option<&LoadThresholdConfig>,
     ) -> Option<LoadThresholdConfig> {
-        let mut result = None;
-        for entry in self.worker_sets.iter() {
-            if let Some(ref monitor) = entry.value().worker_monitor {
-                if let Some(cfg) = config {
-                    monitor.set_load_threshold_config(cfg);
-                }
-                if result.is_none() {
-                    result = Some(monitor.load_threshold_config());
-                }
-            }
+        let worker_sets = self.worker_sets.load();
+        let handles: Vec<_> = worker_sets
+            .values()
+            .filter_map(|worker_set| worker_set.load_thresholds.as_ref())
+            .collect();
+        if let Some(cfg) = config {
+            handles.iter().for_each(|handle| handle.update(cfg));
         }
-        result
+        handles
+            .iter()
+            .find(|handle| handle.is_enabled())
+            .or(handles.first())
+            .map(|handle| handle.get())
+    }
+
+    /// Whether any WorkerSet has an enabled threshold handle.
+    pub(crate) fn accepts_load_thresholds(&self) -> bool {
+        self.worker_sets.load().values().any(|worker_set| {
+            worker_set
+                .load_thresholds
+                .as_ref()
+                .is_some_and(|thresholds| thresholds.is_enabled())
+        })
     }
 
     /// Total worker count across all WorkerSets.
     pub fn total_workers(&self) -> usize {
         self.worker_sets
-            .iter()
-            .map(|entry| entry.value().worker_count())
+            .load()
+            .values()
+            .map(|worker_set| worker_set.worker_count())
             .sum()
     }
 
@@ -807,15 +943,23 @@ impl Model {
     where
         F: Fn(&WorkerSet) -> Option<T>,
     {
-        // One snapshot drives both the readiness filter and candidate
-        // eligibility, so a concurrent add/remove can't make us treat a
-        // namespace as complete while routing to a set that lost a peer. It also
-        // avoids re-entering the DashMap mid-iteration, which can deadlock.
-        let snapshot: Vec<Arc<WorkerSet>> = self
-            .worker_sets
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect();
+        self.select_worker_set_with_worker_count(extract, WorkerSet::worker_count)
+    }
+
+    fn select_worker_set_with_worker_count<T, F, C>(
+        &self,
+        extract: F,
+        count_workers: C,
+    ) -> Option<T>
+    where
+        F: Fn(&WorkerSet) -> Option<T>,
+        C: Fn(&WorkerSet) -> usize,
+    {
+        // One immutable membership map drives both the readiness filter and
+        // candidate eligibility, so a concurrent add/remove can't make us treat a
+        // namespace as complete while routing to a set that lost a peer.
+        let worker_sets = self.worker_sets.load();
+        let snapshot: Vec<&WorkerSet> = worker_sets.values().map(Arc::as_ref).collect();
 
         // Namespaces whose worker set is complete, evaluated against the snapshot.
         let mut namespaces: Vec<&str> = snapshot.iter().map(|ws| ws.namespace()).collect();
@@ -824,10 +968,10 @@ impl Model {
         let ready_namespaces: std::collections::HashSet<&str> = namespaces
             .into_iter()
             .filter(|ns| {
-                let in_ns: Vec<Arc<WorkerSet>> = snapshot
+                let in_ns: Vec<&WorkerSet> = snapshot
                     .iter()
                     .filter(|ws| ws.namespace() == *ns)
-                    .cloned()
+                    .copied()
                     .collect();
                 self.evaluate_namespace(&in_ns).ready
             })
@@ -835,8 +979,8 @@ impl Model {
 
         // Fast path: single set (same zero-worker filtering as the multi-set path below)
         if snapshot.len() == 1 {
-            let ws = &snapshot[0];
-            if ws.worker_count() == 0 || !ready_namespaces.contains(ws.namespace()) {
+            let ws = snapshot[0];
+            if count_workers(ws) == 0 || !ready_namespaces.contains(ws.namespace()) {
                 return None;
             }
             return extract(ws);
@@ -848,8 +992,8 @@ impl Model {
         // Discovery models with count=0 have no available workers and are skipped.
         let eligible: Vec<(T, usize)> = snapshot
             .iter()
-            .filter_map(|ws| {
-                let count = ws.worker_count();
+            .filter_map(|&ws| {
+                let count = count_workers(ws);
                 if count == 0 || !ready_namespaces.contains(ws.namespace()) {
                     return None;
                 }
@@ -882,8 +1026,97 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_card::ModelDeploymentCard;
+    use crate::local_model::runtime_config::{
+        VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+    };
+    use crate::model_card::{LoraInfo, ModelDeploymentCard};
+    use crate::protocols::common::preprocessor::PreprocessedRequest;
+    use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
+    use async_trait::async_trait;
+    use dynamo_runtime::engine::AsyncEngine;
+    use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
     use tokio::sync::watch;
+
+    struct StubGenerateEngine;
+
+    struct StubImageEngine;
+
+    #[async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<crate::protocols::openai::images::NvCreateImageRequest>,
+            ManyOut<Annotated<crate::protocols::openai::images::NvImagesResponse>>,
+            Error,
+        > for StubImageEngine
+    {
+        async fn generate(
+            &self,
+            _: SingleIn<crate::protocols::openai::images::NvCreateImageRequest>,
+        ) -> Result<ManyOut<Annotated<crate::protocols::openai::images::NvImagesResponse>>, Error>
+        {
+            unreachable!("selection must not generate images")
+        }
+    }
+
+    /// Selection must carry the chosen set's admission snapshot into dispatch.
+    #[test]
+    fn image_edits_select_only_compatible_ready_sets_and_snapshot_membership() {
+        use super::super::image_edits::ImageEditAdmission;
+        let model = Model::new("served-alias".into());
+        let legacy_engine: OpenAIImagesStreamingEngine = Arc::new(StubImageEngine);
+        let upgraded_engine: OpenAIImagesStreamingEngine = Arc::new(StubImageEngine);
+        let mut legacy = WorkerSet::new(
+            "legacy".into(),
+            "same".into(),
+            ModelDeploymentCard::default(),
+        );
+        legacy.images_engine = Some(legacy_engine);
+        model.add_worker_set("legacy".into(), Arc::new(legacy));
+        let (tx, rx) = watch::channel(vec![1, 2]);
+        let admission = Arc::new(ImageEditAdmission::new(rx.clone()));
+        admission.replace([(1, 4), (2, 4), (99, 0)].into_iter());
+        let mut upgraded = WorkerSet::new(
+            "upgraded".into(),
+            "same".into(),
+            ModelDeploymentCard::default(),
+        );
+        upgraded.images_engine = Some(upgraded_engine.clone());
+        upgraded.image_edit_admission = Some(admission.clone());
+        upgraded.set_instance_watcher(rx);
+        model.add_worker_set("upgraded".into(), Arc::new(upgraded));
+        for _ in 0..20 {
+            let selected = model.select_image_edit_engine(4).unwrap().unwrap();
+            assert!(Arc::ptr_eq(&selected.engine, &upgraded_engine));
+            assert_eq!(
+                selected.snapshot.unwrap().worker_ids,
+                [1, 2].into_iter().collect()
+            );
+        }
+        assert!(model.select_image_edit_engine(5).unwrap().is_none());
+        // A legacy join disables multi-image requests for this entire set, even
+        // though the upgraded members still advertise four images.
+        tx.send_replace(vec![1, 2, 3]);
+        assert!(model.select_image_edit_engine(2).unwrap().is_none());
+        assert!(model.select_image_edit_engine(1).unwrap().is_some());
+        tx.send_replace(vec![1]);
+        assert!(model.select_image_edit_engine(4).unwrap().is_some());
+        tx.send_replace(vec![]);
+        assert!(model.select_image_edit_engine(2).unwrap().is_none());
+        model.remove_worker_set("legacy");
+        assert!(model.select_image_edit_engine(1).is_err());
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for StubGenerateEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            unimplemented!("stub for generate engine selection tests only")
+        }
+    }
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> Arc<WorkerSet> {
         Arc::new(WorkerSet::new(
@@ -891,6 +1124,40 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         ))
+    }
+
+    fn make_generate_worker_set(
+        namespace: &str,
+        block_size: u32,
+        lora_name: Option<&str>,
+        tower_connector_lora_enabled: bool,
+    ) -> (
+        Arc<WorkerSet>,
+        GenerateStreamingEngine,
+        watch::Sender<Vec<u64>>,
+    ) {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.kv_cache_block_size = block_size;
+        card.lora = lora_name.map(|name| LoraInfo {
+            name: name.to_string(),
+            max_gpu_lora_count: None,
+        });
+        card.runtime_config.runtime_data.insert(
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+            true.into(),
+        );
+        card.runtime_config.runtime_data.insert(
+            VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY.to_string(),
+            tower_connector_lora_enabled.into(),
+        );
+        let engine: GenerateStreamingEngine = Arc::new(StubGenerateEngine);
+        let mut worker_set =
+            WorkerSet::new(namespace.to_string(), format!("{namespace}-checksum"), card);
+        worker_set.generate_engine = Some(engine.clone());
+        let (worker_tx, worker_rx) = watch::channel(vec![1]);
+        worker_set.set_instance_watcher(worker_rx);
+        (Arc::new(worker_set), engine, worker_tx)
     }
 
     /// Create a WorkerSet backed by a watch channel so worker_count reflects the vec length.
@@ -934,6 +1201,22 @@ mod tests {
 
         let removed_again = model.remove_worker_set("ns1");
         assert!(removed_again.is_none());
+    }
+
+    #[test]
+    fn snapshot_is_isolated_from_later_membership_changes() {
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+
+        let snapshot = model.snapshot();
+        model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "abc"));
+        model.remove_worker_set("ns1");
+
+        assert_eq!(snapshot.worker_set_count(), 1);
+        assert!(snapshot.has_worker_set("ns1"));
+        assert!(!snapshot.has_worker_set("ns2"));
+        assert_eq!(model.worker_set_count(), 1);
+        assert!(model.has_worker_set("ns2"));
     }
 
     #[test]
@@ -1039,6 +1322,298 @@ mod tests {
         assert!(model.get_images_engine().is_err());
         assert!(model.get_tensor_engine().is_err());
         assert!(model.get_realtime_engine().is_err());
+        assert!(model.get_generate_engine().is_err());
+    }
+
+    #[test]
+    fn test_generate_engine_selection_keeps_worker_set_metadata_atomic() {
+        let model = Model::new("generate-model".to_string());
+        let (worker_set_a, engine_a, worker_tx_a) =
+            make_generate_worker_set("ns-a", 16, None, false);
+        let (worker_set_b, engine_b, worker_tx_b) =
+            make_generate_worker_set("ns-b", 32, Some("adapter-b"), true);
+        worker_tx_b.send(vec![]).expect("disable worker set B");
+        model.add_worker_set("ns-a".to_string(), worker_set_a);
+        model.add_worker_set("ns-b".to_string(), worker_set_b);
+
+        let selection_a = model
+            .get_generate_engine_for_capability_with_routing(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+            .expect("select live worker set A");
+        assert!(Arc::ptr_eq(&selection_a.engine, &engine_a));
+        assert_eq!(selection_a.kv_cache_block_size, 16);
+        assert_eq!(selection_a.lora_name, None);
+        assert!(!selection_a.tower_connector_lora_enabled);
+
+        worker_tx_a.send(vec![]).expect("disable worker set A");
+        worker_tx_b.send(vec![2]).expect("enable worker set B");
+
+        let selection_b = model
+            .get_generate_engine_for_capability_with_routing(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+            .expect("select live worker set B");
+        assert!(Arc::ptr_eq(&selection_b.engine, &engine_b));
+        assert_eq!(selection_b.kv_cache_block_size, 32);
+        assert_eq!(selection_b.lora_name.as_deref(), Some("adapter-b"));
+        assert!(selection_b.tower_connector_lora_enabled);
+    }
+
+    fn systemone_worker_set(
+        namespace: &str,
+        configure: impl FnOnce(&mut ModelDeploymentCard),
+    ) -> (Arc<WorkerSet>, watch::Sender<Vec<u64>>) {
+        let mut card = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.runtime_config.runtime_data.insert(
+            crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY.to_string(),
+            true.into(),
+        );
+        card.runtime_config
+            .runtime_data
+            .insert("sglang_systemone_serial_v1".to_string(), true.into());
+        card.runtime_config.max_num_seqs = Some(1);
+        configure(&mut card);
+        let preprocessor = OpenAIPreprocessor::new(card.clone()).unwrap();
+        let mut worker_set = WorkerSet::new(namespace.to_string(), namespace.to_string(), card);
+        worker_set.generate_engine = Some(Arc::new(StubGenerateEngine));
+        worker_set.systemone_preprocessor = Some(preprocessor);
+        let (worker_tx, worker_rx) = watch::channel(vec![1]);
+        worker_set.set_instance_watcher(worker_rx);
+        (Arc::new(worker_set), worker_tx)
+    }
+
+    #[test]
+    fn systemone_selection_keeps_engine_card_and_assets_atomic() {
+        let model = Model::new("scoring-model".to_string());
+        let (worker_set_a, workers_a) = systemone_worker_set("ns-a", |card| {
+            card.kv_cache_block_size = 16;
+        });
+        let (worker_set_b, workers_b) = systemone_worker_set("ns-b", |card| {
+            card.kv_cache_block_size = 32;
+        });
+        workers_b.send(vec![]).unwrap();
+        model.add_worker_set("ns-a".to_string(), worker_set_a.clone());
+        model.add_worker_set("ns-b".to_string(), worker_set_b.clone());
+        let selection_a = model.get_systemone_execution_selection().unwrap();
+        assert!(Arc::ptr_eq(
+            &selection_a.engine,
+            worker_set_a.generate_engine.as_ref().unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &selection_a.preprocessor,
+            worker_set_a.systemone_preprocessor.as_ref().unwrap()
+        ));
+        assert_eq!(selection_a.card.kv_cache_block_size, 16);
+        assert_eq!(selection_a.canonical_model, "scoring-model");
+
+        workers_a.send(vec![]).unwrap();
+        workers_b.send(vec![2]).unwrap();
+        let selection_b = model.get_systemone_execution_selection().unwrap();
+        assert!(Arc::ptr_eq(
+            &selection_b.engine,
+            worker_set_b.generate_engine.as_ref().unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &selection_b.preprocessor,
+            worker_set_b.systemone_preprocessor.as_ref().unwrap()
+        ));
+        assert_eq!(selection_b.card.kv_cache_block_size, 32);
+        assert_eq!(selection_a.card.kv_cache_block_size, 16);
+    }
+
+    #[test]
+    fn systemone_selection_distinguishes_unsupported_from_unavailable() {
+        let unsupported: [fn(&mut ModelDeploymentCard); 9] = [
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .remove("sglang_systemone_serial_v1");
+            },
+            |card| {
+                card.runtime_config.max_num_seqs = None;
+            },
+            |card| {
+                card.runtime_config.max_num_seqs = Some(2);
+            },
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .remove(crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY);
+            },
+            |card| {
+                card.worker_type = None;
+            },
+            |card| {
+                card.worker_type = Some(crate::worker_type::WorkerType::Prefill);
+            },
+            |card| {
+                card.lora = Some(LoraInfo {
+                    name: "adapter".to_string(),
+                    max_gpu_lora_count: None,
+                });
+            },
+            |card| {
+                card.needs = vec![vec![crate::worker_type::WorkerType::Prefill]];
+            },
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .insert("spec_decode".to_string(), serde_json::json!({}));
+            },
+        ];
+        for configure in unsupported {
+            let model = Model::new("scoring-model".to_string());
+            let (worker_set, _workers) = systemone_worker_set("ns", configure);
+            model.add_worker_set("ns".to_string(), worker_set);
+            assert!(matches!(
+                model.get_systemone_execution_selection(),
+                Err(SystemOneSelectionError::Unsupported)
+            ));
+        }
+        let model = Model::new("scoring-model".to_string());
+        let (mut worker_set, _workers) = systemone_worker_set("ns", |_| {});
+        Arc::get_mut(&mut worker_set)
+            .unwrap()
+            .systemone_preprocessor = None;
+        model.add_worker_set("ns".to_string(), worker_set);
+        assert!(matches!(
+            model.get_systemone_execution_selection(),
+            Err(SystemOneSelectionError::Unavailable)
+        ));
+        let model = Model::new("scoring-model".to_string());
+        let (mut worker_set, _workers) = systemone_worker_set("ns", |_| {});
+        Arc::get_mut(&mut worker_set).unwrap().generate_engine = None;
+        model.add_worker_set("ns".to_string(), worker_set);
+        assert!(matches!(
+            model.get_systemone_execution_selection(),
+            Err(SystemOneSelectionError::Unavailable)
+        ));
+        let model = Model::new("scoring-model".to_string());
+        let (worker_set, workers) = systemone_worker_set("ns", |_| {});
+        workers.send(vec![]).unwrap();
+        model.add_worker_set("ns".to_string(), worker_set);
+        assert!(matches!(
+            model.get_systemone_execution_selection(),
+            Err(SystemOneSelectionError::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn systemone_selection_ignores_unrelated_card_migration_limit() {
+        let model = Model::new("scoring-model".to_string());
+        let (worker_set, _workers) = systemone_worker_set("ns", |card| {
+            card.migration_limit = 1;
+        });
+        model.add_worker_set("ns".to_string(), worker_set);
+        assert!(model.get_systemone_execution_selection().is_ok());
+    }
+
+    #[test]
+    fn systemone_retained_selection_rejects_lifecycle_retirement() {
+        let model = Model::new("scoring-model".to_string());
+        let (mut workers, _tx) = systemone_worker_set("ns", |_| {});
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        Arc::get_mut(&mut workers)
+            .unwrap()
+            .set_lifecycle_cancellation(cancellation.clone());
+        model.add_worker_set("ns".to_string(), workers);
+        let selection = model.get_systemone_execution_selection().unwrap();
+        assert_eq!(selection.validate_dispatch(Some(1)), Ok(()));
+        cancellation.cancel();
+        assert_eq!(
+            selection.validate_dispatch(Some(1)),
+            Err(SystemOneSelectionError::Unavailable)
+        );
+        assert!(matches!(
+            model.get_systemone_execution_selection(),
+            Err(SystemOneSelectionError::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn systemone_in_process_selection_does_not_require_discovery_admissions() {
+        let model = Model::new("scoring-model".to_string());
+        let (registered, _tx) = systemone_worker_set("ns", |_| {});
+        let mut local = WorkerSet::new(
+            "local".to_string(),
+            "local".to_string(),
+            registered.card().clone(),
+        );
+        local.generate_engine = registered.generate_engine.clone();
+        local.systemone_preprocessor = registered.systemone_preprocessor.clone();
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        local.set_lifecycle_cancellation(cancellation.clone());
+        assert_eq!(local.decision_worker_count(), 1);
+        model.add_worker_set("local".to_string(), Arc::new(local));
+        let selection = model.get_systemone_execution_selection().unwrap();
+        assert!(selection.admitted_ids.is_none());
+        assert_eq!(selection.validate_dispatch(None), Ok(()));
+        cancellation.cancel();
+        assert_eq!(
+            selection.validate_dispatch(None),
+            Err(SystemOneSelectionError::Unavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn systemone_selection_excludes_discovered_but_unadmitted_workers() {
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let component = distributed
+            .namespace("decision-admission-test".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap();
+        let model = Model::new("scoring-model".to_string());
+        let (mut unadmitted, discovered) = systemone_worker_set("ns-a", |_| {});
+        let (admitted_tx, admitted_rx) = watch::channel(Vec::new());
+        let selected_card = Arc::new(unadmitted.card().clone());
+        Arc::get_mut(&mut unadmitted).unwrap().set_topology_target(
+            super::super::worker_set::CommittedWorkerSetTarget {
+                endpoint: component.endpoint("generate".to_string()),
+                group: "group-a".to_string(),
+                generation: 1,
+                card: selected_card,
+                admitted_ids: admitted_rx,
+            },
+        );
+        model.add_worker_set("ns-a".to_string(), unadmitted);
+        assert!(matches!(
+            model.get_systemone_execution_selection(),
+            Err(SystemOneSelectionError::Unavailable)
+        ));
+        let (available, _available_tx) = systemone_worker_set("ns-b", |_| {});
+        model.add_worker_set("ns-b".to_string(), available.clone());
+        let selection = model.get_systemone_execution_selection().unwrap();
+        assert!(Arc::ptr_eq(
+            &selection.engine,
+            available.generate_engine.as_ref().unwrap()
+        ));
+        admitted_tx.send(vec![1, 2]).unwrap();
+        let workers = model.get_worker_set("ns-a").unwrap();
+        assert_eq!(workers.worker_count(), 1);
+        assert_eq!(workers.decision_worker_count(), 1);
+        admitted_tx.send(vec![2]).unwrap();
+        assert_eq!(workers.decision_worker_count(), 0);
+        admitted_tx.send(vec![1]).unwrap();
+        assert_eq!(workers.decision_worker_count(), 1);
+        drop(discovered);
+        assert_eq!(workers.decision_worker_count(), 0);
+        drop(admitted_tx);
+        assert_eq!(workers.decision_worker_count(), 0);
+        let selection = model.get_systemone_execution_selection().unwrap();
+        assert!(Arc::ptr_eq(
+            &selection.engine,
+            available.generate_engine.as_ref().unwrap()
+        ));
+        runtime.shutdown();
     }
 
     fn make_realtime_worker_set(namespace: &str) -> Arc<WorkerSet> {
@@ -1175,90 +1750,9 @@ mod tests {
             dynamo_runtime::pipeline::RouterMode::RoundRobin,
             None,
         );
-        pr.mark_active_for_test();
-        pr.deactivate();
+        pr.set_target(None);
         ws.prefill_router = Some(pr);
         Arc::new(ws)
-    }
-
-    fn endpoint_id(
-        namespace: &str,
-        component: &str,
-        name: &str,
-    ) -> dynamo_runtime::protocols::EndpointId {
-        dynamo_runtime::protocols::EndpointId {
-            namespace: namespace.to_string(),
-            component: component.to_string(),
-            name: name.to_string(),
-        }
-    }
-
-    fn make_endpoint_worker_set(
-        namespace: &str,
-        component: &str,
-        endpoint: &str,
-        worker_type: crate::worker_type::WorkerType,
-        with_prefill_router: bool,
-    ) -> Arc<WorkerSet> {
-        let mut card = ModelDeploymentCard::default();
-        card.worker_type = Some(worker_type);
-        let mut worker_set = WorkerSet::new(
-            namespace.to_string(),
-            format!("{component}-{endpoint}"),
-            card,
-        );
-        worker_set.set_endpoint_id(endpoint_id(namespace, component, endpoint));
-        if with_prefill_router {
-            let router = PrefillRouter::disabled(
-                Arc::new(crate::discovery::ModelManager::new()),
-                dynamo_runtime::pipeline::RouterMode::RoundRobin,
-                None,
-            );
-            router.mark_active_for_test();
-            worker_set.prefill_router = Some(router);
-        }
-        Arc::new(worker_set)
-    }
-
-    #[test]
-    fn one_endpoint_scoped_prefill_decode_pair_is_unambiguous() {
-        use crate::worker_type::WorkerType;
-
-        let model = Model::new("llama".to_string());
-        let decode = make_endpoint_worker_set(
-            "deployment-a",
-            "decode",
-            "generate",
-            WorkerType::Decode,
-            true,
-        );
-        model.add_worker_set("decode-leaf".to_string(), decode.clone());
-        model.add_worker_set(
-            "prefill-leaf".to_string(),
-            make_endpoint_worker_set(
-                "deployment-a",
-                "prefill",
-                "generate",
-                WorkerType::Prefill,
-                false,
-            ),
-        );
-        model.add_worker_set(
-            "unrelated-aggregated".to_string(),
-            make_endpoint_worker_set(
-                "deployment-a",
-                "aggregated",
-                "generate",
-                WorkerType::Aggregated,
-                false,
-            ),
-        );
-
-        let selected = model
-            .unique_prefill_routed_worker_set_in_namespace("deployment-a")
-            .expect("one P/D pair is unambiguous")
-            .expect("decode leaf is present");
-        assert!(Arc::ptr_eq(&selected, &decode));
     }
 
     /// Baseline: a WorkerSet without a PrefillRouter is always displayable

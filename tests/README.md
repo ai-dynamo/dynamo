@@ -104,6 +104,19 @@ dynamo/
 
 Prefer API responses, structured response fields, metrics, or direct test helper APIs for functional and semantic assertions. If a router-internal fact is only exposed as a structured tracing event, keep parsing in a shared helper rather than duplicating ad hoc log scraping in tests.
 
+### AISimulate dependency regression coverage
+
+- `tests/dependencies/test_aisimulate_consistency.py` checks exact, matching
+  AISimulate pins in Python manifests, container requirements, and Cargo files.
+  Missing declarations and unbounded requirements fail these checks. Current
+  containers stage AISimulate through `requirements.aisimulate.txt`; the former
+  AIC cap in the `mocker` extra and planner requirements is obsolete.
+- `components/src/dynamo/profiler/tests/unit/test_replay_bench_imports.py` executes
+  the replay benchmark module with AISimulate imports blocked. It checks that
+  importing the module succeeds and that an AIC comparison requires AISimulate
+  only when called. Sibling replay modules are stubbed, so this unit test needs
+  neither native Dynamo bindings nor an installed AISimulate package.
+
 ---
 
 ## Test Marking: How to Mark Tests
@@ -332,7 +345,7 @@ mod kv_cache_tests {
 ```
 
 ### CI Integration
-- CI runs the commands listed in [Running Rust Checks and Tests](#running-rust-checks-and-tests) across 4 workspace directories: `.`, `lib/bindings/python`, `lib/runtime/examples`, `lib/bindings/kvbm`. See [`.github/workflows/pre-merge.yml`](../.github/workflows/pre-merge.yml) for the exact steps.
+- CI runs the commands listed in [Running Rust Checks and Tests](#running-rust-checks-and-tests) across 3 workspace directories: `.`, `lib/bindings/python`, `lib/runtime/examples`. See [`.github/workflows/pre-merge.yml`](../.github/workflows/pre-merge.yml) for the exact steps.
 
 ---
 
@@ -463,7 +476,7 @@ Source workflow files (see [`.github/workflows/`](../.github/workflows/) for the
 
 Two workflows run on every PR. See [`pre-merge.yml`](../.github/workflows/pre-merge.yml) and [`pr.yaml`](../.github/workflows/pr.yaml).
 
-**Rust checks** (only if Rust files changed) -- runs `pre-commit`, then the full sequence from [Running Rust Checks and Tests](#running-rust-checks-and-tests) across 4 workspace dirs (`.`, `lib/bindings/python`, `lib/runtime/examples`, `lib/bindings/kvbm`): format, clippy, cargo-deny, machete, compile, doc tests, unit tests.
+**Rust checks** (only if Rust files changed) -- runs `pre-commit`, then the full sequence from [Running Rust Checks and Tests](#running-rust-checks-and-tests) across 3 workspace dirs (`.`, `lib/bindings/python`, `lib/runtime/examples`): format, clippy, cargo-deny, machete, compile, doc tests, unit tests.
 
 **Python tests** (framework-agnostic, CPU-only, inside a dynamo container):
 
@@ -493,7 +506,7 @@ pytest -m "nightly and vllm and gpu_1" -v --tb=short
 
 ### Reproducing CI locally
 
-All commands shown in the "Local equivalent" columns above are also documented in [Running Rust Checks and Tests](#running-rust-checks-and-tests) and [Running Python Tests](#running-python-tests). Run Rust commands from the repo root, repeating for each workspace dir: `.`, `lib/bindings/python`, `lib/runtime/examples`, `lib/bindings/kvbm`. Run Python commands inside a container.
+All commands shown in the "Local equivalent" columns above are also documented in [Running Rust Checks and Tests](#running-rust-checks-and-tests) and [Running Python Tests](#running-python-tests). Run Rust commands from the repo root, repeating for each workspace dir: `.`, `lib/bindings/python`, `lib/runtime/examples`. Run Python commands inside a container.
 
 ---
 
@@ -547,7 +560,7 @@ Tests must be deterministic. A flaky test -- one that sometimes passes and somet
    **Other in-repo retry sites** (in case you need to roll your own for a different layer):
    - `tests/frontend/test_frontend_api_surface_compliance.py:_retry_network_op` -- sync, network-only exception list.
    - `tests/router/helper.py:send_request_with_retry` -- async, status-code-driven (aiohttp).
-   - `tests/utils/managed_deployment.py` -- sync connect retry with 1.5x backoff.
+   - `tests/deploy/dgd_utils.py` -- sync connect retry with 1.5x backoff.
    - `components/src/dynamo/planner/connectors/remote_client.py` -- sync exponential backoff (`2**attempt`).
 3. **If retry is not enough either**, quarantine the test to prevent it from blocking other developers:
    - `@pytest.mark.skip(reason="Flaky: <ticket link>")` -- disables the test entirely. Use when the test provides no signal in its current state.

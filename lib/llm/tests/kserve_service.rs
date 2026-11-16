@@ -105,6 +105,8 @@ pub mod kserve_test {
         ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
             let (request, context) = request.transfer(());
             let ctx = context.context();
+            assert!(uuid::Uuid::parse_str(ctx.id()).is_ok());
+            assert_ne!(Some(ctx.id()), request.inner.user.as_deref());
 
             // let generator = NvCreateChatCompletionStreamResponse::generator(request.model.clone());
             let generator = request.response_generator(ctx.id().to_string());
@@ -226,6 +228,8 @@ pub mod kserve_test {
             // name "repeat", if so, send the same response as many time as the value of the tensor
             let (request, context) = request.transfer(());
             let ctx = context.context();
+            assert!(uuid::Uuid::parse_str(ctx.id()).is_ok());
+            assert_ne!(Some(ctx.id()), request.id.as_deref());
 
             let repeat_count = request
                 .tensors
@@ -504,16 +508,31 @@ pub mod kserve_test {
         let mut client = get_ready_client(TestPort::InferSuccess as u16, 5).await;
 
         let model_name = "split";
+        let client_id = uuid::Uuid::new_v4().to_string();
         let request = tonic::Request::new(ModelInferRequest {
             model_name: model_name.into(),
             model_version: "1".into(),
-            id: "1234".into(),
+            id: client_id.clone(),
             inputs: vec![text_input.clone()],
             ..Default::default()
         });
 
-        let response = client.model_infer(request).await.unwrap();
-        validate_infer_response(response, model_name);
+        let request = request.into_inner();
+        let mut second_client = client.clone();
+        let (first, second) = timeout(
+            Duration::from_secs(5),
+            futures::future::join(
+                client.model_infer(request.clone()),
+                second_client.model_infer(request),
+            ),
+        )
+        .await
+        .expect("requests sharing a client id must not hang");
+        for response in [first, second] {
+            let response = response.unwrap();
+            assert_eq!(response.get_ref().id, client_id);
+            validate_infer_response(response, model_name);
+        }
 
         // Input data in raw_input_content
         let mut text_input = text_input.clone();
@@ -525,12 +544,13 @@ pub mod kserve_test {
         let request = tonic::Request::new(ModelInferRequest {
             model_name: model_name.into(),
             model_version: "1".into(),
-            id: "1234".into(),
+            id: client_id.clone(),
             inputs: vec![text_input],
             raw_input_contents: vec![serialized_input],
             ..Default::default()
         });
         let response = client.model_infer(request).await.unwrap();
+        assert_eq!(response.get_ref().id, client_id);
         validate_infer_response(response, model_name);
     }
 
@@ -540,6 +560,14 @@ pub mod kserve_test {
             model_name,
             "Expected response of the same model name",
         );
+        let mut output_names = response
+            .get_ref()
+            .outputs
+            .iter()
+            .map(|output| output.name.as_str())
+            .collect::<Vec<_>>();
+        output_names.sort_unstable();
+        assert_eq!(output_names, ["finish_reason", "text_output"]);
         for output in &response.get_ref().outputs {
             match output.name.as_str() {
                 "text_output" => {
@@ -699,6 +727,13 @@ pub mod kserve_test {
                         "Expected response ID to match request ID"
                     );
                     let expected_output: Vec<Vec<u8>> = vec!["dummy".into(), "input".into()];
+                    let mut output_names = response
+                        .outputs
+                        .iter()
+                        .map(|output| output.name.as_str())
+                        .collect::<Vec<_>>();
+                    output_names.sort_unstable();
+                    assert_eq!(output_names, ["finish_reason", "text_output"]);
                     for output in &response.outputs {
                         match output.name.as_str() {
                             "text_output" => {
@@ -790,6 +825,13 @@ pub mod kserve_test {
                         format!("{response_idx}"),
                         "Expected response ID to match request ID"
                     );
+                    let mut output_names = response
+                        .outputs
+                        .iter()
+                        .map(|output| output.name.as_str())
+                        .collect::<Vec<_>>();
+                    output_names.sort_unstable();
+                    assert_eq!(output_names, ["finish_reason", "text_output"]);
                     for output in &response.outputs {
                         match output.name.as_str() {
                             "text_output" => {
@@ -873,30 +915,21 @@ pub mod kserve_test {
             .unwrap();
         let mut inbound = response.into_inner();
 
-        loop {
-            match inbound.message().await {
-                Ok(Some(_)) => {
-                    panic!("Expecting failure in the stream");
-                }
-                Err(err) => {
-                    assert_eq!(
-                        err.code(),
-                        tonic::Code::Internal,
-                        "Expected Internal error for streaming, get {}",
-                        err
-                    );
-                    assert!(
-                        err.message().contains("Failed to generate completions:"),
-                        "Expected error message to contain 'Failed to generate completions:', got: {}",
-                        err.message()
-                    );
-                }
-                Ok(None) => {
-                    // End of stream
-                    break;
-                }
-            }
-        }
+        let err = inbound
+            .message()
+            .await
+            .expect_err("the failing engine must terminate the stream with an error");
+        assert_eq!(
+            err.code(),
+            tonic::Code::Internal,
+            "Expected Internal error for streaming, get {}",
+            err
+        );
+        assert!(
+            err.message().contains("Failed to generate completions:"),
+            "Expected error message to contain 'Failed to generate completions:', got: {}",
+            err.message()
+        );
     }
 
     #[rstest]
@@ -1019,6 +1052,22 @@ pub mod kserve_test {
             model_name,
             "Expected response of the same model name",
         );
+        let mut input_names = response
+            .get_ref()
+            .inputs
+            .iter()
+            .map(|input| input.name.as_str())
+            .collect::<Vec<_>>();
+        input_names.sort_unstable();
+        assert_eq!(input_names, ["streaming", "text_input"]);
+        let mut output_names = response
+            .get_ref()
+            .outputs
+            .iter()
+            .map(|output| output.name.as_str())
+            .collect::<Vec<_>>();
+        output_names.sort_unstable();
+        assert_eq!(output_names, ["finish_reason", "text_output"]);
         // input
         for io in &response.get_ref().inputs {
             match io.name.as_str() {
@@ -1091,6 +1140,20 @@ pub mod kserve_test {
             config.name, model_name,
             "Expected response of the same model name",
         );
+        let mut input_names = config
+            .input
+            .iter()
+            .map(|input| input.name.as_str())
+            .collect::<Vec<_>>();
+        input_names.sort_unstable();
+        assert_eq!(input_names, ["streaming", "text_input"]);
+        let mut output_names = config
+            .output
+            .iter()
+            .map(|output| output.name.as_str())
+            .collect::<Vec<_>>();
+        output_names.sort_unstable();
+        assert_eq!(output_names, ["finish_reason", "text_output"]);
         // input
         for io in &config.input {
             match io.name.as_str() {
@@ -1206,6 +1269,7 @@ pub mod kserve_test {
         validate_tensor_response(
             response,
             model_name,
+            "1234",
             inputs,
             std::collections::HashMap::new(),
         );
@@ -1503,6 +1567,24 @@ pub mod kserve_test {
             "tensor",
             "Expected response of the same model name",
         );
+        assert_eq!(
+            response
+                .get_ref()
+                .inputs
+                .iter()
+                .map(|input| input.name.as_str())
+                .collect::<Vec<_>>(),
+            ["input"]
+        );
+        assert_eq!(
+            response
+                .get_ref()
+                .outputs
+                .iter()
+                .map(|output| output.name.as_str())
+                .collect::<Vec<_>>(),
+            ["output"]
+        );
         // input
         for io in &response.get_ref().inputs {
             match io.name.as_str() {
@@ -1531,22 +1613,38 @@ pub mod kserve_test {
         }
 
         let model_name = "tensor";
+        let client_id = uuid::Uuid::new_v4().to_string();
         let inputs = vec![text_input.clone()];
         let request = tonic::Request::new(ModelInferRequest {
             model_name: model_name.into(),
             model_version: "1".into(),
-            id: "1234".into(),
+            id: client_id.clone(),
             inputs: inputs.clone(),
             ..Default::default()
         });
 
-        let response = client.model_infer(request).await.unwrap();
-        validate_tensor_response(
-            response,
-            model_name,
-            inputs,
-            std::collections::HashMap::new(),
-        );
+        let request = request.into_inner();
+        let mut second_client = client.clone();
+        let (first, second) = timeout(
+            Duration::from_secs(5),
+            futures::future::join(
+                client.model_infer(request.clone()),
+                second_client.model_infer(request),
+            ),
+        )
+        .await
+        .expect("requests sharing a client id must not hang");
+        for response in [first, second] {
+            let response = response.unwrap();
+            assert_eq!(response.get_ref().id, client_id);
+            validate_tensor_response(
+                response,
+                model_name,
+                &client_id,
+                inputs.clone(),
+                std::collections::HashMap::new(),
+            );
+        }
 
         // streaming response in model_infer(), expect failure
         let repeat = inference::model_infer_request::InferInputTensor {
@@ -1641,6 +1739,7 @@ pub mod kserve_test {
                     validate_tensor_response(
                         Response::new(response.clone()),
                         model_name,
+                        "1234",
                         inputs.clone(),
                         std::collections::HashMap::from([
                             ("text_input".into(), serialized_text_input.clone()),
@@ -1657,6 +1756,7 @@ pub mod kserve_test {
     fn validate_tensor_response(
         response: Response<ModelInferResponse>,
         model_name: &str,
+        request_id: &str,
         inputs: Vec<inference::model_infer_request::InferInputTensor>,
         expected_raw_outputs: std::collections::HashMap<String, Vec<u8>>,
     ) {
@@ -1672,7 +1772,7 @@ pub mod kserve_test {
         );
         assert_eq!(
             response.get_ref().id,
-            "1234",
+            request_id,
             "Expected response of the same request ID"
         );
         assert_eq!(

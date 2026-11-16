@@ -1,0 +1,9 @@
+{
+  "inputs": {
+    "compatibility/missing-origin/input.yaml": "cb1ffc0f6529e1d3535a62917ec560f1868fbd8f1563c19d95902a1e5397c193"
+  },
+  "reconciledVersion": "1.6.0",
+  "sourceKind": "release-tag",
+  "sourceRef": "v1.6.0",
+  "sourceRevision": "701da25292ecca8f64d770cc0b17d389200019a1"
+}

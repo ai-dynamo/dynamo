@@ -17,11 +17,11 @@ A KV-routed deployment is still just a frontend plus workers (see the [Overview]
 - The **frontend** runs in KV routing mode so it tracks cache state across workers.
 - Each **worker** publishes KV cache events (over ZMQ by default) so the frontend knows what each worker holds.
 
-You run **two or more workers** so the router has somewhere to choose between. The pre-built `launch/agg_router.sh` presets wire this up for you.
+Use **two or more workers** when you want to evaluate worker selection. The vLLM and SGLang `launch/agg_router.sh` presets wire up two workers; the TensorRT-LLM preset is a one-worker router-path smoke setup.
 
 ## Aggregated serving with KV routing
 
-Two workers behind the KV-aware router, maximizing cache reuse. Requires 2 GPUs.
+The vLLM and SGLang presets start two workers and require 2 GPUs. The TensorRT-LLM preset starts one worker and requires 1 GPU; use it to verify the router path, then add workers when you need worker selection.
 
 <Tabs>
   <Tab title="vLLM" language="vllm">
@@ -50,7 +50,7 @@ Two workers behind the KV-aware router, maximizing cache reuse. Requires 2 GPUs.
 
 ## Disaggregated serving with KV routing
 
-Scales to 2 prefill + 2 decode workers with KV-aware routing on both pools. The frontend runs in KV routing mode and automatically detects prefill workers to activate an internal prefill router. Requires 4 GPUs.
+The vLLM and SGLang presets start 2 prefill and 2 decode workers and require 4 GPUs. The TensorRT-LLM preset starts 1 prefill and 1 decode worker and requires 2 GPUs. The frontend runs in KV routing mode and activates its internal prefill router after discovering compatible typed prefill and decode services for the same model and namespace.
 
 <Tabs>
   <Tab title="vLLM" language="vllm">
@@ -81,12 +81,40 @@ Scales to 2 prefill + 2 decode workers with KV-aware routing on both pools. The 
 Once a routed deployment is running, try adding another worker — the frontend discovers it automatically and starts routing to it.
 </Tip>
 
+## Change the Worker-Selection Policy
+
+By default the frontend ranks workers with Dynamo's built-in cost model. Dynamo also ships
+built-in worker-selection policies with the frontend, so you can swap that ranking step without
+rebuilding.
+
+Write the policy into a YAML file:
+
+```yaml
+# worker-selection.yaml
+worker_selection:
+  aggregated: dynamo-two-tier-cost-fn
+```
+
+Then point the frontend at it:
+
+```bash
+python3 -m dynamo.frontend \
+  --router-mode kv \
+  --router-policy-config worker-selection.yaml
+```
+
+To compare against the built-in selector, restart with
+`DYN_ROUTER_WORKER_SELECTION_POLICY=default` — no config change needed.
+
+For the available policy types and per-stage prefill/decode selection, see
+[Worker-Selection Policies](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#worker-selection-policies).
+
 ## Troubleshooting
 
 **Router not routing correctly (vLLM).** Ensure `PYTHONHASHSEED=0` is set for all vLLM processes when using KV-aware routing, so cache-block hashes are consistent across workers. See [Hashing Consistency](../../developer-guide/knowledge-base/modular-components/backends/vllm/reference-guide.md#hashing-consistency-for-kv-events).
 
 ## See also
 
-- **[Router Guide](../../developer-guide/knowledge-base/modular-components/router/router-guide.md)** — router modes and configuration
+- **[Router Guide](../../developer-guide/knowledge-base/modular-components/router/router-guide.md)** — deployment topologies and routing modes
 - **[Disaggregated Serving](../disaggregated-serving/overview.mdx)** — split prefill and decode across workers
 - **[vLLM local deployment examples](../../recipes/cli-templates/vllm.mdx)** — copyable commands for KV-routing launch scripts

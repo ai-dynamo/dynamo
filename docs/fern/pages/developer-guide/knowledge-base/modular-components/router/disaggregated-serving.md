@@ -5,7 +5,7 @@ title: Disaggregated Serving
 subtitle: Prefill and decode routing with the Dynamo router
 ---
 
-Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. When you register prefill workers with `WorkerType.Prefill`, the frontend automatically detects them and activates an internal prefill router.
+Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. The frontend activates an internal prefill router when it discovers compatible typed prefill and decode services.
 
 For the high-level deployment matrix, see [Router Guide](router-guide.md). For the router flags used in this setup, see [Configuration and Tuning](configuration-and-tuning.md).
 
@@ -14,13 +14,14 @@ If prefill and decode workers span topology domains such as zones or racks, use 
 ## Automatic Prefill Router Activation
 
 The prefill router is automatically created when:
-1. A decode model is registered, for example via `register_model()` with `ModelType.Chat | ModelType.Completions`.
-2. A prefill worker is detected with the same model name and `WorkerType.Prefill`.
+1. A decode worker is registered with `WorkerType.Decode`, for example via `register_model()` with `ModelType.Chat | ModelType.Completions`.
+2. A prefill service in the same Runtime namespace is registered with the same model name and `WorkerType.Prefill`.
 
 Key characteristics of the prefill router:
 - **Always disables active block tracking** (`track_active_blocks=false`) since prefill workers do not perform decode.
-- **Seamlessly integrates** into the request pipeline between preprocessing and decode routing.
-- **Falls back gracefully** to decode-only mode if prefill fails or no prefill workers are available.
+- **Runs between preprocessing and decode routing** and returns handoff metadata for the selected decode worker.
+- **Uses decode-only routing when no prefill service is registered.** Once a request has been dispatched to prefill, a prefill or handoff failure is returned to the request; it does not retry through an aggregated decode-only path.
+- **Rejects requests while the prefill router is activating.** At startup or during a rollout, decode workers can become routable shortly before the frontend finishes setting up the prefill router. Requests in that window get HTTP 503 (`prefill routing for model <model> in namespace <namespace> is still activating`) instead of being sent to decode without prefill, which a disaggregated-only decode worker would reject. The window is usually brief; clients should retry. Frontend [request migration](../../concepts/fault-tolerance/request-migration-architecture.md) does not cover it, because a migrated request is re-dispatched to the same, still-activating route.
 
 Key characteristics of the decode routing stage in disaggregated mode:
 - **Disables overlap scoring** (`overlap_score_credit=0`) because decode routing should not chase prefix reuse.

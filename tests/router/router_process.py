@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import os
 import sys
 from collections.abc import Mapping
 
+from tests.utils.http_checks import check_http_ok
 from tests.utils.managed_process import ManagedProcess
 
 
@@ -53,7 +55,7 @@ class FrontendRouterProcess(ManagedProcess):
         request_plane: str = "nats",
         router_mode: str = "kv",
         min_initial_workers: int | None = None,
-        router_aic_config: dict[str, str | int] | None = None,
+        router_ais_config: dict[str, str | int] | None = None,
         serve_indexer: bool = False,
         use_remote_indexer: bool = False,
         event_plane: str | None = None,
@@ -102,29 +104,16 @@ class FrontendRouterProcess(ManagedProcess):
                 ["--router-session-affinity-ttl-secs", str(session_affinity_ttl_secs)]
             )
 
-        if router_aic_config is not None:
+        if router_ais_config is not None:
             command.extend(
                 [
                     "--router-track-prefill-tokens",
                     "--router-prefill-load-model",
-                    "aic",
-                    "--aic-backend",
-                    str(router_aic_config["aic_backend"]),
-                    "--aic-system",
-                    str(router_aic_config["aic_system"]),
-                    "--aic-model-path",
-                    str(router_aic_config["aic_model_path"]),
-                    "--aic-tp-size",
-                    str(router_aic_config.get("aic_tp_size", 1)),
+                    "ais",
+                    "--ais-perf-config",
+                    json.dumps(router_ais_config),
                 ]
             )
-            if "aic_backend_version" in router_aic_config:
-                command.extend(
-                    [
-                        "--aic-backend-version",
-                        str(router_aic_config["aic_backend_version"]),
-                    ]
-                )
 
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane
@@ -147,7 +136,7 @@ class FrontendRouterProcess(ManagedProcess):
             display_output=True,
             health_check_ports=[frontend_port],
             health_check_urls=[
-                (f"http://localhost:{frontend_port}/v1/models", self._check_ready)
+                (f"http://localhost:{frontend_port}/v1/models", check_http_ok)
             ],
             log_dir=request.node.name,
             terminate_all_matching_process_names=False,
@@ -155,13 +144,6 @@ class FrontendRouterProcess(ManagedProcess):
         )
         self.port = frontend_port
         self.router_mode = router_mode
-
-    def _check_ready(self, response):
-        """Check if KV, random, round-robin, or direct router is ready"""
-        return response.status_code == 200
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        super().__exit__(exc_type, exc_val, exc_tb)
 
 
 # Backward-compatible alias so existing callers that import KVRouterProcess

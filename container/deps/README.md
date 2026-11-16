@@ -8,6 +8,7 @@ so each image only installs what it needs.
 | File | Purpose |
 |------|---------|
 | `requirements.common.txt` | Core deps shared by all containers |
+| `requirements.aisimulate.txt` | Published AISimulate wheel staged into wheelhouses |
 | `requirements.planner.txt` | Planner, profiler, and global_planner deps |
 | `requirements.frontend.txt` | Frontend deps |
 | `requirements.benchmark.txt` | Benchmark and profiling tools |

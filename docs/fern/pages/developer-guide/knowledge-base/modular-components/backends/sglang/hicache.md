@@ -11,8 +11,8 @@ This guide covers running SGLang's Hierarchical Cache (HiCache) with Dynamo, and
 
 SGLang HiCache extends RadixAttention with a multi-tier KV cache that transparently moves pages between GPU HBM, host memory, and an optional external storage backend (e.g. Mooncake). For a full description of HiCache itself — flag reference, storage backends, memory layouts, prefetch policies — see SGLang's own documentation:
 
-- [SGLang HiCache Design](https://docs.sglang.ai/advanced_features/hicache_design.html)
-- [SGLang HiCache Best Practices](https://docs.sglang.ai/advanced_features/hicache_best_practices.html)
+- [SGLang HiCache Design](https://docs.sglang.io/docs/advanced_features/hicache_design)
+- [SGLang HiCache Best Practices](https://docs.sglang.io/docs/advanced_features/hicache_best_practices)
 
 What Dynamo adds on top of HiCache:
 
@@ -43,7 +43,7 @@ python -m dynamo.frontend --http-port 8000
 ```
 
 > [!NOTE]
-> The HiCache flags (`--enable-hierarchical-cache`, `--hicache-ratio`, `--hicache-write-policy`, `--hicache-storage-backend`, `--hicache-mem-layout`, etc.) are SGLang-native — Dynamo passes them through unchanged. See [SGLang's best-practices doc](https://docs.sglang.ai/advanced_features/hicache_best_practices.html) for the complete flag reference and tuning guidance.
+> The HiCache flags (`--enable-hierarchical-cache`, `--hicache-ratio`, `--hicache-write-policy`, `--hicache-storage-backend`, `--hicache-mem-layout`, etc.) are SGLang-native — Dynamo passes them through unchanged. See [SGLang's best-practices doc](https://docs.sglang.io/docs/advanced_features/hicache_best_practices) for the complete flag reference and tuning guidance.
 
 ## Tier-Aware Shared KV Cache Routing
 
@@ -188,7 +188,10 @@ python -m dynamo.frontend \
 | `--shared-cache-multiplier` | `DYN_SHARED_CACHE_MULTIPLIER` | `0.5`   | Discount factor for shared-pool hits. `0.0` ignores them; `0.5` treats a shared hit as half a device hit; `1.0` treats shared and device hits equally.             |
 | —                           | `DYN_MOONCAKE_KV_EVENTS_ENDPOINT` | unset | Mooncake PUB endpoint consumed by the frontend. When unset, Dynamo uses one consistently advertised worker endpoint. |
 
-Per-request overrides are available via `RouterConfigOverride.shared_cache_multiplier` for A/B experimentation without restarting the router.
+Set `shared_cache_multiplier` in the [default policy parameters](../../router/configuration-and-tuning.md#configure-the-default-policy). The default is `0.5` when shared cache is enabled. The legacy flag and environment variable are deprecated; per-request score overrides do not apply to the default policy.
+
+> [!WARNING]
+> During a mixed-version rollout, set `--shared-cache-multiplier 0.5` explicitly on workers that advertise HiCache routing configuration until all frontends support policy-owned defaults. Older frontends interpret an omitted multiplier as zero and give shared-cache hits no scoring credit. Use your existing value if you have tuned this multiplier.
 
 Set `DYN_MOONCAKE_KV_EVENTS_ENDPOINT` on the frontend to the Mooncake PUB endpoint, such as `tcp://mooncake-master.internal:5557`. The endpoint must be reachable from the frontend. Workers can advertise the same variable as a fallback, but a missing worker value does not disable shared-cache routing.
 
@@ -227,12 +230,12 @@ curl -s localhost:8000/metrics | grep shared_cache
 | Workers registered but router never tracks shared cache | `--shared-cache-type` left at default `none`                                | Set `--shared-cache-type hicache` on the frontend.                                        |
 | Shared hits do not affect worker selection              | `--shared-cache-multiplier 0.0`                                             | Raise the multiplier — typical starting range is `0.3`–`0.7`.                             |
 | Page-size mismatch warnings                              | Router `--page-size` doesn't match worker `--page-size`                      | They must agree; the router hashes pages using the worker's page size.                        |
+| Mooncake page-size mismatch on a DCP worker              | DCP widens radix-event blocks but Mooncake objects retain the physical page size | DCP with Mooncake shared-cache tracking is unsupported; use `--shared-cache-type none`.     |
 | Router logs "no workers have HiCache enabled"            | No worker published `sglang_hicache_mooncake` metadata                       | Confirm workers started with `--hicache-storage-backend mooncake`.                            |
 
 ## Further Reading
 
-- [SGLang HiCache Design](https://docs.sglang.ai/advanced_features/hicache_design.html) and [Best Practices](https://docs.sglang.ai/advanced_features/hicache_best_practices.html)
+- [SGLang HiCache Design](https://docs.sglang.io/docs/advanced_features/hicache_design) and [Best Practices](https://docs.sglang.io/docs/advanced_features/hicache_best_practices)
 - [Mooncake](https://github.com/kvcache-ai/Mooncake) — the shared KV store used as the external tier
 - [SGLang PR #22894](https://github.com/sgl-project/sglang/pull/22894) — the tier-annotated events prerequisite
-- [KVBM Guide](../../kvbm/kvbm-guide.md) — Dynamo's own block manager, an alternative to HiCache
 - [KV Events for Custom Engines](../../../../advanced-customizations/writing-custom-backends/publish-kv-events.md) — the event protocol contract for backends other than SGLang

@@ -52,44 +52,65 @@ The standalone router exposes three Dynamo runtime endpoints:
 
 Clients can use `generate` when the router should forward the request, `best_worker_id` when an external scheduler wants to make the final call itself, or `get_overlap_scores` when the scheduler needs the raw tiered overlap signal.
 
-## Manual prefill routing example
+## Runtime client example
 
-> [!NOTE]
-> This is an advanced alternative setup. For most disaggregated serving deployments, use the frontend's automatic prefill routing, which activates when workers register with `WorkerType.Prefill`. See [Disaggregated Serving](../../developer-guide/knowledge-base/modular-components/router/disaggregated-serving.md).
-
-Use a standalone router when you need explicit control over prefill routing configuration or want to manage prefill and decode routers separately.
+This example places the standalone service in front of aggregated workers. Start
+the router against the workers' registered endpoint:
 
 ```bash
-# Start frontend routing for decode workers.
-python -m dynamo.frontend \
-  --router-mode kv \
-  --http-port 8000 \
-  --router-kv-overlap-score-credit 0
-
-# Start standalone routing for prefill workers.
 python -m dynamo.router \
-  --endpoint dynamo.prefill.generate \
-  --router-block-size 64 \
-  --no-router-track-active-blocks
-
-# Start decode workers.
-python -m dynamo.vllm \
-  --model MODEL_NAME \
-  --block-size 64 \
-  --disaggregation-mode decode \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
-
-# Start prefill workers.
-python -m dynamo.vllm \
-  --model MODEL_NAME \
-  --block-size 64 \
-  --disaggregation-mode prefill \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
+  --endpoint dynamo.backend.generate \
+  --router-block-size 64
 ```
 
-For an integrated frontend disaggregated example, see [`examples/backends/vllm/launch/disagg_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_router.sh). For explicit multi-router composition, see the [Global Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/global_router/README.md).
+Start two workers with matching block sizes and unique KV event endpoints. For
+example, use the worker commands from [Router Examples](../../developer-guide/knowledge-base/modular-components/router/router-examples.md#setup).
 
-For event-driven prefix-cache state, add the backend-specific KV event publishing flags to the workers that the router indexes. Use `--no-router-kv-events` on the router only when approximate cache-state prediction is acceptable.
+The standalone service is not an HTTP server. Call its Runtime `generate`
+endpoint from a Dynamo client:
+
+```python
+import asyncio
+
+import uvloop
+
+from dynamo.runtime import DistributedRuntime, dynamo_worker
+
+
+@dynamo_worker()
+async def main(runtime: DistributedRuntime):
+    client = await runtime.endpoint("dynamo.router.generate").client()
+    await client.wait_for_instances()
+
+    request = {
+        "model": "Qwen/Qwen3-0.6B",
+        "token_ids": [1, 2, 3, 4],
+        "stop_conditions": {"max_tokens": 20},
+        "sampling_options": {},
+        "output_options": {},
+    }
+    stream = await client.generate(request)
+    async for response in stream:
+        if response.is_error():
+            raise RuntimeError(response.comments())
+        print(response.data())
+
+
+if __name__ == "__main__":
+    uvloop.run(main())
+```
+
+For most disaggregated serving deployments, use the frontend's automatic
+prefill routing. A standalone prefill router only exposes Runtime endpoints; a
+custom client must call it, consume the returned `disaggregated_params`, and
+perform the decode handoff. Merely launching it beside `dynamo.frontend` does
+not insert it into the frontend request path. See [Disaggregated Serving](../../developer-guide/knowledge-base/modular-components/router/disaggregated-serving.md)
+and the [Global Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/global_router/README.md).
+
+For event-driven prefix-cache state, add the backend-specific KV event
+publishing flags to the workers that the router indexes. Use
+`--no-router-kv-events` on the router only when approximate cache-state
+prediction is acceptable.
 
 ## Configuration guidance
 

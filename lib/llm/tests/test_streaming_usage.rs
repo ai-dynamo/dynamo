@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use async_trait::async_trait;
-use dynamo_llm::preprocessor::OpenAIPreprocessor;
+use dynamo_llm::preprocessor::{ANNOTATION_PAYLOAD_USAGE, OpenAIPreprocessor};
 use dynamo_llm::protocols::common::llm_backend::{BackendOutput, FinishReason};
 use dynamo_llm::protocols::openai::ParsingOptions;
 use dynamo_llm::protocols::openai::chat_completions::{
-    NvCreateChatCompletionRequest, aggregator::ChatCompletionAggregator,
+    DeltaGenerator, NvCreateChatCompletionRequest, aggregator::ChatCompletionAggregator,
 };
 use dynamo_llm::protocols::openai::completions::NvCreateCompletionRequest;
 use dynamo_protocols::types::{
@@ -19,12 +19,14 @@ use dynamo_protocols::types::{
     PromptTokensDetails,
 };
 use dynamo_runtime::engine::{AsyncEngineContext, AsyncEngineStream};
+use dynamo_runtime::metrics::frontend_perf::{DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::StreamExt;
 use futures::stream;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
 // Mock context for testing
 #[derive(Debug)]
@@ -114,6 +116,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
+            jailed_text: None,
         },
         BackendOutput {
             token_ids: vec![1917],
@@ -131,6 +134,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
+            jailed_text: None,
         },
         BackendOutput {
             token_ids: vec![0],
@@ -149,6 +153,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
                 prompt_tokens_details: Some(PromptTokensDetails {
                     audio_tokens: None,
                     cached_tokens: Some(ct),
+                    ..Default::default()
                 }),
                 completion_tokens_details: None,
             }),
@@ -157,6 +162,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
+            jailed_text: None,
         },
     ]
 }
@@ -198,6 +204,8 @@ fn create_chat_request(
     };
 
     NvCreateChatCompletionRequest {
+        preserve_thinking: None,
+        responses_tools: None,
         inner,
         common: Default::default(),
         nvext: None,
@@ -205,7 +213,43 @@ fn create_chat_request(
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
         unsupported_fields: Default::default(),
+    }
+}
+
+struct DetokenizeMetricsFixture {
+    response_generator: DeltaGenerator,
+    context: Arc<MockContext>,
+    backend_stream: Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
+    yielded: Arc<AtomicUsize>,
+}
+
+fn create_detokenize_metrics_fixture(
+    request_id: &str,
+    include_usage: Option<bool>,
+    outputs: Vec<BackendOutput>,
+    detokenize_latency: Duration,
+) -> DetokenizeMetricsFixture {
+    let request = create_chat_request(include_usage, None);
+    let response_generator = request.response_generator(request_id.to_string());
+    let tracker = response_generator.tracker();
+    let yielded = Arc::new(AtomicUsize::new(0));
+    let yielded_by_stream = yielded.clone();
+    let stream = stream::iter(outputs.into_iter().map(move |output| {
+        yielded_by_stream.fetch_add(1, Ordering::Relaxed);
+        tracker.record_detokenize_latency(detokenize_latency);
+        Annotated::from_data(output)
+    }));
+    let context = Arc::new(MockContext::new());
+    let backend_stream =
+        dynamo_runtime::engine::ResponseStream::new(Box::pin(stream), context.clone());
+
+    DetokenizeMetricsFixture {
+        response_generator,
+        context,
+        backend_stream,
+        yielded,
     }
 }
 
@@ -270,6 +314,214 @@ async fn test_streaming_without_usage() {
             );
         }
     }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_detokenize_metrics_flush_once_at_stream_completion() {
+    let count_before = DETOKENIZE_TOKEN_COUNT.get();
+    let total_us_before = DETOKENIZE_TOTAL_US.get();
+
+    let DetokenizeMetricsFixture {
+        response_generator,
+        context,
+        backend_stream,
+        yielded,
+    } = create_detokenize_metrics_fixture(
+        "test-detokenize-metrics",
+        None,
+        build_backend_outputs_with_cached_tokens(None),
+        Duration::from_micros(10),
+    );
+
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        Box::new(response_generator),
+        context,
+        false,
+        false,
+        None,
+        Default::default(),
+    );
+    futures::pin_mut!(transformed_stream);
+
+    for _ in 0..3 {
+        assert!(transformed_stream.next().await.is_some());
+        assert_eq!(DETOKENIZE_TOKEN_COUNT.get(), count_before);
+        assert_eq!(DETOKENIZE_TOTAL_US.get(), total_us_before);
+    }
+
+    // Polling past the final backend chunk emits the internal usage item. The state
+    // is still live, so the per-request totals must remain local.
+    assert!(transformed_stream.next().await.is_some());
+    assert_eq!(DETOKENIZE_TOKEN_COUNT.get(), count_before);
+    assert_eq!(DETOKENIZE_TOTAL_US.get(), total_us_before);
+
+    // The next poll drops the completed state and flushes its totals once.
+    assert!(transformed_stream.next().await.is_none());
+    assert_eq!(yielded.load(Ordering::Relaxed), 3);
+    assert_eq!(DETOKENIZE_TOKEN_COUNT.get() - count_before, 3.0);
+    assert_eq!(DETOKENIZE_TOTAL_US.get() - total_us_before, 30.0);
+
+    assert!(transformed_stream.next().await.is_none());
+    assert_eq!(DETOKENIZE_TOKEN_COUNT.get() - count_before, 3.0);
+    assert_eq!(DETOKENIZE_TOTAL_US.get() - total_us_before, 30.0);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_detokenize_metrics_flush_when_stream_is_dropped() {
+    let count_before = DETOKENIZE_TOKEN_COUNT.get();
+    let total_us_before = DETOKENIZE_TOTAL_US.get();
+
+    let DetokenizeMetricsFixture {
+        response_generator,
+        context,
+        backend_stream,
+        yielded,
+    } = create_detokenize_metrics_fixture(
+        "test-detokenize-drop",
+        None,
+        build_backend_outputs_with_cached_tokens(None),
+        Duration::from_micros(10),
+    );
+
+    let mut transformed_stream = Box::pin(OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        Box::new(response_generator),
+        context,
+        false,
+        false,
+        None,
+        Default::default(),
+    ));
+
+    for _ in 0..2 {
+        assert!(transformed_stream.next().await.is_some());
+        assert_eq!(DETOKENIZE_TOKEN_COUNT.get(), count_before);
+        assert_eq!(DETOKENIZE_TOTAL_US.get(), total_us_before);
+    }
+
+    drop(transformed_stream);
+    assert_eq!(yielded.load(Ordering::Relaxed), 2);
+    assert_eq!(DETOKENIZE_TOKEN_COUNT.get() - count_before, 2.0);
+    assert_eq!(DETOKENIZE_TOTAL_US.get() - total_us_before, 20.0);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_detokenize_metrics_flush_on_postprocessor_cancellation() {
+    let count_before = DETOKENIZE_TOKEN_COUNT.get();
+    let total_us_before = DETOKENIZE_TOTAL_US.get();
+
+    let mut outputs = build_backend_outputs_with_cached_tokens(None);
+    outputs[1].finish_reason = Some(FinishReason::Error("test error".to_string()));
+
+    let DetokenizeMetricsFixture {
+        response_generator,
+        context,
+        backend_stream,
+        yielded,
+    } = create_detokenize_metrics_fixture(
+        "test-detokenize-cancel",
+        None,
+        outputs,
+        Duration::from_micros(10),
+    );
+
+    let mut transformed_stream = Box::pin(OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        Box::new(response_generator),
+        context.clone(),
+        false,
+        false,
+        None,
+        Default::default(),
+    ));
+
+    assert!(transformed_stream.next().await.is_some());
+    let error = transformed_stream.next().await.expect("error response");
+    assert!(error.is_error());
+    assert_eq!(DETOKENIZE_TOKEN_COUNT.get(), count_before);
+    assert_eq!(DETOKENIZE_TOTAL_US.get(), total_us_before);
+
+    // The next backend item observes the cancellation and drops the state.
+    assert!(transformed_stream.next().await.is_none());
+    assert!(context.is_stopped());
+    let yielded_count = yielded.load(Ordering::Relaxed) as f64;
+    assert_eq!(DETOKENIZE_TOKEN_COUNT.get() - count_before, yielded_count);
+    assert_eq!(
+        DETOKENIZE_TOTAL_US.get() - total_us_before,
+        yielded_count * 10.0
+    );
+
+    assert!(transformed_stream.next().await.is_none());
+    assert_eq!(DETOKENIZE_TOKEN_COUNT.get() - count_before, yielded_count);
+    assert_eq!(
+        DETOKENIZE_TOTAL_US.get() - total_us_before,
+        yielded_count * 10.0
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_detokenize_metrics_flush_once_with_payload_usage() {
+    let count_before = DETOKENIZE_TOKEN_COUNT.get();
+    let total_us_before = DETOKENIZE_TOTAL_US.get();
+
+    let DetokenizeMetricsFixture {
+        response_generator,
+        context,
+        backend_stream,
+        yielded,
+    } = create_detokenize_metrics_fixture(
+        "test-detokenize-payload-usage",
+        Some(true),
+        build_backend_outputs_with_cached_tokens(None),
+        Duration::from_micros(10),
+    );
+
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        Box::new(response_generator),
+        context,
+        true,
+        false,
+        None,
+        Default::default(),
+    );
+    futures::pin_mut!(transformed_stream);
+
+    for _ in 0..3 {
+        assert!(transformed_stream.next().await.is_some());
+        assert_eq!(DETOKENIZE_TOKEN_COUNT.get(), count_before);
+        assert_eq!(DETOKENIZE_TOTAL_US.get(), total_us_before);
+    }
+
+    let payload_usage = transformed_stream
+        .next()
+        .await
+        .expect("internal payload usage chunk");
+    assert_eq!(
+        payload_usage.event.as_deref(),
+        Some(ANNOTATION_PAYLOAD_USAGE)
+    );
+    assert_eq!(DETOKENIZE_TOKEN_COUNT.get(), count_before);
+    assert_eq!(DETOKENIZE_TOTAL_US.get(), total_us_before);
+
+    let client_usage = transformed_stream.next().await.expect("client usage chunk");
+    assert!(client_usage.event.is_none());
+    assert_eq!(DETOKENIZE_TOKEN_COUNT.get(), count_before);
+    assert_eq!(DETOKENIZE_TOTAL_US.get(), total_us_before);
+
+    assert!(transformed_stream.next().await.is_none());
+    assert_eq!(yielded.load(Ordering::Relaxed), 3);
+    assert_eq!(DETOKENIZE_TOKEN_COUNT.get() - count_before, 3.0);
+    assert_eq!(DETOKENIZE_TOTAL_US.get() - total_us_before, 30.0);
+
+    assert!(transformed_stream.next().await.is_none());
+    assert_eq!(DETOKENIZE_TOKEN_COUNT.get() - count_before, 3.0);
+    assert_eq!(DETOKENIZE_TOTAL_US.get() - total_us_before, 30.0);
 }
 
 #[tokio::test]
@@ -525,6 +777,7 @@ fn create_cmpl_request(include_usage: Option<bool>, stream: bool) -> NvCreateCom
         nvext: None,
         metadata: None,
         return_tokens_as_token_ids: None,
+        no_stop_trim: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -547,6 +800,8 @@ fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
     };
 
     NvCreateChatCompletionRequest {
+        preserve_thinking: None,
+        responses_tools: None,
         inner,
         common: Default::default(),
         nvext: None,
@@ -554,6 +809,7 @@ fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -890,4 +1146,79 @@ async fn test_multimodal_counts_on_every_metrics_frame() {
             "frame {i} must carry the request counts (every frame, not just the first)"
         );
     }
+}
+
+/// The chunks a chat request with usage gets, as `(event, content, finish_reason)`.
+async fn chat_chunks_with_usage(
+    backend_stream: Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
+    ctx: Arc<MockContext>,
+) -> Vec<(Option<String>, Option<String>, Option<String>, bool)> {
+    let request = create_chat_request(Some(true), None);
+    let response_generator = Box::new(request.response_generator("test-pending".to_string()));
+    OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx,
+        false,
+        false,
+        None,
+        Default::default(),
+    )
+    .map(|chunk| {
+        let data = chunk.data.as_ref();
+        let choice = data.and_then(|data| data.inner.choices.first());
+        (
+            chunk.event.clone(),
+            choice.and_then(|choice| {
+                choice
+                    .delta
+                    .content
+                    .as_ref()
+                    .map(|content| format!("{content:?}"))
+            }),
+            choice.and_then(|choice| choice.finish_reason.map(|reason| format!("{reason:?}"))),
+            data.is_some_and(|data| data.inner.usage.is_some()),
+        )
+    })
+    .collect()
+    .await
+}
+
+/// A backend stream that is not ready before each chunk gives the same chunks as one that
+/// always is.
+#[tokio::test]
+async fn test_postprocessor_output_is_the_same_when_the_backend_is_pending_between_chunks() {
+    let ctx = Arc::new(MockContext::new());
+    let ready = chat_chunks_with_usage(create_mock_backend_stream(ctx.clone()), ctx.clone()).await;
+
+    let outputs = build_backend_outputs_with_cached_tokens(None);
+    let pending_polls = Arc::new(AtomicUsize::new(0));
+    let polls = pending_polls.clone();
+    let pending_first = stream::iter(outputs).then(move |output| {
+        let polls = polls.clone();
+        async move {
+            // Return `Pending` once before each chunk.
+            let mut yielded = false;
+            std::future::poll_fn(|cx| {
+                if yielded {
+                    return std::task::Poll::Ready(());
+                }
+                yielded = true;
+                polls.fetch_add(1, Ordering::Relaxed);
+                cx.waker().wake_by_ref();
+                std::task::Poll::Pending
+            })
+            .await;
+            Annotated::from_data(output)
+        }
+    });
+    let backend_stream = dynamo_runtime::engine::ResponseStream::new(
+        Box::pin(pending_first),
+        ctx.clone() as Arc<dyn AsyncEngineContext>,
+    );
+    let pending = chat_chunks_with_usage(backend_stream, ctx).await;
+
+    assert_eq!(pending_polls.load(Ordering::Relaxed), 3);
+    assert_eq!(pending, ready);
+    assert!(ready.last().is_some_and(|chunk| chunk.3), "{ready:?}");
 }

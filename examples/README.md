@@ -19,8 +19,14 @@ limitations under the License.
 
 This directory contains practical examples demonstrating how to deploy and use Dynamo for distributed LLM inference. Each example includes setup instructions, configuration files, and explanations to help you understand different deployment patterns and use cases.
 
-> **Want to see a specific example?**
-> Open a [GitHub issue](https://github.com/ai-dynamo/dynamo/issues) to request an example you'd like to see, or [open a pull request](https://github.com/ai-dynamo/dynamo/pulls) if you'd like to contribute your own!
+> [!IMPORTANT]
+> All DynamoGraphDeployment manifests use `nvidia.com/v1beta1`. Other custom resources that do not
+> have a `v1beta1` API, such as `DynamoModel`, continue to use their supported version.
+> To migrate an existing `v1alpha1` manifest, follow the
+> [API version converter instructions](../deploy/utils/README.md).
+
+**Want to see a specific example?**
+Open a [GitHub issue](https://github.com/ai-dynamo/dynamo/issues) to request an example you'd like to see, or [open a pull request](https://github.com/ai-dynamo/dynamo/pulls) if you'd like to contribute your own!
 
 ## Basics & Tutorials
 
@@ -38,6 +44,11 @@ If you want to see advanced, framework-specific deployment patterns and best pra
 - **[vLLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm)** – vLLM-specific deployment and configuration
 - **[SGLang](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang)** – SGLang integration examples and workflows
 - **[TensorRT-LLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm)** – TensorRT-LLM workflows and optimizations
+- **[TokenSpeed](backends/tokenspeed/README.md)** – LongCat-Flash prefill/decode disaggregation with KV-aware routing
+
+## Use Case Examples
+
+- **[Nemotron Speech Cascaded Pipeline](nemotron_speech_cascaded_pipeline/README.md)** - OpenAI-compatible realtime ASR and streaming TTS adapters for NVIDIA Speech NIMs serving Nemotron models
 
 ## Deployment Examples
 
@@ -47,6 +58,13 @@ Platform-specific manifests and templates for production environments. Deploymen
 - **[Azure AKS](deployments/AKS/README.md)** - Helm values ([deployment guide](../docs/fern/pages/kubernetes/installation/managed-kubernetes/azure/aks-setup.mdx))
 - **[Amazon ECS](deployments/ECS/README.md)** - Task definitions ([deployment guide](../docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/ecs.mdx))
 - **[Google GKE](deployments/GKE/README.md)** - DGD manifests ([deployment guide](../docs/fern/pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx))
+
+## Integration Examples
+
+End-to-end examples that connect Dynamo to adjacent inference services:
+
+- **[Offline Batch API](deployments/batch-gateway/README.md)** provides an experimental OpenAI Batch lifecycle for a DynamoGraphDeployment.
+- **[Slime External Rollouts](rl/slime/README.md)** connects a fixed Slime worker set to stock SGLang engines and Dynamo sidecars.
 
 ## Runtime Examples
 

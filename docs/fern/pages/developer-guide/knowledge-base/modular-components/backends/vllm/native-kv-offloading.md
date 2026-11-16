@@ -7,7 +7,7 @@ subtitle: vLLM's OffloadingConnector with KV-aware routing in Dynamo
 
 This guide shows how to run vLLM's native CPU KV cache offloading
 (`OffloadingConnector`) with Dynamo's KV router. For Dynamo-side offloading
-backends such as KVBM, LMCache, and FlexKV, see
+backends such as LMCache and FlexKV, see
 [KV Cache Offloading](kv-cache-offloading.md).
 
 ## Support Matrix
@@ -35,7 +35,7 @@ Status legend: ✅ validated end to end · ⚠️ available but not yet validate
 
 Three settings are required, and none is on by default:
 
-1. On every worker, enable KV event publishing with `--kv-events-config` — `--router-mode kv` on the frontend does not enable it (see [KV Routing Requirements](overview.md#kv-routing-requirements)).
+1. On every worker, enable KV event publishing with `--kv-events-config` — `--router-mode kv` on the frontend does not enable it (see [KV-Aware Routing](overview.md#feature-support-matrix)).
 2. On every worker, set `"self_describing_kv_events": true` inside `kv_connector_extra_config`.
 3. On the frontend, select event-driven KV routing with `--router-mode kv`.
 
@@ -168,6 +168,6 @@ Queried lower-tier indexer storage_tier=HostPinned queried_workers=2 matched_wor
 - [Offloading Support Matrix](../../router/offloading-support-matrix.md) — cross-framework support matrix for KV routing with offloading
 - [vLLM KV offloading guide](https://docs.vllm.ai/en/latest/features/kv_offloading_usage/) — connector configuration reference
 - [Configuration and Tuning](../../router/configuration-and-tuning.md) — full router flag reference, including lower-tier cache-hit weights
-- [Router Guide](../../router/router-guide.md) — routing modes and deployment matrix
-- [KV Cache Offloading](kv-cache-offloading.md) — KVBM, LMCache, and FlexKV offloading backends for vLLM
+- [Router Guide](../../router/router-guide.md) — routing modes and deployment topologies
+- [KV Cache Offloading](kv-cache-offloading.md) — LMCache and FlexKV offloading backends for vLLM
 - [Using HiCache](../sglang/hicache.md) — the SGLang counterpart: tier-aware routing with HiCache

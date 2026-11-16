@@ -1,8 +1,13 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # SGLang Kubernetes Deployment Configurations
 
 This directory contains Kubernetes Custom Resource Definition (CRD) templates for deploying SGLang inference graphs using the **DynamoGraphDeployment** resource.
 
-The top-level `deploy/*.yaml` templates use `nvidia.com/v1alpha1` for compatibility with existing tooling. Equivalent `nvidia.com/v1beta1` templates are available under [`v1beta1/`](./v1beta1/).
+The `deploy/*.yaml` templates use the supported `nvidia.com/v1beta1` API.
 
 ## Available Deployment Patterns
 
@@ -29,46 +34,71 @@ High-performance deployment with separated prefill and decode workers.
 - `SGLangPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 - Communication via NIXL transfer backend (`--disaggregation-transfer-backend nixl`)
 
+### 4. **Deployments with Intel XPU (Optional)** (see [`xpu/`](./xpu/))
+Hardware-specific deployment templates for Intel GPUs using Kubernetes Dynamic Resource Allocation (DRA) or the Intel device plugin.
+
+**Available Templates:**
+- `agg_xpu_dra.yaml`: Aggregated deployment with DRA
+- `agg_router_xpu_dra.yaml`: Aggregated deployment with the KV router and DRA
+- `disagg_xpu_dra.yaml`: Disaggregated deployment with DRA
+- `disagg_xpu.yaml`: Disaggregated deployment using traditional device plugin (non-DRA)
+
+See the [XPU deployment README](./xpu/README.md) for detailed prerequisites and usage instructions.
+
+### Gateway API Inference Extension
+
+[gaie/agg.yaml](gaie/agg.yaml) uses a native Dynamo EPP and a direct-mode frontend sidecar
+per SGLang worker. For model selection before worker selection, see the
+[Switchyard deployment example](gaie/switchyard/README.md).
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: <deployment-name>
 spec:
-  services:
-    <ServiceName>:
-      # Service configuration
+  components:
+  - name: <component-name>
+    type: worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          # Container configuration
 ```
 
 ### Key Configuration Options
 
 **Resource Management:**
 ```yaml
-resources:
-  requests:
-    cpu: "10"
-    memory: "20Gi"
-    gpu: "1"
-  limits:
-    cpu: "10"
-    memory: "20Gi"
-    gpu: "1"
+podTemplate:
+  spec:
+    containers:
+    - name: main
+      resources:
+        requests:
+          cpu: "10"
+          memory: "20Gi"
+        limits:
+          nvidia.com/gpu: "1"
 ```
 
 **Container Configuration:**
 ```yaml
-extraPodSpec:
-  mainContainer:
-    image: my-registry/sglang-runtime:my-tag
-    workingDir: /workspace/examples/backends/sglang
-    args:
-      - "python3"
-      - "-m"
-      - "dynamo.sglang"
+podTemplate:
+  spec:
+    containers:
+    - name: main
+      image: my-registry/sglang-runtime:my-tag
+      workingDir: /workspace/examples/backends/sglang
+      command:
+      - python3
+      - -m
+      - dynamo.sglang
       # Model-specific arguments
 ```
 
@@ -79,7 +109,7 @@ Before using these templates, ensure you have:
 1. **Dynamo Kubernetes Platform installed** - See [Installing Dynamo Kubernetes Platform](../../../../docs/fern/pages/kubernetes/installation/install-dynamo.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for SGLang runtime images
-4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
+4. **Hugging Face token secret** (referenced through `envFrom.secretRef`)
 
 ## Usage
 
@@ -88,6 +118,8 @@ Select the deployment pattern that matches your requirements:
 - Use `agg.yaml` for development/testing
 - Use `agg_router.yaml` for production with load balancing
 - Use `disagg.yaml` for maximum performance
+- Use `disagg_planner.yaml` for SLA-optimized performance
+- Use [XPU templates](./xpu/) for Intel GPU clusters
 
 ### 2. Customize Configuration
 Edit the template to match your environment:
@@ -131,7 +163,7 @@ To use a custom dynamo frameworks image for SGLang, you can update the deploymen
 export DEPLOYMENT_FILE=agg.yaml
 export FRAMEWORK_RUNTIME_IMAGE=<sglang-image>
 
-yq '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE  > $DEPLOYMENT_FILE.generated
+yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then .image = env(FRAMEWORK_RUNTIME_IMAGE) else . end)' $DEPLOYMENT_FILE > $DEPLOYMENT_FILE.generated
 kubectl apply -f $DEPLOYMENT_FILE.generated -n $NAMESPACE
 ```
 

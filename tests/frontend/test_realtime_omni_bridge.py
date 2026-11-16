@@ -30,6 +30,10 @@ import requests
 
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.port_utils import ServicePorts
+from tests.utils.vllm_omni import vllm_omni_skip_reason
+
+if _omni_skip_reason := vllm_omni_skip_reason():
+    pytest.skip(_omni_skip_reason, allow_module_level=True)
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +85,11 @@ def realtime_omni_frontend(
     """Launch the frontend + mock-Omni worker; yield the frontend port once discovered.
 
     Uses file-based discovery (the ``file_storage_backend`` fixture sets
-    ``DYN_FILE_KV``), the tcp request plane, and an explicit zmq event plane, so
-    the two processes coordinate without etcd or nats and an ambient
-    ``NATS_SERVER`` never forces a connection. Mirrors ``test_prompt_embeds.py``.
+    ``DYN_FILE_KV``), the tcp request plane, and an explicit zmq event plane in
+    both processes (``--event-plane zmq`` for the frontend, ``event_plane="zmq"``
+    in ``realtime_omni_mock_worker.py``), so they coordinate without etcd or nats
+    and an ambient ``NATS_SERVER`` never forces a connection. Mirrors
+    ``test_prompt_embeds.py``.
     """
     _ = file_storage_backend  # sets DYN_FILE_KV for both subprocesses
     frontend_port = dynamo_dynamic_ports.frontend_port

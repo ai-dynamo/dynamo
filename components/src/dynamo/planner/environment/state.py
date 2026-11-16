@@ -15,6 +15,7 @@ class ReplicaState:
     active: int = 0
     expected: Optional[int] = None
     scaling: bool = False
+    pending_startup: int = 0
 
 
 @dataclass
@@ -22,6 +23,15 @@ class ComponentState:
     info: Optional[WorkerInfo] = None
     replicas: ReplicaState = field(default_factory=ReplicaState)
     num_gpus: Optional[int] = None
+    gpus_per_replica: Optional[int] = None
+    # DGD-owned per-GPU power cap (watts) and per-replica draw projected by the
+    # operator in component status. Both are startup-static for the Planner
+    # lifetime; DGD admission rejects power-limit changes, which require DGD
+    # replacement and a new Planner. They stay None when power awareness is off.
+    # ``num_gpus`` is the inference-engine width used by performance models;
+    # ``gpus_per_replica`` is the unique allocation used by GPU-budget math.
+    power_gpu_limit_watts: Optional[int] = None
+    power_watts_per_replica: Optional[int] = None
 
 
 @dataclass

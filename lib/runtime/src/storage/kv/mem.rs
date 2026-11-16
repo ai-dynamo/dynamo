@@ -13,7 +13,7 @@ use tokio::sync::broadcast;
 
 use super::{Bucket, Key, KeyValue, Store, StoreError, StoreOutcome, WatchEvent};
 
-const MEMORY_EVENT_BUFFER_CAPACITY: usize = 16_384;
+pub(crate) const MEMORY_EVENT_BUFFER_CAPACITY: usize = 16_384;
 
 #[derive(Clone, Debug)]
 enum MemoryEvent {
@@ -141,8 +141,8 @@ impl Bucket for MemoryBucketRef {
             }
             Entry::Occupied(mut entry) => {
                 let (rev, _v) = entry.get();
-                if *rev == revision {
-                    StoreOutcome::Exists(revision)
+                if revision == 0 || *rev == revision {
+                    StoreOutcome::Exists(*rev)
                 } else {
                     entry.insert((revision, value.clone()));
                     let _ = self.inner.change_sender.send(MemoryEvent::Put {
@@ -155,6 +155,33 @@ impl Bucket for MemoryBucketRef {
             }
         };
         Ok(outcome)
+    }
+
+    async fn compare_and_replace(
+        &self,
+        key: &Key,
+        expected: bytes::Bytes,
+        value: bytes::Bytes,
+    ) -> Result<StoreOutcome, StoreError> {
+        let mut locked_data = self.inner.data.lock();
+        let bucket = locked_data
+            .get_mut(&self.name)
+            .ok_or_else(|| StoreError::MissingBucket(self.name.to_string()))?;
+        let entry = bucket
+            .data
+            .get_mut(&key.0)
+            .ok_or_else(|| StoreError::MissingKey(key.to_string()))?;
+        if entry.1 != expected {
+            return Err(StoreError::Retry);
+        }
+        let next_revision = entry.0.saturating_add(1).max(1);
+        *entry = (next_revision, value.clone());
+        let _ = self.inner.change_sender.send(MemoryEvent::Put {
+            bucket: self.name.clone(),
+            key: key.to_string(),
+            value,
+        });
+        Ok(StoreOutcome::Created(next_revision))
     }
 
     async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError> {
@@ -179,8 +206,6 @@ impl Bucket for MemoryBucketRef {
         Ok(())
     }
 
-    /// All current values in the bucket first, then block waiting for new
-    /// values to be published.
     async fn watch(
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + 'life0>>, StoreError> {
@@ -191,21 +216,17 @@ impl Bucket for MemoryBucketRef {
             return Err(StoreError::MissingBucket(self.name.to_string()));
         };
         let mut changes = self.inner.change_sender.subscribe();
-        let existing_items: Vec<_> = bucket
+        let snapshot: HashMap<Key, bytes::Bytes> = bucket
             .data
             .iter()
-            .map(|(key, (_revision, value))| {
-                WatchEvent::Put(KeyValue::new(Key::new(key.clone()), value.clone()))
-            })
+            .map(|(key, (_revision, value))| (Key::new(key.clone()), value.clone()))
             .collect();
         drop(data_lock);
         let bucket_name = self.name.clone();
         let inner = self.inner.clone();
 
         Ok(Box::pin(async_stream::stream! {
-            for event in existing_items {
-                yield event;
-            }
+            yield WatchEvent::Resync(snapshot);
             loop {
                 match changes.recv().await {
                     Ok(MemoryEvent::Put { bucket, key, value }) => {
@@ -267,10 +288,73 @@ impl Bucket for MemoryBucketRef {
 #[cfg(test)]
 mod tests {
     use super::MEMORY_EVENT_BUFFER_CAPACITY;
-    use crate::storage::kv::{Bucket as _, Key, MemoryStore, Store as _, WatchEvent};
+    use crate::storage::kv::{
+        Bucket as _, Key, MemoryStore, Store as _, StoreError, StoreOutcome, WatchEvent,
+    };
     use futures::StreamExt;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
     use std::time::Duration;
+    use tokio::sync::Barrier;
+
+    #[tokio::test]
+    async fn delete_wins_race_with_compare_and_replace() {
+        let store = MemoryStore::new();
+        let bucket = Arc::new(store.get_or_create_bucket("bucket", None).await.unwrap());
+        let key = Key::new("model".to_string());
+        bucket.insert(&key, "old".into(), 0).await.unwrap();
+
+        let barrier = Arc::new(Barrier::new(3));
+        let update_bucket = bucket.clone();
+        let update_key = key.clone();
+        let update_barrier = barrier.clone();
+        let update = tokio::spawn(async move {
+            update_barrier.wait().await;
+            update_bucket
+                .compare_and_replace(&update_key, "old".into(), "new".into())
+                .await
+        });
+        let delete_bucket = bucket.clone();
+        let delete_key = key.clone();
+        let delete_barrier = barrier.clone();
+        let delete = tokio::spawn(async move {
+            delete_barrier.wait().await;
+            delete_bucket.delete(&delete_key).await
+        });
+
+        barrier.wait().await;
+        let update_result = update.await.unwrap();
+        delete.await.unwrap().unwrap();
+        assert!(update_result.is_ok() || matches!(update_result, Err(StoreError::MissingKey(_))));
+        assert_eq!(bucket.get(&key).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn revision_zero_replay_preserves_cas_update() {
+        let store = MemoryStore::new();
+        let bucket = store.get_or_create_bucket("bucket", None).await.unwrap();
+        let key = Key::new("model".to_string());
+
+        assert_eq!(
+            bucket.insert(&key, "initial".into(), 0).await.unwrap(),
+            StoreOutcome::Created(0)
+        );
+        assert_eq!(
+            bucket
+                .compare_and_replace(&key, "initial".into(), "updated".into())
+                .await
+                .unwrap(),
+            StoreOutcome::Created(1)
+        );
+        assert_eq!(
+            bucket.insert(&key, "initial".into(), 0).await.unwrap(),
+            StoreOutcome::Exists(1)
+        );
+        assert_eq!(
+            bucket.get(&key).await.unwrap().unwrap().as_ref(),
+            b"updated"
+        );
+    }
 
     #[tokio::test]
     async fn multiple_watchers_receive_updates_without_cross_bucket_stealing() {
@@ -290,6 +374,12 @@ mod tests {
             .await
             .unwrap();
 
+        for watcher in [&mut a_first, &mut a_second, &mut b] {
+            assert_eq!(
+                watcher.next().await.unwrap(),
+                WatchEvent::Resync(HashMap::new())
+            );
+        }
         for watcher in [&mut a_first, &mut a_second] {
             let WatchEvent::Put(item) = watcher.next().await.unwrap() else {
                 panic!("expected bucket-a put");
@@ -311,7 +401,13 @@ mod tests {
             .await
             .unwrap();
         let mut watcher = bucket.watch().await.unwrap();
-        assert!(matches!(watcher.next().await, Some(WatchEvent::Put(_))));
+        assert_eq!(
+            watcher.next().await.unwrap(),
+            WatchEvent::Resync(HashMap::from([(
+                Key::new("key".to_string()),
+                bytes::Bytes::from("old")
+            )]))
+        );
 
         bucket
             .insert(&Key::new("key".to_string()), "new".into(), 2)
@@ -328,6 +424,11 @@ mod tests {
         let store = MemoryStore::new();
         let bucket = store.get_or_create_bucket("bucket", None).await.unwrap();
         let mut watcher = bucket.watch().await.unwrap();
+        // Consume the startup snapshot so the resync below can only come from the lag.
+        assert_eq!(
+            watcher.next().await.unwrap(),
+            WatchEvent::Resync(HashMap::new())
+        );
         let key = Key::new("key".to_string());
 
         for revision in 1..=MEMORY_EVENT_BUFFER_CAPACITY + 1 {

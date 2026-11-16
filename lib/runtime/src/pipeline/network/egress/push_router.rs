@@ -3,41 +3,77 @@
 
 use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
+use crate::pipeline::network::egress::route_span::{
+    get_route_trace_context, record_route_error, record_route_span_start, wrap_route_span,
+};
 use crate::{
-    component::{
-        Client, DeviceType, Endpoint, Instance, RoutingInstances, RoutingOccupancyState,
-        get_or_create_routing_occupancy_state,
-    },
+    component::{Client, DeviceType, Endpoint, Instance, RoutingInstances},
     discovery::EndpointInstanceId,
     dynamo_nvtx_range,
     engine::{AsyncEngine, AsyncEngineContext, Data},
     metrics::frontend_perf::{STAGE_DURATION_SECONDS, STAGE_ROUTE},
     pipeline::{
-        AddressedPushRouter, AddressedRequest, Error, ManyIn, ManyOut, SingleIn,
+        AddressedPushRouter, AddressedRequest, Error, ManyIn, ManyOut, SingleIn, StreamingDispatch,
         error::{PipelineError, PipelineErrorExt},
     },
     protocols::{EndpointId, maybe_error::MaybeError},
+    routing_policy::{
+        InstanceSelector, ModeSelectors, OccupancyReservation, RouteCandidate, RouteContext,
+        RouteDevice, RouteTarget, RoutingOccupancyState, get_or_create_routing_occupancy_state,
+    },
     traits::DistributedRuntimeProvider,
 };
 use async_trait::async_trait;
 use futures::Stream;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, atomic::AtomicU64},
     task::Poll,
     time::Instant,
 };
 use tokio_stream::StreamExt;
 use tracing::Instrument;
 
+/// The stable reason of a worker's overload refusal.
+///
+/// Across the request plane a refusal keeps its semantic class and reason but
+/// decodes with the legacy type `ResourceExhausted`, which it shares with
+/// pool-wide exhaustion (`capacity.pool_exhausted`), so the reason, not the
+/// legacy type, identifies a worker-scoped overload.
+const WORKER_OVERLOADED_REASON: &str = "capacity.worker_overloaded";
+
+/// A worker's overload refusal, wherever it appears in an error chain.
+///
+/// A worker refusing a request it has no capacity for is backpressure from a
+/// healthy worker. The refusal reaches the router as the cause of a pre-stream
+/// `CannotConnect`, so only a walk of the whole chain finds it.
+fn worker_overload<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a DynamoError> {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(error) = error.downcast_ref::<DynamoError>()
+            && error.class() == ErrorType::CapacityExhausted
+            && error.reason().as_str() == WORKER_OVERLOADED_REASON
+        {
+            return Some(error);
+        }
+        current = error.source();
+    }
+    None
+}
+
+/// Whether a worker's overload appears anywhere in an error chain: see
+/// [`worker_overload`].
+fn is_worker_overloaded(err: &(dyn std::error::Error + 'static)) -> bool {
+    worker_overload(err).is_some()
+}
+
 /// Check if an error chain indicates the worker should be reported as down.
+///
+/// Never for a chain that carries a worker's overload, whatever wraps it: see
+/// [`is_worker_overloaded`].
 fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
     const INHIBITED: &[ErrorType] = &[
         ErrorType::CannotConnect,
@@ -45,8 +81,27 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         ErrorType::ConnectionTimeout,
         ErrorType::ResponseTimeout,
         ErrorType::Backend(BackendError::EngineShutdown),
+        // A stream that ends mid-generation means this worker dropped the
+        // request. Quarantine it, or a migration retry can reselect the same
+        // worker before discovery removal catches up.
+        ErrorType::Backend(BackendError::StreamIncomplete),
+        // The addressed server has no handler for this instance: discovery is
+        // stale or the worker is shutting down. Same reasoning as above.
+        ErrorType::WorkerUnavailable,
     ];
-    match_error_chain(err, INHIBITED, &[])
+    // Pre-stream request rejections can carry an outer CannotConnect wrapper.
+    // A `Conflict` is a worker refusing a request id it is still serving.
+    !is_worker_overloaded(err)
+        && match_error_chain(
+            err,
+            INHIBITED,
+            &[
+                ErrorType::InvalidRequest,
+                ErrorType::InvalidArgument,
+                ErrorType::Backend(BackendError::InvalidArgument),
+                ErrorType::Conflict,
+            ],
+        )
 }
 
 /// Read the backend response inactivity timeout from the environment.
@@ -61,53 +116,66 @@ fn response_inactivity_timeout() -> Option<std::time::Duration> {
         .map(std::time::Duration::from_secs)
 }
 
+/// Read the response-stream establish timeout from the environment.
+fn response_stream_establish_timeout() -> Option<std::time::Duration> {
+    use crate::config::environment_names::response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS;
+    std::env::var(DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+        .map(std::time::Duration::from_secs)
+}
+
 /// RAII handle for one in-flight unit of work charged against
 /// [`RoutingOccupancyState`]. The counter is incremented at construction; the
 /// matching decrement is emitted on drop (or by [`Self::into_tracked_stream`]).
 struct OccupancyPermit {
-    state: Arc<RoutingOccupancyState>,
-    instance_id: u64,
-    armed: bool,
+    reservation: Option<OccupancyReservation>,
 }
 
 impl OccupancyPermit {
-    fn new(state: Arc<RoutingOccupancyState>, instance_id: u64) -> Self {
+    fn acquire(state: Arc<RoutingOccupancyState>, instance_id: u64) -> Self {
         Self {
-            state,
-            instance_id,
-            armed: true,
+            reservation: Some(state.reserve(instance_id)),
+        }
+    }
+
+    fn from_counter(
+        state: Arc<RoutingOccupancyState>,
+        instance_id: u64,
+        counter: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            reservation: Some(OccupancyReservation::from_counter(
+                state,
+                instance_id,
+                counter,
+            )),
+        }
+    }
+
+    fn from_reservation(reservation: OccupancyReservation) -> Self {
+        Self {
+            reservation: Some(reservation),
         }
     }
 
     fn retarget(&mut self, instance_id: u64) {
-        if self.instance_id == instance_id {
-            return;
-        }
-        self.state.increment(instance_id);
-        self.state.decrement(self.instance_id);
-        self.instance_id = instance_id;
+        self.reservation
+            .as_mut()
+            .expect("occupancy permit must be armed before stream tracking")
+            .retarget(instance_id);
     }
 
-    fn into_tracked_stream<U: Data>(mut self, stream: ManyOut<U>) -> ManyOut<U> {
-        self.armed = false;
+    fn into_tracked_stream<U: Data + MaybeError>(mut self, stream: ManyOut<U>) -> ManyOut<U> {
         let engine_ctx = stream.context();
         ResponseStream::new(
             Box::pin(OccupancyTrackedStream {
                 inner: stream,
-                state: self.state.clone(),
-                instance_id: self.instance_id,
-                released: false,
+                reservation: self.reservation.take(),
             }),
             engine_ctx,
         )
-    }
-}
-
-impl Drop for OccupancyPermit {
-    fn drop(&mut self) {
-        if self.armed {
-            self.state.decrement(self.instance_id);
-        }
     }
 }
 
@@ -146,12 +214,15 @@ where
     /// dynamo-llm's KV Routing does this.
     router_mode: RouterMode,
 
-    /// Number of round robin requests handled. Used to decide which server is next.
-    round_robin_counter: Arc<AtomicU64>,
+    /// Instance selectors for the modes this router picks by: the configured mode, plus
+    /// round-robin and random, which [`Self::round_robin`] and [`Self::random`] use whatever
+    /// the mode. Resolved once at construction from [`PushRouterOptions::selectors`].
+    selectors: Vec<(RouterMode, Arc<dyn InstanceSelector>)>,
 
-    /// The next step in the chain. PushRouter (this object) picks an instances,
-    /// addresses it, then passes it to AddressedPushRouter which does the network traffic.
-    addressed: Arc<AddressedPushRouter>,
+    /// The final hop: after selecting an instance, `PushRouter` hands it to this
+    /// `StreamingDispatch` (the request-plane `AddressedPushRouter` by default).
+    /// A trait object so an alternate transport can swap it out.
+    addressed: Arc<dyn StreamingDispatch<T, U>>,
 
     /// When false, `generate_with_fault_detection` skips fault detection logic:
     /// it won't call `report_instance_down` on errors, and it uses the raw discovery
@@ -163,7 +234,13 @@ where
     /// [`environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS`](crate::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS) to avoid a syscall per request.
     response_timeout: Option<std::time::Duration>,
 
-    /// Shared request occupancy state for tracked routing modes.
+    /// Cached bound on the wait for a worker's response stream after the worker
+    /// ACKs a unary request. Read once at construction from
+    /// [`environment_names::response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS`](crate::config::environment_names::response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS).
+    /// Applied only when fault detection is enabled.
+    establish_timeout: Option<std::time::Duration>,
+
+    /// Shared request occupancy state, present when the mode or a selector reads in-flight counts.
     occupancy_state: Option<Arc<RoutingOccupancyState>>,
 
     /// Optional cache index for direct multimodal embedding cache lookups.
@@ -185,6 +262,9 @@ pub enum RouterMode {
     #[default]
     RoundRobin,
     Random,
+    /// `--router-mode power-of-two`, removed in v1.7. Cards from v1.5 and v1.6 workers can still
+    /// carry it, so it stays decodable; building a router with it fails.
+    // TODO(v1.9): Remove when v1.6 falls outside the N-2 compatibility window.
     PowerOfTwoChoices,
     KV,
     Direct,
@@ -200,15 +280,74 @@ enum TransportFallback<'a> {
     Within(&'a HashSet<u64>),
 }
 
+#[derive(Clone, Copy)]
+enum OverloadCheck {
+    Required,
+    AlreadyAdmitted,
+}
+
 struct DeviceAwareCandidates {
-    candidates: Vec<u64>,
-    device_type_map: HashMap<u64, Option<DeviceType>>,
+    candidates: Vec<RouteCandidate>,
+    context: RouteContext,
     embedding_cache_hit: bool,
-    full_embedding_cache_hit: bool,
     request_cache_keys: usize,
 }
 
+/// A DeviceAware policy decision whose optional occupancy booking is owned by
+/// the caller's request lifecycle.
+pub struct DeviceAwareSelection {
+    worker_id: u64,
+    candidate_count: usize,
+    load: u64,
+    is_cpu: bool,
+    embedding_cache_hit: bool,
+    request_cache_keys: usize,
+    reservation: Option<OccupancyReservation>,
+}
+
+impl DeviceAwareSelection {
+    pub fn worker_id(&self) -> u64 {
+        self.worker_id
+    }
+
+    pub fn candidate_count(&self) -> usize {
+        self.candidate_count
+    }
+
+    pub fn load(&self) -> u64 {
+        self.load
+    }
+
+    pub fn is_cpu(&self) -> bool {
+        self.is_cpu
+    }
+
+    pub fn embedding_cache_hit(&self) -> bool {
+        self.embedding_cache_hit
+    }
+
+    pub fn request_cache_keys(&self) -> usize {
+        self.request_cache_keys
+    }
+
+    pub fn into_reservation(self) -> Option<OccupancyReservation> {
+        self.reservation
+    }
+}
+
 impl RouterMode {
+    pub const fn telemetry_label(self) -> &'static str {
+        match self {
+            Self::RoundRobin => "round-robin",
+            Self::Random => "random",
+            Self::PowerOfTwoChoices => "power-of-two-choices",
+            Self::KV => "kv",
+            Self::Direct => "direct",
+            Self::LeastLoaded => "least-loaded",
+            Self::DeviceAwareWeighted => "device-aware-weighted",
+        }
+    }
+
     pub fn is_kv_routing(&self) -> bool {
         *self == RouterMode::KV
     }
@@ -216,93 +355,59 @@ impl RouterMode {
     pub fn is_direct_routing(&self) -> bool {
         *self == RouterMode::Direct
     }
+
+    /// Whether this mode admits requests against host-owned occupancy counters.
+    pub const fn requires_occupancy(self) -> bool {
+        matches!(self, Self::LeastLoaded | Self::DeviceAwareWeighted)
+    }
+
+    /// Whether this mode picks with an [`InstanceSelector`] passed in
+    /// [`PushRouterOptions::selectors`].
+    pub const fn picks_with_selector(self) -> bool {
+        matches!(self, Self::RoundRobin | Self::Random | Self::LeastLoaded)
+    }
 }
 
-/// Pick the instance with lower in-flight count from two random candidates.
-/// Returns the single instance if only one is available.
-fn p2c_select_from(occupancy_state: &RoutingOccupancyState, instance_ids: &[u64]) -> u64 {
-    let count = instance_ids.len();
-    if count == 1 {
-        let worker_id = instance_ids[0];
-        tracing::info!(
-            router_mode = "power-of-two-choices",
-            worker_id,
-            candidate_count = count,
-            load = occupancy_state.load(worker_id),
-            "Selected worker"
-        );
-        return worker_id;
-    }
-    let mut rng = rand::rng();
-    let idx1 = rng.random_range(0..count);
-    let idx2 = (idx1 + 1 + rng.random_range(0..count - 1)) % count;
-    let id1 = instance_ids[idx1];
-    let id2 = instance_ids[idx2];
-    let load1 = occupancy_state.load(id1);
-    let load2 = occupancy_state.load(id2);
-    let selected = if load1 <= load2 { id1 } else { id2 };
-    tracing::info!(
-        router_mode = "power-of-two-choices",
-        worker_id = selected,
-        candidate_count = count,
-        load = std::cmp::min(load1, load2),
-        candidate_a = id1,
-        candidate_a_load = load1,
-        candidate_b = id2,
-        candidate_b_load = load2,
-        "Selected worker"
+/// The selectors a router keeps: its configured mode's, required when that mode picks with
+/// one, and round-robin's and random's when the caller provides them.
+fn resolve_selectors(
+    router_mode: RouterMode,
+    selectors: Option<&ModeSelectors>,
+) -> anyhow::Result<Vec<(RouterMode, Arc<dyn InstanceSelector>)>> {
+    // TODO(v1.9): Remove with the `PowerOfTwoChoices` wire value.
+    anyhow::ensure!(
+        router_mode != RouterMode::PowerOfTwoChoices,
+        "the power-of-two router mode was removed in Dynamo v1.7; use another router mode"
     );
-    selected
+    let Some(selectors) = selectors else {
+        anyhow::ensure!(
+            !router_mode.picks_with_selector(),
+            "{router_mode:?} routing needs instance selectors; pass PushRouterOptions::selectors"
+        );
+        return Ok(Vec::new());
+    };
+    let mut resolved = Vec::with_capacity(3);
+    if router_mode.picks_with_selector() {
+        let selector = selectors(router_mode)
+            .ok_or_else(|| anyhow::anyhow!("no instance selector for {router_mode:?} routing"))?;
+        resolved.push((router_mode, selector));
+    }
+    for mode in [RouterMode::RoundRobin, RouterMode::Random] {
+        if mode != router_mode
+            && let Some(selector) = selectors(mode)
+        {
+            resolved.push((mode, selector));
+        }
+    }
+    Ok(resolved)
 }
 
-/// Select the target device group for the next request in `DeviceAwareWeighted` mode.
-///
-/// If only one class exists (all CPU or all non-CPU), returns that class directly.
-/// If both classes exist, compares capability-normalized load and returns the less-loaded group.
-///
-/// Budget check (integer form):
-/// `allowed_cpu_inflight = total_non_cpu_inflight * cpu_count / (ratio * non_cpu_count)`
-/// and choose CPU when `total_cpu_inflight < allowed_cpu_inflight`.
-///
-/// `ratio` is `non_cpu_to_cpu_ratio` (from `DYN_ENCODER_CUDA_TO_CPU_RATIO`,
-/// default `8` in `device_aware_weighted`).
-fn device_aware_candidate_group(
-    state: &RoutingOccupancyState,
-    instance_ids: &[u64],
-    device_type_map: &HashMap<u64, Option<DeviceType>>,
-    non_cpu_to_cpu_ratio: usize,
-) -> Vec<u64> {
-    let cpu_ids: Vec<u64> = instance_ids
-        .iter()
-        .copied()
-        .filter(|id| matches!(device_type_map.get(id), Some(Some(DeviceType::Cpu))))
-        .collect();
-    let non_cpu_ids: Vec<u64> = instance_ids
-        .iter()
-        .copied()
-        .filter(|id| !matches!(device_type_map.get(id), Some(Some(DeviceType::Cpu))))
-        .collect();
-
-    if cpu_ids.is_empty() {
-        return non_cpu_ids;
-    }
-    if non_cpu_ids.is_empty() {
-        return cpu_ids;
-    }
-
-    // Both classes exist: compute a budget for CPU in-flight requests.
-    let total_non_cpu_inflight: u64 = non_cpu_ids.iter().map(|id| state.load(*id)).sum();
-    let total_cpu_inflight: u64 = cpu_ids.iter().map(|id| state.load(*id)).sum();
-    let cpu_count = cpu_ids.len() as u64;
-    let non_cpu_count = non_cpu_ids.len() as u64;
-    let allowed_cpu_inflight = total_non_cpu_inflight.saturating_mul(cpu_count)
-        / ((non_cpu_to_cpu_ratio as u64).saturating_mul(non_cpu_count));
-
-    if total_cpu_inflight < allowed_cpu_inflight {
-        cpu_ids
-    } else {
-        non_cpu_ids
-    }
+/// One instance picked by an [`InstanceSelector`], booked when the selector reads load.
+struct SelectedInstance {
+    instance_id: u64,
+    candidate_count: usize,
+    load: Option<u64>,
+    permit: Option<OccupancyPermit>,
 }
 
 /// At most one `list_and_watch` per endpoint, across all `PushRouter`
@@ -310,9 +415,24 @@ fn device_aware_candidate_group(
 static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId, ()>> =
     std::sync::OnceLock::new();
 
-/// At most one multimodal cache cleanup watcher per endpoint.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct RuntimeEndpointId {
+    connection_id: u64,
+    endpoint_id: EndpointId,
+}
+
+impl RuntimeEndpointId {
+    fn for_endpoint(endpoint: &Endpoint) -> Self {
+        Self {
+            connection_id: endpoint.drt().connection_id(),
+            endpoint_id: endpoint.id(),
+        }
+    }
+}
+
+/// At most one multimodal cache cleanup watcher per runtime endpoint.
 static ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE: std::sync::OnceLock<
-    dashmap::DashMap<EndpointId, ()>,
+    dashmap::DashMap<RuntimeEndpointId, ()>,
 > = std::sync::OnceLock::new();
 
 /// Watch discovery for instance removals and cancel pending response-stream
@@ -320,11 +440,14 @@ static ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE: std::sync::OnceLock<
 /// a migratable `Disconnected` error. Uses raw `list_and_watch` events
 /// (not a coalesced snapshot diff) so a rapid remove→re-add of the same
 /// identity is not silently swallowed. Keyed by full `EndpointInstanceId`.
-fn spawn_instance_removal_watcher(
+fn spawn_instance_removal_watcher<T, U>(
     endpoint: Endpoint,
-    addressed: Arc<AddressedPushRouter>,
+    dispatch: Arc<dyn StreamingDispatch<T, U>>,
     cancel_token: tokio_util::sync::CancellationToken,
-) {
+) where
+    T: Data + Serialize + 'static,
+    U: Data + for<'de> Deserialize<'de> + MaybeError + 'static,
+{
     use crate::discovery::{
         DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     };
@@ -388,25 +511,16 @@ fn spawn_instance_removal_watcher(
                         match event {
                             Some(Ok(DiscoveryEvent::Removed(id))) => {
                                 if let DiscoveryInstanceId::Endpoint(eid) = &id {
-                                    let n = addressed.cancel_instance_streams(eid).await;
-                                    if n > 0 {
-                                        tracing::warn!(
-                                            namespace = %eid.namespace,
-                                            component = %eid.component,
-                                            endpoint = %eid.endpoint,
-                                            instance_id = eid.instance_id,
-                                            cancelled = n,
-                                            "Cancelled pending response streams for removed \
-                                             instance (discovery-driven cleanup)"
-                                        );
-                                    }
+                                    dispatch.on_instance_removed(eid).await;
                                 }
                             }
                             Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
                                 let eid: EndpointInstanceId = inst.endpoint_instance_id();
-                                addressed.clear_instance_tombstone(&eid).await;
+                                dispatch.on_instance_added(&eid).await;
                             }
-                            Some(Ok(_)) => {}
+                            Some(Ok(DiscoveryEvent::Added(_)))
+                            | Some(Ok(DiscoveryEvent::ModelTaintsUpdated(_)))
+                            | Some(Ok(DiscoveryEvent::Resync(_))) => {}
                             Some(Err(e)) => {
                                 tracing::warn!(
                                     endpoint = %endpoint_name,
@@ -443,11 +557,12 @@ fn spawn_multimodal_cache_cleanup_watcher(
     use tokio_stream::StreamExt as _;
 
     let guard = ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
-    let endpoint_id = endpoint.id();
-    if guard.insert(endpoint_id.clone(), ()).is_some() {
+    let watcher_id = RuntimeEndpointId::for_endpoint(&endpoint);
+    if guard.insert(watcher_id.clone(), ()).is_some() {
         tracing::debug!(
-            ?endpoint_id,
-            "Multimodal cache cleanup watcher already running for this endpoint, skipping"
+            connection_id = watcher_id.connection_id,
+            ?watcher_id.endpoint_id,
+            "Multimodal cache cleanup watcher already running for this runtime endpoint, skipping"
         );
         return;
     }
@@ -457,7 +572,7 @@ fn spawn_multimodal_cache_cleanup_watcher(
     let component = endpoint.component().name().to_string();
 
     tokio::spawn(async move {
-        struct GuardRelease(EndpointId);
+        struct GuardRelease(RuntimeEndpointId);
         impl Drop for GuardRelease {
             fn drop(&mut self) {
                 if let Some(map) = ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE.get() {
@@ -465,7 +580,7 @@ fn spawn_multimodal_cache_cleanup_watcher(
                 }
             }
         }
-        let _release = GuardRelease(endpoint_id);
+        let _release = GuardRelease(watcher_id);
 
         const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
         'reconnect: loop {
@@ -496,7 +611,10 @@ fn spawn_multimodal_cache_cleanup_watcher(
                             Some(Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::Endpoint(eid)))) => {
                                 indexer.remove_worker(eid.instance_id);
                             }
-                            Some(Ok(_)) => {}
+                            Some(Ok(DiscoveryEvent::Added(_)))
+                            | Some(Ok(DiscoveryEvent::ModelTaintsUpdated(_)))
+                            | Some(Ok(DiscoveryEvent::Removed(_)))
+                            | Some(Ok(DiscoveryEvent::Resync(_))) => {}
                             Some(Err(error)) => {
                                 tracing::warn!(
                                     endpoint = %endpoint_name,
@@ -526,14 +644,53 @@ async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPu
     AddressedPushRouter::from_runtime_provider(endpoint).await
 }
 
+/// Optional capabilities of a [`PushRouter`], for [`PushRouter::from_client_with_options`].
+///
+/// Every named constructor on [`PushRouter`] is a shorthand for one of these.
+pub struct PushRouterOptions<T, U> {
+    /// Durable overload detection, driven through `client.set_overloaded_instances(...)`.
+    pub worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
+    /// Multimodal embedding-cache state for `RouterMode::DeviceAwareWeighted`.
+    pub multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
+    pub multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
+    /// A caller-supplied final hop in place of the request plane. Its `ErrorType`
+    /// mapping drives report-down, overload and migration as usual.
+    pub dispatch: Option<Arc<dyn StreamingDispatch<T, U>>>,
+    /// Report transient worker errors to discovery (`report_instance_down`) and
+    /// route `direct()` through the filtered available list. Off for recovery and
+    /// query paths that must reach a worker regardless of its health.
+    pub fault_detection: bool,
+    /// Instance selectors for round-robin, random and least-loaded. Required
+    /// when the router's mode is one of them; also backs [`PushRouter::round_robin`] and
+    /// [`PushRouter::random`] on routers of any mode.
+    pub selectors: Option<ModeSelectors>,
+}
+
+impl<T, U> Default for PushRouterOptions<T, U> {
+    fn default() -> Self {
+        Self {
+            worker_monitor: None,
+            multimodal_cache_indexer: None,
+            multimodal_cache_key_extractor: None,
+            dispatch: None,
+            fault_detection: true,
+            selectors: None,
+        }
+    }
+}
+
 impl<T, U> PushRouter<T, U>
 where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
+    pub fn router_mode(&self) -> RouterMode {
+        self.router_mode
+    }
+
     /// Create a new PushRouter without a worker load monitor (no overload detection)
     pub async fn from_client(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
-        Self::from_client_with_monitor(client, router_mode, None).await
+        Self::from_client_with_options(client, router_mode, PushRouterOptions::default()).await
     }
 
     /// Create a new PushRouter with fault detection disabled.
@@ -545,81 +702,79 @@ where
         client: Client,
         router_mode: RouterMode,
     ) -> anyhow::Result<Self> {
-        let addressed = addressed_router(&client.endpoint).await?;
-
-        let occupancy_state = if matches!(
-            router_mode,
-            RouterMode::PowerOfTwoChoices
-                | RouterMode::LeastLoaded
-                | RouterMode::DeviceAwareWeighted
-        ) {
-            Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
-        } else {
-            None
-        };
-
-        // Cancel orphaned pending response streams when workers die.
-        spawn_instance_removal_watcher(
-            client.endpoint.clone(),
-            addressed.clone(),
-            client.endpoint.drt().primary_token(),
-        );
-
-        Ok(PushRouter {
+        Self::from_client_with_options(
             client,
-            addressed,
             router_mode,
-            round_robin_counter: Arc::new(AtomicU64::new(0)),
-            fault_detection_enabled: false,
-            response_timeout: response_inactivity_timeout(),
-            occupancy_state,
-            multimodal_cache_indexer: None,
-            multimodal_cache_key_extractor: None,
-            _phantom: PhantomData,
-        })
+            PushRouterOptions {
+                fault_detection: false,
+                ..PushRouterOptions::default()
+            },
+        )
+        .await
     }
 
     /// Create a new PushRouter with an optional worker load monitor.
     ///
     /// The rejection path is gated by `fault_detection_enabled` (true here);
-    /// overload detection itself is driven by the monitor via `client.set_overloaded_instances(...)`.
-    /// If no thresholds are configured on the monitor (or no monitor is provided),
-    /// the routing snapshot reports at least one free instance and the gate never rejects.
+    /// durable overload detection is driven by the monitor through
+    /// `client.set_overloaded_instances(...)`. Worker responses can also create
+    /// bounded request-path overload leases.
     pub async fn from_client_with_monitor(
         client: Client,
         router_mode: RouterMode,
         worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
     ) -> anyhow::Result<Self> {
-        Self::from_client_with_state(client, router_mode, worker_monitor, None, None).await
+        Self::from_client_with_options(
+            client,
+            router_mode,
+            PushRouterOptions {
+                worker_monitor,
+                ..PushRouterOptions::default()
+            },
+        )
+        .await
     }
 
-    /// Create a new PushRouter with optional load monitoring and multimodal cache indexing.
-    pub async fn from_client_with_state(
+    /// Create a new PushRouter from `client` with the given optional capabilities.
+    /// A caller-supplied `dispatch` replaces the request plane as the final hop;
+    /// fault detection stays on, so its `ErrorType` mapping drives report-down,
+    /// overload and migration as usual.
+    pub async fn from_client_with_options(
         client: Client,
         router_mode: RouterMode,
-        worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
-        multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
-        multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
+        options: PushRouterOptions<T, U>,
     ) -> anyhow::Result<Self> {
-        let addressed = addressed_router(&client.endpoint).await?;
+        let PushRouterOptions {
+            worker_monitor,
+            multimodal_cache_indexer,
+            multimodal_cache_key_extractor,
+            dispatch,
+            fault_detection,
+            selectors,
+        } = options;
+        let selectors = resolve_selectors(router_mode, selectors.as_ref())?;
+
+        // Type-erase to the seam so discovery-removal cleanup runs through it.
+        let addressed: Arc<dyn StreamingDispatch<T, U>> = match dispatch {
+            Some(dispatch) => dispatch,
+            None => addressed_router(&client.endpoint).await?,
+        };
 
         // Start worker monitor if provided and in dynamic mode
         if let Some(monitor) = worker_monitor.as_ref() {
             monitor.start_monitoring().await?;
         }
 
-        let occupancy_state = if matches!(
-            router_mode,
-            RouterMode::PowerOfTwoChoices
-                | RouterMode::LeastLoaded
-                | RouterMode::DeviceAwareWeighted
-        ) {
+        let occupancy_state = if router_mode.requires_occupancy()
+            || selectors
+                .iter()
+                .any(|(_, selector)| selector.reads_active_requests())
+        {
             Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
         } else {
             None
         };
 
-        // Cancel orphaned pending response streams when workers die.
         spawn_instance_removal_watcher(
             client.endpoint.clone(),
             addressed.clone(),
@@ -634,21 +789,19 @@ where
                 client.endpoint.drt().primary_token(),
             );
         }
-
-        let router = PushRouter {
+        Ok(PushRouter {
             client,
             addressed,
             router_mode,
-            round_robin_counter: Arc::new(AtomicU64::new(0)),
-            fault_detection_enabled: true,
+            selectors,
+            fault_detection_enabled: fault_detection,
             response_timeout: response_inactivity_timeout(),
+            establish_timeout: response_stream_establish_timeout(),
             occupancy_state,
             multimodal_cache_indexer,
             multimodal_cache_key_extractor,
             _phantom: PhantomData,
-        };
-
-        Ok(router)
+        })
     }
 
     /// `ResourceExhausted` when workers are routable but all overloaded;
@@ -675,104 +828,217 @@ where
             .into()
     }
 
-    /// Issue a request to the next available instance in a round-robin fashion
-    pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        self.round_robin_prepared(request, |_, _| Ok(()))
-            .await
-            .map(|(_, stream)| stream)
+    fn selector(&self, mode: RouterMode) -> anyhow::Result<&dyn InstanceSelector> {
+        self.selectors
+            .iter()
+            .find(|(selector_mode, _)| *selector_mode == mode)
+            .map(|(_, selector)| selector.as_ref())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no instance selector for {mode:?} routing on endpoint {}",
+                    self.client.endpoint.id()
+                )
+            })
     }
 
-    async fn round_robin_prepared<M, F>(
-        &self,
-        request: SingleIn<T>,
-        prepare: F,
-    ) -> anyhow::Result<(M, ManyOut<U>)>
-    where
-        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
-    {
-        let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
-
-        let (instance_id, candidate_count) = {
-            let routing_instances = self.client.routing_instances();
-            let count = routing_instances.free_ids().len();
-            if count == 0 {
-                return Err(self.empty_free_pool_error(&routing_instances));
-            }
-            (routing_instances.free_ids()[counter % count], count)
-        };
-        tracing::info!(
-            router_mode = "round-robin",
-            worker_id = instance_id,
-            candidate_count,
-            "Selected worker"
-        );
-
-        self.dispatch_selected(instance_id, request, None, prepare)
-            .await
-    }
-
-    /// Issue a request to a random endpoint
-    pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        self.random_prepared(request, |_, _| Ok(()))
-            .await
-            .map(|(_, stream)| stream)
-    }
-
-    async fn random_prepared<M, F>(
-        &self,
-        request: SingleIn<T>,
-        prepare: F,
-    ) -> anyhow::Result<(M, ManyOut<U>)>
-    where
-        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
-    {
-        let (instance_id, candidate_count) = {
-            let routing_instances = self.client.routing_instances();
-            let count = routing_instances.free_ids().len();
-            if count == 0 {
-                return Err(self.empty_free_pool_error(&routing_instances));
-            }
-            let counter = rand::rng().random::<u64>() as usize;
-            (routing_instances.free_ids()[counter % count], count)
-        };
-        tracing::info!(
-            router_mode = "random",
-            worker_id = instance_id,
-            candidate_count,
-            "Selected worker"
-        );
-
-        self.dispatch_selected(instance_id, request, None, prepare)
-            .await
-    }
-
-    /// Issue a request using power-of-two-choices: pick 2 random healthy workers,
-    /// route to the one with fewer in-flight requests.
-    pub async fn power_of_two_choices(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        self.power_of_two_choices_prepared(request, |_, _| Ok(()))
-            .await
-            .map(|(_, stream)| stream)
-    }
-
-    async fn power_of_two_choices_prepared<M, F>(
-        &self,
-        request: SingleIn<T>,
-        prepare: F,
-    ) -> anyhow::Result<(M, ManyOut<U>)>
-    where
-        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
-    {
+    /// Pick a free instance by `mode`. A selector that reads in-flight counts picks under
+    /// the admission lock, and the pick is booked before the lock is released.
+    fn select_by(&self, mode: RouterMode) -> anyhow::Result<SelectedInstance> {
+        let selector = self.selector(mode)?;
+        let routing_instances = self.client.routing_instances();
+        let candidates = routing_instances.free_ids();
+        if candidates.is_empty() {
+            return Err(self.empty_free_pool_error(&routing_instances));
+        }
+        if !selector.reads_active_requests() {
+            let instance_id = selector
+                .select_instance(candidates, &|_| 0, false)
+                .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+            return Ok(SelectedInstance {
+                instance_id,
+                candidate_count: candidates.len(),
+                load: None,
+                permit: None,
+            });
+        }
         let state = self.occupancy_state()?;
-        let instance_id = {
-            let routing_instances = self.client.routing_instances();
-            if routing_instances.free_ids().is_empty() {
-                return Err(self.empty_free_pool_error(&routing_instances));
-            }
-            p2c_select_from(state.as_ref(), routing_instances.free_ids())
-        };
-        state.increment(instance_id);
-        let permit = OccupancyPermit::new(state, instance_id);
-        self.dispatch_selected(instance_id, request, Some(permit), prepare)
+        let selection = state.select_and_reserve_with(candidates, |active_requests| {
+            selector
+                .select_instance(candidates, active_requests, false)
+                .ok_or_else(|| self.empty_free_pool_error(&routing_instances))
+        })?;
+        Ok(SelectedInstance {
+            instance_id: selection.worker_id(),
+            candidate_count: selection.candidate_count(),
+            load: Some(selection.load()),
+            permit: Some(OccupancyPermit::from_reservation(
+                selection.into_reservation(),
+            )),
+        })
+    }
+
+    /// Snapshot workers currently eligible for a new routing decision.
+    ///
+    /// Selection stays outside `PushRouter`; this is the discovery/admission
+    /// boundary used by routing hosts that own their policy lifecycle.
+    pub fn selectable_worker_ids(&self) -> anyhow::Result<Vec<u64>> {
+        self.with_selectable_worker_ids(<[u64]>::to_vec)
+    }
+
+    /// Borrow workers currently eligible for a new routing decision.
+    pub fn with_selectable_worker_ids<R>(
+        &self,
+        select: impl FnOnce(&[u64]) -> R,
+    ) -> anyhow::Result<R> {
+        let routing_instances = self.client.routing_instances();
+        if routing_instances.free_ids().is_empty() {
+            return Err(self.empty_free_pool_error(&routing_instances));
+        }
+        Ok(select(routing_instances.free_ids()))
+    }
+
+    /// Shared O(1) occupancy capability for load-aware routing hosts.
+    pub fn routing_occupancy_state(&self) -> Option<Arc<RoutingOccupancyState>> {
+        self.occupancy_state.clone()
+    }
+
+    /// Select a DeviceAware worker while leaving request-lifecycle cleanup to
+    /// the routing host. Request and device metadata is prepared before the
+    /// occupancy admission lock is acquired.
+    pub fn select_device_aware_and_reserve(
+        &self,
+        request: &T,
+        pinned_worker: Option<u64>,
+    ) -> anyhow::Result<DeviceAwareSelection> {
+        anyhow::ensure!(
+            self.router_mode == RouterMode::DeviceAwareWeighted,
+            "{:?} routing is not DeviceAwareWeighted",
+            self.router_mode
+        );
+
+        let state = self.occupancy_state()?;
+        if let Some(worker_id) = pinned_worker {
+            self.ensure_routable(worker_id)?;
+            let selection = self.device_aware_candidates(request, &[worker_id]);
+            let is_cpu = selection
+                .candidates
+                .first()
+                .is_some_and(|candidate| candidate.device == RouteDevice::Cpu);
+            let reservation = state.reserve(worker_id);
+            let load = reservation.load();
+            return Ok(DeviceAwareSelection {
+                worker_id,
+                candidate_count: 1,
+                load,
+                is_cpu,
+                embedding_cache_hit: selection.embedding_cache_hit,
+                request_cache_keys: selection.request_cache_keys,
+                reservation: Some(reservation),
+            });
+        }
+
+        let routing_instances = self.client.routing_instances();
+        let instance_ids = routing_instances.free_ids();
+        if instance_ids.is_empty() {
+            return Err(self.empty_free_pool_error(&routing_instances));
+        }
+        let selection = self.device_aware_candidates(request, instance_ids);
+        let (decision, counter) = state
+            .select_and_admit_device_aware(&selection.candidates, selection.context)
+            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+        let worker_id = decision.target.worker_id;
+        let is_cpu = selection.candidates.iter().any(|candidate| {
+            candidate.target.worker_id == worker_id && candidate.device == RouteDevice::Cpu
+        });
+        let reservation = counter
+            .map(|counter| OccupancyReservation::from_counter(state.clone(), worker_id, counter));
+
+        Ok(DeviceAwareSelection {
+            worker_id,
+            candidate_count: selection.candidates.len(),
+            load: state.load(worker_id),
+            is_cpu,
+            embedding_cache_hit: selection.embedding_cache_hit,
+            request_cache_keys: selection.request_cache_keys,
+            reservation,
+        })
+    }
+
+    /// Reject an exact target that local fault detection has removed from routing.
+    pub fn ensure_routable(&self, instance_id: u64) -> anyhow::Result<()> {
+        if self
+            .client
+            .routing_instances()
+            .routable_ids()
+            .contains(&instance_id)
+        {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "instance_id={instance_id} not found for endpoint {}",
+            self.client.endpoint.id()
+        )
+    }
+
+    fn ensure_discovered_for_dispatch(&self, instance_id: u64) -> anyhow::Result<()> {
+        if self.client.is_instance_live(instance_id) {
+            return Ok(());
+        }
+        Err(DynamoError::builder()
+            .error_type(ErrorType::CannotConnect)
+            .message(format!(
+                "instance_id={instance_id} not found for endpoint {}",
+                self.client.endpoint.id()
+            ))
+            .build()
+            .into())
+    }
+
+    /// Issue a request to the next instance in round-robin order.
+    pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        self.dispatch_by(RouterMode::RoundRobin, request).await
+    }
+
+    /// Issue a request to a random instance.
+    pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        self.dispatch_by(RouterMode::Random, request).await
+    }
+
+    /// Issue a request to the instance with the fewest requests in flight.
+    pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        self.dispatch_by(RouterMode::LeastLoaded, request).await
+    }
+
+    async fn dispatch_by(
+        &self,
+        mode: RouterMode,
+        request: SingleIn<T>,
+    ) -> anyhow::Result<ManyOut<U>> {
+        self.select_and_dispatch_by(mode, request, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    /// Pick an instance by `mode`, prepare the request for the instance that survives
+    /// transport resolution, then dispatch with normal fallback behavior.
+    async fn select_and_dispatch_by<M, F>(
+        &self,
+        mode: RouterMode,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        let selected = self.select_by(mode)?;
+        tracing::info!(
+            router_mode = mode.telemetry_label(),
+            worker_id = selected.instance_id,
+            candidate_count = selected.candidate_count,
+            load = selected.load,
+            "Selected worker"
+        );
+        self.dispatch_selected(selected.instance_id, request, selected.permit, prepare)
             .await
     }
 
@@ -820,29 +1086,103 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
-        // Fallback-enabled dispatch still honors a selected worker while it remains in
-        // discovery. Local inhibition only filters worker selection owned by this router;
-        // fallback is considered only if the selected worker disappears after this check.
-        if !self.client.instance_ids().contains(&instance_id) {
-            return Err(DynamoError::builder()
-                .error_type(ErrorType::CannotConnect)
-                .message(format!(
-                    "instance_id={instance_id} not found for endpoint {}",
-                    self.client.endpoint.id()
-                ))
-                .build()
-                .into());
-        }
-
-        tracing::info!(
-            router_mode = "direct",
-            worker_id = instance_id,
-            "Selected worker"
-        );
-
         let fallback = allowed_fallback
             .map(TransportFallback::Within)
             .unwrap_or(TransportFallback::Allow);
+        self.direct_prepared_with_fallback(instance_id, request, fallback, prepare)
+            .await
+    }
+
+    /// Dispatch a worker already selected by a routing host.
+    ///
+    /// `PushRouter` may still resolve transport fallback if the selected worker
+    /// disappears before dispatch. The callback receives that final worker so
+    /// the caller can retarget its own reservation and telemetry.
+    pub async fn dispatch_preselected_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        instance_id: u64,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        self.dispatch_preselected_with_fallback(
+            instance_id,
+            request,
+            TransportFallback::Allow,
+            prepare,
+        )
+        .await
+    }
+
+    async fn direct_prepared_with_fallback<M, F>(
+        &self,
+        instance_id: u64,
+        request: SingleIn<T>,
+        fallback: TransportFallback<'_>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        // Fallback resolution owns the unavailable-target decision. Allowing it
+        // to see a worker already absent from discovery preserves Direct's
+        // historical standalone fallback; `Deny` remains exact-target behavior.
+        let selected_is_discovered = self.client.is_instance_live(instance_id);
+        if !selected_is_discovered {
+            let fallback_is_available = self
+                .client
+                .routing_instances()
+                .free_ids()
+                .iter()
+                .copied()
+                .any(|candidate| {
+                    candidate != instance_id
+                        && match fallback {
+                            TransportFallback::Allow => true,
+                            TransportFallback::Deny => false,
+                            TransportFallback::Within(allowed) => allowed.contains(&candidate),
+                        }
+                });
+            if !fallback_is_available {
+                self.ensure_discovered_for_dispatch(instance_id)?;
+            }
+        }
+        let ((metadata, resolved_instance_id), response_stream) = self
+            .generate_with_fault_detection_prepared(
+                instance_id,
+                request,
+                fallback,
+                |request, resolved_instance_id| {
+                    prepare(request, resolved_instance_id)
+                        .map(|metadata| (metadata, resolved_instance_id))
+                },
+            )
+            .await?;
+        tracing::info!(
+            router_mode = self.router_mode.telemetry_label(),
+            worker_id = resolved_instance_id,
+            "Selected worker"
+        );
+        Ok((metadata, response_stream))
+    }
+
+    async fn dispatch_preselected_with_fallback<M, F>(
+        &self,
+        instance_id: u64,
+        request: SingleIn<T>,
+        fallback: TransportFallback<'_>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        // Fallback-enabled dispatch still honors a selected worker while it remains in
+        // discovery. Local inhibition only filters worker selection owned by this router;
+        // fallback is considered only if the selected worker disappears after this check.
+        self.ensure_discovered_for_dispatch(instance_id)?;
+
         self.generate_with_fault_detection_prepared(instance_id, request, fallback, prepare)
             .await
     }
@@ -858,6 +1198,29 @@ where
     ) -> anyhow::Result<ManyOut<U>> {
         self.generate_with_fault_detection(instance_id, request, TransportFallback::Deny)
             .await
+    }
+
+    /// Dispatch exactly to a worker whose KV selection step already performed
+    /// overload admission.
+    ///
+    /// Discovery and fault detection are still enforced. The shared client
+    /// overload state is not rechecked because admission may synchronously
+    /// publish this request's own load before dispatch begins.
+    pub async fn dispatch_kv_admitted(
+        &self,
+        request: SingleIn<T>,
+        instance_id: u64,
+    ) -> anyhow::Result<ManyOut<U>> {
+        if !self.router_mode.is_kv_routing() {
+            anyhow::bail!("admitted dispatch is only valid in KV routing mode");
+        }
+        self.generate_with_fault_detection_inner(
+            instance_id,
+            request,
+            TransportFallback::Deny,
+            OverloadCheck::AlreadyAdmitted,
+        )
+        .await
     }
 
     /// Select and book one worker, prepare the request for that exact worker,
@@ -894,12 +1257,6 @@ where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
         match self.router_mode {
-            RouterMode::Random => self.random_prepared(request, prepare).await,
-            RouterMode::RoundRobin => self.round_robin_prepared(request, prepare).await,
-            RouterMode::PowerOfTwoChoices => {
-                self.power_of_two_choices_prepared(request, prepare).await
-            }
-            RouterMode::LeastLoaded => self.least_loaded_prepared(request, prepare).await,
             RouterMode::DeviceAwareWeighted => {
                 self.device_aware_weighted_prepared(request, prepare).await
             }
@@ -907,6 +1264,7 @@ where
             RouterMode::Direct => anyhow::bail!(
                 "Direct routing should use direct_within_prepared instead of select_and_dispatch"
             ),
+            mode => self.select_and_dispatch_by(mode, request, prepare).await,
         }
     }
 
@@ -964,7 +1322,7 @@ where
     {
         let state = self.occupancy_state()?;
         let routing_instances = self.client.routing_instances();
-        let instance_ids = routing_instances.free_ids().to_vec();
+        let instance_ids = routing_instances.free_ids();
 
         if instance_ids.is_empty() {
             return Err(self.empty_free_pool_error(&routing_instances));
@@ -973,28 +1331,19 @@ where
         // Apply a unified policy for all endpoints.
         let endpoint_id = self.client.endpoint.id();
 
-        let selection =
-            self.device_aware_candidates(request.content(), state.as_ref(), &instance_ids);
+        let selection = self.device_aware_candidates(request.content(), instance_ids);
 
         // Only full cache hits bypass weighted accounting; partial hits still follow the
         // device-aware ratio because some image encoding remains for this request.
-        let instance_id = if selection.full_embedding_cache_hit {
-            state.select_exact_min(&selection.candidates).await
-        } else {
-            state
-                .select_exact_min_and_increment(&selection.candidates)
-                .await
-        }
-        .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
-        let permit = if selection.full_embedding_cache_hit {
-            None
-        } else {
-            Some(OccupancyPermit::new(state.clone(), instance_id))
-        };
-        let is_cpu = matches!(
-            selection.device_type_map.get(&instance_id),
-            Some(Some(DeviceType::Cpu))
-        );
+        let (decision, counter) = state
+            .select_and_admit_device_aware(&selection.candidates, selection.context)
+            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+        let instance_id = decision.target.worker_id;
+        let permit = counter
+            .map(|counter| OccupancyPermit::from_counter(state.clone(), instance_id, counter));
+        let is_cpu = selection.candidates.iter().any(|candidate| {
+            candidate.target.worker_id == instance_id && candidate.device == RouteDevice::Cpu
+        });
         tracing::info!(
             router_mode = "device-aware-weighted",
             worker_id = instance_id,
@@ -1011,18 +1360,20 @@ where
             .await
     }
 
-    fn device_aware_candidates(
-        &self,
-        request: &T,
-        state: &RoutingOccupancyState,
-        instance_ids: &[u64],
-    ) -> DeviceAwareCandidates {
+    fn device_aware_candidates(&self, request: &T, instance_ids: &[u64]) -> DeviceAwareCandidates {
         let device_type_map = self
             .client
             .instances()
             .iter()
-            .map(|instance| (instance.instance_id, instance.device_type.clone()))
-            .collect();
+            .map(|instance| {
+                let device = if matches!(instance.device_type, Some(DeviceType::Cpu)) {
+                    RouteDevice::Cpu
+                } else {
+                    RouteDevice::Accelerator
+                };
+                (instance.instance_id, device)
+            })
+            .collect::<HashMap<_, _>>();
         let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
@@ -1048,95 +1399,56 @@ where
             };
 
         let embedding_cache_hit = !cache_matched_candidates.is_empty();
+        let cache_hits = cache_matched_candidates
+            .into_iter()
+            .collect::<HashMap<_, _>>();
         let request_cache_key_count = request_cache_keys
             .iter()
             .collect::<std::collections::HashSet<_>>()
             .len();
-        let full_cache_candidates = cache_matched_candidates
+        let candidates = instance_ids
             .iter()
-            .filter_map(|(worker_id, hits)| {
-                (*hits >= request_cache_key_count).then_some(*worker_id)
+            .map(|worker_id| RouteCandidate {
+                target: RouteTarget::worker(*worker_id),
+                device: device_type_map.get(worker_id).copied().unwrap_or_default(),
+                cache_hits: cache_hits.get(worker_id).copied().unwrap_or_default(),
             })
             .collect::<Vec<_>>();
-        let full_embedding_cache_hit = !full_cache_candidates.is_empty();
-        let candidates = if full_embedding_cache_hit {
-            full_cache_candidates
-        } else {
-            device_aware_candidate_group(state, instance_ids, &device_type_map, cuda_to_cpu_ratio)
-        };
 
         DeviceAwareCandidates {
             candidates,
-            device_type_map,
+            context: RouteContext {
+                required_cache_hits: request_cache_key_count,
+                non_cpu_to_cpu_ratio: cuda_to_cpu_ratio,
+            },
             embedding_cache_hit,
-            full_embedding_cache_hit,
             request_cache_keys: request_cache_keys.len(),
         }
-    }
-
-    /// Issue a request to the instance with the fewest active connections.
-    pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        self.least_loaded_prepared(request, |_, _| Ok(()))
-            .await
-            .map(|(_, stream)| stream)
-    }
-
-    async fn least_loaded_prepared<M, F>(
-        &self,
-        request: SingleIn<T>,
-        prepare: F,
-    ) -> anyhow::Result<(M, ManyOut<U>)>
-    where
-        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
-    {
-        let state = self.occupancy_state()?;
-        let routing_instances = self.client.routing_instances();
-        let instance_ids = routing_instances.free_ids().to_vec();
-        let instance_id = state
-            .select_exact_min_and_increment(&instance_ids)
-            .await
-            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
-        let permit = OccupancyPermit::new(state.clone(), instance_id);
-        tracing::info!(
-            router_mode = "least-loaded",
-            worker_id = instance_id,
-            candidate_count = instance_ids.len(),
-            load = state.load(instance_id),
-            "Selected worker"
-        );
-
-        self.dispatch_selected(instance_id, request, Some(permit), prepare)
-            .await
     }
 
     /// Select the next worker according to the routing mode.
     /// Increments round-robin counter if applicable.
     /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
     pub fn select_next_worker(&self) -> Option<u64> {
-        let routing_instances = self.client.routing_instances();
-        let count = routing_instances.free_ids().len();
-        if count == 0 {
-            return None;
-        }
-
         match self.router_mode {
-            RouterMode::RoundRobin => {
-                let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
-                Some(routing_instances.free_ids()[counter % count])
-            }
-            RouterMode::Random => {
-                let counter = rand::rng().random::<u64>() as usize;
-                Some(routing_instances.free_ids()[counter % count])
-            }
-            RouterMode::PowerOfTwoChoices
-            | RouterMode::Direct
-            | RouterMode::LeastLoaded
-            | RouterMode::DeviceAwareWeighted => None,
             RouterMode::KV => {
                 panic!(
                     "select_next_worker should not be called for {:?} routing mode",
                     self.router_mode
                 )
+            }
+            RouterMode::Direct | RouterMode::DeviceAwareWeighted => None,
+            mode => {
+                let selector = self.selector(mode).ok()?;
+                if selector.reads_active_requests() {
+                    return None;
+                }
+                let routing_instances = self.client.routing_instances();
+                let instance_ids = routing_instances.free_ids();
+                if instance_ids.is_empty() {
+                    return None;
+                }
+                selector.select_instance(instance_ids, &|_| 0, false)
             }
         }
     }
@@ -1149,29 +1461,13 @@ where
     pub fn peek_next_worker(&self) -> Option<u64> {
         // Select among free (admission-eligible) workers — see select_next_worker
         // for the per-mode selection rationale.
-        let instance_ids = self.client.routing_instances().free_ids().to_vec();
-        let count = instance_ids.len();
-        if count == 0 {
+        let routing_instances = self.client.routing_instances();
+        let instance_ids = routing_instances.free_ids();
+        if instance_ids.is_empty() {
             return None;
         }
 
         match self.router_mode {
-            RouterMode::RoundRobin => {
-                // Just peek at the current counter value without incrementing
-                let counter = self.round_robin_counter.load(Ordering::Relaxed) as usize;
-                Some(instance_ids[counter % count])
-            }
-            RouterMode::Random => {
-                // For random, peeking implies a fresh random selection since it's stateless.
-                // Note: The caller must realize that select_next_worker() will pick a DIFFERENT random worker.
-                let counter = rand::rng().random::<u64>() as usize;
-                Some(instance_ids[counter % count])
-            }
-            RouterMode::LeastLoaded => self.occupancy_state.as_deref()?.peek_min(&instance_ids),
-            RouterMode::PowerOfTwoChoices => Some(p2c_select_from(
-                self.occupancy_state.as_deref()?,
-                &instance_ids,
-            )),
             RouterMode::DeviceAwareWeighted => {
                 let state = self.occupancy_state.as_deref()?;
                 let device_type_map: HashMap<u64, Option<DeviceType>> = self
@@ -1185,13 +1481,30 @@ where
                     .and_then(|value| value.parse::<usize>().ok())
                     .filter(|value| *value >= 1)
                     .unwrap_or(8);
-                let candidates = device_aware_candidate_group(
-                    state,
-                    &instance_ids,
-                    &device_type_map,
-                    cuda_to_cpu_ratio,
-                );
-                state.peek_min(&candidates)
+                let candidates = instance_ids
+                    .iter()
+                    .map(|worker_id| RouteCandidate {
+                        target: RouteTarget::worker(*worker_id),
+                        device: if matches!(
+                            device_type_map.get(worker_id),
+                            Some(Some(DeviceType::Cpu))
+                        ) {
+                            RouteDevice::Cpu
+                        } else {
+                            RouteDevice::Accelerator
+                        },
+                        cache_hits: 0,
+                    })
+                    .collect::<Vec<_>>();
+                state
+                    .peek_device_aware(
+                        &candidates,
+                        RouteContext {
+                            required_cache_hits: 0,
+                            non_cpu_to_cpu_ratio: cuda_to_cpu_ratio,
+                        },
+                    )
+                    .map(|decision| decision.target.worker_id)
             }
             RouterMode::Direct => None,
             RouterMode::KV => {
@@ -1200,7 +1513,25 @@ where
                     self.router_mode
                 )
             }
+            mode => {
+                let selector = self.selector(mode).ok()?;
+                if selector.reads_active_requests() {
+                    let state = self.occupancy_state.as_deref()?;
+                    selector.select_instance(instance_ids, &|id| state.load(id), true)
+                } else {
+                    selector.select_instance(instance_ids, &|_| 0, true)
+                }
+            }
         }
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn occupancy_for_test(&self, worker_id: u64) -> u64 {
+        self.occupancy_state
+            .as_deref()
+            .map(|state| state.load(worker_id))
+            .unwrap_or(0)
     }
 
     async fn select_exact_target(
@@ -1216,75 +1547,39 @@ where
                     self.client.endpoint.id()
                 ));
             }
-            let permit = match self.router_mode {
-                RouterMode::LeastLoaded
-                | RouterMode::PowerOfTwoChoices
-                | RouterMode::DeviceAwareWeighted => {
-                    let state = self.occupancy_state()?;
-                    state.increment(instance_id);
-                    Some(OccupancyPermit::new(state, instance_id))
-                }
-                RouterMode::RoundRobin
-                | RouterMode::Random
-                | RouterMode::Direct
-                | RouterMode::KV => None,
-            };
+            let permit = self
+                .occupancy_state
+                .clone()
+                .map(|state| OccupancyPermit::acquire(state, instance_id));
             return Ok((instance_id, permit));
         }
 
         match self.router_mode {
-            RouterMode::LeastLoaded
-            | RouterMode::PowerOfTwoChoices
-            | RouterMode::DeviceAwareWeighted => {
+            RouterMode::DeviceAwareWeighted => {
                 let state = self.occupancy_state()?;
                 let routing_instances = self.client.routing_instances();
-                let instance_ids = routing_instances.free_ids().to_vec();
+                let instance_ids = routing_instances.free_ids();
                 if instance_ids.is_empty() {
                     return Err(self.empty_free_pool_error(&routing_instances));
                 }
-
-                let instance_id = match self.router_mode {
-                    RouterMode::LeastLoaded => state
-                        .select_exact_min_and_increment(&instance_ids)
-                        .await
-                        .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?,
-                    RouterMode::PowerOfTwoChoices => {
-                        let instance_id = p2c_select_from(state.as_ref(), &instance_ids);
-                        state.increment(instance_id);
-                        instance_id
-                    }
-                    RouterMode::DeviceAwareWeighted => {
-                        let selection =
-                            self.device_aware_candidates(request, state.as_ref(), &instance_ids);
-                        let instance_id = if selection.full_embedding_cache_hit {
-                            state.select_exact_min(&selection.candidates).await
-                        } else {
-                            state
-                                .select_exact_min_and_increment(&selection.candidates)
-                                .await
-                        }
-                        .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
-                        let permit = (!selection.full_embedding_cache_hit)
-                            .then(|| OccupancyPermit::new(state, instance_id));
-                        return Ok((instance_id, permit));
-                    }
-                    _ => unreachable!(),
-                };
-                Ok((instance_id, Some(OccupancyPermit::new(state, instance_id))))
+                let selection = self.device_aware_candidates(request, instance_ids);
+                let (decision, counter) = state
+                    .select_and_admit_device_aware(&selection.candidates, selection.context)
+                    .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+                let instance_id = decision.target.worker_id;
+                let permit = counter
+                    .map(|counter| OccupancyPermit::from_counter(state, instance_id, counter));
+                Ok((instance_id, permit))
             }
-            RouterMode::RoundRobin | RouterMode::Random => self
-                .select_next_worker()
-                .map(|instance_id| (instance_id, None))
-                .ok_or_else(|| {
-                    let routing_instances = self.client.routing_instances();
-                    self.empty_free_pool_error(&routing_instances)
-                }),
             RouterMode::Direct => Err(anyhow::anyhow!(
                 "Worker ID required for exact dispatch in Direct routing mode"
             )),
             RouterMode::KV => Err(anyhow::anyhow!(
                 "select_and_dispatch_exact cannot select workers in KV routing mode"
             )),
+            mode => self
+                .select_by(mode)
+                .map(|selected| (selected.instance_id, selected.permit)),
         }
     }
 
@@ -1313,16 +1608,59 @@ where
         request: SingleIn<T>,
         fallback: TransportFallback<'_>,
     ) -> anyhow::Result<ManyOut<U>> {
-        self.generate_with_fault_detection_prepared(instance_id, request, fallback, |_, _| Ok(()))
-            .await
-            .map(|(_, stream)| stream)
+        self.generate_with_fault_detection_inner(
+            instance_id,
+            request,
+            fallback,
+            OverloadCheck::Required,
+        )
+        .await
+    }
+
+    async fn generate_with_fault_detection_inner(
+        &self,
+        instance_id: u64,
+        request: SingleIn<T>,
+        fallback: TransportFallback<'_>,
+        overload_check: OverloadCheck,
+    ) -> anyhow::Result<ManyOut<U>> {
+        self.generate_with_fault_detection_prepared_inner(
+            instance_id,
+            request,
+            fallback,
+            overload_check,
+            |_, _| Ok(()),
+        )
+        .await
+        .map(|(_, stream)| stream)
     }
 
     async fn generate_with_fault_detection_prepared<M, F>(
         &self,
         instance_id: u64,
+        request: SingleIn<T>,
+        fallback: TransportFallback<'_>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        self.generate_with_fault_detection_prepared_inner(
+            instance_id,
+            request,
+            fallback,
+            OverloadCheck::Required,
+            prepare,
+        )
+        .await
+    }
+
+    async fn generate_with_fault_detection_prepared_inner<M, F>(
+        &self,
+        instance_id: u64,
         mut request: SingleIn<T>,
         fallback: TransportFallback<'_>,
+        overload_check: OverloadCheck,
         prepare: F,
     ) -> anyhow::Result<(M, ManyOut<U>)>
     where
@@ -1330,23 +1668,61 @@ where
     {
         let route_start = Instant::now();
         let request_id = request.id().to_string();
+        let route_trace_context = get_route_trace_context(&request);
         let route_span = if matches!(self.router_mode, RouterMode::KV) {
             tracing::Span::none()
         } else {
             tracing::info_span!(
+                target: "request_span",
                 "router.route_request",
+                otel.kind = "client",
                 request_id = %request_id,
-                worker_id = instance_id,
+                worker_id = tracing::field::Empty,
                 router_mode = ?self.router_mode,
+                "request.attempt" = tracing::field::Empty,
+                "request.outcome" = tracing::field::Empty,
+                "migration.is_retry" = tracing::field::Empty,
+                "migration.reason" = tracing::field::Empty,
+                "migration.from_worker_id" = tracing::field::Empty,
+                "migration.tokens_completed" = tracing::field::Empty,
+                "cancellation.signal" = tracing::field::Empty,
+                "error.type" = tracing::field::Empty,
+                otel.status_code = tracing::field::Empty,
+                otel.status_description = tracing::field::Empty,
             )
         };
+        let (instance_id, address, transport_kind, instance) = match self
+            .resolve_transport(instance_id, fallback)
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
+                record_route_error(&route_span, error.as_ref());
+                return Err(error);
+            }
+        };
+        record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
+        if matches!(overload_check, OverloadCheck::Required)
+            && let Err(error) = self.check_workers_available(instance_id, &request_id)
+        {
+            record_route_error(&route_span, error.as_ref());
+            return Err(error);
+        }
 
-        let (instance_id, address, transport_kind, instance) =
-            self.resolve_transport(instance_id, fallback)?;
-        self.check_workers_available(instance_id, &request_id)?;
-
-        let metadata = prepare(&mut request, instance_id)?;
-        let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
+        let metadata = match prepare(&mut request, instance_id) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                record_route_error(&route_span, error.as_ref());
+                return Err(error);
+            }
+        };
+        let establish_timeout = self
+            .establish_timeout
+            .filter(|_| self.fault_detection_enabled);
+        let request = request.map(|req| {
+            AddressedRequest::with_instance(req, address, instance)
+                .with_establish_timeout(establish_timeout)
+        });
 
         STAGE_DURATION_SECONDS
             .with_label_values(&[STAGE_ROUTE])
@@ -1356,9 +1732,9 @@ where
         let stream = self
             .addressed
             .generate(request)
-            .instrument(route_span)
+            .instrument(route_span.clone())
             .await;
-        let stream = self.wrap_with_fault_detection(stream, instance_id)?;
+        let stream = self.wrap_with_fault_detection(stream, instance_id, route_span)?;
         Ok((metadata, stream))
     }
 
@@ -1398,7 +1774,7 @@ where
             "Selected worker is overloaded, please retry later".into(),
         );
         Err(DynamoError::builder()
-            .error_type(ErrorType::ResourceExhausted)
+            .error_type(ErrorType::WorkerOverloaded)
             .message("Selected worker is overloaded, please retry later")
             .cause(cause)
             .build()
@@ -1418,19 +1794,15 @@ where
         use crate::component::TransportType;
 
         let lookup = |id: u64| {
-            self.client
-                .instances()
-                .iter()
-                .find(|i| i.instance_id == id)
-                .map(|instance| {
-                    let (addr, kind) = match &instance.transport {
-                        TransportType::Tcp(tcp_endpoint) => {
-                            (tcp_endpoint.clone(), "transport.tcp.request")
-                        }
-                        TransportType::Nats(subject) => (subject.clone(), "transport.nats.request"),
-                    };
-                    (addr, kind, instance.clone())
-                })
+            self.client.instance_by_id(id).map(|instance| {
+                let (addr, kind) = match &instance.transport {
+                    TransportType::Tcp(tcp_endpoint) => {
+                        (tcp_endpoint.clone(), "transport.tcp.request")
+                    }
+                    TransportType::Nats(subject) => (subject.clone(), "transport.nats.request"),
+                };
+                (addr, kind, instance)
+            })
         };
 
         if let Some((addr, kind, inst)) = lookup(instance_id) {
@@ -1474,14 +1846,27 @@ where
                 })?;
                 Ok((id, addr, kind, inst))
             }
-            // TODO(https://github.com/ai-dynamo/dynamo/issues/12383): Distinguish
-            // no discoverable fallback from pool-wide overload and return the
-            // appropriate typed error for each case.
-            None => Err(anyhow::anyhow!(
-                "Instance {} not found and no other instances available for endpoint {}",
-                instance_id,
-                self.client.endpoint.id()
-            )),
+            // The selected instance vanished from discovery and no permitted
+            // fallback is free. Typed rather than a bare `anyhow!` so
+            // `error_type_from_chain` (route spans) and the frontend's status
+            // mapping see a real category instead of `unknown`/500.
+            //
+            // Uniformly `Unavailable`, not a pool-state split: reaching here
+            // means *this request's* worker is gone, which is a discovery fact,
+            // and `transport_resolution_precedes_stale_overload_check` requires
+            // that a vanished instance is never redressed as overload. Nor
+            // `CannotConnect`, which stays the signature of exact dispatch
+            // (`TransportFallback::Deny`) and must remain distinguishable from a
+            // fallback-enabled failure.
+            None => Err(DynamoError::builder()
+                .error_type(ErrorType::Unavailable)
+                .message(format!(
+                    "Instance {} not found and no other instances available for endpoint {}",
+                    instance_id,
+                    self.client.endpoint.id()
+                ))
+                .build()
+                .into()),
         }
     }
 
@@ -1493,27 +1878,44 @@ where
         &self,
         stream: anyhow::Result<ManyOut<U>>,
         instance_id: u64,
+        route_span: tracing::Span,
     ) -> anyhow::Result<ManyOut<U>> {
         let stream = match stream {
             Ok(stream) => stream,
             Err(err) => {
+                record_route_error(&route_span, err.as_ref());
                 if self.fault_detection_enabled {
-                    if is_inhibited(err.as_ref()) {
+                    // Overload first: a worker's refusal arrives as the cause
+                    // of a pre-stream `CannotConnect`, which on its own would
+                    // report a healthy worker down.
+                    if let Some(refusal) = worker_overload(err.as_ref()) {
+                        match refusal.error_type() {
+                            // Backpressure from one DP rank. The worker's other
+                            // ranks may still have room, which a lease on the
+                            // whole worker would withhold.
+                            ErrorType::WorkerRankOverloaded(dp_rank) => tracing::debug!(
+                                "Leaving instance {instance_id} routable: its overload is limited to DP rank {dp_rank}: {err}"
+                            ),
+                            _ if self.router_mode.is_direct_routing() => tracing::debug!(
+                                "Leaving instance {instance_id} routable in direct mode; its refusal goes back to the caller: {err}"
+                            ),
+                            // Backpressure: the worker said "my queue is full,
+                            // retry later". A bounded lease prevents an immediate
+                            // retry loop. Fresh monitor data clears the lease early.
+                            // Lease expiry permits a recovery probe when load events
+                            // remain unchanged. This is not a fault quarantine.
+                            _ => {
+                                tracing::debug!(
+                                    "Marking instance {instance_id} overloaded due to backpressure: {err}"
+                                );
+                                self.client.mark_overloaded_immediate(instance_id);
+                            }
+                        }
+                    } else if is_inhibited(err.as_ref()) {
                         tracing::debug!(
                             "Reporting instance {instance_id} down due to error: {err}"
                         );
                         self.client.report_instance_down(instance_id);
-                    } else if match_error_chain(err.as_ref(), &[ErrorType::ResourceExhausted], &[])
-                    {
-                        // Backpressure: worker said "my queue is full,
-                        // retry later". Mark overloaded so this FE skips it on
-                        // the next selection; the next ActiveLoad event from the
-                        // worker monitor overwrites the overloaded set from fresh
-                        // metrics. This is NOT report_instance_down (fault path).
-                        tracing::debug!(
-                            "Marking instance {instance_id} overloaded due to backpressure: {err}"
-                        );
-                        self.client.mark_overloaded_immediate(instance_id);
                     }
                 }
                 return Err(err);
@@ -1521,7 +1923,7 @@ where
         };
 
         if !self.fault_detection_enabled {
-            return Ok(stream);
+            return Ok(wrap_route_span(stream, route_span));
         }
 
         let engine_ctx = stream.context();
@@ -1574,7 +1976,10 @@ where
                 Box::pin(stream)
             };
 
-        Ok(ResponseStream::new(stream, engine_ctx))
+        Ok(wrap_route_span(
+            ResponseStream::new(stream, engine_ctx),
+            route_span,
+        ))
     }
 }
 
@@ -1586,19 +1991,16 @@ where
 {
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
         match self.router_mode {
-            RouterMode::Random => self.random(request).await,
-            RouterMode::RoundRobin => self.round_robin(request).await,
-            RouterMode::PowerOfTwoChoices => self.power_of_two_choices(request).await,
             RouterMode::KV => {
                 anyhow::bail!("KV routing should not call generate on PushRouter");
             }
             RouterMode::Direct => {
                 anyhow::bail!(
-                    "Direct routing should not call generate on PushRouter directly; use DirectRoutingRouter wrapper"
+                    "Direct routing should not call generate on PushRouter directly; use RoutingHost"
                 );
             }
-            RouterMode::LeastLoaded => self.least_loaded(request).await,
             RouterMode::DeviceAwareWeighted => self.device_aware_weighted(request).await,
+            mode => self.dispatch_by(mode, request).await,
         }
     }
 }
@@ -1616,16 +2018,41 @@ where
     ) -> anyhow::Result<ManyOut<U>> {
         let route_start = Instant::now();
         let request_id = input.context().id().to_string();
+        let route_trace_context = get_route_trace_context(&input);
         let route_span = tracing::info_span!(
+            target: "request_span",
             "router.route_request_bidirectional",
+            otel.kind = "client",
             request_id = %request_id,
-            worker_id = instance_id,
+            worker_id = tracing::field::Empty,
             router_mode = ?self.router_mode,
+            "request.attempt" = tracing::field::Empty,
+            "request.outcome" = tracing::field::Empty,
+            "migration.is_retry" = tracing::field::Empty,
+            "migration.reason" = tracing::field::Empty,
+            "migration.from_worker_id" = tracing::field::Empty,
+            "migration.tokens_completed" = tracing::field::Empty,
+            "cancellation.signal" = tracing::field::Empty,
+            "error.type" = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+            otel.status_description = tracing::field::Empty,
         );
 
-        let (instance_id, address, transport_kind, instance) =
-            self.resolve_transport(instance_id, TransportFallback::Allow)?;
-        self.check_workers_available(instance_id, &request_id)?;
+        let (instance_id, address, transport_kind, instance) = match self
+            .resolve_transport(instance_id, TransportFallback::Allow)
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
+                record_route_error(&route_span, error.as_ref());
+                return Err(error);
+            }
+        };
+        record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
+        if let Err(error) = self.check_workers_available(instance_id, &request_id) {
+            record_route_error(&route_span, error.as_ref());
+            return Err(error);
+        }
 
         STAGE_DURATION_SECONDS
             .with_label_values(&[STAGE_ROUTE])
@@ -1635,9 +2062,9 @@ where
         let stream: anyhow::Result<ManyOut<U>> = self
             .addressed
             .generate_bidirectional(instance, address, input)
-            .instrument(route_span)
+            .instrument(route_span.clone())
             .await;
-        self.wrap_with_fault_detection(stream, instance_id)
+        self.wrap_with_fault_detection(stream, instance_id, route_span)
     }
 }
 
@@ -1648,8 +2075,7 @@ where
 /// unary impl.
 ///
 /// **Reserve-before-observe rationale.** The router-mode strategies
-/// (`RoundRobin`, `Random`, `PowerOfTwoChoices`, `LeastLoaded`,
-/// `DeviceAwareWeighted`) don't depend on frame contents, so selection
+/// (`RoundRobin`, `Random`, `LeastLoaded`, `DeviceAwareWeighted`) don't depend on frame contents, so selection
 /// runs immediately and connection setup proceeds in parallel with the
 /// client producing its first frame. A client that connects but never
 /// sends one still releases the slot via the response-stream-drop path;
@@ -1667,7 +2093,7 @@ where
             }
             RouterMode::Direct => {
                 anyhow::bail!(
-                    "Direct routing should not call generate on PushRouter directly; use DirectRoutingRouter wrapper"
+                    "Direct routing should not call generate on PushRouter directly; use RoutingHost"
                 );
             }
             // These modes drive `select_next_worker()` to `None` — they rely on
@@ -1695,30 +2121,38 @@ where
     }
 }
 
-struct OccupancyTrackedStream<U: Data> {
+struct OccupancyTrackedStream<U: Data + MaybeError> {
     inner: ManyOut<U>,
-    state: Arc<RoutingOccupancyState>,
-    instance_id: u64,
-    released: bool,
+    reservation: Option<OccupancyReservation>,
 }
 
-impl<U: Data> Drop for OccupancyTrackedStream<U> {
-    fn drop(&mut self) {
-        if !self.released {
-            self.state.decrement(self.instance_id);
-        }
+impl<U: Data + MaybeError> OccupancyTrackedStream<U> {
+    fn release(&mut self) {
+        drop(self.reservation.take());
     }
 }
 
-impl<U: Data> std::fmt::Debug for OccupancyTrackedStream<U> {
+impl<U: Data + MaybeError> Drop for OccupancyTrackedStream<U> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+impl<U: Data + MaybeError> std::fmt::Debug for OccupancyTrackedStream<U> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OccupancyTrackedStream")
-            .field("instance_id", &self.instance_id)
+            .field(
+                "instance_id",
+                &self
+                    .reservation
+                    .as_ref()
+                    .map(OccupancyReservation::worker_id),
+            )
             .finish()
     }
 }
 
-impl<U: Data> Stream for OccupancyTrackedStream<U> {
+impl<U: Data + MaybeError> Stream for OccupancyTrackedStream<U> {
     type Item = U;
 
     fn poll_next(
@@ -1726,25 +2160,28 @@ impl<U: Data> Stream for OccupancyTrackedStream<U> {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         let poll = self.inner.as_mut().poll_next(cx);
-        if matches!(poll, Poll::Ready(None)) && !self.released {
-            self.state.decrement(self.instance_id);
-            self.released = true;
+        if matches!(&poll, Poll::Ready(None))
+            || matches!(&poll, Poll::Ready(Some(item)) if item.err().is_some())
+        {
+            self.release();
         }
         poll
     }
 }
 
-impl<U: Data> AsyncEngineContextProvider for OccupancyTrackedStream<U> {
+impl<U: Data + MaybeError> AsyncEngineContextProvider for OccupancyTrackedStream<U> {
     fn context(&self) -> Arc<dyn AsyncEngineContext> {
         self.inner.context()
     }
 }
 
-impl<U: Data> crate::engine::AsyncEngineStream<U> for OccupancyTrackedStream<U> {}
+impl<U: Data + MaybeError> crate::engine::AsyncEngineStream<U> for OccupancyTrackedStream<U> {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use crate::{
         DistributedRuntime, Runtime,
         distributed::DistributedConfig,
@@ -1752,9 +2189,79 @@ mod tests {
         pipeline::{
             RequestStream, ResponseStream,
             context::{Context, Controller},
+            network::egress::route_span,
         },
     };
     use serde::{Deserialize, Serialize};
+
+    /// A stand-in for the router-mode plugins, which own and test the real algorithms. It
+    /// rotates through the instances, or takes the least loaded (first on ties) when it reads
+    /// load, so these tests exercise transport, occupancy and fallback.
+    struct TestSelector {
+        reads_load: bool,
+        cursor: AtomicUsize,
+    }
+
+    impl TestSelector {
+        fn new(reads_load: bool) -> Self {
+            Self {
+                reads_load,
+                cursor: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl InstanceSelector for TestSelector {
+        fn reads_active_requests(&self) -> bool {
+            self.reads_load
+        }
+
+        fn select_instance(
+            &self,
+            instance_ids: &[u64],
+            active_requests: &dyn Fn(u64) -> u64,
+            preview: bool,
+        ) -> Option<u64> {
+            if self.reads_load {
+                return instance_ids
+                    .iter()
+                    .copied()
+                    .min_by_key(|id| active_requests(*id));
+            }
+            let cursor = if preview {
+                self.cursor.load(Ordering::Relaxed)
+            } else {
+                self.cursor.fetch_add(1, Ordering::Relaxed)
+            };
+            instance_ids.get(cursor % instance_ids.len()).copied()
+        }
+    }
+
+    fn test_selectors() -> ModeSelectors {
+        Arc::new(|mode| {
+            mode.picks_with_selector().then(|| {
+                Arc::new(TestSelector::new(mode.requires_occupancy())) as Arc<dyn InstanceSelector>
+            })
+        })
+    }
+
+    impl<T, U> PushRouter<T, U>
+    where
+        T: Data + Serialize,
+        U: Data + for<'de> Deserialize<'de> + MaybeError,
+    {
+        async fn for_test(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
+            Self::from_client_with_options(
+                client,
+                router_mode,
+                PushRouterOptions {
+                    selectors: Some(test_selectors()),
+                    ..PushRouterOptions::default()
+                },
+            )
+            .await
+        }
+    }
 
     #[derive(Clone, Debug, Deserialize, Serialize)]
     struct TestResponse {
@@ -1793,6 +2300,20 @@ mod tests {
         );
     }
 
+    /// The no-permitted-fallback path must carry a typed `Unavailable`, not a
+    /// bare `anyhow!`. Asserted through `error_type_from_chain` because that is
+    /// what route spans and the frontend's 503 mapping actually call: an
+    /// untyped error classifies as `Unknown` there and is exported as
+    /// `error.type=unknown` / HTTP 500.
+    fn assert_unavailable(error: &anyhow::Error) {
+        assert_eq!(
+            route_span::error_type_from_chain(error.as_ref()),
+            ErrorType::Unavailable,
+            "no-permitted-fallback failure must be typed Unavailable, got: {error}"
+        );
+        assert_not_cannot_connect(error);
+    }
+
     struct StaticMultimodalCacheIndex {
         worker_id: u64,
     }
@@ -1806,54 +2327,60 @@ mod tests {
     }
 
     #[test]
-    fn p2c_selects_lower_load_worker() {
-        let state = RoutingOccupancyState::default();
-        for _ in 0..10 {
-            state.increment(1);
-        }
-        state.increment(2);
-
-        // With only two workers, p2c_select_from must pick both and choose id=2 (lower load).
-        let result = p2c_select_from(&state, &[1, 2]);
-        assert_eq!(result, 2);
+    fn router_mode_telemetry_labels_are_stable() {
+        assert_eq!(RouterMode::RoundRobin.telemetry_label(), "round-robin");
+        assert_eq!(RouterMode::Random.telemetry_label(), "random");
+        assert_eq!(
+            RouterMode::PowerOfTwoChoices.telemetry_label(),
+            "power-of-two-choices"
+        );
+        assert_eq!(RouterMode::KV.telemetry_label(), "kv");
+        assert_eq!(RouterMode::Direct.telemetry_label(), "direct");
+        assert_eq!(RouterMode::LeastLoaded.telemetry_label(), "least-loaded");
+        assert_eq!(
+            RouterMode::DeviceAwareWeighted.telemetry_label(),
+            "device-aware-weighted"
+        );
     }
 
     #[test]
-    fn p2c_selects_single_worker() {
-        let state = RoutingOccupancyState::default();
-        assert_eq!(p2c_select_from(&state, &[42]), 42);
-    }
-
-    #[test]
-    fn p2c_treats_missing_counts_as_zero() {
-        let state = RoutingOccupancyState::default();
-        for _ in 0..5 {
-            state.increment(1);
-        }
-        // Worker 2 has no entry — should be treated as 0, so it wins.
-        let result = p2c_select_from(&state, &[1, 2]);
-        assert_eq!(result, 2);
-    }
-
-    #[test]
-    fn p2c_returns_valid_worker_on_tie() {
-        let state = RoutingOccupancyState::default();
-        for _ in 0..3 {
-            state.increment(1);
-            state.increment(2);
-        }
-
-        for _ in 0..100 {
-            let result = p2c_select_from(&state, &[1, 2]);
-            assert!(result == 1 || result == 2);
-        }
+    fn selectors_resolve_once_per_mode_and_are_required_for_picking_modes() {
+        let modes = |resolved: Vec<(RouterMode, Arc<dyn InstanceSelector>)>| {
+            resolved
+                .into_iter()
+                .map(|(mode, _)| mode)
+                .collect::<Vec<_>>()
+        };
+        let selectors = test_selectors();
+        assert_eq!(
+            modes(resolve_selectors(RouterMode::KV, Some(&selectors)).unwrap()),
+            [RouterMode::RoundRobin, RouterMode::Random]
+        );
+        assert_eq!(
+            modes(resolve_selectors(RouterMode::RoundRobin, Some(&selectors)).unwrap()),
+            [RouterMode::RoundRobin, RouterMode::Random]
+        );
+        assert_eq!(
+            modes(resolve_selectors(RouterMode::LeastLoaded, Some(&selectors)).unwrap()),
+            [
+                RouterMode::LeastLoaded,
+                RouterMode::RoundRobin,
+                RouterMode::Random
+            ]
+        );
+        assert!(
+            resolve_selectors(RouterMode::Direct, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(resolve_selectors(RouterMode::RoundRobin, None).is_err());
     }
 
     #[test]
     fn occupancy_permit_decrements_before_stream_creation() {
         let state = Arc::new(RoutingOccupancyState::default());
-        state.increment(42);
-        let permit = OccupancyPermit::new(state.clone(), 42);
+        let counter = state.increment(42);
+        let permit = OccupancyPermit::from_counter(state.clone(), 42, counter);
         assert_eq!(state.load(42), 1);
         drop(permit);
         assert_eq!(state.load(42), 0);
@@ -1862,11 +2389,11 @@ mod tests {
     #[test]
     fn occupancy_tracked_stream_decrements_on_drop() {
         let state = Arc::new(RoutingOccupancyState::default());
-        state.increment(7);
-        let permit = OccupancyPermit::new(state.clone(), 7);
+        let counter = state.increment(7);
+        let permit = OccupancyPermit::from_counter(state.clone(), 7, counter);
         let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
         let stream = permit.into_tracked_stream(ResponseStream::new(
-            Box::pin(tokio_stream::iter(vec![1u64])),
+            Box::pin(tokio_stream::iter(vec![TestResponse { error: None }])),
             ctx,
         ));
         assert_eq!(state.load(7), 1);
@@ -1877,30 +2404,315 @@ mod tests {
     #[tokio::test]
     async fn occupancy_tracked_stream_decrements_on_completion() {
         let state = Arc::new(RoutingOccupancyState::default());
-        state.increment(7);
-        let permit = OccupancyPermit::new(state.clone(), 7);
+        let counter = state.increment(7);
+        let permit = OccupancyPermit::from_counter(state.clone(), 7, counter);
         let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
         let mut stream = permit.into_tracked_stream(ResponseStream::new(
-            Box::pin(tokio_stream::iter(vec![1u64])),
+            Box::pin(tokio_stream::iter(vec![TestResponse { error: None }])),
             ctx,
         ));
 
-        assert_eq!(stream.next().await, Some(1));
+        assert!(stream.next().await.unwrap().err().is_none());
         assert_eq!(state.load(7), 1);
-        assert_eq!(stream.next().await, None);
+        assert!(stream.next().await.is_none());
         assert_eq!(state.load(7), 0);
         drop(stream);
         assert_eq!(state.load(7), 0, "drop must not release twice after EOF");
     }
 
+    #[tokio::test]
+    async fn occupancy_tracked_stream_releases_before_yielding_error() {
+        let state = Arc::new(RoutingOccupancyState::default());
+        let counter = state.increment(7);
+        let permit = OccupancyPermit::from_counter(state.clone(), 7, counter);
+        let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
+        let error = DynamoError::builder()
+            .error_type(ErrorType::WorkerOverloaded)
+            .message("worker queue full")
+            .build();
+        let mut stream = permit.into_tracked_stream(ResponseStream::new(
+            Box::pin(tokio_stream::iter(vec![TestResponse {
+                error: Some(error),
+            }])),
+            ctx,
+        ));
+
+        let response = stream.next().await.expect("error response");
+        assert!(response.err().is_some());
+        assert_eq!(
+            state.load(7),
+            0,
+            "occupancy must be released before retry observes the error"
+        );
+    }
+
     #[test]
-    fn p2c_lifecycle_tracks_inflight_counts_with_shared_tracker() {
+    fn same_id_readd_keeps_existing_permit_accounting() {
+        let state = Arc::new(RoutingOccupancyState::default());
+        state.retain(&[7]);
+        let old_counter = state.increment(7);
+        let old_permit = OccupancyPermit::from_counter(state.clone(), 7, old_counter);
+
+        state.retain(&[]);
+        assert_eq!(state.load(7), 1);
+        state.retain(&[7]);
+        let new_permit = OccupancyPermit::acquire(state.clone(), 7);
+        assert_eq!(state.load(7), 2);
+
+        drop(old_permit);
+        assert_eq!(
+            state.load(7),
+            1,
+            "re-added worker must retain the still-live request"
+        );
+        drop(new_permit);
+        assert_eq!(state.load(7), 0);
+    }
+
+    /// A mid-generation stream end means the worker dropped the request, so it
+    /// must quarantine — otherwise a migration retry can reselect the same
+    /// worker before discovery removal catches up.
+    ///
+    /// This pins `is_inhibited` against the migration layer's migratable set:
+    /// a worker fault that is migratable must also inhibit, or migration
+    /// bounces off the same dead worker.
+    #[test]
+    fn stream_incomplete_quarantines_the_worker() {
+        let err = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::StreamIncomplete))
+            .message("stream ended before generation completed")
+            .build();
+        assert!(
+            is_inhibited(&err),
+            "StreamIncomplete must inhibit; it is migratable, so leaving it out \
+             lets a retry reselect the failed worker"
+        );
+
+        let cancelled = DynamoError::builder()
+            .error_type(ErrorType::Cancelled)
+            .message("client went away")
+            .build();
+        assert!(
+            !is_inhibited(&cancelled),
+            "client cancellation is not a worker fault"
+        );
+    }
+
+    #[test]
+    fn worker_unavailable_quarantines_the_worker() {
+        let err = DynamoError::builder()
+            .error_type(ErrorType::WorkerUnavailable)
+            .message("Server unavailable: unknown endpoint a/generate")
+            .build();
+        assert!(is_inhibited(&err));
+    }
+
+    /// A worker's admission refusal as the gate raises it, in process: for
+    /// the whole worker, or for DP rank `dp_rank` alone.
+    fn refusal(dp_rank: Option<u32>) -> DynamoError {
+        DynamoError::builder()
+            .error_type(
+                dp_rank.map_or(ErrorType::WorkerOverloaded, ErrorType::WorkerRankOverloaded),
+            )
+            .message("Server overloaded: worker at capacity")
+            .build()
+    }
+
+    /// The same refusal as the request plane delivers it: carried as JSON in
+    /// the response prologue, then made the cause of a pre-stream
+    /// `CannotConnect`.
+    fn admission_refusal(dp_rank: Option<u32>) -> DynamoError {
+        use crate::pipeline::network::{ResponseStreamPrologue, StreamPrologueError};
+
+        let prologue = ResponseStreamPrologue {
+            error: Some("Server overloaded: worker at capacity".to_string()),
+            typed_error: Some(refusal(dp_rank)),
+        };
+        let delivered: ResponseStreamPrologue =
+            serde_json::from_slice(&serde_json::to_vec(&prologue).unwrap()).unwrap();
+        crate::pipeline::network::egress::addressed_router::pre_stream_failure_error(
+            StreamPrologueError::new(
+                "Server overloaded: worker at capacity",
+                delivered
+                    .typed_error
+                    .expect("the prologue keeps the typed refusal"),
+            ),
+        )
+    }
+
+    /// The overload is found through the `CannotConnect` that wraps it — by
+    /// its reason, since the wire decodes its legacy type as the pool-wide
+    /// `ResourceExhausted` — and it never inhibits the worker, whether it
+    /// applies to the whole worker or names one DP rank, which it keeps.
+    /// Pool-wide exhaustion is not a worker's refusal, and a `CannotConnect`
+    /// without one is still a connection fault.
+    #[test]
+    fn a_wrapped_overload_is_backpressure_not_a_fault() {
+        let delivered = admission_refusal(None);
+        assert_eq!(
+            delivered.error_type(),
+            ErrorType::CannotConnect,
+            "the outer type is unchanged"
+        );
+        let cause = std::error::Error::source(&delivered)
+            .and_then(|source| source.downcast_ref::<DynamoError>())
+            .expect("the worker's refusal is the cause");
+        assert_eq!(cause.error_type(), ErrorType::ResourceExhausted);
+        assert_eq!(cause.reason().as_str(), WORKER_OVERLOADED_REASON);
+        assert!(is_worker_overloaded(&delivered));
+        assert!(!is_inhibited(&delivered));
+
+        let rank = admission_refusal(Some(4));
+        assert_eq!(rank.error_type(), ErrorType::CannotConnect);
+        assert!(!is_inhibited(&rank));
+        assert_eq!(
+            worker_overload(&rank).unwrap().error_type(),
+            ErrorType::WorkerRankOverloaded(4)
+        );
+
+        let local = refusal(None);
+        assert_eq!(local.reason().as_str(), WORKER_OVERLOADED_REASON);
+        assert!(is_worker_overloaded(&local));
+        assert!(!is_inhibited(&local));
+
+        let pool_exhausted = DynamoError::builder()
+            .error_type(ErrorType::ResourceExhausted)
+            .message("All workers are busy, please retry later")
+            .build();
+        assert!(!is_worker_overloaded(&pool_exhausted));
+
+        let connection_failure = DynamoError::builder()
+            .error_type(ErrorType::CannotConnect)
+            .message("connection refused")
+            .build();
+        assert!(!is_worker_overloaded(&connection_failure));
+        assert!(is_inhibited(&connection_failure));
+    }
+
+    /// Through the router's own fault detection, on one client: a refusal
+    /// that names one DP rank leaves the worker selectable for its other work,
+    /// while a whole-worker refusal — as an older worker's, which names none,
+    /// also is — marks it overloaded, except in direct mode. Time is held still
+    /// throughout, so no lease can lapse between a refusal and the check after
+    /// it. Neither reports the worker down; a real connection failure still does.
+    #[tokio::test]
+    async fn fault_detection_marks_only_a_whole_worker_refusal_overloaded_and_never_down() {
+        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_admission_refusal_fault_detection".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+        assert!(poll_until(|| client.instance_ids_avail().contains(&instance_id)).await);
+        let router =
+            PushRouter::<u64, TestResponse>::for_test(client.clone(), RouterMode::RoundRobin)
+                .await
+                .unwrap();
+        let direct =
+            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::Direct)
+                .await
+                .unwrap();
+
+        let refuse = |router: &PushRouter<u64, TestResponse>, dp_rank: Option<u32>| {
+            let error = router
+                .wrap_with_fault_detection(
+                    Err(admission_refusal(dp_rank).into()),
+                    instance_id,
+                    tracing::Span::none(),
+                )
+                .expect_err("the refusal propagates");
+            assert!(
+                is_worker_overloaded(error.as_ref()),
+                "the overload survives for the frontend to map"
+            );
+        };
+        let overloaded = || {
+            client
+                .overloaded_instance_ids()
+                .is_some_and(|overloaded| overloaded.contains(&instance_id))
+        };
+
+        tokio::time::pause();
+        refuse(&direct, None);
+        assert!(!overloaded(), "a refusal in direct mode marks nothing");
+        refuse(&router, Some(4));
+        assert!(!overloaded(), "a refusal for one rank marks nothing");
+        assert!(
+            router
+                .check_workers_available(instance_id, "sibling")
+                .is_ok(),
+            "so the same router still dispatches the worker's other work"
+        );
+        refuse(&router, None);
+        assert!(overloaded(), "a whole-worker refusal marks it overloaded");
+        assert!(
+            router.check_workers_available(instance_id, "next").is_err(),
+            "so the same router holds new work for it back"
+        );
+        tokio::time::resume();
+        assert!(
+            client.instance_ids_avail().contains(&instance_id),
+            "a refusing worker is never reported down"
+        );
+
+        let connection_failure = DynamoError::builder()
+            .error_type(ErrorType::CannotConnect)
+            .message("connection refused")
+            .build();
+        let _ = router.wrap_with_fault_detection(
+            Err(connection_failure.into()),
+            instance_id,
+            tracing::Span::none(),
+        );
+        assert!(
+            !client.instance_ids_avail().contains(&instance_id),
+            "a real connection failure still reports the worker down"
+        );
+
+        rt.shutdown();
+    }
+
+    #[test]
+    fn pre_stream_invalid_request_does_not_quarantine_healthy_worker() {
+        use crate::pipeline::network::{
+            StreamPrologueError, egress::addressed_router::pre_stream_failure_error,
+        };
+
+        for (error_type, is_worker_fault) in [
+            (ErrorType::InvalidRequest, false),
+            (ErrorType::InvalidArgument, false),
+            (ErrorType::Backend(BackendError::InvalidArgument), false),
+            (ErrorType::Conflict, false),
+            (ErrorType::CannotConnect, true),
+            (ErrorType::Unavailable, true),
+        ] {
+            let rejection = DynamoError::builder()
+                .error_type(error_type)
+                .message("native request failed")
+                .build();
+            let error =
+                pre_stream_failure_error(StreamPrologueError::new("Generate Error", rejection));
+            assert_eq!(is_inhibited(&error), is_worker_fault, "{error_type:?}");
+        }
+    }
+
+    #[test]
+    fn occupancy_permits_track_inflight_counts_with_shared_tracker() {
         let state = Arc::new(RoutingOccupancyState::default());
         let mut permits = Vec::new();
-        for _ in 0..5 {
-            let selected = p2c_select_from(&state, &[1, 2]);
-            state.increment(selected);
-            permits.push(OccupancyPermit::new(state.clone(), selected));
+        for selected in [1, 2, 1, 2, 1] {
+            permits.push(OccupancyPermit::acquire(state.clone(), selected));
         }
 
         let total = state.load(1) + state.load(2);
@@ -1911,44 +2723,25 @@ mod tests {
         assert_eq!(total, 0, "All guards dropped, counts should be 0");
     }
 
-    #[test]
-    fn p2c_never_selects_dominated_worker() {
-        let state = RoutingOccupancyState::default();
-        for _ in 0..100 {
-            state.increment(3);
-        }
-
-        let mut selected = [0u32; 3];
-        for _ in 0..1000 {
-            let result = p2c_select_from(&state, &[1, 2, 3]);
-            match result {
-                1 => selected[0] += 1,
-                2 => selected[1] += 1,
-                3 => selected[2] += 1,
-                _ => panic!("unexpected worker id"),
-            }
-        }
-        assert_eq!(
-            selected[2], 0,
-            "Worker 3 (load=100) should never be selected against load=0 workers, but got {} times",
-            selected[2]
-        );
-    }
-
     #[tokio::test]
-    async fn least_loaded_selects_exact_min_and_tracks_counts() {
+    async fn load_reading_selection_books_its_pick_until_the_permit_drops() {
         let state = Arc::new(RoutingOccupancyState::default());
         state.increment(1);
         state.increment(1);
         state.increment(2);
 
-        let selected = state
-            .select_exact_min_and_increment(&[1, 2, 3])
-            .await
+        let selector = TestSelector::new(true);
+        let selection = state
+            .select_and_reserve_with(&[1, 2, 3], |active_requests| {
+                selector
+                    .select_instance(&[1, 2, 3], active_requests, false)
+                    .ok_or(())
+            })
             .unwrap();
+        let selected = selection.worker_id();
         assert_eq!(selected, 3);
 
-        let permit = OccupancyPermit::new(state.clone(), selected);
+        let permit = OccupancyPermit::from_reservation(selection.into_reservation());
         assert_eq!(state.load(selected), 1);
         drop(permit);
         assert_eq!(state.load(selected), 0);
@@ -1965,7 +2758,7 @@ mod tests {
         let endpoint = component.endpoint("test_endpoint".to_string());
         let client = endpoint.client().await.unwrap();
 
-        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+        let router = PushRouter::<u64, TestResponse>::for_test(client, RouterMode::RoundRobin)
             .await
             .unwrap();
 
@@ -2053,14 +2846,10 @@ mod tests {
         let ns = drt.namespace("test_bidi_load_aware".to_string()).unwrap();
         let component = ns.component("test_component".to_string()).unwrap();
 
-        for mode in [
-            RouterMode::PowerOfTwoChoices,
-            RouterMode::LeastLoaded,
-            RouterMode::DeviceAwareWeighted,
-        ] {
+        for mode in [RouterMode::LeastLoaded, RouterMode::DeviceAwareWeighted] {
             let endpoint = component.endpoint("test_endpoint".to_string());
             let client = endpoint.client().await.unwrap();
-            let router = PushRouter::<u64, TestResponse>::from_client(client, mode)
+            let router = PushRouter::<u64, TestResponse>::for_test(client, mode)
                 .await
                 .unwrap();
 
@@ -2097,7 +2886,7 @@ mod tests {
         endpoint.register_endpoint_instance().await.unwrap();
         client.wait_for_instances().await.unwrap();
 
-        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::LeastLoaded)
+        let router = PushRouter::<u64, TestResponse>::for_test(client, RouterMode::LeastLoaded)
             .await
             .unwrap();
 
@@ -2127,7 +2916,7 @@ mod tests {
         endpoint.register_endpoint_instance().await.unwrap();
         let worker_id = client.wait_for_instances().await.unwrap()[0].id();
 
-        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::LeastLoaded)
+        let router = PushRouter::<u64, TestResponse>::for_test(client, RouterMode::LeastLoaded)
             .await
             .unwrap();
         let state = router.occupancy_state.clone().unwrap();
@@ -2162,7 +2951,7 @@ mod tests {
         let worker_id = client.wait_for_instances().await.unwrap()[0].id();
 
         let router =
-            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::LeastLoaded)
+            PushRouter::<u64, TestResponse>::for_test(client.clone(), RouterMode::LeastLoaded)
                 .await
                 .unwrap();
         let state = router.occupancy_state.clone().unwrap();
@@ -2198,7 +2987,7 @@ mod tests {
         let stale_id = 99999;
         client.override_instance_avail(vec![stale_id]);
         client.set_overloaded_instances(&[stale_id]);
-        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+        let router = PushRouter::<u64, TestResponse>::for_test(client, RouterMode::RoundRobin)
             .await
             .unwrap();
 
@@ -2260,7 +3049,7 @@ mod tests {
         );
 
         client.set_overloaded_instances(&[worker_id]);
-        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+        let router = PushRouter::<u64, TestResponse>::for_test(client, RouterMode::RoundRobin)
             .await
             .unwrap();
 
@@ -2301,7 +3090,7 @@ mod tests {
         let worker_id = client.wait_for_instances().await.unwrap()[0].id();
         client.set_overloaded_instances(&[worker_id]);
 
-        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+        let router = PushRouter::<u64, TestResponse>::for_test(client, RouterMode::RoundRobin)
             .await
             .unwrap();
         let allowed = HashSet::from([worker_id]);
@@ -2310,9 +3099,12 @@ mod tests {
             .await
             .unwrap_err();
 
+        // A *selected* worker being overloaded is single-worker overload, distinct
+        // from pool-wide exhaustion: migration may retry elsewhere. Previously
+        // both collapsed to ResourceExhausted, which blocked that retry.
         assert!(match_error_chain(
             error.as_ref(),
-            &[ErrorType::ResourceExhausted],
+            &[ErrorType::WorkerOverloaded],
             &[]
         ));
         assert!(
@@ -2335,7 +3127,7 @@ mod tests {
         let component = ns.component("test_component".to_string()).unwrap();
         let endpoint = component.endpoint("test_endpoint".to_string());
         let client = endpoint.client().await.unwrap();
-        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+        let router = PushRouter::<u64, TestResponse>::for_test(client, RouterMode::RoundRobin)
             .await
             .unwrap();
 
@@ -2390,7 +3182,7 @@ mod tests {
         client.override_instance_avail(vec![1, 2]);
         client.set_overloaded_instances(&[1]);
 
-        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+        let router = PushRouter::<u64, TestResponse>::for_test(client, RouterMode::RoundRobin)
             .await
             .unwrap();
 
@@ -2407,90 +3199,6 @@ mod tests {
         }
 
         rt.shutdown();
-    }
-
-    #[tokio::test]
-    async fn device_aware_cpu_only_selects_least_loaded_instance() {
-        let state = RoutingOccupancyState::default();
-        // All candidates are CPU. Make worker 2 the least-loaded one.
-        for _ in 0..3 {
-            state.increment(1);
-        }
-        state.increment(3);
-
-        let instance_ids = vec![1, 2, 3];
-        let device_type_map = HashMap::from([
-            (1, Some(DeviceType::Cpu)),
-            (2, Some(DeviceType::Cpu)),
-            (3, Some(DeviceType::Cpu)),
-        ]);
-
-        let candidates = device_aware_candidate_group(&state, &instance_ids, &device_type_map, 8);
-        assert_eq!(candidates, vec![1, 2, 3]);
-
-        let selected = state
-            .select_exact_min_and_increment(&candidates)
-            .await
-            .unwrap();
-        assert_eq!(selected, 2);
-    }
-
-    #[tokio::test]
-    async fn device_aware_non_cpu_only_selects_least_loaded_instance() {
-        let state = RoutingOccupancyState::default();
-        // All candidates are non-CPU. Make worker 2 the least-loaded one.
-        for _ in 0..3 {
-            state.increment(1);
-        }
-        state.increment(3);
-
-        let instance_ids = vec![1, 2, 3];
-        let device_type_map = HashMap::from([
-            (1, Some(DeviceType::Cuda)),
-            (2, Some(DeviceType::Cuda)),
-            (3, Some(DeviceType::Cuda)),
-        ]);
-
-        let candidates = device_aware_candidate_group(&state, &instance_ids, &device_type_map, 8);
-        assert_eq!(candidates, vec![1, 2, 3]);
-
-        let selected = state
-            .select_exact_min_and_increment(&candidates)
-            .await
-            .unwrap();
-        assert_eq!(selected, 2);
-    }
-
-    #[test]
-    fn device_aware_group_uses_ratio_budget() {
-        let state = RoutingOccupancyState::default();
-        // CPU ids: 1,2 ; non-CPU ids: 3,4
-        for _ in 0..4 {
-            state.increment(3);
-            state.increment(4);
-        }
-        // CPU inflight can differ across instances; budgeting uses total CPU inflight.
-        for _ in 0..3 {
-            state.increment(1);
-        }
-        // total_non_cpu_inflight=8, cpu_count=2, non_cpu_count=2, ratio=2
-        // allowed_cpu_inflight = 8*2/(2*2)=4
-        // total_cpu_inflight=3 < 4 => choose CPU group.
-        let instance_ids = vec![1, 2, 3, 4];
-        let device_type_map = HashMap::from([
-            (1, Some(DeviceType::Cpu)),
-            (2, Some(DeviceType::Cpu)),
-            (3, Some(DeviceType::Cuda)),
-            (4, Some(DeviceType::Cuda)),
-        ]);
-
-        let candidates = device_aware_candidate_group(&state, &instance_ids, &device_type_map, 2);
-        assert_eq!(candidates, vec![1, 2]);
-
-        // Within selected CPU group, final choice should be the least-loaded instance (id=2).
-        let selected =
-            futures::executor::block_on(state.select_exact_min_and_increment(&candidates)).unwrap();
-        assert_eq!(selected, 2);
     }
 
     #[tokio::test]
@@ -2540,22 +3248,24 @@ mod tests {
         endpoint.register_endpoint_instance().await.unwrap();
         let cache_worker = client.wait_for_instances().await.unwrap()[0].id();
 
-        let router = PushRouter::<u64, TestResponse>::from_client_with_state(
+        let router = PushRouter::<u64, TestResponse>::from_client_with_options(
             client,
             RouterMode::DeviceAwareWeighted,
-            None,
-            Some(Arc::new(StaticMultimodalCacheIndex {
-                worker_id: cache_worker,
-            })),
-            Some(Arc::new(|_| vec!["image-key".to_string()])),
+            PushRouterOptions {
+                multimodal_cache_indexer: Some(Arc::new(StaticMultimodalCacheIndex {
+                    worker_id: cache_worker,
+                })),
+                multimodal_cache_key_extractor: Some(Arc::new(|_| vec!["image-key".to_string()])),
+                ..PushRouterOptions::default()
+            },
         )
         .await
         .unwrap();
 
-        let (worker_id, permit) = router.select_exact_target(&42, None).await.unwrap();
-        assert_eq!(worker_id, cache_worker);
+        let selection = router.select_device_aware_and_reserve(&42, None).unwrap();
+        assert_eq!(selection.worker_id(), cache_worker);
         assert!(
-            permit.is_none(),
+            selection.into_reservation().is_none(),
             "full cache hits bypass occupancy charging"
         );
 
@@ -2655,7 +3365,7 @@ mod tests {
         client.override_instance_avail(vec![stale_id, real_id]);
 
         let router =
-            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
+            PushRouter::<u64, TestResponse>::for_test(client.clone(), RouterMode::RoundRobin)
                 .await
                 .unwrap();
 
@@ -2687,7 +3397,7 @@ mod tests {
         let real_id = client.wait_for_instances().await.unwrap()[0].id();
         let stale_id = real_id.wrapping_add(1);
         client.override_instance_avail(vec![stale_id, real_id]);
-        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::LeastLoaded)
+        let router = PushRouter::<u64, TestResponse>::for_test(client, RouterMode::LeastLoaded)
             .await
             .unwrap();
         let state = router.occupancy_state.clone().unwrap();
@@ -2726,14 +3436,26 @@ mod tests {
             .unwrap();
         let component = ns.component("test_component".to_string()).unwrap();
         let endpoint = component.endpoint("test_endpoint".to_string());
-        let client = endpoint.client().await.unwrap();
+        // Freeze `monitor_instance_source` before staging routing state. That
+        // task reconciles `routable_ids` back to the real discovered set on
+        // every discovery change *and* every `reconcile_interval` (5s by
+        // default), so it silently undoes `override_instance_avail` mid-test.
+        // Cancelling before registration means the only writer left is this
+        // test. Safe because `wait_for_instances` reads `instance_source`
+        // directly rather than the reconciled routing snapshot.
+        let monitor = tokio_util::sync::CancellationToken::new();
+        let client = endpoint
+            .client_with_cancellation(monitor.clone())
+            .await
+            .unwrap();
+        monitor.cancel();
 
         // Register an instance so we can create the router (needs transport setup).
         endpoint.register_endpoint_instance().await.unwrap();
         client.wait_for_instances().await.unwrap();
 
         let router =
-            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
+            PushRouter::<u64, TestResponse>::for_test(client.clone(), RouterMode::RoundRobin)
                 .await
                 .unwrap();
 
@@ -2747,7 +3469,7 @@ mod tests {
 
         assert!(result.is_err());
         let error = result.unwrap_err();
-        assert_not_cannot_connect(&error);
+        assert_unavailable(&error);
         let msg = error.to_string();
         assert!(
             msg.contains("not found") && msg.contains("no other instances available"),
@@ -2768,13 +3490,25 @@ mod tests {
             .unwrap();
         let component = ns.component("test_component".to_string()).unwrap();
         let endpoint = component.endpoint("test_endpoint".to_string());
-        let client = endpoint.client().await.unwrap();
+        // Freeze `monitor_instance_source` before staging routing state. That
+        // task reconciles `routable_ids` back to the real discovered set on
+        // every discovery change *and* every `reconcile_interval` (5s by
+        // default), so it silently undoes `override_instance_avail` mid-test.
+        // Cancelling before registration means the only writer left is this
+        // test. Safe because `wait_for_instances` reads `instance_source`
+        // directly rather than the reconciled routing snapshot.
+        let monitor = tokio_util::sync::CancellationToken::new();
+        let client = endpoint
+            .client_with_cancellation(monitor.clone())
+            .await
+            .unwrap();
+        monitor.cancel();
         endpoint.register_endpoint_instance().await.unwrap();
         let instances = client.wait_for_instances().await.unwrap();
         let real_id = instances[0].id();
 
         let router =
-            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
+            PushRouter::<u64, TestResponse>::for_test(client.clone(), RouterMode::RoundRobin)
                 .await
                 .unwrap();
         let stale_id = real_id.wrapping_add(1);
@@ -2797,7 +3531,7 @@ mod tests {
         let disallowed_error = router
             .resolve_transport(stale_id, TransportFallback::Within(&disallowed))
             .unwrap_err();
-        assert_not_cannot_connect(&disallowed_error);
+        assert_unavailable(&disallowed_error);
 
         let exact_error = router
             .resolve_transport(stale_id, TransportFallback::Deny)
@@ -2816,7 +3550,6 @@ mod tests {
                 .contains("Fallback instance"),
             "expected fallback lookup failure, got: {stale_fallback_error}"
         );
-
         rt.shutdown();
     }
 
@@ -2897,5 +3630,426 @@ mod tests {
         .unwrap();
 
         assert!(!map.contains_key(&endpoint_id));
+    }
+
+    #[tokio::test]
+    async fn cache_cleanup_watcher_identity_includes_runtime() {
+        let runtime = Runtime::from_current().unwrap();
+        let first = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let second = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = |distributed: &DistributedRuntime| {
+            distributed
+                .namespace("cache-watcher-identity".to_string())
+                .unwrap()
+                .component("workers".to_string())
+                .unwrap()
+                .endpoint("generate".to_string())
+        };
+        let first = RuntimeEndpointId::for_endpoint(&endpoint(&first));
+        let second = RuntimeEndpointId::for_endpoint(&endpoint(&second));
+
+        assert_eq!(first.endpoint_id, second.endpoint_id);
+        assert_ne!(first.connection_id, second.connection_id);
+        assert_ne!(first, second);
+
+        runtime.shutdown();
+    }
+
+    /// A `StreamingDispatch` that records what the router hands the seam, so the
+    /// test can assert a *caller-supplied* dispatch (not just the default
+    /// `AddressedPushRouter`) receives the selected address/instance and the
+    /// discovery lifecycle events.
+    #[derive(Default)]
+    struct RecordingDispatch {
+        unary: std::sync::Mutex<Vec<(u64, String, Option<u64>)>>,
+        bidi: std::sync::Mutex<Vec<(String, u64)>>,
+        added: std::sync::Mutex<Vec<u64>>,
+        removed: std::sync::Mutex<Vec<u64>>,
+    }
+
+    impl RecordingDispatch {
+        fn canned_stream() -> ManyOut<TestResponse> {
+            let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
+            ResponseStream::new(
+                Box::pin(tokio_stream::iter(vec![TestResponse { error: None }])),
+                ctx,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingDispatch<u64, TestResponse> for RecordingDispatch {
+        async fn generate(
+            &self,
+            request: SingleIn<AddressedRequest<u64>>,
+        ) -> Result<ManyOut<TestResponse>, Error> {
+            let (addressed, _ctx) = request.transfer(());
+            let (payload, address, instance) = addressed.into_parts();
+            self.unary
+                .lock()
+                .unwrap()
+                .push((payload, address, instance.map(|i| i.id())));
+            Ok(Self::canned_stream())
+        }
+
+        async fn generate_bidirectional(
+            &self,
+            instance: Instance,
+            address: String,
+            _input: ManyIn<u64>,
+        ) -> Result<ManyOut<TestResponse>, Error> {
+            self.bidi.lock().unwrap().push((address, instance.id()));
+            Ok(Self::canned_stream())
+        }
+
+        async fn on_instance_removed(&self, id: &EndpointInstanceId) {
+            self.removed.lock().unwrap().push(id.instance_id);
+        }
+
+        async fn on_instance_added(&self, id: &EndpointInstanceId) {
+            self.added.lock().unwrap().push(id.instance_id);
+        }
+    }
+
+    /// The transport seam must deliver to a caller-supplied `StreamingDispatch`:
+    /// unary and bidirectional requests arrive with the selected address and
+    /// instance, and discovery removal/re-addition reach its lifecycle hooks.
+    #[tokio::test]
+    async fn from_client_with_dispatch_delivers_requests_and_lifecycle() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_dispatch_seam".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+
+        let dispatch = Arc::new(RecordingDispatch::default());
+        let router = PushRouter::<u64, TestResponse>::from_client_with_options(
+            client.clone(),
+            RouterMode::RoundRobin,
+            PushRouterOptions {
+                selectors: Some(test_selectors()),
+                dispatch: Some(dispatch.clone()),
+                ..PushRouterOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Unary hop reaches the supplied dispatch with the selected worker.
+        let mut stream = router.generate(SingleIn::new(42u64)).await.unwrap();
+        while stream.next().await.is_some() {}
+        {
+            let unary = dispatch.unary.lock().unwrap();
+            assert_eq!(unary.len(), 1, "one unary dispatch expected");
+            let (payload, address, dispatched) = &unary[0];
+            assert_eq!(*payload, 42);
+            assert_eq!(*dispatched, Some(instance_id));
+            assert!(!address.is_empty(), "selected transport address expected");
+        }
+
+        // Bidirectional hop reaches the supplied dispatch with the same worker.
+        let input: ManyIn<u64> =
+            Context::new(RequestStream::new(Box::pin(tokio_stream::iter(vec![
+                1u64, 2u64,
+            ]))));
+        let mut stream = router.generate(input).await.unwrap();
+        while stream.next().await.is_some() {}
+        {
+            let bidi = dispatch.bidi.lock().unwrap();
+            assert_eq!(bidi.len(), 1, "one bidirectional dispatch expected");
+            assert_eq!(bidi[0].1, instance_id);
+            assert!(!bidi[0].0.is_empty());
+        }
+
+        // Gate on the initial-snapshot add before mutating discovery: this both
+        // asserts on_instance_added is delivered and guarantees the watcher is
+        // subscribed, so the removal broadcast can't race ahead of it.
+        assert!(
+            poll_until(|| dispatch.added.lock().unwrap().contains(&instance_id)).await,
+            "on_instance_added (initial snapshot) not delivered to the supplied dispatch"
+        );
+
+        endpoint.unregister_endpoint_instance().await.unwrap();
+        assert!(
+            poll_until(|| dispatch.removed.lock().unwrap().contains(&instance_id)).await,
+            "on_instance_removed not delivered to the supplied dispatch"
+        );
+
+        // A fresh add after re-registration must also reach the hook.
+        let adds_before = dispatch.added.lock().unwrap().len();
+        endpoint.register_endpoint_instance().await.unwrap();
+        assert!(
+            poll_until(|| dispatch.added.lock().unwrap().len() > adds_before).await,
+            "on_instance_added (re-registration) not delivered to the supplied dispatch"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn admitted_dispatch_does_not_reject_the_load_it_just_booked() {
+        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_admitted_dispatch".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+        for _ in 0..50 {
+            if client.instance_ids_avail().contains(&instance_id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(client.instance_ids_avail().contains(&instance_id));
+        let dispatch = Arc::new(RecordingDispatch::default());
+        let router = PushRouter::<u64, TestResponse>::from_client_with_options(
+            client.clone(),
+            RouterMode::KV,
+            PushRouterOptions {
+                dispatch: Some(dispatch.clone()),
+                ..PushRouterOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        client.set_overloaded_instances(&[instance_id]);
+        let error = router
+            .dispatch_exact(SingleIn::new(41), instance_id)
+            .await
+            .unwrap_err();
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::WorkerOverloaded],
+            &[]
+        ));
+        assert!(dispatch.unary.lock().unwrap().is_empty());
+
+        let mut stream = router
+            .dispatch_kv_admitted(SingleIn::new(42), instance_id)
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let unary = dispatch.unary.lock().unwrap();
+        assert_eq!(unary.len(), 1);
+        assert_eq!(unary[0].0, 42);
+        assert!(!unary[0].1.is_empty());
+        assert_eq!(unary[0].2, Some(instance_id));
+        drop(unary);
+
+        rt.shutdown();
+    }
+
+    /// Records the establish timeout each unary dispatch carries.
+    #[derive(Default)]
+    struct DeadlineRecordingDispatch {
+        seen: std::sync::Mutex<Vec<Option<std::time::Duration>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingDispatch<u64, TestResponse> for DeadlineRecordingDispatch {
+        async fn generate(
+            &self,
+            request: SingleIn<AddressedRequest<u64>>,
+        ) -> Result<ManyOut<TestResponse>, Error> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(request.content().establish_timeout());
+            Ok(RecordingDispatch::canned_stream())
+        }
+
+        async fn generate_bidirectional(
+            &self,
+            _instance: Instance,
+            _address: String,
+            _input: ManyIn<u64>,
+        ) -> Result<ManyOut<TestResponse>, Error> {
+            Ok(RecordingDispatch::canned_stream())
+        }
+    }
+
+    async fn establish_timeout_seen_by_dispatch(
+        namespace: &str,
+        fault_detection_enabled: bool,
+    ) -> Option<std::time::Duration> {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace(namespace.to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+        assert!(
+            poll_until(|| client.instance_ids_avail().contains(&instance_id)).await,
+            "precondition: worker should be available"
+        );
+
+        let dispatch = Arc::new(DeadlineRecordingDispatch::default());
+        let mut router = PushRouter::<u64, TestResponse>::from_client_with_options(
+            client.clone(),
+            RouterMode::RoundRobin,
+            PushRouterOptions {
+                selectors: Some(test_selectors()),
+                dispatch: Some(dispatch.clone()),
+                ..PushRouterOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        router.establish_timeout = Some(std::time::Duration::from_millis(200));
+        router.fault_detection_enabled = fault_detection_enabled;
+
+        let mut stream = router.generate(SingleIn::new(42u64)).await.unwrap();
+        while stream.next().await.is_some() {}
+
+        let seen = dispatch.seen.lock().unwrap().clone();
+        rt.shutdown();
+        assert_eq!(seen.len(), 1, "expected exactly one unary dispatch");
+        seen[0]
+    }
+
+    /// The deadline rides on the addressed request so the transport can start
+    /// it at the worker's ACK rather than around local admission and send.
+    #[tokio::test]
+    async fn establish_timeout_is_passed_to_dispatch() {
+        assert_eq!(
+            establish_timeout_seen_by_dispatch("test_establish_timeout", true).await,
+            Some(std::time::Duration::from_millis(200))
+        );
+    }
+
+    /// A monitor that records whether the router started it.
+    #[derive(Default)]
+    struct CountingMonitor {
+        started: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl WorkerLoadMonitor for CountingMonitor {
+        async fn start_monitoring(&self) -> anyhow::Result<()> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    async fn options_test_client(namespace: &str) -> (Client, Runtime) {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace(namespace.to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        client.wait_for_instances().await.unwrap();
+        (client, rt)
+    }
+
+    #[tokio::test]
+    async fn named_constructors_set_fault_detection_as_advertised() {
+        let (client, rt) = options_test_client("test_options_fault_detection").await;
+        let default =
+            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::Direct)
+                .await
+                .unwrap();
+        assert!(default.fault_detection_enabled);
+        let recovery = PushRouter::<u64, TestResponse>::from_client_no_fault_detection(
+            client,
+            RouterMode::Direct,
+        )
+        .await
+        .unwrap();
+        assert!(!recovery.fault_detection_enabled);
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn options_combine_a_dispatch_with_a_monitor() {
+        let (client, rt) = options_test_client("test_options_dispatch_and_monitor").await;
+        let dispatch = Arc::new(RecordingDispatch::default());
+        let monitor = Arc::new(CountingMonitor::default());
+        let router = PushRouter::<u64, TestResponse>::from_client_with_options(
+            client,
+            RouterMode::RoundRobin,
+            PushRouterOptions {
+                selectors: Some(test_selectors()),
+                dispatch: Some(dispatch.clone()),
+                worker_monitor: Some(monitor.clone()),
+                ..PushRouterOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(monitor.started.load(Ordering::SeqCst), 1);
+        assert!(router.fault_detection_enabled);
+
+        let mut stream = router.generate(SingleIn::new(7u64)).await.unwrap();
+        while stream.next().await.is_some() {}
+        let unary = dispatch.unary.lock().unwrap();
+        assert_eq!(
+            unary.len(),
+            1,
+            "the request must reach the supplied dispatch"
+        );
+        assert_eq!(unary[0].0, 7);
+        drop(unary);
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn establish_timeout_skipped_without_fault_detection() {
+        assert_eq!(
+            establish_timeout_seen_by_dispatch("test_establish_timeout_no_fd", false).await,
+            None,
+            "routers without fault detection must not bound dispatch"
+        );
+    }
+
+    /// Poll a predicate until it holds or a short deadline elapses; discovery
+    /// events reach the watcher's spawned task asynchronously.
+    async fn poll_until(mut pred: impl FnMut() -> bool) -> bool {
+        for _ in 0..200 {
+            if pred() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        pred()
     }
 }

@@ -113,6 +113,7 @@ spec:
                 nvidia.com/dynamo-sub-component-type: decode
                 nvidia.com/metrics-enabled: "true"
                 nvidia.com/selector: grove-manifest-decode
+                nvidia.com/dynamo-worker-hash: $var:worker-hash
               name: decode-ldr
               spec:
                 minAvailable: 1
@@ -132,6 +133,8 @@ spec:
                               value: "false"
                             - name: DYN_NAMESPACE
                               value: $pattern:clusterenv-.*-grove-manifest
+                            - name: DYN_NAMESPACE_WORKER_SUFFIX
+                              value: $var:worker-hash
                             - name: DYN_PARENT_DGD_K8S_NAME
                               value: grove-manifest
                             - name: DYN_PARENT_DGD_K8S_NAMESPACE
@@ -223,6 +226,7 @@ spec:
                 nvidia.com/dynamo-sub-component-type: decode
                 nvidia.com/metrics-enabled: "true"
                 nvidia.com/selector: grove-manifest-decode
+                nvidia.com/dynamo-worker-hash: $var:worker-hash
               name: decode-wkr
               spec:
                 minAvailable: 1
@@ -242,6 +246,8 @@ spec:
                               value: "false"
                             - name: DYN_NAMESPACE
                               value: $pattern:clusterenv-.*-grove-manifest
+                            - name: DYN_NAMESPACE_WORKER_SUFFIX
+                              value: $var:worker-hash
                             - name: DYN_PARENT_DGD_K8S_NAME
                               value: grove-manifest
                             - name: DYN_PARENT_DGD_K8S_NAMESPACE
@@ -309,4 +315,3 @@ spec:
               name: decode
               replicas: 1
         terminationDelay: 15m0s
-status: $notexists

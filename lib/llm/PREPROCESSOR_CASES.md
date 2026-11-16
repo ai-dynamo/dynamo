@@ -48,11 +48,23 @@ the request. The exact arg name and value varies per family:
 
 - `kimi_k25` — `thinking: false`
 - `nemotron_nano` / `nemotron3` / `nemotron_v3` —
-  `enable_thinking: false` OR `force_nonempty_content: true`
+  `enable_thinking: false`; `force_nonempty_content: true` keeps parsing enabled and defers reasoning until content is known
 - `deepseek_r1` / `deepseek_v4` — `thinking: false` OR
   `thinking_mode: "chat"` (matches V4 formatter's `resolve_thinking_mode`
   convention; keeps parser and prompt synchronized)
 - `gemma4` — `enable_thinking: false`
+- `minimax_m3` — `thinking_mode: "disabled"`, but only when the rendered
+  generation prompt ends with `</mm:think>` or a grammar controls the
+  output (`response_format`, top-level `guided_*`, forced `tool_choice`).
+  For top-level `guided_*`, an actual `<mm:think>` prompt tail keeps parsing
+  enabled and sets SGLang's `require_reasoning`; neither JSON-looking output
+  nor a conflicting request control overrides that prompt-open state.
+  A chat template that does not render `thinking_mode` leaves a disabled
+  request's prompt open, so the model may still write
+  `<mm:think>...</mm:think>` and the parser keeps running. A request with
+  no rendered text (token input) or no generation prompt
+  (`add_generation_prompt: false`, `continue_final_message`) keeps the
+  request's decision. Other grammar paths retain their existing request gate.
 
 When the gate fires, no reasoning parser runs; the model output is
 treated as plain content.
@@ -118,9 +130,7 @@ included here as a baseline reminder that the preprocessor owns this.
 **Function:** `OpenAIPreprocessor::strip_leading_reasoning_start_from_stream`
 
 When PRE.2 disables a Nemotron force-reasoning parser, Dynamo must not
-run the reasoning parser. However, vLLM-compatible Nemotron templates can
-still produce a leading `<think>` in disabled-thinking modes such as
-`force_nonempty_content=true`. The preprocessor strips only that leading
+run the reasoning parser. However, vLLM-compatible Nemotron templates can still produce a leading `<think>` when thinking is explicitly disabled. The preprocessor strips only that leading
 marker, buffers split prefixes like `"<thi"` + `"nk>answer"`, tracks
 state per streamed choice, and emits the remaining bytes as normal
 `content`.
@@ -148,7 +158,7 @@ if you know the answer, fill it in.
 | `deepseek_v3_2` / `deepseek_v4` (DSML) | ? — DSML markers (`<｜DSML｜tool_calls>`); likely YES | `thinking=false` / `thinking_mode=chat` | — | **NEEDS ON** even when last_is_tool (V4 formatter seeds `<think>`); see #8901 | DSv3.2 / DSv4 grammar. |
 | `deepseek_r1` (reasoning) | NO (uses plain `<think>`) | `thinking=false` | — | — | DeepSeek-R1. |
 | `nemotron_deci` (tool) | ? | — | — | — | Nemotron tool parser. |
-| `nemotron_nano` / `nemotron3` / `nemotron_v3` (reasoning) | ? | `enable_thinking=false` / `force_nonempty_content=true` | YES when PRE.2 disables reasoning | — | Dynamically distinguish bare guided JSON from `reasoning</think>JSON`; `nemotron_v3` is the vLLM-compatible alias. |
+| `nemotron_nano` / `nemotron3` / `nemotron_v3` (reasoning) | ? | `enable_thinking=false`; `force_nonempty_content=true` keeps parsing enabled | YES when explicit thinking disablement fires PRE.2 | — | Dynamically distinguish bare guided JSON from `reasoning</think>JSON`; `nemotron_v3` is the vLLM-compatible alias. |
 | `llama3_json` (tool) | ? — `<\|python_tag\|>` is a special token, likely YES | — | — | — | Llama 3.x. |
 | `hermes` (tool) | NO | — | — | — | Plain XML `<tool_call>...</tool_call>`. |
 | `qwen3_coder` (tool) | NO | — | — | — | Plain XML `<tool_call><function=...>`. |
@@ -156,7 +166,7 @@ if you know the answer, fill it in.
 | `mistral` (tool + reasoning) | **YES** for reasoning | disabled unless `reasoning_effort` is present and not `none` | — | — | `[TOOL_CALLS]` tool text; `[THINK]...[/THINK]` reasoning. |
 | `phi4` (tool) | NO | — | — | — | `functools[...]` plain text. |
 | `minimax_m2` (tool + reasoning) | NO | `thinking=false` / `enable_thinking=false` | — | — | Force reasoning with `<think>...</think>`; dynamically distinguishes bare guided JSON from reasoning followed by an XML tool payload. |
-| `minimax_m3` (tool + reasoning) | YES | `thinking_mode=disabled` | — | — | Prompt-prefilled `<mm:think>...</mm:think>` reasoning with MiniMax namespace-token XML tool calls. |
+| `minimax_m3` (tool + reasoning) | YES | `thinking_mode=disabled` when the rendered prompt ends with `</mm:think>` or a grammar controls the output, except prompt-open top-level `guided_*` (see PRE.2) | — | — | Prompt-prefilled `<mm:think>...</mm:think>` reasoning with MiniMax namespace-token XML tool calls. |
 | `minimax_append_think` (reasoning) | NO | — | — | OFF on `tool_choice=required/named` (universal, PRE.4) | Deprecated legacy MiniMax pass-through; does not populate `reasoning_content`. Use `minimax_m2` for MiniMax M2 tool-calling deployments. |
 | `glm47` (tool) | NO | — | — | — | Plain XML. |
 | `jamba` (tool) | NO | — | — | — | `<tool_calls>` plain text wrapper. |

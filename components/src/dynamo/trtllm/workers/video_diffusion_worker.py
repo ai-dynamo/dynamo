@@ -11,6 +11,7 @@ import asyncio
 import logging
 from typing import Optional
 
+from dynamo.common.model_taints import register_model_taint_route
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.args import Config
@@ -100,6 +101,7 @@ async def init_video_diffusion_worker(
         worker_type=WorkerType.Aggregated,
         needs=[],
     )
+    register_model_taint_route(runtime, endpoint)
 
     logging.info(f"Model registered, serving endpoint: {config.endpoint}")
 

@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+                          @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                          @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                          @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                     @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                @@@@@@@@@@@@@@@     @@@@@@@@@@@@@@@@@@@@@@@@@
+             @@@@@@@@@@   @@@@@@@@@@    @@@@@@@@@@@@@@@@@@@@@
+          @@@@@@@@     @@@@@@@@@@@@@@@@   @@@@@@@@@@@@@@@@@@@
+        @@@@@@@    @@@@@@@@      @@@@@@@    @@@@@@@@@@@@@@@@@
+      @@@@@@@@   @@@@@@@  @@@@      @@@@@@    @@@@@@@@@@@@@@@
+      @@@@@@@   @@@@@@    @@@@@@   @@@@@@@   @@@@@@@@@@@@@@@@
+       @@@@@@@  @@@@@@    @@@@@@@@@@@@@@    @@@@@@@@@@@@@@@@@
+        @@@@@@   @@@@@@   @@@@@@@@@@@@    @@@@@@@@@@@@@@@@@@@
+         @@@@@@@  @@@@@@@ @@@@@@@@@@   @@@@@@@@@      @@@@@@@
+           @@@@@@   @@@@@@@@@@@@@    @@@@@@@@         @@@@@@@
+             @@@@@@    @@@@     @@@@@@@@@@          @@@@@@@@@
+               @@@@@@@    @@@@@@@@@@@@@        @@@@@@@@@@@@@@
+                 @@@@@@@@@@@@@@@@@        @@@@@@@@@@@@@@@@@@@
+                     @@@@@@       @@@@@@@@@@@@@@@@@@@@@@@@@@@
+                          @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                          @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                          @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+  @@@@@@@@@     @@@@      @@@@ @@@@  @@@@@@@@       @@@@       @@@@@
+ @@@@@@@@@@@@@  @@@@@    @@@@@ @@@@@ @@@@@@@@@@@@@  @@@@@     @@@@@@@
+ @@@@@@@@@@@@@@ @@@@@@  @@@@@  @@@@@ @@@@@@@@@@@@@@ @@@@@    @@@@@@@@@
+ @@@@@    @@@@@@@@@@@@  @@@@@  @@@@@ @@@@@    @@@@@ @@@@@   @@@@@ @@@@@
+ @@@@@     @@@@@ @@@@@@@@@@@   @@@@@ @@@@@    @@@@@ @@@@@  @@@@@  @@@@@@
+ @@@@@     @@@@@  @@@@@@@@@@   @@@@@ @@@@@   @@@@@@ @@@@@  @@@@@@@@@@@@@
+ @@@@@     @@@@@  @@@@@@@@@    @@@@@ @@@@@@@@@@@@@@ @@@@@ @@@@@@@@@@@@@@@
+ @@@@@     @@@@@   @@@@@@@     @@@@@ @@@@@@@@@@@@@  @@@@@@@@@@@     @@@@@@
+  @@@       @@@      @@@@       @@@   @@@@@@@        @@   @@@         @@@  ®
+
+Dynamo: A Datacenter Scale Distributed Inference Serving Framework
+
+This is the Dynamo Triton runtime: NVIDIA Triton Inference Server models served
+through Dynamo's frontend over the KServe gRPC protocol.
+
+Start the frontend and Triton worker as two processes (file-based discovery, no
+etcd/nats required):
+> python -m dynamo.frontend --kserve-grpc-server --http-port=8001 --discovery-backend=file &
+> python -m dynamo.triton --discovery-backend=file &
+
+Send a request (tensor models use KServe gRPC, not the OpenAI HTTP API):
+> python client.py
+
+The worker exposes the full tritonserver.Options surface as flags
+(python -m dynamo.triton --help). See
+$DYNAMO_HOME/components/src/dynamo/triton/README.md for details.

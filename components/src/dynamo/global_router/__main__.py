@@ -100,6 +100,8 @@ async def _serve_disagg(
         f"{config.namespace}.{config.component_name}.decode_generate"
     )
 
+    # The GlobalRouter only forwards tokenized requests. It needs model metadata
+    # for its deployment cards, but never loads model weights for inference.
     logger.info("Registering as prefill worker...")
     await register_model(
         model_input=ModelInput.Tokens,
@@ -114,6 +116,7 @@ async def _serve_disagg(
         model_name=config.model_name,
         worker_type=WorkerType.Prefill,
         needs=[[WorkerType.Decode]],
+        ignore_weights=True,
     )
     logger.info(
         f"Registered prefill endpoint: {config.namespace}.{config.component_name}.prefill_generate"
@@ -128,6 +131,7 @@ async def _serve_disagg(
         model_name=config.model_name,
         worker_type=WorkerType.Decode,
         needs=[[WorkerType.Prefill]],
+        ignore_weights=True,
     )
     logger.info(
         f"Registered decode endpoint: {config.namespace}.{config.component_name}.decode_generate"
@@ -172,6 +176,8 @@ async def _serve_agg(
         f"{config.namespace}.{config.component_name}.generate"
     )
 
+    # The GlobalRouter only forwards tokenized requests. It needs model metadata
+    # for its deployment card, but never loads model weights for inference.
     logger.info("Registering as agg worker (Chat + Completions)...")
     await register_model(
         model_input=ModelInput.Tokens,
@@ -180,6 +186,7 @@ async def _serve_agg(
         model_path=config.model_name,
         model_name=config.model_name,
         worker_type=WorkerType.Aggregated,
+        ignore_weights=True,
     )
     logger.info(
         f"Registered agg endpoint: {config.namespace}.{config.component_name}.generate"

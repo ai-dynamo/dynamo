@@ -135,14 +135,14 @@ class TierTransport:
         runtime: Any,
         tier: Tier,
         kv_router_config: Any,
-        aic_perf_config: Any,
+        ais_perf_config: Any,
         default_block_size: int,
         concurrency: int = 32,
     ) -> None:
         self._runtime = runtime
         self._tier = tier
         self._kv_router_config = kv_router_config
-        self._aic_perf_config = aic_perf_config
+        self._ais_perf_config = ais_perf_config
         self._block_size = tier.block_size or default_block_size
         self._semaphore = asyncio.Semaphore(concurrency)
         self._router: Any = None
@@ -161,7 +161,7 @@ class TierTransport:
                 endpoint=endpoint,
                 block_size=self._block_size,
                 kv_router_config=self._kv_router_config,
-                aic_perf_config=self._aic_perf_config,
+                ais_perf_config=self._ais_perf_config,
             )
         return self._router
 
@@ -246,7 +246,7 @@ class SqueezeEvolveOrchestrator:
         tiers: Optional[list[Tier]] = None,
         runtime: Any = None,
         kv_router_config: Any = None,
-        aic_perf_config: Any = None,
+        ais_perf_config: Any = None,
         default_block_size: int = 64,
         transports: Optional[list[Any]] = None,
     ) -> None:
@@ -264,7 +264,7 @@ class SqueezeEvolveOrchestrator:
                     runtime,
                     tier,
                     kv_router_config,
-                    aic_perf_config,
+                    ais_perf_config,
                     default_block_size,
                     concurrency=cfg.tier_concurrency,
                 )

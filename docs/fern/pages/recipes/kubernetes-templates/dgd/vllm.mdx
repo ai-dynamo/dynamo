@@ -5,8 +5,9 @@ title: vLLM Deployment Templates
 subtitle: Ready-to-apply DynamoGraphDeployment manifests for serving vLLM with Dynamo on Kubernetes.
 ---
 
-Copy-paste `DynamoGraphDeployment` (`nvidia.com/v1alpha1`) manifests for the vLLM backend, grouped by
-topology. Each manifest is embedded from
+Copy-paste deployment templates for the vLLM backend, grouped by topology. Each template includes a
+`DynamoGraphDeployment` that uses `nvidia.com/v1beta1`; XPU templates also include
+`resource.k8s.io/v1` Dynamic Resource Allocation resources. Each manifest is embedded from
 [`examples/backends/vllm/deploy/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy)
 — open an entry, use the copy button, then set your image tag and `hf-token-secret` before applying.
 

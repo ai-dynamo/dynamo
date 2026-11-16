@@ -1,13 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.environment.base import PlannerEnvironmentImpl
-from dynamo.planner.errors import DeploymentValidationError
+from dynamo.planner.core import util
+from dynamo.planner.core.base import build_worker_capabilities
+from dynamo.planner.core.types import (
+    BatchDrainLimitDecision,
+    BatchSchedulingObservation,
+    WorkerCounts,
+)
+from dynamo.planner.environment import base as environment_base
+from dynamo.planner.environment.base import (
+    NoopBatchSchedulingProvider,
+    PlannerEnvironmentImpl,
+)
+from dynamo.planner.errors import DeploymentValidationError, GPUShapeUnavailableError
+from dynamo.planner.monitoring.dgd_services import ComponentGPUShape
 from dynamo.planner.monitoring.worker_info import (
     WorkerInfo,
     build_worker_info_from_defaults,
@@ -42,7 +55,10 @@ def _controller() -> MagicMock:
     controller.get_worker_info.side_effect = lambda sub_component_type, backend: (
         build_worker_info_from_defaults(backend, sub_component_type)
     )
-    controller.get_gpu_counts.return_value = (2, 4)
+    controller.get_gpu_shapes.return_value = (
+        ComponentGPUShape(2, 2),
+        ComponentGPUShape(4, 4),
+    )
     controller.get_actual_worker_counts = AsyncMock(return_value=(2, 3, True))
     controller.get_model_name.return_value = "test-model"
     return controller
@@ -56,6 +72,24 @@ def _fpm_provider() -> MagicMock:
     return provider
 
 
+def _batch_provider() -> MagicMock:
+    provider = MagicMock()
+    provider.initialize = AsyncMock()
+    provider.collect = AsyncMock(return_value=BatchSchedulingObservation())
+    provider.apply_drain_limits = AsyncMock()
+    provider.shutdown = AsyncMock()
+    return provider
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decisions", [[], [MagicMock()]])
+async def test_noop_batch_provider_rejects_every_actuation_call(decisions):
+    provider = NoopBatchSchedulingProvider()
+
+    with pytest.raises(RuntimeError, match="actuation is not configured"):
+        await provider.apply_drain_limits(decisions)
+
+
 @pytest.mark.asyncio
 async def test_initialize_uses_backend_names_and_resolves_namespace_before_state():
     order = []
@@ -63,8 +97,8 @@ async def test_initialize_uses_backend_names_and_resolves_namespace_before_state
     controller.wait_for_deployment_ready = AsyncMock(
         side_effect=lambda **kwargs: order.append("ready")
     )
-    controller.get_gpu_counts.side_effect = lambda **kwargs: (
-        order.append("gpu") or (2, 4)
+    controller.get_gpu_shapes.side_effect = lambda **kwargs: (
+        order.append("gpu") or (ComponentGPUShape(2, 2), ComponentGPUShape(4, 4))
     )
 
     namespace_source = MagicMock()
@@ -88,14 +122,238 @@ async def test_initialize_uses_backend_names_and_resolves_namespace_before_state
     await environment.initialize()
 
     controller.validate_deployment.assert_awaited_once_with(
-        prefill_component_name="VllmPrefillWorker",
-        decode_component_name="VllmDecodeWorker",
+        prefill_component_name="prefill",
+        decode_component_name="decode",
         require_prefill=True,
         require_decode=True,
     )
     assert order.index("ready") < order.index("namespace") < order.index("gpu")
     assert order.index("gpu") < order.index("fpm:base-ns-workerhash")
     fpm_provider.async_init.assert_awaited_once_with("base-ns-workerhash")
+
+
+def _agg_environment(controller: MagicMock) -> PlannerEnvironmentImpl:
+    return PlannerEnvironmentImpl(
+        config=_config(mode="agg"),
+        controller=controller,
+        require_prefill=False,
+        require_decode=True,
+        fpm_provider=_fpm_provider(),
+    )
+
+
+def _blocking_ready_wait() -> AsyncMock:
+    """A readiness wait that never finishes, like one stuck on a Pending replica."""
+
+    async def wait_forever(**kwargs):
+        await asyncio.Event().wait()
+
+    return AsyncMock(side_effect=wait_forever)
+
+
+async def _assert_no_leftover_tasks() -> None:
+    await asyncio.sleep(0)
+    current = asyncio.current_task()
+    assert [t for t in asyncio.all_tasks() if t is not current and not t.done()] == []
+
+
+@pytest.mark.asyncio
+async def test_initialize_does_not_block_on_pending_startup_capacity():
+    controller = _controller()
+    controller.wait_for_deployment_ready = _blocking_ready_wait()
+    controller.get_worker_inventory = AsyncMock(
+        return_value=WorkerCounts(ready_num_decode=2, pending_num_decode=1)
+    )
+    environment = _agg_environment(controller)
+
+    await asyncio.wait_for(environment.initialize(), timeout=5)
+
+    controller.get_worker_inventory.assert_any_await(
+        prefill_component_name=None, decode_component_name="decode"
+    )
+    await _assert_no_leftover_tasks()
+
+
+@pytest.mark.asyncio
+async def test_initialize_proceeds_once_only_pending_capacity_remains(monkeypatch):
+    monkeypatch.setattr(environment_base, "STARTUP_PENDING_RECHECK_SECONDS", 0.01)
+    controller = _controller()
+    controller.wait_for_deployment_ready = _blocking_ready_wait()
+    observations = iter(
+        [
+            WorkerCounts(ready_num_decode=0, pending_num_decode=1),
+            WorkerCounts(ready_num_decode=0, pending_num_decode=1),
+        ]
+    )
+    controller.get_worker_inventory = AsyncMock(
+        side_effect=lambda **kwargs: next(
+            observations, WorkerCounts(ready_num_decode=1, pending_num_decode=1)
+        )
+    )
+    environment = _agg_environment(controller)
+
+    await asyncio.wait_for(environment._wait_for_startup_ready(), timeout=5)
+
+    # Only the third inventory, the first with a serving worker, may start early.
+    assert controller.get_worker_inventory.await_count == 3
+    await _assert_no_leftover_tasks()
+
+
+@pytest.mark.asyncio
+async def test_initialize_does_not_treat_rollout_as_pending_capacity():
+    controller = _controller()
+    controller.get_worker_inventory = AsyncMock(
+        return_value=WorkerCounts(
+            ready_num_decode=2, decode_scaling_in_progress=True, pending_num_decode=0
+        )
+    )
+    environment = _agg_environment(controller)
+
+    await environment.initialize()
+
+    controller.wait_for_deployment_ready.assert_awaited_once_with(include_planner=False)
+
+
+@pytest.mark.asyncio
+async def test_initialize_raises_when_no_worker_serves_after_readiness_wait():
+    controller = _controller()
+    controller.wait_for_deployment_ready = AsyncMock(
+        side_effect=TimeoutError("not ready after 1800 seconds")
+    )
+    controller.get_worker_inventory = AsyncMock(
+        return_value=WorkerCounts(ready_num_decode=0, pending_num_decode=1)
+    )
+    environment = _agg_environment(controller)
+
+    with pytest.raises(TimeoutError):
+        await environment.initialize()
+
+    environment.fpm_provider.async_init.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_initialize_falls_back_to_readiness_wait_without_pod_inventory():
+    controller = _controller()
+    controller.get_worker_inventory = AsyncMock(return_value=None)
+    environment = _agg_environment(controller)
+
+    await environment.initialize()
+
+    controller.wait_for_deployment_ready.assert_awaited_once_with(include_planner=False)
+
+
+@pytest.mark.asyncio
+async def test_initialize_surfaces_readiness_error_raised_during_inventory_check():
+    controller = _controller()
+    controller.wait_for_deployment_ready = AsyncMock(
+        side_effect=RuntimeError("deployment lookup failed")
+    )
+
+    async def inventory_after_readiness_fails(**kwargs):
+        for _ in range(3):
+            await asyncio.sleep(0)
+        return WorkerCounts(ready_num_decode=2, pending_num_decode=1)
+
+    controller.get_worker_inventory = AsyncMock(
+        side_effect=inventory_after_readiness_fails
+    )
+    environment = _agg_environment(controller)
+
+    with pytest.raises(RuntimeError, match="deployment lookup failed"):
+        await environment.initialize()
+
+
+@pytest.mark.asyncio
+async def test_power_aware_startup_keeps_the_settled_wait():
+    controller = _controller()
+    controller.get_worker_inventory = AsyncMock(
+        return_value=WorkerCounts(ready_num_decode=2, pending_num_decode=1)
+    )
+    controller.wait_for_settled_graph_deployment = AsyncMock(
+        side_effect=RuntimeError("settled wait reached")
+    )
+    controller.get_graph_deployment = MagicMock(return_value={})
+    controller.get_component_power_configs = MagicMock(return_value=(None, None))
+    controller.get_power_aware_worker_counts = AsyncMock(return_value=(0, 2, True))
+    environment = PlannerEnvironmentImpl(
+        config=_config(mode="agg", enable_power_awareness=True),
+        controller=controller,
+        require_prefill=False,
+        require_decode=True,
+        fpm_provider=_fpm_provider(),
+    )
+
+    with pytest.raises(RuntimeError, match="settled wait reached"):
+        await environment.initialize()
+
+    controller.wait_for_settled_graph_deployment.assert_awaited_once()
+    controller.wait_for_deployment_ready.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_batch_provider_lifecycle_collection_and_actuation_are_delegated():
+    controller = _controller()
+    fpm_provider = _fpm_provider()
+    batch_provider = _batch_provider()
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+        fpm_provider=fpm_provider,
+        batch_provider=batch_provider,
+    )
+
+    await environment.initialize()
+    observation = await environment.collect_batch_scheduling()
+    decisions = [
+        BatchDrainLimitDecision(
+            pool_id="pool",
+            max_admission_rps=0.0,
+            valid_until_s=100.0,
+            decision_id="decision",
+        )
+    ]
+    await environment.apply_batch_drain_limits(decisions)
+    await environment.shutdown()
+
+    assert observation == BatchSchedulingObservation()
+    batch_provider.initialize.assert_awaited_once_with()
+    batch_provider.collect.assert_awaited_once_with()
+    batch_provider.apply_drain_limits.assert_awaited_once_with(decisions)
+    batch_provider.shutdown.assert_awaited_once_with()
+    fpm_provider.shutdown.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_cold_restart_bootstraps_batch_pause_before_deployment_settlement():
+    order: list[str] = []
+    controller = _controller()
+    controller.validate_deployment = AsyncMock(
+        side_effect=lambda **_kwargs: order.append("validate")
+    )
+    controller.wait_for_deployment_ready = AsyncMock(
+        side_effect=lambda **_kwargs: order.append("settled-dgdsa-zero")
+    )
+    batch_provider = _batch_provider()
+    batch_provider.initialize = AsyncMock(
+        side_effect=lambda: order.append("redis-zero-and-writer-fence")
+    )
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+        batch_provider=batch_provider,
+    )
+
+    await environment.initialize()
+
+    assert order[:3] == [
+        "redis-zero-and-writer-fence",
+        "validate",
+        "settled-dgdsa-zero",
+    ]
 
 
 @pytest.mark.asyncio
@@ -132,10 +390,37 @@ async def test_replica_expected_count_tracks_only_stable_observations():
     assert environment.deployment_state().decode.replicas.scaling is True
 
 
+@pytest.mark.parametrize(
+    "fresh_capacity,expected_endpoint",
+    [({"total_kv_blocks": 1024}, "infer"), ({}, "generate")],
+)
+def test_worker_info_refresh_takes_endpoint_only_from_worker_metadata(
+    fresh_capacity, expected_endpoint
+):
+    controller = _controller()
+    controller.get_worker_info.side_effect = lambda sub_component_type, backend: (
+        WorkerInfo(
+            k8s_name="worker",
+            component_name="custom",
+            endpoint="infer",
+            **fresh_capacity,
+        )
+    )
+    environment = _agg_environment(controller)
+    state = environment.deployment_state()
+    state.decode.info = WorkerInfo(
+        k8s_name="worker", component_name="custom", endpoint="generate"
+    )
+
+    environment._refresh_worker_info()
+
+    assert state.decode.info.endpoint == expected_endpoint
+
+
 def test_gpu_discovery_validation_error_falls_back_without_mutating_config():
     config = _config(prefill_engine_num_gpu=2, decode_engine_num_gpu=4)
     controller = _controller()
-    controller.get_gpu_counts.side_effect = DeploymentValidationError(
+    controller.get_gpu_shapes.side_effect = DeploymentValidationError(
         ["DGD does not declare GPU resources"]
     )
     environment = PlannerEnvironmentImpl(
@@ -149,14 +434,79 @@ def test_gpu_discovery_validation_error_falls_back_without_mutating_config():
 
     assert environment.deployment_state().prefill.num_gpus == 2
     assert environment.deployment_state().decode.num_gpus == 4
+    assert environment.deployment_state().prefill.gpus_per_replica == 2
+    assert environment.deployment_state().decode.gpus_per_replica == 4
     assert config.prefill_engine_num_gpu == 2
     assert config.decode_engine_num_gpu == 4
+
+
+def test_mocker_zero_physical_shape_uses_configured_logical_shape():
+    config = _config(prefill_engine_num_gpu=2, decode_engine_num_gpu=4)
+    controller = _controller()
+    controller.get_gpu_shapes.return_value = (None, None)
+    environment = PlannerEnvironmentImpl(
+        config=config,
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+    )
+
+    environment._refresh_gpu_counts()
+
+    assert environment.deployment_state().prefill.num_gpus == 2
+    assert environment.deployment_state().prefill.gpus_per_replica == 2
+    assert environment.deployment_state().decode.num_gpus == 4
+    assert environment.deployment_state().decode.gpus_per_replica == 4
+
+
+def test_gpu_shape_keeps_engine_width_separate_from_replica_cost():
+    controller = _controller()
+    controller.get_gpu_shapes.return_value = (
+        ComponentGPUShape(2, 3),
+        ComponentGPUShape(4, 5),
+    )
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+    )
+
+    environment._refresh_gpu_counts()
+    capabilities = build_worker_capabilities(environment.deployment_state())
+
+    assert capabilities.prefill is not None
+    assert capabilities.prefill.num_gpu == 2
+    assert capabilities.prefill.resolved_gpu_cost_per_replica == 3
+    assert capabilities.decode is not None
+    assert capabilities.decode.num_gpu == 4
+    assert capabilities.decode.resolved_gpu_cost_per_replica == 5
+
+
+def test_replica_gpu_cost_change_refreshes_engine_capabilities():
+    old_state = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=_controller(),
+        require_prefill=False,
+        require_decode=True,
+    ).deployment_state()
+    old_state.decode.num_gpus = 4
+    old_state.decode.gpus_per_replica = 4
+    new_state = old_state.clone()
+    new_state.decode.gpus_per_replica = 5
+
+    assert util.deployment_state_changed(
+        old_state,
+        new_state,
+        check_prefill=False,
+        check_decode=True,
+    )
 
 
 def test_gpu_discovery_failure_retains_last_observed_state():
     config = _config(prefill_engine_num_gpu=None, decode_engine_num_gpu=None)
     controller = _controller()
-    controller.get_gpu_counts.side_effect = DeploymentValidationError(
+    controller.get_gpu_shapes.side_effect = DeploymentValidationError(
         ["temporary DGD lookup failure"]
     )
     environment = PlannerEnvironmentImpl(
@@ -167,11 +517,139 @@ def test_gpu_discovery_failure_retains_last_observed_state():
     )
     environment.deployment_state().prefill.num_gpus = 2
     environment.deployment_state().decode.num_gpus = 4
+    environment.deployment_state().prefill.gpus_per_replica = 3
+    environment.deployment_state().decode.gpus_per_replica = 5
 
     environment._refresh_gpu_counts()
 
     assert environment.deployment_state().prefill.num_gpus == 2
     assert environment.deployment_state().decode.num_gpus == 4
+    assert environment.deployment_state().prefill.gpus_per_replica == 3
+    assert environment.deployment_state().decode.gpus_per_replica == 5
+
+
+def test_authoritative_gpu_shape_disappearance_fails_closed():
+    controller = _controller()
+    controller.get_gpu_shapes.side_effect = GPUShapeUnavailableError(
+        "decode", "operator cleared DRA shape"
+    )
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=False,
+        require_decode=True,
+    )
+    environment.deployment_state().decode.num_gpus = 4
+    environment.deployment_state().decode.gpus_per_replica = 5
+
+    with pytest.raises(GPUShapeUnavailableError, match="cleared DRA shape"):
+        environment._refresh_gpu_counts()
+
+    assert environment.deployment_state().decode.num_gpus == 4
+    assert environment.deployment_state().decode.gpus_per_replica == 5
+
+
+def test_authoritative_zero_gpu_shape_fails_closed_without_legacy_fallback():
+    controller = _controller()
+    controller.get_gpu_shapes.side_effect = GPUShapeUnavailableError(
+        "decode", "operator published an authoritative zero-GPU shape"
+    )
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=False,
+        require_decode=True,
+    )
+    environment.deployment_state().decode.num_gpus = 4
+    environment.deployment_state().decode.gpus_per_replica = 5
+
+    with pytest.raises(GPUShapeUnavailableError, match="authoritative zero-GPU"):
+        environment._refresh_gpu_counts()
+
+    assert environment.deployment_state().decode.num_gpus == 4
+    assert environment.deployment_state().decode.gpus_per_replica == 5
+
+
+@pytest.mark.asyncio
+async def test_refresh_replica_counts_legacy_connector_power_disabled():
+    """Power-disabled mode keeps the ordinary connector protocol unchanged."""
+
+    class _LegacyConnector:
+        async def get_actual_worker_counts(
+            self,
+            prefill_component_name=None,
+            decode_component_name=None,
+        ):
+            return 1, 2, True
+
+    controller = _controller()
+    legacy = _LegacyConnector()
+    controller.get_actual_worker_counts = legacy.get_actual_worker_counts
+    environment = PlannerEnvironmentImpl(
+        config=_config(enable_power_awareness=False),
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+    )
+    environment.deployment_state().prefill.info = WorkerInfo(k8s_name="prefill")
+    environment.deployment_state().decode.info = WorkerInfo(k8s_name="decode")
+
+    await environment._refresh_replica_counts()
+
+    assert environment.deployment_state().prefill.replicas.active == 1
+    assert environment.deployment_state().decode.replicas.active == 2
+
+
+@pytest.mark.asyncio
+async def test_refresh_replica_counts_uses_dedicated_power_aware_snapshot():
+    """Power-aware mode uses the capability-specific snapshot method."""
+    controller = _controller()
+    controller.get_graph_deployment = MagicMock(return_value={})
+    controller.get_component_power_configs = MagicMock(return_value=(None, None))
+    controller.wait_for_settled_graph_deployment = AsyncMock(return_value={})
+    controller.get_actual_worker_counts = AsyncMock(return_value=(9, 9, True))
+    controller.get_power_aware_worker_counts = AsyncMock(return_value=(2, 3, True))
+    environment = PlannerEnvironmentImpl(
+        config=_config(enable_power_awareness=True),
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+    )
+    environment.deployment_state().prefill.info = WorkerInfo(k8s_name="prefill")
+    environment.deployment_state().decode.info = WorkerInfo(k8s_name="decode")
+
+    await environment._refresh_replica_counts()
+
+    controller.get_power_aware_worker_counts.assert_awaited_once_with(
+        prefill_component_name="prefill",
+        decode_component_name="decode",
+    )
+    controller.get_actual_worker_counts.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_refresh_replica_counts_power_enabled_non_power_aware_raises():
+    """When enable_power_awareness=True but the connector is not a
+    PowerAwareConnector, _refresh_replica_counts must raise
+    DeploymentValidationError rather than using its ordinary count method.
+    """
+    controller = _controller()
+    controller.get_graph_deployment = MagicMock(return_value={})
+    controller.get_component_power_configs = MagicMock(return_value=(None, None))
+    controller.wait_for_settled_graph_deployment = AsyncMock(return_value={})
+    # Deliberately omit get_power_aware_worker_counts: the three older
+    # capabilities are insufficient for the dedicated runtime snapshot.
+    environment = PlannerEnvironmentImpl(
+        config=_config(enable_power_awareness=True),
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+    )
+    environment.deployment_state().prefill.info = WorkerInfo(k8s_name="prefill")
+    environment.deployment_state().decode.info = WorkerInfo(k8s_name="decode")
+
+    with pytest.raises(DeploymentValidationError):
+        await environment._refresh_replica_counts()
 
 
 @pytest.mark.parametrize(
@@ -189,7 +667,7 @@ def test_gpu_refresh_validates_required_widths(
         decode_engine_num_gpu=None,
     )
     controller = _controller()
-    controller.get_gpu_counts.return_value = (None, None)
+    controller.get_gpu_shapes.return_value = (None, None)
     environment = PlannerEnvironmentImpl(
         config=config,
         controller=controller,

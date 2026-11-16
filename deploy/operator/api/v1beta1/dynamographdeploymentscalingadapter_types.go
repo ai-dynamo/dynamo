@@ -29,12 +29,12 @@ type DynamoGraphDeploymentScalingAdapterSpec struct {
 	// replicas is the desired number of replicas for the target component.
 	// This field is modified by external autoscalers (HPA/KEDA/Planner) or
 	// manually by users.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:Minimum=0
 	Replicas int32 `json:"replicas"`
 
 	// dgdRef references the DynamoGraphDeployment and the specific component to scale.
-	// +kubebuilder:validation:Required
+	// +required
 	DGDRef DynamoGraphDeploymentComponentRef `json:"dgdRef"`
 }
 
@@ -44,13 +44,13 @@ type DynamoGraphDeploymentScalingAdapterSpec struct {
 // `serviceName -> componentName` renames.
 type DynamoGraphDeploymentComponentRef struct {
 	// name is the `metadata.name` of the target DynamoGraphDeployment.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
 	// componentName is the `componentName` of the entry within the target
 	// DGD's `spec.components` list to scale.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	ComponentName string `json:"componentName"`
 }
@@ -61,6 +61,7 @@ type DynamoGraphDeploymentScalingAdapterStatus struct {
 	// replicas is the current number of replicas for the target component.
 	// This is synced from the DGD's component replicas and is required for
 	// the scale subresource.
+	// +required
 	Replicas int32 `json:"replicas"`
 
 	// selector is a label selector string for the pods managed by this
@@ -75,6 +76,7 @@ type DynamoGraphDeploymentScalingAdapterStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:printcolumn:name="DGD",type="string",JSONPath=".spec.dgdRef.name",description="DynamoGraphDeployment name"
 // +kubebuilder:printcolumn:name="COMPONENT",type="string",JSONPath=".spec.dgdRef.componentName",description="Component name"
@@ -90,14 +92,17 @@ type DynamoGraphDeploymentScalingAdapterStatus struct {
 // ensuring that only the adapter controller modifies the DGD's component replicas.
 // This prevents conflicts when multiple autoscaling mechanisms are in play.
 //
-// v1alpha1 remains the storage version; conversion between served versions is
-// handled by the operator's conversion webhook
+// v1beta1 is the storage version; conversion to and from the served v1alpha1
+// version is handled by the operator's conversion webhook
 // (see api/v1alpha1/dynamographdeploymentscalingadapter_conversion.go).
 type DynamoGraphDeploymentScalingAdapter struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DynamoGraphDeploymentScalingAdapterSpec   `json:"spec,omitempty"`
+	// +optional
+	Spec DynamoGraphDeploymentScalingAdapterSpec `json:"spec,omitempty"`
+	// +optional
 	Status DynamoGraphDeploymentScalingAdapterStatus `json:"status,omitempty"`
 }
 
@@ -108,10 +113,6 @@ type DynamoGraphDeploymentScalingAdapterList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []DynamoGraphDeploymentScalingAdapter `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&DynamoGraphDeploymentScalingAdapter{}, &DynamoGraphDeploymentScalingAdapterList{})
 }
 
 // IsReady returns true if the adapter has active replicas and a selector.

@@ -14,10 +14,12 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from gpu_memory_service.cli.snapshot import run_per_device
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
@@ -62,11 +64,7 @@ def _load_device(
         sharded_ssd_roots=sharded_ssd_roots,
         sharded_ssd_queues_per_root=sharded_ssd_queues_per_root,
     )
-    client.load_to_gms(
-        input_dir,
-        max_workers=max_workers,
-        clear_existing=True,
-    )
+    client.load_to_gms(input_dir, max_workers=max_workers)
     elapsed = time.monotonic() - t0
     logger.info("GMS checkpoint loaded: device=%d elapsed=%.2fs", device, elapsed)
 
@@ -114,15 +112,30 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=[d.value for d in VMMDeviceType],
         help="VMM device type (default: cuda).",
     )
+    parser.add_argument(
+        "--device",
+        type=int,
+        default=None,
+        help="Device ordinal. Default: every visible GPU.",
+    )
     return parser
 
 
 def _list_checkpoint_devices(
     checkpoint_dir: str | None,
+    device: int | None = None,
 ) -> list[int]:
     vmm = get_vmm()
     vmm.ensure_initialized()
     devices = vmm.list_devices()
+    if device is not None:
+        if device not in devices:
+            raise RuntimeError(f"--device {device} is not visible: visible={devices}")
+        if checkpoint_dir:
+            path = Path(checkpoint_dir) / f"device-{device}"
+            if not path.is_dir():
+                raise RuntimeError(f"Checkpoint directory {path} is missing")
+        return [device]
     if not checkpoint_dir:
         return devices
 
@@ -158,8 +171,22 @@ def _list_checkpoint_devices(
 
 
 def main(argv: list[str] | None = None) -> None:
+    # python -m passes no argv, and run_per_device forwards argv verbatim to
+    # the per-device helpers, so substitute the real command line first.
+    argv = argv if argv is not None else sys.argv[1:]
+    if os.environ.get("DYN_GMS_USE_V1") == "true":
+        run_per_device("gpu_memory_service.v1.snapshot.loader", argv)
+        if "-h" in argv or "--help" in argv:
+            return
+        # Stay alive like V0: a restarted container would request a second RW
+        # session, which times out on the restored worker's RO lease.
+        while True:
+            time.sleep(3600)
+
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.transfer_backend == TransferBackendKind.MX.value:
+        parser.error("--transfer-backend=mx requires DYN_GMS_USE_V1=true")
     if not args.checkpoint_dir:
         parser.error(
             f"--checkpoint-dir is required for --transfer-backend={args.transfer_backend}"
@@ -181,7 +208,7 @@ def main(argv: list[str] | None = None) -> None:
         ",".join(sharded_ssd_roots) or "-",
         sharded_ssd_queues_per_root,
     )
-    devices = _list_checkpoint_devices(checkpoint_dir)
+    devices = _list_checkpoint_devices(checkpoint_dir, args.device)
 
     t0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=len(devices)) as pool:

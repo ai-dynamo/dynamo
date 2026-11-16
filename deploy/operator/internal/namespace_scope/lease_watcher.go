@@ -102,17 +102,17 @@ func (lw *LeaseWatcher) Start(ctx context.Context) error {
 
 	// Add event handler for namespace scope marker leases
 	_, err := leaseInformer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
+		AddFunc: func(obj any) {
 			if lease := lw.extractLease(obj); lease != nil {
 				lw.handleLeaseAdd(lease)
 			}
 		},
-		UpdateFunc: func(oldObj, newObj interface{}) {
+		UpdateFunc: func(oldObj, newObj any) {
 			if lease := lw.extractLease(newObj); lease != nil {
 				lw.handleLeaseUpdate(lease)
 			}
 		},
-		DeleteFunc: func(obj interface{}) {
+		DeleteFunc: func(obj any) {
 			if lease := lw.extractLease(obj); lease != nil {
 				lw.handleLeaseDelete(lease)
 			}

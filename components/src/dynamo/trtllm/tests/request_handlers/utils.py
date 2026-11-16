@@ -27,7 +27,7 @@ def create_mock_context(request_id: str = "test-id") -> MagicMock:
 def setup_multimodal_config(config: MagicMock, image_urls: List[str]) -> None:
     """Configure multimodal_processor and encode_client on config."""
     config.multimodal_processor = MagicMock()
-    config.multimodal_processor.extract_prompt_and_media = MagicMock(
+    config.multimodal_processor.extract_prompt_and_media_from_request = MagicMock(
         return_value=("text", image_urls, [])
     )
     config.encode_client = MagicMock()

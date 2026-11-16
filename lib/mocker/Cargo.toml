@@ -12,46 +12,47 @@ homepage.workspace = true
 repository.workspace = true
 readme = "README.md"
 
+[package.metadata.cargo-machete]
+# flate2 only selects the deflate backend that zip uses; no code imports it.
+ignored = ["flate2"]
+
 [features]
 default = []
 profile = []
-# Test/benchmark-only deterministic replay plumbing. Production replay never
-# enables this feature and keeps the existing random selector behavior.
-replay-bench = ["dynamo-kv-router/bench"]
+# Benchmark builds for replay parity tooling. Canonical (seeded) replay needs no
+# feature: a caller opts in per replay with ReplayDeterminism::CanonicalV1.
+replay-bench = ["aisimulate-core/replay-bench", "dynamo-kv-router/bench", "dynamo-kv-indexer/bench", "dynamo-scheduler/bench", "dynamo-slot-tracker/bench"]
 test-support = []
 zmq-events = ["dep:tmq"]
-# Enables G1↔G2 offload simulation via kvbm-engine.
-kvbm-offload = ["dep:kvbm-engine", "dep:kvbm-physical", "dep:kvbm-common", "dep:velo"]
 
 [dependencies]
+dynamo-router-policies = { workspace = true }
 # repo
-dynamo-data-gen = { workspace = true }
+aisimulate-core = { workspace = true }
+dynamo-admission = { workspace = true }
+dynamo-kv-events = { workspace = true }
+dynamo-kv-hashing = { workspace = true }
+dynamo-kv-hints = { workspace = true }
+dynamo-kv-indexer = { workspace = true }
 dynamo-kv-router = { workspace = true }
+dynamo-router-protocol = { workspace = true }
+dynamo-scheduler = { workspace = true }
+dynamo-session-affinity = { workspace = true }
+dynamo-slot-tracker = { workspace = true }
 dynamo-tokens = { workspace = true }
-dynamo-truthy = { workspace = true }
-kvbm-logical = { workspace = true }
-
-# kvbm-offload feature dependencies (G1↔G2 transport simulation)
-kvbm-engine = { workspace = true, optional = true }
-kvbm-physical = { workspace = true, optional = true }
-kvbm-common = { workspace = true, optional = true }
-velo = { workspace = true, optional = true }
+dynamo-worker-selection = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
-derive_builder = { workspace = true }
-derive-getters = { workspace = true }
 futures = { workspace = true }
-indicatif = "0.18"
-rand = { workspace = true }
+parking_lot = { workspace = true }
 rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_path_to_error = { workspace = true }
-smallvec = { workspace = true }
 tmq = { workspace = true, optional = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -60,12 +61,16 @@ uuid = { workspace = true }
 validator = { workspace = true }
 
 # crate-specific
-ddsketchy = "0.1.7"
+# zip's deflate-flate2 picks no flate2 backend; flate2's default backend is miniz_oxide.
+flate2 = "1.1.9"
 ndarray = "0.16"
-slotmap = "1"
-ndarray-npy = "0.9"
+# Without its npz feature, which needs zip 2.x; perf_model.rs reads NPZ archives with zip.
+ndarray-npy = { version = "0.9", default-features = false }
 ndarray-interp = "0.5"
 rustc-hash = "2"
+fastrand = "2"
+# deflate-flate2 uses the miniz_oxide backend above; the zlib variants switch flate2 for all users.
+zip = { version = "9.1.3", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-timerfd = "0.2"

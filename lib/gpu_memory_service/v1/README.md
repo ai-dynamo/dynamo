@@ -1,0 +1,347 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# GPU Memory Service V1
+
+GMS V1 is an experimental, rank-local memory owner for engines restored by
+Dynamo Snapshot. It is fail-stop: errors terminate the worker rather than
+retrying, rolling back, falling back to native allocation, or continuing after
+a partial wake.
+
+## Snapshot assumptions
+
+Dynamo Snapshot captures only after whole-engine GMS sleep. Restore preserves:
+
+- the same Python and Torch process state;
+- the same TensorImpls and post-partition StorageImpl graph;
+- tensor layouts;
+- GMS allocation IDs; and
+- CUDA virtual-address reservations.
+
+Model construction, model loading, and non-Parameter storage copy-out do not
+run again after restore. Default-allocator copies are ordinary process-owned
+Snapshot state.
+
+Committed weight allocations can be saved as raw shards before Snapshot
+capture and loaded under the same allocation IDs in a fresh rank-local V1
+server. The restored process then imports those allocations at its preserved
+virtual addresses.
+
+KV TensorImpls, mapping records, allocation IDs, sizes, and VA reservations also
+survive. KV physical backing and contents do not. Wake creates fresh backing
+under the saved IDs and maps it at the preserved VAs before vLLM prepares the
+cache for use.
+
+## Ownership
+
+`GMSV1Worker._maybe_get_memory_pool_context(tag)` is the vLLM routing seam.
+vLLM calls its allocation-scope labels tags. V1 maps the recognized `weights`
+and `kv_cache` tags to isolated GMS domains owned by one
+`GMSV1SleepModeBackend`; every other tag follows vLLM's normal implementation.
+
+```text
+GMSV1Worker
+  _maybe_get_memory_pool_context(tag)
+    -> GMSV1SleepModeBackend
+         owns one CUDAPluggableAllocator
+         owns temporary weights MemPool + long-lived KV MemPool
+         owns two GMSClientMemoryManager instances
+              weights -> weights.sock
+              kv      -> kv_cache.sock
+
+sidecar per rank:
+  weights.sock  -> GMSServerMemoryManager + independent allocations and sessions
+  kv_cache.sock -> GMSServerMemoryManager + independent allocations and sessions
+```
+
+The pluggable allocator outlives both MemPools. Allocation callbacks route by
+the active domain. Free callbacks route by VA ownership because Torch can free
+outside the context that allocated the storage. C free callbacks cannot
+reliably propagate Python exceptions, so the backend latches and surfaces the
+first callback failure.
+
+V1 reuses the existing
+`gpu_memory_service.client.torch.extensions._allocator_ext` native shim
+unchanged and permits one V1 allocator/backend owner per process. The default
+V0 and `DYN_GMS_USE_V1=true` launch profiles are mutually exclusive. Mixed
+initialization is unsupported by contract and prevented by launch/process
+topology; no runtime cross-profile arbitration is provided or needed.
+
+Both client domains use the same `GMSClientMemoryManager` class and the same
+V0-style operations:
+
+| Operation | Purpose |
+|---|---|
+| `connect` / `disconnect` | Acquire or release the socket lease |
+| `create_mapping` / `destroy_mapping` | Own one server allocation and local VA |
+| `commit` | Change the same weights socket and mappings from RW to RO |
+| `unmap_all_vas` | Drop imported handles but preserve IDs, sizes, and VAs |
+| `reallocate_all_handles` | Recreate ephemeral server backing under saved IDs |
+| `remap_all_vas` | Install server backing at saved VAs |
+| `close` | Release local mappings and the socket |
+
+Each Unix-domain socket is its lease. A writer excludes all other sessions.
+Committed weights can have shared readers. Waiting writers have priority over
+new readers. A same-socket commit changes RW to RO atomically. Disconnecting an
+uncommitted writer clears its complete allocation epoch before another writer
+is admitted. Reader disconnect only releases that reader.
+
+The server retains allocation IDs, aligned sizes, and CUDA handles rather than
+persistent export FDs. Each export
+creates a transient FD, transfers it with `SCM_RIGHTS`, and closes the server
+copy. Client import consumes and closes the received copy. The wire protocol is
+a small typed `msgspec.Struct` MessagePack protocol; there is no JSON
+compatibility path.
+
+## Checkpoint control
+
+After the engine has slept and both GMS domains are quiescent, an external
+controller calls `prepare`. The sidecar atomically requires committed weights
+with retained allocations and an empty, uncommitted KV-cache domain, then
+fences new admission across both domain sockets. A handshake that races the
+fence is rejected under V1's fail-stop contract.
+
+The fence has no expiry. `abort` and `complete` require the active opaque token
+and are retry-safe for the same resolution. Because control calls are one-shot,
+a replacement controller can call `state` to recover the active token before
+explicitly aborting or completing the checkpoint. Access to the mode-`0600`
+rank-local socket is the control-plane trust boundary.
+
+## Cold weight storage
+
+GMS saves weight bytes before Snapshot captures the sleeping engine. A size
+check cannot detect a shard that changes on disk without changing size. New
+checkpoints record a BLAKE3 digest for each shard and verify the bytes during
+restore. A mismatch stops the restore before the worker uses those weights.
+
+| Weight-artifact version | Integrity check | Restore behavior |
+| --- | --- | --- |
+| 2 (new checkpoints) | BLAKE3 for each shard | Rejects missing, truncated, or changed shards, including same-size changes. |
+| 1 (legacy checkpoints) | No content digest | Still loads after structural checks, with a warning that same-size corruption cannot be detected. |
+
+The weight-artifact version is independent of the GMS protocol version.
+Recapture a version-1 checkpoint with the current saver to add digests: hashing
+an old shard now cannot prove what it contained when it was captured.
+
+With `DYN_GMS_USE_V1=true`, the saver reads committed allocation IDs and sizes
+from the rank-local `weights` socket, temporarily imports the allocations, and
+writes raw shards through the shared snapshot disk writer. It hashes bytes as
+they pass through host memory, without rereading the saved files. The manifest
+records each allocation's ID, aligned size, shard path, and offset, plus the
+size and digest of every shard. By default, paths are relative to the device
+artifact directory. `--sharded-ssd-roots` distributes files across per-device
+roots using the V0 layout and records absolute paths.
+
+On restore, the loader validates the manifest and shard layout, including the
+required digests for version 2. Missing or invalid digests fail the load;
+they do not silently fall back to version-1 behavior. The loader requests
+`RW_OR_RO` on the `weights` socket. If weights are already committed, it gets
+RO and returns without another transfer. Otherwise, it gets RW, recreates the
+saved allocation IDs and sizes, and transfers the shards. Backend selection
+uses `snapshot.transfer.create_transfer_backend` and the existing V0
+configuration:
+
+| Transfer backend | How it verifies the recorded digest |
+| --- | --- |
+| `nixl` and `sharded-ssd` | Hash the same bytes being copied through pinned host memory, with no extra storage read. |
+| `nixl-gds` | Read and verify each shard before direct transfer, because GDS has no CPU-visible staging buffer. Keep files unchanged between verification and transfer. |
+| `mx` | Does not verify, because it reads no shard. It fills the allocations over RDMA from a ModelExpress peer that serves the same weights under the same source key (`v1.snapshot.mx_source`), pairing allocations by creation order and requiring equal sizes. |
+
+`nixl-gds` needs the checkpoint on a file system that cuFile can register.
+NFS works. SMB/CIFS (for example, the default Azure Files storage class) does
+not. A local ext4 or xfs disk works only when the container can read the host's
+`/run/udev`. Before the integrity pass, the loader registers one shard and fails
+with the file system type when cuFile rejects it. Use `nixl` on other storage.
+
+After transfer and verification succeed, the loader synchronizes, releases its
+temporary mappings, commits the socket from RW to RO, and closes its lease.
+The loader process stays running so Kubernetes does not restart the container.
+The server keeps the committed backing while the restored worker reconnects RO
+and remaps the preserved virtual addresses.
+
+## Weight construction
+
+V1 uses vLLM's normal model loader inside its broad weights allocation scope:
+
+1. Connect `weights` RW and enter the temporary GMS weights MemPool.
+2. Run model construction, loading, quantization, and post-load transforms.
+3. Leave the GMS MemPool.
+4. Copy live non-Parameter tensors from GMS storage to Torch's default
+   allocator while preserving TensorImpl identity and non-Parameter aliases.
+5. Synchronize CUDA.
+6. Destroy the temporary weights MemPool, releasing cached and unreferenced
+   blocks through the allocator free callback.
+7. Surface any allocator callback failure.
+8. Protect surviving Parameter mappings RO and commit the same socket RW to RO.
+
+Destroying the MemPool is V1's pruning operation; it does not free allocations
+still owned by live Parameter storage. The free callbacks remove only mappings
+for blocks that are no longer retained, leaving the Parameter-backed allocation
+set to commit.
+
+The storage copy operates on each overlapping connected component of bounding
+storage byte ranges, not on an entire StorageImpl and not once per tensor.
+Relative aliases and offsets inside a copied component are preserved. Disjoint
+components get separate storage. Absolute non-empty storage offsets may be
+rebased. Mixed Parameter/non-Parameter aliasing is deliberately severed.
+
+See `client/parameter_storage.py` for the detailed before/after diagram and
+implementation.
+
+The commit log reports Parameter span bytes, retained aligned GMS bytes,
+uncovered retained bytes and ratio, copied-out bytes, and retained allocation
+count.
+
+## Sleep and wake
+
+```mermaid
+sequenceDiagram
+    participant W as vLLM worker
+    participant WM as weights manager
+    participant KM as KV manager
+    participant L as V1 weight loader
+    participant WS as fresh weights server
+    participant KS as KV server
+
+    W->>WM: unmap_all_vas, disconnect RO
+    W->>KM: unmap_all_vas, disconnect RW
+    Note over KS: clear KV epoch
+    Note over W: Dynamo Snapshot captures sleeping engine
+
+    L->>WS: connect RW, allocate saved IDs
+    L->>WS: load with configured backend
+    L->>WS: commit RW to RO and exit
+    W->>KM: connect RW
+    W->>KM: reallocate_all_handles, remap_all_vas
+    Note over KS: fresh KV backing at preserved VAs
+    W->>WM: connect RO to its GPU's socket
+    W->>WM: verify GPU and remap exact IDs
+```
+
+Suspend order is weights then KV so the exclusive KV lease remains held until
+local weight memory is asleep. Resume order is KV then weights.
+
+Sockets are named by GPU UUID, and each connection reaches the sockets of the
+GPU the engine's device is on at that moment, so a restore onto other GPUs needs
+no configuration and engines may number GPUs in any order. Every connection
+verifies the physical GPU identity; a predecessor server identity is not
+persisted.
+
+GMS device N is the pod's N-th GPU in PCI bus order and names the
+`device-<N>` artifact directory. Restore relies on Dynamo Snapshot moving the
+process from the checkpoint's N-th GPU in bus order to the restoring pod's
+N-th, where GMS device N loads the `device-<N>` artifact. If a restore pairs
+GPUs differently, the engine fails to remap: the artifact holds another rank's
+allocation IDs.
+
+V1 does not reconstruct models, retain KV contents, scan raw mappings, validate
+model-specific layouts, or implement SGLang integration.
+
+## Running V1
+
+Start one V1 process per GPU:
+
+```text
+DYN_GMS_USE_V1=true python3 -m gpu_memory_service.cli.server
+```
+
+The supervisor reads the GPUs from `/proc/driver/nvidia/gpus` without starting
+CUDA, keeps those whose device node it can open, and serves GMS device N from
+the N-th of them in PCI bus order. Each device's process is pinned to its GPU
+with `CUDA_VISIBLE_DEVICES` and told its GPU's UUID. libcuda initializes every
+GPU whose device node it can open, so the supervisor also confines each process
+with Landlock to open only its own GPU's node, and the process brings up that
+GPU alone. This shortens start-up and keeps it from slowing other CUDA work on
+the node. It is not isolation between devices. On a kernel without Landlock the
+supervisor logs a warning and runs the processes unconfined. Pass
+`--no-isolation` to run them unconfined anyway. To start one device's server
+directly:
+
+```text
+DYN_GMS_USE_V1=true gpu-memory-service --device 0
+```
+
+Save or load every visible device (pass `--device N` for one GPU). Artifacts
+land under `<checkpoint-dir>/device-<N>`:
+
+```text
+DYN_GMS_USE_V1=true python -m gpu_memory_service.cli.snapshot.saver \
+  --checkpoint-dir /checkpoints/run/versions/1
+DYN_GMS_USE_V1=true python -m gpu_memory_service.cli.snapshot.loader \
+  --checkpoint-dir /checkpoints/run/versions/1 \
+  --transfer-backend nixl-gds
+DYN_GMS_USE_V1=true python3 -m gpu_memory_service.cli.server --enable-loader \
+  --checkpoint-dir /checkpoints/run/versions/1 \
+  --transfer-backend nixl-gds
+DYN_GMS_USE_V1=true python3 -m gpu_memory_service.cli.server --enable-loader \
+  --checkpoint-dir /checkpoints/run/versions/1 \
+  --transfer-backend mx --mx-source-key <checkpoint>
+```
+
+With `--enable-loader`, each device's server process loads its weights in a
+thread and keeps serving. The `mx` backend starts its NIXL agent while the
+loader allocates.
+
+The loader also accepts `nixl` and `sharded-ssd`, the existing sharded SSD root
+and queue flags, and repeatable `--posix-backend-param KEY=VALUE` overrides.
+Start the restored worker with `GMS_SOCKET_DIR`. Only the `weights` socket is
+used by artifact transfer. `--enable-loader` must come last among server flags.
+
+The operator injects `DYN_GMS_USE_V1=true` on snapshot-coupled GMS pods.
+Dynamo vLLM and SGLang backends select the V1 client from that env; no extra
+CLI flag is required. vLLM keeps its normal load format and uses
+`GMSV1Worker`. SGLang enables `--enable-memory-saver` (a real SGLang
+ServerArgs field) from the same env.
+
+### ModelExpress restore (experimental)
+
+The `mx` backend fills each device from a peer that serves the same weights
+over ModelExpress RDMA. It is V1 only. The V0 loader rejects it. No CI lane
+runs a live peer-to-peer transfer yet.
+
+Peers publish their weights with
+`python3 -m gpu_memory_service.v1.snapshot.mx_source --source-key <checkpoint>`.
+It serves every device, one process each. Pass `--device N` to serve one.
+Device N's loader listens on `--mx-listen-port` (default 25555) + N. It fills
+from the peer's device N, so the peer must hold the same rank on its N-th GPU
+in bus order, as pods of one deployment do. Ranks of equal size cannot be told
+apart. The loader does not fall back to another backend: it fails if no peer
+serves the key.
+
+The operator has no MX field. Declare the loader and the source as your own
+containers and list them under `experimental.gpuMemoryService.extraClientContainers`.
+The operator then gives each one the GMS socket, the shared DRA claim and
+`DYN_GMS_USE_V1=true`:
+
+```yaml
+experimental:
+  gpuMemoryService:
+    extraClientContainers: [gms-loader, gms-mx-source]
+podTemplate:
+  spec:
+    containers:
+    - name: main
+      # ... the engine ...
+    - name: gms-loader  # on pods that restore from a peer
+      image: my-registry/runtime:my-tag
+      command: [python3, -m, gpu_memory_service.cli.snapshot.loader]
+      args: [--checkpoint-dir, /checkpoints/run/versions/1,
+             --transfer-backend, mx, --mx-source-key, <checkpoint>]
+    - name: gms-mx-source  # on pods that serve their weights to peers
+      image: my-registry/runtime:my-tag
+      command: [python3, -m, gpu_memory_service.v1.snapshot.mx_source]
+      args: [--source-key, <checkpoint>]
+```
+
+The source waits until the weights are committed, then holds a read-only
+lease on them until it stops. A pod running it cannot be checkpointed:
+checkpoint prepare refuses while the lease is held, and the pod keeps serving.
+Do not list the source under `checkpoint.job.gmsClientContainers`. The lease
+does not block restored engines, which attach the weights read-only.
+
+The source exits with an error if it finds no GPU or cannot start publishing.
+While the ModelExpress server is unreachable it keeps retrying the
+registration (`MX_PUBLISH_TIMEOUT_SECS` defaults to 0, no limit, here). When
+stopped, it withdraws the source before it releases the weights.

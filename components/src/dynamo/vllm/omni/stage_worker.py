@@ -5,22 +5,27 @@
 
 import asyncio
 import atexit
+import contextlib
 import importlib
 import inspect
 import logging
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass
-from typing import Any, AsyncGenerator
+import uuid
+from dataclasses import dataclass, replace
+from enum import Enum
+from typing import Any, AsyncGenerator, Iterator
 
 import torch
 import yaml
+from vllm_omni.config import register_pipeline
+from vllm_omni.config.config_factory import StageConfigFactory
+from vllm_omni.config.pipeline_registry import OMNI_PIPELINES
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
 from vllm_omni.engine.orchestrator import build_engine_core_request_from_tokens
 from vllm_omni.entrypoints.async_omni import AsyncOmni
 from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
-from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
 from vllm_omni.inputs.data import OmniTokensPrompt
 
 from dynamo import prometheus_names
@@ -36,6 +41,7 @@ from dynamo.vllm.omni.utils import (
     ensure_awaited,
     is_empty_payload,
     parse_omni_request,
+    resolve_stage_configs,
     unwrap_connector_payload,
 )
 
@@ -469,20 +475,17 @@ async def init_omni_stage(
         raise ValueError("--stage-id is required for stage worker initialization")
     stage_id: int = config.stage_id
 
-    (
-        resolved_stage_configs_path,
-        stage_configs,
-        _omni_lb_policy,
-    ) = load_and_resolve_stage_configs(
+    trust_remote_code: bool = bool(
+        getattr(getattr(config, "engine_args", None), "trust_remote_code", False)
+    )
+
+    resolved_path, stage_configs = resolve_stage_configs(
         config.model,
-        config.stage_configs_path,
-        kwargs={},
-        trust_remote_code=getattr(
-            getattr(config, "engine_args", None), "trust_remote_code", False
-        ),
+        trust_remote_code=trust_remote_code,
+        deploy_config_path=config.stage_configs_path,
     )
     connector_configs_path = _ensure_stage_connectors(
-        resolved_stage_configs_path,
+        resolved_path,
         stage_configs,
     )
     # Only register NixlConnector if it's actually used in stage configs
@@ -506,7 +509,14 @@ async def init_omni_stage(
     generate_endpoint = runtime.endpoint(f"{config.namespace}.{model_stage}.generate")
     shutdown_endpoints[:] = [generate_endpoint]
 
-    engine = _create_engine(config.model, my_config, stage_type)
+    engine = _create_engine(
+        config.model,
+        my_config,
+        stage_type,
+        stage_id,
+        trust_remote_code,
+        config.stage_configs_path,
+    )
     logger.info("Stage %d: engine created (type=%s)", stage_id, stage_type)
 
     # Connectors for inter-stage output transfer — type determined by YAML config
@@ -569,8 +579,12 @@ def _connector_key(from_stage: int | str, to_stage: int | str) -> tuple[str, str
     return (str(from_stage), str(to_stage))
 
 
-def _uses_nixl_connector(stage_configs_path: str, stage_configs: list[Any]) -> bool:
+def _uses_nixl_connector(
+    stage_configs_path: str | None, stage_configs: list[Any]
+) -> bool:
     """Check if any stage connector uses NixlConnector."""
+    if stage_configs_path is None:
+        return False
     try:
         with open(stage_configs_path) as f:
             raw = f.read()
@@ -603,12 +617,18 @@ def _uses_nixl_connector(stage_configs_path: str, stage_configs: list[Any]) -> b
     if isinstance(runtime, dict) and isinstance(runtime.get("connectors"), dict):
         connectors_list.append(runtime["connectors"])
 
+    for stage in deploy_config.get("stages", []):
+        if isinstance(stage, dict):
+            for key in ("input_connectors", "output_connectors"):
+                if isinstance(stage.get(key), dict):
+                    connectors_list.append(stage[key])
+
     for connectors in connectors_list:
         for connector_config in connectors.values():
             if not isinstance(connector_config, dict):
                 continue
             connector_type = connector_config.get("name", "")
-            if connector_type == "NixlConnector":
+            if connector_type in ("NixlConnector", "DynamoOmniNixlConnector"):
                 return True
 
     return False
@@ -622,8 +642,12 @@ def _load_processor(func_path: str | None) -> Any:
     return getattr(importlib.import_module(module_path), func_name)
 
 
-def _ensure_stage_connectors(stage_configs_path: str, stage_configs: list[Any]) -> str:
+def _ensure_stage_connectors(
+    stage_configs_path: str | None, stage_configs: list[Any]
+) -> str | None:
     """Add default SHM connector edges for stage configs that omit them."""
+    if stage_configs_path is None:
+        return None
     try:
         with open(stage_configs_path) as f:
             deploy_config = yaml.safe_load(f) or {}
@@ -648,6 +672,24 @@ def _ensure_stage_connectors(stage_configs_path: str, stage_configs: list[Any]) 
     }
     connector_name = "connector_of_shared_memory"
     changed = False
+
+    sections = [deploy_config, deploy_config.get("runtime", {})]
+    sections.extend(
+        {"connectors": stage.get(key, {})}
+        for stage in stages
+        if isinstance(stage, dict)
+        for key in ("input_connectors", "output_connectors")
+    )
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        definitions = section.get("connectors", {})
+        if not isinstance(definitions, dict):
+            continue
+        for connector in definitions.values():
+            if isinstance(connector, dict) and connector.get("name") == "NixlConnector":
+                connector["name"] = "DynamoOmniNixlConnector"
+                changed = True
 
     for stage_config in stage_configs:
         to_stage = int(getattr(stage_config, "stage_id", -1))
@@ -689,7 +731,7 @@ def _ensure_stage_connectors(stage_configs_path: str, stage_configs: list[Any]) 
 
     atexit.register(_cleanup_temp_stage_config, tmp_dir)
     logger.info(
-        "Synthesized default SharedMemoryConnector edges in %s from %s",
+        "Prepared stage connectors in %s from %s",
         tmp_path,
         stage_configs_path,
     )
@@ -809,23 +851,108 @@ def _accepts_source_outputs_processor(parameter_names: list[str]) -> bool:
     )
 
 
-def _create_engine(model: str, stage_config: Any, stage_type: str) -> StageEngine:
-    """Create AsyncOmni with a single-stage YAML."""
+@contextlib.contextmanager
+def _register_single_stage_pipeline(
+    model: str,
+    stage_id: int,
+    trust_remote_code: bool,
+    deploy_config_path: str | None,
+) -> Iterator[str]:
+    """Register a one-stage pipeline for this worker, yielding its lookup key.
+
+    The entry is removed once the caller has built its engine: vLLM-Omni reads
+    the registry only while resolving the deploy config, and the built engine
+    keeps working without it. Leaving it registered would grow the process-wide
+    OMNI_PIPELINES dict on every call.
+    """
+    pipeline = StageConfigFactory.get_pipeline_config(
+        model=model,
+        trust_remote_code=trust_remote_code,
+        deploy_config_path=deploy_config_path,
+    )
+    if pipeline is None:
+        raise ValueError(
+            f"vLLM-Omni resolved no pipeline for model {model!r}; cannot build a "
+            f"single-stage engine for stage_id {stage_id}"
+        )
+    source_stage = pipeline.get_stage(stage_id)
+    if source_stage is None:
+        available = [stage.stage_id for stage in pipeline.stages]
+        raise ValueError(
+            f"stage_id {stage_id} is not defined by the pipeline for {model!r} "
+            f"(pipeline declares stage ids {available})"
+        )
+
+    single_stage = replace(
+        source_stage,
+        stage_id=0,
+        input_sources=(),
+        final_output=True,
+        custom_process_input_func=None,
+        sync_process_input_func=None,
+    )
+    pipeline_key = f"dynamo_stage{stage_id}_{uuid.uuid4().hex}"
+    register_pipeline(
+        replace(
+            pipeline,
+            model_type=pipeline_key,
+            stages=(single_stage,),
+            default_deploy_config_name=None,
+        ),
+        model_type=pipeline_key,
+    )
+    try:
+        yield pipeline_key
+    finally:
+        OMNI_PIPELINES.pop(pipeline_key, None)
+
+
+def _create_engine(
+    model: str,
+    stage_config: Any,
+    stage_type: str,
+    stage_id: int,
+    trust_remote_code: bool,
+    deploy_config_path: str | None,
+) -> StageEngine:
+    """Create AsyncOmni for a single stage of a disaggregated pipeline."""
     stage_arg = _stage_config_to_dict(stage_config, stage_type)
     _normalize_single_stage_runtime_devices(stage_arg)
-    single_stage_config = {
-        "stage_args": [stage_arg],
-        "runtime": {"edges": []},
+
+    stage_entry: dict[str, Any] = {
+        "stage_id": 0,
+        "num_replicas": 1,
+        "engine_args": stage_arg["engine_args"],
     }
+    runtime = stage_arg.get("runtime") or {}
+    for runtime_key in ("devices", "env"):
+        value = runtime.get(runtime_key)
+        if value is not None:
+            stage_entry[runtime_key] = value
+    if "default_sampling_params" in stage_arg:
+        stage_entry["default_sampling_params"] = stage_arg["default_sampling_params"]
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tmp:
-        yaml.dump(single_stage_config, tmp)
-        tmp_path = tmp.name
+    with _register_single_stage_pipeline(
+        model, stage_id, trust_remote_code, deploy_config_path
+    ) as pipeline_key:
+        deploy_config = {
+            "pipeline": pipeline_key,
+            "async_chunk": False,
+            "stages": [stage_entry],
+        }
 
-    try:
-        return AsyncOmni(model=model, stage_configs_path=tmp_path)
-    finally:
-        os.unlink(tmp_path)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tmp:
+            yaml.dump(deploy_config, tmp)
+            tmp_path = tmp.name
+
+        try:
+            return AsyncOmni(
+                model=model,
+                deploy_config=tmp_path,
+                trust_remote_code=trust_remote_code,
+            )
+        finally:
+            os.unlink(tmp_path)
 
 
 def _stage_config_to_dict(stage_config: Any, stage_type: str) -> dict:
@@ -834,15 +961,31 @@ def _stage_config_to_dict(stage_config: Any, stage_type: str) -> dict:
 
     def _to_plain(obj: Any) -> Any:
         if OmegaConf.is_config(obj):
-            return OmegaConf.to_container(obj, resolve=True)
+            obj = OmegaConf.to_container(obj, resolve=True)
+        if isinstance(obj, Enum):
+            return obj.value
         if hasattr(obj, "__dict__"):
-            return dict(vars(obj))
+            obj = dict(vars(obj))
+        if isinstance(obj, dict):
+            return {key: _to_plain(value) for key, value in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_to_plain(value) for value in obj]
         return obj
+
+    engine_args = _to_plain(stage_config.engine_args)
+    execution_type = getattr(stage_config, "execution_type", None)
+    if execution_type is not None:
+        from vllm_omni.config.omni_config import _STAGE_ENGINE_FIELDS_BY_EXECUTION_TYPE
+
+        deploy_fields = _STAGE_ENGINE_FIELDS_BY_EXECUTION_TYPE[execution_type]
+        engine_args = {
+            key: value for key, value in engine_args.items() if key in deploy_fields
+        }
 
     result: dict = {
         "stage_id": 0,
         "stage_type": stage_type,
-        "engine_args": _to_plain(stage_config.engine_args),
+        "engine_args": engine_args,
         "final_output": True,
         "final_output_type": getattr(stage_config, "final_output_type", "text"),
     }

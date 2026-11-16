@@ -61,6 +61,7 @@ fn test_sampling_parameters_include_stop_str_in_output_extraction() {
     use dynamo_llm::protocols::common::SamplingOptionsProvider;
 
     let request = NvCreateChatCompletionRequest {
+        responses_tools: None,
         inner: Default::default(),
         common: CommonExt::builder()
             .include_stop_str_in_output(true)
@@ -71,11 +72,51 @@ fn test_sampling_parameters_include_stop_str_in_output_extraction() {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
+        preserve_thinking: None,
         unsupported_fields: Default::default(),
     };
 
     let sampling = request.extract_sampling_options().unwrap();
     assert_eq!(sampling.include_stop_str_in_output, Some(true));
+}
+
+fn chat_request_with_top_p(top_p: f32) -> NvCreateChatCompletionRequest {
+    // helper to create a chat request with a specific top_p value for testing
+    serde_json::from_value(serde_json::json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "top_p": top_p,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn test_sampling_options_reject_zero_top_p() {
+    // Test that top_p = 0 is rejected
+    use dynamo_llm::protocols::common::SamplingOptionsProvider;
+
+    let error = chat_request_with_top_p(0.0)
+        .extract_sampling_options()
+        .expect_err("top_p = 0 must be rejected");
+
+    assert!(
+        error.to_string().contains("Top_p"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn test_sampling_options_accept_valid_top_p() {
+    // Test that valid top_p values are accepted
+    use dynamo_llm::protocols::common::SamplingOptionsProvider;
+
+    for top_p in [0.0001, 0.5, 1.0] {
+        let sampling = chat_request_with_top_p(top_p)
+            .extract_sampling_options()
+            .unwrap_or_else(|e| panic!("top_p = {top_p} must be accepted: {e}"));
+        assert_eq!(sampling.top_p, Some(top_p));
+    }
 }
 
 #[test]
@@ -278,6 +319,8 @@ fn test_completions_common_values() {
 fn test_serialization_preserves_structure() {
     // Test that serialization preserves the flattened structure
     let request = NvCreateChatCompletionRequest {
+        preserve_thinking: None,
+        responses_tools: None,
         inner: dynamo_protocols::types::CreateChatCompletionRequest {
             model: "test-model".to_string(),
             messages: vec![dynamo_protocols::types::ChatCompletionRequestMessage::User(
@@ -303,6 +346,7 @@ fn test_serialization_preserves_structure() {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
         unsupported_fields: Default::default(),
     };
 
@@ -346,6 +390,7 @@ fn test_sampling_parameters_extraction() {
 
     // Test that top_k and repetition_penalty are extracted in sampling options when passed a top level
     let request = NvCreateChatCompletionRequest {
+        responses_tools: None,
         inner: Default::default(),
         common: CommonExt::builder()
             .top_k(42)
@@ -357,6 +402,8 @@ fn test_sampling_parameters_extraction() {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
+        preserve_thinking: None,
         unsupported_fields: Default::default(),
     };
 
@@ -364,4 +411,38 @@ fn test_sampling_parameters_extraction() {
 
     assert_eq!(sampling_options.top_k, Some(42));
     assert_eq!(sampling_options.repetition_penalty, Some(1.3));
+}
+
+#[test]
+fn test_chat_completions_generation_prompt_fields_from_common() {
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(
+        r#"{
+        "model": "test-model",
+        "messages": [
+            {"role": "user", "content": "Continue this sentence"},
+            {"role": "assistant", "content": "LLM-Native Interaction"}
+        ],
+        "add_generation_prompt": false,
+        "continue_final_message": true
+    }"#,
+    )
+    .unwrap();
+
+    assert_eq!(request.common.add_generation_prompt, Some(false));
+    assert_eq!(request.common.continue_final_message, Some(true));
+    assert_eq!(request.get_continue_final_message(), Some(true));
+}
+
+#[test]
+fn test_generation_prompt_fields_omitted_default_none() {
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(
+        r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}]
+    }"#,
+    )
+    .unwrap();
+
+    assert_eq!(request.common.add_generation_prompt, None);
+    assert_eq!(request.common.continue_final_message, None);
 }

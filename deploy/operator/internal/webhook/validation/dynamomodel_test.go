@@ -19,16 +19,13 @@ package validation
 
 import (
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	admissionv1 "k8s.io/api/admission/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 )
 
 func TestDynamoModelValidator_Validate(t *testing.T) {
@@ -266,26 +263,13 @@ func TestDynamoModelValidator_Validate(t *testing.T) {
 	}
 }
 
-func TestDynamoModelHandlerBoundaryErrorsRemainRegular(t *testing.T) {
-	handler := NewDynamoModelHandler()
-	_, err := handler.ValidateCreate(t.Context(), &runtime.Unknown{})
-	if err == nil || !strings.Contains(err.Error(), "expected DynamoModel") {
-		t.Fatalf("ValidateCreate() error = %v, want cast error", err)
-	}
-	if k8serrors.IsInvalid(err) {
-		t.Fatalf("ValidateCreate() error = %v, want regular boundary error", err)
-	}
-}
-
 func dynamoModelForAdmission(
 	mutate func(*nvidiacomv1alpha1.DynamoModel),
 ) *nvidiacomv1alpha1.DynamoModel {
 	model := &nvidiacomv1alpha1.DynamoModel{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
-			Kind:       "DynamoModel",
-		},
-		ObjectMeta: metav1.ObjectMeta{Name: "test-model", Namespace: "default"},
+		APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
+		Kind:       "DynamoModel",
+		Name:       "test-model", Namespace: "default",
 		Spec: nvidiacomv1alpha1.DynamoModelSpec{
 			ModelName:     "Qwen/Qwen3-0.6B",
 			BaseModelName: "Qwen/Qwen3-0.6B",

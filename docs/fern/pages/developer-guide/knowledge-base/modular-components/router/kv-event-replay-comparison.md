@@ -22,16 +22,16 @@ A KV event consumer (router, cache coordinator) subscribes to a live stream of b
 | **Event ordering** | Monotonic sequence number (8-byte int) | Monotonic `event_id` with consecutive-ID validation |
 | **Lookup** | Linear scan (`for seq, buf in buffer`) | Binary search (`binary_search_by_key`) |
 | **Serialization** | Pre-serialized msgpack bytes stored in buffer | Structured events stored; serialized on demand |
-| **Fallback when buffer too old** | Consumer must rebuild externally | Tree dump of full RadixTree state |
+| **Fallback when buffer too old** | Consumer must rebuild externally | Full RadixTree snapshot |
 | **Initial sync** | Not built in — consumer starts from live stream | Tree dump (request with `start_event_id=None`) |
-| **Authoritative state** | Buffer only | RadixTree (buffer is an optimization layer) |
+| **Recoverable state** | Buffer only | RadixTree snapshot (buffer is an optimization layer) |
 | **Compression / dedup** | Events stored as-is (pre-serialized) | RadixTree compresses shared prefixes across sequences |
-| **Expiration** | Implicit via `maxlen` eviction | TTL expiration via `PruneManager` |
+| **Expiration** | Replay history expires through `maxlen` eviction | Replay history expires through buffer eviction; event-backed tree state changes through worker events, not router TTL pruning |
 | **Transport** | ZMQ PUB/SUB + ROUTER/REQ | Dynamo service RPC (request/response) |
 | **Multi-rank** | Port offset per DP rank | Separate query endpoint per DP rank |
 | **Thread model** | Background thread with queue | Single-threaded tokio runtime on dedicated OS thread |
-| **Delivery guarantee** | At-least-once (consumer dedupes) | At-least-once (router dedupes via event ID tracking) |
-| **Dedup responsibility** | Consumer must filter by seq number | Handled inside indexer infrastructure |
+| **Delivery guarantee** | Fire-and-forget live delivery; replay is bounded by retained history | Fire-and-forget live delivery; recovery can return retained events or a snapshot |
+| **Duplicate/stale events** | Consumer filters by sequence number | Router filters stale event IDs and coordinates per-rank recovery |
 
 ## How Each System Works
 
@@ -53,24 +53,27 @@ The publisher keeps a `deque` of the last `buffer_steps` (default 10,000) serial
 
 ### Dynamo: Buffer + Indexer with Tree Dump Fallback
 
-Dynamo's `LocalKvIndexer` (in `lib/kv-router/src/indexer/local.rs`) wraps a `KvIndexer` (backed by a `RadixTree`) with a circular event buffer:
+Dynamo's `LocalKvIndexer` (in `lib/router/kv-indexer/src/local.rs`) wraps a `KvIndexer` (backed by a `RadixTree`) with a circular event buffer:
 
 ```text
 LocalKvIndexer
-├── indexer: KvIndexer          // Authoritative state (RadixTree)
+├── indexer: KvIndexer          // Current state and snapshot source (RadixTree)
 ├── event_buffer: VecDeque      // Circular buffer for fast replay
 └── max_buffer_size: usize
 ```
 
-When the router queries a worker for events via `get_events_in_id_range(start_id, end_id)`, the local indexer returns one of three responses:
+When the router queries a worker, the local indexer can return six response variants:
 
 | Response | When | What happens |
 |----------|------|--------------|
-| `Events` | Requested range within buffer | Returns buffered events directly (binary search for slice bounds) |
-| `TreeDump` | Range too old or initial sync (`start_id=None`) | Dumps the full RadixTree as synthetic events — complete state snapshot |
-| `TooNew` | Consumer is ahead of producer | Error response; no gap to fill |
+| `Events` | Requested start is available in the buffer | Returns retained events and a real-event watermark |
+| `TreeDump` | Initial/full recovery or retained events cannot cover the request | Returns a full RadixTree snapshot as synthetic events plus the latest real-event watermark |
+| `TreeDumpFailed` | The worker cannot construct an exact snapshot and the client opted into explicit failure | Reports a non-authoritative failure; the router retries within its existing bounds and preserves state and cursor if no snapshot becomes available |
+| `TooNew` | Requested range begins after the newest available event | Reports the available watermark without applying state |
+| `InvalidRange` | The requested end precedes the start | Rejects the malformed range |
+| `Error` | The worker query itself fails | Returns a serialized query error |
 
-The tree dump fallback means that when the buffer can't satisfy the request, the indexer falls back to dumping the entire tree state. This makes "buffer too old" a recoverable condition at the cost of additional complexity and memory for maintaining the tree.
+The snapshot fallback makes an evicted replay range recoverable while the worker-local indexer is available. To apply a tree dump, the router clears that worker rank in its index and then admits the dumped events one at a time, so routing lookups that run during the replacement can see the rank empty or partially rebuilt. The fallback is not a transport delivery guarantee: both the live stream and the query can fail, and router state can remain temporarily degraded.
 
 ## Gap Detection
 
@@ -84,8 +87,14 @@ if last_seq >= 0 and seq > last_seq + 1:
     # ... receive and process replayed events
 ```
 
-**Dynamo** (from `lib/llm/src/kv_router/worker_query.rs`):
-The router tracks `last_recovered_event_id` per worker and requests `recover_from_worker(worker_id, dp_rank, start_event_id, end_event_id)` when it detects a gap or on initial discovery. The local indexer handles the complexity of deciding whether to replay from buffer or dump the tree.
+**Dynamo** (from `lib/llm/src/kv_router/indexer/recovery/worker_query_state.rs`):
+The router tracks an admission cursor per worker and data-parallel rank. Discovering and activating a source with a recovery target starts an initial full recovery immediately; live events arriving during recovery are admitted or buffered according to the rank state. A later gap buffers the live event and requests events from the next expected ID (`start_event_id=Some(expected)`, `end_event_id=None`), preserving the existing rank and cursor.
+
+The worker selects the recovery response when handling the query: retained history produces `Events`; expired or unavailable history requires `TreeDump`. Buffered events update the existing index, while a successful tree dump clears the rank and then admits the dumped events. The client does not preselect snapshot recovery for an ordinary gap.
+
+After applying the response, the router sorts and deduplicates its local pending events, discards those covered by the response watermark, and admits the remaining suffix in order. Missing IDs, including events evicted from the bounded pending buffer, produce a structured warning; the router continues through the gaps and finishes recovery without another catch-up RPC. This can leave stale or missing advisory cache hints. The cursor advances only after successful queue admission, and source fencing and clear ordering still apply.
+
+Snapshot construction failures preserve existing state and cursor after bounded retries. Other query failures retain degraded live-event processing; admission failures fence the rank. A later independent live-stream gap or source change can trigger another recovery.
 
 ## When to Use Which
 
@@ -95,17 +104,17 @@ The router tracks `last_recovered_event_id` per worker and requests `recover_fro
 - You are building a custom external router or cache coordinator and want to consume KV events directly from vLLM without wrapping it in another framework.
 
 **Dynamo's local indexer** is a good fit when:
-- You need robust recovery, including initial state sync for newly joined routers or consumers that were offline for extended periods.
-- You are running multiple router replicas that may start at different times and need to converge on a consistent view of cache state.
+- You need snapshot-based recovery, including initial state sync for newly joined routers or consumers that were offline for extended periods.
+- You are running multiple router replicas that may start at different times and should independently rebuild cache state from workers.
 - You want dedup and recovery handled by the infrastructure rather than implementing it in each consumer.
 
-The two approaches share the same core idea — a FIFO ring buffer for catching up on small, transient gaps. Dynamo adds a RadixTree underneath as authoritative state, which enables the tree dump fallback for full state recovery at the cost of additional memory and complexity. vLLM keeps it simple with just the buffer, which is sufficient when consumers are stable and gaps are short-lived.
+The two approaches share the same core idea — a FIFO ring buffer for catching up on small, transient gaps. Dynamo adds a RadixTree underneath, which enables a current-state snapshot fallback at the cost of additional memory and complexity. vLLM keeps replay history in the buffer, which is sufficient when consumers are stable and gaps remain inside the retained window.
 
 For deployments using Dynamo's KV-aware routing, the local indexer is used automatically. For standalone vLLM deployments where you want to build your own event consumer, vLLM's replay buffer provides a lightweight starting point.
 
 ## See Also
 
-- **[KV Router Index Data Structures](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/indexer/README.md)**: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` internals
-- **[Router Guide](router-guide.md)**: Deployment modes and quick start for KV-aware routing
+- **[KV Router Index Data Structures](https://github.com/ai-dynamo/dynamo/blob/main/lib/router/kv-indexer/src/README.md)**: `RadixTree`, `ConcurrentRadixTreeCompressed`, and `PositionalIndexer` internals
+- **[Router Guide](router-guide.md)**: Deployment topologies and worker-set configuration
 - **[Configuration and Tuning](configuration-and-tuning.md)**: Router flags and tuning details
 - **[Router Design](router-design.md)**: Architecture details and event transport modes

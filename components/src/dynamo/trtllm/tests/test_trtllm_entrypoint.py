@@ -4,7 +4,7 @@
 from pathlib import Path
 
 
-def test_trtllm_entrypoint_checks_snapshot_standby_before_main_import():
+def test_trtllm_entrypoint_bootstraps_snapshot_before_main_import():
     entrypoint = Path(__file__).parents[1] / "__main__.py"
     source = entrypoint.read_text(encoding="utf-8")
 

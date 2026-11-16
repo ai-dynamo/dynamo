@@ -8,9 +8,13 @@ inputs:
   aws_default_region:
     description: 'AWS Default Region'
     required: false
-  aws_account_id:
-    description: 'AWS Account ID'
+  ecr_registry:
+    description: 'ECR registry hostname'
     required: false
+  ecr_registry_east:
+    description: 'East ECR registry hostname'
+    required: false
+    default: ''
   azure_acr_hostname:
     description: 'Azure ACR hostname'
     required: false
@@ -26,12 +30,18 @@ runs:
   steps:
     - name: ECR Login
       shell: bash
-      if: ${{ inputs.aws_default_region != '' && inputs.aws_account_id != '' }}
-      env:
-        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      if: ${{ inputs.aws_default_region != '' && inputs.ecr_registry != '' }}
       run: |
         set -euo pipefail
-        aws ecr get-login-password --region ${{ inputs.aws_default_region }} | docker login --username AWS --password-stdin "${ECR_HOSTNAME}"
+        aws ecr get-login-password --region ${{ inputs.aws_default_region }} | docker login --username AWS --password-stdin "${{ inputs.ecr_registry }}"
+    - name: East ECR Login
+      shell: bash
+      if: ${{ inputs.ecr_registry_east != '' }}
+      env:
+        ECR_REGISTRY_EAST: ${{ inputs.ecr_registry_east }}
+      run: |
+        set -euo pipefail
+        aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${ECR_REGISTRY_EAST}"
     - name: NGC Login
       if: ${{ inputs.ngc_ci_access_token != '' }}
       shell: bash

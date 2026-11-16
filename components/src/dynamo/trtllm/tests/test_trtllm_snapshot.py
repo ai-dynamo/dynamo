@@ -37,9 +37,6 @@ def _snapshot_config(**overrides):
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
         "encode_endpoint": "",
         "frontend_decoding": False,
-        "tensor_parallel_size": 1,
-        "pipeline_parallel_size": 1,
-        "gpus_per_node": None,
         "has_connector": lambda name: False,
     }
     values.update(overrides)
@@ -51,6 +48,7 @@ def _runtime_config(**overrides):
         "namespace": "checkpoint-ns",
         "discovery_backend": "kubernetes",
         "request_plane": "nats",
+        "response_plane": "tcp",
         "event_plane": None,
     }
     values.update(overrides)
@@ -66,7 +64,7 @@ def _prefetch_config(**overrides):
     return SimpleNamespace(**values)
 
 
-def test_snapshot_config_accepts_single_gpu_aggregated_text_path():
+def test_snapshot_config_accepts_aggregated_text_path():
     _validate_supported_snapshot_config(_snapshot_config())
 
 
@@ -103,9 +101,6 @@ def test_snapshot_prefetch_skips_external_model_loader():
         ),
         ({"encode_endpoint": "dyn://ns.encode.generate"}, "--encode-endpoint"),
         ({"frontend_decoding": True}, "--frontend-decoding"),
-        ({"tensor_parallel_size": 2}, "tensor_parallel_size=2"),
-        ({"pipeline_parallel_size": 2}, "pipeline_parallel_size=2"),
-        ({"gpus_per_node": 2}, "gpus_per_node=2"),
         ({"has_connector": lambda name: name == "kvbm"}, "--connector kvbm"),
     ],
 )
@@ -130,17 +125,29 @@ async def test_snapshot_runtime_proxy_materializes_runtime_after_restore(monkeyp
             self.snapshot_config = snapshot_config
 
         async def wait_for_restore(self):
-            lifecycle_calls.append("pause")
-            assert await self.pause_controller.pause(self.engine) is True
-            lifecycle_calls.append("resume")
-            assert await self.pause_controller.resume() is True
-            self.pause_controller.mark_resumed()
+            assert await self.pause_controller.pause(["kv_cache"]) is True
             return True
 
-    def fake_create_runtime(discovery_backend, request_plane, event_plane):
+    class FakePauseController:
+        async def pause(self, tags):
+            lifecycle_calls.append(("pause", tags))
+            return True
+
+        async def resume(self):
+            lifecycle_calls.append("resume")
+            return True
+
+        def mark_resumed(self):
+            pass
+
+    def fake_create_runtime(
+        discovery_backend, request_plane, event_plane, response_plane="tcp"
+    ):
         assert discovery_backend == "kubernetes"
         assert request_plane == "nats"
         assert event_plane is None
+        assert response_plane == "tcp"
+        assert "resume" not in lifecycle_calls
         return created_runtime, object()
 
     async def fake_refresh_restore_runtime_config(config, argv):
@@ -161,6 +168,9 @@ async def test_snapshot_runtime_proxy_materializes_runtime_after_restore(monkeyp
         fake_refresh_restore_runtime_config,
     )
     monkeypatch.setattr(snapshot_mod, "_create_runtime", fake_create_runtime)
+    monkeypatch.setattr(
+        snapshot_mod, "_create_pause_controller", lambda engine: FakePauseController()
+    )
 
     proxy = _SnapshotRuntimeProxy(
         snapshot_config=object(),
@@ -173,7 +183,7 @@ async def test_snapshot_runtime_proxy_materializes_runtime_after_restore(monkeyp
 
     await proxy.snapshot_before_endpoint(engine=object(), config=config)
 
-    assert lifecycle_calls == ["pause", "resume"]
+    assert lifecycle_calls == [("pause", ["kv_cache"]), "resume"]
     assert config.namespace == "restored-ns"
     assert config.discovery_backend == "kubernetes"
     assert proxy.endpoint("ns.component.generate") == "endpoint:ns.component.generate"
@@ -207,6 +217,9 @@ async def test_snapshot_runtime_proxy_exits_without_runtime_after_capture(monkey
         snapshot_mod,
         "_create_engine_snapshot_controller",
         FakeSnapshotController,
+    )
+    monkeypatch.setattr(
+        snapshot_mod, "_create_pause_controller", lambda engine: object()
     )
     monkeypatch.setattr(snapshot_mod, "_create_runtime", unexpected_create_runtime)
     monkeypatch.setattr(snapshot_mod.os, "_exit", fake_exit)

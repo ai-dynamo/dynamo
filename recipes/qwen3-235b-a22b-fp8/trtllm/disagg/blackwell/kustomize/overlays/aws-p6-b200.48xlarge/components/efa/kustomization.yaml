@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Generated file. For repository contributors, do not edit this checked-in copy.
+# Regenerate this matrix's public overlays and template Components from the repository root:
+# Regenerate: scripts/kustomize-matrix.py unfold recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/.kustomize-matrix.yaml
+# Template source: recipes/kustomize/templates/aws-efa/p6-b200.48xlarge
+
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - target:
+      group: nvidia.com
+      version: v1alpha1
+      kind: DynamoGraphDeployment
+    path: dgd-worker-efa-resources-patch.yaml

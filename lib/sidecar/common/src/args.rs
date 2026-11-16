@@ -7,17 +7,24 @@ use std::time::Duration;
 use clap::Args;
 use dynamo_backend_common::CommonArgs;
 
+use crate::GrpcEndpoint;
+
 const DEFAULT_GRPC_CONNECT_ATTEMPT_TIMEOUT_SECS: u64 = 30;
-const DEFAULT_GRPC_CONNECTIONS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
+const DEFAULT_GRPC_CONNECTIONS: NonZeroUsize = NonZeroUsize::new(32).unwrap();
 const DEFAULT_GRPC_RETRY_INTERVAL_SECS: u64 = 1;
-const DEFAULT_GRPC_STARTUP_DEADLINE_SECS: u64 = 300;
+const DEFAULT_GRPC_STARTUP_DEADLINE_SECS: u64 = 1800;
+
+fn parse_grpc_endpoint(raw: &str) -> Result<GrpcEndpoint, String> {
+    GrpcEndpoint::parse(raw, "--grpc-endpoint").map_err(|error| error.to_string())
+}
 
 /// CLI flags shared by gRPC sidecars.
 #[derive(Args, Clone, Debug)]
 pub struct GrpcTransportArgs {
-    /// Number of parallel sidecar gRPC connections. The default of eight was
-    /// sufficient in sidecar load tests to avoid connection-level throttling
-    /// at high request concurrency.
+    /// Number of parallel sidecar gRPC connections. Each HTTP/2 connection
+    /// serializes all of its streams' per-message work behind one lock, so
+    /// spreading high request concurrency over more connections keeps that
+    /// lock from being contended.
     #[arg(
         long = "grpc-connections",
         env = "DYN_SIDECAR_GRPC_CONNECTIONS",
@@ -43,7 +50,7 @@ pub struct GrpcTransportArgs {
     )]
     pub grpc_retry_interval_secs: u64,
 
-    /// Maximum total duration for sidecar gRPC startup.
+    /// Maximum duration for each sidecar gRPC startup phase.
     #[arg(
         long = "grpc-startup-deadline-secs",
         env = "DYN_SIDECAR_GRPC_STARTUP_DEADLINE_SECS",
@@ -69,6 +76,15 @@ impl GrpcTransportArgs {
 pub struct SidecarArgs {
     #[command(flatten)]
     pub common: CommonArgs,
+
+    /// Engine gRPC endpoint as `host:port`, a plaintext gRPC/HTTP URL, or
+    /// `unix:///ABSOLUTE/PATH` for a Unix socket.
+    #[arg(
+        long,
+        env = "DYN_SIDECAR_GRPC_ENDPOINT",
+        value_parser = parse_grpc_endpoint
+    )]
+    pub grpc_endpoint: GrpcEndpoint,
 
     #[command(flatten)]
     pub grpc: GrpcTransportArgs,
@@ -109,15 +125,18 @@ mod tests {
 
     #[test]
     fn parses_defaults_and_overrides() {
-        let defaults = TestArgs::try_parse_from(["test"]).expect("parse defaults");
+        let defaults = TestArgs::try_parse_from(["test", "--grpc-endpoint", "127.0.0.1:50051"])
+            .expect("parse defaults");
         let config = defaults.sidecar.grpc.config();
-        assert_eq!(config.connections.get(), 8);
+        assert_eq!(config.connections.get(), 32);
         assert_eq!(config.connect_attempt_timeout, Duration::from_secs(30));
         assert_eq!(config.retry_interval, Duration::from_secs(1));
-        assert_eq!(config.startup_deadline, Duration::from_secs(300));
+        assert_eq!(config.startup_deadline, Duration::from_secs(1800));
 
         let overrides = TestArgs::try_parse_from([
             "test",
+            "--grpc-endpoint",
+            "127.0.0.1:50051",
             "--grpc-connections",
             "2",
             "--grpc-connect-attempt-timeout-secs",
@@ -143,7 +162,12 @@ mod tests {
             "--grpc-retry-interval-secs",
             "--grpc-startup-deadline-secs",
         ] {
-            assert!(TestArgs::try_parse_from(["test", flag, "0"]).is_err());
+            assert!(
+                TestArgs::try_parse_from(
+                    ["test", "--grpc-endpoint", "127.0.0.1:50051", flag, "0",]
+                )
+                .is_err()
+            );
         }
     }
 }

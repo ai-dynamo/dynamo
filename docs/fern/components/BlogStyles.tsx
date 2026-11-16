@@ -76,6 +76,21 @@ article:has(.dynamo-blog-home) {
   padding: 0 clamp(0.25rem, 2vw, 1.5rem) 5rem;
 }
 
+/* The publication lists set hide-toc, which removes the TOC aside that holds
+   the right page margin, so Fern's mx-auto centers the article between the
+   sidebar and the viewport edge and it drifts right of the header on wide
+   screens. Reserve that margin the way Fern's reference layout does, and
+   start the article beside the sidebar where the digest landing starts.
+   Keyed on #fern-toc because Fern renders that aside before the content
+   wrapper, out of reach of a sibling combinator. */
+.fern-main:not(:has(> #fern-toc)) .fern-layout-guide:has(.dynamo-blog-home) {
+  padding-right: calc(var(--page-padding, 2rem) + var(--aside-offset, 0px));
+}
+
+.fern-main:not(:has(> #fern-toc)) article:has(.dynamo-blog-home) {
+  margin-inline: 0 auto;
+}
+
 article:has(.dynamo-blog-home) > header {
   display: none;
 }
@@ -169,6 +184,9 @@ article:has(.dynamo-blog-home) > header {
   background: linear-gradient(135deg, transparent 40%, rgba(0, 0, 0, 0.35));
 }
 
+.dynamo-blog-art--aiperf { background: linear-gradient(145deg, #16181f, #4b5368 52%, #0b0c10); }
+.dynamo-blog-art--encoder { background: linear-gradient(145deg, #2b0a1c, #a01f5c 52%, #1a0512); }
+
 .dynamo-blog-art--snapshot { background: linear-gradient(145deg, #031d28, #006b78 52%, #001318); }
 
 .dynamo-blog-art--tokens { background: linear-gradient(145deg, #211600, #9b5b00 52%, #1b0e00); }
@@ -178,6 +196,15 @@ article:has(.dynamo-blog-home) > header {
 .dynamo-blog-art--stack { background: linear-gradient(145deg, #0c1e37, #245aa6 52%, #050d18); }
 
 .dynamo-blog-art--indexer { background: linear-gradient(145deg, #25120b, #a43d13 52%, #180903); }
+
+.dynamo-blog-art--hillclimb { background: linear-gradient(145deg, #210d31, #6d2693 52%, #14051d); }
+
+.dynamo-blog-art__climb {
+  position: absolute;
+  z-index: 1;
+  inset: 12% 8% 14% 8%;
+  opacity: 0.92;
+}
 
 .dynamo-blog-art__grid {
   position: absolute;
@@ -585,6 +612,14 @@ article:has(.dynamo-blog-article) pre {
 }
 
 /* Date-first archive labels, inspired by editorial blog indexes. */
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/aiperf-benchmarking"]::before,
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/aiperf-benchmarking"]::before { content: "SEP 18"; }
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/epd-disaggregation-multimodal"]::before,
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/epd-disaggregation-multimodal"]::before { content: "SEP 09"; }
+
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/agent-optimization-skills"]::before,
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/agent-optimization-skills"]::before { content: "AUG 21"; }
+
 body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/dynosim-pareto-frontier"]::before,
 body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/dynosim-pareto-frontier"]::before { content: "MAY 29"; }
 
@@ -672,25 +707,12 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] > svg {
   color: #0b1400;
 }
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner,
-body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner {
-  display: flex;
-  flex-direction: column;
-  gap: 0.28rem;
-  font-size: 1rem;
-  font-weight: 750;
-  letter-spacing: -0.015em;
-}
+/* The stacked title-and-kicker treatment, and the "2026 · ENGINEERING STORIES"
+   label under it, belonged to the tile. The entry is a plain sidebar link now,
+   and the label had also gone stale — the section it sits on is "Dynamo blogs",
+   which is not year-scoped.
 
-body:has(.dynamo-blog-home) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner::after,
-body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner::after {
-  content: "2026  ·  ENGINEERING STORIES";
-  color: var(--dynamo-blog-muted);
-  font-size: 0.58rem;
-  font-weight: 700;
-  letter-spacing: 0.09em;
-  line-height: 1.2;
-}
+   The type is levelled further down, where the entry's own font rule lives. */
 
 body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1,
 body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 {
@@ -891,15 +913,20 @@ article:has(.dynamo-blog-article) img.dynamo-blog-image-reveal[data-revealed="tr
   }
 }
 
-/* The landing page is a normal nav entry; the archive year supplies hierarchy. */
+/* The /digest entry is a normal nav link, and now a peer of the "External
+   publications" page entry directly above it in the Blog tab. The inset margin
+   and min-height left over from its days as the bespoke "Latest" tile put the
+   two at different indents and different heights, so both go: it takes the
+   ordinary top-level sidebar box, like its neighbour. Padding and radius are
+   already settled by main.css, which declares them !important.
+
+   No backticks in this block: it sits inside the BLOG_CSS template literal, so
+   one would close the string and hand the rest of the file to the JS parser. */
 body:has(.dynamo-blog-home) #fern-sidebar a[href$="/digest"],
 body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] {
-  min-height: 2.8rem;
   align-items: center;
-  margin: 0.2rem 0.35rem 0.65rem;
-  padding: 0.62rem 0.75rem;
+  margin: 0.18rem 0;
   border: 0;
-  border-radius: 10px;
   background: transparent;
   box-shadow: none;
   backdrop-filter: none;
@@ -918,8 +945,16 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] > svg {
   display: none;
 }
 
+/* "Dynamo blogs" is a section and the other two are pages, and Fern weights
+   section headers more heavily. All three sit side by side at the top of this
+   tab as siblings, so they take the same type rather than reading as two
+   different ranks. */
 body:has(.dynamo-blog-home) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner,
-body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner {
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/digest"] .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/external-publications"] .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/external-publications"] .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/research-publications"] .fern-sidebar-link-title-inner,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/research-publications"] .fern-sidebar-link-title-inner {
   display: block;
   font-size: 0.8rem;
   font-weight: 720;
@@ -959,6 +994,14 @@ body:has(.dynamo-blog-home) #fern-sidebar a[href*="/digest/"]::before,
 body:has(.dynamo-blog-article) #fern-sidebar a[href*="/digest/"]::before {
   content: "" !important;
 }
+
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/aiperf-benchmarking"] .fern-sidebar-link-title-inner::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/aiperf-benchmarking"] .fern-sidebar-link-title-inner::before { content: "SEP 18"; }
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/epd-disaggregation-multimodal"] .fern-sidebar-link-title-inner::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/epd-disaggregation-multimodal"] .fern-sidebar-link-title-inner::before { content: "SEP 09"; }
+
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/agent-optimization-skills"] .fern-sidebar-link-title-inner::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/agent-optimization-skills"] .fern-sidebar-link-title-inner::before { content: "AUG 21"; }
 
 body:has(.dynamo-blog-home) #fern-sidebar a[href$="/dynosim-pareto-frontier"] .fern-sidebar-link-title-inner::before,
 body:has(.dynamo-blog-article) #fern-sidebar a[href$="/dynosim-pareto-frontier"] .fern-sidebar-link-title-inner::before { content: "MAY 29"; }

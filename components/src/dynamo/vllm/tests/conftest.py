@@ -75,6 +75,56 @@ def pytest_ignore_collect(collection_path, config):
     return None
 
 
+_PLATFORM_UNSET = object()
+
+
+@pytest.fixture
+def vllm_cpu_platform_when_no_accelerator():
+    """Pin vLLM's CpuPlatform on hosts where vLLM recognizes no accelerator.
+
+    Tests that build the vLLM engine argument parser reach
+    ``DeviceConfig.__post_init__``, which resolves ``current_platform`` when
+    ``device`` is left at ``"auto"`` and raises ``RuntimeError: Failed to infer
+    device type`` if the resolved platform has an empty ``device_type``. With no
+    accelerator every builtin platform plugin declines and the resolver falls
+    back to ``UnspecifiedPlatform``, whose ``device_type`` is exactly that. The
+    parser instantiates each config dataclass to compute its argparse default,
+    so this fires while *building* the parser -- passing ``--device cpu`` cannot
+    avoid it.
+
+    Gating on ``device_type`` rather than on ``torch.cuda`` makes this a no-op
+    wherever vLLM already recognizes the hardware, so both CUDA and XPU runners
+    keep exercising real detection (these modules are also marked ``xpu_1``).
+
+    ``vllm.platforms`` resolves ``current_platform`` lazily through a module
+    ``__getattr__``, and assigning the name writes a real module-dict entry that
+    shadows the hook. That entry, not the ``__setattr__`` the module also
+    defines, is what makes the pin visible: the interpreter never calls a
+    module-level ``__setattr__``, since PEP 562 covers only ``__getattr__`` and
+    ``__dir__``. Teardown therefore *deletes* the entry to re-arm the lazy hook
+    -- assigning the previous value back would leave the resolver shadowed for
+    every later test on this xdist worker.
+    """
+    import vllm.platforms as vllm_platforms
+    from vllm.platforms import current_platform
+
+    if current_platform.device_type:
+        yield
+        return
+
+    from vllm.platforms.cpu import CpuPlatform
+
+    previous = vllm_platforms.__dict__.get("current_platform", _PLATFORM_UNSET)
+    vllm_platforms.current_platform = CpuPlatform()
+    try:
+        yield
+    finally:
+        if previous is _PLATFORM_UNSET:
+            del vllm_platforms.current_platform
+        else:
+            vllm_platforms.current_platform = previous
+
+
 def make_cli_args_fixture(module_name: str):
     """Create a pytest fixture for mocking CLI arguments for vllm backend."""
 

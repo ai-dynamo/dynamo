@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -12,10 +13,13 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     component::{DeviceType, Endpoint, Instance, TransportType},
     distributed::RequestPlaneMode,
-    pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint},
+    pipeline::network::{
+        PushWorkHandler, RequestPlanePayloadCodec, ResponsePlaneMode,
+        ingress::push_endpoint::PushEndpoint,
+    },
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
-    transports::nats,
+    transports::{nats, tcp},
 };
 
 fn endpoint_device_type() -> Option<DeviceType> {
@@ -131,6 +135,11 @@ impl EndpointConfigBuilder {
     pub async fn start_with_registration(self) -> Result<StartedEndpoint> {
         let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
             self.build_internal()?.dissolve();
+        if endpoint.track_response_completion
+            && endpoint.drt().response_plane() != ResponsePlaneMode::Tcp
+        {
+            anyhow::bail!("response completion tracking requires the TCP response plane");
+        }
         let connection_id = endpoint.drt().connection_id();
         let endpoint_id = endpoint.id();
 
@@ -139,6 +148,7 @@ impl EndpointConfigBuilder {
         let metrics_labels: Option<Vec<(&str, &str)>> = metrics_labels
             .as_ref()
             .map(|v| v.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect());
+        handler.bind_endpoint(&endpoint);
         // Add metrics to the handler. The endpoint provides additional information to the handler.
         handler.add_metrics(&endpoint, metrics_labels.as_deref())?;
 
@@ -181,6 +191,7 @@ impl EndpointConfigBuilder {
                 instance_id: connection_id,
                 transport: transport.clone(),
                 device_type: endpoint_device_type(),
+                request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
             };
             tracing::debug!(endpoint_name = %endpoint.name, "Registering endpoint health check target");
             let guard = system_health.lock();
@@ -236,6 +247,7 @@ impl EndpointConfigBuilder {
             endpoint: endpoint_id.name.clone(),
             transport,
             device_type: endpoint_device_type(),
+            request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
         };
 
         let discovery_instance = match discovery.register(discovery_spec).await {
@@ -246,7 +258,9 @@ impl EndpointConfigBuilder {
                     error = %e,
                     "Unable to register service for discovery"
                 );
-                let _ = server.unregister_endpoint(&endpoint_name_for_task).await;
+                let _ = server
+                    .unregister_endpoint_instance(&endpoint_id, connection_id)
+                    .await;
                 if let Some(tracker) = tracker_clone {
                     tracker.unregister_endpoint();
                 }
@@ -279,7 +293,7 @@ impl EndpointConfigBuilder {
             );
 
             if let Err(e) = server_for_cleanup
-                .unregister_endpoint(&endpoint_name_for_cleanup)
+                .unregister_endpoint_instance(&endpoint_id, connection_id)
                 .await
             {
                 tracing::warn!(
@@ -309,7 +323,7 @@ impl EndpointConfigBuilder {
 ///
 /// This function handles both health check and discovery transport building.
 /// All transport modes use consistent addressing:
-/// - TCP: Includes instance_id and endpoint name for routing (e.g., host:port/instance_id_hex/endpoint_name)
+/// - TCP: Includes instance ID, namespace, component, and endpoint name in the request path
 /// - NATS: Uses subject-based addressing (unique per endpoint)
 ///
 /// # Errors
@@ -321,25 +335,8 @@ fn build_transport_type_inner(
 ) -> Result<TransportType> {
     match mode {
         RequestPlaneMode::Tcp => {
-            let tcp_host = crate::utils::tcp_rpc_host_from_env();
-            // If a fixed port is explicitly configured, use it directly (no init ordering dependency).
-            // Otherwise, use the actual bound port (set by TCP server after binding when port 0 is used).
-            let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
-                .ok()
-                .and_then(|p| p.parse::<u16>().ok())
-                .filter(|&p| p != 0)
-                .unwrap_or(crate::pipeline::network::manager::get_actual_tcp_rpc_port()?);
-
-            // Include instance_id and endpoint name for proper TCP routing.
-            // Format: host:port/instance_id_hex/endpoint_name
-            // This ensures each worker has a unique routing key when multiple workers
-            // share the same TCP server (e.g., --num-workers > 1).
-            let tcp_endpoint = format!(
-                "{}:{}/{:x}/{}",
-                tcp_host, tcp_port, connection_id, endpoint_id.name
-            );
-
-            Ok(TransportType::Tcp(tcp_endpoint))
+            let address = crate::pipeline::network::manager::get_actual_tcp_rpc_address()?;
+            Ok(tcp_transport_type(address, endpoint_id, connection_id))
         }
         RequestPlaneMode::Nats => Ok(TransportType::Nats(nats::instance_subject(
             endpoint_id,
@@ -348,11 +345,23 @@ fn build_transport_type_inner(
     }
 }
 
+fn tcp_transport_type(
+    address: SocketAddr,
+    endpoint_id: &EndpointId,
+    connection_id: u64,
+) -> TransportType {
+    // Clients forward the discovered path unchanged; ingress uses the same key.
+    TransportType::Tcp(format!(
+        "{address}/{}",
+        tcp::instance_path(endpoint_id, connection_id)
+    ))
+}
+
 /// Build transport type, ensuring TCP server is initialized when needed.
 ///
-/// In TCP mode with an OS-assigned port (`DYN_TCP_RPC_PORT` unset or invalid), the server must bind
-/// before we can construct a correct transport address. This helper ensures that initialization
-/// occurs, then delegates to the internal builder.
+/// In TCP mode the server must bind before discovery can publish the concrete
+/// advertised address. This helper ensures that initialization occurs, then
+/// delegates to the internal builder.
 pub async fn build_transport_type(
     endpoint: &Endpoint,
     endpoint_id: &EndpointId,
@@ -360,19 +369,7 @@ pub async fn build_transport_type(
 ) -> Result<TransportType> {
     let mode = endpoint.drt().request_plane();
 
-    // For TCP with OS-assigned ports, we must ensure the server is initialized
-    // (bound to a port) before we can construct a correct transport address.
-    let has_fixed_port = match mode {
-        RequestPlaneMode::Tcp => std::env::var("DYN_TCP_RPC_PORT")
-            .ok()
-            .and_then(|p| p.parse::<u16>().ok())
-            .filter(|&p| p != 0)
-            .is_some(),
-        RequestPlaneMode::Nats => true, // NATS doesn't need port init
-    };
-
-    if !has_fixed_port {
-        // Ensure request plane server is initialized before building transport.
+    if mode == RequestPlaneMode::Tcp {
         let _ = endpoint.drt().request_plane_server().await?;
     }
 
@@ -380,6 +377,17 @@ pub async fn build_transport_type(
 }
 
 impl Endpoint {
+    /// Keep the ingress metric guard alive until the TCP response writer exits.
+    pub fn track_response_completion(mut self) -> Self {
+        self.track_response_completion = true;
+        self
+    }
+
+    /// Active requests on an endpoint configured to track response completion.
+    pub fn inflight_requests(&self) -> Option<i64> {
+        self.inflight_requests.get().map(prometheus::IntGauge::get)
+    }
+
     /// Unregister this endpoint instance from discovery.
     ///
     /// This removes the endpoint from the instances bucket, preventing the router
@@ -400,6 +408,7 @@ impl Endpoint {
             instance_id,
             transport,
             device_type: endpoint_device_type(),
+            request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
         });
 
         let discovery = drt.discovery();
@@ -442,6 +451,7 @@ impl Endpoint {
             endpoint: endpoint_id.name,
             transport,
             device_type: endpoint_device_type(),
+            request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
         };
 
         let discovery = drt.discovery();
@@ -463,5 +473,32 @@ impl Endpoint {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tcp_transport_uses_concrete_ipv4_and_bracketed_ipv6_addresses() {
+        let endpoint_id = EndpointId {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            name: "generate".to_string(),
+        };
+
+        for (address, expected) in [
+            ("192.0.2.10:1234", "192.0.2.10:1234/2a/ns/worker/generate"),
+            (
+                "[2001:db8::10]:1234",
+                "[2001:db8::10]:1234/2a/ns/worker/generate",
+            ),
+        ] {
+            let transport = tcp_transport_type(address.parse().unwrap(), &endpoint_id, 0x2a);
+            assert_eq!(transport.address(), expected);
+            assert!(!transport.address().starts_with("0.0.0.0"));
+            assert!(!transport.address().starts_with("[::]"));
+        }
     }
 }

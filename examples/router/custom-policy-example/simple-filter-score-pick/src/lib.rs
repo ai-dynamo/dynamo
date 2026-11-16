@@ -1,0 +1,110 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Factory and registration for the `simple-filter-score-pick` policy.
+//!
+//! The policy filters workers by device cache overlap, then ranks the remaining
+//! workers by active requests.
+
+mod filter;
+mod picker;
+mod scorer;
+
+use std::sync::Arc;
+
+use dynamo_kv_router::plugins::prelude::*;
+use filter::MinimumDeviceOverlapFilter;
+use picker::RequestAwarePicker;
+use scorer::ActiveRequestsScorer;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Parameters {
+    min_device_overlap_blocks: f64,
+}
+
+fn validate_min_device_overlap_blocks(
+    min_device_overlap_blocks: f64,
+) -> Result<(), WorkerSelectionPolicyProviderError> {
+    if !min_device_overlap_blocks.is_finite() || min_device_overlap_blocks < 0.0 {
+        return Err(WorkerSelectionPolicyProviderError::new(
+            "min_device_overlap_blocks must be a finite non-negative number",
+        ));
+    }
+    Ok(())
+}
+
+fn provider(
+    parameters: &WorkerSelectionPolicyParameters,
+) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
+    let parameters: Parameters = parameters.deserialize()?;
+    validate_min_device_overlap_blocks(parameters.min_device_overlap_blocks)?;
+    let min_device_overlap_blocks = parameters.min_device_overlap_blocks;
+
+    Ok(Arc::new(
+        move |config: &SelectionConfig, worker_type, _partition| {
+            let policy = build_policy(config, worker_type.as_str(), min_device_overlap_blocks);
+            let config = config.clone();
+            policy.with_runtime_config(
+                [(
+                    "min_device_overlap_blocks".into(),
+                    min_device_overlap_blocks.into(),
+                )]
+                .into_iter()
+                .collect(),
+                Arc::new(move |values| {
+                    let parameters: Parameters = serde_json::from_value(serde_json::Value::Object(
+                        values,
+                    ))
+                    .map_err(|error| RuntimePolicyError::InvalidParameters(error.to_string()))?;
+                    validate_min_device_overlap_blocks(parameters.min_device_overlap_blocks)
+                        .map_err(|error| {
+                            RuntimePolicyError::InvalidParameters(error.to_string())
+                        })?;
+                    Ok(build_policy(
+                        &config,
+                        worker_type.as_str(),
+                        parameters.min_device_overlap_blocks,
+                    ))
+                }),
+            )
+        },
+    ))
+}
+
+fn build_policy(
+    config: &SelectionConfig,
+    worker_label: &'static str,
+    min_device_overlap_blocks: f64,
+) -> WorkerSelectionPolicy {
+    let filters: Vec<Box<dyn WorkerFilter>> = vec![Box::new(MinimumDeviceOverlapFilter {
+        min_device_overlap_blocks,
+    })];
+    WorkerSelectionPolicy::new_with_filters(
+        config.clone(),
+        worker_label,
+        filters,
+        vec![Box::new(ActiveRequestsScorer)],
+        Box::new(RequestAwarePicker),
+    )
+}
+
+/// Register the `simple-filter-score-pick` policy type.
+pub fn register(
+    registry: &mut RouterPluginRegistry,
+) -> Result<(), WorkerSelectionPolicyRegistryError> {
+    registry.register_worker_selection("simple-filter-score-pick", Arc::new(provider))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_min_device_overlap_blocks() {
+        assert!(validate_min_device_overlap_blocks(0.0).is_ok());
+        assert!(validate_min_device_overlap_blocks(8.0).is_ok());
+        assert!(validate_min_device_overlap_blocks(-1.0).is_err());
+        assert!(validate_min_device_overlap_blocks(f64::NAN).is_err());
+    }
+}

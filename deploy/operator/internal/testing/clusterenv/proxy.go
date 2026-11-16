@@ -108,7 +108,7 @@ type proxyRuntime struct {
 
 func startProxy(ctx context.Context, config *rest.Config, kubeClient kubernetes.Interface, image string, timeout time.Duration) (*proxyRuntime, error) {
 	namespace, err := kubeClient.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{GenerateName: "clusterenv-webhook-"},
+		GenerateName: "clusterenv-webhook-",
 	}, metav1.CreateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("create webhook proxy namespace: %w", err)
@@ -122,14 +122,14 @@ func startProxy(ctx context.Context, config *rest.Config, kubeClient kubernetes.
 	}()
 
 	configMap := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: proxyPodName, Namespace: namespace.Name},
-		Data:       map[string]string{"proxy.py": proxyScript},
+		Name: proxyPodName, Namespace: namespace.Name,
+		Data: map[string]string{"proxy.py": proxyScript},
 	}
 	if _, err := kubeClient.CoreV1().ConfigMaps(namespace.Name).Create(ctx, configMap, metav1.CreateOptions{}); err != nil {
 		return nil, fmt.Errorf("create webhook proxy script: %w", err)
 	}
 	service := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: webhookServiceName, Namespace: namespace.Name},
+		Name: webhookServiceName, Namespace: namespace.Name,
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{"app": proxyPodName},
 			Ports: []corev1.ServicePort{{
@@ -142,7 +142,7 @@ func startProxy(ctx context.Context, config *rest.Config, kubeClient kubernetes.
 	}
 	mode := int32(0o555)
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: proxyPodName, Namespace: namespace.Name, Labels: map[string]string{"app": proxyPodName}},
+		Name: proxyPodName, Namespace: namespace.Name, Labels: map[string]string{"app": proxyPodName},
 		Spec: corev1.PodSpec{
 			RestartPolicy:                 corev1.RestartPolicyAlways,
 			TerminationGracePeriodSeconds: ptr.To[int64](0),
@@ -155,14 +155,13 @@ func startProxy(ctx context.Context, config *rest.Config, kubeClient kubernetes.
 					{Name: "health", ContainerPort: proxyHealthPort},
 				},
 				ReadinessProbe: &corev1.Probe{
-					ProbeHandler:  corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString("health")}},
+					TCPSocket:     &corev1.TCPSocketAction{Port: intstr.FromString("health")},
 					PeriodSeconds: 1,
 				},
 				VolumeMounts: []corev1.VolumeMount{{Name: "script", MountPath: "/proxy", ReadOnly: true}},
 			}},
-			Volumes: []corev1.Volume{{Name: "script", VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: proxyPodName}, DefaultMode: &mode},
-			}}},
+			Volumes: []corev1.Volume{{Name: "script",
+				ConfigMap: &corev1.ConfigMapVolumeSource{Name: proxyPodName, DefaultMode: &mode}}},
 		},
 	}
 	if _, err := kubeClient.CoreV1().Pods(namespace.Name).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
@@ -261,11 +260,9 @@ func (p *proxyRuntime) startBridge(target string, timeout time.Duration) error {
 	p.bridgeStop = cancel
 	ready := make(chan struct{}, 1)
 	for range proxyBridgeCount {
-		p.bridgeDone.Add(1)
-		go func() {
-			defer p.bridgeDone.Done()
+		p.bridgeDone.Go(func() {
 			p.bridge(ctx, target, ready)
-		}()
+		})
 	}
 	select {
 	case <-ready:

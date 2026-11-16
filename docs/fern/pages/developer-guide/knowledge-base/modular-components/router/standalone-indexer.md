@@ -21,8 +21,10 @@ For Dynamo-native remote indexing, use `--serve-indexer` on `dynamo.frontend` or
 The HTTP API follows the [Mooncake KV Indexer RFC](https://github.com/kvcache-ai/Mooncake/issues/1403) conventions.
 
 `DYN_ROUTER_MIN_INITIAL_WORKERS` is also honored here. When set to a positive integer, the
-standalone indexer waits for that many workers to register before opening its startup-ready
-gate, matching the frontend/router startup behavior.
+standalone indexer registers the initial `--workers` entries, attempts `--peers` recovery, and
+then waits for that catalog count before binding its HTTP listener. Because `/register` is
+unavailable during this wait, the threshold must be met by initial workers, workers recovered
+from peers, or a combination of both.
 
 ## Model and Routing Group Support
 
@@ -99,15 +101,16 @@ The service is exposed through the Python bindings package and launched with `py
 ### Standalone build
 
 ```bash
-cd lib/bindings/python && VIRTUAL_ENV=../../.venv ../../.venv/bin/maturin develop --uv --features kv-indexer
+cd lib/bindings/python && VIRTUAL_ENV=../../../.venv ../../../.venv/bin/maturin develop --uv --features kv-indexer
 ```
 
-After installation, launch the service with `python -m dynamo.indexer`.
+After installation, launch the service from `lib/bindings/python` with
+`../../../.venv/bin/python -m dynamo.indexer`.
 
 ### Standalone build with metrics
 
 ```bash
-cd lib/bindings/python && VIRTUAL_ENV=../../.venv ../../.venv/bin/maturin develop --uv --features kv-indexer,kv-indexer-metrics
+cd lib/bindings/python && VIRTUAL_ENV=../../../.venv ../../../.venv/bin/maturin develop --uv --features kv-indexer,kv-indexer-metrics
 ```
 
 This keeps the default `kv-indexer` build lean while still allowing Prometheus metrics when needed.
@@ -124,18 +127,22 @@ python -m dynamo.indexer --port 8090 [--threads 4] [--block-size 16 --model-name
 | `--port` | `8090` | HTTP server listen port |
 | `--threads` | `4` | Number of indexer threads (1 = single-threaded, >1 = thread pool) |
 | `--workers` | (none) | Initial workers as `instance_id[:dp_rank]=zmq_address,...` pairs (dp_rank defaults to 0) |
+| `--engine-owned-mm-identity` | `false` | Enable [multimodal event filtering](#multimodal-event-sources) for every initial `--workers` entry. Later HTTP registrations use their own field. |
 | `--model-name` | `default` | Model name for initial `--workers` |
 | `--routing-group` | `default` | Routing group for initial `--workers` |
 | `--peers` | (none) | Comma-separated peer indexer URLs for P2P recovery on startup |
 | `--access-log` | (none) | Write one JSON access-log record per request to this file |
 | `--trace-id-header` | `x-trace-id` | Request header copied into each access-log record's `trace_id` field |
+| `DYN_ZMQ_IO_THREADS` | `4` | Environment variable: I/O threads per shared ZMQ context; KV-event and replay sockets share contexts of up to 1023 sockets each, the libzmq limit |
 | `--access-log-local-time` | disabled | Use local time for access-log timestamps instead of UTC |
 
 ### Shared Startup Gate
 
 Set `DYN_ROUTER_MIN_INITIAL_WORKERS=<n>` to require at least `<n>` workers before the
 standalone indexer, frontend push-router path, and KV router config-ready gate all proceed.
-Leave it unset or set it to `0` to disable the startup wait.
+For the standalone indexer, the gate runs before the HTTP listener is bound, so its count can
+only be satisfied by initial `--workers` and workers recovered through `--peers`; `/register`
+cannot satisfy it. Leave the variable unset or set it to `0` to disable the startup wait.
 
 ## HTTP API
 
@@ -196,6 +203,10 @@ Returns:
 Register a ZMQ endpoint for an instance. Each call creates or reuses the indexer for the given `(model_name, routing_group)` pair.
 Registration is non-blocking: if the worker is not up yet, the listener is accepted in `pending` state and transitions to `active` once the initial ZMQ connection succeeds.
 
+Repeating `/register` for an existing `instance_id` and `dp_rank` returns an error;
+it does not replace the listener or reset its sequence watermark. For worker restarts,
+see [Worker Restarts](#worker-restarts).
+
 ```bash
 # Single model, default routing group
 curl -X POST http://localhost:8090/register \
@@ -229,12 +240,31 @@ curl -X POST http://localhost:8090/register \
 | `routing_group` | no | `"default"` | Worker routing group |
 | `dp_rank` | no | `0` | Data parallel rank |
 | `replay_endpoint` | no | — | ZMQ ROUTER address for gap replay (e.g. `tcp://host:5560`) |
+| `engine_owned_mm_identity` | no | `false` | Boolean: enable [multimodal event filtering](#multimodal-event-sources) for this source. |
 | `additional_salt` | no | — | Per-tenant salt (Mooncake RFC #1403 `additionalsalt`, alias accepted). Currently parsed for forward compatibility — engines apply their own salting today. |
 
 For transition compatibility, indexer HTTP inputs also accept a string `tenant_id`, and the
 CLI accepts the hidden `--tenant-id` flag. These values are ignored. `routing_group` always
 controls worker eligibility; when it is omitted, the endpoint's normal default or all-groups
 behavior applies. Responses never include `tenant_id`.
+
+#### Multimodal Event Sources
+
+For direct sources using [wide-token SGLang builds](../backends/sglang/multimodal.md#wide-token-sglang-builds), set `engine_owned_mm_identity` to `true` in each source's registration. The indexer then excludes media blocks and their descendants from predicted cache hits. Leave it `false` for legacy sources whose media tokens already match Dynamo's routing tokens.
+
+```bash
+curl -X POST http://localhost:8090/register \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "instance_id": 3,
+    "endpoint": "tcp://127.0.0.1:5559",
+    "model_name": "Qwen/Qwen3-VL-2B-Instruct",
+    "block_size": 16,
+    "engine_owned_mm_identity": true
+  }'
+```
+
+The flag depends on the SGLang build, not the model. For initial `--workers`, the indexer's `--engine-owned-mm-identity` flag applies to every listed source. Use separate HTTP registrations for sources with different event formats. Changing an existing registration requires unregistering it first, as described in [Worker Restarts](#worker-restarts).
 
 ### `POST /unregister` — Deregister an instance
 
@@ -477,7 +507,38 @@ When a `replay_endpoint` is provided during `/register`, the indexer connects a 
 
 If no `replay_endpoint` is configured, gaps are logged as warnings but not recovered.
 
-The sequence counter (`last_seq`) persists across unregister/register cycles, so re-registering a worker after a gap will trigger replay on the first batch received by the new listener.
+Deregistration removes the listener's sequence watermark. Re-registering the same worker and
+DP rank therefore starts with a fresh watermark; it does not continue incremental replay from
+the previous listener's `last_seq`. If the first live batch starts above sequence `0`, a configured
+`replay_endpoint` triggers replay from sequence `0` before that live batch is applied. This only
+recovers history still retained by the engine. Without a replay endpoint, or when the requested
+range is no longer retained, restart with a healthy indexer in `--peers` to recover its startup
+snapshot, or perform another full resynchronization before relying on the rebuilt worker state.
+
+## Worker Restarts
+
+A ZMQ reconnect does not identify a new worker or cache-event publisher lifetime.
+If the publisher restarts with its sequence reset, an existing listener retains its
+watermark and discards batches at or below it. Previously indexed ownership can also
+remain stale.
+
+On a worker or publisher restart, call `/unregister` and wait for the response before
+calling `/register` with the current worker metadata. For a whole-worker restart,
+omit `dp_rank` from `/unregister` to remove all ranks. Apply this lifecycle change to
+every indexer replica; peer registration does not propagate worker lifecycle changes.
+Serialize lifecycle operations for the same worker.
+
+This sequence requests removal of old cache ownership and starts a fresh sequence
+watermark. It does not certify a complete cache view or provide an atomic boundary
+against in-flight old events. Registration success and listener status `active` do
+not establish that startup events were received or replayed. Recover missing history
+before relying on cache overlap, subject to the limits in
+[Gap Detection and Replay](#gap-detection-and-replay).
+
+The [standalone selector](standalone-selection.md#worker-restarts) has a different
+registration API: updating a schedulable worker reconciles its indexer registration
+per rank, keeping listeners whose endpoints did not change, and a restart at the same
+address needs `DELETE /workers/{worker_id}` before the new `POST /workers`.
 
 ## Limitations
 

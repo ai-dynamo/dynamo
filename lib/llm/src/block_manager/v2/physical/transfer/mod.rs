@@ -10,7 +10,7 @@
 //! # Core Concepts
 //!
 //! - [`PhysicalLayout`]: Wraps a layout with its physical storage location and NIXL metadata
-//! - [`LayoutDescriptor`]: Serializable representation for cross-node communication
+//! - `LayoutDescriptor`: Serializable representation for cross-node communication
 //! - Transfer strategies: memcpy, CUDA, NIXL based on source/destination locations
 //! - Block-wise and layer-wise transfer operations
 //!

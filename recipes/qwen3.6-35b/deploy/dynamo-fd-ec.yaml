@@ -39,7 +39,7 @@ spec:
       extraPodSpec:
         # Hostname pin + toleration + image come from hw/${HW}.env
         # (shared across vllm-serve, dynamo-fd, dynamo-fd-ec). Both
-        # Frontend and VllmWorker get the same nodeSelector so the
+        # Frontend and worker get the same nodeSelector so the
         # gang scheduler places both on that exact node. This
         # supersedes inter-pod podAffinity (which never worked under
         # kai-scheduler gang scheduling — see git log).
@@ -63,7 +63,7 @@ spec:
           memory: 32Gi
       subComponentType: null
 
-    VllmWorker:
+    worker:
       componentType: worker
       extraPodSpec:
         # Same hostname pin as Frontend — keeps the NIXL embedding

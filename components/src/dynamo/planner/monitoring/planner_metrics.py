@@ -4,6 +4,7 @@
 from prometheus_client import CollectorRegistry, Counter, Enum, Gauge, Histogram
 
 PREFIX = "dynamo_planner"
+SIGNAL_DEGRADATION_OBSERVATIONS = 3
 
 LOAD_DECISION_STATES = [
     "unset",
@@ -26,6 +27,9 @@ LOAD_DECISION_STATES = [
     "reconcile_clamped_to_ceiling",
     "held_over",
     "rejected_by_plugin",
+    "gpu_budget_guard_hold",
+    "gpu_budget_reconcile",
+    "missing_engine_metadata",
 ]
 
 THROUGHPUT_DECISION_STATES = [
@@ -42,6 +46,10 @@ THROUGHPUT_DECISION_STATES = [
     "held_over",
     "circuit_open",
     "rejected_by_plugin",
+    "gpu_budget_guard_hold",
+    "no_change",
+    "gpu_budget_reconcile",
+    "missing_engine_metadata",
 ]
 
 
@@ -179,6 +187,21 @@ class PlannerPrometheusMetrics:
             labelnames=_engine_labels,
         )
 
+        # -- Power-aware budget (DGD-owned caps; read-only) ---------------
+        self.power_budget_total_watts = Gauge(
+            f"{PREFIX}_power_budget_total_watts",
+            "Configured total GPU power budget for this DGD (watts).",
+        )
+        self.power_projected_watts = Gauge(
+            f"{PREFIX}_power_projected_watts",
+            "Projected GPU power draw at current replica counts and "
+            "DGD-resolved per-GPU caps (watts).",
+        )
+        self.power_budget_utilization = Gauge(
+            f"{PREFIX}_power_budget_utilization",
+            "Ratio of projected power to total budget (0.0–1.0+).",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Plugin-framework metrics
@@ -216,6 +239,20 @@ class PluginFrameworkMetrics:
 
     def __init__(self, registry: CollectorRegistry | None = None) -> None:
         kw: dict = {} if registry is None else {"registry": registry}
+
+        self.signal_unavailable = Gauge(
+            f"{PREFIX}_signal_unavailable",
+            "Whether a required Planner input was unavailable on its latest observation",
+            labelnames=["component", "signal"],
+            **kw,
+        )
+        self.degraded_signals_total = Counter(
+            f"{PREFIX}_degraded_signals_total",
+            "Episodes with a required input unavailable for "
+            f"{SIGNAL_DEGRADATION_OBSERVATIONS} consecutive observations",
+            labelnames=["component", "signal"],
+            **kw,
+        )
 
         self.plugin_evaluations_total = Counter(
             f"{PREFIX}_plugin_evaluations_total",

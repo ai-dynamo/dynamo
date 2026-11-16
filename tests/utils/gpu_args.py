@@ -5,10 +5,59 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
+
+# vLLM's per-engine PyNvVideoCodec reservation: PYNVVIDEOCODEC_DEFAULT_HW_DECODERS
+# x PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
+# (vllm/multimodal/video_decoders). Kept as a literal because importing vLLM at
+# collection mutates the environment; test_vllm.py checks it against vLLM.
+PYNVVIDEOCODEC_RESERVED_BYTES = 2 * 128 * 1024**2 + int(1.8 * 1024 * 1024**2)
+
+
+def pynvvideocodec_reserved_bytes() -> int:
+    """Return the per-engine bytes vLLM subtracts from the KV cache for
+    PyNvVideoCodec, or 0 when the image selects another video loader."""
+    if os.environ.get("VLLM_VIDEO_LOADER_BACKEND") != "pynvvideocodec":
+        return 0
+    return PYNVVIDEOCODEC_RESERVED_BYTES
+
+
+def map_cuda_visible_devices(
+    logical_indices: Iterable[int], inherited: str | None
+) -> str:
+    """Map logical device indices through an inherited CUDA assignment.
+
+    GPU-parallel tests receive a restricted ``CUDA_VISIBLE_DEVICES`` from the
+    scheduler. A nested backend process must select from that visible-device
+    list instead of replacing it with physical indices, which would escape the
+    scheduler assignment. UUID and MIG tokens are deliberately kept opaque.
+
+    When no assignment is inherited, logical indices retain their normal CUDA
+    meaning and are serialized directly.
+    """
+    requested = list(logical_indices)
+    if any(index < 0 for index in requested):
+        raise ValueError(f"CUDA device indices must be non-negative: {requested}")
+
+    if inherited is None:
+        return ",".join(str(index) for index in requested)
+
+    visible = [token.strip() for token in inherited.split(",") if token.strip()]
+    if not visible:
+        raise ValueError("CUDA_VISIBLE_DEVICES does not expose any devices")
+
+    unavailable = [index for index in requested if index >= len(visible)]
+    if unavailable:
+        raise ValueError(
+            "Requested logical CUDA device(s) "
+            f"{unavailable} but CUDA_VISIBLE_DEVICES exposes only {visible}"
+        )
+
+    return ",".join(visible[index] for index in requested)
 
 
 def _call_gpu_utils_function(
@@ -33,6 +82,14 @@ def build_gpu_mem_args(
 ) -> list[str]:
     """Call a backend memory-args function that returns shell-style CLI args."""
     return shlex.split(_call_gpu_utils_function(function_name, env=env))
+
+
+def build_vllm_gpu_mem_args(default_utilization: str = "0.4") -> list[str]:
+    """Return scheduler-aware vLLM memory args with a local fallback."""
+    return build_gpu_mem_args("build_vllm_gpu_mem_args") or [
+        "--gpu-memory-utilization",
+        default_utilization,
+    ]
 
 
 def build_trtllm_override_args(env: Mapping[str, str] | None = None) -> list[str]:

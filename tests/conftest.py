@@ -26,14 +26,15 @@ from tests.utils.collection_env_guard import (
 )
 from tests.utils.constants import TEST_MODELS, DynamoPortRange
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.output_paths import resolve_test_output_path
 from tests.utils.port_utils import (
     ServicePorts,
+    allocate_contiguous_ports,
     allocate_port,
     allocate_ports,
     deallocate_port,
     deallocate_ports,
 )
-from tests.utils.test_output import resolve_test_output_path
 
 _logger = logging.getLogger(__name__)
 
@@ -229,6 +230,32 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "elastic_ep: marks vLLM elastic expert-parallelism (ePLB) scaling tests "
         "(scale_elastic_ep over the Ray DP backend)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "token_budget_parity: compares native backend and Dynamo prompt/output "
+        "overflow behavior",
+    )
+    config.addinivalue_line(
+        "markers",
+        "sidecar: marks tests that launch a Dynamo dynamo-*-sidecar binary "
+        "against its native-gRPC engine via lib/sidecar/*/launch/*.sh",
+    )
+    config.addinivalue_line(
+        "markers",
+        "engine_ports: dynamo_dynamic_ports also allocates per-worker engine "
+        "HTTP/gRPC and vLLM KV replay ports, exported as "
+        "DYN_ENGINE_{HTTP,GRPC}_PORT{N} and DYN_VLLM_KV_REPLAY_PORT{N}",
+    )
+    config.addinivalue_line(
+        "markers",
+        "framework_with_efa: marks deployment tests that require an EFA-capable "
+        "cluster and an -efa image",
+    )
+    config.addinivalue_line(
+        "markers",
+        "framework_with_kvcr: marks deployment tests that require a KVCR-capable "
+        "image and multi-host RDMA",
     )
 
     models_dir = config.getoption("--models-dir", default=None)
@@ -437,6 +464,8 @@ def download_models(model_list=None, ignore_weights=False):
 
     Args:
         model_list: List of model IDs to download. If None, downloads TEST_MODELS.
+            An ID written as ``repo_id@revision`` downloads that revision instead
+            of the default branch.
         ignore_weights: If True, skips downloading model weight files. Default is False.
     """
     if model_list is None:
@@ -463,6 +492,7 @@ def download_models(model_list=None, ignore_weights=False):
 
     failures = []
     for model_id in model_list:
+        repo_id, _, revision = model_id.partition("@")
         logging.info(
             f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
         )
@@ -480,13 +510,15 @@ def download_models(model_list=None, ignore_weights=False):
 
                 # Download everything except weight files
                 snapshot_download(
-                    repo_id=model_id,
+                    repo_id=repo_id,
+                    revision=revision or None,
                     ignore_patterns=weight_patterns,
                 )
             else:
                 # Download the full model snapshot (includes all files)
                 snapshot_download(
-                    repo_id=model_id,
+                    repo_id=repo_id,
+                    revision=revision or None,
                 )
             logging.info(f"Successfully pre-downloaded: {model_id}")
 
@@ -653,7 +685,12 @@ def pytest_collection_modifyitems(config, items):
     This function is called to modify the list of tests to run.
     """
     _check_sglang_mm_hashes_present(items)
-    # Auto-skip tests marked with a framework marker when the framework is not installed
+    # Auto-skip tests marked with a framework marker when the framework is not
+    # installed. Framework markers are also how CI selects which container runs a
+    # test, so a test that inspects the container itself must carry every
+    # framework marker to be selected everywhere -- and would then be skipped
+    # everywhere, since no image ships all of them. framework_agnostic opts such
+    # a test out of the skip while leaving its selection markers intact.
     framework_markers = {
         "trtllm": "tensorrt_llm",
         "vllm": "vllm",
@@ -665,7 +702,9 @@ def pytest_collection_modifyitems(config, items):
         if importlib.util.find_spec(module_name) is None:
             skip = pytest.mark.skip(reason=f"{module_name} is not installed")
             for item in items:
-                if _item_has_marker(item, marker_name):
+                if _item_has_marker(item, marker_name) and not _item_has_marker(
+                    item, "framework_agnostic"
+                ):
                     item.add_marker(skip)
 
     # Deselect tests based on --max-vram-gib:
@@ -753,8 +792,11 @@ def pytest_collection_modifyitems(config, items):
         ):
             continue
         for model_mark in item.iter_markers("model"):
+            # model(repo_id, revision=...) pins the download, so a test that
+            # loads a fixed revision finds it cached once HF_HUB_OFFLINE is set.
+            revision = model_mark.kwargs.get("revision")
             for repo_id in model_mark.args:
-                models_to_download.add(repo_id)
+                models_to_download.add(f"{repo_id}@{revision}" if revision else repo_id)
 
     # Store models to download in pytest config for fixtures to access
     if models_to_download:
@@ -1267,12 +1309,17 @@ def num_system_ports(request) -> int:
 
 
 @pytest.fixture(scope="function")
-def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None]:
+def dynamo_dynamic_ports(
+    request, num_system_ports
+) -> Generator[ServicePorts, None, None]:
     """Allocate per-test ports for Dynamo deployments.
 
     - frontend_port: OpenAI-compatible HTTP/gRPC ingress (dynamo.frontend)
     - system_ports: List of worker metrics/system ports (configurable count via num_system_ports)
-    - kv_event_port: ZMQ port for vLLM KV event publishing (avoids collisions under xdist)
+    - kv_event_ports: one ZMQ port per worker for vLLM KV event publishing
+    - engine_http_ports/engine_grpc_ports/engine_kv_replay_ports: one set per
+      worker for engines launched out of process (sidecars); only with
+      @pytest.mark.engine_ports
     """
     # Track ports as they are allocated so a failure mid-sequence (e.g. NIXL
     # allocation raising) still cleans up earlier reservations via finally,
@@ -1283,8 +1330,11 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
         all_ports.append(frontend_port)
         system_port_list = allocate_ports(num_system_ports, DynamoPortRange.SERVE.value)
         all_ports.extend(system_port_list)
-        kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
-        all_ports.append(kv_event_port)
+        # One block, so a data-parallel engine can publish on the first port + rank.
+        kv_event_ports = allocate_contiguous_ports(
+            1, num_system_ports, DynamoPortRange.SERVE.value
+        )
+        all_ports.extend(kv_event_ports)
         fpm_port = allocate_port(DynamoPortRange.FPM.value)
         all_ports.append(fpm_port)
         # One NIXL side-channel port per worker (avoids xdist collisions on shared hosts).
@@ -1292,12 +1342,32 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
             num_system_ports, DynamoPortRange.NIXL.value
         )
         all_ports.extend(nixl_side_channel_ports)
+        engine_http_ports: list[int] = []
+        engine_grpc_ports: list[int] = []
+        engine_kv_replay_ports: list[int] = []
+        if request.node.get_closest_marker("engine_ports"):
+            engine_http_ports = allocate_ports(
+                num_system_ports, DynamoPortRange.SERVE.value
+            )
+            all_ports.extend(engine_http_ports)
+            engine_grpc_ports = allocate_ports(
+                num_system_ports, DynamoPortRange.SERVE.value
+            )
+            all_ports.extend(engine_grpc_ports)
+            # One block, so a data-parallel engine can replay on the first port + rank.
+            engine_kv_replay_ports = allocate_contiguous_ports(
+                1, num_system_ports, DynamoPortRange.SERVE.value
+            )
+            all_ports.extend(engine_kv_replay_ports)
         yield ServicePorts(
             frontend_port=frontend_port,
             system_ports=system_port_list,
-            kv_event_port=kv_event_port,
+            kv_event_ports=kv_event_ports,
             fpm_port=fpm_port,
             nixl_side_channel_ports=nixl_side_channel_ports,
+            engine_http_ports=engine_http_ports,
+            engine_grpc_ports=engine_grpc_ports,
+            engine_kv_replay_ports=engine_kv_replay_ports,
         )
     finally:
         deallocate_ports(all_ports)

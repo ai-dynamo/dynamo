@@ -8,6 +8,7 @@ import weakref
 from vllm.lora.request import LoRARequest
 
 from dynamo.common.lora.manager import LoRAInfo
+from dynamo.llm.exceptions import InvalidArgument
 
 
 class LoRAState:
@@ -23,6 +24,8 @@ class LoRAState:
             str, asyncio.Lock
         ] = weakref.WeakValueDictionary()
         self.lora_load_locks_guard = threading.Lock()
+        self.active_requests: dict[str, int] = {}
+        self.request_drained: dict[str, asyncio.Event] = {}
 
     def resolve_request(
         self,
@@ -34,8 +37,8 @@ class LoRAState:
         """Resolve a model name to a loaded LoRA request.
 
         Returns None for missing model name, base-model aliases, and uncommitted
-        placeholder reservations (id=-1). Raises ValueError for unknown non-base
-        names when LoRA is enabled.
+        placeholder reservations (id=-1). Raises InvalidArgument for unknown
+        non-base names when LoRA is enabled.
         """
         if not model_name or model_name in base_model_names:
             return None
@@ -47,7 +50,9 @@ class LoRAState:
             if lora.id == -1:
                 if lora_enabled:
                     # Treat as loading/unknown during the reservation window
-                    raise ValueError(f"unknown model or LoRA adapter: '{model_name}'")
+                    raise InvalidArgument(
+                        f"unknown model or LoRA adapter: '{model_name}'"
+                    )
                 return None
 
             return LoRARequest(
@@ -57,7 +62,7 @@ class LoRAState:
             )
 
         if lora_enabled:
-            raise ValueError(f"unknown model or LoRA adapter: '{model_name}'")
+            raise InvalidArgument(f"unknown model or LoRA adapter: '{model_name}'")
 
         return None
 
@@ -75,6 +80,28 @@ class LoRAState:
                 lock = asyncio.Lock()
                 self.lora_load_locks[lora_name] = lock
             return lock
+
+    def begin_request(self, lora_name: str) -> None:
+        """Track a request; every call must be paired with ``end_request``."""
+        count = self.active_requests.get(lora_name, 0)
+        if count == 0:
+            self.request_drained[lora_name] = asyncio.Event()
+        self.active_requests[lora_name] = count + 1
+
+    def end_request(self, lora_name: str) -> None:
+        """Release one request previously tracked by ``begin_request``."""
+        count = self.active_requests[lora_name]
+        if count > 1:
+            self.active_requests[lora_name] = count - 1
+            return
+        del self.active_requests[lora_name]
+        self.request_drained.pop(lora_name).set()
+
+    async def wait_until_idle(self, lora_name: str) -> None:
+        """Wait until all tracked requests for an adapter have ended."""
+        drained = self.request_drained.get(lora_name)
+        if drained is not None:
+            await drained.wait()
 
     def list_lora_ids(self) -> dict[str, int]:
         """Return map of loaded LoRA names to integer IDs.

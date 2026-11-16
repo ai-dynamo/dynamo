@@ -22,12 +22,10 @@ With GPUDirect RDMA enabled, the NIC reads and writes GPU memory directly, so a 
 Dynamo needs RDMA for **disaggregated serving**, where prefill workers generate KV cache and hand it to decode workers. Each handoff is a large GPU-to-GPU transfer, and the transport decides whether it takes milliseconds or seconds.
 
 - **Across nodes** — NVLink does not span nodes, so an RDMA fabric is the only fast path between a prefill worker and a decode worker on different machines.
-- **Same node, different pods** — Kubernetes process isolation and GPU partitioning block NVLink between pods, so even co-located prefill and decode workers transfer over the NIC. Use RDMA here too.
+- **Same node, different pods** — By default, Kubernetes process isolation and GPU partitioning block NVLink between pods, so even co-located prefill and decode workers transfer over the NIC. Use RDMA here too. Pods that share the host PID namespace and can see each other's GPUs can use NVLink instead; see [Use NVLink between pods on one node](../../disaggregated-serving/overview.md#use-nvlink-between-pods-on-one-node) for this opt-in and its security trade-offs.
 - **The alternative is TCP over Ethernet**, which is 200-500x slower for this transfer: roughly 98s Time To First Token (TTFT) on TCP versus 200-500ms with RDMA.
 
 Aggregated deployments run prefill and decode in one worker, transfer no KV cache between workers, and do not need RDMA.
-
-For the full transport comparison (NVLink, InfiniBand, RoCE, and TCP), UCX and libfabric tuning, and GPUDirect RDMA diagnostics, see the [Disaggregated Communication Guide](../../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/disagg-communication.md).
 
 ## Set It Up for Your Platform
 
@@ -37,12 +35,11 @@ Pick the guide that matches your fabric:
 |----------|--------|-------------|
 | Azure (AKS) | InfiniBand | [RDMA / InfiniBand on AKS](infiniband-on-azure.mdx) |
 | AWS (EKS) | EFA | [EFA (RDMA over AWS Fabric) on EKS](efa-on-aws.mdx) |
-| On-premises / bare metal | InfiniBand or RoCE | [Disaggregated Communication Guide](../../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/disagg-communication.md) |
+| On-premises / bare metal | InfiniBand or RoCE | Use your cluster's RDMA and device-plugin documentation. |
 
 Whatever the fabric, the building blocks are the same: an RDMA-capable NIC, a Kubernetes device plugin that advertises the NIC as a schedulable resource (such as `rdma/hca_shared_devices_a` or `vpc.amazonaws.com/efa`), the GPU Operator with GPUDirect RDMA enabled, and worker pods that request the RDMA resource.
 
 ## See Also
 
-- [Disaggregated Communication Guide](../../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/disagg-communication.md) — transport options, UCX and libfabric configuration, and performance expectations
 - [Multinode Orchestration](../multinode-orchestration.md) — gang scheduling for workloads that span nodes
 - [Disaggregated Serving](../../../developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md) — the architecture that relies on KV cache transfer

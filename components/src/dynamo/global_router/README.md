@@ -11,7 +11,7 @@ A hierarchical routing service that sits between the Dynamo frontend and local r
 
 The Global Router supports two modes:
 
-- **Disagg mode** (default): Registers as both prefill and decode worker. Routes prefill requests based on (ISL, TTFT) and decode requests based on (context_length, ITL) to separate pool types.
+- **Disagg mode** (default): Registers as both prefill and decode worker. Routes prefill requests based on (ISL, TTFT) and decode requests based on (request token count, ITL) to separate pool types. The decode strategy retains the `context_length_*` configuration names.
 - **Agg mode**: Registers as a single generate worker. Routes all requests by (TTFT target, ITL target), with an optional ISL dimension, to unified pools that handle both prefill and decode.
 
 Both modes support priority-based pool overrides from agent hints and optional priority retry to faster pools.
@@ -22,8 +22,8 @@ Both modes support priority-based pool overrides from agent hints and optional p
 - **Mocker** - Uses same synchronous path as vLLM
 - **SGLang** - Uses the bootstrap path (async KV transfer)
 
-**Not supported:**
-- **TensorRT-LLM** - Bootstrap path not implemented
+**Not currently supported or validated:**
+- **TensorRT-LLM** - The core frontend supports a non-bootstrap handoff path, but Global Router has no dedicated TensorRT-LLM end-to-end integration.
 
 ## Architecture
 
@@ -205,9 +205,14 @@ The default pool selection uses a 2D grid lookup. Each dimension is divided into
    - `ttft_idx = clamp((ttft_target_ms - ttft_min_ms) / ttft_step_ms, 0, ttft_resolution - 1)`
 4. Lookup pool: `pool_index = prefill_pool_mapping[isl_idx][ttft_idx]`
 
-**Decode Pool Selection** (disagg mode, based on context length and ITL target):
+**Decode Pool Selection** (disagg mode, based on request token count and ITL target):
 
-Same logic but using `context_length` and `itl_target` with `decode_pool_mapping`.
+Valid `PreprocessedRequest` payloads require `token_ids`. The handler passes the
+length of that list into the strategy's `context_length` dimension and does not
+add subsequently generated tokens. Its `request.get("token_ids", [])` fallback
+only protects malformed direct calls; a missing field routes those calls with a
+request token count of `0`. The bucket calculation otherwise uses
+`context_length_*` and `itl_target` with `decode_pool_mapping`.
 
 **Agg Pool Selection** (agg mode, based on TTFT and ITL targets, with optional ISL):
 
@@ -291,7 +296,7 @@ The preprocessor forwards `nvext.router` to the backend as the typed `router` fi
 5. Local router forwards to a prefill worker
 6. Prefill response returns with `disaggregated_params`
 7. Frontend sends decode request to Global Router (registered as decode)
-8. Global Router selects decode pool based on (context_length, ITL_target, priority)
+8. Global Router selects decode pool based on (request token count, ITL_target, priority)
 9. Request is forwarded to local router in the selected decode pool namespace
 10. If forwarding fails before streaming tokens and priority retry is enabled, Global Router retries faster decode pools
 11. Tokens stream back through the chain

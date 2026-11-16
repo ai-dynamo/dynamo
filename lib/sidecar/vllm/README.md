@@ -1,161 +1,92 @@
 <!--
 SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
+
+Note to AI agents: keep this README minimal (intro, support matrix, launch example,
+Kubernetes example, topologies). Do not edit it unless the user explicitly asks
+you to.
 -->
 
 # vLLM sidecar
 
 > [!WARNING]
-> **Experimental.** This sidecar and its deployment examples are experimental
-> and not yet packaged for distribution. The manifests, flags, and behavior may
-> change without notice.
+> **Experimental.** The sidecars and their deployment examples are
+> experimental. Manifests, flags, and behavior may change without notice.
 
-`dynamo-vllm-sidecar` connects a Dynamo worker to vLLM's native gRPC
-`Generate` service. It is a standalone Rust executable.
+`dynamo-vllm-sidecar` connects a Dynamo worker to vLLM's native gRPC server
+(`vllm-rs`). See the [sidecar overview](../README.md) for installation.
 
-## Supported
+> [!TIP]
+> For the best and latest support, use the upstream vLLM nightly image,
+> which carries the latest gRPC server updates: [`vllm/vllm-openai:nightly`](https://hub.docker.com/r/vllm/vllm-openai/tags?name=nightly).
 
-- Aggregated generation
-- NIXL prefill/decode generation
-- Token and text requests through Dynamo preprocessing
-- Sampling, stop conditions, structured output, logprobs, cache options, and priority
-- Opaque `kv_transfer_params` handoff
+## Support matrix
 
-The initial protocol does not support multimodal input, LoRA, KV-aware data
-parallel routing, encode workers, beam search, or `n > 1`.
+| Feature | Supported |
+|---------|-----------|
+| Aggregated | Yes |
+| Disaggregated | Yes |
+| KV routing | Yes |
+| Kubernetes multinode tensor parallelism (TP) and hybrid load balancing (hybrid-LB) data parallelism (DP) | Yes |
 
-## Run
+See [support notes](../SUPPORT_NOTES.md#vllm) for feature restrictions and operational limits.
 
-Start vLLM with its released gRPC listener:
+## Run locally
 
-```bash
-vllm-rs serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051
-```
-
-This listener is unauthenticated and plaintext. Keep colocated deployments on
-loopback or a private interface. Remote access requires network controls or a
-secure proxy.
-
-Start the Dynamo worker explicitly:
+See [`launch/`](launch/) for all topologies. For example, aggregated serving on
+one GPU:
 
 ```bash
-dynamo-vllm-sidecar \
-  --vllm-endpoint 127.0.0.1:50051 \
-  --model-path Qwen/Qwen3-0.6B
+export DYN_DISCOVERY_BACKEND=file   # single host: no etcd or NATS needed
+lib/sidecar/vllm/launch/agg.sh
 ```
 
-Use `VLLM_GRPC_ENDPOINT` instead of `--vllm-endpoint` when the endpoint is
-provided through the environment.
-
-The sidecar opens eight gRPC connections by default. This avoided
-connection-level throttling in high-concurrency sidecar tests. Override the
-pool size with `--grpc-connections` or `DYN_SIDECAR_GRPC_CONNECTIONS`.
-
-Connection startup uses a 30-second timeout per attempt, a one-second retry
-interval, and a five-minute deadline for establishing the full connection
-pool. Override them with `--grpc-connect-attempt-timeout-secs`,
-`--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs`, or with the
-corresponding `DYN_SIDECAR_GRPC_*` environment variables.
-
-## Test without vLLM or a GPU
-
-Use the CPU-only `dynamo-vllm-mocker-server` to exercise this sidecar against
-the same `Generate` gRPC contract:
+In a second terminal:
 
 ```bash
-cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
-  --listen 127.0.0.1:50051 \
-  --model mocker-model \
-  --extra-engine-args '{"speedup_ratio":1000}'
-
-cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
-  --vllm-endpoint 127.0.0.1:50051 \
-  --model-path mocker-model
+curl -s localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
 ```
 
-See [`../../mocker/servers/vllm/README.md`](../../mocker/servers/vllm/README.md)
-for aggregated and prefill/decode examples, supported Mocker configuration,
-and fidelity limits.
+## Deploy on Kubernetes
 
-## Deploy on Kubernetes (quick start)
+Before applying, replace `<your-registry>/dynamo-sidecar` in the manifest with a
+[sidecar image](../README.md#docker).
 
-`deploy/agg.yaml` runs an aggregated deployment (a frontend plus one worker pod
-that colocates the sidecar with a vLLM engine). `deploy/disagg.yaml` runs
-disaggregated prefill/decode with NIXL KV transfer.
-
-There is no published vLLM sidecar image yet, so you build and push your own from
-`Dockerfile` — the same pattern as the TensorRT-LLM and SGLang sidecars.
-
-> [!NOTE]
-> vLLM's `vllm-rs` exposes no gRPC health method, so the engine's probes can only
-> confirm the gRPC port accepts connections (not that the model is loaded) —
-> weaker than the TensorRT-LLM and SGLang sidecars, which make a real HealthCheck
-> RPC. The engine image must be a stock vLLM build that ships `vllm-rs` (v0.26.0+).
-
-### Prerequisites
-
-- A Kubernetes cluster (**v1.29+**, or v1.28 with the `SidecarContainers` feature
-  gate) with the Dynamo operator and a GPU node (multiple GPUs plus an RDMA fabric
-  for `disagg.yaml`). The engine runs as a native sidecar (`initContainers` with
-  `restartPolicy: Always`), which requires that version.
-- `kubectl` set to that cluster, and a namespace to deploy into.
-- A Hugging Face token for the model.
-- A container registry you can push to and the cluster can pull from.
-
-### 1. Build and push the sidecar image
-
-Build a multi-arch image so it runs on any node — `amd64` (x86) or `arm64`
-(GB200/Grace):
-
-```bash
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -f lib/sidecar/vllm/Dockerfile \
-  -t <your-registry>/dynamo-vllm-sidecar:1.3.0 --push .
-```
-
-### 2. Point the manifest at your image
-
-In `deploy/agg.yaml` (and `deploy/disagg.yaml`), set the `main` worker image to
-the one you pushed. Add `imagePullSecrets` if your registry is private.
-
-### 3. Create the Hugging Face token secret
-
-```bash
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN="$HF_TOKEN" -n <namespace>
-```
-
-### 4. Deploy
+See [`deploy/`](deploy/) for all manifests. For example, aggregated serving:
 
 ```bash
 kubectl apply -f lib/sidecar/vllm/deploy/agg.yaml -n <namespace>
+kubectl port-forward -n <namespace> svc/vllm-sidecar-agg-frontend 8000:8000
 ```
 
-Wait for the worker pod to reach `2/2 Running`:
+Multinode deployments use complete `leader` and `worker` role PodTemplates. See
+[`multinode_tp.yaml`](deploy/multinode_tp.yaml), [`multinode_dp.yaml`](deploy/multinode_dp.yaml),
+and the [vLLM sidecar guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md#deploy-on-kubernetes).
 
-```bash
-kubectl get pods -n <namespace> -w
-```
+## Topologies
 
-### 5. Send a request
+The frontend reaches each sidecar over Dynamo's request, discovery, and event
+planes; the sidecar reaches the engine over its native gRPC API. Dashed arrows
+carry KV events.
 
-```bash
-kubectl port-forward -n <namespace> svc/vllm-sidecar-agg-frontend 8000:8000 &
+### Single-Node TP
 
-curl -s localhost:8000/v1/models | jq .
+One engine on one node, with one sidecar.
 
-curl -s localhost:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}' | jq .
-```
+![On one node, a request reaches the vLLM tensor-parallel ranks through the Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar.](../../../docs/fern/assets/img/sidecar-vllm-single-node-tp.svg)
 
-### Disaggregated
+### Multi-Node TP
 
-`deploy/disagg.yaml` runs prefill and decode as separate worker pods with NIXL
-KV transfer. It needs multiple GPUs and an RDMA fabric, and both worker pods
-must reach `2/2 Running`. Apply it the same way and call the frontend as above.
+One engine spans two nodes. Only the leader node has a sidecar; the follower
+node holds the remaining TP ranks.
 
-## Packaging
+![When one vLLM engine spans two nodes with tensor parallelism, only the leader node runs a Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar on Node 0.](../../../docs/fern/assets/img/sidecar-vllm-multinode-tp.svg)
 
-There is no published image yet; the quick start above builds one from
-`Dockerfile`. Official packaging is deferred to a follow-up change.
+### Multi-Node DP
+
+Hybrid DP load balancing: each node runs vLLM for its local DP ranks plus a
+sidecar that serves requests. The frontend routes to either node.
+
+![vLLM hybrid data parallelism across two nodes. The Dynamo Frontend router picks a DP rank and sends requests over the request plane to the Dynamo Sidecar on the node that owns that rank: node 0 serves DP ranks 0-1 and node 1 serves DP ranks 2-3.](../../../docs/fern/assets/img/sidecar-vllm-multinode-dp.svg)

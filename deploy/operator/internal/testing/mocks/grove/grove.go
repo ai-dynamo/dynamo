@@ -11,7 +11,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/webhookconfig"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -37,7 +36,7 @@ func Setup(mgr ctrl.Manager) error {
 	)
 	mgr.GetWebhookServer().Register(
 		groveValidatingPath,
-		admission.WithCustomValidator(mgr.GetScheme(), &grovev1alpha1.PodCliqueSet{}, h).WithRecoverPanic(true),
+		admission.WithValidator(mgr.GetScheme(), h).WithRecoverPanic(true),
 	)
 	return nil
 }
@@ -46,15 +45,15 @@ func (*handler) Default(context.Context, runtime.Object) error {
 	return nil
 }
 
-func (*handler) ValidateCreate(context.Context, runtime.Object) (admission.Warnings, error) {
+func (*handler) ValidateCreate(context.Context, *grovev1alpha1.PodCliqueSet) (admission.Warnings, error) {
 	return nil, nil
 }
 
-func (*handler) ValidateUpdate(context.Context, runtime.Object, runtime.Object) (admission.Warnings, error) {
+func (*handler) ValidateUpdate(context.Context, *grovev1alpha1.PodCliqueSet, *grovev1alpha1.PodCliqueSet) (admission.Warnings, error) {
 	return nil, nil
 }
 
-func (*handler) ValidateDelete(context.Context, runtime.Object) (admission.Warnings, error) {
+func (*handler) ValidateDelete(context.Context, *grovev1alpha1.PodCliqueSet) (admission.Warnings, error) {
 	return nil, nil
 }
 
@@ -70,17 +69,15 @@ func Configurations() webhookconfig.Configurations {
 		admissionregistrationv1.Update,
 	}
 	rule := admissionregistrationv1.RuleWithOperations{
-		Operations: operations,
-		Rule: admissionregistrationv1.Rule{
-			APIGroups:   []string{groveGroup},
-			APIVersions: []string{"v1alpha1"},
-			Resources:   []string{groveResource},
-			Scope:       &namespaced,
-		},
+		Operations:  operations,
+		APIGroups:   []string{groveGroup},
+		APIVersions: []string{"v1alpha1"},
+		Resources:   []string{groveResource},
+		Scope:       &namespaced,
 	}
 	return webhookconfig.Configurations{
 		Mutating: []*admissionregistrationv1.MutatingWebhookConfiguration{{
-			ObjectMeta: metav1.ObjectMeta{Name: "podcliqueset-defaulting-webhook"},
+			Name: "podcliqueset-defaulting-webhook",
 			Webhooks: []admissionregistrationv1.MutatingWebhook{{
 				Name:                    "pcs.defaulting.webhooks.grove.io",
 				AdmissionReviewVersions: []string{"v1"},
@@ -92,7 +89,7 @@ func Configurations() webhookconfig.Configurations {
 			}},
 		}},
 		Validating: []*admissionregistrationv1.ValidatingWebhookConfiguration{{
-			ObjectMeta: metav1.ObjectMeta{Name: "podcliqueset-validating-webhook"},
+			Name: "podcliqueset-validating-webhook",
 			Webhooks: []admissionregistrationv1.ValidatingWebhook{{
 				Name:                    "pcs.validating.webhooks.grove.io",
 				AdmissionReviewVersions: []string{"v1"},

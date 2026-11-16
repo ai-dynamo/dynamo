@@ -1,12 +1,43 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::common::checked_file::CheckedFile;
+use dynamo_llm::local_model::runtime_config::TokenizerBackend;
 use dynamo_llm::model_card::{ModelDeploymentCard, PromptFormatterArtifact, TokenizerKind};
-use dynamo_llm::tokenizers::{TikTokenTokenizer, traits::Encoder};
-use tempfile::tempdir;
+use dynamo_llm::tokenizers::{
+    BasetenTokenizer, EncodeSegment, HuggingFaceTokenizer, TikTokenTokenizer, traits::Encoder,
+};
+use std::path::PathBuf;
+use tempfile::{TempDir, tempdir};
+use tokenizers::models::bpe::{BPE, Vocab};
 
 const HF_PATH: &str = "tests/data/sample-models/TinyLlama_v1.1";
 const TIKTOKEN_PATH: &str = "tests/data/sample-models/mock-tiktoken";
+
+fn unsupported_alternate_tokenizer() -> (TempDir, PathBuf) {
+    let dir = tempdir().unwrap();
+    let tokenizer_path = dir.path().join("tokenizer.json");
+    std::fs::write(
+        &tokenizer_path,
+        r#"{
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [],
+            "normalizer": null,
+            "pre_tokenizer": {"type": "Whitespace"},
+            "post_processor": null,
+            "decoder": null,
+            "model": {
+                "type": "WordLevel",
+                "vocab": {"[UNK]": 0, "hello": 1},
+                "unk_token": "[UNK]"
+            }
+        }"#,
+    )
+    .unwrap();
+    (dir, tokenizer_path)
+}
 
 #[tokio::test]
 async fn test_model_info_from_hf_like_local_repo() {
@@ -40,6 +71,242 @@ async fn test_tokenizer_from_hf_like_local_repo() {
 }
 
 #[test]
+#[serial_test::serial]
+fn test_basetenkenizer_model_card_matches_hf_and_uses_prefix_cache() {
+    temp_env::with_vars(
+        [
+            ("DYN_TOKENIZER_CACHE", Some("1")),
+            ("DYN_TOKENIZER_CACHE_EXTEND", Some("1")),
+        ],
+        || {
+            let model = "model-card-basetenkenizer-cache-integration";
+            let dir = tempdir().unwrap();
+            let tokenizer_path = dir.path().join("tokenizer.json");
+            let vocab = Vocab::from_iter(
+                [
+                    "<unk>", " ", "!", ",", "H", "T", "d", "e", "h", "l", "o", "r", "w", "He",
+                    "ll", "llo", "or", "ld",
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(id, token)| (token.to_string(), id as u32)),
+            );
+            let merges = [("H", "e"), ("l", "l"), ("ll", "o"), ("o", "r"), ("l", "d")]
+                .into_iter()
+                .map(|(left, right)| (left.to_string(), right.to_string()))
+                .collect();
+            let bpe = BPE::builder()
+                .vocab_and_merges(vocab, merges)
+                .unk_token("<unk>".to_string())
+                .build()
+                .unwrap();
+            tokenizers::Tokenizer::new(bpe)
+                .save(&tokenizer_path, false)
+                .unwrap();
+            std::fs::write(
+                dir.path().join("tokenizer_config.json"),
+                r#"{
+                    "added_tokens_decoder": {
+                        "18": {
+                            "content": "<special>",
+                            "single_word": false,
+                            "lstrip": false,
+                            "rstrip": false,
+                            "normalized": false,
+                            "special": true
+                        }
+                    }
+                }"#,
+            )
+            .unwrap();
+
+            let mut mdc = ModelDeploymentCard::with_name_only(model);
+            mdc.tokenizer = Some(TokenizerKind::HfTokenizerJson(
+                CheckedFile::from_disk(&tokenizer_path).unwrap(),
+            ));
+            mdc.runtime_config.tokenizer_backend = Some(TokenizerBackend::Basetenkenizer);
+
+            let production = mdc.tokenizer().unwrap();
+            let direct = HuggingFaceTokenizer::from_file(tokenizer_path.to_str().unwrap()).unwrap();
+
+            let cached_tokens =
+                dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_CACHED_TOKENS_TOTAL
+                    .with_label_values(&[model]);
+            let uncached_tokens =
+                dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL
+                    .with_label_values(&[model]);
+            let cached_before = cached_tokens.get();
+            let uncached_before = uncached_tokens.get();
+
+            let prompts = ["<special>Hello, world!", "<special>The world"];
+            let mut returned_tokens = 0_u64;
+            for prompt in prompts {
+                let actual = production.encode(prompt).unwrap().token_ids().to_vec();
+                let expected = direct.encode(prompt).unwrap().token_ids().to_vec();
+                assert_eq!(
+                    actual.first(),
+                    Some(&18),
+                    "the sibling-only special token must retain its configured token ID"
+                );
+                assert_eq!(
+                    actual, expected,
+                    "Baseten and HuggingFace paths must remain token-exact"
+                );
+                returned_tokens += actual.len() as u64;
+            }
+
+            let cached_delta = cached_tokens.get() - cached_before;
+            let uncached_delta = uncached_tokens.get() - uncached_before;
+            assert!(
+                cached_delta > 0,
+                "the second request should reuse the shared special-token prefix"
+            );
+            assert_eq!(
+                cached_delta + uncached_delta,
+                returned_tokens,
+                "cache token accounting must cover every returned token"
+            );
+            assert_eq!(
+                production.decode(&[18], false).unwrap().as_str(),
+                "<special>",
+                "the sibling-only special token must remain decodable"
+            );
+
+            production
+                .encode_segments(&[EncodeSegment::new("Hello, world!", false)])
+                .expect("selected Baseten backend must preserve segmented encoding support");
+        },
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn test_basetenkenizer_load_failure_falls_back_to_hf() {
+    temp_env::with_vars(
+        [
+            ("DYN_TOKENIZER_CACHE", Some("0")),
+            ("DYN_TOKENIZER_FALLBACK", None),
+        ],
+        || {
+            let (_dir, tokenizer_path) = unsupported_alternate_tokenizer();
+
+            assert!(
+                BasetenTokenizer::from_file(tokenizer_path.to_str().unwrap()).is_err(),
+                "fixture must remain unsupported by the Baseten BPE backend"
+            );
+
+            let mut mdc = ModelDeploymentCard::with_name_only("baseten-fallback");
+            mdc.tokenizer = Some(TokenizerKind::HfTokenizerJson(
+                CheckedFile::from_disk(&tokenizer_path).unwrap(),
+            ));
+            mdc.runtime_config.tokenizer_backend = Some(TokenizerBackend::Basetenkenizer);
+
+            let tokenizer = mdc
+                .tokenizer()
+                .expect("unsupported Baseten tokenizer must fall back to HuggingFace");
+            assert_eq!(
+                tokenizer.encode("hello").unwrap().token_ids(),
+                &[1],
+                "fallback must remain usable"
+            );
+        },
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn test_alternate_tokenizer_load_failure_is_rejected_when_fallback_is_disabled() {
+    temp_env::with_vars(
+        [
+            ("DYN_TOKENIZER_CACHE", Some("0")),
+            ("DYN_TOKENIZER_FALLBACK", Some("1")),
+        ],
+        || {
+            for backend in [
+                TokenizerBackend::Fastokens,
+                TokenizerBackend::Basetenkenizer,
+            ] {
+                let (_dir, tokenizer_path) = unsupported_alternate_tokenizer();
+                let mut mdc = ModelDeploymentCard::with_name_only("strict-tokenizer");
+                mdc.tokenizer = Some(TokenizerKind::HfTokenizerJson(
+                    CheckedFile::from_disk(&tokenizer_path).unwrap(),
+                ));
+                mdc.runtime_config.tokenizer_backend = Some(backend);
+                mdc.runtime_config.tokenizer_fallback_enabled = Some(false);
+
+                let error = mdc
+                    .tokenizer()
+                    .err()
+                    .expect("unsupported alternate tokenizer must fail without fallback")
+                    .to_string();
+                assert!(error.contains(backend.as_str()));
+                assert!(error.contains("fallback is disabled"));
+            }
+        },
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn test_hf_model_card_disables_serialized_padding_and_truncation() {
+    temp_env::with_vars([("DYN_TOKENIZER_CACHE", Some("0"))], || {
+        let dir = tempdir().unwrap();
+        let tokenizer_path = dir.path().join("tokenizer.json");
+        std::fs::write(
+            &tokenizer_path,
+            r#"{
+                "version": "1.0",
+                "truncation": {
+                    "direction": "Right",
+                    "max_length": 2,
+                    "strategy": "LongestFirst",
+                    "stride": 0
+                },
+                "padding": {
+                    "strategy": {"Fixed": 8},
+                    "direction": "Right",
+                    "pad_to_multiple_of": null,
+                    "pad_id": 0,
+                    "pad_type_id": 0,
+                    "pad_token": "[UNK]"
+                },
+                "added_tokens": [],
+                "normalizer": null,
+                "pre_tokenizer": {"type": "Whitespace"},
+                "post_processor": null,
+                "decoder": null,
+                "model": {
+                    "type": "WordLevel",
+                    "vocab": {"[UNK]": 0, "hello": 1, "world": 2, "again": 3},
+                    "unk_token": "[UNK]"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let raw = HuggingFaceTokenizer::from_file(tokenizer_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            raw.encode("hello world again").unwrap().token_ids(),
+            &[1, 2, 0, 0, 0, 0, 0, 0],
+            "fixture must exercise serialized truncation and padding"
+        );
+
+        let mut mdc = ModelDeploymentCard::with_name_only("hf-online-normalization");
+        mdc.tokenizer = Some(TokenizerKind::HfTokenizerJson(
+            CheckedFile::from_disk(&tokenizer_path).unwrap(),
+        ));
+
+        let tokenizer = mdc.tokenizer().unwrap();
+        assert_eq!(
+            tokenizer.encode("hello world again").unwrap().token_ids(),
+            &[1, 2, 3],
+            "online tokenization must not apply serialized padding or truncation"
+        );
+    });
+}
+
+#[test]
+#[serial_test::serial]
 fn test_tiktoken_model_card_cache_matches_direct_tokenizer_and_records_tokens() {
     let model = "model-card-tiktoken-cache-integration";
     let mut mdc = ModelDeploymentCard::load_from_disk(TIKTOKEN_PATH, None).unwrap();

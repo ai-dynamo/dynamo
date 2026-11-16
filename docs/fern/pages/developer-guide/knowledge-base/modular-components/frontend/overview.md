@@ -56,7 +56,7 @@ If the model is not available on Hugging Face, such as a private or customized m
 python -m dynamo.frontend --kserve-grpc-server
 ```
 
-See the [Frontend Guide](frontend-guide.md) for KServe-specific configuration and message formats.
+See the [KServe gRPC Frontend](frontend-guide.md) page for KServe-specific configuration and message formats.
 
 ### Kubernetes
 
@@ -66,14 +66,15 @@ kind: DynamoGraphDeployment
 metadata:
   name: frontend-example
 spec:
-  graphs:
-    - name: frontend
+  services:
+    Frontend:
+      componentType: frontend
       replicas: 1
-      services:
-        - name: Frontend
-          image: nvcr.io/nvidia/dynamo/dynamo-vllm:latest
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
           command:
-            - python
+            - python3
             - -m
             - dynamo.frontend
             - --http-port
@@ -86,16 +87,17 @@ spec:
 |-----------|---------|-------------|
 | `--http-port` | 8000 | HTTP server port |
 | `--kserve-grpc-server` | false | Enable KServe gRPC server |
-| `--router-mode` | `round-robin` | Routing strategy: `round-robin`, `random`, `power-of-two`, `kv`, `direct`, `least-loaded`, `device-aware-weighted` (`power-of-two` and `least-loaded` use synchronous prefill fallback in disaggregated prefill mode) |
+| `--router-mode` | `round-robin` | Routing strategy: `round-robin`, `random`, `kv`, `direct`, `least-loaded`, `device-aware-weighted` (`least-loaded` uses synchronous prefill fallback in disaggregated prefill mode) |
 
-See the [Frontend Guide](frontend-guide.md) for full configuration options.
+See the [KServe gRPC Frontend](frontend-guide.md) page for KServe configuration options.
 
 ## Next Steps
 
 | Document | Description |
 |----------|-------------|
 | [Configuration Reference](../../../../reference/components/frontend-configuration.mdx) | All CLI arguments, env vars, and HTTP endpoints |
-| [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
+| [Protocol Field Handling](protocol-field-handling.md) | Ownership, transport, and end-to-end review contract for request and response fields |
+| [KServe gRPC Frontend](frontend-guide.md) | KServe endpoints, backend registration, and flow-control tuning |
 | [Python Route Extensions](python-route-extensions.md) | Add trusted HTTP routes from a Python package or importable module |
 | [NVIDIA Request Extensions (nvext)](../../../additional-resources/nvidia-request-extensions-nvext.md) | Custom request fields for routing hints and cache control |
 | [Router Documentation](../router/overview.md) | KV-aware routing configuration |

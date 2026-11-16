@@ -1,0 +1,212 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated vLLM deployment for Nemotron 3.5 Lightning NVFP4 on 1x H100 with DSpark speculative decoding.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-agg-h100-dspark-kv-router-config
+data:
+  speculative-config: |-
+    {
+      "method": "dspark",
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark",
+      "num_speculative_tokens": 7,
+      "attention_backend": "TRITON_ATTN"
+    }
+  speculative-config-synthetic: |-
+    {
+      "method": "dspark",
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark",
+      "num_speculative_tokens": 7,
+      "rejection_sample_method": "synthetic",
+      "synthetic_acceptance_length": 3.69,
+      "attention_backend": "TRITON_ATTN"
+    }
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-h100-dspark-kv-router
+  labels:
+    app.kubernetes.io/name: vllm-agg-h100-dspark-kv-router
+    app.kubernetes.io/part-of: dynamo
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          imagePullSecrets:
+            - name: your-image-pull-secret
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+              args:
+                - -m
+                - dynamo.frontend
+                - --router-mode
+                - kv
+                - --router-kv-events
+                - --kv-cache-block-size
+                - "64"
+                - --trust-remote-code
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: DYN_HTTP_BODY_LIMIT_MB
+                  value: "200"
+                - name: HF_HOME
+                  value: /model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
+              resources: {}
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                periodSeconds: 10
+                timeoutSeconds: 60
+                failureThreshold: 60
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /model-cache
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+
+    - name: agg
+      type: worker
+      replicas: 4
+      sharedMemorySize: 40Gi
+      podTemplate:
+        spec:
+          imagePullSecrets:
+            - name: your-image-pull-secret
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-H100-80GB-HBM3
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 40Gi
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace/
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+                - --served-model-name
+                - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+                - --trust-remote-code
+                - --tensor-parallel-size
+                - "1"
+                - --max-num-seqs
+                - "512"
+                - --max-num-batched-tokens
+                - "32768"
+                - --enable-prefix-caching
+                - --block-size
+                - "64"
+                - --async-scheduling
+                - --mamba-backend
+                - flashinfer
+                - --mamba-ssm-cache-dtype
+                - float16
+                - --mamba-cache-mode
+                - align
+                - --enable-mamba-cache-stochastic-rounding
+                - --mamba-cache-philox-rounds
+                - "5"
+                - --dyn-tool-call-parser
+                - nemotron_nano
+                - --dyn-reasoning-parser
+                - nemotron_nano
+                - --reasoning-parser
+                - nemotron_v3
+                - --speculative-config=$(SPECULATIVE_CONFIG)
+                - --kv-events-config
+                - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+                - --disaggregation-mode
+                - agg
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
+                - name: TRITON_CACHE_DIR
+                  value: /tmp/.triton-cache
+                - name: VLLM_CONFIG_ROOT
+                  value: /tmp/vllm-config
+                - name: VLLM_CACHE_ROOT
+                  value: /tmp/vllm-cache
+                - name: SPECULATIVE_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: vllm-agg-h100-dspark-kv-router-config
+                      key: speculative-config # speculative-config-synthetic for benchmarking
+                - name: NCCL_IB_DISABLE
+                  value: "1"
+                - name: PYTHONHASHSEED
+                  value: "0"
+              resources:
+                requests:
+                  memory: 128Gi
+                  nvidia.com/gpu: "1"
+                limits:
+                  nvidia.com/gpu: "1"
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_RESOURCE
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 30
+                timeoutSeconds: 20
+                failureThreshold: 120
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /model-cache
+                - name: dshm
+                  mountPath: /dev/shm

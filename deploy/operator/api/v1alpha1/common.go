@@ -22,36 +22,124 @@ import (
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+// ProviderOverride carries a sparse provider-native fragment for its DGD context.
+// Grove support is restricted as follows:
+//   - apiVersion must be `grove.io/v1alpha1`.
+//   - target is `PodCliqueSet`, `PodCliqueTemplateSpec`, or
+//     `PodCliqueScalingGroupConfig`, according to the field location and
+//     component shape.
+//   - value may set topologyConstraint, and component contexts may set the
+//     native minAvailable field and rollingUpdate.maxUnavailable. Availability
+//     and rollout budgets are not supported at root or role scope.
+//
+// All other providers, versions, targets, and fields are rejected.
+type ProviderOverride struct {
+	// apiVersion is the Kubernetes API group and version of the provider schema.
+	// Grove requires `grove.io/v1alpha1`.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	APIVersion string `json:"apiVersion"`
+
+	// target identifies the provider resource kind or embedded provider schema.
+	// It may be omitted on input when the DGD location has one unambiguous target;
+	// admission resolves and persists it.
+	// +optional
+	Target string `json:"target,omitempty"`
+
+	// value is a sparse fragment of the selected provider schema. For Grove,
+	// PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded
+	// targets accept `topologyConstraint`. Component contexts also accept
+	// `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on
+	// PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the
+	// deprecated component field preserves its value and leaves the update strategy unchanged.
+	// Component contexts also accept rollingUpdate.maxUnavailable.
+	// +required
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	Value apiextensionsv1.JSON `json:"value"`
+}
+
+const (
+	// ComponentRoleLeader identifies the leader Pod-producing role of a multinode component.
+	ComponentRoleLeader = "leader"
+	// ComponentRoleWorker identifies the worker Pod-producing role of a multinode component.
+	ComponentRoleWorker = "worker"
+	// ComponentRoleLPXConductor identifies the launcher role of an LPX component.
+	ComponentRoleLPXConductor = "conductor"
+	// ComponentRoleLPXAgent identifies the LPU-serving role of an LPX component.
+	ComponentRoleLPXAgent = "agent"
+)
+
+// ComponentRoleSpec configures one named Pod-producing role inside a compound component.
+// The enclosing component type defines the allowed role names and cardinality.
+type ComponentRoleSpec struct {
+	// Name identifies the role within the enclosing component independently of
+	// generated provider resource names.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// Replicas is the logical cardinality of this role in one complete component
+	// instance. The enclosing component type defines the cardinality. For
+	// multinode components, admission defaults and persists omitted values from
+	// Multinode.NodeCount; leader must be 1 and worker must be
+	// Multinode.NodeCount minus 1.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	Replicas *int32 `json:"replicas,omitempty"`
+
+	// ProviderOverride configures the provider workload unit generated for this
+	// role. It is supported only for components embedded in a DGD.
+	// +optional
+	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
+
+	// PodTemplate defines the complete Pod configuration for this role. Admission
+	// permits it only when the enclosing component type supports role-specific Pod
+	// templates. For multinode components, every required role must supply one and
+	// the role templates own backend-specific leader and worker launch commands.
+	// +optional
+	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
+}
 
 // +kubebuilder:validation:XValidation:rule="!has(self.create) || self.create == false || (has(self.size) && has(self.storageClass) && has(self.volumeAccessMode))",message="When create is true, size, storageClass, and volumeAccessMode are required"
 type PVC struct {
 	// Create indicates to create a new PVC
+	// +optional
 	Create *bool `json:"create,omitempty"`
 	// Name is the name of the PVC
-	// +kubebuilder:validation:Required
+	// +required
 	Name *string `json:"name,omitempty"`
 	// StorageClass to be used for PVC creation. Required when create is true.
+	// +optional
 	StorageClass string `json:"storageClass,omitempty"`
 	// Size of the volume in Gi, used during PVC creation. Required when create is true.
+	// +optional
 	Size resource.Quantity `json:"size,omitempty"`
 	// VolumeAccessMode is the volume access mode of the PVC. Required when create is true.
+	// +optional
 	VolumeAccessMode corev1.PersistentVolumeAccessMode `json:"volumeAccessMode,omitempty"`
 }
 
 // VolumeMount references a PVC defined at the top level for volumes to be mounted by the component
 type VolumeMount struct {
 	// Name references a PVC name defined in the top-level PVCs map
-	// +kubebuilder:validation:Required
+	// +required
 	Name string `json:"name,omitempty"`
 	// MountPoint specifies where to mount the volume.
 	// If useAsCompilationCache is true and mountPoint is not specified,
 	// a backend-specific default will be used.
+	// +optional
 	MountPoint string `json:"mountPoint,omitempty"`
 	// UseAsCompilationCache indicates this volume should be used as a compilation cache.
 	// When true, backend-specific environment variables will be set and default mount points may be used.
 	// +kubebuilder:default=false
+	// +optional
 	UseAsCompilationCache bool `json:"useAsCompilationCache,omitempty"`
 }
 
@@ -60,14 +148,19 @@ type VolumeMount struct {
 // for migration guidance. This field will be removed in a future API version.
 type Autoscaling struct {
 	// Deprecated: This field is ignored.
+	// +optional
 	Enabled bool `json:"enabled,omitempty"`
 	// Deprecated: This field is ignored.
+	// +optional
 	MinReplicas int `json:"minReplicas,omitempty"`
 	// Deprecated: This field is ignored.
+	// +optional
 	MaxReplicas int `json:"maxReplicas,omitempty"`
 	// Deprecated: This field is ignored.
+	// +optional
 	Behavior *autoscalingv2.HorizontalPodAutoscalerBehavior `json:"behavior,omitempty"`
 	// Deprecated: This field is ignored.
+	// +optional
 	Metrics []autoscalingv2.MetricSpec `json:"metrics,omitempty"`
 }
 
@@ -77,22 +170,29 @@ type SharedMemorySpec struct {
 	// component. When false (or unset), shared memory is enabled and Size is
 	// required (enforced by the validating webhook). Size is ignored when
 	// Disabled is true.
-	Disabled bool              `json:"disabled,omitempty"`
-	Size     resource.Quantity `json:"size,omitempty"`
+	// +optional
+	Disabled bool `json:"disabled,omitempty"`
+	// +optional
+	Size resource.Quantity `json:"size,omitempty"`
 }
 
 type ResourceItem struct {
 	// CPU specifies the CPU resource request/limit (e.g., "1000m", "2")
+	// +optional
 	CPU string `json:"cpu,omitempty"`
 	// Memory specifies the memory resource request/limit (e.g., "4Gi", "8Gi")
+	// +optional
 	Memory string `json:"memory,omitempty"`
 	// GPU indicates the number of GPUs to request.
 	// Total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+	// +optional
 	GPU string `json:"gpu,omitempty"`
 	// GPUType can specify a custom GPU type, e.g. "gpu.intel.com/xe"
 	// By default if not specified, the GPU type is "nvidia.com/gpu"
+	// +optional
 	GPUType string `json:"gpuType,omitempty"`
 	// Custom specifies additional custom resource requests/limits
+	// +optional
 	Custom map[string]string `json:"custom,omitempty"`
 }
 
@@ -100,35 +200,49 @@ type ResourceItem struct {
 // GPUs/devices, and any runtime-specific resources.
 type Resources struct {
 	// Requests specifies the minimum resources required by the component
+	// +optional
 	Requests *ResourceItem `json:"requests,omitempty"`
 	// Limits specifies the maximum resources allowed for the component
+	// +optional
 	Limits *ResourceItem `json:"limits,omitempty"`
 	// Claims specifies resource claims for dynamic resource allocation
+	// +optional
 	Claims []corev1.ResourceClaim `json:"claims,omitempty"`
 }
 
 type DeploymentTargetHPAConf struct {
-	CPU         *int32  `json:"cpu,omitempty"`
-	GPU         *int32  `json:"gpu,omitempty"`
-	Memory      *string `json:"memory,omitempty"`
-	QPS         *int64  `json:"qps,omitempty"`
-	MinReplicas *int32  `json:"min_replicas,omitempty"`
-	MaxReplicas *int32  `json:"max_replicas,omitempty"`
+	// +optional
+	CPU *int32 `json:"cpu,omitempty"`
+	// +optional
+	GPU *int32 `json:"gpu,omitempty"`
+	// +optional
+	Memory *string `json:"memory,omitempty"`
+	// +optional
+	QPS *int64 `json:"qps,omitempty"`
+	// +optional
+	MinReplicas *int32 `json:"min_replicas,omitempty"`
+	// +optional
+	MaxReplicas *int32 `json:"max_replicas,omitempty"`
 }
 
 type LabelItemSchema struct {
-	Key   string `json:"key"`
+	// +required
+	Key string `json:"key"`
+	// +required
 	Value string `json:"value"`
 }
 
 type ExtraPodMetadata struct {
+	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 type ExtraPodSpec struct {
 	*corev1.PodSpec `json:",inline"`
-	MainContainer   *corev1.Container `json:"mainContainer,omitempty"`
+	// +optional
+	MainContainer *corev1.Container `json:"mainContainer,omitempty"`
 }
 
 // MarshalJSON implements json.Marshaler for ExtraPodSpec.
@@ -180,6 +294,7 @@ const (
 type GPUMemoryServiceSpec struct {
 	// Enabled activates GMS wiring. GPU resources on client containers are
 	// replaced with a DRA ResourceClaim for shared GPU access.
+	// +required
 	Enabled bool `json:"enabled"`
 	// Mode selects the GMS deployment topology.
 	// +kubebuilder:default=intraPod
@@ -193,11 +308,9 @@ type GPUMemoryServiceSpec struct {
 
 	// ExtraClientContainers lists additional user-declared containers that should
 	// be wired as GMS clients in pods rendered from the enclosing spec.
-	// DGD/DCD services apply this to service pods. Auto-created checkpoints
-	// apply checkpoint job clients before creating the DynamoCheckpoint; manual
-	// DynamoCheckpoint users must provide an already-prepared pod template.
-	// In each rendered pod, only matching container names are wired; absent
-	// names are ignored.
+	// DGD/DCD services apply this to service pods. Automatic captures apply
+	// SnapshotJob capture Pod clients before creating the SnapshotJob.
+	// Every name must match a user-declared container in the enclosing pod spec.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:items:MinLength=1
@@ -219,6 +332,7 @@ type GMSClientPodSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +required
 	Name string `json:"name"`
 
 	// PodTemplate configures the pod to run as a GMS client.
@@ -235,6 +349,7 @@ type GMSClientPodSpec struct {
 // multiple engine pods per rank that share GPUs via DRA resource claims.
 type FailoverSpec struct {
 	// Enabled activates failover mode.
+	// +required
 	Enabled bool `json:"enabled"`
 	// Mode selects the failover deployment topology.
 	// intraPod: engine containers run within the same pod (requires gpuMemoryService.enabled).
@@ -256,12 +371,16 @@ type FailoverSpec struct {
 }
 
 // ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
-// for replica management. When enabled, the DGDSA owns the replicas field and
-// external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.
+// (DGDSA) for replica management. When enabled, the DGDSA owns the replicas field so that
+// external autoscalers (HPA, KEDA, Planner) can drive scaling via the Scale subresource.
+//
+// Enable it with `scalingAdapter: {enabled: true}`. Because `enabled` defaults to false, a
+// bare `scalingAdapter: {}` is disabled.
 type ScalingAdapter struct {
-	// Enabled indicates whether the ScalingAdapter should be enabled for this service.
-	// When true, a DGDSA is created and owns the replicas field.
-	// When false (default), no DGDSA is created and replicas can be modified directly in the DGD.
+	// Enabled turns the ScalingAdapter on for this service. When true, a DGDSA is created and
+	// owns the replicas field. When false (the default), no DGDSA is created and replicas are
+	// set directly on the DGD -- so a bare `scalingAdapter: {}` is disabled; set
+	// `enabled: true` to opt in.
 	// +optional
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
@@ -269,14 +388,14 @@ type ScalingAdapter struct {
 
 // Deprecated: use checkpoint.enabled instead.
 // enabled=true without checkpointRef creates a DGD-managed automatic
-// checkpoint; checkpointRef restores the named checkpoint.
+// checkpoint; checkpointRef restores the named PodSnapshot.
 // +kubebuilder:validation:Enum=Auto;Manual
 type CheckpointMode string
 
 const (
 	// Deprecated: use checkpoint.enabled=true and omit checkpointRef.
 	CheckpointModeAuto CheckpointMode = "Auto"
-	// Deprecated: use checkpointRef to restore an existing checkpoint.
+	// Deprecated: use checkpointRef to restore an existing PodSnapshot.
 	CheckpointModeManual CheckpointMode = "Manual"
 )
 
@@ -285,8 +404,8 @@ const (
 type CheckpointStartupPolicy string
 
 const (
-	// CheckpointStartupPolicyImmediate starts workers immediately. The checkpoint
-	// job runs in the background, and only pods created after the checkpoint is
+	// CheckpointStartupPolicyImmediate starts workers immediately. The SnapshotJob
+	// capture runs in the background, and only pods created after the checkpoint is
 	// Ready are restore-shaped by the pod-create mutating webhook.
 	CheckpointStartupPolicyImmediate CheckpointStartupPolicy = "Immediate"
 	// CheckpointStartupPolicyWaitForCheckpoint gates worker replicas until the
@@ -304,22 +423,24 @@ const (
 	// CRs and artifacts when the owning DGD is deleted.
 	CheckpointDeletionPolicyDelete CheckpointDeletionPolicy = "Delete"
 	// CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs
-	// and artifacts after the owning DGD is deleted. Users can reference the
-	// retained checkpoint with checkpointRef if they accept compatibility risk.
+	// and artifacts after the owning DGD is deleted. Retained automatic
+	// checkpoints are not valid checkpointRef targets.
 	CheckpointDeletionPolicyRetain CheckpointDeletionPolicy = "Retain"
 )
 
 // ServiceCheckpointConfig configures checkpointing for a DGD service
 // +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0",message="checkpoint.job cannot be set when checkpointRef is specified"
 type ServiceCheckpointConfig struct {
-	// Enabled indicates whether checkpointing is enabled for this service
+	// Enabled indicates whether checkpointing is enabled for this service. When
+	// true, omit CheckpointRef for a DGD-managed automatic checkpoint or set
+	// CheckpointRef to restore a PodSnapshot in the same namespace.
 	// +optional
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 
 	// Deprecated: omit mode. Use enabled=true without checkpointRef for a
 	// DGD-managed automatic checkpoint, or use checkpointRef to restore the
-	// named checkpoint.
+	// named PodSnapshot.
 	// +optional
 	Mode CheckpointMode `json:"mode,omitempty"`
 
@@ -335,18 +456,22 @@ type ServiceCheckpointConfig struct {
 
 	// DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and
 	// artifact are deleted or retained when the owning DGD is deleted.
-	// Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+	// Explicit checkpointRef PodSnapshots are never owned or deleted by the DGD.
 	// +optional
 	// +kubebuilder:default=Delete
 	DeletionPolicy CheckpointDeletionPolicy `json:"deletionPolicy,omitempty"`
 
-	// CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.
-	// If specified, this service's Identity is ignored and the referenced checkpoint is used directly.
+	// CheckpointRef references an existing PodSnapshot in the same namespace by
+	// metadata.name. If specified, this service's Identity is ignored and the
+	// referenced PodSnapshot is used directly.
+	// Standalone worker-class (worker, prefill, or decode)
+	// DynamoComponentDeployment resources cannot set this field; configure
+	// CheckpointRef on the owning DynamoGraphDeployment service.
 	// +optional
 	CheckpointRef *string `json:"checkpointRef,omitempty"`
 
-	// Deprecated: omit for DGD-managed checkpoints; no action is needed.
-	// Use CheckpointRef to restore an existing checkpoint.
+	// Deprecated: omit for DGD-managed checkpoints; the operator ignores this field.
+	// Use CheckpointRef to restore an existing PodSnapshot.
 	// +optional
 	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
 
@@ -358,14 +483,14 @@ type ServiceCheckpointConfig struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	TargetContainerName string `json:"targetContainerName,omitempty"`
 
-	// Job customizes the DGD-managed checkpoint Job.
+	// Job customizes the DGD-managed SnapshotJob capture Pod.
 	// +optional
 	Job *ServiceCheckpointJobConfig `json:"job,omitempty"`
 }
 
-// ServiceCheckpointJobConfig customizes the checkpoint Job created for a DGD service.
+// ServiceCheckpointJobConfig customizes the SnapshotJob capture Pod created for a DGD service.
 type ServiceCheckpointJobConfig struct {
-	// GMSClientContainers lists checkpoint Job containers that should receive
+	// GMSClientContainers lists SnapshotJob capture Pod containers that should receive
 	// GMS client wiring. Requires gpuMemoryService on the service.
 	// +optional
 	// +listType=set
@@ -374,7 +499,7 @@ type ServiceCheckpointJobConfig struct {
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	GMSClientContainers []string `json:"gmsClientContainers,omitempty"`
 
-	// PodTemplate customizes the checkpoint Job pod. The operator starts from the
+	// PodTemplate customizes the SnapshotJob capture Pod. The operator starts from the
 	// selected workload container and merges this template so users can add helper
 	// containers such as gms-saver.
 	// +optional
@@ -382,4 +507,54 @@ type ServiceCheckpointJobConfig struct {
 	// +kubebuilder:validation:Type=object
 	// +kubebuilder:pruning:PreserveUnknownFields
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
+}
+
+// Deprecated: omit in DGD service checkpoint configs. Automatic capture
+// needs no replacement; use CheckpointRef to restore a PodSnapshot.
+type DynamoCheckpointIdentity struct {
+	// Model is the model identifier (e.g., "meta-llama/Llama-3-70B").
+	// Deprecated: legacy identity only.
+	// +required
+	Model string `json:"model"`
+
+	// BackendFramework is the runtime framework (vllm, sglang, trtllm).
+	// Deprecated: legacy identity only.
+	// +required
+	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
+	BackendFramework string `json:"backendFramework"`
+
+	// DynamoVersion is the Dynamo platform version.
+	// Deprecated: legacy identity only.
+	// +optional
+	DynamoVersion string `json:"dynamoVersion,omitempty"`
+
+	// TensorParallelSize is the tensor parallel configuration.
+	// Deprecated: automatic capture derives compatibility from the worker.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=1
+	TensorParallelSize int32 `json:"tensorParallelSize,omitempty"`
+
+	// PipelineParallelSize is the pipeline parallel configuration.
+	// Deprecated: automatic capture derives compatibility from the worker.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=1
+	PipelineParallelSize int32 `json:"pipelineParallelSize,omitempty"`
+
+	// Dtype is the data type (fp16, bf16, fp8, etc.).
+	// Deprecated: legacy identity only.
+	// +optional
+	Dtype string `json:"dtype,omitempty"`
+
+	// MaxModelLen is the maximum sequence length.
+	// Deprecated: legacy identity only.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	MaxModelLen int32 `json:"maxModelLen,omitempty"`
+
+	// ExtraParameters contains additional legacy identity parameters.
+	// Deprecated: legacy identity only.
+	// +optional
+	ExtraParameters map[string]string `json:"extraParameters,omitempty"`
 }

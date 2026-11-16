@@ -2,13 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Unit tests for resolve_model_path() and the rapid.py / thorough.py call
-sites that feed its result into aiconfigurator."""
+sites that feed its result into aisimulate."""
 
+import asyncio
 import copy
+import errno
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
+import yaml
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -18,6 +22,7 @@ pytestmark = [
 ]
 
 try:
+    from dynamo.profiler.profile_sla import run_profile
     from dynamo.profiler.rapid import (
         _generate_dgd_from_pick,
         _run_autoscale_sim,
@@ -28,7 +33,10 @@ try:
         run_thorough,
     )
     from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
-    from dynamo.profiler.utils.dgd_materialization import DGDMaterializationPurpose
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         HardwareSpec,
@@ -145,6 +153,13 @@ class TestResolveModelPath:
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(f"{tmp_path}/", "/model"))
         assert resolve_model_path(dgdr) == str(local_dir)
 
+    def test_absolute_pvc_model_path_inside_mount_is_not_doubled(self, tmp_path):
+        """An already container-visible pvcModelPath should not be joined again."""
+        local_dir = tmp_path / "model"
+        _make_model_dir(local_dir)
+        dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(tmp_path), str(local_dir)))
+        assert resolve_model_path(dgdr) == str(local_dir)
+
     def test_returns_hf_id_when_local_path_is_a_file(self, tmp_path):
         """The resolved path exists but is a file, not a directory -> the HF id."""
         (tmp_path / "model").write_text("not a directory")
@@ -160,6 +175,85 @@ class TestResolveModelPath:
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(tmp_path), "model"))
         assert resolve_model_path(dgdr) == _HF_ID
 
+    def test_inaccessible_pvc_config_during_materialization(
+        self, tmp_path, monkeypatch
+    ):
+        local_dir = tmp_path / "model"
+        _make_model_dir(local_dir)
+        config_path = local_dir / "config.json"
+        dgdr = _make_dgdr(
+            backend="vllm", modelCache=_pvc_model_cache(str(tmp_path), "model")
+        )
+        error = PermissionError(errno.EACCES, "Permission denied", str(config_path))
+        original_stat = os.stat
+
+        def stat(path, *args, **kwargs):
+            if os.fspath(path) == str(config_path):
+                raise error
+            return original_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", stat)
+        blueprint = {
+            "spec": {
+                "components": [
+                    {
+                        "name": "worker",
+                        "type": "worker",
+                        "podTemplate": {
+                            "spec": {"containers": [{"name": "main", "args": []}]}
+                        },
+                    }
+                ]
+            }
+        }
+        with (
+            patch("dynamo.profiler.utils.model_info.hf_hub_download") as download,
+            pytest.raises(RuntimeError, match="Cannot inspect PVC model config") as exc,
+        ):
+            materialize_dgd(
+                blueprint,
+                purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+                runtime_backend=dgdr.backend,
+                model_name_or_path=resolve_model_path(dgdr),
+            )
+        assert exc.value.__cause__ is error
+        assert str(config_path) in str(exc.value)
+        assert "symlink ownership" in str(exc.value)
+        assert "modelCache.pvcModelPath" in str(exc.value)
+        download.assert_not_called()
+
+    def test_run_profile_records_pvc_inspection_failure(self, tmp_path, monkeypatch):
+        local_dir = tmp_path / "model"
+        _make_model_dir(local_dir)
+        config_path = local_dir / "config.json"
+        dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(tmp_path), "model"))
+        error = PermissionError(errno.EACCES, "Permission denied", str(config_path))
+        original_stat = os.stat
+
+        def stat(path, *args, **kwargs):
+            if os.fspath(path) == str(config_path):
+                raise error
+            return original_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", stat)
+        output_dir = tmp_path / "output"
+        with (
+            patch(
+                "dynamo.profiler.profile_sla.check_model_hardware_support",
+                side_effect=AssertionError("Must not fall back to the Hub model"),
+            ),
+            pytest.raises(RuntimeError, match="Cannot inspect PVC model config") as exc,
+        ):
+            asyncio.run(
+                run_profile(dgdr, ProfilerOperationalConfig(output_dir=str(output_dir)))
+            )
+        status = yaml.safe_load((output_dir / "profiler_status.yaml").read_text())
+        assert status["status"] == "failed"
+        assert status["error"] == str(exc.value)
+        assert str(config_path) in status["error"]
+        assert "modelCache.pvcModelPath" in status["error"]
+        assert exc.value.__cause__ is error
+
 
 # ---------------------------------------------------------------------------
 # rapid.py call sites
@@ -167,7 +261,7 @@ class TestResolveModelPath:
 
 
 class TestRapidResolvesModelPath:
-    """rapid.py call sites pass resolve_model_path()'s result to aiconfigurator."""
+    """rapid.py call sites pass resolve_model_path()'s result to aisimulate."""
 
     @staticmethod
     def _execute_return(chosen="disagg"):
@@ -398,6 +492,20 @@ class TestThoroughResolvesModelPath:
 
         assert mock_enumerate.call_args.kwargs["model_path"] == str(local_dir)
 
+    async def test_enumerate_uses_relative_pvc_path_for_absolute_model_path(
+        self, tmp_path
+    ):
+        """run_thorough passes AIC a PVC-relative path for mounted model paths."""
+        pvc_root = tmp_path / "pvc"
+        local_dir = pvc_root / "model"
+        _make_model_dir(local_dir)
+        dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(pvc_root), str(local_dir)))
+
+        mock_enumerate = await self._capture_enumerate(dgdr, tmp_path)
+
+        assert mock_enumerate.call_args.kwargs["model_path"] == str(local_dir)
+        assert mock_enumerate.call_args.kwargs["k8s_model_path_in_pvc"] == "model"
+
     async def test_enumerate_uses_hf_id_when_no_pvc(self, tmp_path):
         """run_thorough -> enumerate_profiling_configs gets the HF id when no PVC."""
         dgdr = _make_dgdr()
@@ -405,6 +513,20 @@ class TestThoroughResolvesModelPath:
         mock_enumerate = await self._capture_enumerate(dgdr, tmp_path)
 
         assert mock_enumerate.call_args.kwargs["model_path"] == _HF_ID
+
+    async def test_enumerate_preserves_unset_pvc_model_path(self, tmp_path):
+        """run_thorough keeps missing pvcModelPath as None for AIC."""
+        dgdr = _make_dgdr(
+            modelCache=ModelCacheSpec(
+                pvcName="model-cache",
+                pvcMountPath="/opt/model-cache",
+            )
+        )
+
+        mock_enumerate = await self._capture_enumerate(dgdr, tmp_path)
+
+        assert mock_enumerate.call_args.kwargs["model_path"] == _HF_ID
+        assert mock_enumerate.call_args.kwargs["k8s_model_path_in_pvc"] is None
 
     async def test_materializes_each_candidate_once_with_resolved_model_path(
         self, tmp_path
@@ -463,6 +585,7 @@ class TestThoroughResolvesModelPath:
                 "tolerations": [],
                 "runtime_backend": "trtllm",
                 "model_name_or_path": _HF_ID,
+                "trust_remote_code": False,
             }
             for call in materialize.call_args_list
         )

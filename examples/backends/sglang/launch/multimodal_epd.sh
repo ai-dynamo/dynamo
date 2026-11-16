@@ -18,6 +18,7 @@ CHAT_TEMPLATE="qwen2-vl"
 PROVIDED_CHAT_TEMPLATE=""
 CACHE_CAPACITY_GB=""
 TRANSFER_BACKEND="${DYN_SGLANG_DISAGGREGATION_TRANSFER_BACKEND:-nixl}"
+FRONTEND_DECODING=false
 
 # --single-gpu: Packs both workers (encode, PD) onto a single GPU.
 # This is intended for functional testing with small models (e.g. 2B) where CI
@@ -51,6 +52,10 @@ while [[ $# -gt 0 ]]; do
             TRANSFER_BACKEND=$2
             shift 2
             ;;
+        --frontend-decoding)
+            FRONTEND_DECODING=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
@@ -62,6 +67,7 @@ while [[ $# -gt 0 ]]; do
             echo "                       Enable encode-worker CPU embedding cache with this capacity"
             echo "  --disaggregation-transfer-backend <backend>"
             echo "                       SGLang disaggregation transfer backend (default: $TRANSFER_BACKEND)"
+            echo "  --frontend-decoding  Decode images in the Rust frontend and transfer pixels to the encode worker"
             echo "  -h, --help           Show this help message"
             exit 0
             ;;
@@ -119,6 +125,10 @@ WORKER_EXTRA_ARGS="$GPU_MEM_ARGS"
 
 if [[ -n "$CACHE_CAPACITY_GB" ]]; then
     ENCODE_EXTRA_ARGS="$ENCODE_EXTRA_ARGS --multimodal-embedding-cache-capacity-gb $CACHE_CAPACITY_GB"
+fi
+
+if [[ "$FRONTEND_DECODING" == "true" ]]; then
+    ENCODE_EXTRA_ARGS="$ENCODE_EXTRA_ARGS --frontend-decoding"
 fi
 
 if [[ "$SINGLE_GPU" == "true" ]]; then

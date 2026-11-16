@@ -12,19 +12,51 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 |----------|--------------|------------|---------------|-------|
 | **Image** | HTTP/HTTPS URL | Yes | Yes | Vision encoder generates embeddings |
 | **Image** | Data URL (Base64) | No | No |  |
-| **Video** | HTTP/HTTPS/`file://` URL | Yes | Yes | Vision encoder generates embeddings |
+| **Video** | HTTP/HTTPS, `file://`, `data:` | Yes, VP8/VP9 on CUDA for Qwen3-VL and Qwen3.5 | Yes, H.264/H.265 for Qwen2-family only | Aggregated video requires `--frontend-decoding`; disaggregated video requires the encode worker |
 | **Audio** | HTTP/HTTPS URL | No | No | Not supported in SGLang backend |
+
+> [!IMPORTANT]
+> SGLang has two video-input paths with different codec and model support.
+>
+> - Aggregated Qwen3-VL and Qwen3.5 workers on CUDA support VP8 and VP9 with
+>   `--frontend-decoding`. Dynamo's Rust frontend decodes and transfers the
+>   sampled frames; SGLang still runs model-specific preprocessing and vision
+>   encoding. The multimodal router launcher uses this path for video-aware KV
+>   routing on [compatible SGLang builds](#wide-token-sglang-builds).
+> - Disaggregated Qwen2-family deployments support H.264 and H.265 through the
+>   frontend-facing `--disaggregation-mode encode` worker. NVDEC performs the
+>   decode before the vision encoder produces embeddings.
+>
+> The shipped SGLang image does not provide an AV1 input decoder. SGLang XPU
+> images also omit the frontend FFmpeg decoder, so the aggregated VP8/VP9 path
+> is CUDA-only.
+>
+> NVDEC requires a GPU with a video decode engine and a container granted the
+> `video` driver capability — see
+> [Video Decode GPU Requirements](../../../../../use-cases/video-understanding/video-decoding.md).
+> `file://` sources additionally require `DYN_MM_LOCAL_PATH` to permit local reads.
 
 ### Supported URL Formats
 
 | Format | Example | Description |
 |--------|---------|-------------|
-| **HTTP/HTTPS** | `http://example.com/image.jpg` | Remote media files |
+| **HTTP/HTTPS** | `https://example.com/image.jpg` | Remote media files |
 | **file://** | `file:///tmp/test.mp4` | Local files accessible to the backend |
+
+> [!NOTE]
+> Media URLs are validated against a default-deny policy. `https://` and `data:` sources
+> pass; plain `http://` and hostnames that resolve to private or loopback addresses are
+> refused. Two settings change this:
+>
+> - `DYN_MM_ALLOW_INTERNAL=1`, on the worker that loads the media, allows `http://` and
+>   internal hosts.
+> - `DYN_MM_ALLOW_REMOTE_URLS=0`, on the frontend and the workers, refuses every remote
+>   media URL and takes precedence over `DYN_MM_ALLOW_INTERNAL`. See
+>   [Runtime Configuration](../../../../../reference/components/runtime-configuration.mdx#multimodal-and-media-output).
 
 ## Deployment Patterns
 
-SGLang supports EPD, EP/D, E/PD, and E/P/D patterns. See [Multimodal Model Serving](../../../../../use-cases/multimodal-serving/overview.md) for detailed explanations.
+SGLang supports EPD, EP/D, E/PD, and E/P/D patterns. See [Multimodal Model Serving](../../../../../use-cases/image-understanding/vlm-performance-optimization.md) for detailed explanations.
 
 | Pattern | Supported | Launch Script | Notes |
 |---------|-----------|---------------|-------|
@@ -50,24 +82,64 @@ SGLang supports EPD, EP/D, E/PD, and E/P/D patterns. See [Multimodal Model Servi
 
 ### SGLang-Specific Characteristics
 
-- **Vision Encoder in Python**: Encode worker uses SGLang's MMEncoder for model-agnostic vision encoding
+- **Vision Encoder in Python**: SGLang runs model-specific vision encoding after the frontend or worker decodes the media
 - **Token Expansion**: Single `<|image_pad|>` token replaced with N tokens based on embedding shape
 - **NIXL Transfer**: Embeddings transferred from Encoder → PD Worker using NIXL
-- **No Rust Processing**: All tokenization and image handling happens in Python
+- **Optional Rust Frontend Decode**: `--frontend-decoding` moves media fetch and decode to the Rust frontend while retaining SGLang preprocessing and vision encoding
 
 ## Multimodal KV Routing
 
 Multimodal KV routing works with SGLang's aggregated worker topology. It is independent of the E/PD and E/P/D encoder-disaggregation patterns described later in this guide.
 
-SGLang RadixAttention includes a per-image `pad_value` token in its prefix-cache key. Dynamo must use that same token in the routing view:
+SGLang builds before [sgl-project/sglang#43043](https://github.com/sgl-project/sglang/pull/43043) include a per-media `pad_value` token in the RadixAttention prefix-cache key. Dynamo uses the same token in the routing view:
 
-1. The Rust frontend hashes each image and calculates its expanded token count.
+1. The Rust frontend hashes each image or sampled video and calculates its expanded token count.
 2. It derives `pad_value = MM_PAD_SHIFT_VALUE + (mm_hash % 2^30)`.
-3. It substitutes that value for the image placeholder in the routing-only token view.
+3. It substitutes that value for the media placeholder in the routing-only token view.
 4. It forwards the original hash list through `GenerateReqInput.mm_hashes`.
-5. SGLang uses the supplied hash when constructing its own `pad_value`, keeping the router and RadixAttention cache keys aligned.
+5. SGLang builds before that change derive their own `pad_value` from the
+   supplied hash, so the router and RadixAttention cache keys match. Later
+   builds, including the pinned 0.5.23, use wide pads, and the router matches
+   only the text before the first media block. See
+   [Wide-Token SGLang Builds](#wide-token-sglang-builds).
 
 The frontend selects this behavior automatically when the worker's `ModelDeploymentCard` reports `backend_framework="sglang"`.
+
+For Qwen3-VL and Qwen3.5 video, `--frontend-decoding` also makes an aggregated
+worker publish its effective frame-sampling, resize, timestamp, and placeholder
+contract. The frontend enables exact video routing only when every worker in the
+discovery cohort publishes the same compatible contract. Unsupported models,
+legacy workers, mixed contracts, or a processor override fall back to
+text-prefix routing without failing the request.
+
+Step 4 needs an SGLang build that accepts `mm_hashes` (0.5.13 or later). A build
+without it is still supported: Dynamo detects the missing argument when the
+worker starts and routes on the text prefix alone. On wide-token builds, media
+identity does not contribute to routing overlap either.
+
+### Wide-Token SGLang Builds
+
+SGLang builds containing [sgl-project/sglang#43043](https://github.com/sgl-project/sglang/pull/43043) use four wide placeholder values per media item. These no longer match Dynamo's routing tokens, including for processors such as Qwen-VL that still accept `mm_hashes`. Kimi K2.5 and K3 processors also reject caller-supplied image hashes. Dynamo detects that processor capability and omits those overrides for these models.
+
+The fallback below requires Dynamo support for wide KV event tokens and the `engine_owned_mm_identity` source setting.
+
+On these builds, Dynamo accepts the wide values in KV events and indexes only the text blocks before the first block whose hash includes an image or video token. That block and all blocks chained after it are excluded from predicted cache hits, including in subsequent events. Other text stores, evictions, and cache clears continue to update the index. Requests still run, and SGLang continues to manage its own prefix cache, but image- and video-aware routing is unavailable. This applies both to URL passthrough and to `--frontend-decoding`.
+
+Python SGLang workers detect the wide format automatically. A standalone indexer or selection service receiving engine events directly must set `engine_owned_mm_identity: true` in the [indexer source registration](../../router/standalone-indexer.md#multimodal-event-sources) or [selector worker record](../../router/standalone-selection.md#worker-registration). This boolean defaults to `false` for legacy sources. Without it, values that do not fit in 32 bits are still excluded, but smaller values in SGLang's new multimodal range cannot be distinguished from legacy routing tokens.
+
+To check a build before registering a direct source, run this in the SGLang engine's Python environment:
+
+```bash
+python3 -c 'from sglang.srt.managers.schedule_batch import MultimodalDataItem; print("pad_values" in MultimodalDataItem.__struct_fields__)'
+```
+
+`True` identifies a wide-token build and requires the flag above. `False` identifies a legacy build. The result depends on the SGLang build, not the selected model.
+
+The [SGLang sidecar](sidecar.md) cannot inspect the engine build and leaves the flag disabled. It excludes values that do not fit in 32 bits, but does not provide the full multimodal exclusion behavior above. Media-aware routing on wide-token builds is not supported through the sidecar.
+
+Dynamo tracks up to 1,048,576 excluded block IDs per KV event publisher or direct source listener, across cache tiers. At the limit, it logs `Multimodal exclusion state is full` and, for that worker rank, accepts only new root stores (blocks with no parent) until the engine clears its cache. Existing text evictions still apply. Routing may miss additional text-prefix hits until that cache clear.
+
+### Launch an Aggregated Deployment
 
 Launch an aggregated deployment with multimodal KV routing:
 
@@ -76,7 +148,8 @@ cd $DYNAMO_HOME
 bash examples/backends/sglang/launch/agg_multimodal_router.sh
 ```
 
-The launcher configures KV events on each worker and sets `--router-mode kv` with a matching frontend and worker block size.
+The launcher enables `--frontend-decoding`, configures KV events on each worker,
+and sets `--router-mode kv` with a matching frontend and worker block size.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -84,36 +157,25 @@ The launcher configures KV events on each worker and sets `--router-mode kv` wit
 | `NUM_WORKERS` | `2` | Number of SGLang workers |
 | `BLOCK_SIZE` | `16` | Worker page size and frontend KV block size |
 | `KV_EVENTS_PORT_BASE` | `29090` | Starting port for per-worker KV event publishers |
+| `DYN_MM_VIDEO_NUM_FRAMES` | `32` | Maximum sampled video frames; keep this value consistent across the frontend and workers |
 | `SGLANG_EXTRA_ARGS` | unset | Additional arguments for `python -m dynamo.sglang` |
 
-### Source-Build Requirements
+### Version Requirements
 
-The Dynamo SGLang image includes both routing prerequisites:
+The pinned Dynamo SGLang image includes these routing prerequisites:
 
 - Dynamo is built with the `mm-routing` Rust feature.
-- SGLang includes `GenerateReqInput.mm_hashes` support.
+- SGLang 0.5.13 or later includes `GenerateReqInput.mm_hashes` support.
+- The CUDA image includes the codec-limited VP8/VP9 frontend decoder.
 
-When using a custom SGLang installation, apply the `mm_hashes` change from [sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300). Without it, requests still complete but fall back to text-prefix-only routing.
+Custom installations on SGLang 0.5.12 or earlier need the `mm_hashes` change
+from [sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300).
+Without it, requests still complete but fall back to text-prefix-only routing.
+Prefer upgrading to 0.5.13 or later instead of patching an installed package.
 
-To apply only the Python portion of the patch:
+Enable `DYN_LOG=info,mm_routing=debug` to inspect media-token counts, multimodal hashes, the video processor contract, and the selected worker's overlap. On compatible builds, a repeated request should select the same worker with high block overlap. Builds using the newer identities only predict the text-prefix overlap described above.
 
-```bash
-SITE_PACKAGES_ROOT="$(python3 -c 'import pathlib, sglang; print(pathlib.Path(sglang.__file__).resolve().parent.parent)')"
-cd "$SITE_PACKAGES_ROOT"
-curl -sL https://github.com/sgl-project/sglang/pull/25300.diff | python3 -c '
-import sys
-chunks = sys.stdin.read().split("diff --git ")
-filtered = [c for c in chunks if c.startswith("a/python/sglang/")]
-print("".join("diff --git " + c for c in filtered), end="")
-' > /tmp/sglang_pr25300_python_only.diff
-patch --dry-run -p2 < /tmp/sglang_pr25300_python_only.diff
-patch -p2 < /tmp/sglang_pr25300_python_only.diff
-cd -
-```
-
-Enable `DYN_LOG=info,mm_routing=debug` to inspect image-token counts, multimodal hashes, and the selected worker's overlap. A repeated request should select the same worker with high block overlap.
-
-For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/multimodal-serving/multimodal-kv-routing.md).
+For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/image-understanding/vlm-performance-optimization/multimodal-kv-routing.md).
 
 ## Use the Latest Release
 
@@ -533,7 +595,7 @@ Controls how many threads the encoder uses to fetch and load images concurrently
 export SGLANG_ENCODER_MM_LOAD_WORKERS=16
 ```
 
-Only applies to the EPD encode worker (which uses [SGLang's MMEncoder](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/disaggregation/encode_server.py) internally).
+Only applies to the EPD encode worker (which uses [SGLang's MMEncoder](https://github.com/sgl-project/sglang/blob/release/v0.5.23/python/sglang/srt/disaggregation/encoder/server.py) internally).
 
 ## Profiling
 
@@ -547,7 +609,9 @@ DYN_NVTX=1 nsys profile --trace=cuda,nvtx -o profile.nsys-rep \
 
 | ENV Variable | Default | Description |
 |---|---|---|
-| `DYN_NVTX` | `0` | Set to `1` to enable NVTX range/mark annotations in multimodal encode/prefill/decode worker paths for `nsys` profiling |
+| `DYN_NVTX` | unset (off) | Set to `1`, `true`, `on`, or `yes` to enable NVTX range/mark annotations in multimodal encode/prefill/decode worker paths for `nsys` profiling. Before v1.7.0, only `0` and `1` are accepted, and any other value raises an error at import, so the worker does not start |
+
+The markers need the `nvtx` package, which ships in the container images and is otherwise installed with `pip install "ai-dynamo[profiling]"`. Without it, the worker logs a warning and starts without the markers. The same switch also enables the Rust runtime's ranges on the frontend and worker paths; see [NVTX Profiling](../../../../../reference/observability/nvtx-profiling.md).
 
 Key NVTX ranges emitted:
 

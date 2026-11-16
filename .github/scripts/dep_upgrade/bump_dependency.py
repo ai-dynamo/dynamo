@@ -27,7 +27,7 @@ TRTLLM_TARGETS: list[tuple[str, Pattern[str], str]] = [
         # Match runtime_image_tag inside the trtllm: block (first sub-block,
         # e.g. cuda13.1) without colliding with vllm/sglang earlier in the file.
         re.compile(
-            r"(?m)(^trtllm:\s*?\n(?:[ \t]+[^\n]*\n)*?[ \t]+runtime_image_tag:\s+)\S+",
+            r"(?m)(^trtllm:\s*?\n(?:[ \t][^\n]*\n)*?[ \t]+runtime_image_tag:\s+)\S+",
         ),
         r"\g<1>{ver}",
     ),
@@ -50,6 +50,41 @@ TRTLLM_TARGETS: list[tuple[str, Pattern[str], str]] = [
 FRAMEWORK_TARGETS: dict[str, list[tuple[str, Pattern[str], str]]] = {
     "trtllm": TRTLLM_TARGETS,
 }
+
+# Sibling of FRAMEWORK_TARGETS, kept separate because it is driven by a value
+# only the compliance capture can produce (the new baseline's digest stem), not
+# by the release version. Same block anchoring as runtime_image_tag above, so it
+# cannot reach the vllm/sglang baseline_sbom lines earlier in the file.
+FRAMEWORK_BASELINES: dict[str, tuple[str, Pattern[str], str]] = {
+    "trtllm": (
+        "container/context.yaml",
+        re.compile(
+            r"(?m)(^trtllm:\s*?\n(?:[ \t][^\n]*\n)*?[ \t]+baseline_sbom:\s+)\S+",
+        ),
+        r"\g<1>{stem}",
+    ),
+}
+
+
+def set_baseline_stem(framework: str, stem: str, repo_root: Path) -> bool:
+    """Point the framework's baseline_sbom at a freshly captured stem.
+
+    The runtime image's licenses stage subtracts this baseline from NOTICES, so
+    leaving it behind a runtime_image_tag bump makes every moved package version
+    read as net-new and fails the license gate. Returns True if the file changed.
+    """
+    rel, pat, tmpl = FRAMEWORK_BASELINES[framework]
+    path = repo_root / rel
+    text = path.read_text()
+    new_text, n = pat.subn(tmpl.replace("{stem}", stem), text)
+    if n != 1:
+        raise SystemExit(
+            f"{rel}: matched {n} {framework} baseline_sbom pins; expected 1"
+        )
+    if new_text == text:
+        return False
+    path.write_text(new_text)
+    return True
 
 
 def apply(framework: str, version: str, repo_root: Path) -> int:
@@ -81,10 +116,24 @@ def main() -> int:
         required=True,
         help="version without 'v' prefix, e.g. 1.3.0rc12",
     )
+    p.add_argument(
+        "--baseline-stem",
+        help=(
+            "Compliance baseline stem from capture_baseline_sbom.py, e.g. "
+            "release@2366e4b4. When given, also repoints the framework's "
+            "baseline_sbom in container/context.yaml. Omit to bump versions only."
+        ),
+    )
     p.add_argument("--repo-root", type=Path, default=Path("."))
     args = p.parse_args()
     n = apply(args.framework, args.version, args.repo_root)
     print(f"changed {n} files")
+    if args.baseline_stem:
+        changed = set_baseline_stem(args.framework, args.baseline_stem, args.repo_root)
+        print(
+            f"baseline_sbom -> {args.baseline_stem}"
+            f"{'' if changed else ' (already set)'}"
+        )
     return 0
 
 

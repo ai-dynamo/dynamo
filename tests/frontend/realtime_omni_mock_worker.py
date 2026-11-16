@@ -45,9 +45,13 @@ class _MockAsyncOmni:
     """Fake AsyncOmni: drains the streaming audio input, then echoes it back.
 
     Yields a stage-0 text frame (transcript) followed by the accumulated audio
-    as a single multimodal output, matching the fields RealtimeOmniHandler reads
-    off a real ``OmniRequestOutput`` (``stage_id``, ``outputs[].text``, and a
-    ``MultimodalPayload`` whose ``tensors['audio']`` holds the waveform).
+    as a single multimodal output, mirroring the shapes a real
+    ``OmniRequestOutput`` exposes (``stage_id``, ``outputs[].text``, and
+    ``multimodal_output``).
+
+    ``multimodal_output`` is a plain ``dict`` when the step attached no payload
+    and a ``MultimodalPayload`` when it did; the frames below use both so the
+    handler is exercised against either.
     """
 
     default_sampling_params_list: list = []
@@ -61,7 +65,7 @@ class _MockAsyncOmni:
             stage_id=0,
             outputs=[SimpleNamespace(text=MOCK_TRANSCRIPT, token_ids=[1])],
             prompt_token_ids=[0],
-            multimodal_output=MultimodalPayload(),
+            multimodal_output={},
         )
         yield SimpleNamespace(
             stage_id=1,
@@ -73,7 +77,12 @@ class _MockAsyncOmni:
 
 
 async def main() -> None:
-    runtime = DistributedRuntime(asyncio.get_running_loop(), "file", "tcp")
+    """Register and serve the mock realtime worker with an explicit ZMQ event plane."""
+    # Pass event_plane explicitly: DYN_EVENT_PLANE alone does not stop an ambient
+    # NATS_SERVER from forcing a NATS connection that retries for up to 120s.
+    runtime = DistributedRuntime(
+        asyncio.get_running_loop(), "file", "tcp", event_plane="zmq"
+    )
     endpoint = runtime.endpoint(ENDPOINT_PATH)
     handler = RealtimeOmniHandler(
         engine_client=_MockAsyncOmni(),

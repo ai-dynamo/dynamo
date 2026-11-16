@@ -7,6 +7,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::live::ObservedAdmission;
+use crate::loadgen::{AgenticGraphIdentity, AgenticTrajectorySnapshot};
 use crate::replay::{ReplayTerminalStatus, SlaThresholds, TraceCollector, TraceSimulationReport};
 use crate::scheduler::AdmissionEvent;
 
@@ -34,6 +35,12 @@ enum RecorderEvent {
         session_id: String,
         turn_index: usize,
     },
+    AgenticMetadata {
+        uuid: Uuid,
+        request_id: String,
+        play_id: String,
+        dispatched_at_ms: f64,
+    },
     DecodeAssigned {
         uuid: Uuid,
         worker_idx: usize,
@@ -45,6 +52,8 @@ enum RecorderEvent {
     Terminal(TerminalObservation),
     Finish {
         wall_time_ms: f64,
+        agentic_trajectory: Option<AgenticTrajectorySnapshot>,
+        agentic_graph: Option<AgenticGraphIdentity>,
     },
 }
 
@@ -94,6 +103,26 @@ impl RecorderSender {
             .map_err(|_| anyhow!("online replay recorder closed while recording worker assignment"))
     }
 
+    pub(super) fn record_agentic_metadata(
+        &self,
+        uuid: Uuid,
+        request_id: String,
+        play_id: String,
+        dispatched_at_ms: f64,
+    ) -> Result<()> {
+        if !self.capture_per_request {
+            return Ok(());
+        }
+        self.tx
+            .send(RecorderEvent::AgenticMetadata {
+                uuid,
+                request_id,
+                play_id,
+                dispatched_at_ms,
+            })
+            .map_err(|_| anyhow!("online replay recorder closed while recording agentic metadata"))
+    }
+
     pub(super) fn record_terminal(&self, terminal: TerminalObservation) -> Result<()> {
         self.tx
             .send(RecorderEvent::Terminal(terminal))
@@ -124,9 +153,18 @@ impl OnlineTraceRecorder {
         }
     }
 
-    pub(super) async fn finish(self, wall_time_ms: f64) -> Result<TraceSimulationReport> {
+    pub(super) async fn finish(
+        self,
+        wall_time_ms: f64,
+        agentic_trajectory: Option<AgenticTrajectorySnapshot>,
+        agentic_graph: Option<AgenticGraphIdentity>,
+    ) -> Result<TraceSimulationReport> {
         self.tx
-            .send(RecorderEvent::Finish { wall_time_ms })
+            .send(RecorderEvent::Finish {
+                wall_time_ms,
+                agentic_trajectory,
+                agentic_graph,
+            })
             .map_err(|_| anyhow!("online replay recorder closed before finalization"))?;
         drop(self.tx);
         self.task
@@ -175,6 +213,12 @@ async fn run_recorder(
                 session_id,
                 turn_index,
             } => collector.on_session_metadata(uuid, session_id, turn_index),
+            RecorderEvent::AgenticMetadata {
+                uuid,
+                request_id,
+                play_id,
+                dispatched_at_ms,
+            } => collector.on_agentic_metadata(uuid, request_id, play_id, dispatched_at_ms),
             RecorderEvent::DecodeAssigned { uuid, worker_idx } => {
                 collector.on_decode_assigned(uuid, worker_idx);
             }
@@ -187,7 +231,17 @@ async fn run_recorder(
                 }
                 collector.on_terminal(terminal.uuid, terminal.terminal_time_ms, terminal.status);
             }
-            RecorderEvent::Finish { wall_time_ms } => {
+            RecorderEvent::Finish {
+                wall_time_ms,
+                agentic_trajectory,
+                agentic_graph,
+            } => {
+                if let Some(snapshot) = agentic_trajectory {
+                    collector.set_agentic_trajectory(snapshot);
+                }
+                if let Some(identity) = agentic_graph {
+                    collector.set_agentic_graph(identity);
+                }
                 return Ok(collector.finish().with_wall_time_ms(wall_time_ms));
             }
         }

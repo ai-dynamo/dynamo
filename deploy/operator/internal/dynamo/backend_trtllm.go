@@ -7,20 +7,22 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type TRTLLMBackend struct {
-	MpiRunSecretName string
+	MpiRunSecretName    string
+	roleLaunchOwnership roleLaunchOwnership
 }
 
 // UpdateContainer configures the container for TRT-LLM multinode deployments.
 // For single-node deployments it is a no-op. For multinode, it mounts the SSH
 // keypair secret and injects the appropriate SSH setup and launch commands for
 // leader (mpirun) and worker (sshd) roles.
-func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
 	if component.CompilationCache != nil {
 		logger := log.Log.WithName("trtllm-backend")
 		logger.Info("Compilation cache configured for TensorRT-LLM but not yet fully supported",
@@ -32,7 +34,7 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 
 	// For single node, nothing to do
 	if numberOfNodes <= 1 {
-		return
+		return nil
 	}
 
 	// Configure probes for multinode deployments
@@ -41,10 +43,8 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		container.LivenessProbe = nil
 		container.StartupProbe = nil
 		container.ReadinessProbe = &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				TCPSocket: &corev1.TCPSocketAction{
-					Port: intstr.FromInt(commonconsts.MpiRunSshPort),
-				},
+			TCPSocket: &corev1.TCPSocketAction{
+				Port: intstr.FromInt(commonconsts.MpiRunSshPort),
 			},
 			InitialDelaySeconds: 20,
 			PeriodSeconds:       20,
@@ -63,14 +63,26 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		Value: "1",
 	}
 	container.Env = append(container.Env, envVar)
+	if b.roleLaunchOwnership == roleLaunchOwnedByPodTemplate {
+		// The worker readiness probe above still targets the MPI SSH port, so
+		// a role-authored worker command must start sshd on that port.
+		return nil
+	}
 
 	// Update container command based on role
 	switch role {
 	case RoleLeader:
-		b.setupLeaderContainer(container, numberOfNodes, serviceName, component, multinodeDeployer)
+		containerGPUs, err := containerGPUCount()
+		if err != nil {
+			return fmt.Errorf("failed to resolve container GPUs: %w", err)
+		}
+		mapByNode := compatibility.TRTLLMMpirunMapByNode.Enabled(GetPodTemplateAnnotations(component))
+		b.setupLeaderContainer(container, numberOfNodes, serviceName, multinodeDeployer, containerGPUs, mapByNode)
 	case RoleWorker:
 		b.setupWorkerContainer(container)
 	}
+
+	return nil
 }
 
 // UpdatePodSpec injects the SSH keypair volume into the pod spec for TRT-LLM
@@ -80,11 +92,9 @@ func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int
 	if numberOfNodes > 1 {
 		sshVolume := corev1.Volume{
 			Name: b.MpiRunSecretName,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName:  b.MpiRunSecretName,
-					DefaultMode: func() *int32 { mode := int32(0644); return &mode }(),
-				},
+			Secret: &corev1.SecretVolumeSource{
+				SecretName:  b.MpiRunSecretName,
+				DefaultMode: func() *int32 { mode := int32(0644); return &mode }(),
 			},
 		}
 		podSpec.Volumes = append(podSpec.Volumes, sshVolume)
@@ -102,7 +112,7 @@ func (b *TRTLLMBackend) addSSHVolumeMount(container *corev1.Container) {
 }
 
 // setupLeaderContainer configures the leader node with SSH setup and mpirun command
-func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, numberOfNodes int32, serviceName string, component *v1beta1.DynamoComponentDeploymentSharedSpec, multinodeDeployer MultinodeDeployer) {
+func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, numberOfNodes int32, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, mapByNode bool) {
 	// Generate the list of all hostnames
 	hostNamesList := b.hostNamesList(numberOfNodes, serviceName, multinodeDeployer)
 	allHostnames := strings.Join(hostNamesList, ",")
@@ -113,7 +123,7 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	if len(container.Command) > 0 && isPythonCommand(container.Command[0]) {
 		// Direct Python command: combine command + args
 		// Shell-quote each part to handle args with spaces (e.g., JSON in --override-engine-args)
-		var quotedParts []string
+		quotedParts := make([]string, 0, len(container.Command)+len(container.Args))
 		for _, part := range container.Command {
 			quotedParts = append(quotedParts, shellQuoteForBashC(part))
 		}
@@ -144,13 +154,8 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 		fmt.Sprintf("printf 'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort %d\\n' > $HOME/.ssh/config", commonconsts.MpiRunSshPort),
 	}
 
-	// Calculate total number of GPUs across all nodes. In the normal pod
-	// generation path container.Resources has already been merged from the
-	// component podTemplate; keep the component fallback for direct backend
-	// callers and focused unit tests.
-	resources := resourceRequirementsWithFallback(container.Resources, GetMainContainerResources(component))
-	gpusPerNode := getGPUsPerNode(&resources)
-	totalGPUs := numberOfNodes * gpusPerNode
+	// Calculate total GPUs from the scalar or DRA-resolved main-container count.
+	totalGPUs := int64(numberOfNodes) * containerGPUs
 
 	// Build mpirun command with explicit SSH configuration and environment variables
 	// Wrap the entire command (trtllm-llmapi-launch + original command) in bash -c for proper shell interpretation
@@ -162,9 +167,16 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	// Use --allow-run-as-root only when the container is running as root (UID 0).
 	// When running as a non-root user, mpirun works without this flag and omitting
 	// it avoids masking accidental root execution.
-	mpirunCmd := fmt.Sprintf("mpirun $([ \"$(id -u)\" = \"0\" ] && echo --allow-run-as-root) --oversubscribe -n %d -H %s --mca pml ob1 --mca plm_rsh_args \"-p %d -o StrictHostKeyChecking=no -i $HOME/.ssh/id_rsa\" %s %s",
+	// Open MPI 5 (arm64 image) puts every rank of an unslotted -H list on the first host;
+	// --map-by ppr:<GPUs>:node places GPUs-per-pod ranks on each host.
+	mapByFlag := ""
+	if mapByNode {
+		mapByFlag = fmt.Sprintf(" --map-by ppr:%d:node", containerGPUs)
+	}
+	mpirunCmd := fmt.Sprintf("mpirun $([ \"$(id -u)\" = \"0\" ] && echo --allow-run-as-root) --oversubscribe -n %d -H %s%s --mca pml ob1 --mca plm_rsh_args \"-p %d -o StrictHostKeyChecking=no -i $HOME/.ssh/id_rsa\" %s %s",
 		totalGPUs,
 		allHostnames,
+		mapByFlag,
 		commonconsts.MpiRunSshPort,
 		envVarsStr,
 		wrappedCommand)
@@ -229,14 +241,6 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 // hostNamesList generates the list of hostnames for all nodes in the multinode deployment
 func (b *TRTLLMBackend) hostNamesList(numberOfNodes int32, serviceName string, multinodeDeployer MultinodeDeployer) []string {
 	return multinodeDeployer.GetHostNames(serviceName, numberOfNodes)
-}
-
-// getGPUsPerNode extracts the number of GPUs per node from resources
-func getGPUsPerNode(resources *corev1.ResourceRequirements) int32 {
-	if resources == nil {
-		return 0
-	}
-	return int32(getGPUQuantity(resources))
 }
 
 // getCommonTRTLLMEnvVars returns a map of common environment variables for TRTLLM deployments

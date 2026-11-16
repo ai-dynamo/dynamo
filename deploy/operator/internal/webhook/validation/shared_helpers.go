@@ -18,19 +18,26 @@
 package validation
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/santhosh-tekuri/jsonschema/v6/kind"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -41,7 +48,7 @@ const (
 	vllmDistributedExecutorBackendMP  = "mp"
 	vllmDistributedExecutorBackendRay = "ray"
 
-	runtimeVersionOverrideRequiredMessage = "is required when the specified main container image has no parseable semantic-version tag"
+	runtimeVersionOverrideRequiredMessage = "is required when the specified Dynamo runtime container image has no parseable semantic-version tag"
 )
 
 // runtimeVersionValidationSource identifies the API representation whose field
@@ -51,7 +58,6 @@ type runtimeVersionValidationSource uint8
 const (
 	runtimeVersionSourceV1Beta1 runtimeVersionValidationSource = iota
 	runtimeVersionSourceV1Alpha1
-	runtimeVersionSourceDisabled
 )
 
 // runtimeVersionValidationSourceForRequest uses RequestKind because it preserves
@@ -78,20 +84,31 @@ func runtimeVersionValidationSourceForGVK(gvk schema.GroupVersionKind) runtimeVe
 }
 
 func (v *sharedValidation) validatesRuntimeVersionFor(source runtimeVersionValidationSource) bool {
+	return !v.ratchetRuntimeVersion && v.runtimeVersionSource == source
+}
+
+func (v *sharedValidation) hasRuntimeVersionSource(source runtimeVersionValidationSource) bool {
 	return v.runtimeVersionSource == source
 }
 
-// runtimeVersionImageAndPath returns the main image and its v1beta1 field path.
+// runtimeVersionImageAndPath returns the Dynamo runtime image and its v1beta1 field path.
 // spec and fldPath must not be nil.
 func runtimeVersionImageAndPath(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) (string, *field.Path) {
+	// In sidecar mode the engine image says nothing about Dynamo compatibility.
+	if spec.PodTemplate != nil {
+		if index := slices.IndexFunc(spec.PodTemplate.Spec.InitContainers, func(c corev1.Container) bool { return c.Name == consts.RuntimeContainerName }); index >= 0 {
+			return spec.PodTemplate.Spec.InitContainers[index].Image, fldPath.Child("podTemplate", "spec", "initContainers").Index(index).Child("image")
+		}
+	}
+
 	imagePath := fldPath.Child("podTemplate", "spec", "containers")
 
 	// Resolve the exact container path when the named main container exists.
 	if spec.PodTemplate != nil {
-		if index := containerIndexByName(spec.PodTemplate.Spec.Containers, consts.MainContainerName); index >= 0 {
+		if index := mainContainerIndex(spec.PodTemplate.Spec.Containers); index >= 0 {
 			imagePath = imagePath.Index(index).Child("image")
 			return spec.PodTemplate.Spec.Containers[index].Image, imagePath
 		}
@@ -99,17 +116,48 @@ func runtimeVersionImageAndPath(
 	return "", imagePath
 }
 
-// runtimeVersionImageAndPathV1Alpha1 returns the main image and its v1alpha1 field path.
+// runtimeVersionImageAndPathV1Alpha1 returns the runtime image and its alpha field path.
 // spec and fldPath must not be nil.
 func runtimeVersionImageAndPathV1Alpha1(
 	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) (string, *field.Path) {
+	// Alpha represents init containers directly, so live fields determine the mode.
+	if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.PodSpec != nil {
+		if index := slices.IndexFunc(spec.ExtraPodSpec.PodSpec.InitContainers, func(c corev1.Container) bool { return c.Name == consts.RuntimeContainerName }); index >= 0 {
+			return spec.ExtraPodSpec.PodSpec.InitContainers[index].Image, fldPath.Child("extraPodSpec", "initContainers").Index(index).Child("image")
+		}
+	}
+
 	imagePath := fldPath.Child("extraPodSpec", "mainContainer", "image")
 	if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.MainContainer != nil {
 		return spec.ExtraPodSpec.MainContainer.Image, imagePath
 	}
 	return "", imagePath
+}
+
+// toleratesMissingRuntimeVersionOverride reports whether componentType may omit
+// runtimeVersionOverride when its image tag carries no resolvable version.
+//
+// Components without a Dynamo role do not carry a Dynamo runtime contract.
+// EPP is never exempt. Whether eppConfig is required (legacy Go EPP) or
+// forbidden (native Rust EPP, 1.5.0+) is decided entirely by the resolved
+// runtime version, so an unresolvable version enforces neither half of the
+// rule: eppRuntimeCompatibilityError returns nil and the component is admitted
+// with no contract checked at all. Standalone DynamoComponentDeployments set
+// allowMissingRuntimeVersionOverride, so without this carve-out an EPP DCD on a
+// non-semver tag (a CI sha tag, :latest, a digest ref) would silently skip the
+// check that the DynamoGraphDeployment path still performs.
+func (v *sharedValidation) toleratesMissingRuntimeVersionOverride(componentType string) bool {
+	switch componentType {
+	case consts.ComponentTypeEPP:
+		return false
+	case consts.ComponentTypeFrontend, consts.ComponentTypeWorker, consts.ComponentTypePrefill,
+		consts.ComponentTypeDecode, consts.ComponentTypePlanner:
+		return v.allowMissingRuntimeVersionOverride
+	default:
+		return true
+	}
 }
 
 // runtimeVersionOverrideRequired reports whether image cannot provide a version and override is absent.
@@ -121,6 +169,87 @@ func runtimeVersionOverrideRequired(image, override string) bool {
 	return err != nil
 }
 
+type eppRuntimeContract struct {
+	componentType          string
+	image                  string
+	runtimeVersionOverride string
+	hasEPPConfig           bool
+}
+
+// eppRuntimeContractV1Beta1 returns the complete runtime-contract inputs represented by spec.
+// spec must not be nil. image is the source-version main container image.
+func eppRuntimeContractV1Beta1(spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, image string) eppRuntimeContract {
+	return eppRuntimeContract{
+		componentType:          string(spec.ComponentType),
+		image:                  image,
+		runtimeVersionOverride: spec.RuntimeVersionOverride,
+		hasEPPConfig:           spec.EPPConfig != nil,
+	}
+}
+
+// eppRuntimeContractV1Alpha1 returns the complete runtime-contract inputs represented by spec.
+// spec must not be nil. image is the source-version main container image.
+func eppRuntimeContractV1Alpha1(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, image string) eppRuntimeContract {
+	return eppRuntimeContract{
+		componentType:          spec.ComponentType,
+		image:                  image,
+		runtimeVersionOverride: spec.RuntimeVersionOverride,
+		hasEPPConfig:           spec.EPPConfig != nil,
+	}
+}
+
+// eppRuntimeCompatibilityError returns the cross-field error for an EPP runtime-contract mismatch.
+// Invalid or unavailable runtime versions are reported by the runtime-version
+// validator instead, which for an EPP component always demands a resolvable
+// version (see toleratesMissingRuntimeVersionOverride) -- so returning nil here
+// defers the report rather than admitting an unchecked contract.
+func eppRuntimeCompatibilityError(contract eppRuntimeContract, eppConfigPath *field.Path) *field.Error {
+	if contract.componentType != consts.ComponentTypeEPP {
+		return nil
+	}
+
+	version, err := runtimeversion.Resolve(contract.image, contract.runtimeVersionOverride)
+	if err != nil {
+		return nil
+	}
+
+	if runtimefeatures.NativeRustEPP.Enabled(&version) {
+		if contract.hasEPPConfig {
+			return field.Forbidden(
+				eppConfigPath,
+				"must be omitted for native Rust EPP images with runtime version 1.5.0 or later",
+			)
+		}
+		return nil
+	}
+
+	if !contract.hasEPPConfig {
+		return field.Required(
+			eppConfigPath,
+			"is required for legacy Go EPP images with runtime version earlier than 1.5.0",
+		)
+	}
+	return nil
+}
+
+// eppRuntimeCompatibilityUpdateError ratchets only an identical pre-existing contract violation.
+// eppConfigPath must not be nil. sameEPPConfig reports full source-version value equality.
+func eppRuntimeCompatibilityUpdateError(
+	newContract eppRuntimeContract,
+	oldContract eppRuntimeContract,
+	sameEPPConfig bool,
+	eppConfigPath *field.Path,
+) *field.Error {
+	newErr := eppRuntimeCompatibilityError(newContract, eppConfigPath)
+	if newErr == nil {
+		return nil
+	}
+	if newContract == oldContract && sameEPPConfig {
+		return nil
+	}
+	return newErr
+}
+
 func hasContainerNamed(containers []corev1.Container, name string) bool {
 	for i := range containers {
 		if containers[i].Name == name {
@@ -128,6 +257,23 @@ func hasContainerNamed(containers []corev1.Container, name string) bool {
 		}
 	}
 	return false
+}
+
+func mainContainerIndex(containers []corev1.Container) int {
+	// Return the first exact match so callers can update that container in place.
+	for i := range containers {
+		if containers[i].Name == consts.MainContainerName {
+			return i
+		}
+	}
+	return -1
+}
+
+func podTemplateContainers(podTemplate *corev1.PodTemplateSpec) []corev1.Container {
+	if podTemplate == nil {
+		return nil
+	}
+	return podTemplate.Spec.Containers
 }
 
 func invalidVLLMDistributedExecutorBackendAnnotation(annotations map[string]string) (string, bool) {
@@ -147,13 +293,59 @@ func invalidVLLMDistributedExecutorBackendAnnotation(annotations map[string]stri
 // inferencePoolAvailabilityError checks the InferencePool API.
 // ctx and mgr must not be nil.
 func inferencePoolAvailabilityError(ctx context.Context, mgr ctrl.Manager) error {
-	if features.DetectInferencePoolAvailability(ctx, mgr) {
+	available, err := features.DetectInferencePoolAvailability(ctx, mgr)
+	if err != nil {
+		return fmt.Errorf("detect InferencePool API availability: %w", err)
+	}
+	if available {
 		return nil
 	}
 	return fmt.Errorf(
 		"InferencePool API group (%s) is not available in the cluster; install the Gateway API Inference Extension before deploying EPP components",
 		epp.InferencePoolGroup,
 	)
+}
+
+// validateElasticEPRequiresCommand rejects an operator-managed vLLM leader
+// that requests the elastic-EP Ray topology but omits the main container
+// command. Complete role PodTemplates own their launch commands and skip this
+// operator rewrite.
+func validateElasticEPRequiresCommand(
+	backendFramework string,
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if backendFramework != string(dynamo.BackendFrameworkVLLM) || dynamo.HasRolePodTemplates(spec) {
+		return nil
+	}
+
+	// The global template is also the leader source in legacy template mode.
+	return validateElasticEPTemplateRequiresCommand(spec.PodTemplate, fldPath.Child("podTemplate"))
+}
+
+func validateElasticEPTemplateRequiresCommand(
+	podTemplate *corev1.PodTemplateSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if podTemplate == nil {
+		return nil
+	}
+	containers := podTemplate.Spec.Containers
+	index := mainContainerIndex(containers)
+	if index < 0 {
+		return nil
+	}
+	mainContainer := &containers[index]
+	if len(mainContainer.Command) > 0 || !dynamo.IsElasticEPRayLaunch(mainContainer) {
+		return nil
+	}
+	commandPath := fldPath.Child("spec", "containers").Index(index).Child("command")
+	return field.ErrorList{field.Required(
+		commandPath,
+		"elastic expert parallelism (--enable-elastic-ep with --data-parallel-backend ray) requires an explicit "+
+			"container command; the operator starts the Ray head by wrapping that command and cannot "+
+			"start it from the image ENTRYPOINT",
+	)}
 }
 
 func gpuMemoryServiceFor(
@@ -182,6 +374,18 @@ func failoverForExperimental(experimental *nvidiacomv1beta1.ExperimentalSpec) *n
 	return experimental.Failover
 }
 
+func groveForExperimental(experimental *nvidiacomv1beta1.ExperimentalSpec) *nvidiacomv1beta1.GroveSpec {
+	if experimental == nil {
+		return nil
+	}
+	return experimental.Grove
+}
+
+func forceScalingGroupFor(experimental *nvidiacomv1beta1.ExperimentalSpec) bool {
+	grove := groveForExperimental(experimental)
+	return grove != nil && ptr.Deref(grove.ForceScalingGroup, false)
+}
+
 func effectiveGMSMode(mode nvidiacomv1beta1.GPUMemoryServiceMode) nvidiacomv1beta1.GPUMemoryServiceMode {
 	if mode == "" {
 		return nvidiacomv1beta1.GMSModeIntraPod
@@ -202,4 +406,99 @@ func effectiveNumShadows(failover *nvidiacomv1beta1.FailoverSpec) int32 {
 		return 1
 	}
 	return failover.NumShadows
+}
+
+// groveNativeMinimumPath locates the owning component's native availability field.
+// component and fldPath are non-nil; an omitted override uses the same path.
+func groveNativeMinimumPath(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path) *field.Path {
+	if component.UsesPCSG() || component.IsLPX() {
+		return fldPath.Child("providerOverride", "value", "minAvailable")
+	}
+	return fldPath.Child("providerOverride", "value", "spec", "minAvailable")
+}
+
+// traceClaimPathHasOnlyNamedSegments reports whether subPath is relative to the claim root and
+// every segment names an entry: none is empty, "." or "..".
+func traceClaimPathHasOnlyNamedSegments(subPath string) bool {
+	if subPath == "" {
+		return false
+	}
+	for segment := range strings.SplitSeq(subPath, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// hasRoleSidecarV1Alpha1 resolves component-wide mode from the authored leader.
+// spec must not be nil.
+func hasRoleSidecarV1Alpha1(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) bool {
+	for _, role := range spec.Roles {
+		if role.Name != nvidiacomv1alpha1.ComponentRoleLeader || role.PodTemplate == nil {
+			continue
+		}
+		for _, container := range role.PodTemplate.Spec.InitContainers {
+			if container.Name == consts.RuntimeContainerName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// inputSchemaErrors reports native JSON pointers at the shared spec owner. Lowering
+// combines typed fields and overrides, so a native path need not name an override.
+// Do not include input values in errors: arbitrary override strings may contain secrets.
+func inputSchemaErrors(err *jsonschema.ValidationError, fldPath *field.Path) field.ErrorList {
+	switch err.ErrorKind.(type) {
+	case *kind.Schema, *kind.Group, *kind.Reference:
+		allErrs := make(field.ErrorList, 0, len(err.Causes))
+		for _, cause := range err.Causes {
+			allErrs = append(allErrs, inputSchemaErrors(cause, fldPath)...)
+		}
+		slices.SortFunc(allErrs, func(a, b *field.Error) int { return cmp.Compare(a.Detail, b.Detail) })
+		return allErrs
+	}
+
+	// Keep unions as one error, but retain the paths needed to repair nested input.
+	path := inputJSONPointer(err.InstanceLocation)
+	keyword := strings.Join(err.ErrorKind.KeywordPath(), "/")
+	detail := fmt.Sprintf("generated AISimulate input at %s violates JSON Schema keyword %s", path, keyword)
+	switch constraint := err.ErrorKind.(type) {
+	case *kind.Required:
+		names := slices.Sorted(slices.Values(constraint.Missing))
+		detail += ": missing " + strings.Join(names, ", ")
+	case *kind.AdditionalProperties:
+		names := slices.Sorted(slices.Values(constraint.Properties))
+		detail += ": unknown " + strings.Join(names, ", ")
+	case *kind.AnyOf, *kind.OneOf:
+		locations := map[string]bool{}
+		pending := append([]*jsonschema.ValidationError(nil), err.Causes...)
+		for len(pending) > 0 {
+			cause := pending[0]
+			pending = append(pending[1:], cause.Causes...)
+			if len(cause.InstanceLocation) > len(err.InstanceLocation) {
+				locations[inputJSONPointer(cause.InstanceLocation)] = true
+			}
+		}
+		paths := make([]string, 0, len(locations))
+		for location := range locations {
+			paths = append(paths, location)
+		}
+		slices.Sort(paths)
+		if len(paths) > 0 {
+			detail += "; alternatives reject " + strings.Join(paths, ", ")
+		}
+	}
+	return field.ErrorList{field.Invalid(fldPath, "<redacted>", detail)}
+}
+
+func inputJSONPointer(location []string) string {
+	escape := strings.NewReplacer("~", "~0", "/", "~1")
+	tokens := make([]string, len(location))
+	for i, token := range location {
+		tokens[i] = escape.Replace(token)
+	}
+	return "/" + strings.Join(tokens, "/")
 }

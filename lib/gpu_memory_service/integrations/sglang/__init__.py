@@ -1,19 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GPU Memory Service integration for SGLang.
-
-Usage:
-    from gpu_memory_service.integrations.sglang import setup_gms
-
-    if server_args.load_format == "gms":
-        server_args.load_format = setup_gms(server_args)
-"""
+"""GPU Memory Service integration for SGLang."""
 
 from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Type
+
+try:
+    from sglang.srt.arg_groups.overrides import declare_resolution
+except ImportError:
+    # SGLang <0.5.19 predates declarations. setup_gms() rejects such a build
+    # instead of running inert.
+    declare_resolution = None
 
 if TYPE_CHECKING:
     from gpu_memory_service.integrations.sglang.model_loader import GMSModelLoader
@@ -57,7 +57,13 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
             "Cannot use --enable-draft-weights-cpu-backup with --load-format gms."
         )
 
-    server_args.enable_memory_saver = True
+    if declare_resolution is not None:
+        declare_resolution(server_args, "dynamo.gms", enable_memory_saver=True)
+    else:
+        raise RuntimeError(
+            "GMS requires an SGLang build exposing declare_resolution(); none found."
+        )
+
     # Resolve lock mode and RO reconnect timeout from model_loader_extra_config
     # before patches fire.
     global _gms_lock_mode

@@ -20,7 +20,7 @@ This guide walks through deploying **Meta-Llama-3.1-8B-Instruct** with **Eagle3*
 
 ### Step 1: Set Up Your Docker Environment
 
-First, initialize a Docker container using the vLLM backend. See the [vLLM Quickstart Guide](../../knowledge-base/modular-components/backends/vllm/overview.md#vllm-quick-start) for details.
+First, initialize a Docker container using the vLLM backend. See the [vLLM Quickstart Guide](../../knowledge-base/modular-components/backends/vllm/overview.md#quick-start) for details.
 
 ```bash
 # Launch infrastructure services
@@ -104,6 +104,10 @@ Speculative decoding in vLLM uses Eagle3 as the draft model. The launch script c
 - Aggregated serving mode
 
 See `examples/backends/vllm/launch/agg_spec_decoding.sh` for the full configuration.
+
+### With KV-Aware Routing
+
+When a worker publishes KV events, as it does for KV-aware routing, Dynamo sets `disable_lookahead_block_hashes: true` in the speculative config unless you set it yourself. vLLM's EAGLE and MTP lookahead block hashes also cover tokens after each block, while Dynamo's KV router expects one hash per block. The cost is that these workers do not get the extra prefix-cache reuse that lookahead hashes provide. Setting `disable_lookahead_block_hashes` to `false` on a worker that publishes KV events is not supported.
 
 ## Limitations
 

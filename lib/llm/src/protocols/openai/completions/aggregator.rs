@@ -3,10 +3,10 @@
 
 use std::collections::HashMap;
 
-use anyhow::Result;
-use futures::{Stream, StreamExt};
+use dynamo_runtime::error::DynamoError;
+use futures::{Stream, StreamExt, TryStreamExt};
 
-use super::NvCreateCompletionResponse;
+use super::{CompletionEcho, NvCreateCompletionResponse};
 use crate::protocols::{
     Annotated, DataStream,
     codec::{Message, SseCodecError},
@@ -15,7 +15,7 @@ use crate::protocols::{
     openai::ParsingOptions,
 };
 
-/// Aggregates a stream of [`CompletionResponse`]s into a single [`CompletionResponse`].
+/// Aggregates a stream of `CompletionResponse`s into a single `CompletionResponse`.
 pub struct DeltaAggregator {
     id: String,
     model: String,
@@ -23,7 +23,6 @@ pub struct DeltaAggregator {
     usage: Option<dynamo_protocols::types::CompletionUsage>,
     system_fingerprint: Option<String>,
     choices: HashMap<u32, DeltaChoice>,
-    error: Option<String>,
     nvext: Option<serde_json::Value>,
 }
 
@@ -32,6 +31,20 @@ struct DeltaChoice {
     text: String,
     finish_reason: Option<FinishReason>,
     logprobs: Option<dynamo_protocols::types::Logprobs>,
+    /// The echoed prompt (`echo: true`), prepended once the stream has ended.
+    echo: Option<CompletionEcho>,
+}
+
+impl DeltaChoice {
+    fn empty(index: u32) -> Self {
+        Self {
+            index,
+            text: String::new(),
+            finish_reason: None,
+            logprobs: None,
+            echo: None,
+        }
+    }
 }
 
 impl Default for DeltaAggregator {
@@ -49,30 +62,20 @@ impl DeltaAggregator {
             usage: None,
             system_fingerprint: None,
             choices: HashMap::new(),
-            error: None,
             nvext: None,
         }
     }
 
-    /// Aggregates a stream of [`Annotated<CompletionResponse>`]s into a single [`CompletionResponse`].
+    /// Aggregates a stream of `Annotated<CompletionResponse>`s into a single `CompletionResponse`.
     pub async fn apply(
         stream: impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateCompletionResponse> {
+    ) -> Result<NvCreateCompletionResponse, DynamoError> {
         tracing::debug!("Tool Call Parser: {:?}", parsing_options.tool_call_parser); // TODO: remove this once completion has tool call support
         let aggregator = stream
-            .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
-                let delta = match delta.ok() {
-                    Ok(delta) => delta,
-                    Err(error) => {
-                        aggregator.error = Some(error);
-                        return aggregator;
-                    }
-                };
-
-                if aggregator.error.is_none()
-                    && let Some(delta) = delta.data
-                {
+            .map(Annotated::into_data)
+            .try_fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
+                if let Some(delta) = delta {
                     // TODO(#14) - Aggregate Annotation
 
                     // these are cheap to move so we do it every time since we are consuming the delta
@@ -86,19 +89,24 @@ impl DeltaAggregator {
                         aggregator.system_fingerprint = Some(system_fingerprint);
                     }
                     merge_response_nvext(&mut aggregator.nvext, delta.nvext);
+                    if let Some(echo) = delta.echo {
+                        let index = echo.choice_index;
+                        let state_choice = aggregator
+                            .choices
+                            .entry(index)
+                            .or_insert_with(|| DeltaChoice::empty(index));
+                        match state_choice.echo.as_mut() {
+                            Some(existing) => existing.merge(echo),
+                            None => state_choice.echo = Some(echo),
+                        }
+                    }
 
                     // handle the choices
                     for choice in delta.inner.choices {
-                        let state_choice =
-                            aggregator
-                                .choices
-                                .entry(choice.index)
-                                .or_insert(DeltaChoice {
-                                    index: choice.index,
-                                    text: "".to_string(),
-                                    finish_reason: None,
-                                    logprobs: None,
-                                });
+                        let state_choice = aggregator
+                            .choices
+                            .entry(choice.index)
+                            .or_insert_with(|| DeltaChoice::empty(choice.index));
 
                         state_choice.text.push_str(&choice.text);
 
@@ -137,16 +145,9 @@ impl DeltaAggregator {
                         }
                     }
                 }
-                aggregator
+                Ok(aggregator)
             })
-            .await;
-
-        // If we have an error, return it
-        let aggregator = if let Some(error) = aggregator.error {
-            return Err(anyhow::anyhow!(error));
-        } else {
-            aggregator
-        };
+            .await?;
 
         // extra the aggregated deltas and sort by index
         let mut choices: Vec<_> = aggregator
@@ -170,6 +171,7 @@ impl DeltaAggregator {
         let response = NvCreateCompletionResponse {
             inner,
             nvext: aggregator.nvext,
+            echo: None,
         };
 
         Ok(response)
@@ -180,12 +182,16 @@ impl From<DeltaChoice> for dynamo_protocols::types::Choice {
     fn from(delta: DeltaChoice) -> Self {
         let finish_reason = delta.finish_reason.map(Into::into);
 
-        dynamo_protocols::types::Choice {
+        let mut choice = dynamo_protocols::types::Choice {
             index: delta.index,
             text: delta.text,
             finish_reason,
             logprobs: delta.logprobs,
+        };
+        if let Some(echo) = delta.echo {
+            echo.prepend_to(&mut choice);
         }
+        choice
     }
 }
 
@@ -193,7 +199,7 @@ impl NvCreateCompletionResponse {
     pub async fn from_sse_stream(
         stream: DataStream<Result<Message, SseCodecError>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateCompletionResponse> {
+    ) -> Result<NvCreateCompletionResponse, DynamoError> {
         let stream = convert_sse_stream::<NvCreateCompletionResponse>(stream);
         NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options).await
     }
@@ -201,7 +207,7 @@ impl NvCreateCompletionResponse {
     pub async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateCompletionResponse> {
+    ) -> Result<NvCreateCompletionResponse, DynamoError> {
         DeltaAggregator::apply(stream, parsing_options).await
     }
 }
@@ -233,6 +239,7 @@ mod tests {
             token_logprobs: vec![Some(lp)],
             top_logprobs: vec![
                 serde_json::to_value(dynamo_protocols::types::TopLogprobs {
+                    token_id: None,
                     token: text.to_string(),
                     logprob: lp,
                     bytes: None,
@@ -257,7 +264,11 @@ mod tests {
             object: "text_completion".to_string(),
         };
 
-        let response = NvCreateCompletionResponse { inner, nvext: None };
+        let response = NvCreateCompletionResponse {
+            inner,
+            nvext: None,
+            echo: None,
+        };
 
         Annotated {
             data: Some(response),
@@ -416,7 +427,11 @@ mod tests {
             object: "text_completion".to_string(),
         };
 
-        let response = NvCreateCompletionResponse { inner, nvext: None };
+        let response = NvCreateCompletionResponse {
+            inner,
+            nvext: None,
+            echo: None,
+        };
 
         let annotated_delta = Annotated {
             data: Some(response),
@@ -462,5 +477,73 @@ mod tests {
             choice1.finish_reason,
             Some(dynamo_protocols::types::CompletionFinishReason::Stop)
         );
+    }
+
+    #[tokio::test]
+    async fn preserves_typed_error_after_partial_output() {
+        use dynamo_runtime::error::{BackendError, ErrorType};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("unsupported logprobs")
+            .build();
+        let stream = stream::iter(vec![
+            create_test_delta(0, "partial", None, None),
+            Annotated {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(error),
+            },
+        ]);
+
+        let error = DeltaAggregator::apply(stream, ParsingOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert_eq!(error.message(), "unsupported logprobs");
+    }
+
+    #[tokio::test]
+    async fn echo_is_prepended_to_the_aggregated_choice() {
+        // The text rides the first chunk, the prompt logprobs the final one.
+        let mut first = create_test_delta(0, "Hi", None, Some(-0.3));
+        first.data.as_mut().expect("delta data").echo = Some(CompletionEcho {
+            choice_index: 0,
+            text: "Prompt".to_string(),
+            logprobs: None,
+        });
+        let mut last = create_test_delta(0, "!", Some("stop".to_string()), Some(-0.7));
+        last.data.as_mut().expect("delta data").echo = Some(CompletionEcho {
+            choice_index: 0,
+            text: String::new(),
+            logprobs: Some(dynamo_protocols::types::Logprobs {
+                tokens: vec!["Prompt".to_string()],
+                token_logprobs: vec![None],
+                top_logprobs: vec![serde_json::Value::Null],
+                text_offset: vec![],
+            }),
+        });
+
+        let response = DeltaAggregator::apply(
+            futures::stream::iter(vec![first, last]),
+            ParsingOptions::default(),
+        )
+        .await
+        .expect("aggregation");
+
+        assert!(response.echo.is_none());
+        let choice = &response.inner.choices[0];
+        assert_eq!(choice.text, "PromptHi!");
+        let logprobs = choice.logprobs.as_ref().expect("logprobs");
+        assert_eq!(logprobs.tokens, vec!["Prompt", "Hi", "!"]);
+        assert_eq!(logprobs.token_logprobs, vec![None, Some(-0.3), Some(-0.7)]);
+        assert_eq!(logprobs.top_logprobs[0], serde_json::Value::Null);
+        // Generated offsets (0 in `create_test_delta`) move past the echoed text.
+        assert_eq!(logprobs.text_offset, vec![6, 6]);
     }
 }

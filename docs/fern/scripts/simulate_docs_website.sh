@@ -12,11 +12,14 @@
 # asserts the invariants:
 #
 #   1. fern check on the composed tree reports 0 errors.
-#   2. The generated versions/<TAG>.yml keeps the Reference General variant
-#      on ../pages-dev/ (shared, always-current) while the Kubernetes API and
-#      Components variants point at the frozen ../pages-<TAG>/ snapshot.
+#   2. The generated versions/<TAG>.yml keeps the shared Reference group
+#      (reference/general/) on ../pages-dev/ (always-current) while Kubernetes
+#      API, Components, Backends, Observability and NIXL Connect point at the
+#      frozen ../pages-<TAG>/ snapshot.
 #   3. The pages-<TAG> snapshot drops exactly the shared reference files and
 #      keeps the versioned ones (runtime-config, observability).
+#  11. A tag-only reference/general page (removed on main after the cut) stays
+#      in the snapshot, its nav stays on ../pages-<TAG>/, and propagation keeps it.
 #   4. No React .tsx leaks into pages-dev/components/ (doc pages only).
 #   5. Pre-rework version files gain no shared-reference pointers.
 #   6. Round two: a page added to the General variant on a later main push
@@ -25,6 +28,14 @@
 #      root-level copy is removed.
 #   8. Translation links resolve from authored relative paths to dev URLs in
 #      pages-dev and tag-pinned URLs in pages-<TAG>, with no /dev/ leakage.
+#   9. dev.yml still exposes a shared Reference group at all. Checked first,
+#      because 2, 3 and 6 are vacuous without it — and because a selector that
+#      quietly stops matching is exactly how this broke: #12410 flattened the
+#      Reference tab and the old label-keyed selector no-opped for six days.
+#  10. The composed default version starts with the shared Home tab so the
+#      bare site URL renders Home instead of the release snapshot's first page.
+#  12. Snapshot links to the dropped shared reference files point at their
+#      pages-dev copies, so they resolve instead of rendering as raw paths.
 #
 # Usage: ./scripts/simulate_docs_website.sh [TAG]
 #   TAG defaults to v9.9.9 (must not exist on docs-website yet).
@@ -58,9 +69,30 @@ assert() { # assert <label> <ok|FAIL>
   note "$1" "$2"; [ "$2" = "ok" ] || fail=1
 }
 
-REF_SEL='.navigation[] | select(.tab == "reference") | .variants[] | select(.title == "General")'
+# The shared Reference group is identified by CONTENT PATH, not by a nav label.
+# It used to key on `variants[] | select(.title == "General")`; #12410
+# deliberately flattened the Reference tab into folded sections with no variant
+# selector, and the label-keyed selector then matched nothing without failing
+# anything. Directory layout is the durable signal — IA work renames labels.
+#
+# GEN_SEL selects the reference tab's top-level entries whose every descendant
+# path is under reference/general/. Never put it on the left of a `yq -i`
+# assignment against a file that may not match: yq auto-creates missing keys in
+# lvalue position, which is how the old selector injected `variants: []` and
+# invalidated the whole navigation. Reads only; writes go through the
+# layout-scoped `|=` in propagate_shared_reference.
+GEN_SEL='.navigation[] | select(.tab == "reference") | .layout[] | select([.. | select(has("path")) | .path] | all_c(test("/reference/general/")))'
 
 echo "=== SYNC JOB (replayed) ==="
+# The Python/Rust API references are publish-time artifacts (gitignored in the
+# source tree); the real sync job generates them before the pages-dev rsync,
+# so the replay must too or the synced nav dangles. Requires griffe, like CI.
+if ! "$PY" -c 'import griffe' 2>/dev/null; then
+  echo "error: griffe is required to generate the API references (python3 -m pip install 'griffe==2.1.0')" >&2
+  exit 1
+fi
+"$PY" "$SRC/scripts/gen_python_api.py"
+"$PY" "$SRC/scripts/gen_rust_api.py"
 rm -rf "$WT/fern/pages-dev"; mkdir -p "$WT/fern/pages-dev"
 rsync -a --exclude='/home/index.mdx' "$SRC/pages/" "$WT/fern/pages-dev/"
 "$PY" "$SRC/scripts/rewrite_snapshot_paths.py" "$WT/fern/pages-dev"
@@ -74,9 +106,16 @@ rm -f "$WT/fern/convert_callouts.py"
 mkdir -p "$WT/fern/scripts"
 [ -f "$SRC/scripts/convert_callouts.py" ] && cp "$SRC/scripts/convert_callouts.py" "$WT/fern/scripts/convert_callouts.py" || true
 rm -rf "$WT/fern/components"; cp -r "$SRC/components" "$WT/fern/components"
+# The nightly selector data is a publish-time artifact too. Generated after the
+# copy and into the checkout, so the replay never overwrites the source tree's
+# module. Offline: this gate checks composition, not nightly freshness, so it
+# must not depend on NGC being reachable.
+"$PY" "$SRC/scripts/gen_nightly_selector.py" --offline \
+  --out "$WT/fern/components/nightly-selector-data.generated.ts"
 rm -rf "$WT/fern/products"
 cp "$SRC/pages/home/index.mdx" "$WT/fern/index.mdx"
 perl -pi -e 's|\.\./\.\./assets/|./assets/|g' "$WT/fern/index.mdx"
+"$PY" "$SRC/scripts/gen_llms_tables.py" --assets-only
 [ -d "$SRC/assets" ] && cp -r "$SRC/assets/." "$WT/fern/assets/" || true
 if [ -d "$SRC/pages/blog/_assets" ]; then
   mkdir -p "$WT/fern/digest"; cp -r "$SRC/pages/blog/_assets/." "$WT/fern/digest/"
@@ -106,12 +145,16 @@ yq -i '(.. | select(has("path")).path) |= sub("^pages/home/index\.mdx$", "../ind
 yq -i '(.. | select(has("path")).path) |= sub("^pages/", "../pages-dev/")' "$WT/fern/versions/dev.yml"
 
 propagate_shared_reference() {
-  yq "[$REF_SEL][0]" "$WT/fern/versions/dev.yml" > "$WT/.ref_general.yml"
+  yq "[$GEN_SEL]" "$WT/fern/versions/dev.yml" > "$WT/.ref_general.yml"
   for vfile in "$WT"/fern/versions/v*.yml; do
     [ -e "$vfile" ] || continue
-    if [ "$(yq "[$REF_SEL] | length" "$vfile")" != "0" ]; then
-      REF_BLOCK="$WT/.ref_general.yml" \
-        yq -i "($REF_SEL) = load(strenv(REF_BLOCK))" "$vfile"
+    # Only rewrite files that already carry shared entries. Versions cut before
+    # the tab restructure have no reference tab at all (v1.3.0.yml is
+    # `tab: docs`), so this stays inert on every currently-released version.
+    if [ "$(yq "[$GEN_SEL] | length" "$vfile")" != "0" ]; then
+      ENTRIES="$WT/.ref_general.yml" \
+        yq -i "(.navigation[] | select(.tab == \"reference\") | .layout) |=
+               (load(strenv(ENTRIES)) + [.[] | select([.. | select(has(\"path\")) | .path] | any_c(test(\"/pages-dev/reference/general/\")) | not)])" "$vfile"
     fi
   done
 }
@@ -132,6 +175,13 @@ cp "$SRC/docs.yml" docs.yml
 yq -i '."landing-page".path = "./index.mdx"' docs.yml
 PRESERVED="$WT/.preserved_versions.yml" \
   yq -i '.versions = load(strenv(PRESERVED))' docs.yml
+"$SRC/scripts/ensure_default_version_home.sh" "$WT/fern"
+sync_default_nav=$(yq -r '.versions[0].path' docs.yml)
+sync_default_nav="${sync_default_nav#./}"
+sync_home_count=$(yq '[.navigation[] | select(.tab == "home")] | length' "$sync_default_nav")
+sync_first_tab=$(yq -r '.navigation[0].tab // ""' "$sync_default_nav")
+[ "$sync_home_count" = "1" ] && [ "$sync_first_tab" = "home" ] && s11=ok || s11=FAIL
+assert "10a. synced default version has one canonical Home tab first" "$s11"
 
 echo "=== RELEASE-VERSION JOB (replayed, tag $TAG) ==="
 cd "$WT"
@@ -139,11 +189,16 @@ cd "$WT"
 [ -f "fern/versions/$TAG.yml" ] && { echo "ERROR: versions/$TAG.yml already exists"; exit 1; }
 
 cp -r fern/pages-dev "fern/pages-$TAG"
-yq "$REF_SEL | .. | select(has(\"path\")) | .path" fern/versions/dev.yml \
-  | sed 's|^\.\./pages-dev/||' | while read -r relpath; do
-    [ -n "$relpath" ] && rm -f "fern/pages-$TAG/$relpath"
-  done
+# A page the tag carries under reference/general/ that main has since removed.
+TAG_ONLY="reference/general/sim-tag-only.mdx"
+printf -- '---\ntitle: Sim Tag Only\n---\n\nTag-only fixture.\n' > "fern/pages-$TAG/$TAG_ONLY"
+# Drop only the shared pages pages-dev still carries; the rest stay frozen.
+while IFS= read -r f; do
+  rel="${f#fern/pages-"$TAG"/}"
+  [ -e "fern/pages-dev/$rel" ] && rm -f "$f"
+done < <(find "fern/pages-$TAG/reference/general" -type f)
 find "fern/pages-$TAG/reference" -type d -empty -delete 2>/dev/null || true
+"$PY" "$SRC/scripts/relink_shared_reference.py" "fern/pages-$TAG" fern/pages-dev >/dev/null
 
 if [ -d "$SRC/translations" ]; then
   for lang_dir in "$SRC"/translations/*/; do
@@ -172,7 +227,16 @@ fi
 VERSION_FILE="fern/versions/$TAG.yml"
 cp fern/versions/dev.yml "$VERSION_FILE"
 perl -pi -e "s|path: \.\./pages-dev/|path: ../pages-$TAG/|g" "$VERSION_FILE"
-yq -i "($REF_SEL | .. | select(has(\"path\")).path) |= sub(\"\.\./pages-$TAG/\", \"../pages-dev/\")" "$VERSION_FILE"
+FIXTURE_PATH="../pages-$TAG/$TAG_ONLY" yq -i '(.navigation[] | select(.tab == "reference") | .layout) +=
+  [{"page": "Sim Tag Only", "path": strenv(FIXTURE_PATH), "slug": "sim-tag-only"}]' "$VERSION_FILE"
+# Text substitution, not a yq assignment: a yq assignment whose left-hand side
+# traverses a missing key auto-creates it, which is how the old `.variants[]`
+# form injected `variants: []` and invalidated the navigation.
+perl -pi -e "s|path: \.\./pages-$TAG/reference/general/|path: ../pages-dev/reference/general/|g" "$VERSION_FILE"
+while IFS= read -r f; do
+  rel="${f#fern/pages-"$TAG"/}"
+  perl -pi -e "s|path: \.\./pages-dev/\Q$rel\E|path: ../pages-$TAG/$rel|g" "$VERSION_FILE"
+done < <(find "fern/pages-$TAG/reference/general" -type f)
 perl -pi -e "s|href: /dynamo/dev/|href: /dynamo/$TAG/|g" "$VERSION_FILE"
 
 DEV_IDX=$(yq '.versions | to_entries | map(select(.value.display-name == "dev")) | .[0].key' fern/docs.yml)
@@ -188,36 +252,79 @@ yq -i ".versions[0].path = \"./versions/$TAG.yml\"" fern/docs.yml
 yq -i ".versions[0].display-name = \"Latest ($TAG)\"" fern/docs.yml
 
 echo "=== ASSERTIONS ==="
-shared=$(grep -c "path: \.\./pages-dev/reference/" "$VERSION_FILE" || true)
+default_nav=$(yq -r '.versions[0].path' fern/docs.yml)
+default_nav="fern/${default_nav#./}"
+default_first_tab=$(yq -r '.navigation[0].tab // ""' "$default_nav")
+[ "$default_first_tab" = "home" ] && s11=ok || s11=FAIL
+assert "10b. released default version starts with the shared Home tab" "$s11"
+
+# 9 first: everything below assumes the shared group is findable at all. This is
+# the tripwire the old label-keyed selector lacked — it no-opped silently for six
+# days after #12410 renamed the nav out from under it.
+general=$(yq "[$GEN_SEL] | length" "$WT/fern/versions/dev.yml")
+[ "$general" -gt 0 ] && s10=ok || s10=FAIL
+assert "9. dev.yml exposes a shared Reference group ($general entries)" "$s10"
+
+shared=$(grep -c "path: \.\./pages-dev/reference/general/" "$VERSION_FILE" || true)
 frozen=$(grep -c "path: \.\./pages-$TAG/reference/components/runtime-configuration.mdx" "$VERSION_FILE" || true)
 [ "$shared" -ge 10 ] && s1=ok || s1=FAIL
-assert "2. $TAG.yml: General variant shared ($shared pages-dev refs)" "$s1"
+assert "2. $TAG.yml: reference/general shared ($shared pages-dev refs)" "$s1"
 [ "$frozen" -eq 1 ] && s2=ok || s2=FAIL
-assert "2. $TAG.yml: Components variant frozen (runtime configuration)" "$s2"
+assert "2. $TAG.yml: Components section frozen (runtime configuration)" "$s2"
 
-[ ! -e "fern/pages-$TAG/reference/general/compatibility.mdx" ] && \
+[ "$(find "fern/pages-$TAG/reference/general" -type f)" = "fern/pages-$TAG/$TAG_ONLY" ] && \
   [ -e "fern/pages-$TAG/reference/components/runtime-configuration.mdx" ] && \
   [ -d "fern/pages-$TAG/reference/observability" ] && s3=ok || s3=FAIL
 assert "3. snapshot drops shared files, keeps versioned reference/" "$s3"
 
-[ "$(find fern/pages-dev/components -name '*.tsx' | wc -l | tr -d ' ')" = "0" ] && s4=ok || s4=FAIL
-assert "4. no .tsx in pages-dev/components/" "$s4"
+grep -q "path: \.\./pages-$TAG/$TAG_ONLY" "$VERSION_FILE" && \
+  ! grep -q "path: \.\./pages-dev/$TAG_ONLY" "$VERSION_FILE" && s12=ok || s12=FAIL
+assert "11. tag-only reference/general page stays on pages-$TAG" "$s12"
 
-prework=$(git diff -U0 -- 'fern/versions/v*.yml' 2>/dev/null \
-  | grep -E '^[+-][^+-]' | grep -c "pages-dev/reference" || true)
+relinked=$(grep -rlE 'pages-dev/reference/general/' "fern/pages-$TAG" --include='*.md' --include='*.mdx' | wc -l | tr -d ' ')
+residual=$("$PY" "$SRC/scripts/relink_shared_reference.py" "fern/pages-$TAG" fern/pages-dev | grep -oE '[0-9]+ file' | grep -oE '[0-9]+')
+[ "$relinked" -gt 0 ] && [ "$residual" = "0" ] && s14=ok || s14=FAIL
+assert "12. snapshot links to dropped shared pages point at pages-dev ($relinked files)" "$s14"
+
+# The find target must exist, or find errors to stderr, wc counts 0 and the
+# assertion reports ok on a failure — which it did once pages-dev/components/
+# stopped existing.
+if [ -d fern/pages-dev/components ]; then
+  [ "$(find fern/pages-dev/components -name '*.tsx' | wc -l | tr -d ' ')" = "0" ] && s4=ok || s4=FAIL
+  assert "4. no .tsx in pages-dev/components/" "$s4"
+else
+  note "4. no .tsx in pages-dev/components/" "n/a (no components/ page dir)"
+fi
+
+# Post-rework versions legitimately gain pointers when a PR adds a shared
+# reference page; only versions that carry no pages-dev refs at all
+# (pre-rework) must stay untouched by propagation.
+prework=0
+for vf in fern/versions/v*.yml; do
+  git show "HEAD:$vf" 2>/dev/null | grep -q 'pages-dev/' && continue
+  n=$(git diff -U0 -- "$vf" 2>/dev/null \
+    | grep -E '^[+-][^+-]' | grep -c "pages-dev/reference" || true)
+  prework=$((prework + n))
+done
 [ "$prework" -eq 0 ] && s5=ok || s5=FAIL
 assert "5. pre-rework versions gain no shared-reference pointers" "$s5"
 
 # Round two: a later main push adds a page to the shared reference; the
-# already-cut version's nav must pick it up via propagation.
-FAKE='{"page": "Sim Test Page", "path": "../pages-dev/reference/sim-test-page.mdx", "slug": "sim-test-page"}'
-FAKE="$FAKE" yq -i "($REF_SEL | .layout[] | select(has(\"section\")) | select(.section == \"Releases\") | .contents) += [env(FAKE)]" \
+# already-cut version's nav must pick it up via propagation. Append to the
+# reference tab's layout rather than descending into a named section, so the
+# test does not re-couple itself to a nav label.
+FAKE='{"page": "Sim Test Page", "path": "../pages-dev/reference/general/sim-test-page.mdx", "slug": "sim-test-page"}'
+FAKE="$FAKE" yq -i '(.navigation[] | select(.tab == "reference") | .layout) += [env(FAKE)]' \
   "$WT/fern/versions/dev.yml"
 propagate_shared_reference
 grep -q "sim-test-page" "$VERSION_FILE" && s6=ok || s6=FAIL
 assert "6. round-two propagation reaches the cut version's nav" "$s6"
-# Undo before fern check (the fake page has no backing file).
-perl -ni -e 'print unless /sim-test-page|Sim Test Page/' "$WT/fern/versions/dev.yml" "$VERSION_FILE"
+grep -q "path: \.\./pages-$TAG/$TAG_ONLY" "$VERSION_FILE" && s13=ok || s13=FAIL
+assert "11. propagation keeps the tag-only page in the cut version's nav" "$s13"
+# Undo before fern check (the fake page has no backing file). Propagation
+# rewrites every synced version file, so scrub them all, not just the two
+# this test touched directly.
+perl -ni -e 'print unless /sim-test-page|Sim Test Page/' "$WT"/fern/versions/*.yml
 
 [ -f "$WT/fern/scripts/convert_callouts.py" ] && \
   [ ! -e "$WT/fern/convert_callouts.py" ] && s8=ok || s8=FAIL
@@ -232,6 +339,7 @@ from pathlib import Path
 root = Path(sys.argv[1])
 tag = sys.argv[2]
 link = re.compile(r"!?\[[^]]*\]\(([^)#\s]+)(?:#[^)]*)?\)")
+href = re.compile(r'\bhref="([^"#\s]+)')
 
 def counts(trees, version: str):
     relative = versioned = dev = 0
@@ -242,7 +350,7 @@ def counts(trees, version: str):
             if page.suffix not in {".md", ".mdx"}:
                 continue
             text = page.read_text(encoding="utf-8")
-            for target in link.findall(text):
+            for target in link.findall(text) + href.findall(text):
                 if target.endswith((".md", ".mdx")) and not target.startswith(
                     ("http://", "https://", "mailto:", "/")
                 ):

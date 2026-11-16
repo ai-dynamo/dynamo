@@ -11,37 +11,49 @@
 # Routing is optimized for Docker layer caching, linear scaling, and
 # 100% pod utilization across any number of BuildKit pods.
 #
-# CACHE GROUPS (3 distinct groups, one cache domain per framework):
-#   - Group 0 (vllm):                 vLLM
-#   - Group 1 (sglang):               SGLang
-#   - Group 2 (general-trt-combined): TRT-LLM & General Builds
+# CACHE GROUPS (3 groups, one cache domain per dynamo_base image tag):
+#   - Group 0 (vllm-sglang): vLLM & SGLang                    (cuda13.0 base)
+#   - Group 1 (general):     dynamo runtime, planner, frontend,
+#                            operator, snapshot, power-agent  (cuda13.0 base)
+#   - Group 2 (trtllm):      TRT-LLM runtime / dev / efa, Triton (cuda13.1 base)
+#
+# Groups follow the dynamo_base image tag, not the framework: that is where the
+# rendered Dockerfiles diverge, since manylinux_${ARCH}, wheel_builder_base and
+# runtime_wheel_builder are shared by every build kind. TRT-LLM and Triton share
+# the cuda13.1 base, so they use one group. vLLM and SGLang share
+# one because their build filters differ, and a dedicated pool for either would
+# idle whenever only the other changed.
 #
 # ALGORITHM:
 # 1. SCORING: Each group key is hashed with every active pod index (SHA-256)
 #    to produce a uniformly distributed score per (group, arch, pod) triple.
 # 2. RANKING: Pods are sorted by score (descending) per group. StatefulSet
 #    pod names are constant, so rankings are stable across invocations.
-# 3. POOL SIZING: Pool Size = ceil(Active Pods / 3) ensures even distribution.
+# 3. POOL SIZING: Each group gets its GROUP_WEIGHTS share of the active pods,
+#    rounded, and at least one pod. General gets any pod that rounding
+#    leaves out.
 # 4. COVERAGE-AWARE SELECTION: Pools are built round-by-round across all 3
 #    groups simultaneously. In each round, each group picks its highest-ranked
 #    pod that is NOT YET in any group's pool (preferring uncovered pods).
 #    This guarantees every active pod appears in at least one group's pool.
 # 5. RANDOM PICK: ONE pod is randomly selected from the candidate pool.
 #
-# LOAD DISTRIBUTION (cksum-based, all pods utilized):
-# +------+------+-------------------+-------------------+---------------------+
-# | Pods | Pool | G0: vLLM          | G1: SGLang        | G2: TRT-LLM/General |
-# +------+------+-------------------+-------------------+---------------------+
-# |  1   |  1   | {0}               | {0}               | {0}                 |
-# |  2   |  1   | {0}               | {1}               | {1}                 |
-# |  3   |  1   | {0}               | {2}               | {1}                 |
-# |  4   |  2   | {0, 3}            | {2, 1}            | {1, 2}             |
-# |  5   |  2   | {0, 3}            | {2, 4}            | {1, 2}             |
-# |  6   |  2   | {0, 3}            | {5, 1}            | {2, 4}             |
-# |  7   |  3   | {0, 3, 4}         | {5, 1, 2}         | {2, 6, 5}          |
-# |  8   |  3   | {7, 0, 3}         | {5, 1, 4}         | {2, 6, 5}          |
-# |  9   |  3   | {7, 0, 3}         | {8, 5, 1}         | {2, 6, 4}          |
-# +------+------+-------------------+-------------------+---------------------+
+# LOAD DISTRIBUTION (example: amd64; arm64 ranks differently, all pods utilized):
+# +------+--------+---------------------------+--------------------------------------------+---------------------+
+# | Pods | Sizes  | G0: vLLM/SGLang           | G1: General                                | G2: TRT-LLM, Triton |
+# +------+--------+---------------------------+--------------------------------------------+---------------------+
+# | 1    | 1/1/1  | {0}                       | {0}                                        | {0}                 |
+# | 2    | 1/1/1  | {0}                       | {1}                                        | {1}                 |
+# | 3    | 1/2/1  | {2}                       | {0, 2}                                     | {1}                 |
+# | 4    | 1/2/1  | {2}                       | {3, 0}                                     | {1}                 |
+# | 5    | 2/3/1  | {4, 0}                    | {2, 3, 4}                                  | {1}                 |
+# | 6    | 2/3/1  | {4, 0}                    | {2, 3, 5}                                  | {1}                 |
+# | 7    | 2/4/1  | {4, 2}                    | {6, 3, 5, 0}                               | {1}                 |
+# | 8    | 2/4/2  | {7, 4}                    | {6, 2, 3, 0}                               | {1, 5}              |
+# | 9    | 3/5/2  | {7, 4, 8}                 | {6, 2, 3, 0, 8}                            | {1, 5}              |
+# | 14   | 4/7/3  | {12, 7, 2, 8}             | {6, 9, 13, 3, 5, 10, 0}                    | {1, 4, 11}          |
+# | 24   | 7/12/5 | {12, 7, 4, 15, 17, 21, 0} | {6, 9, 13, 2, 8, 3, 5, 16, 14, 23, 20, 10} | {1, 19, 18, 22, 11} |
+# +------+--------+---------------------------+--------------------------------------------+---------------------+
 #
 # =============================================================================
 
@@ -51,7 +63,7 @@ set -e
 ARCH_INPUT=""
 FLAVOR_INPUT=""
 CUDA_VERSION=""
-ALL_FLAVORS=("vllm" "trtllm" "sglang" "general")
+ALL_FLAVORS=("vllm" "trtllm" "sglang" "triton" "general")
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -68,7 +80,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     *)
-      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|general|all> [--cuda <13.0|13.1>]."
+      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|triton|general|all> [--cuda <13.0|13.1>]."
       exit 1
       ;;
   esac
@@ -80,7 +92,7 @@ if [ -z "$ARCH_INPUT" ]; then
 fi
 
 if [ -z "$FLAVOR_INPUT" ]; then
-  echo "❌ Error: Must specify --flavor <vllm|trtllm|sglang|general|all>."
+  echo "❌ Error: Must specify --flavor <vllm|trtllm|sglang|triton|general|all>."
   exit 1
 fi
 
@@ -109,9 +121,9 @@ esac
 
 # Validate flavor input
 case $FLAVOR_INPUT in
-  vllm|trtllm|sglang|general|all) ;;
+  vllm|trtllm|sglang|triton|general|all) ;;
   *)
-    echo "❌ Error: Invalid flavor '$FLAVOR_INPUT'. Must be vllm, trtllm, sglang, general, or all."
+    echo "❌ Error: Invalid flavor '$FLAVOR_INPUT'. Must be vllm, trtllm, sglang, triton, general, or all."
     exit 1
     ;;
 esac
@@ -144,12 +156,12 @@ else
 fi
 
 # --- CONFIGURATION ---
-NAMESPACE="buildkit"
+NAMESPACE="${BUILDKIT_NAMESPACE:?BUILDKIT_NAMESPACE must be set}"
 PORT="1234"
 # Highest buildkit pod ordinal to probe, exclusive. Must be >= the KEDA
 # maxReplicaCount for the buildkit StatefulSet, or pods above this ordinal are
 # never discovered and sit idle while builds queue on the pods below it.
-MAX_POD_CHECK=${MAX_POD_CHECK:-16}
+MAX_POD_CHECK=${MAX_POD_CHECK:-25}
 # ---------------------
 
 if ! command -v nslookup &> /dev/null; then
@@ -187,17 +199,21 @@ get_active_indices() {
   echo "${active_indices[@]}"
 }
 
-GROUP_KEYS=("vllm" "sglang" "general-trt-combined")
+# Group keys are SHA-256 salt: renaming one reshuffles that group's pod pool and
+# cold-starts its cache.
+GROUP_KEYS=("vllm-sglang" "general" "trtllm")
 
-# Map a flavor to a group index (0, 1, or 2). One cache domain per framework:
-# vLLM and SGLang each get a dedicated group; TRT-LLM and general builds share
-# the third.
+# Share of the active pods per group, in GROUP_KEYS order, sized to the
+# relative build load of each group.
+GROUP_WEIGHTS=(30 50 20)
+
+# Map a flavor to a group index (0, 1, or 2).
 flavor_to_group() {
   local flavor=$1
   case "$flavor" in
-    vllm)  echo 0 ;;
-    sglang) echo 1 ;;
-    trtllm|general|*) echo 2 ;;
+    vllm|sglang) echo 0 ;;
+    trtllm|triton) echo 2 ;;
+    general|*) echo 1 ;;
   esac
 }
 
@@ -213,7 +229,20 @@ compute_group_pools() {
     return
   fi
 
-  local pool_size=$(( (count + 2) / 3 ))
+  local total_weight=$(( GROUP_WEIGHTS[0] + GROUP_WEIGHTS[1] + GROUP_WEIGHTS[2] ))
+  local -a pool_sizes=()
+  local max_size=0 assigned=0
+  for g in 0 1 2; do
+    pool_sizes[g]=$(( (count * GROUP_WEIGHTS[g] + total_weight / 2) / total_weight ))
+    if [ "${pool_sizes[g]}" -lt 1 ]; then pool_sizes[g]=1; fi
+    assigned=$(( assigned + pool_sizes[g] ))
+  done
+  if [ "$assigned" -lt "$count" ]; then
+    pool_sizes[1]=$(( pool_sizes[1] + count - assigned ))
+  fi
+  for g in 0 1 2; do
+    if [ "${pool_sizes[g]}" -gt "$max_size" ]; then max_size=${pool_sizes[g]}; fi
+  done
 
   local rank0="" rank1="" rank2=""
   for g in 0 1 2; do
@@ -232,8 +261,9 @@ compute_group_pools() {
   local pool0=" " pool1=" " pool2=" "
   local covered=" "
 
-  for (( round=0; round<pool_size; round++ )); do
+  for (( round=0; round<max_size; round++ )); do
     for g in 0 1 2; do
+      if [ "$round" -ge "${pool_sizes[g]}" ]; then continue; fi
       local current_rank="" current_pool=""
       if [ "$g" -eq 0 ]; then current_rank="$rank0"; current_pool="$pool0"; fi
       if [ "$g" -eq 1 ]; then current_rank="$rank1"; current_pool="$pool1"; fi

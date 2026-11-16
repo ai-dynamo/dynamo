@@ -16,7 +16,7 @@
 """
 Helpers to build AIC-compatible DataFrames from real-GPU benchmark results.
 
-The picking functions in ``aiconfigurator.sdk.picking`` expect DataFrames
+The picking functions in ``aisimulate.sdk.picking`` expect DataFrames
 whose columns match the ``ColumnsStatic`` schema.  Only a subset of columns
 are actually accessed; this module populates exactly those columns.
 """
@@ -24,8 +24,8 @@ are actually accessed; this module populates exactly those columns.
 from __future__ import annotations
 
 import pandas as pd
-from aiconfigurator.sdk.picking import _build_disagg_summary_dict
-from aiconfigurator_core.sdk import common
+from aisimulate.sdk.picking import _build_disagg_summary_dict
+from aisimulate_core.sdk import common
 
 
 def make_parallel_label(tp: int, pp: int, dp: int, moe_tp: int, moe_ep: int) -> str:

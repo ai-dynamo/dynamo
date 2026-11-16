@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 title: Expose the Frontend
 subtitle: Route external traffic to a DynamoGraphDeployment's Frontend with a Kubernetes Ingress, a LoadBalancer Service, or the Inference Gateway.
-# TODO: either add or drop this page
 ---
 
 The [DGD Guide](deploy-with-dgd.md) reaches the Frontend with `kubectl port-forward`, which is fine for a smoke test but not for production traffic. This page shows how to give the Frontend a stable external address. Whatever the API version, the operator creates a `ClusterIP` Service named `<name>-frontend` (where `<name>` is `metadata.name`) on port 8000 for the Frontend component — the options below route external traffic to that Service. Choose one of three paths depending on what your cluster runs.
@@ -47,7 +46,7 @@ spec:
 The operator creates the Ingress object; the controller provisions the actual address.
 
 > [!NOTE]
-> The `nvidia.com/v1alpha1` API had a convenience `ingress` field on the Frontend component that generated this Ingress (or a service-mesh VirtualService) for you. That field is **not** part of `nvidia.com/v1beta1` — author the Ingress directly as shown above, or use a LoadBalancer Service (Option 2). See the [API Reference](../../reference/kubernetes-api/additional-resources/api-reference-k8s.md#ingressspec) for the v1alpha1 field.
+> The `nvidia.com/v1alpha1` API had a convenience `ingress` field on the Frontend component that generated this Ingress (or a service-mesh VirtualService) for you. That field is **not** part of `nvidia.com/v1beta1` — author the Ingress directly as shown above, or use a LoadBalancer Service (Option 2). See the [API Reference](../../reference/kubernetes-api/full-api-reference.mdx#ingressspec) for the v1alpha1 field.
 
 ## Option 2: A LoadBalancer Service
 
@@ -75,4 +74,4 @@ The [Gateway API Inference Extension (GAIE)](../kv-aware-routing/gateway-api.mdx
 ## Related pages
 
 - [Inference Gateway (GAIE)](../kv-aware-routing/gateway-api.mdx) — Gateway API model-aware routing.
-- [API Reference — IngressSpec](../../reference/kubernetes-api/additional-resources/api-reference-k8s.md#ingressspec) — full field reference.
+- [API Reference — IngressSpec](../../reference/kubernetes-api/full-api-reference.mdx#ingressspec) — full field reference.

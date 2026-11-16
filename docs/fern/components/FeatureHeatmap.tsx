@@ -11,9 +11,13 @@
  * treatment (translucent fill + 1px border, matching .dynref-badge--green /
  * --amber in ReferenceStyles.tsx) so green stays an accent, never a solid
  * wallpaper. Experimental keeps the dashed amber outline; not-supported stays
- * dim neutral. Cells with a note carry a superscript footnote marker
- * (numbered in row-major grid order) resolved in an ordered list below the
- * grid; the title attribute is kept as a hover bonus.
+ * dim neutral. Cells with a note carry an information marker and reveal the
+ * note in a CSS-only tooltip on hover or keyboard focus.
+ *
+ * CSS is injected via dangerouslySetInnerHTML, not as a <style> text child:
+ * a text child is escaped on render, so a `>` child combinator becomes &gt;
+ * and the double quotes in the [data-backend="..."] selectors below become
+ * &quot;, silently dropping those rules (see #12402).
  *
  * Server component (no "use client"); shares .dynref-* base classes from
  * ReferenceStyles.tsx and carries only its own .dynref-heat-* layout rules.
@@ -104,6 +108,7 @@ const HEAT_CSS = `
 }
 
 .dynref-heat-cell {
+    position: relative;
     box-sizing: border-box;
     height: 26px;
     border-radius: 6px;
@@ -112,7 +117,14 @@ const HEAT_CSS = `
     justify-content: center;
 }
 
-.dynref-heat-cell--titled { cursor: help; }
+.dynref-heat-cell--titled {
+    cursor: help;
+}
+
+.dynref-heat-cell--titled:focus-visible {
+    outline: 2px solid var(--dynref-blue-fg);
+    outline-offset: 2px;
+}
 
 .dynref-heat-cell--yes {
     background: var(--dynref-green-bg);
@@ -148,21 +160,91 @@ const HEAT_CSS = `
 
 .dynref-heat-dash { color: var(--pst-color-text-muted); }
 
-.dynref-heat-fn {
-    margin-left: 2px;
-    font-size: 11px;
-    font-weight: 600;
+.dynref-heat-note-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 12px;
+    height: 12px;
+    margin-left: 3px;
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    font-size: 8px;
+    font-weight: 700;
     line-height: 1;
 }
 
-.dynref-heat-footnotes {
-    margin: 12px 0 0;
-    padding-left: 20px;
+.dynref-heat-tooltip {
+    position: absolute;
+    z-index: 10;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    width: min(280px, calc(100vw - 48px));
+    padding: 8px 10px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 7px;
+    background: var(--pst-color-surface);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+    color: var(--pst-color-text-base);
     font-size: 12px;
-    color: var(--pst-color-text-muted);
+    font-weight: 400;
+    line-height: 1.4;
+    text-align: left;
+    transform: translate(-50%, 3px);
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 120ms ease, transform 120ms ease, visibility 120ms ease;
 }
 
-.dynref-heat-footnotes li { margin: 2px 0; }
+.dark .dynref-heat-tooltip {
+    background: #202020;
+    border-color: #3a3a3a;
+}
+
+.dynref-heat-tooltip::after {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    width: 100%;
+    height: 8px;
+    content: "";
+}
+
+.dynref-heat-cell[data-backend="SGLang"] .dynref-heat-tooltip {
+    left: 0;
+    transform: translate(0, 3px);
+}
+
+.dynref-heat-cell[data-backend="vLLM"] .dynref-heat-tooltip {
+    right: 0;
+    left: auto;
+    transform: translate(0, 3px);
+}
+
+.dynref-heat-cell--titled:hover,
+.dynref-heat-cell--titled:focus-visible {
+    z-index: 9;
+}
+
+.dynref-heat-cell--titled:hover .dynref-heat-tooltip,
+.dynref-heat-cell--titled:focus-visible .dynref-heat-tooltip {
+    opacity: 1;
+    visibility: visible;
+    transform: translate(-50%, 0);
+    pointer-events: auto;
+}
+
+.dynref-heat-cell--titled[data-backend="SGLang"]:hover .dynref-heat-tooltip,
+.dynref-heat-cell--titled[data-backend="SGLang"]:focus-visible .dynref-heat-tooltip,
+.dynref-heat-cell--titled[data-backend="vLLM"]:hover .dynref-heat-tooltip,
+.dynref-heat-cell--titled[data-backend="vLLM"]:focus-visible .dynref-heat-tooltip {
+    transform: translate(0, 0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .dynref-heat-tooltip { transition: none; }
+}
 `;
 
 const BACKENDS = [
@@ -179,26 +261,6 @@ const STATUS_LABEL: Record<FeatureCell["status"], string> = {
   wip: "Experimental",
   no: "Not supported",
 };
-
-interface Footnote {
-  feature: string;
-  backend: string;
-  note: string;
-}
-
-/** Every noted cell, numbered in row-major grid order (derived, never hardcoded). */
-const FOOTNOTES: Footnote[] = FEATURES.flatMap((feature) =>
-  BACKENDS.flatMap((backend) => {
-    const note = feature[backend.key].note;
-    return note ? [{ feature: feature.name, backend: backend.label, note }] : [];
-  }),
-);
-
-/** 1-based footnote number for a noted cell; undefined when the cell has no note. */
-function footnoteIndex(feature: string, backend: string): number | undefined {
-  const i = FOOTNOTES.findIndex((fn) => fn.feature === feature && fn.backend === backend);
-  return i === -1 ? undefined : i + 1;
-}
 
 function coverageScore(key: BackendKey): string {
   const supported = FEATURES.filter((feature) => {
@@ -281,11 +343,25 @@ function StatusCell({ cell, feature, backend }: { cell: FeatureCell; feature: st
     .filter(Boolean)
     .join(" ");
   const label = `${feature} on ${backend}: ${STATUS_LABEL[cell.status]}${cell.note ? ` — ${cell.note}` : ""}`;
-  const index = cell.note ? footnoteIndex(feature, backend) : undefined;
   return (
-    <div className={classes} title={cell.note} role="img" aria-label={label}>
+    <div
+      className={classes}
+      data-backend={backend}
+      role="img"
+      aria-label={label}
+      tabIndex={cell.note ? 0 : undefined}
+    >
       <StatusCellContent status={cell.status} />
-      {index !== undefined && <sup className="dynref-heat-fn">{index}</sup>}
+      {cell.note && (
+        <>
+          <span className="dynref-heat-note-mark" aria-hidden="true">
+            i
+          </span>
+          <span className="dynref-heat-tooltip" aria-hidden="true">
+            {cell.note}
+          </span>
+        </>
+      )}
     </div>
   );
 }
@@ -293,7 +369,7 @@ function StatusCell({ cell, feature, backend }: { cell: FeatureCell; feature: st
 export function FeatureHeatmap() {
   return (
     <div className="dynref-panel">
-      <style>{HEAT_CSS}</style>
+      <style dangerouslySetInnerHTML={{ __html: HEAT_CSS }} />
       <div className="dynref-panel-header">
         <span className="dynref-h">Feature support by backend</span>
         <div className="dynref-heat-legend">
@@ -337,16 +413,7 @@ export function FeatureHeatmap() {
           </Fragment>
         ))}
       </div>
-      {FOOTNOTES.length > 0 && (
-        <ol className="dynref-heat-footnotes">
-          {FOOTNOTES.map((fn) => (
-            <li key={`${fn.feature}-${fn.backend}`}>
-              {fn.feature} &middot; {fn.backend}: {fn.note}
-            </li>
-          ))}
-        </ol>
-      )}
-      <p className="dynref-grid-note">Superscripts reference the numbered notes above; full per-backend detail follows.</p>
+      <p className="dynref-grid-note">Hover a noted cell or focus it with the keyboard to view its compatibility note.</p>
     </div>
   );
 }

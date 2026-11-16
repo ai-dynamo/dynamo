@@ -501,9 +501,10 @@ def _tensor_uint8_to_bytes(tensor: torch.Tensor) -> bytes:
 
 
 def _bytes_to_uint8_tensor(value: bytes, device: torch.device) -> torch.Tensor:
+    # Use writable storage because torch.frombuffer warns on immutable bytes.
+    writable_value = bytearray(value)
     return (
-        torch.frombuffer(value, dtype=torch.uint8)
-        .clone()
+        torch.frombuffer(writable_value, dtype=torch.uint8)
         .to(device=device)
         .contiguous()
     )
@@ -608,7 +609,7 @@ def register_dynamoomni_nixl_connector() -> None:
         if OmniConnectorFactory is None:
             raise ImportError(str(_OMNI_FACTORY_IMPORT_ERROR))
 
-        connector_name = "NixlConnector"
+        connector_name = "DynamoOmniNixlConnector"
         if connector_name in OmniConnectorFactory.list_registered_connectors():
             logger.info(
                 "[DynamoOmniNixlConnector] %s already registered; skipping",

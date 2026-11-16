@@ -28,17 +28,38 @@ class CommitResponse(msgspec.Struct, tag="commit_response"):
     success: bool
 
 
+class CommitLayoutRequest(msgspec.Struct, tag="commit_layout_request"):
+    """Seal the allocation set: the shape is final and the pages outlive this session.
+
+    Unlike ``CommitRequest`` this makes no claim about the contents and does not
+    relinquish write access -- the caller is downgraded to RW_DATA and keeps writing.
+    """
+
+    pass
+
+
+class CommitLayoutResponse(msgspec.Struct, tag="commit_layout_response"):
+    success: bool
+    memory_layout_hash: str = ""
+    # What the caller holds now. Like HandshakeResponse, the server is the authority
+    # rather than the client assuming.
+    granted_lock_type: Optional[GrantedLockType] = None
+
+
 class GetLockStateRequest(msgspec.Struct, tag="get_lock_state_request"):
     pass
 
 
 class GetLockStateResponse(msgspec.Struct, tag="get_lock_state_response"):
-    state: str  # "EMPTY", "RW", "COMMITTED", "RO"
+    state: str  # "EMPTY", "RW", "LAYOUT_COMMITTED", "COMMITTED", "RO"
     has_rw_session: bool
     ro_session_count: int
     waiting_writers: int
     committed: bool
     is_ready: bool
+    # Implied by `committed`; reported separately so "held by a live writer" is
+    # distinguishable from "held for reattach".
+    layout_committed: bool = False
 
 
 class GetAllocationStateRequest(msgspec.Struct, tag="get_allocation_state_request"):
@@ -165,6 +186,7 @@ class GetRuntimeStateResponse(msgspec.Struct, tag="get_runtime_state_response"):
     is_ready: bool
     allocation_count: int = 0
     memory_layout_hash: str = ""
+    layout_committed: bool = False
 
 
 class GMSRuntimeEvent(msgspec.Struct):
@@ -185,6 +207,8 @@ Message = Union[
     HandshakeResponse,
     CommitRequest,
     CommitResponse,
+    CommitLayoutRequest,
+    CommitLayoutResponse,
     GetLockStateRequest,
     GetLockStateResponse,
     GetAllocationStateRequest,

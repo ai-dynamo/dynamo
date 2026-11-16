@@ -17,11 +17,12 @@ import (
 )
 
 const (
-	directiveIgnore    = "$ignore"
-	directiveExists    = "$exists"
-	directiveNotExists = "$notexists"
-	directiveStrict    = "$strict"
-	yamlStringTag      = "!!str"
+	directiveIgnore        = "$ignore"
+	directiveExists        = "$exists"
+	directiveNotExists     = "$notexists"
+	directiveStrict        = "$strict"
+	yamlStringTag          = "!!str"
+	variableValueTagPrefix = "!golden-variable-value:"
 )
 
 func matchNode(expected, actual *yaml.Node, fieldPath string) error {
@@ -97,6 +98,15 @@ func matchMapping(expected, actual *yaml.Node, fieldPath string) error {
 }
 
 func matchScalar(expected, actual *yaml.Node, fieldPath string) error {
+	if strings.HasPrefix(expected.Tag, variableValueTagPrefix) {
+		if actual.Tag != yamlStringTag {
+			return fmt.Errorf("%s: variable requires a string", fieldPath)
+		}
+		if expected.Value != actual.Value {
+			return fmt.Errorf("%s: value is %v, want %v", fieldPath, actual.Value, expected.Value)
+		}
+		return nil
+	}
 	if expected.Tag == yamlStringTag {
 		switch expected.Value {
 		case directiveIgnore, directiveExists:

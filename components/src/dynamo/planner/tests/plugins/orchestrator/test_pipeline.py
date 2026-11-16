@@ -155,6 +155,38 @@ async def test_propose_output_flows_as_reconcile_baseline(ctx_factory):
     outcome = await orchestrator.tick(PipelineContext(), {PREFILL: 3})
     assert outcome.execute_action == "apply"
     assert outcome.final_proposal.targets[0].replicas == 7
+    assert outcome.proposed_components == frozenset({PREFILL})
+
+
+@pytest.mark.asyncio
+async def test_proposed_component_mask_is_captured_before_later_stage_merges(
+    ctx_factory,
+):
+    ctx = ctx_factory()
+    orchestrator = ctx["orchestrator"]
+    orchestrator.register_internal(
+        plugin_id="propose_prefill",
+        plugin_type="propose",
+        priority=10,
+        instance=StubPlugin(propose=_propose_override(7, "prefill")),
+    )
+    orchestrator.register_internal(
+        plugin_id="reconcile_decode",
+        plugin_type="reconcile",
+        priority=10,
+        instance=StubPlugin(reconcile=_reconcile_override(5, "decode")),
+    )
+
+    outcome = await orchestrator.tick(
+        PipelineContext(),
+        {PREFILL: 3, ComponentKey(sub_component_type="decode"): 2},
+    )
+
+    assert outcome.execute_action == "apply"
+    assert outcome.proposed_components == frozenset({PREFILL})
+    assert outcome.targeted_components == frozenset(
+        {PREFILL, ComponentKey(sub_component_type="decode")}
+    )
 
 
 @pytest.mark.asyncio
@@ -489,6 +521,29 @@ async def test_whole_tick_timeout_returns_skip_tick_timeout(ctx_factory):
     assert outcome.execute_action == "skip_tick_timeout"
     assert "tick_timeout_total" in outcome.audit_events
     assert outcome.final_proposal is None
+
+
+@pytest.mark.asyncio
+async def test_no_tick_deadline_runs_a_slow_tick_to_completion(ctx_factory):
+    # ``None`` (replay): a tick longer than the 0.05 s deadline above runs to
+    # completion instead of becoming skip_tick_timeout.
+    import asyncio
+
+    ctx = ctx_factory(tick_max_duration_seconds=None)
+
+    async def slow_propose(req):
+        await asyncio.sleep(0.1)
+        return ProposeStageResponse(result_kind="accept", accept=AcceptResult())
+
+    ctx["orchestrator"].register_internal(
+        plugin_id="slow",
+        plugin_type="propose",
+        priority=10,
+        instance=StubPlugin(propose=slow_propose),
+    )
+    outcome = await ctx["orchestrator"].tick(PipelineContext(), {PREFILL: 3})
+    assert outcome.execute_action == "apply"
+    assert "tick_timeout_total" not in outcome.audit_events
 
 
 # ---------------------------------------------------------------------------

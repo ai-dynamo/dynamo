@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+{% set dgd = base.dynamographdeployment | only %}
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: {{ dgd.metadata.name }}
+spec:
+  services:
+  {% for name, service in dgd.spec.services.items() if service.componentType == "worker" %}
+    {{ name }}:
+      resources:
+        limits:
+          custom: &{{ name }}EfaResources
+            vpc.amazonaws.com/efa: "{{ service.resources.limits.gpu | int * values.EFAS_PER_GPU }}"
+        requests:
+          custom: *{{ name }}EfaResources
+  {% endfor %}

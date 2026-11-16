@@ -33,7 +33,7 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -45,11 +45,11 @@ var _ = Describe("DynamoModel Controller", func() {
 
 	var (
 		reconciler *DynamoModelReconciler
-		recorder   *record.FakeRecorder
+		recorder   *events.FakeRecorder
 	)
 
 	BeforeEach(func() {
-		recorder = record.NewFakeRecorder(100)
+		recorder = events.NewFakeRecorder(100)
 		reconciler = &DynamoModelReconciler{
 			Client:         k8sClient,
 			Recorder:       recorder,
@@ -66,10 +66,8 @@ var _ = Describe("DynamoModel Controller", func() {
 
 			// Create the DynamoModel
 			model := &v1alpha1.DynamoModel{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      modelName,
-					Namespace: namespace,
-				},
+				Name:      modelName,
+				Namespace: namespace,
 				Spec: v1alpha1.DynamoModelSpec{
 					ModelName:     modelName,
 					BaseModelName: baseModelName,
@@ -86,13 +84,11 @@ var _ = Describe("DynamoModel Controller", func() {
 			trueVal := true
 			modelHash := dynamo.HashModelName(baseModelName)
 			endpointSlice := &discoveryv1.EndpointSlice{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-lora-endpoints",
-					Namespace: namespace,
-					Labels: map[string]string{
-						consts.KubeLabelDynamoBaseModelHash: modelHash,
-						discoveryv1.LabelServiceName:        "test-service",
-					},
+				Name:      "test-lora-endpoints",
+				Namespace: namespace,
+				Labels: map[string]string{
+					consts.KubeLabelDynamoBaseModelHash: modelHash,
+					discoveryv1.LabelServiceName:        "test-service",
 				},
 				AddressType: discoveryv1.AddressTypeIPv4,
 				Endpoints: []discoveryv1.Endpoint{
@@ -128,10 +124,8 @@ var _ = Describe("DynamoModel Controller", func() {
 
 			// Reconcile
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      modelName,
-					Namespace: namespace,
-				},
+				Name:      modelName,
+				Namespace: namespace,
 			})
 			Expect(err).NotTo(HaveOccurred())
 
@@ -165,10 +159,8 @@ var _ = Describe("DynamoModel Controller", func() {
 
 			// Create the DynamoModel
 			model := &v1alpha1.DynamoModel{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      modelName,
-					Namespace: namespace,
-				},
+				Name:      modelName,
+				Namespace: namespace,
 				Spec: v1alpha1.DynamoModelSpec{
 					ModelName:     modelName,
 					BaseModelName: baseModelName,
@@ -182,12 +174,10 @@ var _ = Describe("DynamoModel Controller", func() {
 			trueVal := true
 			modelHash := dynamo.HashModelName(baseModelName)
 			endpointSlice := &discoveryv1.EndpointSlice{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mixed-endpoints",
-					Namespace: namespace,
-					Labels: map[string]string{
-						consts.KubeLabelDynamoBaseModelHash: modelHash,
-					},
+				Name:      "test-mixed-endpoints",
+				Namespace: namespace,
+				Labels: map[string]string{
+					consts.KubeLabelDynamoBaseModelHash: modelHash,
 				},
 				AddressType: discoveryv1.AddressTypeIPv4,
 				Endpoints: []discoveryv1.Endpoint{
@@ -230,10 +220,8 @@ var _ = Describe("DynamoModel Controller", func() {
 
 			// Reconcile
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      modelName,
-					Namespace: namespace,
-				},
+				Name:      modelName,
+				Namespace: namespace,
 			})
 			Expect(err).NotTo(HaveOccurred())
 
@@ -265,10 +253,8 @@ var _ = Describe("DynamoModel Controller", func() {
 
 			// Create the DynamoModel
 			model := &v1alpha1.DynamoModel{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      modelName,
-					Namespace: namespace,
-				},
+				Name:      modelName,
+				Namespace: namespace,
 				Spec: v1alpha1.DynamoModelSpec{
 					ModelName:     modelName,
 					BaseModelName: baseModelName,
@@ -282,12 +268,10 @@ var _ = Describe("DynamoModel Controller", func() {
 			trueVal := true
 			modelHash := dynamo.HashModelName(baseModelName)
 			endpointSlice := &discoveryv1.EndpointSlice{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-base-endpoints",
-					Namespace: namespace,
-					Labels: map[string]string{
-						consts.KubeLabelDynamoBaseModelHash: modelHash,
-					},
+				Name:      "test-base-endpoints",
+				Namespace: namespace,
+				Labels: map[string]string{
+					consts.KubeLabelDynamoBaseModelHash: modelHash,
 				},
 				AddressType: discoveryv1.AddressTypeIPv4,
 				Endpoints: []discoveryv1.Endpoint{
@@ -313,10 +297,8 @@ var _ = Describe("DynamoModel Controller", func() {
 
 			// Reconcile
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      modelName,
-					Namespace: namespace,
-				},
+				Name:      modelName,
+				Namespace: namespace,
 			})
 			Expect(err).NotTo(HaveOccurred())
 
@@ -341,10 +323,8 @@ var _ = Describe("DynamoModel Controller", func() {
 
 			// Create the DynamoModel
 			model := &v1alpha1.DynamoModel{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      modelName,
-					Namespace: namespace,
-				},
+				Name:      modelName,
+				Namespace: namespace,
 				Spec: v1alpha1.DynamoModelSpec{
 					ModelName:     modelName,
 					BaseModelName: baseModelName,
@@ -356,10 +336,8 @@ var _ = Describe("DynamoModel Controller", func() {
 
 			// Reconcile (no endpoints created)
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      modelName,
-					Namespace: namespace,
-				},
+				Name:      modelName,
+				Namespace: namespace,
 			})
 			Expect(err).NotTo(HaveOccurred())
 

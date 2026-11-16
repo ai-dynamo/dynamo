@@ -546,7 +546,7 @@ pub trait Continuation: Send + Sync + std::fmt::Debug + std::any::Any {
     /// This method is called when a task fails and a continuation is provided.
     /// The implementation can perform retry logic, fallback operations,
     /// transformations, or any other follow-up action.
-    /// Returns the result in a type-erased Box<dyn Any> for flexibility.
+    /// Returns the result in a type-erased `Box<dyn Any>` for flexibility.
     async fn execute(
         &self,
         cancel_token: CancellationToken,
@@ -2136,7 +2136,7 @@ impl TaskTracker {
     ///
     /// The task will be wrapped with scheduling and error handling logic,
     /// then executed according to the configured policies. For tasks that
-    /// need to inspect cancellation tokens, use [`spawn_cancellable`] instead.
+    /// need to inspect cancellation tokens, use `spawn_cancellable` instead.
     ///
     /// # Arguments
     /// * `future` - The async task to execute

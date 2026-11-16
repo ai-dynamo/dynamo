@@ -86,6 +86,41 @@ class SglangHealthCheckPayload(HealthCheckPayload):
 
         super().__init__()
 
+    def to_dict(self) -> dict[str, Any]:
+        payload = dict(super().to_dict())
+        payload[HEALTH_CHECK_KEY] = True
+        return payload
+
+
+class SglangEmbeddingHealthCheckPayload(HealthCheckPayload):
+    """Send an embedding request through the worker's normal encode path."""
+
+    def __init__(
+        self,
+        model_name: str,
+        engine: Optional[sgl.Engine] = None,
+        use_text_input: bool = False,
+    ) -> None:
+        self.default_payload = {
+            "model": model_name,
+            "input": (
+                "Test" if use_text_input else [_get_bos_token_id_from_engine(engine)]
+            ),
+        }
+        super().__init__()
+
+
+class SglangRerankHealthCheckPayload(HealthCheckPayload):
+    """Probe the cross-encoder path with a single query/document pair."""
+
+    def __init__(self, model: str) -> None:
+        self.default_payload = {
+            "model": model,
+            "query": "health check",
+            "documents": ["health check"],
+        }
+        super().__init__()
+
 
 class SglangDisaggHealthCheckPayload(HealthCheckPayload):
     """SGLang-specific health check payload for PD-disaggregated mode.

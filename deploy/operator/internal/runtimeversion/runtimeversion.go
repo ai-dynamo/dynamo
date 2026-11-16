@@ -6,6 +6,7 @@
 package runtimeversion
 
 import (
+	"cmp"
 	"fmt"
 	"regexp"
 	"strings"
@@ -15,7 +16,7 @@ import (
 
 var imageTagPattern = regexp.MustCompile(`^[vV]?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$`)
 
-// Version identifies a runtime compatibility version by semver core.
+// Version identifies a runtime version by semver core.
 type Version struct {
 	Major uint64
 	Minor uint64
@@ -26,7 +27,18 @@ func (v Version) String() string {
 	return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
 }
 
-// Parse returns the compatibility version represented by an explicit override.
+// Compare returns -1, 0, or 1 when v's normalized compatibility core is less
+// than, equal to, or greater than other. Image-tag prerelease and build
+// suffixes are intentionally excluded by ParseImageVersion before comparison.
+func (v Version) Compare(other Version) int {
+	return cmp.Or(
+		cmp.Compare(v.Major, other.Major),
+		cmp.Compare(v.Minor, other.Minor),
+		cmp.Compare(v.Patch, other.Patch),
+	)
+}
+
+// Parse returns the runtime version represented by an explicit override.
 func Parse(value string) (Version, error) {
 	version, err := semver.StrictNewVersion(value)
 	if err != nil {
@@ -35,7 +47,7 @@ func Parse(value string) (Version, error) {
 	return fromSemver(version), nil
 }
 
-// ParseImageVersion returns a normalized compatibility version from an image tag.
+// ParseImageVersion returns a normalized runtime version from an image tag.
 func ParseImageVersion(image string) (Version, error) {
 	tag := imageTag(image)
 	if tag == "" {
@@ -50,6 +62,15 @@ func ParseImageVersion(image string) (Version, error) {
 		return Version{}, fmt.Errorf("image tag %q must contain a semantic version such as \"1.1.0\"", tag)
 	}
 	return fromSemver(version), nil
+}
+
+// Resolve returns the override or the version derived from the image tag.
+func Resolve(image, override string) (Version, error) {
+	if override != "" {
+		return Parse(override)
+	}
+
+	return ParseImageVersion(image)
 }
 
 func fromSemver(version *semver.Version) Version {

@@ -12,6 +12,9 @@ from Hugging Face Hub or through S3-compatible storage backed by MinIO.
 
 The examples cover direct Hugging Face Hub downloads and an HF-to-MinIO synchronization workflow.
 
+The DynamoGraphDeployment (DGD) manifests use `nvidia.com/v1beta1`. `DynamoModel` does not have a
+`v1beta1` API and continues to use `nvidia.com/v1alpha1`.
+
 ## Prerequisites
 
 - Kubernetes cluster with GPU support
@@ -29,6 +32,9 @@ The examples cover direct Hugging Face Hub downloads and an HF-to-MinIO synchron
 | `minio-secret.yaml` | Kubernetes secret for MinIO credentials |
 | `sync-lora-job.yaml` | Job to download a LoRA from Hugging Face Hub and upload it to MinIO |
 | `lora-model.yaml` | DynamoModel CRD for registering LoRA adapters |
+
+The Intel XPU deployment manifest is
+[`../xpu/agg_lora_xpu_dra.yaml`](../xpu/agg_lora_xpu_dra.yaml).
 
 ## Deploy from Hugging Face Hub
 
@@ -186,18 +192,39 @@ env:
 
 #### Update the Image
 
-Edit `v1beta1/agg_lora.yaml` to use your container image:
+Edit `agg_lora.yaml` to use your container image:
 
 ```bash
 # Using yq to update the image
 export FRAMEWORK_RUNTIME_IMAGE=your-registry/your-image:tag
-yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then .image = env(FRAMEWORK_RUNTIME_IMAGE) else . end)' v1beta1/agg_lora.yaml > v1beta1/agg_lora_updated.yaml
+yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then .image = env(FRAMEWORK_RUNTIME_IMAGE) else . end)' agg_lora.yaml > agg_lora_updated.yaml
 ```
 
 #### Deploy the LoRA-Enabled vLLM Graph
 
 ```bash
+export DEPLOYMENT_NAME=vllm-agg-lora
 kubectl apply -f agg_lora_updated.yaml -n ${NAMESPACE}
+```
+
+#### Deploy on Intel XPU with DRA
+
+Use `../xpu/agg_lora_xpu_dra.yaml` instead of
+`agg_lora_updated.yaml` to deploy on Intel XPU. Before applying the
+manifest, complete Steps 1-4 above to create `hf-token-secret` and
+`minio-secret`, deploy MinIO, and upload the adapter.
+
+Use Kubernetes v1.34 or newer with DRA API v1 and the Intel resource drivers
+for Kubernetes installed. Replace the Frontend
+`nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag` image and the worker
+`nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag` image with images available
+to the cluster. See the
+[Intel XPU Deployment Examples](../xpu/README.md) for the XPU image build
+commands and additional requirements.
+
+```bash
+export DEPLOYMENT_NAME=vllm-agg-lora-xpu-dra
+kubectl apply -f ../xpu/agg_lora_xpu_dra.yaml -n ${NAMESPACE}
 ```
 
 #### Verify the Deployment
@@ -207,7 +234,8 @@ kubectl apply -f agg_lora_updated.yaml -n ${NAMESPACE}
 kubectl get pods -n ${NAMESPACE}
 
 # Watch worker logs
-kubectl logs -f deployment/vllm-agg-lora-vllmdecode-worker -n ${NAMESPACE}
+kubectl logs -f -n "${NAMESPACE}" \
+  -l "nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT_NAME},nvidia.com/dynamo-component=worker"
 ```
 
 Wait for the worker to show "Application startup complete".
@@ -266,8 +294,20 @@ kubectl delete -f agg_lora_hf.yaml -n ${NAMESPACE}
 
 ### Remove vLLM Deployment
 
+Delete the manifest that you applied:
+
 ```bash
-kubectl delete -f agg_lora.yaml -n ${NAMESPACE}
+# Standard v1beta1 deployment
+kubectl delete -f agg_lora_updated.yaml -n ${NAMESPACE}
+
+# Intel XPU deployment
+kubectl delete -f ../xpu/agg_lora_xpu_dra.yaml -n ${NAMESPACE}
+```
+
+### Remove DynamoModel CRD
+
+```bash
+kubectl delete -f lora-model.yaml -n ${NAMESPACE}
 ```
 
 ### Remove Sync Job
@@ -293,11 +333,18 @@ kubectl delete secret hf-token-secret -n ${NAMESPACE}
 
 ## Troubleshooting
 
+Set `DEPLOYMENT_NAME` to `vllm-agg-lora` for the standard deployment or
+`vllm-agg-lora-xpu-dra` for the Intel XPU deployment before running these
+commands.
+
 ### LoRA Fails to Load
 
 1. **Check MinIO connectivity from worker**:
    ```bash
-   kubectl exec -it deployment/vllm-agg-lora-vllmdecode-worker -n ${NAMESPACE} -- \
+   WORKER_POD=$(kubectl get pods -n "${NAMESPACE}" \
+     -l "nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT_NAME},nvidia.com/dynamo-component=worker" \
+     -o jsonpath='{.items[0].metadata.name}')
+   kubectl exec -it -n "${NAMESPACE}" "${WORKER_POD}" -- \
      curl http://minio:9000/minio/health/live
    ```
 
@@ -309,7 +356,8 @@ kubectl delete secret hf-token-secret -n ${NAMESPACE}
 
 3. **Check worker logs**:
    ```bash
-   kubectl logs deployment/vllm-agg-lora-vllmdecode-worker -n ${NAMESPACE}
+   kubectl logs -n "${NAMESPACE}" \
+     -l "nvidia.com/dynamo-graph-deployment-name=${DEPLOYMENT_NAME},nvidia.com/dynamo-component=worker"
    ```
 
 ### Sync Job Fails

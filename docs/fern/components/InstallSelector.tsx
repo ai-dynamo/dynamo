@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Hardware-aware local install selector. Unsupported Intel XPU combinations
+ * Hardware-aware install selector. Unsupported Intel XPU combinations
  * stay visible but disabled so readers can understand the support boundary.
  */
 "use client";
@@ -122,6 +122,7 @@ export function InstallSelector({ hardware = "all" }: { hardware?: "all" | "nvid
   const entries = INSTALL_DATA[backend][channel];
   const entry = entries[versionIndex] ?? entries[0];
   const command = entry?.commands[form] ?? entry?.commands.container ?? "";
+  const unavailable = !entry;
 
   function chooseHardware(next: Hardware) {
     setSelectedHardware(next);
@@ -158,21 +159,28 @@ export function InstallSelector({ hardware = "all" }: { hardware?: "all" | "nvid
   const title = channel === "stable"
     ? `Dynamo ${entry?.dynamo}`
     : channel === "nightly"
-      ? "Latest nightly"
+      ? entry?.latest
+        ? "Latest nightly"
+        : `Nightly ${form === "wheel" ? entry?.dynamo : entry?.backend_version}`
       : "Build Dynamo from source";
   const role = channel === "stable"
     ? "Latest stable release that supports this version"
     : channel === "nightly"
-      ? "Latest nightly build"
+      ? entry?.latest
+        ? "Latest nightly build"
+        : form === "wheel"
+          ? "Pinned nightly wheel build"
+          : "Pinned nightly container build"
       : "Intel XPU local runtime";
   const hardwareLabel = activeHardware === "nvidia" ? "NVIDIA GPU" : "Intel XPU";
+  const versionRowLabel = `${INSTALL_DATA[backend].label} version`;
 
   return (
     <>
       <style>{LOCAL_SELECTOR_CSS}</style>
       <section className="lqs-panel" aria-label="Dynamo install selector">
         <div className="lqs-head">
-          <h3>Choose your local build</h3>
+          <h3>Choose your build</h3>
           <p>Unavailable combinations remain visible to show the current support boundary.</p>
         </div>
 
@@ -205,25 +213,35 @@ export function InstallSelector({ hardware = "all" }: { hardware?: "all" | "nvid
 
         {entry && (
           <div className="lqs-row">
-            <span className="lqs-label">{INSTALL_DATA[backend].label} version</span>
-            <div className="lqs-options" role="group" aria-label={`${INSTALL_DATA[backend].label} version`}>
-              {entries.map((version, index) => (
-                <button
-                  key={`${version.backend_version}-${version.dynamo ?? index}`}
-                  type="button"
-                  className="lqs-chip"
-                  aria-pressed={versionIndex === index}
-                  onClick={() => {
-                    setVersionIndex(index);
-                    setForm("container");
-                  }}
-                >
-                  {version.backend_version}
-                  <span className="lqs-chip-sub">
-                    {version.source ? "from main" : version.latest ? "latest nightly" : `Dynamo ${version.dynamo}`}
-                  </span>
-                </button>
-              ))}
+            <span className="lqs-label">{versionRowLabel}</span>
+            <div className="lqs-options" role="group" aria-label={versionRowLabel}>
+              {entries.map((version, index) => {
+                const hasContainer = Boolean(version.commands.container);
+                const hasWheel = Boolean(version.commands.wheel);
+                const displayVersion = version.backend_version;
+                const displayMeta = version.source
+                  ? "from main"
+                  : channel === "nightly"
+                    ? version.latest
+                      ? "latest nightly"
+                      : version.date ?? "nightly wheel"
+                    : `Dynamo ${version.dynamo}`;
+                return (
+                  <button
+                    key={`${version.backend_version}-${version.dynamo ?? index}`}
+                    type="button"
+                    className="lqs-chip"
+                    aria-pressed={versionIndex === index}
+                    onClick={() => {
+                      setVersionIndex(index);
+                      setForm(hasContainer ? "container" : hasWheel ? "wheel" : "container");
+                    }}
+                  >
+                    {displayVersion}
+                    <span className="lqs-chip-sub">{displayMeta}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}
@@ -237,27 +255,33 @@ export function InstallSelector({ hardware = "all" }: { hardware?: "all" | "nvid
           disabledTitle={(option) => disabledReason("form", activeHardware, option.label)}
         />
 
-        {entry && (
-          <div className="lqs-output">
-            <div className={`lqs-rec lqs-rec--${channel}`}>
-              <div className="lqs-eyebrow">{role}</div>
-              <div className="lqs-title">
-                <span className="lqs-badge">{badge}</span>
-                {title}
-              </div>
-              <div className="lqs-support">
-                {hardwareLabel} · {INSTALL_DATA[backend].label} {entry.backend_version}
-              </div>
+        <div className="lqs-output">
+          <div className={`lqs-rec lqs-rec--${channel}`}>
+            <div className="lqs-eyebrow">{unavailable ? "Not currently available" : role}</div>
+            <div className="lqs-title">
+              <span className="lqs-badge">{badge}</span>
+              {unavailable ? "No matching build" : title}
             </div>
-            <div className="lqs-command">
-              <button type="button" className="lqs-copy" onClick={copyCommand}>
-                {copyLabel}
-              </button>
-              <pre>{command}</pre>
-              {entry.note && <p className="lqs-hint">{entry.note}</p>}
+            <div className="lqs-support">
+              {unavailable
+                ? `No ${INSTALL_DATA[backend].label} ${badge.toLowerCase()} build is currently published for this combination.`
+                : `${hardwareLabel} · ${INSTALL_DATA[backend].label} ${entry?.backend_version}`}
             </div>
           </div>
-        )}
+          <div className="lqs-command">
+            {unavailable ? (
+              <p className="lqs-hint">No install command is available for this selection.</p>
+            ) : (
+              <>
+                <button type="button" className="lqs-copy" onClick={copyCommand}>
+                  {copyLabel}
+                </button>
+                <pre>{command}</pre>
+                {entry?.note && <p className="lqs-hint">{entry.note}</p>}
+              </>
+            )}
+          </div>
+        </div>
       </section>
     </>
   );

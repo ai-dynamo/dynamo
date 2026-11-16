@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any
 
 from dynamo.llm import KvRouterConfig
-from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 
 from .engine_args import (
@@ -34,12 +33,12 @@ def _run_replay_for_state(
     *,
     state: DenseReplayState,
     workload: WorkloadSpec,
-    prefill_engine_args: MockEngineArgs,
-    decode_engine_args: MockEngineArgs,
+    prefill_engine_args: dict[str, Any],
+    decode_engine_args: dict[str, Any],
     router_config: KvRouterConfig | None,
 ) -> dict[str, Any]:
     if workload.isTraceBased:
-        return run_trace_replay(
+        report = run_trace_replay(
             Path(workload.traceFile),
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
@@ -53,9 +52,12 @@ def _run_replay_for_state(
             trace_format=workload.traceFormat,
             trace_shared_prefix_ratio=workload.traceSharedPrefixRatio,
             trace_num_prefix_groups=workload.traceNumPrefixGroups,
+            capture_per_request=False,
+            capture_planner_details=False,
         )
+        return report.summary
 
-    return run_synthetic_trace_replay(
+    report = run_synthetic_trace_replay(
         workload.isl,
         workload.osl,
         int(workload.requestCount),
@@ -76,18 +78,21 @@ def _run_replay_for_state(
         shared_prefix_ratio=workload.sharedPrefixRatio,
         num_prefix_groups=workload.numPrefixGroups,
         inter_turn_delay_ms=workload.interTurnDelayMs,
+        capture_per_request=False,
+        capture_planner_details=False,
     )
+    return report.summary
 
 
 def _run_agg_replay_for_state(
     *,
     state: DenseAggReplayState,
     workload: WorkloadSpec,
-    engine_args: MockEngineArgs,
+    engine_args: dict[str, Any],
     router_config: KvRouterConfig | None,
 ) -> dict[str, Any]:
     if workload.isTraceBased:
-        return run_trace_replay(
+        report = run_trace_replay(
             Path(workload.traceFile),
             extra_engine_args=engine_args,
             router_config=router_config,
@@ -99,9 +104,12 @@ def _run_agg_replay_for_state(
             trace_format=workload.traceFormat,
             trace_shared_prefix_ratio=workload.traceSharedPrefixRatio,
             trace_num_prefix_groups=workload.traceNumPrefixGroups,
+            capture_per_request=False,
+            capture_planner_details=False,
         )
+        return report.summary
 
-    return run_synthetic_trace_replay(
+    report = run_synthetic_trace_replay(
         workload.isl,
         workload.osl,
         int(workload.requestCount),
@@ -120,7 +128,10 @@ def _run_agg_replay_for_state(
         shared_prefix_ratio=workload.sharedPrefixRatio,
         num_prefix_groups=workload.numPrefixGroups,
         inter_turn_delay_ms=workload.interTurnDelayMs,
+        capture_per_request=False,
+        capture_planner_details=False,
     )
+    return report.summary
 
 
 def _feasibility(
