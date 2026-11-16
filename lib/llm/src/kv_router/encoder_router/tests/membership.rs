@@ -4,6 +4,64 @@
 use super::*;
 
 #[tokio::test]
+async fn runtime_lora_media_is_rejected_before_encode_but_text_remains_passthrough() {
+    if isolated(concat!(
+        module_path!(),
+        "::runtime_lora_media_is_rejected_before_encode_but_text_remains_passthrough"
+    ))
+    .await
+    {
+        return;
+    }
+    let mut fixture = Fixture::new().await;
+    let downstream = Arc::new(CaptureEngine::default());
+    let mut request = multimodal_request();
+    request.routing_mut().lora_resolution_version =
+        Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION);
+    let before = fixture.encode_calls.load(Ordering::SeqCst);
+    let result = fixture
+        .router
+        .generate(SingleIn::new(request.clone()), downstream.clone())
+        .await;
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("runtime LoRA media must not dispatch to an encoder"),
+    };
+    assert!(dynamo_runtime::error::match_error_chain(
+        error.as_ref(),
+        &[dynamo_runtime::error::ErrorType::InvalidArgument],
+        &[],
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains("runtime_lora_encoder_unsupported")
+    );
+    assert_eq!(fixture.encode_calls.load(Ordering::SeqCst), before);
+    assert!(downstream.request.lock().unwrap().is_none());
+    assert!(fixture.released.try_recv().is_err());
+
+    request.multi_modal_data = None;
+    let response = fixture
+        .router
+        .generate(SingleIn::new(request.clone()), downstream.clone())
+        .await
+        .unwrap();
+    let _: Vec<_> = response.collect().await;
+    let text = downstream.request.lock().unwrap().take().unwrap();
+    assert_eq!(
+        serde_json::to_value(text).unwrap(),
+        serde_json::to_value(request).unwrap()
+    );
+    assert_eq!(fixture.encode_calls.load(Ordering::SeqCst), before);
+    assert!(fixture.released.try_recv().is_err());
+
+    assert_eq!(encoded_worker(&fixture.router).await, Some(fixture.ids[0]));
+    assert_eq!(fixture.encode_calls.load(Ordering::SeqCst), before + 1);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn committed_encoder_admission_survives_membership_changes_and_endpoint_reuse() {
     if isolated(concat!(
         module_path!(),

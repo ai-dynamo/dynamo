@@ -13,13 +13,16 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 
 use dynamo_kv_router::config::{KvRouterConfig, try_kv_router_config_from_dynamo_env};
-use dynamo_kv_router::protocols::RoutingConstraints;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::services::selection::{
-    PromptRequest, RouterPluginRegistry, SelectAndReserveRequest as CoreSelectAndReserveRequest,
-    SelectionError, SelectionService, SelectionServiceBuilder,
-    warn_for_unserved_worker_selection_policies,
+    SelectionService, SelectionServiceBuilder, warn_for_unserved_worker_selection_policies,
 };
-use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, WorkerType};
+use dynamo_router_protocol::WorkerType;
+use dynamo_router_protocol::identity::DEFAULT_ROUTING_GROUP;
+use dynamo_scheduler::host::{
+    PromptRequest, RoutingConstraints, SelectAndReserveRequest as CoreSelectAndReserveRequest,
+    SelectionError,
+};
 use kube::Client;
 use tokio_util::sync::CancellationToken;
 
@@ -258,19 +261,13 @@ impl Drop for Selector {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_ID_BYTES;
+    use dynamo_session_affinity::host::MAX_SESSION_AFFINITY_ID_BYTES;
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use dynamo_kv_router::WorkerSelectionPolicyError;
-    use dynamo_kv_router::plugins::worker_selection::{
-        WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
-        WorkerSelectionPolicyFactory,
-    };
-    use dynamo_kv_router::services::selection::{
-        CatalogReconciler, WorkerRequest, WorkerSelectionPolicyParameters,
-    };
+    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_scheduler::host::{CatalogReconciler, WorkerRequest};
 
     use super::*;
 
@@ -371,7 +368,7 @@ models:
     /// non-zero `block_size`, and a well-formed KV-event endpoint per dp_rank.
     /// The KV-event endpoint is only a `tcp://` address string — the core's ZMQ
     /// SUB listener connects lazily and never needs a live publisher (see the
-    /// `WorkerRegistry` register tests in `lib/kv-router`), so no network infra is
+    /// `WorkerRegistry` register tests in `lib/router/kv-router`), so no network infra is
     /// required. Queueing is disabled under the default router policy, so
     /// `max_num_batched_tokens` is not required here.
     fn schedulable_registration(worker_id: u64) -> WorkerRequest {
@@ -814,7 +811,7 @@ worker_selection:
     /// resolve directly; any other name fails with a 400 scheduler error.
     #[tokio::test]
     async fn unknown_policy_class_is_rejected() {
-        use dynamo_kv_router::scheduling::KvSchedulerError;
+        use dynamo_scheduler::host::KvSchedulerError;
 
         let is_unknown = |error: &SelectionError, expected: &str| {
             matches!(

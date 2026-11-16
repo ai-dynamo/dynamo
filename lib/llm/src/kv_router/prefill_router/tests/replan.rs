@@ -249,7 +249,9 @@ async fn replan_failures_preserve_cause_and_outer_retry_ownership() {
         }
         *fixture.dispatch.prefill_output.lock() = Some(LLMEngineOutput {
             token_ids: vec![7],
-            disaggregated_params: Some(serde_json::json!({"ctx_request_id": "prefill-request"})),
+            disaggregated_params: Some(Box::new(
+                serde_json::json!({"ctx_request_id": "prefill-request"}),
+            )),
             ..Default::default()
         });
         let mut request = inference_request();

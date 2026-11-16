@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_kv_router::conditional_disagg::ConditionalDisaggDecisionInput;
 use dynamo_runtime::pipeline::SingleIn;
+use dynamo_worker_selection::host::ConditionalDisaggDecisionInput;
 
 use super::PrefillRouter;
 use crate::kv_router::routing_host::{RoutePlan, RoutePlanSignals, is_cancelled};

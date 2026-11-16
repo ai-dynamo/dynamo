@@ -34,7 +34,7 @@ use crate::proto::envoy::service::ext_proc::v3::{
 };
 use crate::proto::envoy::r#type::v3::StatusCode;
 use crate::tokio_runtime::{self, TaskKind};
-use dynamo_kv_router::zmq_wire::DYNAMO_CACHE_SALT_PREFIX;
+use dynamo_kv_events::zmq_wire::DYNAMO_CACHE_SALT_PREFIX;
 use serde_json::value::RawValue;
 
 /// State machine phases for the ext_proc stream.

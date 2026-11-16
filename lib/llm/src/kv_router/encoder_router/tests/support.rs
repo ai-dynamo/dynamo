@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use std::sync::atomic::AtomicUsize;
 
 pub(super) fn stream_of(
     items: Vec<Annotated<LLMEngineOutput>>,
@@ -107,6 +108,7 @@ struct EncodeWorker(
     u64,
     tokio::sync::mpsc::UnboundedSender<(u64, PreprocessedRequest)>,
     Arc<tokio::sync::Semaphore>,
+    Arc<AtomicUsize>,
 );
 
 #[async_trait]
@@ -139,6 +141,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 request.context(),
             ));
         }
+        self.3.fetch_add(1, Ordering::SeqCst);
         if matches!(request.sampling_options.n, Some(2 | 4 | 5 | 6))
             || request
                 .multi_modal_data
@@ -173,7 +176,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 .unwrap()
                 .clone(),
         );
-        output.extra_args = Some(json!({ENCODER_RESULT_RELEASE_SUPPORTED: true}));
+        output.extra_args = Some(Box::new(json!({ENCODER_RESULT_RELEASE_SUPPORTED: true})));
         let mut frames = vec![Annotated::from_data(output)];
         if request
             .extra_args
@@ -249,6 +252,7 @@ pub(super) struct Fixture {
     pub(super) admissions: watch::Sender<Vec<u64>>,
     pub(super) released: tokio::sync::mpsc::UnboundedReceiver<(u64, PreprocessedRequest)>,
     pub(super) release_gate: Arc<tokio::sync::Semaphore>,
+    pub(super) encode_calls: Arc<AtomicUsize>,
     card: Arc<ModelDeploymentCard>,
     runtime: Runtime,
     workers: Vec<dynamo_runtime::component::StartedEndpoint>,
@@ -276,6 +280,7 @@ impl Fixture {
         let mut runtimes = Vec::new();
         let (releases, released) = tokio::sync::mpsc::unbounded_channel();
         let release_gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let encode_calls = Arc::new(AtomicUsize::new(0));
         for _ in 0..3 {
             let drt = DistributedRuntime::new(runtime.clone(), config())
                 .await
@@ -293,6 +298,7 @@ impl Fixture {
                         drt.connection_id(),
                         releases.clone(),
                         release_gate.clone(),
+                        encode_calls.clone(),
                     )))
                     .unwrap(),
                 )
@@ -334,6 +340,7 @@ impl Fixture {
             admissions,
             released,
             release_gate,
+            encode_calls,
             card: Arc::new(card),
             runtime,
             workers,

@@ -10,10 +10,6 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use dynamo_kv_router::{
-    PrefillLoadEstimator, conditional_disagg::ConditionalDisaggPolicy,
-    config::RouterConfigOverride, protocols::RoutingConstraints,
-};
 use dynamo_runtime::{
     error::{DynamoError, ErrorClass, ErrorType, match_error_chain},
     pipeline::{
@@ -22,6 +18,8 @@ use dynamo_runtime::{
     },
     protocols::{EndpointId, annotated::Annotated},
 };
+use dynamo_scheduler::host::{PrefillLoadEstimator, RouterConfigOverride, RoutingConstraints};
+use dynamo_worker_selection::host::ConditionalDisaggPolicy;
 use futures::stream::{self, StreamExt};
 
 use crate::{
@@ -507,6 +505,8 @@ impl
         if query_only {
             return next.generate(context.map(|_| req)).await;
         }
+
+        crate::routing_policy::check_stage(&req, crate::routing_policy::ExecutionStage::Prefill)?;
 
         let session_affinity = context
             .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
@@ -1023,8 +1023,9 @@ mod tests {
     mod replan;
 
     use super::*;
-    use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
+    use dynamo_kv_router::config::KvRouterConfig;
     use dynamo_runtime::{engine::AsyncEngine, pipeline::Error};
+    use dynamo_scheduler::host::RouterConfigOverride;
     use futures::StreamExt;
     use std::{
         collections::{HashMap, HashSet},
@@ -1056,10 +1057,10 @@ mod tests {
             assert!(request.get_annotation_value("query_instance_id").is_some());
             self.requests.fetch_add(1, Ordering::Relaxed);
             let output = Annotated::from_data(LLMEngineOutput {
-                routing_data: Some(RoutingData {
+                routing_data: Some(Box::new(RoutingData {
                     token_ids: Some(request.token_ids.as_ref().clone()),
                     ..Default::default()
-                }),
+                })),
                 ..Default::default()
             });
             Ok(ResponseStream::new(
@@ -1691,9 +1692,9 @@ mod tests {
             let mut outputs = Vec::new();
             if after_handoff {
                 outputs.push(Annotated::from_data(LLMEngineOutput {
-                    disaggregated_params: Some(serde_json::json!({
+                    disaggregated_params: Some(Box::new(serde_json::json!({
                         "bootstrap_host": "prefill", "bootstrap_port": 1, "bootstrap_room": 7,
-                    })),
+                    }))),
                     ..Default::default()
                 }));
             }
@@ -1977,7 +1978,7 @@ mod tests {
         fn classify(
             &mut self,
             request: dynamo_kv_router::plugins::request_classifier::ClassifyRequest,
-            _: dynamo_kv_router::plugins::worker_selection::WorkerCandidates<'_>,
+            _: &dyn dynamo_kv_router::plugins::request_classifier::WorkerView,
         ) -> dynamo_kv_router::plugins::request_classifier::ClassifyFuture {
             self.classifications.fetch_add(1, Ordering::Relaxed);
             Box::pin(async move { Ok(request) })
@@ -2673,10 +2674,10 @@ mod tests {
         let output = Annotated::from_data(LLMEngineOutput {
             token_ids: vec![2],
             finish_reason: Some(FinishReason::EoS),
-            disaggregated_params: Some(serde_json::json!({
+            disaggregated_params: Some(Box::new(serde_json::json!({
                 "ctx_request_id": null,
                 "request_type": "context_only",
-            })),
+            }))),
             ..Default::default()
         });
 

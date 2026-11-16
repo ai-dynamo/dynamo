@@ -698,7 +698,7 @@ async fn decode_request_replays_the_prefill_session() {
     let handoff = collect(&prefill, agent_request.clone())
         .await
         .into_iter()
-        .find_map(|output| output.disaggregated_params)
+        .find_map(|output| output.disaggregated_params.map(|params| *params))
         .expect("prefill handoff");
 
     // Phase 2: decode replays it.
@@ -1913,7 +1913,7 @@ async fn image_encoder_and_consumer_exchange_opaque_handoff_over_grpc() {
         let outputs = collect(&encoder, input.clone()).await;
         assert_eq!(outputs.len(), 1);
         assert!(outputs[0].token_ids.is_empty());
-        input.encoder_result = outputs[0].encoder_result.clone();
+        input.encoder_result = outputs[0].encoder_result.as_deref().cloned();
 
         let consumer_service = FakeTrtllm::default();
         *consumer_service.encoder_role.lock().await = Some("consume".into());
@@ -1961,7 +1961,8 @@ async fn prefill_consumes_encoder_reference_and_decode_uses_only_kv_over_grpc() 
         add_images(&mut input, ["https://example.com/image.png"]);
         input.encoder_result = collect(&encoder, input.clone()).await[0]
             .encoder_result
-            .clone();
+            .as_deref()
+            .cloned();
 
         let prefill_service = FakeTrtllm::default();
         *prefill_service.encoder_role.lock().await = Some("consume".into());
@@ -1985,7 +1986,8 @@ async fn prefill_consumes_encoder_reference_and_decode_uses_only_kv_over_grpc() 
                 .last()
                 .unwrap()
                 .disaggregated_params
-                .clone()
+                .as_deref()
+                .cloned()
                 .expect("prefill KV handoff"),
             prompt_tokens_details: None,
         });

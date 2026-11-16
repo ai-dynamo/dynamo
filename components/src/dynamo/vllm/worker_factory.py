@@ -226,6 +226,16 @@ def _validate_benchmark_rank_payload(data: dict, path: Path) -> str:
     status = data.get("status", "complete" if data.get("valid") is True else "failed")
 
     def invalid(reason: str) -> RuntimeError:
+        skipped_entries = data.get("skipped_points")
+        if isinstance(skipped_entries, list) and any(
+            isinstance(entry, dict)
+            and entry.get("reason") == "fake_prefix_cache_validation_failed"
+            for entry in skipped_entries
+        ):
+            reason += (
+                " (synthetic prefix blocks never hit the prefix cache on this "
+                "KV-cache layout; set DYN_BENCH_PREFILL_REAL_SEED=on)"
+            )
         return RuntimeError(
             f"Self-benchmark produced incomplete results at {path}: {reason}; "
             f"coverage={data.get('coverage')} "
@@ -2269,6 +2279,13 @@ class WorkerFactory:
             endpoint=generate_endpoint,
             embedding_worker=True,
         )
+        # Chat-style embedding input loads media in this worker. Use dynamo's
+        # media connector, as the frontend does, so DYN_MM_ALLOW_REMOTE_URLS
+        # applies here too: vLLM's default ``http`` connector fetches any URL.
+        # Set it before the engine starts, since vLLM can cache env reads.
+        os.environ["VLLM_MEDIA_CONNECTOR"] = "dynamo"
+        import dynamo.common.multimodal.media_connector  # noqa: F401
+
         (
             engine_client,
             vllm_config,

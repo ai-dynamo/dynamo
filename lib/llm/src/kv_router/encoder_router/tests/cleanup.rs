@@ -349,10 +349,10 @@ async fn release_support_is_negotiated_per_handoff() {
         cleanup.request.is_none(),
         "ordinary backends must not receive release requests"
     );
-    terminal.extra_args = Some(json!({ENCODER_RESULT_RELEASE_SUPPORTED: false}));
+    terminal.extra_args = Some(Box::new(json!({ENCODER_RESULT_RELEASE_SUPPORTED: false})));
     cleanup.observe("model", &terminal).unwrap();
     assert!(cleanup.request.is_none());
-    terminal.extra_args = Some(json!({ENCODER_RESULT_RELEASE_SUPPORTED: true}));
+    terminal.extra_args = Some(Box::new(json!({ENCODER_RESULT_RELEASE_SUPPORTED: true})));
     cleanup.observe("model", &terminal).unwrap();
     assert_eq!(cleanup.request.take().unwrap().encoder_result, Some(opaque));
     fixture.shutdown().await;

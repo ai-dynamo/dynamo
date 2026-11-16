@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::scheduling::RequestLifecycle;
 use dynamo_runtime::pipeline::{Error, SingleIn};
+use dynamo_scheduler::host::RequestLifecycle;
 use parking_lot::Mutex;
 
 use crate::protocols::common::{llm_backend::PreprocessedRequest, preprocessor::owned_abort_error};

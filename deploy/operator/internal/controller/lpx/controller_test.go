@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"capnproto.org/go/capnp/v3"
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -22,6 +24,8 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
+	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/testfixture"
 	manifestcapnpv2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -4766,4 +4770,71 @@ func mustLPXInputRevision(t *testing.T, dgd *v1beta1.DynamoGraphDeployment) stri
 	revision, err := dynamo.LPXInputRevision(dgd, "")
 	require.NoError(t, err)
 	return revision
+}
+
+// newUnitsTestRegistry publishes matching legacy/units shapes. Each entry keeps its own content identity for real registry acquisition.
+func newUnitsTestRegistry(t *testing.T) lpx.ModelRegistry {
+	t.Helper()
+	root := t.TempDir()
+	writeLPXCheckpointTestBuild(t, root, "legacy", deploymentcapnpv1.CompilationMode_lpuOnly, checkpointTestModel, checkpointTestRevision)
+	writeLPXCheckpointTestBuild(t, root, "units", deploymentcapnpv1.CompilationMode_lpuOnly, checkpointTestModel, checkpointTestRevision)
+	path := filepath.Join(root, "units", "deployment.v1.capnp.bin")
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	message, err := capnp.Unmarshal(data)
+	require.NoError(t, err)
+	deployment, err := deploymentcapnpv1.ReadRootDeployment(message)
+	require.NoError(t, err)
+	writable, _ := capnp.NewSingleSegmentMessage(nil)
+	require.NoError(t, writable.SetRoot(deployment.ToPtr()))
+	message = writable
+	deployment, err = deploymentcapnpv1.ReadRootDeployment(message)
+	require.NoError(t, err)
+	config, err := deployment.Config()
+	require.NoError(t, err)
+	testfixture.WriteUnits(t, config, []testfixture.Unit{{
+		Reservations: []testfixture.Reservation{{IDs: []uint32{7}, Nodes: 2}, {IDs: []uint32{8}, Nodes: 2}},
+		Connectors:   []testfixture.Connector{{}},
+	}})
+	data, err = message.Marshal()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+	registry, err := lpx.NewModelRegistry((&url.URL{Scheme: lpx.BuildSchemeFile, Path: root}).String(), nil)
+	require.NoError(t, err)
+	return registry
+}
+
+func removeUnitsTestConfigMounts(component *v1beta1.DynamoComponentDeploymentSharedSpec) {
+	for i := range component.Roles {
+		spec := &component.Roles[i].PodTemplate.Spec
+		for _, containers := range [][]corev1.Container{spec.Containers, spec.InitContainers} {
+			for j := range containers {
+				containers[j].VolumeMounts = slices.DeleteFunc(containers[j].VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == "config" })
+			}
+		}
+	}
+}
+
+func TestUnitsIndependentLegacyWorkload(t *testing.T) {
+	t.Log("Resolve independent legacy and units workloads within the same graph")
+	registry := newUnitsTestRegistry(t)
+	dgd := loadTestDGD(t, lpx.PipelineSingle, "legacy")
+	second := dgd.Spec.Components[0].DeepCopy()
+	second.ComponentName = "units-engine"
+	second.LPX.BuildID = "units"
+	removeUnitsTestConfigMounts(second)
+	dgd.Spec.Components = append(dgd.Spec.Components, *second)
+	child := newLPXTestDeployment(t, dgd)
+	r := newLPXTestReconciler(t, registry, child, dgd)
+	_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
+	require.NoError(t, err)
+	pcs, err := getPodCliqueSet(t.Context(), r.Client, child)
+	require.NoError(t, err)
+	require.NotNil(t, pcs)
+	require.Len(t, pcs.Spec.Template.PodCliqueScalingGroupConfigs, 2)
+	t.Log("Publish configuration only for the independent legacy workload")
+	maps := &corev1.ConfigMapList{}
+	require.NoError(t, r.List(t.Context(), maps))
+	require.Len(t, maps.Items, 1)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(child), child))
 }

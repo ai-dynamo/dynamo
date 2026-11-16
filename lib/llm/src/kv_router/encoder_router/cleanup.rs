@@ -39,7 +39,7 @@ impl EncoderResultCleanup {
         }
         let Some(result) = output
             .encoder_result
-            .as_ref()
+            .as_deref()
             .filter(|value| value.is_object())
         else {
             return Ok(());

@@ -613,11 +613,11 @@ fn encode_ready_is_a_tokenless_terminal_with_an_opaque_handoff() {
     assert_eq!(result.finish_reason, Some(FinishReason::Stop));
     assert!(result.token_ids.is_empty());
     assert_eq!(
-        result.extra_args.unwrap(),
+        *result.extra_args.unwrap(),
         serde_json::json!({"encoder_result_release": true})
     );
     assert_eq!(
-        result.encoder_result.unwrap(),
+        *result.encoder_result.unwrap(),
         serde_json::json!({"transfer_backend": NIXL_ENCODER_BACKEND, "opaque_state": "AQID"})
     );
     let mut with_usage = response.clone();

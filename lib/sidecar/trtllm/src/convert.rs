@@ -21,7 +21,7 @@ use dynamo_backend_common::{
     MultimodalData, PreprocessedRequest, PromptTokensDetails, StopReason, TopLogprob, usage,
 };
 
-use dynamo_kv_router::zmq_wire::IMAGE_ROUTING_UUID_PREFIX;
+use dynamo_kv_events::zmq_wire::IMAGE_ROUTING_UUID_PREFIX;
 use dynamo_llm::protocols::common::preprocessor::ENCODER_RESULT_RELEASE_SUPPORTED;
 
 use crate::client::{self, ModelLimits};
@@ -1028,8 +1028,9 @@ impl ResponseState {
                 let result = encoder_handoff::to_result(handoff)
                     .map_err(|error| client::protocol_error(error.to_string()))?;
                 let mut output = LLMEngineOutput::encode_terminal(result);
-                output.extra_args =
-                    Some(serde_json::json!({ENCODER_RESULT_RELEASE_SUPPORTED: true}));
+                output.extra_args = Some(Box::new(
+                    serde_json::json!({ENCODER_RESULT_RELEASE_SUPPORTED: true}),
+                ));
                 Ok(Some(output))
             }
             pb::generate_response::Event::Token(token) => self.convert_token(token),
@@ -1082,7 +1083,7 @@ impl ResponseState {
             // which the frontend forwards to the decode leg and which cannot be
             // reconstructed client-side.
             completion_usage: Some(prefill_usage(reported, self.prompt_tokens)),
-            disaggregated_params: Some(disagg::session_to_json(session)?),
+            disaggregated_params: Some(Box::new(disagg::session_to_json(session)?)),
             ..Default::default()
         })
     }

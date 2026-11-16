@@ -348,7 +348,8 @@ async fn run(disaggregated: bool) {
         assert_eq!(encoded[0].finish_reason, Some(FinishReason::Stop));
         let handoff = encoded[0]
             .encoder_result
-            .clone()
+            .as_deref()
+            .cloned()
             .expect("EncodeReady must carry its opaque reference");
         assert_eq!(handoff["transfer_backend"], NIXL_BACKEND);
         assert!(
@@ -394,7 +395,8 @@ async fn run(disaggregated: bool) {
             request.prefill_result = Some(PrefillResult {
                 disaggregated_params: terminal
                     .disaggregated_params
-                    .clone()
+                    .as_deref()
+                    .cloned()
                     .expect("PrefillReady must carry the native KV session"),
                 prompt_tokens_details: usage.prompt_tokens_details.clone(),
             });
