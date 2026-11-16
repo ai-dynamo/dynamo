@@ -34,6 +34,7 @@ MSG_CONTAINS_STATUS_ERROR = "This message contains a 415 status error."
 MSG_CONTAINS_INVALID_ARGUMENT = "This message contains an invalid argument."
 MSG_CONTAINS_INTERNAL_ERROR = "This message contains an internal server error."
 MSG_CONTAINS_ROUTED_ERROR = "This message contains a routed worker's error."
+MSG_CONTAINS_ROUTED_CANCELLED = "This message contains a routed cancellation."
 MSG_SETS_RESPONSE_HEADER = "This message sets a response header."
 
 
@@ -88,6 +89,10 @@ class MockHttpEngine:
             # A worker's HttpError(503) as a routed engine raises it; escaping
             # the engine keeps the worker's status.
             _raise_routed_http_error(503, MSG_CONTAINS_ROUTED_ERROR)
+        elif MSG_CONTAINS_ROUTED_CANCELLED.lower() in user_message.lower():
+            # A routed engine raises a cancelled request as `Cancelled`, which
+            # the chat processors re-raise; the client gets 499, not 500.
+            _raise_routed_http_error(499, MSG_CONTAINS_ROUTED_CANCELLED)
 
         # Stream a mock response
         created = int(time.time())
@@ -278,6 +283,12 @@ HTTP_ERROR_CASES = (
         503,
         "Internal server error",
         "Service Unavailable",
+    ),
+    (
+        MSG_CONTAINS_ROUTED_CANCELLED,
+        499,
+        "Request cancelled",
+        "Client Closed Request",
     ),
 )
 
