@@ -47,7 +47,7 @@ Python components, and accepted only `0` or `1`; any other value fails at import
 | Layer | Annotates | Requires |
 |---|---|---|
 | Rust runtime | Frontend HTTP handling, preprocessing, routing, transport, worker ingress and egress, the Python bridge | The `nvtx` Cargo feature, which the published `ai-dynamo-runtime` wheels and container images include |
-| Python components | Multimodal loading, encoding, and embedding transfer in the frontend and in the vLLM and SGLang workers | The `nvtx` Python package: `pip install "ai-dynamo[profiling]"`, already in the container images |
+| Python components | Multimodal loading, encoding, and embedding transfer in the frontend and in the vLLM and SGLang workers | The `nvtx` Python package: `pip install nvtx`, already in the container images |
 
 The published wheels and images have compiled the Rust markers in since v1.6.0, so they need no
 rebuild. With `DYN_NVTX` unset, the markers add almost no cost; see
