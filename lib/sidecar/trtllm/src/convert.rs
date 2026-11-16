@@ -54,8 +54,8 @@ pub(crate) fn build_generate_request_with_routing(
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(&request, mode, allow_dp_rank)?;
     let request_has_media = has_media(&request);
-    let encoder = encoder_options(&request, limits, mode)?;
     let media = media(&mut request, limits, mode)?;
+    let encoder = encoder_options(&request, limits, mode, request_has_media)?;
 
     // A prefill worker only needs the context phase; TensorRT-LLM still requires
     // a positive budget, and one token is what the context phase produces.
@@ -328,6 +328,17 @@ fn media(
     limits: Option<ModelLimits>,
     mode: DisaggregationMode,
 ) -> Result<Vec<pb::MediaItem>, DynamoError> {
+    if (mode.is_encode() || request.encoder_result.is_some())
+        && request.multi_modal_data.as_ref().is_some_and(|media| {
+            media
+                .iter()
+                .any(|(kind, items)| kind != IMAGE_KEY && !items.is_empty())
+        })
+    {
+        return Err(client::invalid_argument(
+            "encoder handoffs support image media only",
+        ));
+    }
     reject_media_override("mm_processor_kwargs", request.mm_processor_kwargs.as_ref())?;
     reject_media_override("media_io_kwargs", request.media_io_kwargs.as_ref())?;
 
@@ -1371,21 +1382,11 @@ fn encoder_options(
     request: &PreprocessedRequest,
     limits: Option<ModelLimits>,
     mode: DisaggregationMode,
+    request_has_media: bool,
 ) -> Result<Option<pb::EncoderOptions>, DynamoError> {
-    if (mode.is_encode() || request.encoder_result.is_some())
-        && request.multi_modal_data.as_ref().is_some_and(|media| {
-            media
-                .iter()
-                .any(|(kind, items)| kind != IMAGE_KEY && !items.is_empty())
-        })
-    {
-        return Err(client::invalid_argument(
-            "encoder handoffs support image media only",
-        ));
-    }
     if mode.is_encode() {
         if !limits.is_some_and(|limits| limits.encoder_only)
-            || !has_media(request)
+            || !request_has_media
             || request.encoder_result.is_some()
         {
             return Err(client::invalid_argument(
@@ -1398,7 +1399,7 @@ fn encoder_options(
     }
     let Some(result) = request.encoder_result.as_ref() else {
         if limits.is_some_and(|limits| limits.requires_encoder_handoff)
-            && has_media(request)
+            && request_has_media
             && !(mode.is_decode() && request.prefill_result.is_some())
         {
             return Err(client::engine_error(
@@ -1415,7 +1416,7 @@ fn encoder_options(
         mode,
         DisaggregationMode::Aggregated | DisaggregationMode::Prefill
     ) || !limits.is_some_and(|limits| limits.encoder_consumer)
-        || !has_media(request)
+        || !request_has_media
     {
         return Err(client::invalid_argument(
             "encoder_result requires an aggregated or prefill worker and a capable consumer",

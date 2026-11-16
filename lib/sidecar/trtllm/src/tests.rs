@@ -1025,7 +1025,13 @@ async fn encoder_cancelled_terminal_releases_unobserved_export() {
             *service.encoder_role.lock().await = Some("encode".into());
             let server = FakeServer::start(service).await;
             let encoder = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Encode);
-            encoder.start(0).await.unwrap();
+            let config = encoder.start(0).await.unwrap();
+            assert_eq!(
+                config
+                    .runtime_data
+                    .get(dynamo_llm::local_model::runtime_config::ENCODER_SUPPORTED_MODALITIES),
+                Some(&json!(["image_url"]))
+            );
             let mut req = request();
             add_images(&mut req, ["https://example.com/image.png"]);
             let context = dynamo_backend_common::testing::mock_context();

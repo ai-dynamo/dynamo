@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result};
 use tokio::sync::{oneshot, watch};
@@ -16,18 +15,8 @@ use dynamo_runtime::{
     prelude::DistributedRuntimeProvider,
 };
 
-use super::{PrefillBinding, PrefillBuildContext, PrefillLifecycleState, PrefillRouter};
+use super::{PrefillBinding, PrefillBuildContext, PrefillRouter};
 
-/// Routing state of a prefill hop, resolved atomically by [`PrefillRouter::activation_snapshot`].
-pub(super) enum ActivationSnapshot {
-    Active(Arc<PrefillBinding>),
-    /// A target is set but its binding is not published yet: fail closed.
-    Pending,
-    /// No target; retain its policy for handoffs that still require prefill.
-    Untargeted {
-        encoder_result_requires_prefill: bool,
-    },
-}
 use crate::{
     discovery::{LoadThresholdHandle, ModelManager, WorkerSetTarget},
     kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext, SelectionPolicySource},
@@ -35,6 +24,56 @@ use crate::{
     protocols::common::timing::WORKER_TYPE_PREFILL,
     session_affinity::{SessionAffinityMode, create_affinity_coordinator},
 };
+
+#[derive(Clone)]
+pub(super) enum PrefillActivation {
+    Active(Arc<PrefillBinding>),
+    Pending {
+        encoder_result_requires_prefill: bool,
+    },
+    Untargeted {
+        retired_binding: Option<Arc<PrefillBinding>>,
+        encoder_result_requires_prefill: bool,
+    },
+}
+
+impl Default for PrefillActivation {
+    fn default() -> Self {
+        Self::Untargeted {
+            retired_binding: None,
+            encoder_result_requires_prefill: false,
+        }
+    }
+}
+
+impl PrefillActivation {
+    pub(super) fn is_active(&self) -> bool {
+        matches!(self, Self::Active(_))
+    }
+
+    pub(super) fn binding(&self) -> Option<&Arc<PrefillBinding>> {
+        match self {
+            Self::Active(binding) => Some(binding),
+            Self::Untargeted {
+                retired_binding, ..
+            } => retired_binding.as_ref(),
+            Self::Pending { .. } => None,
+        }
+    }
+
+    fn encoder_result_requires_prefill(&self) -> bool {
+        match self {
+            Self::Active(binding) => binding.encoder_result_requires_prefill,
+            Self::Pending {
+                encoder_result_requires_prefill,
+            }
+            | Self::Untargeted {
+                encoder_result_requires_prefill,
+                ..
+            } => *encoder_result_requires_prefill,
+        }
+    }
+}
 
 /// How the prefill worker set wants to be routed to, resolved from its cards.
 #[derive(Debug)]
@@ -169,8 +208,7 @@ impl PrefillRouter {
         session_affinity_mode: SessionAffinityMode,
     ) -> Arc<Self> {
         Arc::new(Self {
-            binding: arc_swap::ArcSwapOption::empty(),
-            encoder_result_requires_prefill: AtomicBool::new(false),
+            activation: arc_swap::ArcSwap::from_pointee(PrefillActivation::default()),
             target: parking_lot::Mutex::new(None),
             target_tx: None,
             decode_routing_host: std::sync::OnceLock::new(),
@@ -188,7 +226,6 @@ impl PrefillRouter {
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
             task_guard: None,
-            lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
             #[cfg(test)]
             activation_task_state: Arc::new(()),
         })
@@ -224,8 +261,7 @@ impl PrefillRouter {
             .and_then(|c| c.conditional_disagg_decode_busy_threshold);
 
         let router = Arc::new(Self {
-            binding: arc_swap::ArcSwapOption::empty(),
-            encoder_result_requires_prefill: AtomicBool::new(false),
+            activation: arc_swap::ArcSwap::from_pointee(PrefillActivation::default()),
             target: parking_lot::Mutex::new(None),
             target_tx: Some(target_tx),
             decode_routing_host: std::sync::OnceLock::new(),
@@ -243,7 +279,6 @@ impl PrefillRouter {
             model_name,
             namespace,
             task_guard: task_guard.clone(),
-            lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
             #[cfg(test)]
             activation_task_state: Arc::new(()),
         });
@@ -503,11 +538,10 @@ impl PrefillRouter {
             let Some(router_ref) = router.upgrade() else {
                 return;
             };
-            let reuses_binding = router_ref
-                .binding
-                .load_full()
-                .is_some_and(|binding| binding.target_id == target_id)
-                && router_ref.lifecycle_state() == PrefillLifecycleState::Active;
+            let activation = router_ref.activation.load();
+            let reuses_binding = matches!(&**activation, PrefillActivation::Active(binding)
+                if binding.target_id == target_id);
+            drop(activation);
             if reuses_binding {
                 drop(router_ref);
                 tokio::select! {
@@ -564,10 +598,9 @@ impl PrefillRouter {
                     if current_target.as_ref() != Some(&target_id) {
                         continue;
                     }
-                    router_ref.binding.store(Some(Arc::new(binding)));
                     router_ref
-                        .lifecycle
-                        .store(PrefillLifecycleState::Active as u8, Ordering::Release);
+                        .activation
+                        .store(Arc::new(PrefillActivation::Active(Arc::new(binding))));
                     drop(current_target);
                     tracing::info!(
                         model_name = %router_ref.model_name,
@@ -610,58 +643,54 @@ impl PrefillRouter {
         if *current == target_id {
             return;
         }
-        let binding = self.binding.load_full();
-        if let Some(binding) = &binding {
-            self.encoder_result_requires_prefill
-                .store(binding.encoder_result_requires_prefill, Ordering::Relaxed);
-        }
-        *current = target_id.clone();
-        let reuses_binding = target_id.is_some()
-            && binding.is_some_and(|binding| Some(&binding.target_id) == target_id.as_ref());
-        let lifecycle = if target.is_none() {
-            PrefillLifecycleState::Unavailable
-        } else if reuses_binding {
-            PrefillLifecycleState::Active
-        } else {
-            self.binding.store(None);
-            PrefillLifecycleState::Pending
+        let previous = self.activation.load();
+        let binding = previous.binding().cloned();
+        let encoder_result_requires_prefill = match &target {
+            Some(WorkerSetTarget::Committed(target)) => {
+                ModelManager::encoder_result_requires_prefill(&target.card)
+            }
+            _ => previous.encoder_result_requires_prefill(),
         };
-        self.lifecycle.store(lifecycle as u8, Ordering::Release);
+        *current = target_id.clone();
+        let activation = match (target_id, binding) {
+            (None, retired_binding) => PrefillActivation::Untargeted {
+                retired_binding,
+                encoder_result_requires_prefill,
+            },
+            (Some(target_id), Some(binding)) if binding.target_id == target_id => {
+                PrefillActivation::Active(binding)
+            }
+            _ => PrefillActivation::Pending {
+                encoder_result_requires_prefill,
+            },
+        };
+        self.activation.store(Arc::new(activation));
         if let Some(target_tx) = &self.target_tx {
             target_tx.send_replace(target);
         }
     }
 
-    pub(super) fn lifecycle_state(&self) -> PrefillLifecycleState {
-        PrefillLifecycleState::from_atomic(self.lifecycle.load(Ordering::Acquire))
+    pub(super) fn binding(&self) -> Option<Arc<PrefillBinding>> {
+        self.activation.load().binding().cloned()
     }
 
-    /// One consistent view of target, lifecycle and binding, read under the
-    /// target lock. Both publishers (`set_target` and the build loop) store the
-    /// binding and lifecycle while holding that lock, so a routing decision made
-    /// from this snapshot cannot interleave with a Pending->Active transition the
-    /// way two separate lock-free reads can.
-    pub(super) fn activation_snapshot(&self) -> ActivationSnapshot {
-        let target = self.target.lock();
-        let binding = self.binding.load_full();
-        let encoder_result_requires_prefill = binding.as_ref().map_or_else(
-            || self.encoder_result_requires_prefill.load(Ordering::Relaxed),
-            |binding| binding.encoder_result_requires_prefill,
-        );
-        let untargeted = || ActivationSnapshot::Untargeted {
-            encoder_result_requires_prefill,
-        };
-        match self.lifecycle_state() {
-            PrefillLifecycleState::Active => match binding {
-                Some(binding) => ActivationSnapshot::Active(binding),
-                // The binding is stored before `Active` under this lock, so this
-                // arm is not expected; resolve by target rather than panicking.
-                None if target.is_some() => ActivationSnapshot::Pending,
-                None => untargeted(),
+    // Clone the state so an ArcSwap read guard never crosses an await.
+    pub(super) fn activation_snapshot(&self) -> PrefillActivation {
+        (**self.activation.load()).clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_test_binding(&self, binding: Option<Arc<PrefillBinding>>) {
+        let activation = match binding {
+            Some(binding) => PrefillActivation::Active(binding),
+            None => PrefillActivation::Pending {
+                encoder_result_requires_prefill: self
+                    .activation
+                    .load()
+                    .encoder_result_requires_prefill(),
             },
-            PrefillLifecycleState::Pending if target.is_some() => ActivationSnapshot::Pending,
-            PrefillLifecycleState::Pending | PrefillLifecycleState::Unavailable => untargeted(),
-        }
+        };
+        self.activation.store(Arc::new(activation));
     }
 
     #[cfg(test)]
@@ -1025,7 +1054,7 @@ mod tests {
                 .available_worker_ids_for("other-group", &endpoint.id())
                 .is_none()
         );
-        let retired = router.binding.load_full().unwrap();
+        let retired = router.binding().unwrap();
         let chooser = retired
             .router
             .kv_router_if_enabled()
@@ -1129,8 +1158,7 @@ mod tests {
         );
         assert_eq!(
             router
-                .binding
-                .load_full()
+                .binding()
                 .unwrap()
                 .router
                 .kv_router_if_enabled()
@@ -1150,6 +1178,32 @@ mod tests {
             .expect("retired prefill admission must fail promptly")
             .is_err()
         );
+
+        for kill in [false, true] {
+            let mut input = request();
+            input.encoder_result = Some(serde_json::json!({"opaque": "legacy-producer"}));
+            input.annotations.push("query_instance_id:".into());
+            let input = SingleIn::new(input);
+            if kill {
+                input.context().kill();
+            } else {
+                input.context().stop_generating();
+            }
+            let mut response = tokio::time::timeout(
+                Duration::from_secs(5),
+                router.generate(input, Arc::new(PrefillWorker(99))),
+            )
+            .await
+            .unwrap()
+            .expect("producer without release support still needs consumption");
+            let output = response.next().await.unwrap().data.unwrap();
+            assert_eq!(
+                output.token_ids,
+                vec![2],
+                "Prefill must consume the cancelled handoff"
+            );
+            assert!(response.next().await.is_none());
+        }
 
         drop(router);
         for worker in workers {
@@ -1330,7 +1384,7 @@ mod tests {
             admitted_ids,
         })));
         tokio::time::timeout(Duration::from_secs(5), async {
-            while router.lifecycle_state() != PrefillLifecycleState::Active {
+            while !router.activation_snapshot().is_active() {
                 tokio::task::yield_now().await;
             }
         })
@@ -1648,7 +1702,7 @@ mod tests {
             admitted_ids,
         })));
         tokio::time::timeout(Duration::from_secs(5), async {
-            while router.lifecycle_state() != PrefillLifecycleState::Active {
+            while !router.activation_snapshot().is_active() {
                 tokio::task::yield_now().await;
             }
         })

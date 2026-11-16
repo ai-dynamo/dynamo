@@ -23,12 +23,8 @@ pub(super) struct ConditionalDisaggDecodeDecision {
 impl ConditionalDisaggDecodeDecision {
     pub(super) fn allows_encoder_bypass(&self, router: &PrefillRouter) -> bool {
         self.encoder_binding.as_ref().is_none_or(|expected| {
-            router.lifecycle_state() == super::PrefillLifecycleState::Active
-                && router
-                    .binding
-                    .load()
-                    .as_ref()
-                    .is_some_and(|current| Arc::ptr_eq(current, expected))
+            matches!(router.activation_snapshot(), super::PrefillActivation::Active(current)
+                if Arc::ptr_eq(&current, expected))
         })
     }
 }
@@ -49,13 +45,18 @@ impl PrefillRouter {
         request: &SingleIn<PreprocessedRequest>,
         request_id: &str,
     ) -> Result<Option<ConditionalDisaggDecodeDecision>> {
-        let encoder_binding = if request.encoder_result.is_some() {
+        let has_raw_media = !request.staged_kv_cleanup
+            && request
+                .multi_modal_data
+                .as_ref()
+                .is_some_and(|media| media.values().any(|items| !items.is_empty()));
+        let encoder_binding = if request.encoder_result.is_some() || has_raw_media {
             let Some(binding) = self
-                .binding
-                .load_full()
+                .binding()
                 .filter(|binding| !binding.encoder_result_requires_prefill)
             else {
-                // Some decoders cannot consume encoder handoffs, even with optional encoding.
+                // Keep raw-media fallback on the admitted Prefill path too. Its
+                // handoff policy does not establish Decode's inline-MM support.
                 return Ok(None);
             };
             Some(binding)
@@ -185,7 +186,7 @@ impl PrefillRouter {
         let Some(threshold) = self.conditional_disagg_prefill_busy_threshold else {
             return Ok(None);
         };
-        let Some(binding) = self.binding.load_full() else {
+        let Some(binding) = self.binding() else {
             return Ok(None);
         };
         Ok(Some(

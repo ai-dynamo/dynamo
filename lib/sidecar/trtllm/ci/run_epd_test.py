@@ -12,8 +12,11 @@ import subprocess
 import sys
 
 import run_image_test as image_test
+from repo_imports import add_repo_root
 
-from tests.utils.managed_process import ManagedProcess
+add_repo_root()
+
+from tests.utils.managed_process import ManagedProcess  # noqa: E402
 
 BACKEND = "trtllm-nixl-encoder-v1"
 FATAL_LOG_MESSAGES = (

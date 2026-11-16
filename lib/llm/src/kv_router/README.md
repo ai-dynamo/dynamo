@@ -62,7 +62,7 @@ What a KV request does in `RoutingHost::generate` (call order):
    (if dispatch fails under hard affinity and the worker is gone, invalidate the binding)
 ```
 
-A query-only request (`query_instance_id`) skips step 2, only looks up the session's target in
+On the KV plane, a query-only request (`query_instance_id`) skips step 2, only looks up the session's target in
 step 3 without acquiring it, selects with `Query` admission in step 4 so nothing is booked, and
 returns the selection instead of steps 5–7.
 
@@ -96,6 +96,12 @@ Discovery builds the pipeline once per Decode or Aggregated worker set
 disabled one that always passes requests through. Prefill worker sets, and Encode worker sets
 that serve no model type of their own, build no pipeline: they are reached only through these
 hops.
+
+Encode workers can advertise `encoder_supported_modalities` using Dynamo media keys such as
+`image_url`. Unsupported optional requests stay inline as a whole. This is an optimization
+hint; required requests are validated by the selected producer. Missing metadata preserves
+legacy encoding. Failed Encode or downstream attempts try bounded disposal of unconsumed
+exports before retry or inline fallback. Successful consumption adds no cleanup wait.
 
 ## Per-stage roles
 
@@ -136,11 +142,19 @@ hops.
 
 An encoder handoff to a prefill set declaring `encoder_result_requires_prefill` always takes
 remote prefill, even when that worker can encode inline. `requires_encoder_result` also
-retains this restriction. Text requests and handoffs without this policy retain conditional bypass. If a binding
-changes after conditional admission, the abandoned decode booking is released and its classifier
-lifecycle is parked for the later decode selection. A late untargeted fallback restores the
-request's prior phase before forwarding. Cancelled handoffs fail before starting an
-independently cancellable prefill; staged-KV cleanup still reaches its worker.
+retains this restriction. Raw media left after optional Encode failure follows the same restriction:
+the Prefill handoff policy does not establish that Decode can encode inline. This conservatively
+disables bypass for those media requests; text and compatible releasable handoffs can still bypass.
+When a Prefill pool is active, handoffs without producer release support always take remote
+Prefill, including cache-hot requests. Their independent consumption survives caller cancellation;
+paired KV cancellation support does not enable disposal of another producer's encoder allocation.
+If a binding changes after conditional admission, the abandoned decode booking is released and
+its classifier lifecycle is parked for the later decode selection. With migration disabled, a
+context-local owner completes it when Prefill alone finishes, or aborts it on error/cancellation;
+actual Decode takes ownership once. This does not enable migration for the request. Genuine
+migration retries keep their outer lifecycle owner. A late untargeted fallback
+restores the request's prior phase before forwarding. Releasable handoffs can fail before Prefill
+on caller cancellation; staged-KV cleanup always reaches its worker.
 
 A failed decision falls back to remote prefill, except for `Cancelled` and `InvalidArgument`
 errors, which return to the client.
@@ -223,7 +237,9 @@ newer booking that reused the same request id and worker.
   Error/cancelled terminals and uncertain failures retain cleanup, which runs in the
   background with a fresh controller and a two-second deadline, without delaying response
   delivery or forcing a cancelled request into its consumer. It never reselects another encoder
-  or carries generation sampling constraints or KV state. Producer release is idempotent after
+  or carries generation sampling constraints or KV state. The resolved transport is retained at
+  Encode dispatch, so a live producer remains reachable after leaving admission or discovery;
+  an old allocation is never redirected to a replacement worker. Producer release is idempotent after
   consumption. Backends that do not advertise this extension retain their existing behavior.
 
 ## Prefill activation
@@ -246,6 +262,10 @@ Encoder routing policy also comes from the committed consumer card. A consumer d
 activating, or returns an error. The encoder worker validates its supported modalities before
 allocation. Text requests bypass the encoder. Decode pipelines inherit this requirement from
 committed Prefill groups even when no unique target is available. Consumers without the declaration retain
-optional inline fallback. Dynamo's native TensorRT-LLM handoff requires producers to advertise
+optional inline fallback, rechecking the current requirement after Encode failure. The strictest
+requirement in the selected checksum cohort defines each serving generation, including member
+updates and removals. A stricter member cannot remain admitted to a retained permissive pipeline;
+canonical MDC checksums and metadata cache identities are unchanged.
+Dynamo's native TensorRT-LLM handoff requires producers to advertise
 NIXL as their single backend; consumers may list additional compatible backends.
 Shared-safetensors helpers are outside this integration.

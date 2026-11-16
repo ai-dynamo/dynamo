@@ -793,6 +793,26 @@ impl PreprocessedRequest {
         PreprocessedRequestBuilder::default()
     }
 
+    /// A release control carries a handoff and no inference input.
+    pub fn is_encoder_result_release(&self) -> bool {
+        self.extra_args
+            .as_ref()
+            .and_then(|args| args.get(RELEASE_ENCODER_RESULT))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && self
+                .encoder_result
+                .as_ref()
+                .is_some_and(serde_json::Value::is_object)
+            && self.token_ids.is_empty()
+            && self.prompt_embeds.is_none()
+            && self
+                .multi_modal_data
+                .as_ref()
+                .is_none_or(|media| media.is_empty())
+            && self.prefill_result.is_none()
+    }
+
     /// Get mutable access to routing hints, creating default if None
     pub fn routing_mut(&mut self) -> &mut RoutingHints {
         self.routing.get_or_insert_with(RoutingHints::default)

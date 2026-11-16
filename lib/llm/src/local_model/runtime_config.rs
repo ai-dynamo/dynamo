@@ -37,6 +37,9 @@ pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
 /// Runtime-data key indicating speculative decoding is configured by a backend.
 pub const SPEC_DECODE_RUNTIME_KEY: &str = "spec_decode";
 
+/// Optional-hop media hint using Dynamo media keys; required requests retain producer validation.
+pub const ENCODER_SUPPORTED_MODALITIES: &str = "encoder_supported_modalities";
+
 /// Runtime-data key indicating that a backend expects tool structural tags to
 /// exclude reasoning and manages grammar activation around reasoning itself.
 ///

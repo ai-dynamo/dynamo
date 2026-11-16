@@ -1,27 +1,28 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use futures::StreamExt;
 use tracing::Instrument;
 
-use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
+use dynamo_runtime::{
+    pipeline::{CleanupRoute, SingleIn},
+    protocols::maybe_error::MaybeError,
+};
 
 use crate::protocols::common::{
     llm_backend::{LLMEngineOutput, PreprocessedRequest},
     preprocessor::{ENCODER_RESULT_RELEASE_SUPPORTED, RELEASE_ENCODER_RESULT},
 };
 
-use super::EncodePushRouter;
+use crate::types::Annotated;
 
 /// Owns the producer allocation until downstream consumption finishes. The
 /// payload remains engine-opaque; cleanup is an idempotent producer operation.
 pub(super) struct EncoderResultCleanup {
-    pub(super) router: Arc<EncodePushRouter>,
-    pub(super) worker_id: u64,
+    pub(super) route: CleanupRoute<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub(super) request: Option<PreprocessedRequest>,
 }
 
@@ -61,17 +62,23 @@ impl EncoderResultCleanup {
         Ok(())
     }
 
+    pub(super) async fn release(&mut self) {
+        if let Some(request) = &self.request {
+            // Retain ownership across the await so cancellation still schedules cleanup.
+            Self::release_request(self.route.clone(), request.clone()).await;
+            self.request = None;
+        }
+    }
+
     async fn release_request(
-        router: Arc<EncodePushRouter>,
-        worker_id: u64,
+        route: CleanupRoute<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         request: PreprocessedRequest,
     ) {
+        let worker_id = route.worker_id();
         let release = async {
             // A fresh controller lets cleanup run after caller cancellation.
             // Resource cleanup must reach its producer despite inference overload.
-            let mut stream = router
-                .direct_cleanup(SingleIn::new(request), worker_id)
-                .await?;
+            let mut stream = route.dispatch(SingleIn::new(request)).await?;
             let mut terminal = false;
             while let Some(item) = stream.next().await {
                 if let Some(error) = item.err() {
@@ -100,10 +107,10 @@ impl Drop for EncoderResultCleanup {
         let Some(request) = self.request.take() else {
             return;
         };
-        let router = self.router.clone();
-        let worker_id = self.worker_id;
+        let route = self.route.clone();
+        let worker_id = route.worker_id();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(Self::release_request(router, worker_id, request).in_current_span());
+            runtime.spawn(Self::release_request(route, request).in_current_span());
         } else {
             tracing::warn!(worker_id, "Runtime stopped before encoder result release");
         }

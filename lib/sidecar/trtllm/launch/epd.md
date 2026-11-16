@@ -10,6 +10,10 @@ Dynamo sidecar builds. Older runtimes without the advertised encoder capabilitie
 cannot run these topologies. Image handoffs support TP/PP/CP=1; video and audio
 encoder handoffs are not supported.
 
+These topologies do not support Dynamo image-aware KV routing. Native prefix-cache
+reuse can still occur, but it does not establish image-block overlap for Dynamo
+worker selection. Integrating encoder-handoff identity with routing is separate work.
+
 Dynamo supports native NIXL encoder handoff only. Producers must advertise NIXL
 as their single encoder transfer backend and typed abort cleanup support.
 Consumers must accept NIXL and may advertise additional backends. Shared-safetensors handoff
@@ -95,9 +99,12 @@ address explicitly when consumers run on another host.
 The scripts above launch every process locally. For separate hosts, launch each
 engine and sidecar on its assigned host with shared Dynamo discovery and a
 consistent served model name. Resolve the same immutable model revision on each
-host and pass the resulting local path to both engine and sidecar. Set the
-engine's `--served_model_name` to the common served name so host-specific cache
-paths do not change model discovery.
+host and pass the resulting local path to both engine and sidecar. Replicas within
+one role's worker set must use the same container-visible absolute path: Dynamo
+includes the sidecar's source path in the discovery identity (`mdcsum`). Mount
+host-specific cache directories at a common container path. Different roles can
+use different paths. Set the engine's `--served_model_name` to the common public
+name; this alias does not normalize discovery identities.
 For E+P+D, the committed prefill capability keeps encoder handoffs on P while
 allowing text requests to use conditional prefill bypass.
 

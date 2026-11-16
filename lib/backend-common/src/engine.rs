@@ -250,6 +250,11 @@ pub trait LLMEngine: Send + Sync + 'static {
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError>;
 
+    /// Recognize resource-only cleanup that must run even when inference admission is full.
+    fn is_cleanup_request(&self, _request: &PreprocessedRequest) -> bool {
+        false
+    }
+
     /// Abort an in-flight request (optional, default no-op).
     ///
     /// Called by the framework only when `ctx.stopped()` or `ctx.killed()`

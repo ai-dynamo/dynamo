@@ -6,6 +6,7 @@ import functools
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -16,9 +17,13 @@ from unittest.mock import MagicMock, Mock, patch
 
 import psutil
 
-from tests.utils import managed_process
-
 CI = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(CI))
+from repo_imports import add_repo_root  # noqa: E402
+
+add_repo_root()
+from tests.utils import managed_process  # noqa: E402
+
 BASE_SPEC = importlib.util.spec_from_file_location(
     "epd_image_runner", CI / "run_image_test.py"
 )
@@ -31,6 +36,37 @@ with patch.dict(sys.modules, {"run_image_test": image_test}):
 
 
 class EpdHarnessTests(unittest.TestCase):
+    def test_standalone_entries_resolve_the_canonical_process_module(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            env = os.environ.copy()
+            env.pop("PYTHONPATH", None)
+            for entry in (
+                CI / "run_epd_test.py",
+                Path(__file__).resolve(),
+            ):
+                # Import by absolute path from outside the checkout, as direct
+                # script execution does, without starting engines or recursing.
+                imported_class = (
+                    "ns['runner'].ManagedProcess"
+                    if entry.name == "test_epd_test.py"
+                    else "ns['ManagedProcess']"
+                )
+                code = (
+                    "import runpy, sys; "
+                    f"sys.path.insert(0, {str(entry.parent)!r}); "
+                    f"ns = runpy.run_path({str(entry)!r}, run_name='bootstrap_probe'); "
+                    "from tests.utils.managed_process import ManagedProcess; "
+                    f"assert {imported_class} is ManagedProcess"
+                )
+                subprocess.run(
+                    [sys.executable, "-c", code],
+                    cwd=cwd,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+
     def test_missing_or_wrong_role_and_backend_fail_without_skip(self):
         for role in ("encoder", "prefill", "decode"):
             capability = dict(
@@ -187,9 +223,72 @@ class EpdHarnessTests(unittest.TestCase):
             )
             process.__enter__()
             process.proc.wait(timeout=3)
-            with self.assertRaisesRegex(RuntimeError, "exited with 7"):
+            with (
+                patch.object(
+                    managed_process.os, "killpg", wraps=os.killpg
+                ) as signal_group,
+                patch.object(
+                    managed_process,
+                    "terminate_process_tree",
+                    wraps=managed_process.terminate_process_tree,
+                ) as signal_tree,
+                self.assertRaisesRegex(RuntimeError, "exited with 7"),
+            ):
                 runner._stop_engine(process)
+            signal_group.assert_not_called()
+            signal_tree.assert_not_called()
             self.assertIsNone(process.proc)
+
+    def test_forced_worker_timeout_keeps_ownership_and_reports_log_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            process = runner.ManagedProcess(
+                command=[sys.executable],
+                log_dir=tmp,
+                graceful_shutdown=True,
+                terminate_all_matching_process_names=False,
+            )
+            process._log_path = str(Path(tmp) / "engine.log.txt")
+            process.proc = Mock(pid=123, poll=Mock(return_value=0))
+            child = Mock(pid=124)
+            process._owned_children[child.pid] = child
+            with (
+                patch.object(process, "_remember_children"),
+                patch.object(process, "_owned_processes", return_value=[child]),
+                patch.object(
+                    process,
+                    "_wait_owned_processes",
+                    side_effect=subprocess.TimeoutExpired("engine worker", 0.1),
+                ),
+                patch.object(process, "_stop_started_processes") as cleanup,
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "workers did not exit after forced shutdown.*engine.log.txt",
+                ) as failure,
+            ):
+                runner._stop_engine(process)
+            self.assertIsInstance(
+                failure.exception.__cause__, managed_process.ManagedProcessStopError
+            )
+            child.kill.assert_called_once_with()
+            cleanup.assert_called_once_with()
+            self.assertEqual(process._owned_children, {child.pid: child})
+
+            process.proc = None
+            with (
+                patch.object(process, "_owned_processes", side_effect=[[child], []]),
+                patch.object(
+                    process,
+                    "_wait_owned_processes",
+                    side_effect=[subprocess.TimeoutExpired("engine worker", 0.1), None],
+                ),
+                patch.object(process, "_stop_started_processes"),
+                self.assertRaisesRegex(
+                    managed_process.ManagedProcessStopError, "required forced shutdown"
+                ),
+            ):
+                process.stop_gracefully()
+            self.assertEqual(child.kill.call_count, 2)
+            self.assertFalse(process._owned_children)
 
     def test_worker_timeout_is_killed_even_after_parent_has_exited(self):
         for detached in (False, True):

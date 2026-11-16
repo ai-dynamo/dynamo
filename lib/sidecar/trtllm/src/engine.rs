@@ -13,6 +13,7 @@ use dynamo_backend_common::{
     GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput, MetricsBindings, MetricsCtx,
     PreprocessedRequest, RuntimeConfig, WorkerConfig,
 };
+use dynamo_llm::local_model::runtime_config::ENCODER_SUPPORTED_MODALITIES;
 use dynamo_llm::protocols::common::preprocessor::{
     ENCODER_RESULT_REQUIRES_PREFILL, REQUIRES_ENCODER_RESULT,
 };
@@ -487,6 +488,12 @@ impl LLMEngine for TrtllmSidecarEngine {
         );
         let mut config = model.engine_config();
         config.served_model_name = Some(info.served_model_name.clone());
+        if self.mode.is_encode() {
+            config.runtime_data.insert(
+                ENCODER_SUPPORTED_MODALITIES.into(),
+                serde_json::json!(["image_url"]),
+            );
+        }
         if self.mode.is_prefill() && self.route_to_encoder {
             config.runtime_data.insert(
                 ENCODER_RESULT_REQUIRES_PREFILL.into(),
@@ -530,6 +537,10 @@ impl LLMEngine for TrtllmSidecarEngine {
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         self.generate_request(request, ctx).await
+    }
+
+    fn is_cleanup_request(&self, request: &PreprocessedRequest) -> bool {
+        self.mode.is_encode() && request.is_encoder_result_release()
     }
 
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {

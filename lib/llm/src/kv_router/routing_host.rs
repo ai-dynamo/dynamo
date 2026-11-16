@@ -55,6 +55,7 @@ mod hosted;
 mod kv;
 mod kv_selection;
 mod occupancy;
+mod replan_lifecycle;
 mod request_guard;
 
 pub(crate) use builder::hosted_picker;
@@ -63,6 +64,7 @@ pub(super) use cancellation::cancelled_error;
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
+pub(crate) use replan_lifecycle::ReplanLifecycle;
 pub(crate) use request_guard::prompt_private_blocks;
 use request_guard::{KvRequestCleanup, LoraLoadGuard, RequestGuard};
 
@@ -389,15 +391,17 @@ impl RoutePlan {
 
     /// Release an abandoned conditional plan while keeping the logical request
     /// registered for its later decode selection.
-    pub(crate) async fn release_for_replan(mut self, request: &mut PreprocessedRequest) {
-        if let Some(mut lifecycle) = self.selection.request_lifecycle.take() {
-            lifecycle.prepare_retry();
-            request
-                .migration_state
-                .get_or_insert_default()
-                .store_request_lifecycle(lifecycle);
-        }
+    pub(crate) async fn release_for_replan(
+        mut self,
+        request: &mut SingleIn<PreprocessedRequest>,
+    ) -> Option<ReplanLifecycle> {
+        let lifecycle = self
+            .selection
+            .request_lifecycle
+            .take()
+            .map(|lifecycle| ReplanLifecycle::park(lifecycle, request));
         self.cleanup.finish().await;
+        lifecycle
     }
 
     /// Give the route up before dispatch: abort the classifier lifecycle with

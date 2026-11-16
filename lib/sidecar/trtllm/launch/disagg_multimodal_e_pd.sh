@@ -15,7 +15,7 @@ if [[ "${1:-}" == "--help" ]]; then
     echo "Requires the TRT-LLM encoder-handoff build and matching native sidecar."
     echo "MODEL_REVISION: required full checkpoint commit SHA; NIXL/UCX must be available."
     echo "EPD_MODE: e_pd (default) or e_p_d."
-    echo "Mandatory image handoffs disable prefill bypass; text and optional handoffs retain normal policy."
+    echo "In E+P+D, image encoder handoffs stay on P; text can use conditional prefill bypass."
     echo "TRTLLM_PYTHON: engine Python."
     echo "ENCODER_GPU/PD_GPU/PREFILL_GPU/DECODE_GPU: explicit CUDA device IDs."
     echo "Defaults use the first inherited CUDA_VISIBLE_DEVICES entry; otherwise E/PD=0, P=1, D=2."

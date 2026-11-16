@@ -265,6 +265,21 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, handle) = input.into_parts();
         let ctx: Arc<dyn AsyncEngineContext> = handle.context();
+        let is_release = request
+            .extra_args
+            .as_ref()
+            .and_then(|args| {
+                args.get(dynamo_llm::protocols::common::preprocessor::RELEASE_ENCODER_RESULT)
+            })
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        if is_release && (!self.mode.is_encode() || !self.engine.is_cleanup_request(&request)) {
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("unsupported or malformed encoder result release")
+                .build()
+                .into());
+        }
 
         // Per-request worker-side span. Nests under `handle_payload` (set up
         // by the runtime's NATS ingress) so the trace tree has a contiguous
@@ -341,15 +356,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         };
 
         // Decode must receive staged KV before it can be aborted.
-        let is_encoder_release = self.mode.is_encode()
-            && request
-                .extra_args
-                .as_ref()
-                .and_then(|extra| {
-                    extra.get(dynamo_llm::protocols::common::preprocessor::RELEASE_ENCODER_RESULT)
-                })
-                .and_then(serde_json::Value::as_bool)
-                == Some(true);
+        let is_encoder_control = self.mode.is_encode() && (request.is_probe || is_release);
         let (ft_tx, mut ft_rx) = if self.mode.is_decode() {
             let (tx, rx) = watch::channel(false);
             (Some(tx), Some(rx))
@@ -452,8 +459,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         #[cfg(debug_assertions)]
         let chunks = crate::validate::wrap(
             chunks,
-            if is_encoder_release {
-                // Release acknowledges disposal; it must not return another handoff.
+            if is_encoder_control {
+                // Probes and releases acknowledge completion without exporting a handoff.
                 DisaggregationMode::Aggregated
             } else {
                 self.mode
@@ -472,7 +479,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // respectively), so both need the worker_trace_link stamped on
         // the terminal even when the chunk has no tokens.
         let is_handoff_terminal_mode =
-            self.mode.is_prefill() || (self.mode.is_encode() && !is_encoder_release);
+            self.mode.is_prefill() || (self.mode.is_encode() && !is_encoder_control);
         let finalizer_span = span.clone();
         let engine_cleanup = self.engine_cleanup.clone();
         let mapped = async_stream::stream! {
@@ -795,6 +802,10 @@ mod tests {
     impl LLMEngine for MockEngine {
         async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
             Ok(EngineConfig::default())
+        }
+
+        fn is_cleanup_request(&self, request: &PreprocessedRequest) -> bool {
+            request.is_encoder_result_release()
         }
 
         async fn generate(
@@ -2098,6 +2109,56 @@ mod tests {
             .expect("successful release acknowledgement");
         assert_eq!(ack.finish_reason, Some(FinishReason::Stop));
         assert!(ack.token_ids.is_empty());
+        assert!(ack.encoder_result.is_none());
+        assert!(ack.worker_trace_link.is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_encoder_release_cannot_run_as_inference() {
+        let (engine, _) = MockEngine::new(Vec::new());
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Encode);
+        let mut request = make_request(vec![1]);
+        request.encoder_result = Some(serde_json::json!({"ref": "original"}));
+        request.extra_args = Some(serde_json::json!({"release_encoder_result": true}));
+        let error = adapter.generate(Context::new(request)).await.err().unwrap();
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+    }
+
+    #[tokio::test]
+    async fn encoder_release_is_rejected_by_backends_without_cleanup_support() {
+        let (engine, _, _) = ParkedEngine::new();
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Encode);
+        let mut request = make_request(Vec::new());
+        request.encoder_result = Some(serde_json::json!({"ref": "original"}));
+        request.extra_args = Some(serde_json::json!({"release_encoder_result": true}));
+        let error = adapter.generate(Context::new(request)).await.err().unwrap();
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+    }
+
+    #[tokio::test]
+    async fn encode_health_probe_acknowledges_without_a_handoff_or_trace_link() {
+        let (_guard, _, _) = install_trace_context_injection();
+        let (engine, _) = MockEngine::new(vec![LLMEngineOutput::stop()]);
+        let adapter = Arc::new(EngineAdapter::new(engine, DisaggregationMode::Encode));
+        let probe = JsonProbeAdapter::new(adapter);
+        let stream = probe
+            .generate(Context::new(serde_json::json!({
+                "token_ids": [1], "_HEALTH_CHECK": true,
+                "multi_modal_data": {"image": [{"Url": "https://example.com/image.png"}]}
+            })))
+            .await
+            .unwrap();
+        let chunks: Vec<_> = stream.collect().await;
+        assert_eq!(chunks.len(), 1);
+        assert!(!chunks[0].is_error());
+        let ack: LLMEngineOutput = serde_json::from_value(chunks[0].data.clone().unwrap()).unwrap();
+        assert_eq!(ack.finish_reason, Some(FinishReason::Stop));
         assert!(ack.encoder_result.is_none());
         assert!(ack.worker_trace_link.is_none());
     }

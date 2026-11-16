@@ -3,6 +3,7 @@
 
 //! Optional multimodal encoder hop for token-serving pipelines.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
@@ -24,10 +25,11 @@ use dynamo_runtime::{
 };
 
 use crate::discovery::{WorkerSetTarget, WorkerSetTargetId};
+use crate::local_model::runtime_config::ENCODER_SUPPORTED_MODALITIES;
 use crate::protocols::common::{
     FinishReason,
     llm_backend::{LLMEngineOutput, PreprocessedRequest},
-    preprocessor::TraceLink,
+    preprocessor::{ENCODER_RESULT_RELEASE_SUPPORTED, TraceLink},
 };
 
 mod cleanup;
@@ -35,7 +37,10 @@ use cleanup::EncoderResultCleanup;
 
 type EncodePushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
+pub(crate) struct EncoderResultReleaseSupported(pub(crate) bool);
+
 struct EncoderBinding {
+    supported_modalities: Option<HashSet<String>>,
     target_id: WorkerSetTargetId,
     router: Arc<EncodePushRouter>,
 }
@@ -74,6 +79,7 @@ pub struct EncoderRouter {
     required: AtomicBool,
     model_name: String,
     namespace: String,
+    router_mode: RouterMode,
 }
 
 impl Drop for EncoderRouter {
@@ -144,25 +150,28 @@ impl EncoderRouter {
             required: AtomicBool::new(false),
             model_name: String::new(),
             namespace: String::new(),
+            router_mode: RouterMode::KV,
         })
     }
 
-    /// Create a router whose endpoint is driven by committed discovery topology.
+    /// Create a discovery-driven router with KV query-only semantics.
     pub fn new(model_name: String, namespace: String) -> Arc<Self> {
-        Self::new_inner(model_name, namespace, None)
+        Self::new_inner(model_name, namespace, RouterMode::KV, None)
     }
 
     pub(crate) fn new_with_task_guard(
         model_name: String,
         namespace: String,
+        router_mode: RouterMode,
         task_guard: dynamo_runtime::engine::EngineContextGuard,
     ) -> Arc<Self> {
-        Self::new_inner(model_name, namespace, Some(task_guard))
+        Self::new_inner(model_name, namespace, router_mode, Some(task_guard))
     }
 
     fn new_inner(
         model_name: String,
         namespace: String,
+        router_mode: RouterMode,
         task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     ) -> Arc<Self> {
         let cancel_token = CancellationToken::new();
@@ -176,6 +185,7 @@ impl EncoderRouter {
             required: AtomicBool::new(false),
             model_name,
             namespace,
+            router_mode,
         });
 
         let router_weak = Arc::downgrade(&router);
@@ -192,6 +202,17 @@ impl EncoderRouter {
         cancel_token: CancellationToken,
     ) -> Result<EncoderBinding> {
         let target_id = target.id();
+        let supported_modalities = match &target {
+            WorkerSetTarget::Committed(target) => target
+                .card
+                .runtime_config
+                .runtime_data
+                .get(ENCODER_SUPPORTED_MODALITIES)
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .context("invalid encoder supported modalities")?,
+            WorkerSetTarget::Legacy(_) => None,
+        };
         let client = target.client(cancel_token).await?;
         let router = EncodePushRouter::from_client_with_options(
             client,
@@ -200,6 +221,7 @@ impl EncoderRouter {
         )
         .await?;
         Ok(EncoderBinding {
+            supported_modalities,
             target_id,
             router: Arc::new(router),
         })
@@ -366,9 +388,10 @@ impl EncoderRouter {
             .and_then(|tx| tx.borrow().as_ref().map(|target| target.endpoint().id()))
     }
 
-    fn should_encode(request: &PreprocessedRequest) -> bool {
-        !request.is_probe
-            && request.get_annotation_value("query_instance_id").is_none()
+    fn should_encode(&self, request: &PreprocessedRequest) -> bool {
+        !(request.is_probe
+            || (self.router_mode.is_kv_routing()
+                && request.get_annotation_value("query_instance_id").is_some()))
             && request.encoder_result.is_none()
             && request
                 .multi_modal_data
@@ -419,8 +442,8 @@ impl
         request: SingleIn<PreprocessedRequest>,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
-        let (mut request, context) = request.into_parts();
-        if !Self::should_encode(&request) {
+        let (mut request, mut context) = request.into_parts();
+        if !self.should_encode(&request) {
             return next.generate(context.map(|_| request)).await;
         }
         let required = self.is_required();
@@ -431,6 +454,19 @@ impl
             return next.generate(context.map(|_| request)).await;
         }
 
+        let binding = self.binding.load_full();
+        if !required
+            && let Some(modalities) = binding
+                .as_ref()
+                .and_then(|b| b.supported_modalities.as_ref())
+            && request.multi_modal_data.as_ref().is_some_and(|media| {
+                media
+                    .iter()
+                    .any(|(kind, items)| !items.is_empty() && !modalities.contains(kind))
+            })
+        {
+            return next.generate(context.map(|_| request)).await;
+        }
         let mut encode_request = request.clone();
         if let Some(routing) = &mut encode_request.routing {
             routing.backend_instance_id = None;
@@ -445,33 +481,42 @@ impl
             context.metadata().clone(),
         );
         let encode_result = async {
-            let binding = self
-                .binding
-                .load_full()
+            let binding = binding
                 .ok_or_else(|| self.unavailable("encoder binding changed during activation"))?;
-            let (worker_id, response) = binding
+            let (route, response) = binding
                 .router
-                .select_and_dispatch(encode_context, |_, worker_id| Ok(worker_id))
+                .select_and_dispatch_with_cleanup(encode_context)
                 .await?;
             let mut cleanup = EncoderResultCleanup {
-                router: binding.router.clone(),
-                worker_id,
+                route,
                 request: None,
             };
             let (result, link) =
-                Self::consume_encode_stream(response, Some((&mut cleanup, &request.model))).await?;
+                match Self::consume_encode_stream(response, Some((&mut cleanup, &request.model)))
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        cleanup.release().await;
+                        return Err(error);
+                    }
+                };
             Ok::<_, anyhow::Error>((result, link, cleanup))
         }
         .await;
 
-        let cleanup = match encode_result {
+        let mut cleanup = match encode_result {
             Ok((encoder_result, worker_link, cleanup)) => {
+                context.insert(
+                    ENCODER_RESULT_RELEASE_SUPPORTED,
+                    EncoderResultReleaseSupported(cleanup.request.is_some()),
+                );
                 request.encoder_result = Some(encoder_result);
                 request.migration_link = worker_link;
                 cleanup
             }
             Err(error) => {
-                if required {
+                if self.is_required() {
                     return Err(error.context("Required encoder hop failed"));
                 }
                 tracing::error!(
@@ -483,7 +528,13 @@ impl
                 return next.generate(context.map(|_| request)).await;
             }
         };
-        let mut response = next.generate(context.map(|_| request)).await?;
+        let mut response = match next.generate(context.map(|_| request)).await {
+            Ok(response) => response,
+            Err(error) => {
+                cleanup.release().await;
+                return Err(error);
+            }
+        };
         let response_context = response.context();
         let stream = async_stream::stream! {
             let mut cleanup = cleanup;
@@ -494,6 +545,11 @@ impl
                 }) {
                     // Tokens or successful completion prove the consumer claimed the handoff.
                     cleanup.request = None;
+                }
+                if item.err().is_some() || item.data.as_ref().is_some_and(|output| {
+                    matches!(output.finish_reason, Some(FinishReason::Error(_) | FinishReason::Cancelled))
+                }) {
+                    cleanup.release().await;
                 }
                 yield item;
             }

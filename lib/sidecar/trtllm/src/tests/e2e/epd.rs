@@ -4,6 +4,7 @@
 use crate::client::{ModelLimits, TrtllmClient};
 use crate::convert::build_generate_request;
 use dynamo_backend_common::LLMEngineOutput;
+use dynamo_sidecar_common::GrpcChannelPool;
 
 use super::*;
 
@@ -204,9 +205,11 @@ async fn reject_replay(endpoint: &str, mut request: pb::GenerateRequest) -> Stri
         Some(pb::encoder_options::Mode::Handoff(_))
     ));
     assert!(request.kv.as_ref().is_none_or(|kv| kv.session.is_none()));
-    let mut inference = pb::inference_client::InferenceClient::connect(endpoint.to_owned())
+    let endpoint = GrpcEndpoint::parse(endpoint, "--grpc-endpoint").expect("valid replay endpoint");
+    let channels = GrpcChannelPool::connect("TensorRT-LLM", &endpoint, transport(1), false)
         .await
         .expect("connect the consumer inference service");
+    let mut inference = pb::inference_client::InferenceClient::new(channels.next_channel());
     let status = match inference.generate(request).await {
         Err(status) => status,
         Ok(response) => response
@@ -221,6 +224,71 @@ async fn reject_replay(endpoint: &str, mut request: pb::GenerateRequest) -> Stri
         "replay must reject the spent export: {status}"
     );
     status.to_string()
+}
+
+#[tokio::test]
+async fn replay_check_uses_the_shared_endpoint_connector() {
+    fn spent_export(_: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
+        Err(tonic::Status::invalid_argument(
+            "encoder export expired or was already consumed",
+        ))
+    }
+    let service = || {
+        pb::inference_server::InferenceServer::with_interceptor(FakeTrtllm::default(), spent_export)
+    };
+    let replay = pb::GenerateRequest {
+        encoder: Some(pb::EncoderOptions {
+            mode: Some(pb::encoder_options::Mode::Handoff(pb::EncoderHandoffRef {
+                transfer_backend: NIXL_BACKEND.into(),
+                opaque_state: vec![1],
+            })),
+        }),
+        ..Default::default()
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let tcp_server = tokio::spawn(
+        tonic::transport::Server::builder()
+            .add_service(service())
+            .serve_with_incoming(TcpListenerStream::new(listener)),
+    );
+    for endpoint in [
+        address.to_string(),
+        format!("grpc://{address}"),
+        format!("http://{address}"),
+    ] {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            reject_replay(&endpoint, replay.clone()),
+        )
+        .await
+        .expect("replay must reach the native status check");
+    }
+    tcp_server.abort();
+
+    #[cfg(unix)]
+    {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("epd-replay-{}-{unique}.sock", std::process::id()));
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let unix_server = tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(service())
+                .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(listener)),
+        );
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            reject_replay(&format!("unix://{}", path.display()), replay),
+        )
+        .await
+        .expect("Unix replay must reach the native status check");
+        unix_server.abort();
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 async fn run(disaggregated: bool) {

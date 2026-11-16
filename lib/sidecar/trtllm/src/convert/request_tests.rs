@@ -1333,6 +1333,39 @@ fn encode_validates_consumer_guides_without_forwarding_them() {
 }
 
 #[test]
+fn invalid_media_is_rejected_before_a_missing_encoder_handoff() {
+    let mut limits = image_limits(4096).unwrap();
+    limits.encoder_consumer = true;
+    limits.requires_encoder_handoff = true;
+    let mut base = request();
+    add_images(&mut base, ["https://example.com/image.png"]);
+    let mut processor_override = base.clone();
+    processor_override.mm_processor_kwargs = Some(json!({"do_resize": false}));
+    let mut io_override = base.clone();
+    io_override.media_io_kwargs = Some(json!({"image": {"mode": "RGB"}}));
+    let mut bad_uuids = base.clone();
+    bad_uuids.multi_modal_uuids = Some(HashMap::from([(
+        "image_url".into(),
+        vec![Some("one".into()), Some("two".into())],
+    )]));
+    let mut bad_url = request();
+    add_images(&mut bad_url, ["file:///unavailable/image.png"]);
+    for source in [processor_override, io_override, bad_uuids, bad_url] {
+        for mode in [AGG, PREFILL, DisaggregationMode::Decode] {
+            let error =
+                build_generate_request(source.clone(), "bad-media", "model", Some(limits), mode)
+                    .unwrap_err();
+            assert!(matches!(
+                error.error_type(),
+                dynamo_backend_common::ErrorType::Backend(
+                    dynamo_backend_common::BackendError::InvalidArgument
+                )
+            ));
+        }
+    }
+}
+
+#[test]
 fn encoder_consumers_require_handoffs_only_for_unstaged_media() {
     let mut limits = image_limits(4096).unwrap();
     limits.encoder_consumer = true;

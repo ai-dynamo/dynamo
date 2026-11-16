@@ -4561,6 +4561,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn topology_uses_serving_policy_instead_of_optional_representative() {
+        use crate::discovery::controller::EncoderPolicy;
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let manager = Arc::new(ModelManager::new());
+        let component = distributed
+            .namespace("mixed-policy")
+            .unwrap()
+            .component("workers")
+            .unwrap();
+        let mut representative = topology_card(WorkerType::Prefill);
+        representative
+            .runtime_config
+            .set_engine_specific(
+                crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT,
+                false,
+            )
+            .unwrap();
+        let checksum = representative.mdcsum().to_string();
+        let mut serving = representative.clone();
+        EncoderPolicy::EncoderRequired.project(&mut serving);
+        assert_eq!(serving.mdcsum(), checksum);
+        let (prefill, _, _) =
+            topology_worker_set(manager.clone(), serving, component.endpoint("prefill"));
+        manager
+            .commit_discovery_group(
+                "prefill",
+                "prefill",
+                prefill,
+                vec![("optional-representative".into(), representative)],
+                Vec::new(),
+            )
+            .unwrap();
+        let card = topology_card(WorkerType::Decode);
+        let (decode, _, encoder) =
+            topology_worker_set(manager.clone(), card.clone(), component.endpoint("decode"));
+        manager
+            .commit_discovery_group(
+                "decode",
+                "decode",
+                decode,
+                vec![("decode".into(), card)],
+                Vec::new(),
+            )
+            .unwrap();
+        let encoder = encoder.unwrap();
+        assert!(encoder.is_required());
+        assert_eq!(encoder.target_endpoint_id(), None);
+        manager.remove_discovery_group("prefill").unwrap();
+        assert!(encoder.is_required());
+        manager.remove_discovery_group("decode").unwrap();
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
     async fn aggregated_encoder_requirement_survives_missing_encoder_target() {
         let manager = ModelManager::new();
         let mut card = ModelDeploymentCard::with_name_only("required-encoder-model");
