@@ -90,17 +90,9 @@ impl<'a> WorkerCandidate<'a> {
             })
     }
 
-    /// Host-pinned KV blocks the router has indexed for the cache owner (KVCR instance)
-    /// attached to this worker, only when this component declared CACHE. Compare with
-    /// [`WorkerInfo::cache_owner_capacity_blocks`].
-    ///
-    /// The count follows the owner's KV events as the router applies them and is read
-    /// live on each call. Events are best effort, so it can differ from the owner's real
-    /// contents: unannounced filling slots and non-main KV groups are missing, and a lost
-    /// Removed event counts until the owner's next recovery. None when the worker has no
-    /// attached owner, when the router has no local lower-tier index, and in a request
-    /// classifier.
-    pub fn cache_owner_blocks(self) -> Option<u64> {
+    /// Backs `experimental::cache_owner_blocks::CacheOwnerBlocks`, which documents the contract:
+    /// the count only when this component declared CACHE and the host has one for the rank.
+    pub(crate) fn cache_owner_block_count(self) -> Option<u64> {
         if !self.inputs.contains(WorkerInputs::CACHE) {
             return None;
         }
@@ -781,9 +773,9 @@ impl<'a> WorkerInputView<'a> {
         }
     }
 
-    /// [`WorkerCandidate::cache_owner_blocks`] for the candidate at `row`, when the picker
-    /// declared CACHE; None also for an out-of-range row.
-    pub fn cache_owner_blocks(self, row: usize) -> Option<u64> {
+    /// Backs `experimental::cache_owner_blocks::CacheOwnerBlocksByRow`: the count for candidate
+    /// `row` when the picker declared CACHE, or None for an out-of-range row.
+    pub(crate) fn cache_owner_block_count(self, row: usize) -> Option<u64> {
         let counts = self.cache?.snapshot.resident_blocks?;
         counts.cache_owner_blocks(self.candidates().get(row)?.worker)
     }

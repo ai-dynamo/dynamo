@@ -547,8 +547,8 @@ where
     /// [`WorkerInputs::CACHE`] and may read cache-owner block counts.
     ///
     /// Returns `false` when they are already installed.
-    pub fn set_cache_owner_block_counts(&self, lower_tier: LowerTierIndexers) -> bool {
-        self.queue.set_cache_owner_block_counts(lower_tier)
+    pub fn set_lower_tier(&self, lower_tier: LowerTierIndexers) -> bool {
+        self.queue.set_lower_tier(lower_tier)
     }
 
     #[expect(clippy::too_many_arguments)]

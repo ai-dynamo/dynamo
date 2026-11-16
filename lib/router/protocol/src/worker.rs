@@ -47,6 +47,8 @@ pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
 pub struct WorkerCapacity {
     max_num_batched_tokens: Option<u64>,
     total_kv_blocks: Option<u64>,
+    /// `NonZeroU64` so the option adds 8 bytes, not 16: classifier rows copy one
+    /// `WorkerCapacity` per rank.
     cache_owner_capacity_blocks: Option<NonZeroU64>,
 }
 
@@ -81,7 +83,8 @@ impl WorkerCapacity {
     }
 
     /// Host-pinned capacity, in KV blocks, of the cache owner (KVCR instance) attached to
-    /// this rank, when the worker advertises it.
+    /// this rank, when the worker advertises it. Experimental: plugins read it through the
+    /// worker-selection stage's `experimental::cache_owner_blocks` module.
     pub fn cache_owner_capacity_blocks(self) -> Option<u64> {
         self.cache_owner_capacity_blocks.map(NonZeroU64::get)
     }

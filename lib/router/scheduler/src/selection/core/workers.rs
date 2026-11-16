@@ -393,7 +393,7 @@ impl SelectionCore {
                 if inputs.contains(WorkerInputs::CACHE)
                     && let Some(lower_tier) = indexer.lower_tier()
                 {
-                    scheduler.set_cache_owner_block_counts(lower_tier.clone());
+                    scheduler.set_lower_tier(lower_tier.clone());
                 }
                 Ok(Arc::new(SelectionEntry {
                     key: key.clone(),

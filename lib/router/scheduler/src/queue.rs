@@ -1002,7 +1002,7 @@ struct SchedulerQueueActor<
     resident_blocks: Arc<OnceLock<ResidentBlockCountsHandle>>,
     /// The partition's lower-tier indexes, installed once by the host for a policy that
     /// declared CACHE, which reads cache-owner block counts from them.
-    cache_owner_blocks: Arc<OnceLock<LowerTierIndexers>>,
+    lower_tier: Arc<OnceLock<LowerTierIndexers>>,
     reject_thresholds: Option<RejectThresholdsProvider>,
 }
 
@@ -1044,7 +1044,7 @@ pub struct SchedulerQueue<
     resident_blocks: Arc<OnceLock<ResidentBlockCountsHandle>>,
     /// The partition's lower-tier indexes, installed once by the host for a policy that
     /// declared CACHE, which reads cache-owner block counts from them.
-    cache_owner_blocks: Arc<OnceLock<LowerTierIndexers>>,
+    lower_tier: Arc<OnceLock<LowerTierIndexers>>,
     reject_thresholds: Option<RejectThresholdsProvider>,
     /// Read by callers to project their request's load before the actor selects.
     slots: Arc<ActiveSequencesMultiWorker<P>>,
@@ -1176,7 +1176,7 @@ impl<
         let non_max_overlap_selection_observer = Arc::new(OnceLock::new());
         let selection_trace = Arc::new(OnceLock::new());
         let resident_blocks = Arc::new(OnceLock::new());
-        let cache_owner_blocks = Arc::new(OnceLock::new());
+        let lower_tier = Arc::new(OnceLock::new());
         let start_time = Instant::now();
         let capacity_updates = queueing_enabled.then(|| Arc::new(CapacityUpdates::new()));
         let direct_release: DirectBookingRelease = {
@@ -1241,7 +1241,7 @@ impl<
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
             selection_trace: Arc::clone(&selection_trace),
             resident_blocks: Arc::clone(&resident_blocks),
-            cache_owner_blocks: Arc::clone(&cache_owner_blocks),
+            lower_tier: Arc::clone(&lower_tier),
             reject_thresholds: reject_thresholds.clone(),
         };
         tokio::spawn(actor.run());
@@ -1265,7 +1265,7 @@ impl<
             non_max_overlap_selection_observer,
             selection_trace,
             resident_blocks,
-            cache_owner_blocks,
+            lower_tier,
             reject_thresholds,
             slots: caller_slots,
             actor_writes,
@@ -1313,8 +1313,8 @@ impl<
     /// `WorkerInputs::CACHE` and may read cache-owner block counts.
     ///
     /// Returns `false` when they are already installed.
-    pub fn set_cache_owner_block_counts(&self, lower_tier: LowerTierIndexers) -> bool {
-        self.cache_owner_blocks.set(lower_tier).is_ok()
+    pub fn set_lower_tier(&self, lower_tier: LowerTierIndexers) -> bool {
+        self.lower_tier.set(lower_tier).is_ok()
     }
 
     /// Enqueue a new request through the router-owned policy queue.
@@ -2867,7 +2867,7 @@ impl<
                             self.block_size,
                         )
                         .with_resident_blocks(resident_blocks.as_deref().map(|counts| &**counts))
-                        .with_cache_owner_blocks(self.cache_owner_blocks.get()),
+                        .with_lower_tier(self.lower_tier.get()),
                         prepared,
                         trace,
                     )
@@ -5291,7 +5291,7 @@ mod tests {
             ),
             selection_trace: Arc::clone(&queue.selection_trace),
             resident_blocks: Arc::clone(&queue.resident_blocks),
-            cache_owner_blocks: Arc::clone(&queue.cache_owner_blocks),
+            lower_tier: Arc::clone(&queue.lower_tier),
             reject_thresholds: queue.reject_thresholds.clone(),
         }
     }

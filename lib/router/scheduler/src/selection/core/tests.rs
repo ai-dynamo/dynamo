@@ -18,6 +18,9 @@ use dynamo_kv_indexer::ResidencyOwnerKeyExt;
 use dynamo_kv_indexer::testing::store_event;
 use dynamo_session_affinity::SessionAffinityMode;
 use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
+use dynamo_worker_selection::experimental::cache_owner_blocks::{
+    CacheOwnerBlocksByRow, CacheOwnerCapacity,
+};
 use dynamo_worker_selection::experimental::resident_blocks::ResidentBlocksByRow;
 use dynamo_worker_selection::{
     WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
