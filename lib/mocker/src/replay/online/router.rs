@@ -33,10 +33,10 @@ use uuid::Uuid;
 use crate::common::protocols::{
     DirectRequest, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEvent,
 };
-use crate::loadgen::{ReplayRequestHashes, local_block_hashes};
+use crate::loadgen::local_block_hashes;
 use crate::replay::router_shared::{
     ReplayScheduler, replay_router_config, replay_selector, replay_slots,
-    replay_workers_with_configs,
+    replay_workers_with_configs, request_cache_salt, salted_request_hashes,
 };
 use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode};
 
@@ -74,29 +74,6 @@ impl ReplayIndexer {
         tokens: &[u32],
         lora_name: Option<&str>,
     ) -> Result<TieredMatchDetails> {
-        // Until lower-tier residency arrives, the cheaper score-only lookup
-        // gives the same device overlap.
-        if self.lower_tier.all().is_empty() {
-            let overlap_scores = match &self.primary {
-                PrimaryIndexer::Single(indexer) => {
-                    indexer
-                        .find_matches_for_request(tokens, lora_name, None, None)
-                        .await?
-                }
-                PrimaryIndexer::Concurrent(indexer) => {
-                    indexer
-                        .find_matches_for_request(tokens, lora_name, None, None)
-                        .await?
-                }
-            };
-            return Ok(TieredMatchDetails {
-                device: MatchDetails {
-                    overlap_scores,
-                    ..MatchDetails::default()
-                },
-                lower_tier: Default::default(),
-            });
-        }
         let sequence = compute_block_hash_for_seq(
             tokens,
             self.block_size,
@@ -105,15 +82,16 @@ impl ReplayIndexer {
                 ..Default::default()
             },
         );
-        self.find_tiered_matches(sequence).await
+        self.find_matches_for_hashes(sequence).await
     }
 
-    /// Look up block hashes the caller already derived, for a request whose
-    /// identities are not Dynamo's own token hashes.
+    /// Look up block hashes the caller already derived.
     async fn find_matches_for_hashes(
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<TieredMatchDetails> {
+        // Until lower-tier residency arrives, the cheaper score-only lookup
+        // gives the same device overlap.
         if self.lower_tier.all().is_empty() {
             let overlap_scores = match &self.primary {
                 PrimaryIndexer::Single(indexer) => indexer.find_matches(sequence).await?,
@@ -368,22 +346,11 @@ impl KvReplayRouter {
         &self,
         request: &DirectRequest,
     ) -> Result<(TieredMatchDetails, Option<Vec<u64>>)> {
-        // The engine hashes a salted prompt in AISim's cache namespace and its
-        // KV events carry those hashes, so derive the request's by the same
-        // contract: the block seed behind `BlockHashOptions::cache_namespace`
-        // is a different one.
-        let cache_salt = request
-            .cache_salt
-            .as_deref()
-            .filter(|salt| !salt.is_empty());
+        let cache_salt = request_cache_salt(request);
         let salted_hashes = cache_salt.map(|cache_salt| {
             local_block_hashes(
-                ReplayRequestHashes::from_tokens_with_cache_salt(
-                    &request.tokens,
-                    self.block_size,
-                    Some(cache_salt),
-                )
-                .local_block_hashes,
+                salted_request_hashes(&request.tokens, self.block_size, cache_salt)
+                    .local_block_hashes,
             )
         });
         // Public tracking chains the salted block hashes, as the engine does.
@@ -663,6 +630,7 @@ mod tests {
     use super::*;
     use crate::common::protocols::EngineType;
     use crate::live::LiveEngine;
+    use crate::loadgen::ReplayRequestHashes;
     use crate::replay::online::live_runtime::LiveRuntime;
     use crate::replay::online::state::LiveReplayMode;
     use crate::replay::online::{OnlineReplayConfig, OnlineReplayOptions};

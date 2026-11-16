@@ -55,7 +55,7 @@ use crate::common::protocols::MockerConfig;
 use crate::replay::offline::extensions::kv_events::RouterEventBatch;
 use crate::replay::router_shared::{
     ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector_with_seed,
-    replay_slots, replay_worker_config,
+    replay_slots, replay_worker_config, request_cache_salt, salted_request_hashes,
 };
 use crate::replay::{
     ConversationAffinityConfig, ConversationAffinityMode, ReplayPrefillLoadEstimator,
@@ -1328,15 +1328,11 @@ impl OfflineReplayRouter {
         let retain_hashes = self.affinity.is_some()
             || (self.indexer.session_prefix_index.is_some() && session_id.is_some());
         let mut block_hashes = None;
-        // A request list arrives without replay hashes. A salted request needs
-        // AISim's, which the engine's KV events carry: the block seed behind
-        // `BlockHashOptions::cache_namespace` is a different one.
-        let cache_salt = request
-            .cache_salt
-            .as_deref()
-            .filter(|salt| !salt.is_empty());
+        // A request list arrives without replay hashes; a salted request
+        // needs the engine's.
+        let cache_salt = request_cache_salt(request);
         let replay_hashes = match (replay_hashes, cache_salt) {
-            (None, Some(_)) => Some(ReplayRequestHashes::from_tokens_with_cache_salt(
+            (None, Some(cache_salt)) => Some(salted_request_hashes(
                 &request_view.prompt_tokens_for_placement()?,
                 self.block_size,
                 cache_salt,
