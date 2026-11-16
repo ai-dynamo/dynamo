@@ -510,6 +510,14 @@ fn print_open_loop_result(result: &OpenLoopResult) {
             runs.longest_run,
             runs.runs_by_length,
         );
+        println!(
+            "Lower-tier run starts: root / absent parent / branch / after a run's end: {:?} ({} joinable) | {} blocks unheld, {} trailing | {} spare slots",
+            runs.runs_by_start,
+            runs.joinable_runs,
+            runs.stored_blocks - runs.held_blocks,
+            runs.unheld_trailing_blocks,
+            runs.spare_slots,
+        );
     }
     if !result.backend_timing_report.is_empty() {
         println!("{}", result.backend_timing_report);

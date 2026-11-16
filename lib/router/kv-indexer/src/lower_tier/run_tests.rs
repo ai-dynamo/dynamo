@@ -451,9 +451,13 @@ fn matches_the_flat_reference_on_random_streams() {
                 both.check_state(&context);
                 both.check_queries(&mut rng, &forest, &context);
                 both.check_cursor(&mut rng, &forest, &context);
-                for (total, kind) in head_kinds.iter_mut().zip(both.runs.store.head_kinds()) {
+                let census = both.runs.store.census();
+                for (total, kind) in head_kinds.iter_mut().zip(census.runs_by_start) {
                     *total += kind;
                 }
+                assert_eq!(census.runs_by_start.iter().sum::<usize>(), census.runs);
+                assert!(census.joinable_runs <= census.runs_by_start[3]);
+                assert!(census.unheld_trailing_blocks <= census.stored_blocks - census.held_blocks);
                 shared_edges += run_edges(&both.runs)
                     .values()
                     .filter(|(_, owners)| owners.len() > 2)

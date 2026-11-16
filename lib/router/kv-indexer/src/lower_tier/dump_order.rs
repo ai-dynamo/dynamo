@@ -132,5 +132,8 @@ mod tests {
         let census = index.run_census();
         // Tests cap a run at 16 blocks.
         assert_eq!((census.runs, census.held_blocks), (3, 40));
+        // One run at the root and two that continue a full run, so none could be joined.
+        assert_eq!(census.runs_by_start, [1, 0, 0, 2]);
+        assert_eq!(census.joinable_runs, 0);
     }
 }

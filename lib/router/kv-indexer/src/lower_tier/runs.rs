@@ -587,16 +587,22 @@ impl RunStore {
         }
     }
 
-    /// Sizes of the structure, for benchmarks and tests.
+    /// Sizes of the structure, for benchmarks and tests. Call when no write is in flight.
     #[cfg(any(test, feature = "bench"))]
     pub(super) fn census(&self) -> RunCensus {
         let mut census = RunCensus::default();
+        let mut starts = Vec::new();
         for run in self.runs() {
             let state = run.read();
             let len = state.blocks.len();
+            if len == 0 {
+                continue;
+            }
             census.runs += 1;
             census.stored_blocks += len;
             census.held_blocks += state.coverage.live() as usize;
+            census.unheld_trailing_blocks += len - state.coverage.live_end() as usize;
+            census.spare_slots += state.blocks.capacity() - len;
             census.segments += state.coverage.segments().count();
             census.longest_run = census.longest_run.max(len);
             census.runs_by_length[match len {
@@ -605,6 +611,29 @@ impl RunStore {
                 16..=255 => 2,
                 _ => 3,
             }] += 1;
+            starts.push((state.parent, len));
+        }
+        // What each run starts after, one run lock at a time.
+        for (parent, len) in starts {
+            let kind = if parent == ROOT_PARENT {
+                0
+            } else {
+                match self.locate(parent) {
+                    None => 1,
+                    Some((before, pos)) => {
+                        let before = before.read().blocks.len();
+                        if pos as usize + 1 < before {
+                            2
+                        } else {
+                            if before + len <= MAX_RUN_BLOCKS {
+                                census.joinable_runs += 1;
+                            }
+                            3
+                        }
+                    }
+                }
+            };
+            census.runs_by_start[kind] += 1;
         }
         census
     }
@@ -624,6 +653,16 @@ pub struct RunCensus {
     pub longest_run: usize,
     /// Runs of 1, 2-15, 16-255 and 256 or more blocks.
     pub runs_by_length: [usize; 4],
+    /// Runs that start at the root, after a block that is not stored, after a block inside
+    /// another run (a branch), and after another run's last block (a chain cut in two).
+    pub runs_by_start: [usize; 4],
+    /// Runs that start after another run's last block and would fit in that run: the cuts
+    /// that joining runs would remove.
+    pub joinable_runs: usize,
+    /// Blocks nobody holds at the end of their run; `stored_blocks - held_blocks` counts all.
+    pub unheld_trailing_blocks: usize,
+    /// Block slots allocated beyond the stored blocks.
+    pub spare_slots: usize,
 }
 
 impl EdgeLookup for RunStore {
@@ -780,35 +819,6 @@ impl RunStore {
             stored += state.blocks.len();
         }
         assert_eq!(self.blocks.len(), stored, "stale block index entries");
-    }
-
-    /// How many runs start at the root, after a block that is not stored,
-    /// after a block inside another run, and after another run's last block.
-    pub(super) fn head_kinds(&self) -> [usize; 4] {
-        let mut kinds = [0; 4];
-        let parents: Vec<ExternalSequenceBlockHash> = self
-            .heads
-            .iter()
-            .map(|head| head.key().parent_hash)
-            .collect();
-        for parent in parents {
-            let kind = if parent == ROOT_PARENT {
-                0
-            } else {
-                match self.locate(parent) {
-                    None => 1,
-                    Some((run, pos)) => {
-                        if pos as usize + 1 < run.read().blocks.len() {
-                            2
-                        } else {
-                            3
-                        }
-                    }
-                }
-            };
-            kinds[kind] += 1;
-        }
-        kinds
     }
 
     /// Every held edge: its key, child hash and owners.

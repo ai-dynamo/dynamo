@@ -255,7 +255,9 @@ cargo bench --package dynamo-bench --bench mooncake_bench \
 `lower_tier` in the result reports each host tier's events, blocks and live
 memberships against what the lower tier indexed, the lower-tier part of each
 lookup, the lookups that found blocks past the device prefix, the lower tier's
-drain, its heap per membership, and the shape of its run storage (`runs`). For
+drain, its heap per membership, and the shape of its run storage (`runs`):
+the runs by length and by what they start after, the runs that could be joined
+to the run before them, the blocks nobody holds, and the spare block slots. For
 each host tier it also reports the stores that arrived before their parent
 (neither of the worker's host tiers held it) and the stores by size: how much
 of the fill reached the lower tier child first. A request's own host stores
