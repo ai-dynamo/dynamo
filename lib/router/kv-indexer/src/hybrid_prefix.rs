@@ -938,11 +938,11 @@ mod tests {
 
     #[test]
     fn cache_owner_hint_cannot_borrow_its_attachment_workers_gpu_checkpoint() {
-        use crate::identity::{
+        use crate::prelude::{ResidencyOwnerKeyExt, ResidencyProjection};
+        use dynamo_router_protocol::identity::{
             CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
             RoutingScopeId, StableDpSlotId,
         };
-        use crate::prelude::{ResidencyOwnerKeyExt, ResidencyProjection};
         let owner = CacheOwnerId::new(
             PoolId::new(
                 IndexerDomainId::new(

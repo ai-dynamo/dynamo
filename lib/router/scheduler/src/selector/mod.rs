@@ -21,14 +21,9 @@ pub use derive::{WorkerCapacityExt, WorkerInfoExt, WorkerLoadInputExt};
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 pub use reference::DefaultWorkerSelector;
 
-// TODO(v1.7): Remove these compatibility re-exports; use dynamo_worker_selection instead.
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 use dynamo_worker_selection::DefaultWorkerPicker;
-pub use dynamo_worker_selection::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
-    WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext,
-};
+use dynamo_worker_selection::{WorkerInputs, WorkerLoadInput, WorkerSelectionContext};
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 use reference::{DefaultWorkerScorer, pick_default_worker};
 

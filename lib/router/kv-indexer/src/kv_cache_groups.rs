@@ -1604,7 +1604,7 @@ mod tests {
 
     #[test]
     fn compact_cache_owner_lookup_and_clear_do_not_change_worker_membership() {
-        use crate::identity::{
+        use dynamo_router_protocol::identity::{
             CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
             RoutingScopeId, StableDpSlotId,
         };

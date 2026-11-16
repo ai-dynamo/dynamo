@@ -11,9 +11,9 @@ use dynamo_kv_events::event::{
 };
 use dynamo_kv_events::residency::{KvCacheGroupKind, KvCacheGroupTag, StorageTier};
 use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
-use dynamo_kv_indexer::backend::Indexer;
 use dynamo_kv_indexer::{
-    ConcurrentRadixTreeCompressed, LowerTierIndexers, LowerTierQueryOptions, ThreadPoolIndexer,
+    ConcurrentRadixTreeCompressed, Indexer, LowerTierIndexers, LowerTierQueryOptions,
+    ThreadPoolIndexer,
 };
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 
