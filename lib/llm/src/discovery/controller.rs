@@ -11,7 +11,7 @@ use std::{
 use async_trait::async_trait;
 use dynamo_runtime::{
     discovery::{
-        DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryStream,
+        DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, DiscoveryStream,
         ModelCardInstanceId,
     },
     protocols::EndpointId,
@@ -149,7 +149,10 @@ pub(crate) trait ControllerHost: Send + Sync + 'static {
 
     fn discard_prepared(&self, prepared: Self::Prepared);
 
-    async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>>;
+    /// Lists the model cards for a reconciliation snapshot. `query` is the namespace filter's
+    /// [`NamespaceFilter::model_query`], so an exact filter lists only its namespace.
+    async fn list_instances(&self, query: DiscoveryQuery)
+    -> anyhow::Result<Vec<DiscoveryInstance>>;
 }
 
 #[derive(Clone)]
@@ -357,7 +360,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     }
                 }
                 _ = reconciliation_interval.tick(), if self.reconciliations.is_empty() => {
-                    self.start_reconciliation();
+                    self.start_reconciliation(namespace_filter.model_query());
                 }
                 result = self.reconciliations.join_next(), if !self.reconciliations.is_empty() => {
                     match result {
@@ -1149,13 +1152,14 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         while self.reconciliations.join_next().await.is_some() {}
     }
 
-    fn start_reconciliation(&mut self) {
+    /// Lists `query` in the background for a reconciliation snapshot at the current revision.
+    fn start_reconciliation(&mut self, query: DiscoveryQuery) {
         let host = self.host.clone();
         let revision = self.revision;
         self.reconciliations.spawn(async move {
             ReconciliationResult {
                 revision,
-                instances: host.list_instances().await,
+                instances: host.list_instances(query).await,
             }
         });
     }
@@ -1596,7 +1600,10 @@ mod tests {
             self.discarded.fetch_add(1, Ordering::SeqCst);
         }
 
-        async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {
+        async fn list_instances(
+            &self,
+            _query: DiscoveryQuery,
+        ) -> anyhow::Result<Vec<DiscoveryInstance>> {
             Ok(Vec::new())
         }
     }

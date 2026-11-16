@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::protocols::{RoutingConstraints, WorkerId};
+use dynamo_router_protocol::worker::WorkerId;
+use dynamo_scheduler::host::RoutingConstraints;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -31,7 +32,7 @@ pub trait RuntimeLoraWorkerFacts {
 }
 
 pub fn supports_runtime_lora<
-    C: RuntimeLoraWorkerFacts + dynamo_kv_router::protocols::WorkerConfigLike,
+    C: RuntimeLoraWorkerFacts + dynamo_scheduler::host::WorkerConfigLike,
 >(
     config: &C,
     is_base: bool,
@@ -120,7 +121,7 @@ pub fn runtime_lora_workers_have_homogeneous_resolvers<C: RuntimeLoraWorkerFacts
 }
 
 pub fn constrain_runtime_lora_workers<
-    C: RuntimeLoraWorkerFacts + dynamo_kv_router::WorkerConfigLike,
+    C: RuntimeLoraWorkerFacts + dynamo_scheduler::host::WorkerConfigLike,
 >(
     is_runtime_lora: bool,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -399,7 +400,7 @@ mod tests {
         }
     }
 
-    impl dynamo_kv_router::WorkerConfigLike for TestWorker {
+    impl dynamo_scheduler::host::WorkerConfigLike for TestWorker {
         fn data_parallel_start_rank(&self) -> u32 {
             0
         }
