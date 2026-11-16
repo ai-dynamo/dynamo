@@ -770,10 +770,16 @@ The `dynamo` chat processor runs Rust parsing in the frontend; workers publish p
 
 <ParamField path="--dyn-chat-processor" type="string" default="dynamo">
   Chat processor. See [Chat Processors](../../use-cases/tool-calling-and-reasoning/chat-processors.mdx) for how this combines with the parser flags.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>dynamo</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge></span>
+  Any value other than `dynamo`, `vllm` or `sglang` loads a [custom chat processor](../../developer-guide/knowledge-base/modular-components/frontend/custom-chat-processors.md):
+  a name registered in the `dynamo.frontend.chat_processors` entry-point group, or a `module:function` path.
 
   Environment variable: `DYN_CHAT_PROCESSOR`
+</ParamField>
+
+<ParamField path="--dyn-chat-processor-config" type="string (JSON object)">
+  Settings passed to a custom chat processor. Rejected with the built-in processors.
+
+  Environment variable: `DYN_CHAT_PROCESSOR_CONFIG`
 </ParamField>
 
 <ParamField path="--dyn-debug-perf" type="boolean" default="false">
@@ -801,67 +807,47 @@ The `dynamo` chat processor runs Rust parsing in the frontend; workers publish p
 
 ## Host memory allocator
 
-The frontend performs per-request host-memory allocations. Under high CPU load, allocator
-contention can cap frontend throughput before the GPU workers saturate. The frontend does not
-preload jemalloc by default.
+The Dynamo Python extension (`dynamo._core`) uses a built-in jemalloc for every Rust allocation, in
+the frontend and in every other process that imports it. CPython and C libraries keep the system
+allocator. `DYN_FRONTEND_JEMALLOC` is no longer read.
 
-<Note>
-Whether the container image ships jemalloc depends on how the image is built. Images built with
-`dynamo_runtime.Dockerfile` without an inference backend (`--framework dynamo`, the `dev` /
-`local-dev` / `runtime` targets used for development containers and backend-less components)
-include `libjemalloc2` since v1.3.0. The released vLLM, SGLang, and TensorRT-LLM images (runtime and
-dev targets), as well as the standalone frontend entrypoint image do not. Verify with
-`dpkg -L libjemalloc2 | grep 'libjemalloc.so'`; if the library is missing, either build a custom
-frontend image that includes it, or install it from an initContainer into a shared volume mounted
-by both containers and point `LD_PRELOAD` at the copied library path. Pointing `LD_PRELOAD` at a
-path that does not exist only prints a loader warning, and the process continues with the default
-glibc allocator.
-</Note>
+jemalloc cannot be turned off at runtime. To use the system allocator, for example to heap-profile
+Rust allocations with a preloaded jemalloc, build without the default `jemalloc` feature and
+re-enable the other defaults (currently `custom-policy`):
+`maturin build --no-default-features --features custom-policy`. musl and Windows (MSVC) builds
+always use the system allocator.
 
-<Note>
-  Released vLLM, SGLang, TensorRT-LLM, and standalone frontend images up to and including v1.5.0 do
-  not ship `libjemalloc2`; images from later releases include it. Verify with
-  `dpkg -L libjemalloc2 | grep 'libjemalloc.so'`. On older images, install the package into a shared
-  volume with an initContainer or use a custom image.
-</Note>
+| Option | Value | Effect |
+|---|---|---|
+| `background_thread` | `true` | Returns unused pages to the operating system on a schedule, even while idle. A process runs one such thread (`jemalloc_bg_thd`), up to four under load. Not set on macOS. |
+| `dirty_decay_ms` | `10000` | Unused pages are returned over about 10 seconds. |
+| `muzzy_decay_ms` | `0` | Pages are released outright, not through `MADV_FREE`, which would keep them counted as resident. |
+| `narenas` | `16` | Caps arenas. The default is four per CPU in the affinity mask, which a Kubernetes CPU limit alone does not shrink. |
 
-<ParamField path="LD_PRELOAD" type="string" default="unset">
-  Preload jemalloc for the frontend process. The library path depends on the container architecture:
+<ParamField path="_RJEM_MALLOC_CONF" type="string" default="the built-in options above">
+  Overrides individual built-in options, for example to return pages sooner:
 
   ```bash
-  # x86_64
-  export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
-
-  # arm64
-  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+  export _RJEM_MALLOC_CONF="dirty_decay_ms:1000"
   ```
 
-  In Kubernetes, set this variable on the frontend container rather than modifying the image. Locate
-  the installed path with `dpkg -L libjemalloc2 | grep 'libjemalloc.so'` if the image uses a different
-  layout.
+  See [Bound frontend host memory growth](../../kubernetes/operations/performance-tuning.md#bound-frontend-host-memory-growth)
+  to measure the effect.
 </ParamField>
 
-<Warning>
-The TensorRT-LLM image bakes its own `LD_PRELOAD` (`/opt/dynamo/libstdc++.so.6` and TensorRT-LLM's
-bundled `libnixl.so`). Assigning `LD_PRELOAD` as shown above replaces that value. On TensorRT-LLM images, prepend the jemalloc
-library instead:
-
-```bash
-export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-```
-</Warning>
-
-<ParamField path="MALLOC_CONF" type="string" default="jemalloc defaults">
-  Configure jemalloc when it is preloaded. The best values depend on the request workload and CPU
-  allocation. This is an empirical starting point, not a production default:
+<ParamField path="LD_PRELOAD" type="string" default="unset">
+  Optional. Preloads a separate jemalloc, configured by `MALLOC_CONF`, for CPython and C
+  allocations; the built-in allocator is unaffected. The vLLM, SGLang, TensorRT-LLM, and frontend
+  images ship `libjemalloc2` from v1.6.0, and `--framework dynamo` images from v1.3.0.
 
   ```bash
-  export MALLOC_CONF="narenas:32,tcache:true,lg_tcache_max:15,dirty_decay_ms:5000,muzzy_decay_ms:5000"
+  export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2    # x86_64
+  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2   # arm64
   ```
 
-  Validate allocator changes with the same AIPerf workload before and after enabling them. See
-  [Bound frontend host memory growth](../../kubernetes/operations/performance-tuning.md#bound-frontend-host-memory-growth)
-  for the symptom this addresses and how to measure the effect.
+  The TensorRT-LLM image already sets `LD_PRELOAD` (`/opt/dynamo/libstdc++.so.6` and its bundled
+  `libnixl.so`): prepend jemalloc to that list instead of replacing it, writing the full list out in
+  a Kubernetes manifest.
 </ParamField>
 
 ## HTTP endpoints

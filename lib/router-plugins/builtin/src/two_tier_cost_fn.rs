@@ -27,6 +27,7 @@
 //! unspecified. This matches the ported implementation; note that Dynamo's built-in selector
 //! instead samples uniformly among ties.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use dynamo_kv_router::plugins::prelude::*;
@@ -82,23 +83,29 @@ impl Parameters {
     }
 }
 
-fn least_loaded(load: &[WorkerLoadInput], rows: impl Iterator<Item = usize>) -> Option<usize> {
-    rows.min_by_key(|&row| load[row].active_requests())
+thread_local! {
+    /// Each row's active request count, read once per pick.
+    static ACTIVE_REQUEST_COUNTS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
+fn least_loaded(load: &[u64], rows: impl Iterator<Item = usize>) -> Option<usize> {
+    rows.min_by_key(|&row| load[row])
+}
+
+/// `load` holds each row's active request count.
 fn select_row(
     parameters: &Parameters,
     cache: WorkerCacheInputs<'_>,
-    load: &[WorkerLoadInput],
+    load: &[u64],
     request_blocks: u64,
 ) -> Option<usize> {
     if cache.is_empty() || cache.len() != load.len() {
         return None;
     }
 
-    let min_load = load.iter().map(|item| item.active_requests()).min()?;
-    let max_load = load.iter().map(|item| item.active_requests()).max()?;
-    if max_load.saturating_sub(min_load) > parameters.balance_abs_threshold
+    let min_load = load.iter().copied().min()?;
+    let max_load = load.iter().copied().max()?;
+    if max_load.saturating_sub(min_load) > parameters.balance_abs_threshold as u64
         && (max_load as f64) > parameters.balance_rel_threshold * (min_load as f64)
     {
         return least_loaded(load, 0..load.len());
@@ -131,7 +138,9 @@ struct TwoTierCostFnPicker {
 
 impl WorkerPicker for TwoTierCostFnPicker {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::CACHE | WorkerInputs::LOAD
+        // Active request counts, not `LOAD` rows: the host projects `LOAD` rows' decode cost
+        // from every rank's overlap with active prompts, which this policy never reads.
+        WorkerInputs::CACHE | WorkerInputs::ACTIVE_REQUESTS
     }
 
     fn pick(
@@ -142,11 +151,16 @@ impl WorkerPicker for TwoTierCostFnPicker {
         let cache = input
             .cache()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
-        let load = input
-            .load()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        select_row(&self.parameters, cache, load, context.request_blocks())
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
+        ACTIVE_REQUEST_COUNTS.with_borrow_mut(|load| {
+            load.clear();
+            for row in 0..input.len() {
+                load.push(input.active_requests(row).ok_or_else(|| {
+                    WorkerSelectionPolicyError::failed("active request counts unavailable")
+                })?);
+            }
+            select_row(&self.parameters, cache, load, context.request_blocks())
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
+        })
     }
 }
 
