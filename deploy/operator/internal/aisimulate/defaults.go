@@ -31,6 +31,11 @@ const (
 	// It matches the trial budget of AISimulate's unified CLI while making the
 	// effective input persisted in Run status self-contained.
 	DefaultMaxTrials int64 = 320
+
+	// TargetPareto is the AISimulate optimization.target value for a Pareto
+	// multi-objective search. The controller reads the effective target from the
+	// lowered input to set is_pareto and pareto_objectives in the dgdr_run config.
+	TargetPareto = "pareto"
 )
 
 // publicUnderlay supplies the role objects required by AISimulate's default

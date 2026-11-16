@@ -210,8 +210,6 @@ areas:
   - lib/llm/src/block_manager/v2.rs
   - lib/llm/src/block_manager/v2/
   - lib/llm/src/block_manager/v2/physical/transfer/nixl_agent/
-  - lib/llm/src/kv.rs
-  - lib/llm/src/kv/
   - lib/memory/
   - lib/memory/bin/
   - lib/memory/src/nixl.rs
@@ -579,7 +577,6 @@ areas:
   path_globs:
   - .github/workflows/pr-xpu.yaml
   - .github/workflows/xpu-ci.yaml
-  - container/templates/sglang_xpu_framework.Dockerfile
   - dev/docker-observability-xpu.yml
   - dev/observability/prometheus-xpu.yml
   - dev/observability/xpu-alert-rules.yml
@@ -1488,11 +1485,6 @@ shared:
   owners:
   - ops
   - backend-sglang
-- glob: container/templates/sglang_xpu_framework.Dockerfile
-  owners:
-  - ops
-  - backend-sglang
-  - xpu
 - glob: container/templates/trtllm_runtime.Dockerfile
   owners:
   - ops

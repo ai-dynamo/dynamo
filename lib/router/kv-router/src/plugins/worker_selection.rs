@@ -10,7 +10,19 @@
 
 mod config;
 
-pub use dynamo_worker_selection::selection_config;
+#[allow(deprecated)]
+pub use dynamo_worker_selection::WorkerTransferInput;
+pub use dynamo_worker_selection::experimental;
+/// The selection slice of the router config, with its defaults and validators.
+pub mod selection_config {
+    pub use dynamo_worker_selection::{
+        OVERLAP_SCORE_CREDIT_RANGE_ERROR, SelectionConfig, SharedCacheType,
+        default_decode_active_request_weight, default_disk_cache_hit_weight,
+        default_host_cache_hit_weight, default_overlap_score_credit_decay,
+        default_prefill_load_scale, overlap_score_credit_error_message,
+        validate_finite_non_negative, validate_overlap_score_credit, validate_range,
+    };
+}
 pub use dynamo_worker_selection::{
     CacheSnapshot, CandidateData, CandidatePreparer, CandidateRank, CandidateRowSource,
     HostedSelectionRequest, HostedWorkerPicker, PreparedRows, RankVisitor, RowPick,
@@ -18,9 +30,9 @@ pub use dynamo_worker_selection::{
     ScoredWorkerCandidate, SelectionConfig, SelectionFailure, SelectionTrace, SelectionTraceRow,
     SelectionTraceSpec, SessionContext, SharedCacheHits, SharedCacheType, WorkerCacheData,
     WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity,
-    WorkerFilter, WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs, WorkerLoadInput,
-    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError, WorkerTransferInput,
+    WorkerCopyInput, WorkerFilter, WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs,
+    WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
+    WorkerSelectionPolicyError,
 };
 #[cfg(any(test, feature = "bench"))]
 pub use dynamo_worker_selection::{DefaultPick, DefaultWorkerPicker};
@@ -32,7 +44,10 @@ pub use super::registry::{
 pub(crate) use config::RawWorkerSelectionConfig;
 pub use config::{WorkerSelectionConfig, WorkerSelectionInstance, WorkerSelectionPolicySelection};
 pub use dynamo_router_protocol::session::WorkerSelectionInputTrigger;
-pub use dynamo_scheduler::selector::{WorkerCapacityExt, WorkerInfoExt, WorkerLoadInputExt};
+pub use dynamo_scheduler::{
+    Commitments, KvCopyLocations, KvCopySource, WorkerCapacityExt, WorkerInfoExt,
+    WorkerLoadInputExt,
+};
 
 /// Factory that creates one worker-selection policy per routing partition.
-pub use dynamo_scheduler::types::WorkerSelectionPolicyFactory;
+pub use dynamo_scheduler::WorkerSelectionPolicyFactory;

@@ -13,17 +13,17 @@ use super::config::RouterConfigOverride;
 use super::filter::RoutingEligibility;
 use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
 use super::prefill_load::effective_prefill_tokens;
-use crate::kv_hints::{KvTransferCandidates, KvTransferSourceChoice};
+use crate::kv_hints::{KvCopySource, KvTransferCandidates, KvTransferSourceChoice};
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{RoutingConstraints, SelectionLogFields, WorkerConfigLike};
-use dynamo_admission::queue::QueueRejection;
+use dynamo_admission::QueueRejection;
 use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::{SelectionTrace, SharedCacheHits};
 
-pub use dynamo_router_protocol::attempt::{AttemptId, AttemptIdMinter};
+pub use dynamo_router_protocol::attempt::AttemptId;
 pub use dynamo_router_protocol::session::{SessionContext, WorkerSelectionInputTrigger};
 
 pub type OverloadedWorkerProvider =
@@ -91,7 +91,7 @@ pub type WorkerSelectionPolicyFactory = std::sync::Arc<
 /// Supplies the busy thresholds the gate applies when it checks whether a worker has room,
 /// re-read on every check so a host can retune them without rebuilding the scheduler.
 pub type RejectThresholdsProvider =
-    std::sync::Arc<dyn Fn() -> dynamo_slot_tracker::busy::BusyThresholds + Send + Sync + 'static>;
+    std::sync::Arc<dyn Fn() -> dynamo_slot_tracker::BusyThresholds + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TierOverlapBlocks {
@@ -140,7 +140,7 @@ pub enum KvSchedulerError {
     RequestClassifierPanicked(String),
 
     #[error("request classifier failed: {0}")]
-    RequestClassifierFailed(Arc<dynamo_admission::classifier::ClassifierError>),
+    RequestClassifierFailed(Arc<dynamo_admission::ClassifierError>),
 
     #[error("request classifier is already tracking request ID {0:?}")]
     DuplicateClassificationRequestId(String),
@@ -178,9 +178,10 @@ pub struct SchedulingResponse {
     /// Raw prefix overlap for the selected worker and DP rank, in tokens.
     pub selected_raw_cached_tokens: Option<usize>,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
-    /// The source `best_worker` fetches its KV prefix from; see
-    /// [`crate::protocols::WorkerSelectionResult::kv_transfer_source`].
-    pub kv_transfer_source: Option<KvTransferSourceChoice>,
+    /// The copy source of `best_worker`: the source selection chose (see
+    /// [`crate::protocols::WorkerSelectionResult::kv_transfer_source`]) with `best_worker`'s
+    /// local prefix.
+    pub kv_copy_source: Option<KvCopySource>,
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
     pub potential_decode_blocks: usize,
     /// Per-candidate costs, present only when the scheduler has a selection
@@ -440,8 +441,8 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
         self.request
     }
 
-    pub(crate) fn with_available_workers(mut self, available: Option<&'a WorkerIdSet>) -> Self {
-        self.eligibility = self.eligibility.with_available_workers(available);
+    pub(crate) fn with_eligibility(mut self, eligibility: RoutingEligibility<'a>) -> Self {
+        self.eligibility = eligibility;
         self
     }
 
@@ -461,9 +462,9 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
                 .effective_cached_tokens
                 .iter()
                 .filter(|(worker, _)| {
-                    self.workers.get(&worker.worker_id).is_some_and(|config| {
-                        self.eligibility.allows_worker(worker.worker_id, config)
-                    })
+                    self.eligibility
+                        .validate_worker_rank(self.workers, **worker)
+                        .is_ok()
                 })
                 .map(|(_, cached_tokens)| *cached_tokens)
                 .max()
@@ -473,6 +474,21 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
 }
 
 impl SchedulingRequest {
+    /// `worker`'s copy from `source`, with the local prefix the source was chosen against.
+    pub(crate) fn kv_copy_source(
+        &self,
+        worker: WorkerWithDpRank,
+        source: Option<KvTransferSourceChoice>,
+    ) -> Option<KvCopySource> {
+        source.map(|choice| {
+            KvCopySource::new(
+                worker,
+                choice,
+                self.transfer_local_prefix_blocks_for(worker),
+            )
+        })
+    }
+
     #[inline]
     pub fn eligibility(&self) -> RoutingEligibility<'_> {
         self.eligibility_with_overloaded(None)
@@ -598,15 +614,15 @@ impl From<dynamo_worker_selection::SelectionFailure> for KvSchedulerError {
     }
 }
 
-impl From<dynamo_admission::profile::UnknownPolicyClassError> for KvSchedulerError {
-    fn from(error: dynamo_admission::profile::UnknownPolicyClassError) -> Self {
+impl From<dynamo_admission::UnknownPolicyClassError> for KvSchedulerError {
+    fn from(error: dynamo_admission::UnknownPolicyClassError) -> Self {
         Self::UnknownPolicyClass(error.0)
     }
 }
 
-impl From<dynamo_admission::classifier::ClassificationError> for KvSchedulerError {
-    fn from(error: dynamo_admission::classifier::ClassificationError) -> Self {
-        use dynamo_admission::classifier::ClassificationError;
+impl From<dynamo_admission::ClassificationError> for KvSchedulerError {
+    fn from(error: dynamo_admission::ClassificationError) -> Self {
+        use dynamo_admission::ClassificationError;
         match error {
             ClassificationError::Panicked(message) => Self::RequestClassifierPanicked(message),
             ClassificationError::Failed(error) => Self::RequestClassifierFailed(error),

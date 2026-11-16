@@ -163,3 +163,7 @@ harness = false
 [[bench]]
 name = "ingress_response_encode"
 harness = false
+
+[[bench]]
+name = "ingress_allocations"
+harness = false

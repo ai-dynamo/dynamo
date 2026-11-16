@@ -5,6 +5,7 @@
 //! `create_reservation` replay path, and the lifecycle calls that advance or
 //! release them.
 
+use super::hint::{BookingHint, booking_hint};
 use super::*;
 use crate::AccountingAttribution;
 use crate::queue::BookingHandle;
@@ -27,6 +28,9 @@ struct ReservationBooking {
     /// Public block hashes to record into an approximate indexer once booked.
     routing_hashes: Option<Vec<LocalBlockHash>>,
     session_id: Option<String>,
+    /// The replayed selection, whose booking runs the partition's hint policies; `None` for an
+    /// explicit reservation, which skips selection and runs no hint policy.
+    replay: Option<Arc<PendingSelection>>,
 }
 
 /// `selection_id` -> the booking it holds.
@@ -250,6 +254,7 @@ impl SelectionCore {
                 accounting_attribution: pending.accounting_attribution,
                 routing_hashes: pending.routing_hashes.clone(),
                 session_id: pending.session_id.clone(),
+                replay: Some(Arc::clone(&pending)),
             },
         )
         .await
@@ -360,6 +365,7 @@ impl SelectionCore {
                 accounting_attribution: AccountingAttribution::default(),
                 routing_hashes,
                 session_id: None,
+                replay: None,
             },
         )
         .await
@@ -386,6 +392,7 @@ impl SelectionCore {
             accounting_attribution,
             routing_hashes,
             session_id,
+            replay,
         } = booking;
 
         let claim = self.claim_reservation(&selection_id, &key)?;
@@ -412,6 +419,25 @@ impl SelectionCore {
                 worker,
                 lora_name: accounting_attribution.accounting_name(lora_name),
             })?;
+        // A replayed selection runs its partition's hint policies for the booked worker. A
+        // failure returns while the booking handle is armed, so the booking is freed.
+        let kv_hint = match &replay {
+            Some(pending) => booking_hint(
+                &entry,
+                BookingHint {
+                    request_id: &selection_id,
+                    worker,
+                    isl_tokens: pending.isl_tokens,
+                    session_context: pending.session_context.as_ref(),
+                    kv_copy_source: pending.kv_copy.as_ref().map(|kv_copy| kv_copy.copy),
+                    kv_transfer_candidates: pending
+                        .kv_copy
+                        .as_ref()
+                        .map(|kv_copy| &kv_copy.candidates),
+                },
+            )?,
+            None => None,
+        };
         let affinity_lease = match session {
             Some((table, session_id, hold)) => {
                 self.commit_session(table, hold, session_id, worker, &key)?
@@ -430,6 +456,7 @@ impl SelectionCore {
             worker_id: worker.worker_id,
             dp_rank: worker.dp_rank,
             endpoint,
+            kv_hint,
         })
     }
 
