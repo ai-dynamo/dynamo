@@ -1126,8 +1126,9 @@ class TestGenerateLocally:
         [
             (WaitingQueuePolicy.PRIORITY, 0.5 + 2**-24),
             (WaitingQueuePolicy.FCFS, DEFAULT_REQUEST_PRIORITY),
+            (None, DEFAULT_REQUEST_PRIORITY),
         ],
-        ids=["priority-queue", "fcfs-queue"],
+        ids=["priority-queue", "fcfs-queue", "no-scheduler-config"],
     )
     async def test_routing_priority_follows_engine_waiting_queue(
         self, waiting_queue_policy, expected
@@ -1135,12 +1136,16 @@ class TestGenerateLocally:
         """routing.priority reaches a priority-queue engine on TRT-LLM's scale.
 
         The default FCFS queue ignores priorities and warns for each request
-        that carries one, so it keeps the default.
+        that carries one, so it keeps the default. Engine args without a
+        scheduler config run that default queue.
         """
         handler = self._make_handler()
-        handler.engine.llm.args.scheduler_config.waiting_queue_policy = (
-            waiting_queue_policy
-        )
+        if waiting_queue_policy is None:
+            del handler.engine.llm.args.scheduler_config
+        else:
+            handler.engine.llm.args.scheduler_config.waiting_queue_policy = (
+                waiting_queue_policy
+            )
         generation_result = self._make_mock_generation_result()
         handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
         request = {

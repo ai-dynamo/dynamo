@@ -1277,8 +1277,10 @@ class HandlerBase(BaseGenerativeHandler):
                 )
         conv_affinity = self._conversation_affinity
         if self._engine_orders_by_priority is None:
+            # Engine args without a scheduler config run the default FCFS queue.
+            scheduler_config = getattr(self.engine.llm.args, "scheduler_config", None)
             self._engine_orders_by_priority = (
-                self.engine.llm.args.scheduler_config.waiting_queue_policy
+                getattr(scheduler_config, "waiting_queue_policy", None)
                 == WaitingQueuePolicy.PRIORITY
             )
 
