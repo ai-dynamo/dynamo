@@ -14,13 +14,18 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from dynamo.planner.reconfiguration import PREDICTOR_FIELDS, RUNTIME_FIELDS
+from dynamo.planner.reconfiguration import (
+    PREDICTOR_FIELDS,
+    RUNTIME_FIELDS,
+    SCALING_POLICY_FIELDS,
+)
 from dynamo.planner.simulation.config import (
     PLANNER_PRESET_GROUPS,
     PLANNER_PUBLIC_TO_CONFIG,
     PLANNER_RETUNE_GROUPS,
     PLANNER_RETUNE_KNOBS,
     PLANNER_RETUNE_STARTUP_ONLY,
+    PLANNER_RETUNE_USER_CONSTRAINTS,
     PlannerRetuneConfig,
 )
 
@@ -42,22 +47,34 @@ def test_every_retune_field_is_classified_and_reaches_a_runtime_field() -> None:
         for knob in PLANNER_PRESET_GROUPS[group]
         if knob in RUNTIME_FIELDS
     }
+    # The user constraints are recommendation fields retune rejects;
+    # min_num_gpus has no recommendation field.
+    constraints = PLANNER_RETUNE_USER_CONSTRAINTS & set(
+        PlannerRetuneConfig.model_fields
+    )
     classes = [
         PLANNER_RETUNE_STARTUP_ONLY,
         set(PLANNER_RETUNE_KNOBS),
         set(PLANNER_RETUNE_GROUPS),
         runtime_group_knobs,
+        constraints,
     ]
     fields = set(PlannerRetuneConfig.model_fields)
     assert set().union(*classes) == fields
     assert sum(len(names) for names in classes) == len(fields)
-    # Retune reaches every runtime field except the SLA.
+    # Retune reaches every runtime field except the SLA and the user
+    # constraints, which the control API changes.
     reachable = (
         set(PLANNER_RETUNE_KNOBS.values())
         | {"load_scaling_down_sensitivity"}
         | PREDICTOR_FIELDS
+        | SCALING_POLICY_FIELDS
     )
-    assert reachable == RUNTIME_FIELDS - {"ttft_ms", "itl_ms"}
+    user_constraint_fields = {
+        PLANNER_PUBLIC_TO_CONFIG[name] for name in PLANNER_RETUNE_USER_CONSTRAINTS
+    }
+    assert reachable == RUNTIME_FIELDS - {"ttft_ms", "itl_ms"} - user_constraint_fields
+    assert user_constraint_fields <= RUNTIME_FIELDS
     assert all(
         PLANNER_PUBLIC_TO_CONFIG.get(public, public) == live
         for public, live in PLANNER_RETUNE_KNOBS.items()

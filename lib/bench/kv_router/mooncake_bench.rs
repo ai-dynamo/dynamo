@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "mooncake_lower_tier.rs"]
+mod mooncake_lower_tier;
 #[path = "mooncake_open_loop.rs"]
 mod mooncake_open_loop;
 #[path = "mooncake_shared.rs"]
@@ -9,10 +11,14 @@ mod mooncake_shared;
 use clap::{Parser, Subcommand};
 use dynamo_bench::kv_router_common::args::CommonArgs;
 use dynamo_bench::kv_router_common::issuer::pin_current_thread_to_cpus;
-use dynamo_bench::kv_router_common::replay::generate_replay_artifacts;
+use dynamo_bench::kv_router_common::replay::{
+    generate_replay_artifacts, generate_replay_artifacts_with_args, host_offload_mock_engine_args,
+};
 use dynamo_bench::kv_router_common::sweep::compute_sweep_durations;
-use dynamo_kv_router::indexer::KvIndexerMetrics;
-use dynamo_kv_router::{ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer};
+use dynamo_kv_indexer::host::{
+    ConcurrentRadixTreeCompressed, KvIndexerMetrics, PositionalIndexer, ThreadPoolIndexer,
+};
+use mooncake_lower_tier::LowerTierRun;
 use mooncake_open_loop::{
     OpenLoopConfig, OpenLoopResult, RunProvenance, parse_cpu_list, prepare_mooncake_corpus,
     prepare_open_loop_trial, run_open_loop, validate_cpu_partition,
@@ -23,6 +29,7 @@ use mooncake_shared::{
 };
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "linux")]
 const PRE_RUN_QUIESCENCE_MS: u64 = 5_000;
@@ -65,11 +72,39 @@ impl IndexerArgs {
     }
 }
 
+/// The lower-tier (KVCR host tier) mode, CRTC only. Workers publish vLLM's CPU offload tier and,
+/// unless `--kvcr-blocks 0`, a KVCR DRAM tier copied from it; the router indexes both in its lower
+/// tier, and every lookup seeds the lower-tier walk with the CRTC device match.
+#[derive(clap::Args, Debug, Clone)]
+struct LowerTierArgs {
+    /// vLLM CPU offload tier capacity per worker, in blocks. Turns the lower-tier mode on.
+    #[clap(long)]
+    num_host_blocks: Option<usize>,
+
+    /// KVCR DRAM tier capacity per worker, in blocks (default: `--num-host-blocks`). 0 publishes
+    /// the CPU tier only.
+    #[clap(long)]
+    kvcr_blocks: Option<usize>,
+
+    /// KV cache bytes per token, which sets the mocker's device-to-host copy time.
+    #[clap(long, default_value = "131072")]
+    kv_cache_bytes_per_token: usize,
+}
+
+impl LowerTierArgs {
+    fn kvcr_blocks(&self) -> usize {
+        self.kvcr_blocks.or(self.num_host_blocks).unwrap_or(0)
+    }
+}
+
 #[derive(Parser, Debug)]
 #[clap(version, about, long_about = None)]
 struct Args {
     #[clap(flatten)]
     common: CommonArgs,
+
+    #[clap(flatten)]
+    lower_tier: LowerTierArgs,
 
     /// Number of persistent logical query lanes.
     #[clap(long, default_value = "128")]
@@ -130,6 +165,16 @@ struct Args {
     #[clap(long, default_value = "1")]
     benchmark_runs: usize,
 
+    /// Keep live per-rank resident block counts on the event threads, as when a
+    /// selection policy reads `RESIDENT_BLOCKS` (concurrent-radix-tree-compressed only).
+    #[clap(long)]
+    track_resident_blocks: bool,
+
+    /// Also read every resident block counter in a loop from a thread pinned to this
+    /// CPU, as selections do. Implies `--track-resident-blocks`.
+    #[clap(long)]
+    resident_blocks_reader_cpu: Option<usize>,
+
     /// Indexer backend to benchmark. Defaults to concurrent-radix-tree-compressed
     /// with `--num-event-workers` event threads.
     #[clap(subcommand)]
@@ -176,6 +221,12 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
     if !args.common.sweep && args.benchmark_runs != 1 {
         anyhow::bail!("repetitions must use fresh processes; invoke one trial per process");
     }
+    if args.lower_tier.num_host_blocks == Some(0) || args.lower_tier.kv_cache_bytes_per_token == 0 {
+        anyhow::bail!("--num-host-blocks and --kv-cache-bytes-per-token must be positive");
+    }
+    if args.lower_tier.kvcr_blocks.is_some() && args.lower_tier.num_host_blocks.is_none() {
+        anyhow::bail!("--kvcr-blocks needs --num-host-blocks");
+    }
     if args.common.mooncake_trace_path.is_none() {
         return Ok(());
     }
@@ -192,6 +243,13 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
         ) {
             anyhow::bail!(
                 "corrected Mooncake replay supports only nested-map and concurrent-radix-tree-compressed; got {name}"
+            );
+        }
+        if args.lower_tier.num_host_blocks.is_some()
+            && config.kind != MooncakeIndexerKind::ConcurrentRadixTreeCompressed
+        {
+            anyhow::bail!(
+                "the lower-tier mode needs concurrent-radix-tree-compressed for device matches; got {name}"
             );
         }
     }
@@ -267,9 +325,14 @@ async fn run_open_loop_for_config(
         prepare_mooncake_corpus(prepared, bench_config.inference_worker_duplication_factor)?;
     let trial = prepare_open_loop_trial(corpus, args.query_lanes)?;
     quiesce_prepared_heap();
-    let metrics = || Some(Arc::new(KvIndexerMetrics::new_unregistered()));
+    let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
     let open_config = parse_open_loop_config(args)?;
     pin_current_thread_to_cpus(&open_config.backend_cpus)?;
+    let track_resident_blocks =
+        args.track_resident_blocks || args.resident_blocks_reader_cpu.is_some();
+    if track_resident_blocks && config.kind != MooncakeIndexerKind::ConcurrentRadixTreeCompressed {
+        anyhow::bail!("resident block tracking applies only to concurrent-radix-tree-compressed");
+    }
 
     match config.kind {
         MooncakeIndexerKind::NestedMap => {
@@ -277,18 +340,62 @@ async fn run_open_loop_for_config(
                 PositionalIndexer::new(config.jump_size),
                 config.num_event_workers,
                 args.common.block_size,
-                metrics(),
+                Some(metrics),
             ));
-            run_backend(config.short_name(), indexer, trial, open_config).await
+            run_backend(config.short_name(), indexer, None, trial, open_config).await
         }
         MooncakeIndexerKind::ConcurrentRadixTreeCompressed => {
             let indexer = Arc::new(ThreadPoolIndexer::new_with_metrics(
                 ConcurrentRadixTreeCompressed::new(),
                 config.num_event_workers,
                 args.common.block_size,
-                metrics(),
+                Some(Arc::clone(&metrics)),
             ));
-            run_backend(config.short_name(), indexer, trial, open_config).await
+            // The router's lower tier shares the primary's event-thread count and metrics.
+            let lower_tier = args.lower_tier.num_host_blocks.map(|_| {
+                LowerTierRun::crtc(
+                    config.num_event_workers,
+                    args.common.block_size,
+                    Some(metrics),
+                    args.lower_tier.kvcr_blocks() > 0,
+                )
+            });
+            let counts = track_resident_blocks.then(|| indexer.bench_track_resident_blocks());
+            let stop = Arc::new(AtomicBool::new(false));
+            let reader = counts
+                .zip(args.resident_blocks_reader_cpu)
+                .map(|(counts, cpu)| {
+                    let stop = stop.clone();
+                    let (pinned_tx, pinned_rx) = std::sync::mpsc::sync_channel(1);
+                    let handle = std::thread::spawn(move || {
+                        let pinned = pin_current_thread_to_cpus(&[cpu]);
+                        let failed = pinned.is_err();
+                        let _ = pinned_tx.send(pinned);
+                        if failed {
+                            return;
+                        }
+                        while !stop.load(Ordering::Relaxed) {
+                            std::hint::black_box(counts.bench_sum());
+                        }
+                    });
+                    (handle, pinned_rx)
+                });
+            // Don't start the trial until the reader is pinned, so a failed pin
+            // aborts here instead of producing a run with no reader.
+            if let Some((_, pinned_rx)) = &reader {
+                pinned_rx.recv().map_err(|_| {
+                    anyhow::anyhow!("resident block reader exited before pinning")
+                })??;
+            }
+            let result =
+                run_backend(config.short_name(), indexer, lower_tier, trial, open_config).await;
+            stop.store(true, Ordering::Relaxed);
+            if let Some((handle, _)) = reader {
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("resident block reader panicked"))?;
+            }
+            result
         }
         MooncakeIndexerKind::RadixTree | MooncakeIndexerKind::BranchShardedCrtc => {
             anyhow::bail!(
@@ -312,9 +419,10 @@ fn quiesce_prepared_heap() {
 #[cfg(not(target_os = "linux"))]
 fn quiesce_prepared_heap() {}
 
-async fn run_backend<T: dynamo_kv_router::indexer::SyncIndexer>(
+async fn run_backend<T: dynamo_kv_indexer::host::SyncIndexer>(
     backend_name: &str,
     indexer: Arc<ThreadPoolIndexer<T>>,
+    lower_tier: Option<LowerTierRun<T>>,
     trial: mooncake_open_loop::PreparedOpenLoopTrial,
     open_config: OpenLoopConfig,
 ) -> anyhow::Result<OpenLoopResult> {
@@ -322,7 +430,7 @@ async fn run_backend<T: dynamo_kv_router::indexer::SyncIndexer>(
     if let Some(cpu) = open_config.query_issuer_cpu {
         pin_current_thread_to_cpus(&[cpu])?;
     }
-    let result = run_open_loop(backend_name, indexer, trial, open_config).await;
+    let result = run_open_loop(backend_name, indexer, lower_tier, trial, open_config).await;
     // Restore the coordinator mask. Otherwise blocking-pool threads spawned while the
     // next sweep or compare cell generates events inherit the single query-issuer CPU.
     let restored = pin_current_thread_to_cpus(&coordinator_cpus);
@@ -353,6 +461,19 @@ fn print_open_loop_result(result: &OpenLoopResult) {
         result.issue_span_ns as f64 / 1e6,
         result.drain_ns as f64 / 1e6,
     );
+    if let Some(lower) = &result.lower_tier {
+        println!(
+            "Lower tier: query p50/p99 {:.1}/{:.1} us | {} of {} lookups hit | drain {:.3} ms | {} B per (block, owner)",
+            lower.query_service.p50_ns as f64 / 1_000.0,
+            lower.query_service.p99_ns as f64 / 1_000.0,
+            lower.hit_queries,
+            result.total_requests,
+            lower.drain_ns as f64 / 1e6,
+            lower
+                .bytes_per_membership
+                .map_or("?".to_string(), |bytes| format!("{bytes:.1}")),
+        );
+    }
     if !result.backend_timing_report.is_empty() {
         println!("{}", result.backend_timing_report);
     }
@@ -404,6 +525,15 @@ fn run_provenance(args: &Args, config: &MooncakeIndexerConfig) -> anyhow::Result
             .then_some(config.jump_size),
         issuer_spin_us: args.issuer_spin_us,
         issue_lag_diagnostic_threshold_us: args.issue_lag_diagnostic_threshold_us,
+        num_host_blocks: args.lower_tier.num_host_blocks,
+        kvcr_blocks: args
+            .lower_tier
+            .num_host_blocks
+            .map(|_| args.lower_tier.kvcr_blocks()),
+        kv_cache_bytes_per_token: args
+            .lower_tier
+            .num_host_blocks
+            .map(|_| args.lower_tier.kv_cache_bytes_per_token),
     })
 }
 
@@ -424,15 +554,36 @@ async fn prepare_benchmark(
     };
 
     let traces = args.common.load_mooncake_trace(path)?;
-    let artifacts = generate_replay_artifacts(
-        &traces,
-        args.common.num_gpu_blocks,
-        args.common.block_size,
-        args.common.trace_simulation_duration_ms,
-    )
-    .await?;
+    let artifacts = match args.lower_tier.num_host_blocks {
+        Some(num_host_blocks) => {
+            let engine = host_offload_mock_engine_args(
+                args.common.num_gpu_blocks,
+                args.common.block_size as usize,
+                num_host_blocks,
+                args.lower_tier.kv_cache_bytes_per_token,
+            )?;
+            generate_replay_artifacts_with_args(
+                &traces,
+                engine,
+                args.common.trace_simulation_duration_ms,
+            )
+            .await?
+        }
+        None => {
+            generate_replay_artifacts(
+                &traces,
+                args.common.num_gpu_blocks,
+                args.common.block_size,
+                args.common.trace_simulation_duration_ms,
+            )
+            .await?
+        }
+    };
     drop(traces);
-    let merged = merge_worker_traces(artifacts, args.common.block_size)?;
+    let mut merged = merge_worker_traces(artifacts, args.common.block_size)?;
+    if args.lower_tier.num_host_blocks.is_some() && args.lower_tier.kvcr_blocks() > 0 {
+        merged = merged.with_kvcr_layer(args.lower_tier.kvcr_blocks())?;
+    }
     Ok(Some(prepare_scaled_benchmark(
         merged,
         benchmark_duration_ms,

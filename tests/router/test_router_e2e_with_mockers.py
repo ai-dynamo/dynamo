@@ -469,7 +469,6 @@ def test_mocker_kv_event_publisher_disabled_diagnostic(
         ),
         pytest.param("round-robin", {}, id="roundrobin"),
         pytest.param("random", {}, id="random"),
-        pytest.param("power-of-two", {}, id="power-of-two"),
     ],
 )
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)

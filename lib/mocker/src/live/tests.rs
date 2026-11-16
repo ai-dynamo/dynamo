@@ -8,7 +8,7 @@ use std::time::Duration;
 use super::*;
 use crate::common::handoff::HandoffId;
 use crate::common::protocols::{EngineType, FpmPublisher, FpmSink, WorkerType};
-use dynamo_kv_router::protocols::StorageTier;
+use dynamo_kv_events::residency::StorageTier;
 
 struct NoopKvSink;
 
@@ -26,13 +26,13 @@ impl FpmSink for CountingFpmSink {
 }
 
 impl crate::common::protocols::KvCacheEventSink for NoopKvSink {
-    fn publish(&self, _event: dynamo_kv_router::protocols::KvCacheEvent) -> anyhow::Result<()> {
+    fn publish(&self, _event: dynamo_kv_events::event::KvCacheEvent) -> anyhow::Result<()> {
         Ok(())
     }
 
     fn publish_with_storage_tier(
         &self,
-        _event: dynamo_kv_router::protocols::KvCacheEvent,
+        _event: dynamo_kv_events::event::KvCacheEvent,
         _storage_tier: StorageTier,
     ) -> anyhow::Result<()> {
         Ok(())
@@ -1237,16 +1237,7 @@ async fn direct_delivery_forwards_admission_before_releasing_output() {
 
 #[tokio::test]
 async fn replay_options_allow_zero_output() {
-    let zero_engine = LiveEngine::start_with_options(
-        args(EngineType::Sglang),
-        0,
-        LiveEngineOptions {
-            request_output_buffering: RequestOutputBuffering::FullResponse,
-            allow_zero_output: true,
-            ..LiveEngineOptions::default()
-        },
-    )
-    .unwrap();
+    let zero_engine = LiveEngine::start(args(EngineType::Sglang), 0).unwrap();
     let mut zero = zero_engine
         .submit(DirectRequest {
             tokens: vec![1, 2, 3],
@@ -1260,6 +1251,19 @@ async fn replay_options_allow_zero_output() {
     assert!(terminal.completed);
     assert_eq!(terminal.token_id, None);
     zero_engine.shutdown().await.unwrap();
+
+    let non_sglang = LiveEngine::start(args(EngineType::Vllm), 0).unwrap();
+    assert!(
+        non_sglang
+            .submit(DirectRequest {
+                tokens: vec![1, 2, 3],
+                max_output_tokens: 0,
+                ..Default::default()
+            })
+            .await
+            .is_err()
+    );
+    non_sglang.shutdown().await.unwrap();
 }
 
 #[tokio::test]

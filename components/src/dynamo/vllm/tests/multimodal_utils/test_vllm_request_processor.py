@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
 from PIL import Image
+from vllm.multimodal.media.image import ImageMediaIO
 
 import dynamo.common.multimodal.video_loader as video_loader_module
 from dynamo.common.constants import DisaggregationMode
@@ -33,6 +35,7 @@ def _processor(
     video_loader=None,
     frontend_decoding: bool = False,
     media_limits: dict[str, int] | None = None,
+    real_image_loader: bool = False,
 ) -> mod.VllmMultimodalRequestProcessor:
     engine_client = None
     if media_limits is not None:
@@ -50,7 +53,9 @@ def _processor(
         engine_client=engine_client,
         enable_multimodal=enabled,
         enable_frontend_decoding=frontend_decoding,
-        image_loader=SimpleNamespace(load_image_batch=AsyncMock(return_value=[])),
+        image_loader=None
+        if real_image_loader
+        else SimpleNamespace(load_image_batch=AsyncMock(return_value=[])),
         video_loader=video_loader
         or SimpleNamespace(load_video_batch=AsyncMock(return_value=[])),
         audio_loader=SimpleNamespace(
@@ -155,6 +160,116 @@ async def test_image_cache_has_no_scope_for_malformed_scope():
     processor.image_loader.load_image_batch.assert_awaited_once_with(
         image_items, cache_scope=None, preserve_uuid_slots=True
     )
+
+
+def _encode_image(image: Image.Image, fmt: str = "PNG", **save_kwargs) -> bytes:
+    buf = BytesIO()
+    image.save(buf, format=fmt, **save_kwargs)
+    return buf.getvalue()
+
+
+def _ink_on_transparent(mode: str) -> Image.Image:
+    """4x2 image: black ink in the top-left pixel, every other pixel fully transparent."""
+    image = Image.new(mode, (4, 2))
+    image.putpixel((0, 0), (0, 0, 0, 255) if mode == "RGBA" else (0, 255))
+    return image
+
+
+def _palette_with_transparent_entry() -> bytes:
+    image = Image.new("P", (4, 2))
+    image.putpalette([0, 0, 0, 255, 0, 0, 0, 0, 0])  # 0 black, 1 red, 2 black
+    image.putdata([0, 1, 2, 0, 0, 1, 2, 0])
+    return _encode_image(image, transparency=0)
+
+
+def _exif_rotate_90() -> bytes:
+    exif = Image.Exif()
+    exif[0x0112] = 6  # Orientation: rotate 90 degrees clockwise to display
+    return exif.tobytes()
+
+
+def _rgba_ink_png() -> bytes:
+    return _encode_image(_ink_on_transparent("RGBA"))
+
+
+def _image_request(content: bytes) -> dict:
+    # The loader reads the format from the bytes, so one media type serves every kind.
+    url = "data:image/png;base64," + base64.b64encode(content).decode()
+    return {"multi_modal_data": {"image_url": [{"Url": url}]}}
+
+
+def _pixels(image: Image.Image) -> tuple[str, tuple[int, int], bytes]:
+    return image.mode, image.size, image.tobytes()
+
+
+def _vllm_pixels(content: bytes) -> tuple[str, tuple[int, int], bytes]:
+    return _pixels(ImageMediaIO(image_mode="RGB").load_bytes(content).media)
+
+
+@pytest.mark.asyncio
+async def test_worker_transparent_pixels_become_white():
+    """Black ink on a transparent canvas stays readable: the canvas is white, as in vLLM."""
+    processor = _processor(real_image_loader=True)
+
+    result = await processor.extract_multimodal_data(
+        _image_request(_rgba_ink_png()), "request-1", None
+    )
+
+    image = result["image"]
+    assert [image.getpixel((0, 0)), image.getpixel((1, 0))] == [
+        (0, 0, 0),
+        (255, 255, 255),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "build_image",
+    [
+        pytest.param(_rgba_ink_png, id="rgba"),
+        pytest.param(lambda: _encode_image(_ink_on_transparent("LA")), id="grey_alpha"),
+        pytest.param(_palette_with_transparent_entry, id="palette_transparent_entry"),
+        pytest.param(
+            lambda: _encode_image(_ink_on_transparent("RGBA"), "WEBP", lossless=True),
+            id="webp_alpha",
+        ),
+        pytest.param(
+            lambda: _encode_image(_ink_on_transparent("RGBA"), exif=_exif_rotate_90()),
+            id="rgba_with_exif_rotation",
+        ),
+    ],
+)
+async def test_worker_image_matches_vllm_loader(build_image):
+    content = build_image()
+    processor = _processor(real_image_loader=True)
+
+    result = await processor.extract_multimodal_data(
+        _image_request(content), "request-1", None
+    )
+
+    assert _pixels(result["image"]) == _vllm_pixels(content)
+
+
+@pytest.mark.asyncio
+async def test_worker_frontend_decoded_image_matches_vllm_loader():
+    """Frontend decoding on or off, a transparent image gives the same pixels."""
+    content = _rgba_ink_png()
+    # The frontend decoder sends an RGBA PNG as an (H, W, 4) uint8 array.
+    decoded = np.asarray(Image.open(BytesIO(content)))
+    processor = _processor(real_image_loader=True)
+    # Stand in for the NIXL connector that --frontend-decoding creates at start-up.
+    processor.image_loader._enable_frontend_decoding = True
+    processor.image_loader._nixl_connector = object()
+
+    with patch(
+        "dynamo.common.multimodal.image_loader.read_decoded_media_via_nixl",
+        new=AsyncMock(return_value=decoded),
+    ):
+        result = await processor.extract_multimodal_data(
+            {"multi_modal_data": {"image_url": [{"Decoded": {}}]}}, "request-1", None
+        )
+
+    assert _pixels(result["image"]) == _vllm_pixels(content)
 
 
 @pytest.mark.asyncio
@@ -649,7 +764,7 @@ async def test_audio_in_video_rejects_unusable_audio(video_item, audio_error, me
     if audio_error is not None:
         processor.audio_loader.load_audio.side_effect = audio_error
 
-    with pytest.raises((ValueError, RuntimeError), match=message):
+    with pytest.raises((mod.InvalidArgument, RuntimeError), match=message):
         await processor.extract_multimodal_data(
             {"multi_modal_data": {"video_url": [video_item]}},
             "request-audio-error",
@@ -818,7 +933,7 @@ def test_build_tokens_prompt_rejects_malformed_user_uuids(
 ) -> None:
     processor = _processor()
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(mod.InvalidArgument, match=message):
         processor.build_tokens_prompt(
             {
                 "token_ids": [1, 2, 3],
@@ -841,7 +956,7 @@ def test_build_tokens_prompt_reports_uuid_only_cache_miss(
 ) -> None:
     processor = _processor(unified_vision_chunk="vision_chunk" in multi_modal_data)
 
-    with pytest.raises(ValueError, match="require aligned multi_modal_uuids"):
+    with pytest.raises(mod.InvalidArgument, match="require aligned multi_modal_uuids"):
         processor.build_tokens_prompt(
             {"token_ids": [1, 2, 3]},
             multi_modal_data,
@@ -2121,7 +2236,7 @@ def test_k3_pad_expands_for_unified_vision_chunk():
 def test_k3_mismatched_pad_count_is_rejected():
     processor, _ = _k3_processor()
 
-    with pytest.raises(ValueError, match="refusing to expand"):
+    with pytest.raises(mod.InvalidArgument, match="refusing to expand"):
         processor._expand_kimi_k3_pads(
             [_K3_PAD_ID],
             {"image": [object(), object()]},
@@ -2284,6 +2399,53 @@ class TestLoadQwenGridParams:
         assert params.vision_hidden_dim == 2048
         # DeepStack concatenates intermediate outputs with the final vision output.
         assert params.decode_embedding_dim == expected_decode_embedding_dim
+
+
+def test_unsupported_audio_is_rejected_before_any_media_loader(monkeypatch):
+    processor = _processor(media_limits={"image": 8, "video": 8})
+    monkeypatch.setattr(
+        processor, "_supported_modalities", lambda: frozenset({"image", "video"})
+    )
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://example.com/image.png"}],
+            "audio_url": [{"Url": "https://example.com/clip.wav"}],
+        },
+    }
+
+    with pytest.raises(mod.InvalidArgument, match="Model does not support audio input"):
+        processor.validate_multimodal_request(request)
+
+    processor.audio_loader.load_audio_batch.assert_not_awaited()
+    processor.audio_loader.load_audio.assert_not_awaited()
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.video_loader.load_video_batch.assert_not_awaited()
+
+
+def test_image_and_video_remain_allowed_when_audio_is_unsupported(monkeypatch):
+    processor = _processor(media_limits={"image": 8, "video": 1})
+    monkeypatch.setattr(
+        processor, "_supported_modalities", lambda: frozenset({"image", "video"})
+    )
+    processor.validate_multimodal_request(
+        {
+            "multi_modal_data": {
+                "image_url": [{"Url": "https://example.com/image.png"}],
+                "video_url": [{"Url": "https://example.com/video.mp4"}],
+            }
+        }
+    )
+
+
+def test_unified_vision_chunk_image_is_allowed(monkeypatch):
+    processor = _processor(unified_vision_chunk=True, media_limits={"vision_chunk": 8})
+    monkeypatch.setattr(
+        processor, "_supported_modalities", lambda: frozenset({"vision_chunk"})
+    )
+    processor.validate_multimodal_request(
+        {"multi_modal_data": {"image_url": [{"Url": "https://example.com/image.png"}]}}
+    )
 
 
 def test_zero_video_limit_rejects_before_any_media_loader():

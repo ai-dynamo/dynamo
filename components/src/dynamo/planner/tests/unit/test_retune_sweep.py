@@ -20,6 +20,7 @@ import time
 import types
 from collections import deque
 from multiprocessing.reduction import ForkingPickler
+from typing import get_args
 
 import pytest
 
@@ -28,12 +29,15 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
+from dynamo.planner.config.planner_config import PlannerConfig, RetuneObjective
 from dynamo.planner.core.types import RetuneParams, TrafficObservation
 from dynamo.planner.retune import sweep as sweep_module
 from dynamo.planner.retune.sweep import (
+    _OBJECTIVES,
     GOODPUT_KEY,
+    evaluated_params,
+    objective_maximized,
     score_summary,
-    with_predictor_fields,
 )
 from dynamo.planner.retune.window import ObservationBuckets
 from dynamo.planner.tests.retune_sweep_helpers import (
@@ -45,6 +49,8 @@ from dynamo.planner.tests.retune_sweep_helpers import (
     trace_rows,
     write_trace,
 )
+
+THROUGHPUT_INTERVAL = "throughput_adjustment_interval_seconds"
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -62,7 +68,7 @@ pytestmark = [
 def test_score_uses_the_fixed_window_denominator():
     summary = {GOODPUT_KEY: 120.0, "gpu_hours": 2.0, "duration_ms": 1_800_000.0}
 
-    score, metrics = score_summary(summary, window_s=1_500.0)
+    score, metrics = score_summary(summary, 1_500.0, "GoodputPerGPU")
 
     # goodput tokens over the run / (window seconds x average GPUs)
     assert score == pytest.approx(120.0 * 1_800.0 / (1_500.0 * 4.0))
@@ -75,7 +81,110 @@ def test_score_uses_the_fixed_window_denominator():
         ({GOODPUT_KEY: math.nan, "gpu_hours": 1.0, "duration_ms": 1.0}, "finite"),
     ]:
         with pytest.raises(ValueError, match=match):
-            score_summary(bad, window_s=10.0)
+            score_summary(bad, 10.0, "GoodputPerGPU")
+
+
+# Four average GPUs over a 1,800 s replay of a 1,500 s window.
+SUMMARY = {
+    "output_throughput_tok_s": 300.0,
+    GOODPUT_KEY: 120.0,
+    "gpu_hours": 2.0,
+    "duration_ms": 1_800_000.0,
+    "mean_output_token_throughput_per_user": 40.0,
+    "mean_ttft_ms": 250.0,
+    "num_ttft_samples": 10,
+    "mean_e2e_latency_ms": 900.0,
+    "num_e2e_latency_samples": 10,
+}
+
+
+@pytest.mark.parametrize(
+    ("objective", "target", "raw", "score", "maximized"),
+    [
+        ("Throughput", "throughput", 300.0, 300.0, True),
+        ("ThroughputPerGPU", "throughput_per_gpu", 75.0, 75.0, True),
+        ("ThroughputPerUser", "throughput_per_user", 40.0, 40.0, True),
+        ("TTFT", "ttft", 250.0, 250.0, False),
+        ("E2ELatency", "e2e_latency", 900.0, 900.0, False),
+        # Goodput is rescaled from the 1,800 s replay to the 1,500 s window.
+        ("Goodput", "goodput", 120.0, 144.0, True),
+        ("GoodputPerGPU", "goodput_per_gpu", 30.0, 36.0, True),
+    ],
+)
+def test_each_objective_scores_the_target_the_dgdr_operator_lowers_it_to(
+    objective, target, raw, score, maximized
+):
+    # The targets are those of the DGDR operator's v1beta2 publicMetric.
+    assert _OBJECTIVES[objective].target.value == target
+
+    value, metrics = score_summary(SUMMARY, 1_500.0, objective)
+
+    assert value == pytest.approx(score)
+    assert metrics[f"objective_{target}"] == pytest.approx(raw)
+    assert objective_maximized(objective) is maximized
+
+
+def test_only_goodput_objectives_ignore_the_drain():
+    # One window of 600k output tokens, 300k of them SLA-good, on 2 GPUs,
+    # with a 100 s or a 300 s drain. The mean latencies are the same.
+    def replay(duration_s):
+        return {
+            **SUMMARY,
+            "output_throughput_tok_s": 600_000 / duration_s,
+            GOODPUT_KEY: 300_000 / duration_s,
+            "gpu_hours": 2 * duration_s / 3_600,
+            "duration_ms": duration_s * 1_000.0,
+        }
+
+    fast, slow = replay(1_000.0), replay(1_200.0)
+    scores = {
+        objective: (
+            score_summary(fast, 900.0, objective)[0],
+            score_summary(slow, 900.0, objective)[0],
+        )
+        for objective in get_args(RetuneObjective)
+    }
+
+    # Good tokens per window second (per GPU): the drain does not count.
+    assert scores["Goodput"] == pytest.approx((300_000 / 900,) * 2)
+    assert scores["GoodputPerGPU"] == pytest.approx((300_000 / 900 / 2,) * 2)
+    # The token total is fixed, so throughput ranks the shorter drain.
+    assert scores["Throughput"] == pytest.approx((600.0, 500.0))
+    assert scores["ThroughputPerGPU"] == pytest.approx((300.0, 250.0))
+    for objective in ("ThroughputPerUser", "TTFT", "E2ELatency"):
+        assert scores[objective][0] == scores[objective][1]
+
+
+@pytest.mark.parametrize(
+    ("objective", "update", "match"),
+    [
+        ("GoodputPerGPU", {GOODPUT_KEY: None}, "needs an SLA"),
+        ("Goodput", {"duration_ms": 0.0}, "positive duration_ms"),
+        ("ThroughputPerGPU", {"gpu_hours": 0.0}, "positive gpu_hours"),
+        ("Throughput", {"output_throughput_tok_s": None}, "must be numeric"),
+        (
+            "ThroughputPerUser",
+            {"mean_output_token_throughput_per_user": math.inf},
+            "finite",
+        ),
+        # AISimulate scores a latency without samples as infinite; retune
+        # leaves that candidate unscored instead.
+        ("TTFT", {"num_ttft_samples": 0}, "positive num_ttft_samples"),
+        ("E2ELatency", {"num_e2e_latency_samples": 0}, "positive num_e2e"),
+        ("E2ELatency", {"mean_e2e_latency_ms": math.nan}, "finite"),
+    ],
+)
+def test_a_missing_score_input_fails_the_candidate(objective, update, match):
+    with pytest.raises(ValueError, match=match):
+        score_summary({**SUMMARY, **update}, 1_500.0, objective)
+
+
+def test_only_goodput_objectives_need_the_sla_and_gpu_hours():
+    summary = {"mean_ttft_ms": 250.0, "num_ttft_samples": 10}
+
+    assert score_summary(summary, 1_500.0, "TTFT")[0] == 250.0
+    with pytest.raises(ValueError, match="needs an SLA"):
+        score_summary(summary, 1_500.0, "Goodput")
 
 
 def test_a_grid_point_equivalent_to_the_baseline_gets_its_key():
@@ -103,17 +212,28 @@ def test_a_grid_point_equivalent_to_the_baseline_gets_its_key():
         "load_predictor_log1p": False,
         "prophet_window_size": 50,
     }
+    # A hybrid SLA planner: the sensitivity and the predictor are active.
+    base = PlannerConfig(
+        namespace="test-ns",
+        mode="disagg",
+        optimization_target="sla",
+        enable_throughput_scaling=True,
+        enable_load_scaling=True,
+    ).model_dump(mode="json")
 
-    assert with_predictor_fields(grid_point, baseline, winner) == baseline
-    assert with_predictor_fields(other, baseline, winner).planner == {
+    def evaluated(candidate, fields):
+        return evaluated_params(candidate, baseline, {"fields": fields}, base)
+
+    assert evaluated(grid_point, winner) == baseline
+    assert evaluated(other, winner).planner == {
         **current,
         "load_scaling_down_sensitivity": 70,
     }
     # The baseline keeps the current predictor; other candidates take the
     # winner's fields over the baseline's.
     kalman = {"load_predictor": "kalman", "kalman_r": 5.0}
-    assert with_predictor_fields(baseline, baseline, kalman) == baseline
-    assert with_predictor_fields(other, baseline, kalman).planner == {
+    assert evaluated(baseline, kalman) == baseline
+    assert evaluated(other, kalman).planner == {
         **current,
         "load_scaling_down_sensitivity": 70,
         **kalman,
@@ -150,19 +270,21 @@ def test_read_task_writes_the_window_and_buckets_the_history(tmp_path):
     )
 
     def read(out, buckets_interval_ms=10_000.0, **changes):
+        interval = int(buckets_interval_ms / 1000)
         buckets = ObservationBuckets(
             request.window_end_ms, buckets_interval_ms, buckets_interval_ms / 1000
         )
         spec = sweep_module._ReadSpec.from_request(
-            request, buckets, write_observations=True
+            request, {interval: buckets}, write_observations=True
         )
         return sweep_module._read_sweep_inputs(
             dataclasses.replace(spec, **changes), str(tmp_path / out)
         )
 
-    def warmup(inputs):
+    def warmup(inputs, interval=10):
         return [
-            obs.num_req for obs in sweep_module._read_observations(inputs.warmup_path)
+            obs.num_req
+            for obs in sweep_module._read_observations(inputs.warmup_paths[interval])
         ]
 
     inputs = read("out")
@@ -172,25 +294,45 @@ def test_read_task_writes_the_window_and_buckets_the_history(tmp_path):
     assert inputs.row_counts["history_requests"] == 20
     # History and window share the pre-sweep buckets, which end at the
     # window end; the pre-sweep workers load them from a file.
-    assert [obs.num_req for obs in inputs.observations] == [10.0, 10.0, 10.0]
-    assert sweep_module._read_observations(inputs.observations_path) == list(
-        inputs.observations
+    assert [obs.num_req for obs in inputs.observations[10]] == [10.0, 10.0, 10.0]
+    assert sweep_module._read_observations(inputs.observations_paths[10]) == list(
+        inputs.observations[10]
     )
     # The inner planner's warmup is the history alone, in buckets that end at
     # the window start: off the grid of the window end, a pre-sweep bucket
     # straddles the window start, but no warmup bucket does.
     assert warmup(inputs) == [10.0, 10.0]
-    assert warmup(read("off-grid", 7_000.0)) == [6.0, 7.0, 7.0]
+    assert warmup(read("off-grid", 7_000.0), 7) == [6.0, 7.0, 7.0]
+
+    # Candidates at several throughput intervals: one read buckets the
+    # history and the window at each of them.
+    both = sweep_module._read_sweep_inputs(
+        sweep_module._ReadSpec.from_request(
+            request,
+            {
+                interval: ObservationBuckets(
+                    request.window_end_ms, interval * 1000.0, float(interval)
+                )
+                for interval in (5, 10)
+            },
+            write_observations=False,
+        ),
+        str(tmp_path / "both"),
+    )
+    assert [obs.num_req for obs in both.observations[5]] == [5.0] * 6
+    assert [obs.num_req for obs in both.observations[10]] == [10.0] * 3
+    assert sorted(both.warmup_paths) == [5, 10]
+    assert both.observations_paths == {}
 
     # The history is read only for a planner that scales on throughput (the
     # only one with a load predictor), and not for an empty window.
-    no_scaling = read("no-scaling", buckets=None)
+    no_scaling = read("no-scaling", buckets={})
     empty = read(
         "empty", window_start_ms=ORIGIN_MS + 60_000, window_end_ms=ORIGIN_MS + 70_000
     )
     for unread, num_requests in [(no_scaling, 10), (empty, 0)]:
         assert unread.num_requests == num_requests
-        assert (unread.observations, unread.warmup_path) == (None, None)
+        assert (unread.observations, unread.warmup_paths) == ({}, {})
         assert "history_requests" not in unread.row_counts
     # A read error propagates: the worker reports it as the task's failure.
     with pytest.raises(ValueError, match="No warmup trace files matched"):
@@ -385,6 +527,28 @@ def test_equivalent_candidates_replay_once_and_share_the_score(tmp_path, monkeyp
     assert result.scores[same.key()] == result.scores[baseline.key()] is not None
 
 
+def test_every_candidate_is_scored_on_the_request_objective(tmp_path, monkeypatch):
+    monkeypatch.setattr(sweep_module, "_WorkerPool", _InlinePool)
+    objectives = []
+
+    def recording_evaluator(*args):
+        objectives.append(args[-1])
+        return fake_evaluator(*args)
+
+    trace = write_trace(
+        tmp_path / "trace.jsonl", trace_rows([ORIGIN_MS + 100 * i for i in range(5)])
+    )
+    a, b = retune_params(0.0), retune_params(1.0)
+
+    result = sweep_module.run_sweep(
+        sweep_request([trace], [a, b], a, objective="TTFT"),
+        evaluator=recording_evaluator,
+    )
+
+    assert result.status == "ok", result.error
+    assert objectives == ["TTFT", "TTFT"]
+
+
 def test_a_predictor_winner_is_prepared_in_the_sweep(tmp_path, monkeypatch):
     monkeypatch.setattr(sweep_module, "_WorkerPool", _InlinePool)
     prepared = []
@@ -422,7 +586,7 @@ def test_a_predictor_winner_is_prepared_in_the_sweep(tmp_path, monkeypatch):
 
     def run_with_winner(fields):
         presweep = {"winner": "w", "fields": fields, "losses": {"w": 0.1}}
-        monkeypatch.setattr(sweep_module, "_run_presweep", lambda *_: presweep)
+        monkeypatch.setattr(sweep_module, "run_presweeps", lambda *_: presweep)
         tasks.clear()
         return sweep_module.run_sweep(request, evaluator=evaluator)
 
@@ -439,6 +603,71 @@ def test_a_predictor_winner_is_prepared_in_the_sweep(tmp_path, monkeypatch):
     assert swapped.predictor_warmup_error == "ValueError: needs 60 warmup points"
     # Queued ahead of the replays, so a long fit overlaps them.
     assert tasks == ["prepare", "replay", "replay"]
+
+
+def test_candidates_at_other_throughput_intervals_warm_at_their_own(
+    tmp_path, monkeypatch
+):
+    # The baseline scales on throughput every 5 s; one candidate every 10 s
+    # and one on load only. Each inner planner is warmed with history at its
+    # own interval, and a swap to the 10-s predictor is prepared on buckets
+    # of that interval.
+    monkeypatch.setattr(sweep_module, "_WorkerPool", _InlinePool)
+    prepared = []
+    warmups = {}
+
+    def prepare_predictor(config, capabilities, observations):
+        prepared.append(
+            (config.throughput_adjustment_interval_seconds, list(observations))
+        )
+
+    def evaluator(*args):
+        params, warmup_path = args[3], args[6]
+        # The sweep directory goes with the sweep: read the warmup now.
+        warmups[params.router["overlap_score_credit"]] = (
+            None
+            if warmup_path is None
+            else [obs.num_req for obs in sweep_module._read_observations(warmup_path)]
+        )
+        return fake_evaluator(*args)
+
+    monkeypatch.setattr(sweep_module, "prepare_predictor", prepare_predictor)
+    trace = write_trace(
+        tmp_path / "trace.jsonl",
+        trace_rows([ORIGIN_MS + 1_000 * i for i in range(-20, 10)]),
+    )
+    baseline = retune_params(1.0)
+    slow = retune_params(0.0, **{THROUGHPUT_INTERVAL: 10})
+    load_only = retune_params(
+        0.5, enable_throughput_scaling=False, enable_load_scaling=True
+    )
+    request = sweep_request(
+        [trace],
+        [baseline, slow, load_only],
+        baseline,
+        history_start_ms=ORIGIN_MS - 20_000,
+        base_planner={
+            "mode": "agg",
+            "optimization_target": "sla",
+            "enable_throughput_scaling": True,
+            "enable_load_scaling": False,
+            THROUGHPUT_INTERVAL: 5,
+            "load_adjustment_interval_seconds": 5,
+        },
+    )
+
+    result = sweep_module.run_sweep(request, evaluator=evaluator)
+
+    assert result.status == "ok", result.error
+    assert sorted(result.interval_observations) == [5, 10]
+    assert [obs.num_req for obs in result.observations_at(5)] == [5.0] * 6
+    assert [obs.num_req for obs in result.observations_at(10)] == [10.0] * 3
+    assert result.warmup_observations == result.observations_at(5)
+    # The 20 s of history before the window, at each candidate's interval;
+    # a load-only inner planner has no predictor to warm.
+    assert warmups == {1.0: [5.0] * 4, 0.0: [10.0] * 2, 0.5: None}
+    assert prepared == [(10, list(result.observations_at(10)))]
+    assert result.predictor_warmup_errors == {}
 
 
 # ---------------------------------------------------------------------------
@@ -543,8 +772,9 @@ def test_presweep_dispatch_does_not_wait_for_workers_that_are_not_reading(tmp_pa
         str(tmp_path / "window.jsonl"),
         1,
         {},
-        observations=tuple(observations),
-        observations_path=path,
+        observations={60: tuple(observations)},
+        observations_paths={60: path},
+        warmup_paths={},
     )
     presets = ("constant_last", "kalman_default_raw")
     request = sweep_request(
@@ -574,7 +804,9 @@ def test_presweep_dispatch_does_not_wait_for_workers_that_are_not_reading(tmp_pa
     timer.start()
     try:
         with pytest.raises(sweep_module._SweepInterrupted, match="cancelled"):
-            sweep_module._run_presweep(request, pool, inputs, 60_000.0, 60)
+            sweep_module.run_presweeps(
+                request, pool, inputs.observations, inputs.observations_paths, [60]
+            )
     finally:
         timer.cancel()
         pool.close()
@@ -583,7 +815,7 @@ def test_presweep_dispatch_does_not_wait_for_workers_that_are_not_reading(tmp_pa
     # Every preset was dispatched, as a message that carries only the path.
     messages = [conn.recv() for conn in unread]
     assert sorted(message[0] for message in messages) == [
-        f"predictor-presweep:{name}" for name in presets
+        f"predictor-presweep:60:{name}" for name in presets
     ]
     for task_id, function, args in messages:
         assert function is sweep_module._presweep_task
@@ -597,3 +829,58 @@ def test_presweep_dispatch_does_not_wait_for_workers_that_are_not_reading(tmp_pa
     for process, conn in zip(processes, unread):
         process.release()
         conn.close()
+
+
+def test_evaluated_params_folds_the_predictor_without_throughput_scaling():
+    # The running planner scales on throughput with kalman; the startup
+    # point (load only) still carries the arima it started with.
+    policy = {
+        "enable_load_scaling": True,
+        "load_adjustment_interval_seconds": 5,
+        "throughput_adjustment_interval_seconds": 180,
+    }
+    running = {**policy, "enable_throughput_scaling": True, "load_predictor": "kalman"}
+    baseline = RetuneParams(planner=dict(running))
+    startup = RetuneParams(
+        planner={
+            **policy,
+            "enable_throughput_scaling": False,
+            "load_predictor": "arima",
+        }
+    )
+    grid = RetuneParams(planner={**policy, "enable_throughput_scaling": False})
+    evaluated = [evaluated_params(c, baseline, None, running) for c in (startup, grid)]
+    # One replay, and no inert predictor change to apply.
+    assert len({point.key() for point in evaluated}) == 1
+    assert evaluated[0].planner["load_predictor"] == "kalman"
+
+
+def test_evaluated_params_keeps_the_running_predictor_without_a_winner():
+    def policy(interval: int) -> dict:
+        return {
+            "enable_throughput_scaling": True,
+            "enable_load_scaling": True,
+            "throughput_adjustment_interval_seconds": interval,
+            "load_adjustment_interval_seconds": 5,
+        }
+
+    running = {**policy(180), "load_predictor": "kalman", "kalman_min_points": 5}
+    baseline = RetuneParams(planner=dict(running))
+    startup = RetuneParams(
+        planner={**policy(600), "load_predictor": "constant", "kalman_min_points": 5}
+    )
+    grid = RetuneParams(planner=policy(600))
+    # The pre-sweep found no winner at 600 s (a window shorter than 600 s).
+    presweep = {
+        "by_interval": {
+            "180": {"fields": {"load_predictor": "kalman"}},
+            "600": {"fields": {}},
+        }
+    }
+    at_600 = {
+        evaluated_params(c, baseline, presweep, running).planner["load_predictor"]
+        for c in (startup, grid)
+    }
+    # Candidates at one interval share one predictor, the one the swap
+    # for that interval is prepared with.
+    assert at_600 == {"kalman"}

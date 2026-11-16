@@ -12,9 +12,11 @@ fails setup instead of silently shrinking coverage.
 
 ## Shared coverage
 
-`test_dgd.py` owns current/current coverage. PR and nightly workflows require the
+`test_dgd.py` owns current/current coverage. The nightly workflow requires the
 ordinary SGLang deployment job to succeed before running this suite; skipped
-controls do not satisfy the dependency. Manual dispatch invokes the same ordinary
+controls do not satisfy the dependency. Pull request CI does not run this suite.
+To test a pull request, dispatch `cross-version-compatibility.yml` from the
+PR branch with its CI image tags. Manual dispatch invokes the same ordinary
 chat and embedding tests first. Both suites call the shared `check_chat_api` and
 `check_embedding_api` helpers for unary, streaming, token limits, stop behavior,
 and embedding formats, dimensions, batch contents and usage.

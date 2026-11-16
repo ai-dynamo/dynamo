@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A speculative pair whose target serves through its agent runtime sidecar
+# instead of a conductor role; the draft, with only an agent role, joins the
+# target's workload.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: node-local-v3-hx-agent-specdecode
+  namespace: test
+  uid: 33333333-3333-4333-8333-333333333333
+  generation: 1
+  annotations:
+    nvidia.com/dynamo-discovery-backend: kubernetes
+spec:
+  components:
+    - name: draft
+      type: lpx
+      replicas: 1
+      lpx:
+        buildId: node-local-v3-hx-sd-draft
+      roles:
+      - name: agent
+        podTemplate:
+          spec:
+            containers:
+            - name: main
+              image: example.invalid/lpu-runtime:test
+              command:
+              - /bin/agent
+              resources:
+                limits:
+                  lpu.nvidia.com/devices: '1'
+              readinessProbe:
+                tcpSocket:
+                  port: 2222
+              env:
+              - name: LPU_MODEL_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['scheduling.lpu.nvidia.com/model']
+              securityContext:
+                privileged: true
+              volumeMounts:
+              - mountPath: /nfs
+                name: model-storage
+              - name: config
+                mountPath: /configs
+            volumes:
+            - name: model-storage
+              persistentVolumeClaim:
+                claimName: model-storage
+            dnsPolicy: ClusterFirstWithHostNet
+            hostIPC: true
+            hostNetwork: true
+    - name: target
+      type: lpx
+      replicas: 1
+      lpx:
+        buildId: node-local-v3-hx-sd-target
+      roles:
+      - name: agent
+        podTemplate:
+          spec:
+            containers:
+            - name: main
+              image: example.invalid/lpu-runtime:test
+              command:
+              - /bin/agent
+              resources:
+                limits:
+                  lpu.nvidia.com/devices: '1'
+              readinessProbe:
+                tcpSocket:
+                  port: 2222
+              env:
+              - name: LPU_MODEL_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['scheduling.lpu.nvidia.com/model']
+              securityContext:
+                privileged: true
+              volumeMounts:
+              - mountPath: /nfs
+                name: model-storage
+              - name: config
+                mountPath: /configs
+            initContainers:
+            - name: runtime
+              image: example.invalid/dynamo-sidecar:test
+              restartPolicy: Always
+              args:
+              - lpx
+              - --model-path
+              - $(LPX_TARGET_MODEL_PATH)/tokenizer
+              ports:
+              - name: system
+                containerPort: 18090
+              env:
+              - name: DYN_SYSTEM_PORT
+                value: '18090'
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 18090
+              volumeMounts:
+              - mountPath: /nfs
+                name: model-storage
+                readOnly: true
+            volumes:
+            - name: model-storage
+              persistentVolumeClaim:
+                claimName: model-storage
+            dnsPolicy: ClusterFirstWithHostNet
+            hostIPC: true
+            hostNetwork: true

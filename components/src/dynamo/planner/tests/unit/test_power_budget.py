@@ -223,6 +223,7 @@ def _bare_adapter(config, capabilities) -> OrchestratorEngineAdapter:
 
 def _agg_config(**overrides):
     base = dict(
+        global_planner_managed_allocation=False,
         enable_power_awareness=True,
         total_gpu_power_limit=1200,
         min_endpoint=1,
@@ -283,6 +284,7 @@ def test_power_clamp_noop_when_awareness_disabled():
 
 def _mode_config(mode, **overrides):
     base = dict(
+        global_planner_managed_allocation=False,
         enable_power_awareness=True,
         total_gpu_power_limit=1200,
         min_endpoint=1,

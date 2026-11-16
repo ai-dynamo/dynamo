@@ -10,6 +10,38 @@ import yaml
 
 
 class UpgradeComponentStatusTest(unittest.TestCase):
+    def test_absent_workload_status_is_not_manufactured(self):
+        path = (
+            fixtures.FIXTURES / "latest/sglang/aggregated/multi/component/output.yaml"
+        )
+        objects = list(yaml.safe_load_all(path.read_text()))
+        workload = next(obj for obj in objects if obj["kind"] == "LeaderWorkerSet")
+        workload.pop("status", None)
+
+        # No LWS controller runs at the immediate-workload boundary.
+        normalized = fixtures.golden_objects(objects, latest=True)
+        self.assertNotIn(
+            "status",
+            next(obj for obj in normalized if obj["kind"] == "LeaderWorkerSet"),
+        )
+
+        # An observed runtime status is ignored without changing the historical capture.
+        workload["status"] = {"readyReplicas": 0}
+        normalized = fixtures.golden_objects(objects, latest=True)
+        self.assertEqual(
+            next(obj for obj in normalized if obj["kind"] == "LeaderWorkerSet")[
+                "status"
+            ],
+            {"$ignore": True},
+        )
+        historical = fixtures.golden_objects(objects)
+        self.assertEqual(
+            next(obj for obj in historical if obj["kind"] == "LeaderWorkerSet")[
+                "status"
+            ],
+            {"readyReplicas": 0},
+        )
+
     def test_runtime_status_does_not_change_component_golden(self):
         path = (
             fixtures.FIXTURES / "latest/sglang/aggregated/single/component/output.yaml"

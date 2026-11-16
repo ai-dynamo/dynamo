@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Validate rolling history or capture a pinned release operator."""
+"""Validate successive history or capture a pinned release operator."""
 
 import argparse
 import hashlib
@@ -122,18 +122,10 @@ def minor(version):
     return tuple(map(int, match.groups()))
 
 
-# One-time exception: main moved to 1.7 before history/1.6.0 was captured (#16650).
-# Delete this entry once history/1.6.0 lands; every other minor keeps the one-minor rule.
-HISTORY_EXCEPTIONS = {(1, 7): (1, 5)}
-
-
 def validate_versions(current, reconciled, previous=None):
     major, number = minor(current)
     old_major, old_number = minor(reconciled)
-    exception = HISTORY_EXCEPTIONS.get(minor(current))
-    if minor(reconciled) != exception and (
-        major != old_major or number - old_number not in (0, 1)
-    ):
+    if major != old_major or number - old_number not in (0, 1):
         raise ValueError(
             f"Operator {current} cannot replay history reconciled by {reconciled}; history must be the same minor or the minor immediately before it. Revert the premature appVersion bump, run clustertest-upgrade-fixtures-regen UPGRADE_RELEASE_TAG=vN.x.y in the selected released operator tree, commit the history, then reapply the bump"
         )
@@ -142,11 +134,11 @@ def validate_versions(current, reconciled, previous=None):
         and minor(previous) != minor(current)
         and (
             minor(current) != (minor(previous)[0], minor(previous)[1] + 1)
-            or minor(reconciled) not in (minor(previous), exception)
+            or minor(reconciled) != minor(previous)
         )
     ):
         raise ValueError(
-            f"The bump from {previous} to {current} must advance exactly one minor and needs history captured by the published {previous} operator; revert the bump and capture that tag with clustertest-upgrade-fixtures-regen first. Skipped-minor and major bumps are unsupported"
+            "A minor bump requires history captured by the immediately previous operator; revert the bump and capture the published predecessor tag with clustertest-upgrade-fixtures-regen first. Skipped-minor and major bumps are unsupported"
         )
 
 
@@ -158,7 +150,8 @@ def fixture_inputs(role):
     return sorted((FIXTURES / role).rglob("input.yaml"))
 
 
-def require_complete_matrix():
+def require_complete_matrix(release_tag=None):
+    """Require full coverage or the exact one-time v1.6.0 input inventory."""
     required = set(
         json.loads((FIXTURES / "required-matrix.json").read_text())["requiredScenarios"]
     )
@@ -167,10 +160,31 @@ def require_complete_matrix():
         for p in fixture_inputs("latest")
     }
     missing = required - available
-    if missing:
-        raise ValueError(
-            "Incomplete release matrix; missing: " + ", ".join(sorted(missing))
-        )
+    if not missing:
+        return None
+    if (
+        release_tag == "v1.6.0"
+        and app_version((ROOT / CHART).read_text()) == "1.6.0"
+        and (FIXTURES / "RECONCILED_VERSION").read_text().strip() == "1.5.0"
+    ):
+        inventory = json.loads((FIXTURES / "capture-v1.6.0.json").read_text())
+        inputs = {
+            str(p.relative_to(FIXTURES)): digest(p)
+            for role in ("history", "latest")
+            for p in fixture_inputs(role)
+        }
+        if (
+            inventory["sourceRef"] != release_tag
+            or inventory["inputs"] != inputs
+            or inventory["requiredScenarios"] != sorted(required)
+            or inventory["missingScenarios"] != sorted(missing)
+            or inventory["promotedScenarios"] != sorted(required & available)
+        ):
+            raise ValueError("The frozen v1.6.0 capture inventory has changed")
+        return inventory
+    raise ValueError(
+        "Incomplete release matrix; missing: " + ", ".join(sorted(missing))
+    )
 
 
 def check(base=None):
@@ -211,6 +225,48 @@ def check(base=None):
         raise ValueError(
             "Historical input inventory or bytes changed; regenerate through production controllers, not by editing inputs"
         )
+    if "captureInventory" in lock:
+        inventory = json.loads((FIXTURES / "capture-v1.6.0.json").read_text())
+        expected = {
+            path for path in inventory["inputs"] if path.startswith("history/")
+        } | {
+            f"history/1.6.0/{scenario}/input.yaml"
+            for scenario in inventory["promotedScenarios"]
+        }
+        if (
+            reconciled != "1.6.0"
+            or lock["sourceRevision"] != inventory["sourceRevision"]
+            or lock["captureInventory"] != inventory
+            or set(inputs) != expected
+        ):
+            raise ValueError("Published v1.6.0 history differs from its frozen scope")
+    compatibility = fixture_inputs("compatibility")
+    compatibility_lock = FIXTURES / "compatibility.lock.json"
+    if (
+        minor(current) >= (1, 7)
+        and not (FIXTURES / "compatibility/missing-origin/input.yaml").is_file()
+    ):
+        raise ValueError("Missing required missing-origin compatibility fixture")
+    if compatibility or compatibility_lock.exists():
+        compatibility_source = json.loads(compatibility_lock.read_text())
+        if compatibility_source["reconciledVersion"] != reconciled:
+            raise ValueError(
+                "Compatibility fixtures and history must have the same last reconciler; regenerate both before bumping the operator"
+            )
+        if (
+            compatibility_source["sourceKind"] != "release-tag"
+            or compatibility_source["sourceRef"] != f"v{reconciled}"
+            or compatibility_source["sourceRevision"] != lock["sourceRevision"]
+        ):
+            raise ValueError(
+                "Compatibility fixtures require the same released-tag provenance as history"
+            )
+        if not compatibility or compatibility_source["inputs"] != {
+            str(path.relative_to(FIXTURES)): digest(path) for path in compatibility
+        }:
+            raise ValueError(
+                "Compatibility input inventory or bytes changed; regenerate through production controllers"
+            )
     for path in fixture_inputs("history"):
         if not path.with_name("output.yaml").exists():
             raise ValueError(f"Missing golden: {path.parent}")
@@ -266,7 +322,7 @@ def golden_objects(objects, latest=False):
                 annotations = metadata.get("annotations", {})
                 if "nvidia.com/last-applied-hash" in annotations:
                     annotations["nvidia.com/last-applied-hash"] = "$ignore"
-            if obj["kind"] in ("Deployment", "LeaderWorkerSet"):
+            if obj["kind"] in ("Deployment", "LeaderWorkerSet") and "status" in obj:
                 # Workload-controller availability is outside the operator lowering boundary.
                 obj["status"] = {"$ignore": True}
             if obj["kind"] in ("DynamoComponentDeployment", "DynamoGraphDeployment"):
@@ -334,6 +390,8 @@ def bind_latest_variables(value):
         for key, child in value.items():
             if key == "nvidia.com/dynamo-operator-origin-version":
                 value[key] = "$var:operator-version"
+            elif key == "disaggregatedset.x-k8s.io/revision":
+                value[key] = "$var:ds-revision"
             elif key in (
                 "nvidia.com/current-worker-hash-v2",
                 "nvidia.com/dynamo-worker-hash",
@@ -351,9 +409,22 @@ def bind_latest_variables(value):
 def write_golden(path, objects, latest=False):
     import yaml
 
+    # Go's YAML parser also recognizes exponent-only numbers such as worker hashes.
+    # Quote those strings so generated goldens retain their Kubernetes string type.
+    class GoldenDumper(yaml.SafeDumper):
+        pass
+
+    GoldenDumper.add_implicit_resolver(
+        "tag:yaml.org,2002:float",
+        re.compile(r"^[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)[eE][-+]?[0-9]+$"),
+        list("-+0123456789."),
+    )
     header = "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n# SPDX-License-Identifier: Apache-2.0\n"
     path.write_text(
-        header + yaml.safe_dump_all(golden_objects(objects, latest), sort_keys=True)
+        header
+        + yaml.dump_all(
+            golden_objects(objects, latest), Dumper=GoldenDumper, sort_keys=True
+        )
     )
 
 
@@ -363,14 +434,12 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
     current, reconciled = check()
     if minor(current) == minor(reconciled):
         raise ValueError(
-            "History is already reconciled by this minor; do not advance it twice"
+            "History is already captured for this minor; do not advance it twice"
         )
-    if minor(current) != (minor(reconciled)[0], minor(reconciled)[1] + 1):
-        raise ValueError(
-            f"Capturing {current} over history reconciled by {reconciled} skips a minor; capture each missing minor from its own released operator tree first"
-        )
-    require_complete_matrix()
+    inventory = require_complete_matrix(release_tag)
     source = capture_source(current, release_tag, candidate_sha)
+    if inventory and source["sourceRevision"] != inventory["sourceRevision"]:
+        raise ValueError("The release source differs from the frozen v1.6.0 source")
     if candidate_sha:
         if (
             candidate_output is None
@@ -401,7 +470,22 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
             env=env,
             check=True,
         )
-        expected = list(fixture_inputs("history")) + list(fixture_inputs("latest"))
+        # Only catalog scenarios become new baselines; legacy latest remains CREATE coverage.
+        catalog = set(
+            json.loads((FIXTURES / "required-matrix.json").read_text())[
+                "requiredScenarios"
+            ]
+        )
+        compatibility = fixture_inputs("compatibility")
+        expected = (
+            fixture_inputs("history")
+            + compatibility
+            + [
+                p
+                for p in fixture_inputs("latest")
+                if p.parent.relative_to(FIXTURES / "latest").as_posix() in catalog
+            ]
+        )
         captures = {}
         for original in expected:
             relative = original.relative_to(FIXTURES)
@@ -409,11 +493,24 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
                 relative = (
                     Path("history")
                     / f"{minor(current)[0]}.{minor(current)[1]}.0"
-                    / Path(*relative.parts[1:])
+                    / original.relative_to(FIXTURES / "latest")
                 )
             captured = capture / relative
             if not captured.is_file():
                 raise ValueError(f"Capture incomplete: {relative}")
+            if relative.parts[0] == "compatibility":
+                dgds = [
+                    obj
+                    for obj in yaml.safe_load_all(captured.read_text())
+                    if obj["kind"] == "DynamoGraphDeployment"
+                ]
+                if len(dgds) != 1 or (
+                    "nvidia.com/dynamo-operator-origin-version"
+                    in dgds[0]["metadata"].get("annotations", {})
+                ):
+                    raise ValueError(
+                        f"Compatibility capture must contain exactly one DGD without an origin annotation: {relative}"
+                    )
             captures[relative] = captured
         if candidate_sha:
             (capture / "capture-source.json").write_text(
@@ -443,14 +540,17 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
                 destination = stage / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(captured, destination)
-                write_golden(
-                    destination.with_name("output.yaml"),
-                    list(yaml.safe_load_all(captured.read_text())),
-                )
+                if relative.parts[0] != "compatibility":
+                    write_golden(
+                        destination.with_name("output.yaml"),
+                        list(yaml.safe_load_all(captured.read_text())),
+                    )
             # Latest describes the development tree; release capture never rewrites it.
             namespaces = set()
-            for historical in list((stage / "history").rglob("input.yaml")) + list(
-                (stage / "latest").rglob("input.yaml")
+            for historical in (
+                path
+                for role in ("history", "compatibility", "latest")
+                for path in (stage / role).rglob("input.yaml")
             ):
                 objects = list(yaml.safe_load_all(historical.read_text()))
                 names = {obj["metadata"]["namespace"] for obj in objects}
@@ -459,10 +559,11 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
                         "Fixture namespace collision: history and latest must use distinct namespaces"
                     )
                 namespaces.update(names)
-                if "history" in historical.relative_to(stage).parts[:1] and any(
+                if historical.relative_to(stage).parts[0] != "latest" and any(
                     not obj["metadata"].get("uid") for obj in objects
                 ):
                     raise ValueError(f"Non-concrete capture: {historical}")
+            # Every active origin now contains state reconciled by this released controller.
             lock = {
                 "reconciledVersion": current,
                 **source,
@@ -471,9 +572,29 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
                     for p in (stage / "history").rglob("input.yaml")
                 },
             }
+            if inventory:
+                lock["captureInventory"] = inventory
             (stage / "history.lock.json").write_text(
                 json.dumps(lock, indent=2, sort_keys=True) + "\n"
             )
+            if compatibility:
+                (stage / "compatibility.lock.json").write_text(
+                    json.dumps(
+                        {
+                            "reconciledVersion": current,
+                            **source,
+                            "inputs": {
+                                str(path.relative_to(stage)): digest(path)
+                                for path in (stage / "compatibility").rglob(
+                                    "input.yaml"
+                                )
+                            },
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
             (stage / "RECONCILED_VERSION").write_text(current + "\n")
             FIXTURES.rename(backup)
             try:
@@ -512,7 +633,7 @@ if __name__ == "__main__":
             regenerate(args.release_tag, args.candidate_sha, args.candidate_output)
         elif args.check_release_matrix:
             check(args.base)
-            require_complete_matrix()
+            require_complete_matrix(args.release_tag)
         else:
             check(args.base)
     except (

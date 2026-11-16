@@ -96,14 +96,14 @@ func TestRenderSelectedLPXRolePreservesTemplate(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			t.Log("Author a Cyborg role using the shared LPX role base renderer")
+			t.Log("Author an LPX role without a runtime sidecar using the shared LPX role base renderer")
 			source := &v1beta1.DynamoGraphDeployment{
 				Name: "hybrid", Namespace: "test",
 			}
 			container := test.container.DeepCopy()
 			container.Name, container.Image = commonconsts.MainContainerName, "cyborg:test"
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "engine", ComponentType: v1beta1.ComponentTypeDecode, SharedMemorySize: test.sharedMemorySize,
+				ComponentName: "engine", ComponentType: v1beta1.ComponentTypeLPX, SharedMemorySize: test.sharedMemorySize,
 				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers:      []corev1.Container{*container},
 					SecurityContext: test.authored,
@@ -113,7 +113,7 @@ func TestRenderSelectedLPXRolePreservesTemplate(t *testing.T) {
 			t.Log("Render the role before runtime-specific lowering")
 			template, err := renderSelectedLPXRole(component, source, nil,
 				&configv1alpha1.OperatorConfiguration{}, &mockSecretsRetriever{}, DiscoveryContext{},
-				&podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults(), servingHash: "serving"})
+				&podTemplateRuntimeDefaults{ComponentDefaults: &BaseComponentDefaults{}, servingHash: "serving"})
 			require.NoError(t, err)
 
 			t.Log("Retain authored security and use the ordinary shared memory default unless resized or disabled")
@@ -379,6 +379,17 @@ func TestLPXInputRevision(t *testing.T) {
 			require.NotEqual(t, want, got)
 		})
 	}
+
+	t.Log("An agent runtime sidecar serves the engine, so replicas scale it as they scale a conductor's")
+	agentServed := source.DeepCopy()
+	served := agentServed.GetComponentByName("decode")
+	served.Roles = []v1beta1.ComponentRoleSpec{*served.ComponentRole(v1beta1.ComponentRoleLPXAgent)}
+	served.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{
+		Name: commonconsts.RuntimeContainerName, Image: "sidecar:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+	}}
+	agentServedHash := mustComputeBetaDGDWorkersSpecHash(t, agentServed)
+	served.Replicas = new(int32(3))
+	require.Equal(t, agentServedHash, mustComputeBetaDGDWorkersSpecHash(t, agentServed))
 
 	t.Log("Both members independently contribute to the shared LPX revision")
 	pair := source.DeepCopy()

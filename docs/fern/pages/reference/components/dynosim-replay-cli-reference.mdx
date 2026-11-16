@@ -129,7 +129,8 @@ evaluation:
 - Omitting the entire section creates 100 independent synthetic requests at concurrency 10, with
   1,024 input tokens and 128 output tokens per request.
 - `source.type: synthetic` creates independent requests with `input_tokens` and `output_tokens`.
-- `source.type: synthetic-session` creates ordered multi-turn sessions.
+- `source.type: synthetic-session` creates ordered multi-turn sessions. Each later turn's prompt
+  starts with the session's earlier prompts and outputs.
 - `source.type: trace` reads one or more paths. Supported formats include `mooncake`,
   `mooncake-delta`, `agentic_mooncake`, `weka`, `applied_compute_agentic`, and `dynamo`.
 - `load.type: concurrency` keeps a fixed number of requests or sessions active.
@@ -349,6 +350,14 @@ hardware offload recipe.
   polynomial model.
 - `router.policy: kv_router` supports one or more routable workers. Set
   `router.prefill_load_model.type` to `none` or `aic`.
+- With `router.policy: kv_router`, each vLLM aggregated or prefill worker that sets
+  `engine.workers.<role>.kv_cache.kvcr` gets the `kv.fetch` hint that the production
+  [KV router](../../developer-guide/knowledge-base/modular-components/router/topology-aware-kv-transfer.md#kv-fetch-hints)
+  chooses, so it pulls the prompt prefix it lacks from the named peer's G2 (see
+  [KV Cache Runner (KVCR) peer fetch](https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-cache.md#kvcr-peer-fetch)).
+  `round_robin` sends no hints, and neither does `router.overlap_score_credit: 0`, which reads no KV
+  index; the router then logs one warning. Replay treats all workers as one transfer island and
+  models no cache-owner sources.
 - `planner.policy` is `disabled` or `enabled`. Enabled settings use the production
   `PlannerConfig` defaults and normalization. The default target is `throughput`, which enables
   load scaling and disables throughput scaling. Throughput scaling with `target: sla` requires
@@ -362,6 +371,24 @@ hardware offload recipe.
   intervals, including the load interval used for performance-model updates.
 - `evaluation.sla` accepts either `e2e_ms` alone or `ttft_ms` and `itl_ms` together. The two forms
   are mutually exclusive.
+
+### Conversation Affinity
+
+For AgentX trace replay, `router.conversation_affinity` uses Dynamo's native hard binding
+with `kv_router` and fixed aggregated or disaggregated worker pools. Online replay and
+Planner-enabled replay are unsupported. Omitting the field preserves normal routing.
+
+```yaml
+router:
+  policy: kv_router
+  conversation_affinity: {mode: session, ttl_seconds: 300}
+planner: {policy: disabled}
+```
+
+`session` (the default) binds each conversation. `sibling_group` binds siblings sharing a parent
+within the same play and requires unambiguous lineage; the parent keeps its own binding.
+Prefill and decode pools bind independently. `ttl_seconds` is the idle expiry in simulated
+seconds, defaults to 300, and must be finite and between 1 and 31,536,000 inclusive.
 
 ## Overrides
 
