@@ -17,18 +17,6 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 <UpgradeSelector />
 
-<a id="v180"></a>
-
-## v1.8.0 - Upcoming
-
-<span className="dynref-badge dynref-badge--blue">Behavioral</span> **AISimulate is installed as the `aisim` distribution** ([#18745](https://github.com/ai-dynamo/dynamo/pull/18745)). `ai-dynamo` requires `aisim` 0.15 in place of `aisimulate` 0.13, and the Python packages are `aisim` and `aisim_core`; the old import names `aisimulate` and `aisimulate_core` still work. An upgrade in place, such as `pip install -U ai-dynamo`, installs `aisim` and leaves `aisimulate` installed. The two own overlapping files, and `import aisim` then fails with an `ImportError` that names both.
-
-  > **Migrate:** Install into a fresh environment, or repair the upgraded one: run `pip uninstall -y aisimulate`, then `pip install --force-reinstall --no-deps "aisim==<version>"` with the version that `pip show aisim` prints. The reinstall is needed because uninstalling `aisimulate` removes files that `aisim` shares with it.
-
-<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Mocker and replay vLLM engines model async scheduling by default** ([#18745](https://github.com/ai-dynamo/dynamo/pull/18745)). With `aisim` 0.15, a busy vLLM engine keeps its next batch committed, so a request that arrives while the engine is busy is admitted one pass later in offline replay and two passes later in online replay and on the live Mocker. A request that arrives at an idle engine is not delayed. On one default live Mocker worker with 512-token prompts and 64 output tokens, mean time to first token rose from 46 ms to 66 ms at 20 requests per second, and with 16 closed-loop streams throughput fell from 20.2 to 19.9 requests per second. SGLang and TensorRT-LLM engines are not affected.
-
-  > **Migrate:** To keep synchronous scheduling, set `engine.async_scheduling` to `false` in the Mocker's `--extra-engine-args` file, or in `extra_engine_args`, `prefill_engine_args`, or `decode_engine_args` of the replay API. The Mocker file replaces the engine flags and the command line's default `dynamo.enable_local_indexer: true`, so a file that changes only the scheduling is `{"engine": {"async_scheduling": false}, "dynamo": {"enable_local_indexer": true}}`.
-
 <a id="v170"></a>
 
 ## v1.7.0 - Upcoming
@@ -119,6 +107,14 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 Removed with no replacement: the dummy shared-cache server, `services::shared_cache::{SharedCacheConfig, run_server}` and `services::shared_cache::server::{AppState, RemoveRequest, SharedCacheQueryRequest, SharedCacheQueryResponse, SharedCacheStore, StoreRequest, create_router}`. From `indexer::cuckoo`, the unused in-process adapter (`LocalCkfAdapter`, `LocalCkfAdapterBuildError`, `LocalCkfAdapterError`, `LocalCkfDeltaSinkError`, `LocalCkfDrainReport`, `LocalCkfEventResult`, `LocalCkfRecoveryReport`) and the `DEFAULT_GLOBAL_INGESTION_CONTROL_TIMEOUT`, `DEFAULT_GLOBAL_INGESTION_QUEUE_CAPACITY`, and `DEFAULT_GLOBAL_INGESTION_WORKERS` constants are removed; the rest of `indexer::cuckoo` still resolves. `protocols::ActiveLoad` lives in `dynamo_llm::kv_router::ActiveLoad` and is not re-exported, because `dynamo-kv-router` cannot depend on `dynamo-llm`.
 
   > **Migrate:** Replace each `dynamo_kv_router::<pre-split path>` import with the owner path from the table (the `#[deprecated]` note on a struct alias spells it out), add the owner crate to your `Cargo.toml`, and drop the `standalone-indexer`, `standalone-slot-tracker`, `standalone-selection`, and `runtime-protocols` features in favor of `http`, `ingest-zmq`, `replica-sync-zmq`, and `peer-recovery`. Finish before v1.10.0.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **AISimulate is installed as the `aisim` distribution** ([#18014](https://github.com/ai-dynamo/dynamo/pull/18014), [#18745](https://github.com/ai-dynamo/dynamo/pull/18745)). `ai-dynamo` requires `aisim` 0.14 in place of `aisimulate` 0.13, and the Python packages are `aisim` and `aisim_core`; the old import names `aisimulate` and `aisimulate_core` still work. An upgrade in place, such as `pip install -U ai-dynamo`, installs `aisim` and leaves `aisimulate` installed. The two own overlapping files, and `import aisim` then fails with an `ImportError` that names both.
+
+  > **Migrate:** Install into a fresh environment, or repair the upgraded one: run `pip uninstall -y aisimulate`, then `pip install --force-reinstall --no-deps "aisim==<version>"` with the version that `pip show aisim` prints. The reinstall is needed because uninstalling `aisimulate` removes files that `aisim` shares with it.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Mocker and replay vLLM engines model async scheduling by default** ([#18014](https://github.com/ai-dynamo/dynamo/pull/18014), [#18745](https://github.com/ai-dynamo/dynamo/pull/18745)). With `aisim` 0.14, a busy vLLM engine keeps its next batch committed, so a request that arrives while the engine is busy is admitted later than before. SGLang and TensorRT-LLM engines are not affected. The figures that follow were measured with `aisim` 0.15. Against synchronous scheduling, the request is admitted one pass later in offline replay and up to two passes later in online replay and on the live Mocker, and a request that arrives at an idle engine is not delayed. Against `aisimulate` 0.13 on one default live Mocker worker with 512-token prompts and 64 output tokens, mean time to first token rose from 46 ms to 66 ms at 20 requests per second, and with 16 closed-loop streams throughput fell from 20.2 to 19.9 requests per second.
+
+  > **Migrate:** To keep synchronous scheduling, set `engine.async_scheduling` to `false` in the Mocker's `--extra-engine-args` file, or in `extra_engine_args`, `prefill_engine_args`, or `decode_engine_args` of the replay API. The Mocker file replaces the engine flags and the command line's default `dynamo.enable_local_indexer: true`, so a file that changes only the scheduling is `{"engine": {"async_scheduling": false}, "dynamo": {"enable_local_indexer": true}}`.
 
 <a id="v160"></a>
 
