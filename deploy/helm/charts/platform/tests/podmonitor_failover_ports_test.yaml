@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: PodMonitor failover system ports
+templates:
+  - charts/dynamo-operator/templates/prometheus.yaml
+
+tests:
+  - it: preserves failover dashboard labels without labeling ordinary workers
+    set:
+      dynamo-operator.dynamo.metrics.podMonitors.enabled: true
+    asserts:
+      - equal:
+          path: spec.podMetricsEndpoints[0].port
+          value: system
+        documentIndex: 1
+      - equal:
+          path: spec.podMetricsEndpoints[0].relabelings[1]
+          value:
+            action: replace
+            sourceLabels:
+              - __meta_kubernetes_pod_container_name
+              - __meta_kubernetes_pod_label_nvidia_com_dynamo_graph_deployment_name
+            regex: 'engine-0;(.+)'
+            replacement: '${1}'
+            targetLabel: dynamo_graph_deployment
+        documentIndex: 1
+      - equal:
+          path: spec.podMetricsEndpoints[1].port
+          value: system-0
+        documentIndex: 1
+      - equal:
+          path: spec.podMetricsEndpoints[2].port
+          value: system-1
+        documentIndex: 1
+      - lengthEqual:
+          path: spec.podMetricsEndpoints
+          count: 4
+        documentIndex: 1

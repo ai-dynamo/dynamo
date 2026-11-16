@@ -83,11 +83,16 @@ spec:
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
       targetLabel: dynamo_component_type
-  # Intra-pod GMS shadow-failover packs two engines into one pod, so each engine's
-  # system port is renamed system-<engineID> (system-0, system-1) to avoid a clash
-  # (see deploy/operator/internal/dynamo/failover.go). The default `system` endpoint
-  # above never matches those, so scrape them explicitly. On non-failover pods these
-  # named ports don't exist, so no extra targets are generated.
+    # Preserve the failover dashboard label without adding it to ordinary workers.
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_container_name
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_graph_deployment_name
+      regex: 'engine-0;(.+)'
+      replacement: '${1}'
+      targetLabel: dynamo_graph_deployment
+  # Older operators named the primary engine port system-0; retain that selector
+  # during upgrades. New primaries use system, and standbys use system-1.
   - interval: 5s
     path: /metrics
     port: system-0
@@ -222,9 +227,6 @@ spec:
 # TODO: Once a first-class 'router' componentType is added to the dynamo operator,
 #       replace this PodMonitor with one that selects on
 #       nvidia.com/dynamo-component-type: router instead of 'default'.
-#       That would also eliminate the port-override relabeling below, since router
-#       pods could declare containerPort: 9090 (DYN_SYSTEM_PORT) explicitly and
-#       the standard targetPort selector would work without the address rewrite hack.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
@@ -245,17 +247,9 @@ spec:
   podMetricsEndpoints:
   - interval: 5s
     path: /metrics
+    port: system
     honorLabels: true
     relabelings:
-    # Force port 9090 (DYN_SYSTEM_PORT) without requiring containerPort in the pod spec.
-    # targetPort: 9090 would generate a keep rule on __meta_kubernetes_pod_container_port_number
-    # that drops pods without an explicit containerPort: 9090 declaration.
-    - action: replace
-      sourceLabels:
-      - __address__
-      regex: '([^:]+)(?::\d+)?'
-      replacement: '${1}:9090'
-      targetLabel: __address__
     - action: replace
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace

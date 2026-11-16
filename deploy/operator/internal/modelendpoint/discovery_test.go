@@ -21,6 +21,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -43,7 +44,6 @@ func TestExtractCandidates(t *testing.T) {
 	tests := []struct {
 		name                 string
 		endpointSlices       *discoveryv1.EndpointSliceList
-		port                 int32
 		expectedCandidates   int
 		expectedServiceNames map[string]bool
 		validateCandidates   func(t *testing.T, candidates []Candidate)
@@ -53,7 +53,6 @@ func TestExtractCandidates(t *testing.T) {
 			endpointSlices: &discoveryv1.EndpointSliceList{
 				Items: []discoveryv1.EndpointSlice{},
 			},
-			port:                 9090,
 			expectedCandidates:   0,
 			expectedServiceNames: map[string]bool{},
 		},
@@ -65,6 +64,7 @@ func TestExtractCandidates(t *testing.T) {
 						Labels: map[string]string{
 							discoveryv1.LabelServiceName: "my-service",
 						},
+						Ports: []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(9090))}},
 						Endpoints: []discoveryv1.Endpoint{
 							{
 								Addresses: []string{"10.0.1.5"},
@@ -80,7 +80,6 @@ func TestExtractCandidates(t *testing.T) {
 					},
 				},
 			},
-			port:               9090,
 			expectedCandidates: 1,
 			expectedServiceNames: map[string]bool{
 				"my-service": true,
@@ -102,6 +101,7 @@ func TestExtractCandidates(t *testing.T) {
 			endpointSlices: &discoveryv1.EndpointSliceList{
 				Items: []discoveryv1.EndpointSlice{
 					{
+						Ports: []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(9090))}},
 						Endpoints: []discoveryv1.Endpoint{
 							{
 								Addresses: []string{"10.0.1.5"},
@@ -114,7 +114,6 @@ func TestExtractCandidates(t *testing.T) {
 					},
 				},
 			},
-			port:                 9090,
 			expectedCandidates:   0,
 			expectedServiceNames: map[string]bool{},
 		},
@@ -123,6 +122,7 @@ func TestExtractCandidates(t *testing.T) {
 			endpointSlices: &discoveryv1.EndpointSliceList{
 				Items: []discoveryv1.EndpointSlice{
 					{
+						Ports: []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(9090))}},
 						Endpoints: []discoveryv1.Endpoint{
 							{
 								Addresses: []string{"10.0.1.5"},
@@ -138,7 +138,6 @@ func TestExtractCandidates(t *testing.T) {
 					},
 				},
 			},
-			port:                 9090,
 			expectedCandidates:   0,
 			expectedServiceNames: map[string]bool{},
 		},
@@ -147,6 +146,7 @@ func TestExtractCandidates(t *testing.T) {
 			endpointSlices: &discoveryv1.EndpointSliceList{
 				Items: []discoveryv1.EndpointSlice{
 					{
+						Ports: []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(9090))}},
 						Endpoints: []discoveryv1.Endpoint{
 							{
 								Addresses: []string{"10.0.1.5"},
@@ -162,7 +162,6 @@ func TestExtractCandidates(t *testing.T) {
 					},
 				},
 			},
-			port:                 9090,
 			expectedCandidates:   1,
 			expectedServiceNames: map[string]bool{},
 		},
@@ -171,6 +170,7 @@ func TestExtractCandidates(t *testing.T) {
 			endpointSlices: &discoveryv1.EndpointSliceList{
 				Items: []discoveryv1.EndpointSlice{
 					{
+						Ports: []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(9090))}},
 						Endpoints: []discoveryv1.Endpoint{
 							{
 								Addresses: []string{"10.0.1.5"},
@@ -186,7 +186,6 @@ func TestExtractCandidates(t *testing.T) {
 					},
 				},
 			},
-			port:                 9090,
 			expectedCandidates:   1,
 			expectedServiceNames: map[string]bool{},
 		},
@@ -195,6 +194,7 @@ func TestExtractCandidates(t *testing.T) {
 			endpointSlices: &discoveryv1.EndpointSliceList{
 				Items: []discoveryv1.EndpointSlice{
 					{
+						Ports: []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(9090))}},
 						Endpoints: []discoveryv1.Endpoint{
 							{
 								Addresses: []string{},
@@ -210,7 +210,6 @@ func TestExtractCandidates(t *testing.T) {
 					},
 				},
 			},
-			port:                 9090,
 			expectedCandidates:   0,
 			expectedServiceNames: map[string]bool{},
 		},
@@ -222,6 +221,7 @@ func TestExtractCandidates(t *testing.T) {
 						Labels: map[string]string{
 							discoveryv1.LabelServiceName: "service-1",
 						},
+						Ports: []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(9090))}},
 						Endpoints: []discoveryv1.Endpoint{
 							{
 								Addresses: []string{"10.0.1.5"},
@@ -247,7 +247,6 @@ func TestExtractCandidates(t *testing.T) {
 					},
 				},
 			},
-			port:               9090,
 			expectedCandidates: 2,
 			expectedServiceNames: map[string]bool{
 				"service-1": true,
@@ -266,6 +265,7 @@ func TestExtractCandidates(t *testing.T) {
 						Labels: map[string]string{
 							discoveryv1.LabelServiceName: "my-service",
 						},
+						Ports: []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(9090))}},
 						Endpoints: []discoveryv1.Endpoint{
 							{
 								Addresses: []string{"10.0.1.5"},
@@ -318,7 +318,6 @@ func TestExtractCandidates(t *testing.T) {
 					},
 				},
 			},
-			port:               9090,
 			expectedCandidates: 3, // testPodWorker0, testPodWorker1 (unready), and testPodWorker2
 			expectedServiceNames: map[string]bool{
 				"my-service": true,
@@ -348,6 +347,7 @@ func TestExtractCandidates(t *testing.T) {
 			endpointSlices: &discoveryv1.EndpointSliceList{
 				Items: []discoveryv1.EndpointSlice{
 					{
+						Ports: []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(9090))}},
 						Endpoints: []discoveryv1.Endpoint{
 							{
 								Addresses: []string{"10.0.1.5", "10.0.2.5"},
@@ -363,7 +363,6 @@ func TestExtractCandidates(t *testing.T) {
 					},
 				},
 			},
-			port:                 9090,
 			expectedCandidates:   1,
 			expectedServiceNames: map[string]bool{},
 			validateCandidates: func(t *testing.T, candidates []Candidate) {
@@ -383,25 +382,26 @@ func TestExtractCandidates(t *testing.T) {
 						Labels: map[string]string{
 							discoveryv1.LabelServiceName: "component-service",
 						},
+						Ports: []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(12345))}},
 						Endpoints: []discoveryv1.Endpoint{{
 							Addresses:  []string{"10.0.1.5"},
-							Conditions: discoveryv1.EndpointConditions{Ready: &trueVal},
-							TargetRef:  &corev1.ObjectReference{Kind: "Pod", Name: testPodWorker0},
+							Conditions: discoveryv1.EndpointConditions{Ready: &falseVal},
+							TargetRef:  &corev1.ObjectReference{Kind: "Pod", Name: testPodWorker0, UID: "worker-uid"},
 						}},
 					},
 					{
 						Labels: map[string]string{
 							discoveryv1.LabelServiceName: "base-model-service",
 						},
+						Ports: []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(12345))}},
 						Endpoints: []discoveryv1.Endpoint{{
 							Addresses:  []string{"10.0.1.5"},
 							Conditions: discoveryv1.EndpointConditions{Ready: &trueVal},
-							TargetRef:  &corev1.ObjectReference{Kind: "Pod", Name: testPodWorker0},
+							TargetRef:  &corev1.ObjectReference{Kind: "Pod", Name: testPodWorker0, UID: "worker-uid"},
 						}},
 					},
 				},
 			},
-			port:               9090,
 			expectedCandidates: 1,
 			expectedServiceNames: map[string]bool{
 				"component-service":  true,
@@ -412,6 +412,7 @@ func TestExtractCandidates(t *testing.T) {
 					t.Fatalf("expected one candidate, got %d", len(candidates))
 				}
 				candidate := candidates[0]
+				require.Equal(t, "http://10.0.1.5:12345", candidate.Address)
 				if !candidate.KubernetesReady {
 					t.Fatal("expected Kubernetes readiness to survive deduplication")
 				}
@@ -425,6 +426,7 @@ func TestExtractCandidates(t *testing.T) {
 						Labels: map[string]string{
 							discoveryv1.LabelServiceName: "service-1",
 						},
+						Ports: []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(9090))}},
 						Endpoints: []discoveryv1.Endpoint{
 							{
 								Addresses: []string{"10.0.1.5"},
@@ -442,6 +444,7 @@ func TestExtractCandidates(t *testing.T) {
 						Labels: map[string]string{
 							discoveryv1.LabelServiceName: "service-2",
 						},
+						Ports: []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(9090))}},
 						Endpoints: []discoveryv1.Endpoint{
 							{
 								Addresses: []string{"10.0.1.6"},
@@ -457,7 +460,6 @@ func TestExtractCandidates(t *testing.T) {
 					},
 				},
 			},
-			port:               9090,
 			expectedCandidates: 2,
 			expectedServiceNames: map[string]bool{
 				"service-1": true,
@@ -468,7 +470,7 @@ func TestExtractCandidates(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			candidates, serviceNames := ExtractCandidates(tt.endpointSlices, tt.port)
+			candidates, serviceNames := ExtractCandidates(tt.endpointSlices)
 
 			// Check candidate count
 			if len(candidates) != tt.expectedCandidates {
@@ -489,6 +491,82 @@ func TestExtractCandidates(t *testing.T) {
 			if tt.validateCandidates != nil {
 				tt.validateCandidates(t, candidates)
 			}
+		})
+	}
+}
+
+func TestExtractCandidatesUsesNamedSystemPort(t *testing.T) {
+	tests := []struct {
+		name        string
+		ports       []discoveryv1.EndpointPort
+		address     string
+		wantAddress string
+	}{
+		{
+			name:        "custom system port",
+			ports:       []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(12345))}},
+			address:     "10.0.1.5",
+			wantAddress: "http://10.0.1.5:12345",
+		},
+		{
+			name:        "IPv6 custom system port",
+			ports:       []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(12345)), Protocol: new(corev1.ProtocolTCP)}},
+			address:     "2001:db8::1",
+			wantAddress: "http://[2001:db8::1]:12345",
+		},
+		{
+			name:        "explicit default port remains supported",
+			ports:       []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(9090))}},
+			address:     "10.0.1.5",
+			wantAddress: "http://10.0.1.5:9090",
+		},
+		{
+			name: "unrelated port does not override system",
+			ports: []discoveryv1.EndpointPort{
+				{Name: new("http"), Port: new(int32(8000))},
+				{Name: new("system"), Port: new(int32(12345))},
+			},
+			address:     "10.0.1.5",
+			wantAddress: "http://10.0.1.5:12345",
+		},
+		{name: "missing ports", address: "10.0.1.5"},
+		{name: "missing name", ports: []discoveryv1.EndpointPort{{Port: new(int32(12345))}}, address: "10.0.1.5"},
+		{name: "unrelated name", ports: []discoveryv1.EndpointPort{{Name: new("http"), Port: new(int32(12345))}}, address: "10.0.1.5"},
+		{name: "missing port", ports: []discoveryv1.EndpointPort{{Name: new("system")}}, address: "10.0.1.5"},
+		{name: "zero port", ports: []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(0))}}, address: "10.0.1.5"},
+		{name: "negative port", ports: []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(-1))}}, address: "10.0.1.5"},
+		{name: "out of range port", ports: []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(65536))}}, address: "10.0.1.5"},
+		{name: "UDP port", ports: []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(12345)), Protocol: new(corev1.ProtocolUDP)}}, address: "10.0.1.5"},
+		{
+			name: "failover engine ports do not invent a pod-level model endpoint",
+			ports: []discoveryv1.EndpointPort{
+				{Name: new("system-0"), Port: new(int32(12345))},
+				{Name: new("system-1"), Port: new(int32(12346))},
+			},
+			address: "10.0.1.5",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Discover one Pod through the ports actually published by its Service")
+			slices := &discoveryv1.EndpointSliceList{Items: []discoveryv1.EndpointSlice{{
+				Labels: map[string]string{discoveryv1.LabelServiceName: "model-service"},
+				Ports:  tt.ports,
+				Endpoints: []discoveryv1.Endpoint{{
+					Addresses:  []string{tt.address},
+					TargetRef:  &corev1.ObjectReference{Kind: "Pod", Name: testPodWorker0, UID: "worker-uid"},
+					Conditions: discoveryv1.EndpointConditions{Ready: new(true)},
+				}},
+			}}}
+			candidates, serviceNames := ExtractCandidates(slices)
+
+			t.Log("Use the resolved system port or leave the endpoint undiscovered without falling back")
+			require.Equal(t, map[string]bool{"model-service": true}, serviceNames)
+			if tt.wantAddress == "" {
+				require.Empty(t, candidates)
+				return
+			}
+			require.Equal(t, []Candidate{{Address: tt.wantAddress, PodName: testPodWorker0, KubernetesReady: true}}, candidates)
 		})
 	}
 }

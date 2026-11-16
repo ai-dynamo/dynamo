@@ -115,7 +115,8 @@ var _ = Describe("DynamoModel Controller", func() {
 				},
 				Ports: []discoveryv1.EndpointPort{
 					{
-						Port: func() *int32 { p := int32(9090); return &p }(),
+						Name: new(consts.DynamoSystemPortName),
+						Port: new(int32(12345)),
 					},
 				},
 			}
@@ -211,7 +212,8 @@ var _ = Describe("DynamoModel Controller", func() {
 				},
 				Ports: []discoveryv1.EndpointPort{
 					{
-						Port: func() *int32 { p := int32(9090); return &p }(),
+						Name: new(consts.DynamoSystemPortName),
+						Port: new(int32(12345)),
 					},
 				},
 			}
@@ -288,7 +290,8 @@ var _ = Describe("DynamoModel Controller", func() {
 				},
 				Ports: []discoveryv1.EndpointPort{
 					{
-						Port: func() *int32 { p := int32(9090); return &p }(),
+						Name: new(consts.DynamoSystemPortName),
+						Port: new(int32(12345)),
 					},
 				},
 			}

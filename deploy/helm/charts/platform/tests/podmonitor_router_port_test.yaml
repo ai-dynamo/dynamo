@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: PodMonitor router system port
+templates:
+  - charts/dynamo-operator/templates/prometheus.yaml
+
+tests:
+  - it: scrapes only the declared system port without rewriting its address
+    set:
+      dynamo-operator.dynamo.metrics.podMonitors.enabled: true
+    asserts:
+      - equal:
+          path: metadata.name
+          value: dynamo-router
+        documentIndex: 4
+      - equal:
+          path: spec.podMetricsEndpoints
+          value:
+            - interval: 5s
+              path: /metrics
+              port: system
+              honorLabels: true
+              relabelings:
+                - action: replace
+                  sourceLabels:
+                    - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
+                  targetLabel: dynamo_namespace
+        documentIndex: 4

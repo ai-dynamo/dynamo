@@ -606,7 +606,7 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		// forever with no Kubernetes liveness probe to detect it (probes are removed
 		// from vLLM multinode containers in UpdateContainer).
 		healthGate := fmt.Sprintf(
-			`i=0; until python3 -c "import os, urllib.request; urllib.request.urlopen('http://%s:' + os.environ.get('DYN_SYSTEM_PORT', '%d') + '/live', timeout=5)" `+
+			`i=0; until python3 -c "import os, urllib.request; url='http://%s:'; port=os.environ.get('DYN_SYSTEM_PORT', '%d'); urllib.request.urlopen(url + str(int(port, 16 if port.strip().lower().startswith('0x') else 10)) + '/live', timeout=5)" `+
 				`2>/dev/null; do `+
 				`i=$((i+1)); [ "$i" -ge 720 ] && { echo "ERROR: leader /live did not become ready within 3h" >&2; exit 1; }; `+
 				`echo 'waiting for leader dynamo.vllm /live to return 200...'; sleep 15; done`,

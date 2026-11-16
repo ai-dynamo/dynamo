@@ -18,15 +18,86 @@
 package controller
 
 import (
+	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 )
+
+func TestModelEndpointLifecycleUsesDiscoveredSystemPort(t *testing.T) {
+	t.Log("Run a model API on an allocated TCP port and publish it through an EndpointSlice")
+	requests := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.Method + " " + r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	address := server.Listener.Addr().(*net.TCPAddr)
+	model := &v1alpha1.DynamoModel{
+		Namespace: "inference",
+		Spec: v1alpha1.DynamoModelSpec{
+			ModelName: "adapter", BaseModelName: "base-model", ModelType: "lora",
+			Source: &v1alpha1.ModelSource{URI: "s3://bucket/adapter"},
+		},
+	}
+	pod := &corev1.Pod{
+		Name: "worker", Namespace: model.Namespace, UID: "worker-uid",
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}
+	slice := &discoveryv1.EndpointSlice{
+		Name: "model-endpoints", Namespace: model.Namespace,
+		Labels: map[string]string{
+			consts.KubeLabelDynamoBaseModelHash: dynamo.HashModelName(model.Spec.BaseModelName),
+			discoveryv1.LabelServiceName:        "model-service",
+		},
+		Ports: []discoveryv1.EndpointPort{{Name: new("system"), Port: new(int32(address.Port))}},
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses: []string{address.IP.String()},
+			TargetRef: &corev1.ObjectReference{Kind: "Pod", Name: pod.Name, UID: pod.UID},
+		}},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, discoveryv1.AddToScheme(scheme))
+	reconciler := &DynamoModelReconciler{
+		Client:         fake.NewClientBuilder().WithScheme(scheme).WithObjects(slice, pod).Build(),
+		EndpointClient: modelendpoint.NewClient(),
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	t.Cleanup(cancel)
+
+	t.Log("Discover the actual listener and keep Pod readiness for LoRA classification")
+	candidates, services, err := reconciler.getEndpointCandidates(ctx, model)
+	require.NoError(t, err)
+	require.Equal(t, map[string]bool{"model-service": true}, services)
+	require.Len(t, candidates, 1)
+	require.Equal(t, server.URL, candidates[0].Address)
+	require.True(t, candidates[0].KubernetesReady)
+
+	t.Log("Load and unload the adapter against the discovered port")
+	endpoints, err := reconciler.EndpointClient.LoadLoRA(ctx, candidates, model)
+	require.NoError(t, err)
+	require.Len(t, endpoints, 1)
+	require.True(t, endpoints[0].Ready)
+	require.NoError(t, reconciler.EndpointClient.UnloadLoRA(ctx, candidates, model.Spec.ModelName))
+	require.Len(t, requests, 2)
+	require.Equal(t, "POST /v1/loras", <-requests)
+	require.Equal(t, "DELETE /v1/loras/adapter", <-requests)
+}
 
 func TestWithPodIdentityClassifiesLoRAFallback(t *testing.T) {
 	tests := []struct {

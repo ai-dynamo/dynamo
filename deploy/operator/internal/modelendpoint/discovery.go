@@ -22,18 +22,20 @@ import (
 	"net"
 	"strconv"
 
+	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
-// ExtractCandidates extracts endpoint candidates from EndpointSlices
+// ExtractCandidates extracts endpoint candidates using each slice's resolved system port.
 // Returns all pod-backed endpoints regardless of ready status
 // The readiness will be determined by probing (for LoRA models) or set to false (for base models)
-func ExtractCandidates(endpointSlices *discoveryv1.EndpointSliceList, port int32) ([]Candidate, map[string]bool) {
+func ExtractCandidates(endpointSlices *discoveryv1.EndpointSliceList) ([]Candidate, map[string]bool) {
 	var candidates []Candidate
 	serviceNames := make(map[string]bool)
 	candidateIndexes := make(map[string]int)
@@ -42,6 +44,20 @@ func ExtractCandidates(endpointSlices *discoveryv1.EndpointSliceList, port int32
 		serviceName := slice.Labels[discoveryv1.LabelServiceName]
 		if serviceName != "" {
 			serviceNames[serviceName] = true
+		}
+
+		// An unresolved system port must not send model-management requests to a default listener.
+		var systemPort *int32
+		for _, port := range slice.Ports {
+			if port.Name != nil && *port.Name == consts.DynamoSystemPortName &&
+				port.Port != nil && *port.Port > 0 && *port.Port <= 65535 &&
+				(port.Protocol == nil || *port.Protocol == corev1.ProtocolTCP) {
+				systemPort = port.Port
+				break
+			}
+		}
+		if systemPort == nil {
+			continue
 		}
 
 		for _, ep := range slice.Endpoints {
@@ -67,7 +83,7 @@ func ExtractCandidates(endpointSlices *discoveryv1.EndpointSliceList, port int32
 			}
 
 			for _, addr := range ep.Addresses {
-				address := "http://" + net.JoinHostPort(addr, strconv.Itoa(int(port)))
+				address := "http://" + net.JoinHostPort(addr, strconv.Itoa(int(*systemPort)))
 				candidateIndexes[candidateKey] = len(candidates)
 				candidates = append(candidates, Candidate{
 					Address:         address,

@@ -765,13 +765,13 @@ func TestBuildColdStartFailoverPod_StaggeredPorts(t *testing.T) {
 	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
 	require.NoError(t, err)
 
-	for i := range 2 {
+	for i, portName := range []string{"system", "system-1"} {
 		engine := ps.Containers[i]
 		env := envToMap(engine.Env)
 		assert.Equal(t, strconv.Itoa(commonconsts.DynamoSystemPort+i), env["DYN_SYSTEM_PORT"])
 		require.Len(t, engine.Ports, 1)
 		assert.Equal(t, int32(commonconsts.DynamoSystemPort+i), engine.Ports[0].ContainerPort)
-		assert.Equal(t, fmt.Sprintf("system-%d", i), engine.Ports[0].Name)
+		assert.Equal(t, portName, engine.Ports[0].Name)
 	}
 }
 
@@ -780,9 +780,9 @@ func TestBuildColdStartFailoverPod_ProbesRetargetedToNamedPort(t *testing.T) {
 	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
 	require.NoError(t, err)
 
-	for i := range 2 {
+	for i, portName := range []string{"system", "system-1"} {
 		engine := ps.Containers[i]
-		expectedPort := intstr.FromString(fmt.Sprintf("system-%d", i))
+		expectedPort := intstr.FromString(portName)
 		if engine.StartupProbe != nil && engine.StartupProbe.HTTPGet != nil {
 			assert.Equal(t, expectedPort, engine.StartupProbe.HTTPGet.Port)
 		}
@@ -966,10 +966,9 @@ func TestBuildFailoverEnginePair_SystemPorts(t *testing.T) {
 			require.Len(t, ps.Containers, 3)
 
 			t.Log("Keep environment, declared ports and named HTTP probes aligned")
-			for i := range failoverEngineCount {
+			for i, name := range []string{"system", "system-1"} {
 				engine := ps.Containers[i]
 				port := int32(tt.wantBase + i)
-				name := fmt.Sprintf("system-%d", i)
 				assert.Equal(t, strconv.Itoa(int(port)), envToMap(engine.Env)["DYN_SYSTEM_PORT"])
 				require.Len(t, engine.Ports, 1)
 				assert.Equal(t, port, engine.Ports[0].ContainerPort)

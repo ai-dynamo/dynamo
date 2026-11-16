@@ -528,18 +528,12 @@ func buildFailoverEnginePair(podSpec *corev1.PodSpec) error {
 
 	// Both engine listeners must fit Dynamo's signed 16-bit system-port setting.
 	basePort := commonconsts.DynamoSystemPort
-	maxBasePort := int64(32767 - (failoverEngineCount - 1))
+	maxBasePort := int32(32767 - (failoverEngineCount - 1))
 	for _, env := range slices.Backward(mainContainer.Env) {
 		if env.Name != "DYN_SYSTEM_PORT" {
 			continue
 		}
-		value := strings.TrimSpace(env.Value)
-		radix := 10
-		if strings.HasPrefix(value, "0x") || strings.HasPrefix(value, "0X") {
-			radix = 16
-			value = value[2:]
-		}
-		port, err := strconv.ParseInt(value, radix, 16)
+		port, err := parseSystemPort(env.Value)
 		if env.ValueFrom != nil || err != nil || port < 1 || port > maxBasePort {
 			return fmt.Errorf("intra-pod failover requires a literal DYN_SYSTEM_PORT between 1 and %d to allocate both engine ports", maxBasePort)
 		}
@@ -566,7 +560,11 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 	engine := *base.DeepCopy()
 	engine.Name = fmt.Sprintf("engine-%d", engineID)
 
-	portName := fmt.Sprintf("system-%d", engineID)
+	// Keep the primary engine reachable through existing named Service targets.
+	portName := commonconsts.DynamoSystemPortName
+	if engineID > 0 {
+		portName = fmt.Sprintf("%s-%d", commonconsts.DynamoSystemPortName, engineID)
+	}
 
 	engine.Ports = []corev1.ContainerPort{
 		{

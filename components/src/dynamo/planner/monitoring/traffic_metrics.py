@@ -632,7 +632,7 @@ class PrometheusAPIClient:
                     "for namespace '%s' in Prometheus. "
                     "Router demand is unavailable until scraping is working. "
                     "Check: (1) PodMonitor 'dynamo-router' is installed in the operator namespace, "
-                    "(2) LocalRouter pods have DYN_SYSTEM_PORT=9090, "
+                    "(2) LocalRouter pods declare a named 'system' port matching DYN_SYSTEM_PORT, "
                     "(3) pods have label nvidia.com/metrics-enabled=true.",
                     metric,
                     ns,

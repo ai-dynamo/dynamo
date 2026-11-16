@@ -72,11 +72,15 @@ When enabled, the chart creates these PodMonitors:
 | PodMonitor | Selects | Scrapes |
 |---|---|---|
 | `dynamo-frontend` | `component-type: frontend` | port `http` (`frontendPath`, default `/metrics`) |
-| `dynamo-worker` | `worker` / `decode` / `prefill` | port `system` (worker metrics), ports `system-0` / `system-1` when present (GMS shadow-failover), port `http` when present (frontend sidecar, also `frontendPath`), and port `nixl` when `dynamo-operator.dynamo.metrics.podMonitors.nixlTelemetry=true` |
+| `dynamo-worker` | `worker` / `decode` / `prefill` | port `system` (worker or failover primary), `system-1` (failover standby), legacy `system-0` when present, port `http` when present (frontend sidecar, also `frontendPath`), and port `nixl` when `dynamo-operator.dynamo.metrics.podMonitors.nixlTelemetry=true` |
 | `dynamo-planner` | `component-type: planner` | port `metrics` |
-| `dynamo-router` | `component-type: default` | port 9090 (`DYN_SYSTEM_PORT`), addressed by relabeling rather than a named container port |
+| `dynamo-router` | `component-type: default` | named port `system`, matching `DYN_SYSTEM_PORT` |
 
 Each endpoint matches on a named container port, so a pod that does not declare that port produces no scrape target for it rather than a failing one.
+
+Standalone router Pods need the labels `nvidia.com/dynamo-component-type: default` and `nvidia.com/metrics-enabled: "true"`. For a `v1beta1` component, omit `type` and set these labels under `podTemplate.metadata.labels`; `type: default` is not a valid API value. Set `DYN_SYSTEM_PORT` on its `main` container, for example `12345`. The operator adds the matching named `system` port, or you can declare it explicitly. See [System Port Configuration](../../reference/kubernetes-api/dynamo-component-deployment.mdx#system-port-configuration).
+
+Upgrade the operator and chart together. Before changing the monitor, give existing portless router Pods a matching named `system` port and allow them to roll. The monitor no longer guesses `9090` or rewrites unrelated container ports into duplicate targets.
 
 A frontend can move its own Prometheus endpoint by setting `DYN_HTTP_SVC_METRICS_PATH`. When it does, set `dynamo-operator.dynamo.metrics.podMonitors.frontendPath` to the same value. It defaults to `/metrics` and applies only to the two endpoints that scrape a frontend HTTP service: the `dynamo-frontend` monitor and the `dynamo-worker` sidecar endpoint on port `http`. The remaining endpoints scrape the system status server, which always serves `/metrics`.
 
