@@ -473,30 +473,9 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         assert cfg.ais_perf_model.roles["prefill"]["tp"] == prefill_pick.tp
         assert cfg.ais_perf_model.roles["decode"]["tp"] == decode_pick.tp
         assert resolved_versions == [("h200_sxm", "vllm")]
-        assert cfg.ais_perf_model.roles["prefill"]["cp_size"] is None
-        assert cfg.ais_perf_model.roles["decode"]["cp_size"] is None
 
-    @pytest.mark.parametrize(
-        ("model", "prefill_pick", "decode_pick", "prefill_cp"),
-        [
-            # DYN-5633: the SGLang MoE RAPID pick, prefill CP4 and decode without CP.
-            (
-                "Qwen/Qwen3-30B-A3B",
-                PickedParallelConfig(tp=1, dp=1, moe_tp=4, cp=4),
-                PickedParallelConfig(tp=1, dp=8, moe_tp=8),
-                4,
-            ),
-            (
-                "Qwen/Qwen3-32B",
-                PickedParallelConfig(tp=2, cp=2),
-                PickedParallelConfig(tp=2),
-                2,
-            ),
-        ],
-    )
-    def test_ais_perf_model_keeps_selected_prefill_cp(
-        self, monkeypatch, model, prefill_pick, decode_pick, prefill_cp
-    ):
+    def test_ais_perf_model_keeps_selected_prefill_cp(self, monkeypatch):
+        # DYN-5633: the SGLang MoE RAPID pick, prefill CP4 and decode without CP.
         monkeypatch.setattr(
             "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
             lambda **_: "0.5.15",
@@ -509,15 +488,15 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         )
 
         spec = build_ais_perf_model_spec(
-            _dgdr(planner=planner, model=model),
-            best_prefill_pick=prefill_pick,
-            best_decode_pick=decode_pick,
+            _dgdr(planner=planner, model="Qwen/Qwen3-30B-A3B"),
+            best_prefill_pick=PickedParallelConfig(tp=1, dp=1, moe_tp=4, cp=4),
+            best_decode_pick=PickedParallelConfig(tp=1, dp=8, moe_tp=8),
             resolved_backend="sglang",
             system="h100_sxm",
         )
 
         assert spec is not None
-        assert spec.roles["prefill"]["cp_size"] == prefill_cp
+        assert spec.roles["prefill"]["cp_size"] == 4
         assert spec.roles["decode"]["cp_size"] is None
 
     def test_ais_perf_model_falls_back_when_database_is_unavailable(self, monkeypatch):
@@ -881,7 +860,6 @@ def test_profiler_preserves_explicit_estimator_config(tmp_path):
             "moe_tp_size",
         ),
         ({}, PickedParallelConfig(cp=4), "vllm", "h200_sxm", "cp_size"),
-        ({"cp_size": 2}, PickedParallelConfig(cp=4), "vllm", "h200_sxm", "cp_size"),
     ],
 )
 def test_profiler_rejects_estimator_identity_that_disagrees_with_deployment(

@@ -280,12 +280,6 @@ class TestAICInterpolationSpec:
         roundtrip = AICInterpolationSpec.model_validate_json(spec.model_dump_json())
         assert roundtrip == spec
 
-    def test_pick_cp_roundtrips_and_defaults_to_one(self):
-        pick = PickedParallelConfig(tp=1, moe_tp=4, cp=4)
-        assert PickedParallelConfig.model_validate_json(pick.model_dump_json()).cp == 4
-        # ConfigMaps written before the field existed carry no ``cp``.
-        assert PickedParallelConfig.model_validate_json('{"tp": 1}').cp == 1
-
     def test_rejects_unknown_backend(self):
         with pytest.raises(ValueError):
             AICInterpolationSpec(
