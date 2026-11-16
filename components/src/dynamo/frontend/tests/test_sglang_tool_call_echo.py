@@ -24,6 +24,7 @@ from sglang.srt.parser.reasoning_parser import ReasoningParser
 
 from dynamo.frontend.sglang_prepost import (
     SglangStreamingPostProcessor,
+    convert_tools,
     preprocess_chat_request,
 )
 from dynamo.frontend.sglang_prompt_renderer import (
@@ -68,7 +69,7 @@ TOOLS = [
     ),
 ]
 TOOLS_JSON = [t.model_dump(exclude_none=True) for t in TOOLS]
-TEMPLATE_TOOLS = [t.model_dump() for t in TOOLS]
+TEMPLATE_TOOLS = [t.model_dump() for t in convert_tools(TOOLS_JSON)]
 
 # What an attacker plants in a tool result / file, and what a faithful echo
 # of it looks like in the hermes format.
