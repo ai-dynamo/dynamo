@@ -5,8 +5,4 @@ SPDX-License-Identifier: Apache-2.0
 
 # dynamo-kv-events
 
-Everything about KV cache events, for both ends of the wire: the event types and the `RouterEvent` envelope (`event`), the engine ZMQ msgpack codec and its filters (`zmq_wire`), the replay cursor a subscriber keeps in step with a publisher (`cursor`), the publisher-side placement helpers (`placement`), and the residency vocabulary engines publish with their events (`residency`: `StorageTier`, `ResidencyDomain`, `ResidencyOwner`, `ResetScope`, `WireResidencyDomain`). Workers, sidecars, and the C bindings publish with this crate; the router's indexer ingests with it.
-
-Dependencies: `dynamo-router-protocol` (identities), `dynamo-kv-hashing` (the block hash identities and the contract the codec recomputes, and its `multimodal` module: the per-block multimodal metadata and the extra-key marker the codec parses), serde, serde_json, rmp-serde, rustc-hash, thiserror, tracing. No sockets, tasks, or servers: the ZMQ socket helper and the listener that drives it are `dynamo-kv-router` adapters behind its ZMQ features. The layering gate (`scripts/router_layering_check.sh`) checks the dependency set.
-
-Part of the router split (see `lib/router/README.md`).
+`dynamo-kv-events` defines the KV cache events engines publish when they store, remove, or clear blocks, and the `RouterEvent` envelope the router consumes them in. It also holds the msgpack codec for engine ZMQ streams (`zmq_wire`), the replay cursor a subscriber uses to resume a stream, and the residency vocabulary (storage tiers, domains, and owners). It opens no sockets; the ZMQ listener lives in `dynamo-kv-router` behind its `ingest-zmq` feature.

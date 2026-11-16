@@ -24,7 +24,7 @@ use super::overlap_refresh::{
 };
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::selector::{
-    CandidatePreparer, CandidatePreparerExt, PreparedCandidates, WorkerInputs, WorkerLoadInputExt,
+    CandidatePreparer, CandidatePreparerExt, PreparedCandidates, WorkerLoadInputExt,
     WorkerSelectionInput, WorkerSelector, worker_input_rows,
 };
 use super::types::{
@@ -36,26 +36,23 @@ use super::types::{
 use crate::protocols::{WorkerConfigLike, WorkerSelectionResult};
 use crate::selector::WorkerCapacityExt;
 use crate::types::RejectThresholdsProvider;
-use dynamo_admission::classifier::{ClassificationOverrides, ClassifyRequest};
-use dynamo_admission::queue::{
-    PolicyQueue, QueueLane, QueueMetadata, QueueReadiness, QueueSnapshot,
-};
+use dynamo_admission::{ClassificationOverrides, ClassifyRequest};
 use dynamo_admission::{PolicyClassConfig, PolicyProfile};
+use dynamo_admission::{PolicyQueue, QueueMetadata, QueueSnapshot};
+use dynamo_admission::{QueueLane, QueueReadiness};
 use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_indexer::ResidentBlockCountsHandle;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
-use dynamo_slot_tracker::busy::{BusyThresholds, FullRankCounts};
-use dynamo_slot_tracker::wire::PrefillLoadHint;
+use dynamo_slot_tracker::PrefillLoadHint;
 use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
     WorkerLoadProjection, WorkerLoadReader,
 };
+use dynamo_slot_tracker::{BusyThresholds, FullRankCounts};
+use dynamo_worker_selection::WorkerInputs;
 use dynamo_worker_selection::{RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate};
 use dynamo_worker_selection::{SelectionTrace, SelectionTraceSpec};
 use dynamo_worker_selection::{WorkerCapacity, WorkerInputRows, WorkerLoadInput};
-
-// The fallback lives beside `WorkerCapacity`; this path stays for existing importers.
-pub use dynamo_router_protocol::worker::DEFAULT_MAX_BATCHED_TOKENS;
 
 mod capacity;
 
@@ -617,7 +614,7 @@ impl RuntimePolicyControl {
     }
 }
 
-pub use dynamo_slot_tracker::booking::SchedulerBookingDescriptor;
+pub use dynamo_slot_tracker::SchedulerBookingDescriptor;
 
 #[derive(Debug)]
 enum SchedulerCleanupTarget {
@@ -3300,9 +3297,10 @@ mod tests {
     use crate::protocols::WorkerSelectionResult;
     use dynamo_kv_hashing::ExternalSequenceBlockHash;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
-    use dynamo_slot_tracker::wire::ActiveSequenceEvent;
+    use dynamo_slot_tracker::ActiveSequenceEvent;
 
-    use crate::selector::{DefaultWorkerSelector, WorkerInputs, WorkerSelector};
+    use crate::selector::{DefaultWorkerSelector, WorkerSelector};
+    use dynamo_worker_selection::WorkerInputs;
 
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
 
@@ -3310,12 +3308,12 @@ mod tests {
 
     use crate::RefreshedOverlap;
 
-    use dynamo_admission::classifier::WorkerView;
+    use dynamo_admission::WorkerView;
     use dynamo_admission::{PolicyClassConfig, RouterQueuePolicy};
-    use dynamo_slot_tracker::busy::BusyThresholds;
+    use dynamo_slot_tracker::BusyThresholds;
     use std::num::NonZeroU32;
 
-    use dynamo_slot_tracker::topology::WorkerDpRange;
+    use dynamo_slot_tracker::WorkerDpRange;
 
     use dynamo_slot_tracker::{ActiveSequencesMultiWorker, SequencePublisher};
 
@@ -3802,7 +3800,7 @@ mod tests {
     ) {
         slots.set_worker_capacities(configs.iter().map(|(&id, cfg)| {
             (
-                dynamo_slot_tracker::topology::WorkerDpRange::new(
+                dynamo_slot_tracker::WorkerDpRange::new(
                     id,
                     cfg.data_parallel_start_rank(),
                     cfg.data_parallel_size(),
@@ -4860,7 +4858,7 @@ mod tests {
 
     #[tokio::test]
     async fn classifier_sequence_hashes_preserve_absence_empty_and_order() {
-        use dynamo_admission::classifier::{ClassifyFuture, RequestClassifier};
+        use dynamo_admission::{ClassifyFuture, RequestClassifier};
 
         struct InspectHashes(Option<Vec<u64>>, WorkerWithDpRank);
         impl RequestClassifier for InspectHashes {
@@ -4906,7 +4904,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "CPU microbenchmark; run explicitly with --release --ignored --nocapture"]
     async fn classifier_input_projection_benchmark() {
-        use dynamo_admission::classifier::{ClassifyFuture, RequestClassifier};
+        use dynamo_admission::{ClassifyFuture, RequestClassifier};
         use std::hint::black_box;
         use std::task::Context;
         use std::time::Instant as WallClock;
@@ -6316,7 +6314,7 @@ mod tests {
             16,
             1_000_000,
             profile,
-            Some(Arc::new(|| dynamo_slot_tracker::busy::BusyThresholds {
+            Some(Arc::new(|| dynamo_slot_tracker::BusyThresholds {
                 decode_busy_threshold_frac: Some(0.5),
                 ..Default::default()
             })),
@@ -6390,7 +6388,7 @@ mod tests {
             16,
             100,
             profile,
-            Some(Arc::new(|| dynamo_slot_tracker::busy::BusyThresholds {
+            Some(Arc::new(|| dynamo_slot_tracker::BusyThresholds {
                 prefill_busy_threshold_frac: Some(0.5),
                 ..Default::default()
             })),
@@ -6403,7 +6401,7 @@ mod tests {
         };
         cfg_tx.send(HashMap::from([(0, worker_config)])).unwrap();
         slots
-            .reconcile_workers([dynamo_slot_tracker::topology::WorkerDpRange::new(0, 0, 2)])
+            .reconcile_workers([dynamo_slot_tracker::WorkerDpRange::new(0, 0, 2)])
             .unwrap();
         set_worker_capacities_from_configs(&slots, &cfg_tx.borrow());
         let rank0 = WorkerWithDpRank::new(0, 0);
@@ -6436,7 +6434,7 @@ mod tests {
 
     #[tokio::test]
     async fn reject_thresholds_follow_the_live_provider_on_prefill_tokens() {
-        let live = Arc::new(Mutex::new(dynamo_slot_tracker::busy::BusyThresholds {
+        let live = Arc::new(Mutex::new(dynamo_slot_tracker::BusyThresholds {
             prefill_busy_threshold_frac: Some(0.5),
             ..Default::default()
         }));
@@ -6475,7 +6473,7 @@ mod tests {
         slots.free(&"free".to_string(), decay_now()).unwrap();
 
         // Lifting the thresholds through the live provider takes effect at the next selection.
-        *live.lock() = dynamo_slot_tracker::busy::BusyThresholds::default();
+        *live.lock() = dynamo_slot_tracker::BusyThresholds::default();
         let (mut again, again_rx) = make_request("again", 16);
         again.pinned_worker = Some(first);
         queue.enqueue(again).await;
