@@ -81,6 +81,180 @@ class JinjaPromptRenderer:
         return _normalize_prompt_token_ids(rendered)
 
 
+_KIMI_K3_THINKING_EFFORTS = frozenset({"low", "high", "max"})
+
+
+def _normalize_kimi_k3_hint(value: Any) -> str:
+    return str(value or "").lower().replace("-", "").replace("_", "")
+
+
+def _should_use_kimi_k3_prompt_bridge(
+    request: dict[str, Any],
+    *,
+    tokenizer,
+    tool_call_parser_name: str | None,
+    reasoning_parser_name: str | None,
+) -> bool:
+    """Return whether to translate OpenAI controls for Kimi K3's encoder.
+
+    K3 ships no Jinja ``chat_template``; its tokenizer renders XTML directly and
+    consumes ``tool_choice``/``response_format``/``thinking_effort`` as template
+    kwargs. Limit the translation to K3 so unrelated templates keep receiving
+    exactly the caller's template arguments.
+    """
+    if getattr(tokenizer, "chat_template", None) is not None:
+        return False
+
+    return any(
+        "kimik3" in _normalize_kimi_k3_hint(hint)
+        for hint in (
+            request.get("model"),
+            tool_call_parser_name,
+            reasoning_parser_name,
+        )
+    )
+
+
+def _kimi_k3_tool_choice_kwargs(
+    request: dict[str, Any],
+    *,
+    has_tools: bool,
+) -> dict[str, Any]:
+    """Translate an OpenAI ``tool_choice`` into K3 encoder arguments.
+
+    Forward ``required`` and ``none`` when the request declares tools; the K3
+    encoder renders the corresponding instruction itself. Named choices use
+    a synthetic system message because the encoder implements only the two
+    string forms. ``auto`` and an omitted choice need no instruction; an
+    explicit ``null`` is equivalent to omission here.
+    """
+    if not has_tools:
+        return {}
+
+    tool_choice = request.get("tool_choice")
+    if tool_choice in ("required", "none"):
+        return {"tool_choice": tool_choice}
+    return {}
+
+
+def _kimi_k3_thinking_effort_kwargs(
+    request: dict[str, Any],
+    chat_template_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Map OpenAI ``reasoning_effort`` to K3's ``thinking_effort``.
+
+    An explicit K3 template argument wins. ``"none"`` leaves the effort unset
+    and does not toggle thinking; upstream request normalization owns that
+    control. Like Dynamo's Rust renderer, reject an unsupported tier while
+    thinking is enabled instead of silently substituting the encoder default.
+    """
+    thinking_disabled = (
+        chat_template_kwargs.get("thinking") is False
+        or chat_template_kwargs.get("thinking_mode") == "disabled"
+    )
+
+    # The native encoder ignores effort entirely when thinking is disabled.
+    if thinking_disabled:
+        return {}
+
+    if "thinking_effort" in chat_template_kwargs:
+        effort = chat_template_kwargs["thinking_effort"]
+        # Explicit null suppresses the encoder's default max-effort instruction.
+        if effort is None or (
+            isinstance(effort, str) and effort in _KIMI_K3_THINKING_EFFORTS
+        ):
+            return {}
+        raise PreprocessError(
+            f"Kimi K3 does not support thinking_effort={effort!r}; "
+            "supported values are 'low', 'high', and 'max'"
+        )
+
+    reasoning_effort = request.get("reasoning_effort")
+    if reasoning_effort is None:
+        reasoning_effort = chat_template_kwargs.get("reasoning_effort")
+    if reasoning_effort is None:
+        return {}
+    if reasoning_effort == "none":
+        return {}
+    if (
+        isinstance(reasoning_effort, str)
+        and reasoning_effort in _KIMI_K3_THINKING_EFFORTS
+    ):
+        return {"thinking_effort": reasoning_effort}
+
+    raise PreprocessError(
+        f"Kimi K3 does not support reasoning_effort={reasoning_effort!r}; "
+        "supported values are 'low', 'high', and 'max'"
+    )
+
+
+def _kimi_k3_response_format_kwargs(request: dict[str, Any]) -> dict[str, Any]:
+    response_format = request.get("response_format")
+    if not isinstance(response_format, dict):
+        return {}
+    # The tokenizer may normalize the schema in place. Keep the caller's request
+    # object independent of prompt rendering.
+    return {"response_format": copy.deepcopy(response_format)}
+
+
+def _normalize_kimi_k3_messages(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Match SGLang's K3 encoder message normalization without mutating input."""
+    return [
+        {**message, "role": "system"} if message.get("role") == "developer" else message
+        for message in messages
+    ]
+
+
+class KimiK3PromptRenderer:
+    def __init__(self, tokenizer: Any):
+        self._tokenizer = tokenizer
+
+    def render(
+        self,
+        request: dict[str, Any],
+        *,
+        messages: list[dict[str, Any]],
+        template_tools: list[dict[str, Any]] | None,
+        resolved_responses_template: str | None,
+    ) -> list[int]:
+        chat_template_kwargs = (
+            request.get("chat_template_kwargs")
+            or request.get("chat_template_args")
+            or {}
+        )
+        template_kwargs: dict[str, Any] = {
+            "add_generation_prompt": True,
+            **_kimi_k3_tool_choice_kwargs(
+                request, has_tools=bool(request.get("tools"))
+            ),
+            **_kimi_k3_thinking_effort_kwargs(request, chat_template_kwargs),
+            **_kimi_k3_response_format_kwargs(request),
+        }
+        if resolved_responses_template is not None:
+            template_kwargs["chat_template"] = resolved_responses_template
+        if template_tools:
+            template_kwargs["tools"] = request.get(
+                "responses_template_tools", template_tools
+            )
+        template_kwargs.update(chat_template_kwargs)
+        template_kwargs.pop("reasoning_effort", None)
+        template_kwargs["tokenize"] = True
+        template_kwargs["return_dict"] = False
+
+        template_messages = _normalize_kimi_k3_messages(
+            _normalize_messages_for_template(messages, self._tokenizer)
+        )
+        try:
+            rendered = self._tokenizer.apply_chat_template(
+                template_messages, **template_kwargs
+            )
+        except (TemplateError, TypeError) as exc:
+            raise PreprocessError(str(exc)) from exc
+        return _normalize_prompt_token_ids(rendered)
+
+
 class DeepSeekPromptRenderer:
     def __init__(
         self,
@@ -125,6 +299,61 @@ class DeepSeekPromptRenderer:
         )
 
 
+class _NativePromptRenderer:
+    """Select a native encoder using request hints for template-free tokenizers."""
+
+    def __init__(
+        self,
+        tokenizer: Any,
+        *,
+        tool_call_parser_name: str | None,
+        reasoning_parser_name: str | None,
+    ):
+        self._tokenizer = tokenizer
+        self._tool_call_parser_name = tool_call_parser_name
+        self._reasoning_parser_name = reasoning_parser_name
+        self._kimi = KimiK3PromptRenderer(tokenizer)
+        self._fallback = DeepSeekPromptRenderer(
+            tokenizer,
+            None,
+            tool_call_parser_name=tool_call_parser_name,
+            reasoning_parser_name=reasoning_parser_name,
+        )
+
+    def select(self, request: dict[str, Any]) -> PromptRenderer:
+        if _should_use_kimi_k3_prompt_bridge(
+            request,
+            tokenizer=self._tokenizer,
+            tool_call_parser_name=self._tool_call_parser_name,
+            reasoning_parser_name=self._reasoning_parser_name,
+        ):
+            return self._kimi
+        return self._fallback
+
+    def render(
+        self,
+        request: dict[str, Any],
+        *,
+        messages: list[dict[str, Any]],
+        template_tools: list[dict[str, Any]] | None,
+        resolved_responses_template: str | None,
+    ) -> list[int]:
+        return self.select(request).render(
+            request,
+            messages=messages,
+            template_tools=template_tools,
+            resolved_responses_template=resolved_responses_template,
+        )
+
+
+def resolve_prompt_renderer(
+    renderer: PromptRenderer, request: dict[str, Any]
+) -> PromptRenderer:
+    if isinstance(renderer, _NativePromptRenderer):
+        return renderer.select(request)
+    return renderer
+
+
 def build_prompt_renderer(
     tokenizer: Any,
     *,
@@ -137,14 +366,18 @@ def build_prompt_renderer(
         return JinjaPromptRenderer(tokenizer)
 
     spec = resolve_deepseek_spec(model_path) if model_path is not None else None
-    # Without a template, retain the request-model/parser hint fallback for
-    # checkpoints whose metadata does not identify a DeepSeek variant.
-    if getattr(tokenizer, "chat_template", None) is None or (
-        spec is not None and recipe_renderer is not None
+    if spec is not None and (
+        getattr(tokenizer, "chat_template", None) is None or recipe_renderer is not None
     ):
         return DeepSeekPromptRenderer(
             tokenizer,
             spec,
+            tool_call_parser_name=tool_call_parser_name,
+            reasoning_parser_name=reasoning_parser_name,
+        )
+    if getattr(tokenizer, "chat_template", None) is None:
+        return _NativePromptRenderer(
+            tokenizer,
             tool_call_parser_name=tool_call_parser_name,
             reasoning_parser_name=reasoning_parser_name,
         )

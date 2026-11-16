@@ -23,13 +23,19 @@ from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.function_call.utils import get_json_schema_constraint
 from sglang.srt.parser.reasoning_parser import GptOssDetector, ReasoningParser
+from xgrammar import StructuralTag, StructuralTagItem
 
 from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
 from .responses_history import responses_history_recipients, responses_tools_request
-from .sglang_prompt_renderer import PromptRenderer, build_prompt_renderer
+from .sglang_prompt_renderer import (
+    KimiK3PromptRenderer,
+    PromptRenderer,
+    build_prompt_renderer,
+    resolve_prompt_renderer,
+)
 from .structural_tag_policy import (
     ToolChoiceKind,
     effective_tool_strict,
@@ -409,11 +415,30 @@ def _guided_output_requires_reasoning(
     return guided_decoding is not None and "structural_tag" in guided_decoding
 
 
+def _kimi_k3_named_tool_choice_message(
+    request: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build the K3 forced-call instruction for a named ``tool_choice``."""
+    tool_choice: Any = request.get("tool_choice")
+    if not _is_named_tool_choice(tool_choice):
+        return None
+
+    return {
+        "role": "system",
+        "content": (
+            "The system is invoked with `tool_choice=specified`.\n"
+            f"You MUST call the tool `{tool_choice['function']['name']}` "
+            "in the next message."
+        ),
+    }
+
+
 def _filter_template_tools(
     request: dict[str, Any],
     *,
     sglang_tools: list[SglangTool] | None,
     exclude_tools_when_tool_choice_none: bool,
+    filter_named_choice: bool = True,
 ) -> list[dict[str, Any]] | None:
     if not sglang_tools:
         return None
@@ -422,7 +447,7 @@ def _filter_template_tools(
     if exclude_tools_when_tool_choice_none and tool_choice == "none":
         return None
 
-    if _is_named_tool_choice(tool_choice):
+    if filter_named_choice and _is_named_tool_choice(tool_choice):
         chosen_name = tool_choice["function"]["name"]
         selected = [
             tool.model_dump()
@@ -628,7 +653,9 @@ def build_tool_call_guided_decoding(
             # for auto, unconstrained generation.
             constraint = None
 
-    guided_decoding = _serialize_tool_constraint(constraint)
+    guided_decoding = _serialize_tool_constraint(
+        constraint, stop_after_first=parallel_tool_calls is False
+    )
     if guided_decoding is not None:
         return guided_decoding
 
@@ -652,7 +679,10 @@ def build_tool_call_guided_decoding(
     return _serialize_tool_constraint(constraint)
 
 
-def _serialize_tool_constraint(constraint: Any) -> dict[str, Any] | None:
+def _serialize_tool_constraint(
+    constraint: Any, *, stop_after_first: bool = False
+) -> dict[str, Any] | None:
+    """Serialize tool guidance for RPC, preserving schemas and single-call limits."""
     if not (isinstance(constraint, tuple) and len(constraint) == 2):
         return None
     if constraint[0] == "json_schema":
@@ -663,10 +693,31 @@ def _serialize_tool_constraint(constraint: Any) -> dict[str, Any] | None:
     tag_value = constraint[1]
     # SGLang returns a Pydantic model (LegacyStructuralTagResponseFormat)
     # here. Convert to a plain dict before it hits the RPC layer because
-    # msgpack/serde_json cannot serialize BaseModel instances.
+    # msgpack/serde_json cannot serialize BaseModel instances. Dump by alias:
+    # the backend reads only "schema"; "schema_" leaves arguments unconstrained.
     if hasattr(tag_value, "model_dump"):
-        tag_value = tag_value.model_dump()
+        tag_value = tag_value.model_dump(by_alias=True)
+    if stop_after_first and isinstance(tag_value, dict) and "structures" in tag_value:
+        tag_value = _legacy_structural_tag_with_one_call(tag_value)
     return {"structural_tag": tag_value}
+
+
+def _legacy_structural_tag_with_one_call(tag: dict[str, Any]) -> dict[str, Any]:
+    """Use XGrammar to convert a legacy tag and stop after its first call."""
+    converted = StructuralTag.from_legacy_structural_tag(
+        [
+            StructuralTagItem(
+                begin=structure["begin"],
+                schema=structure.get("schema") or {},
+                end=structure["end"],
+            )
+            for structure in tag["structures"]
+        ],
+        tag["triggers"],
+    )
+    converted.format.at_least_one = tag.get("at_least_one", False)
+    converted.format.stop_after_first = True
+    return converted.model_dump()
 
 
 def build_response_format_guided_decoding(
@@ -752,6 +803,32 @@ def preprocess_chat_request(
         if recipient := recipients.get(str(index)):
             message["recipient"] = recipient
 
+    if prompt_renderer is None:
+        prompt_renderer = build_prompt_renderer(
+            tokenizer,
+            tool_call_parser_name=tool_call_parser_name,
+            reasoning_parser_name=reasoning_parser_name,
+        )
+    prompt_renderer = resolve_prompt_renderer(prompt_renderer, request)
+    kimi_k3_bridge = isinstance(prompt_renderer, KimiK3PromptRenderer)
+    if kimi_k3_bridge and _is_named_tool_choice(request.get("tool_choice")):
+        # K3's encoder cannot express a named choice. Its Rust formatter disables
+        # thinking and emits a typed ``tool-choice`` XTML system message; the
+        # SGLang tokenizer renders only plain system messages, so carry the same
+        # constraint as text.
+        chat_template_kwargs = dict(
+            request.get("chat_template_kwargs")
+            or request.get("chat_template_args")
+            or {}
+        )
+        chat_template_kwargs["thinking"] = False
+        chat_template_kwargs["enable_thinking"] = False
+        request["chat_template_kwargs"] = chat_template_kwargs
+        request.pop("chat_template_args", None)
+        named_tool_message = _kimi_k3_named_tool_choice_message(request)
+        assert named_tool_message is not None
+        messages.append(named_tool_message)
+
     # Generation mode is independent of whether the client wants reasoning
     # separated into reasoning_content or retained in content.
     force_reasoning = resolve_request_force_reasoning(
@@ -796,14 +873,9 @@ def preprocess_chat_request(
         request,
         sglang_tools=sglang_tools,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
+        filter_named_choice=not kimi_k3_bridge,
     )
 
-    if prompt_renderer is None:
-        prompt_renderer = build_prompt_renderer(
-            tokenizer,
-            tool_call_parser_name=tool_call_parser_name,
-            reasoning_parser_name=reasoning_parser_name,
-        )
     prompt_token_ids = prompt_renderer.render(
         request,
         messages=messages,

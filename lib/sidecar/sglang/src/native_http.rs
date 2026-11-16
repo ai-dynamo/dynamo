@@ -465,7 +465,7 @@ impl NativeHttp {
                 // successful response headers so decode can rendezvous while
                 // prefill runs.
                 yield Ok(LLMEngineOutput {
-                    disaggregated_params: Some(handoff),
+                    disaggregated_params: Some(Box::new(handoff)),
                     ..Default::default()
                 });
             }
@@ -515,7 +515,7 @@ impl NativeHttp {
                     }
                 };
                 if terminal {
-                    output.disaggregated_params = prefill_handoff.take();
+                    output.disaggregated_params = prefill_handoff.take().map(Box::new);
                 }
                 if !first_output_seen && has_output && (!is_prefill || terminal) {
                     abort_guard.needs_first_token = false;
@@ -1242,7 +1242,7 @@ mod tests {
         let terminal = stream.next().await.unwrap().unwrap();
         assert_eq!(
             terminal.engine_data,
-            Some(json!({"sglang_response": response}))
+            Some(Box::new(json!({"sglang_response": response})))
         );
         assert!(terminal.token_ids.is_empty());
         assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));

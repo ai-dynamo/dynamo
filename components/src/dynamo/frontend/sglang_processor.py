@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from sglang.srt.parser.conversation import chat_template_exists
-from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
@@ -58,6 +57,16 @@ from .utils import (
     resolve_chat_template,
     worker_warmup,
 )
+
+try:
+    from sglang.srt.hf_transformers import get_tokenizer
+except ModuleNotFoundError as exc:
+    if exc.name != "sglang.srt.hf_transformers":
+        raise
+    # SGLang 0.5.11 to 0.5.23 (current CUDA and XPU pins).
+    # Remove once both pins are newer.
+    from sglang.srt.utils.hf_transformers import get_tokenizer
+
 
 logger = logging.getLogger(__name__)
 
@@ -511,6 +520,13 @@ def _build_dynamo_preproc(
     else:
         routing = nvext_routing
 
+    # PreprocessedRequest.logit_bias is HashMap<u32, f32>, so JSON's str keys must
+    # become int; the HTTP layer has already validated the keys and values.
+    logit_bias = request.get("logit_bias")
+    logit_bias = (
+        {int(k): float(v) for k, v in logit_bias.items()} if logit_bias else None
+    )
+
     preproc = {
         "model": model_name,
         "token_ids": prompt_token_ids,
@@ -534,6 +550,7 @@ def _build_dynamo_preproc(
             "top_k": request.get("top_k", 0) or -1,
             "min_p": request.get("min_p", 0.0),
             "seed": request.get("seed"),
+            "logit_bias": logit_bias,
             "guided_decoding": guided_decoding,
         },
         "output_options": {

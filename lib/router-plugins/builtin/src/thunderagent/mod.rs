@@ -12,7 +12,7 @@ mod worker_selection;
 
 use config::{ConfigError, ThunderAgentConfig};
 
-use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError};
+use dynamo_kv_router::plugins::prelude::*;
 
 const THUNDERAGENT_CLASSIFIER_TYPE: &str = "thunderagent";
 
@@ -42,7 +42,7 @@ worker_selection:
 "#,
         )
         .unwrap();
-        let config = dynamo_kv_router::KvRouterConfig {
+        let config = dynamo_kv_router::config::KvRouterConfig {
             router_policy_config: Some(policy.path().display().to_string()),
             ..Default::default()
         };
