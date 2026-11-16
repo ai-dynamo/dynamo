@@ -134,7 +134,7 @@ def test_dynamo_pins_matching_aisim_rc_sources() -> None:
 
     patch = cargo["patch"]["crates-io"]["aisim-core"]
     assert set(patch) == {"git", "rev"}
-    assert patch["git"] == "https://github.com/ai-dynamo/aisimulate.git"
+    assert patch["git"] == "https://github.com/ai-dynamo/aisim.git"
     assert re.fullmatch(r"[0-9a-f]{40}", patch["rev"])
     for path in LOCKFILES[1:]:
         with path.with_name("Cargo.toml").open("rb") as handle:

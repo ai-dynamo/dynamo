@@ -13,8 +13,10 @@ from typing import (
     AsyncGenerator,
     AsyncIterator,
     Callable,
+    Coroutine,
     Dict,
     Optional,
+    TypeVar,
     Union,
     cast,
 )
@@ -79,6 +81,8 @@ from dynamo.vllm.omni.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 DEFAULT_VIDEO_FPS = 16
 
@@ -382,27 +386,33 @@ class OmniHandler(BaseOmniHandler):
             parsed_request_raw,
         )
 
-        # Pre-load input image for I2V requests (async I/O before sync build)
-        image = None
-        if (
-            request_type == RequestType.VIDEO_GENERATION
-            and isinstance(parsed_request, NvCreateVideoRequest)
-            and parsed_request.input_reference is not None
-        ):
-            try:
-                image = await self._image_loader.load_image(
-                    parsed_request.input_reference
-                )
-            except (ValueError, PIL.Image.DecompressionBombError) as e:
-                # Keep URLs and inline image data out of the client error.
-                raise InvalidArgument("Failed to load input_reference") from e
+        async def preload_inputs() -> EngineInputs:
+            """Load request media and build the inputs before generation starts."""
+            # Pre-load input image for I2V requests (async I/O before sync build)
+            image = None
+            if (
+                request_type == RequestType.VIDEO_GENERATION
+                and isinstance(parsed_request, NvCreateVideoRequest)
+                and parsed_request.input_reference is not None
+            ):
+                try:
+                    image = await self._image_loader.load_image(
+                        parsed_request.input_reference
+                    )
+                except (ValueError, PIL.Image.DecompressionBombError) as e:
+                    # Keep URLs and inline image data out of the client error.
+                    raise InvalidArgument("Failed to load input_reference") from e
 
-        try:
-            inputs = await self.build_engine_inputs(
-                parsed_request, request_type, image=image, request_id=request_id
-            )
-        except ValueError as error:
-            raise InvalidArgument(str(error)) from error
+            try:
+                return await self.build_engine_inputs(
+                    parsed_request, request_type, image=image, request_id=request_id
+                )
+            except ValueError as error:
+                raise InvalidArgument(str(error)) from error
+
+        inputs = await self._run_until_context_stops(
+            preload_inputs(), context, request_id
+        )
 
         generate_kwargs: Dict[str, Any] = {
             "prompt": inputs.prompt,
@@ -514,6 +524,33 @@ class OmniHandler(BaseOmniHandler):
                     "Error during generation for request %s: %s", request_id, e
                 )
                 raise
+
+    @staticmethod
+    async def _run_until_context_stops(
+        work: Coroutine[Any, Any, _T], context: Context | None, request_id: str
+    ) -> _T:
+        """Await ``work``, cancelling it if the request context stops first.
+
+        Reference downloads need their own stop watcher because preloading
+        runs before ``_abort_monitor`` starts.
+        """
+        if context is None:
+            return await work
+        stopped = asyncio.ensure_future(context.async_killed_or_stopped())
+        task = asyncio.create_task(work)
+        try:
+            await asyncio.wait((task, stopped), return_when=asyncio.FIRST_COMPLETED)
+            if stopped.done() and not task.done():
+                logger.debug("Request %s cancelled during input preloading", request_id)
+                raise asyncio.CancelledError
+            return await task
+        finally:
+            # Await the cancelled download so its connection and any partially
+            # loaded references are released before the request ends.
+            for future in (task, stopped):
+                if not future.done():
+                    future.cancel()
+            await asyncio.gather(task, stopped, return_exceptions=True)
 
     async def _generate_with_lora_admission_lock(
         self,
