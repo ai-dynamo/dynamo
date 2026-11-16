@@ -142,11 +142,13 @@ ENV DYNAMO_HOME=/workspace \
 #   link. The JIT check runs with path overrides unset, a fresh cache and the
 #   CUDA driver stub, so the build needs no GPU.
 #
-# - Remove the Nsight Systems CLI's optional efa_metrics sampler. Nothing in
-#   Dynamo uses it (AWS EFA confirmed on 2026-08-18), and as a static Go binary it
-#   is the sole carrier of 17 of the image's Critical and High findings. The glob
-#   spans CUDA version, Nsight version and architecture; the guard fails the build
-#   if a base bump makes it match nothing.
+# - Remove Nsight's optional efa_metrics sampler. Nothing in Dynamo uses it (AWS
+#   EFA confirmed on 2026-08-18), and as a static Go binary it is the sole
+#   carrier of 17 of the image's Critical and High findings. The globs span CUDA
+#   version, Nsight version and architecture, and cover both the CUDA toolkit's
+#   Nsight Systems and the /opt/nvidia Nsight Systems and Compute installs. The
+#   guard fails the build if any efa_metrics directory survives under /usr/local
+#   or /opt, so a base bump that moves the plugin cannot ship it silently.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     set -eu; \
@@ -210,11 +212,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         LD_LIBRARY_PATH="$chk/stubs:${LD_LIBRARY_PATH:-}" \
         /usr/bin/python3 -c 'from triton import knobs; from triton.backends.nvidia.driver import CudaUtils; CudaUtils(); print("triton env-free cuda_utils JIT ok; tools:", knobs.nvidia.ptxas.path, knobs.nvidia.cuobjdump.path, knobs.nvidia.nvdisasm.path)'; \
     rm -rf "$chk"; \
-    rm -rf /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/plugins/efa_metrics; \
-    if find /usr/local -type d -name efa_metrics 2>/dev/null | grep -q .; then \
-        echo "ERROR: an efa_metrics plugin directory survived removal; the glob no" >&2; \
-        echo "       longer matches the base image's Nsight layout." >&2; \
-        find /usr/local -type d -name efa_metrics >&2; \
+    rm -rf /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/plugins/efa_metrics \
+        /opt/nvidia/nsight-systems-cli/*/target-linux-*/plugins/efa_metrics \
+        /opt/nvidia/nsight-compute/*/host/target-linux-*/plugins/efa_metrics; \
+    if find /usr/local /opt -xdev -type d -name efa_metrics 2>/dev/null | grep -q .; then \
+        echo "ERROR: an efa_metrics plugin directory survived removal; the globs no" >&2; \
+        echo "       longer match the base image's Nsight layout." >&2; \
+        find /usr/local /opt -xdev -type d -name efa_metrics >&2; \
         exit 1; \
     fi
 

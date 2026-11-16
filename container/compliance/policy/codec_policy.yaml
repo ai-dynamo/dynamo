@@ -145,8 +145,10 @@ exceptions:
       Enforcement lives at build time, not here. A guard in
       trtllm_runtime.Dockerfile enumerates every bundled libavcodec, and
       tests/dependencies/test_no_software_video_codecs.py repeats the check
-      against the shipped image. Both fail when their glob matches nothing,
-      because a loop over an empty glob checks nothing and exits 0.
+      against the shipped image. The build-time guard fails when its glob
+      matches nothing, because a loop over an empty glob checks nothing and
+      exits 0. The shipped-image test does not: with no bundled libavcodec it
+      checks nothing and passes.
 
       Deliberately NOT expressed as a deny_components version floor:
       nvidia-dali-cuda130 appears in the base-image SBOM and is therefore
