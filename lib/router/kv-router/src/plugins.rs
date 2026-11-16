@@ -22,7 +22,7 @@ pub use registry::{
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
 };
 
-pub use dynamo_scheduler::hint_policy::PluginConfigError;
+pub use dynamo_scheduler::PluginConfigError;
 
 /// Check, for a routing host building a router, that one role's plugins fit together, and return
 /// the worker inputs whose resources the router starts for that role: the worker-selection
@@ -35,7 +35,7 @@ pub fn check_role(
     hint_policies: hint_policy::RoleHintPolicies,
     config: &crate::config::KvRouterConfig,
 ) -> Result<worker_selection::WorkerInputs, PluginConfigError> {
-    dynamo_scheduler::hint_policy::check_role(
+    dynamo_scheduler::check_role(
         role,
         selection,
         hint_policies,

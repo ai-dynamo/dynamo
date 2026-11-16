@@ -168,7 +168,7 @@ mod tests {
     use crate::overlap::OverlapSignals;
     use crate::test_utils::SimpleWorkerConfig;
     use crate::types::{ScheduleMode, SchedulingRequest};
-    use dynamo_kv_indexer::overlap::OverlapScores;
+    use dynamo_kv_indexer::OverlapScores;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
 
     fn workers_for_request(request: &SchedulingRequest) -> HashMap<u64, SimpleWorkerConfig> {
