@@ -159,7 +159,7 @@ impl std::error::Error for KvHintActionLimitError {}
 /// Who holds a KV prefix a target could fetch: a worker rank, or a cache owner by its compact
 /// residency key. The indexer produces it with a match and owns it; this crate keeps the
 /// public path because [`crate::transfer`] names it in every source choice.
-pub use dynamo_kv_indexer::kv_hints::{KvTransferCandidateSource, KvTransferSourceInterval};
+pub use dynamo_kv_indexer::{KvTransferCandidateSource, KvTransferSourceInterval};
 
 #[cfg(test)]
 mod tests {
