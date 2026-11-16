@@ -167,7 +167,11 @@ def _containing_mapping(
     mapping_bases: tuple[int, ...],
 ) -> LocalMapping | None:
     storage = tensor.untyped_storage()
-    storage_start = int(storage.data_ptr())
+    try:
+        storage_start = int(storage.data_ptr())
+    except RuntimeError:
+        # FakeTensors left alive by torch.compile have no device storage.
+        return None
     storage_end = storage_start + int(storage.nbytes())
     index = bisect_right(mapping_bases, storage_start) - 1
     if index < 0:

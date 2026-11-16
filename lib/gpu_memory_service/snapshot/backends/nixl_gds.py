@@ -93,6 +93,12 @@ class _NixlGDSTransferSession:
 
     def restore(self, targets: Mapping[str, GMSTransferTarget]) -> None:
         validate_transfer_targets(self._sources, targets, device=self._device)
+        file_groups = list(group_sources_by_path(self._sources).items())
+        if file_groups:
+            # cuFile rejects an unsupported file system only when a file is
+            # registered. Check one shard before the integrity pass reads every
+            # byte of the artifact.
+            self._check_file_registration(*file_groups[0])
         verification_t0 = time.monotonic()
         verified_files, verified_bytes = verify_file_source_digests(
             self._sources,
@@ -115,7 +121,6 @@ class _NixlGDSTransferSession:
                 verified_files,
                 min(self._max_workers, verified_files),
             )
-        file_groups = list(group_sources_by_path(self._sources).items())
         total_bytes = sum(source.byte_count for source in self._sources)
         t0 = time.monotonic()
 
@@ -147,6 +152,39 @@ class _NixlGDSTransferSession:
     def close(self) -> None:
         pass
 
+    def _check_file_registration(
+        self,
+        file_path: str,
+        sources: Sequence[FileTransferSource],
+    ) -> None:
+        fd = open_direct_read_fd(file_path, logger=logger, require_direct=True)
+        try:
+            self._agent.deregister_memory(self._register_file(file_path, fd, sources))
+        finally:
+            os.close(fd)
+
+    def _register_file(
+        self,
+        file_path: str,
+        fd: int,
+        sources: Sequence[FileTransferSource],
+    ) -> Any:
+        file_descs = [
+            (source.file_offset, source.byte_count, fd, "") for source in sources
+        ]
+        try:
+            return self._agent.register_memory(file_descs, FILE_MEM_TYPE)
+        except Exception as exc:
+            raise RuntimeError(
+                f"NIXL GDS_MT could not register {file_path} on its "
+                f"{_file_system_type(file_path)!r} file system. cuFile cannot "
+                "open files on some file systems, such as SMB/CIFS, or on a "
+                "local ext4 or xfs disk when the container cannot read the "
+                "host's /run/udev. Store the checkpoint on a GDS-supported "
+                "file system such as NFS, or restore with the 'nixl' transfer "
+                "backend."
+            ) from exc
+
     def _prepare_file_transfer(
         self,
         file_group: Tuple[str, Sequence[FileTransferSource]],
@@ -163,10 +201,7 @@ class _NixlGDSTransferSession:
                 logger=logger,
                 require_direct=True,
             )
-            file_descs = [
-                (source.file_offset, source.byte_count, fd, "") for source in sources
-            ]
-            file_reg = self._agent.register_memory(file_descs, FILE_MEM_TYPE)
+            file_reg = self._register_file(file_path, fd, sources)
 
             vram_descs = [
                 (
@@ -194,3 +229,19 @@ class _NixlGDSTransferSession:
         except Exception:
             release_transfer_resources(self._agent, handle, file_reg, vram_reg, fd)
             raise
+
+
+def _file_system_type(path: str) -> str:
+    """Return the mount type of the file system holding path, or 'unknown'."""
+    dev = os.stat(path).st_dev
+    device = f"{os.major(dev)}:{os.minor(dev)}"
+    try:
+        with open("/proc/self/mountinfo") as mountinfo:
+            for line in mountinfo:
+                fields = line.split()
+                if fields[2] == device:
+                    # Optional fields end at "-", which precedes the type.
+                    return fields[fields.index("-") + 1]
+    except OSError:
+        pass
+    return "unknown"

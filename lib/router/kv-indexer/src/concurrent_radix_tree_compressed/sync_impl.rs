@@ -4,9 +4,8 @@
 use super::*;
 #[cfg(feature = "bench")]
 use crate::WorkerObservationState;
-use crate::{
-    AnchorCapableSyncIndexer, ApproximateLruLane, ApproximateLruTask, ResidentBlockTracker,
-};
+use crate::approximate_lru::ApproximateLruLane;
+use crate::{AnchorCapableSyncIndexer, ApproximateLruTask, ResidentBlockTracker};
 
 /// Publishes `worker`'s block count once a policy reads resident blocks.
 fn track(
@@ -74,7 +73,7 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                         ..
                     } = task;
                     let result = approximate_lru.apply(command).and_then(|output| {
-                        let crate::ApproximateLruApplyOutput {
+                        let crate::approximate_lru::ApproximateLruApplyOutput {
                             events,
                             reply,
                             ttl_update,
