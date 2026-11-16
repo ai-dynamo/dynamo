@@ -3,12 +3,11 @@
 
 //! NVTX timeline-annotation helpers for Nsight Systems profiling.
 //!
-//! Backed by NVIDIA's header-only **NVTX v3** C API, vendored under `third_party/nvtx3`
-//! and compiled with `cc` (from `build.rs`, only when the `nvtx` feature is on) together
-//! with a small C shim, `src/nvtx/shim.c`. There is no link-time dependency on any NVTX
-//! shared library: the v3 headers compile to inert stubs that lazily `dlopen` the
-//! profiler's injection library named by `NVTX_INJECTION64_PATH` the first time an
-//! annotation fires. With no profiler attached, nothing is loaded at all.
+//! Backed by NVIDIA's header-only **NVTX v3** C API through the `nvtx-sys` crate, which
+//! compiles the headers in (only when the `nvtx` feature is on). There is no link-time
+//! dependency on any NVTX shared library: the v3 headers compile to inert stubs that
+//! lazily `dlopen` the profiler's injection library named by `NVTX_INJECTION64_PATH` the
+//! first time an annotation fires. With no profiler attached, nothing is loaded at all.
 //!
 //! This is why v3 matters on CUDA 13: CUDA 13 removed `libnvToolsExt.so`, which the
 //! older v2 C API (and cudarc's binding to it) resolved by `dlopen` — a hard failure
@@ -37,23 +36,22 @@
 //! and about 1.3 µs under `nsys -t nvtx`. Keep the second figure in mind when reading a
 //! profile of a per-chunk path: the observer effect is real.
 //!
-//! # The C shim
+//! # The `nvtx-sys` binding
 //!
-//! The `nvtx` crate this module used to wrap only exposed message-only calls and had two
-//! defects, both resolved by owning the shim:
+//! `ffi` wraps `nvtx-sys` 2.x, NVIDIA's own Rust binding from the NVTX repository. It
+//! replaced the community `nvtx` 1.x crate, which exposed only message-only calls and
+//! narrowed range ids to `int`. `nvtx-sys` gives this module what it needs:
 //!
-//! - **Range ids are `u64` end to end.** NVTX's `nvtxRangeId_t` is `uint64_t`; the crate
-//!   narrowed it to `int`, which would leave a range unterminated if an injection library
-//!   ever returned an id above 2^31. The shim returns and takes `uint64_t`, and so does
-//!   [`NvtxRangeGuard`].
-//! - **The declarations match the C definitions.** [`ffi`] declares exactly what
-//!   `shim.c` defines (the crate's Rust binding disagreed with its C on `ffi_range_end`'s
-//!   return type), and a mismatch is a link error rather than silent drift.
+//! - **Range ids are `u64` end to end.** NVTX's `nvtxRangeId_t` is `uint64_t`, and so is
+//!   the id held by [`NvtxRangeGuard`], so no id an injection library returns is truncated.
+//! - **Event attributes carry a `u64` payload.** `nvtxRangeStartEx` / `nvtxMarkEx` take an
+//!   attributes struct with the request key as payload (see "Request-scoped annotations").
 //!
-//! The shim also exposes the event-attribute entry points the crate lacked, which carry a
-//! `u64` payload (see "Request-scoped annotations"). Interior NULs in names are sanitized
-//! rather than fatal: [`ffi`] substitutes U+FFFD because a profiling aid must never be able
-//! to abort the work it is measuring.
+//! Only `nvtx-sys` is used, not the higher-level `nvtx` crate: these few calls need none of
+//! its defaults (`tracing` integration, colors, a thread-id crate). Its build script runs
+//! bindgen, so building with the feature needs libclang. Interior NULs in names are
+//! sanitized rather than fatal: `ffi` substitutes U+FFFD because a profiling aid must
+//! never be able to abort the work it is measuring.
 //!
 //! # Usage
 //!
@@ -147,28 +145,15 @@ static NVTX_ENABLED: AtomicBool = AtomicBool::new(false);
 /// (`dynamo.common.utils.nvtx_utils`), which parses it with the same vocabulary.
 pub const ENV_VAR: &str = "DYN_NVTX";
 
-/// Declarations for `src/nvtx/shim.c`, compiled into the `dynamo_nvtx_shim` static library by
-/// `build.rs` (which also puts it on the link line).
+/// Thin wrappers over `nvtx-sys`, NVIDIA's binding to the header-only NVTX v3 C API.
 ///
-/// They match the C definitions exactly, with range ids as `uint64_t` end to end. A rename
-/// or signature drift on either side surfaces as a link error, not as silent corruption.
-/// Name conversion below cannot fail: an interior NUL would otherwise turn an interpolated
-/// name into a panic on the path being profiled.
+/// Range ids are `u64` (`nvtxRangeId_t`) end to end. Name conversion below cannot fail: an
+/// interior NUL would otherwise turn an interpolated name into a panic on the path being
+/// profiled.
 #[cfg(feature = "nvtx")]
 mod ffi {
-    use std::ffi::{CString, c_char};
-
-    #[link(name = "dynamo_nvtx_shim", kind = "static")]
-    unsafe extern "C" {
-        fn dynamo_nvtx_range_start(message: *const c_char) -> u64;
-        fn dynamo_nvtx_range_start_payload(message: *const c_char, payload: u64) -> u64;
-        fn dynamo_nvtx_range_end(id: u64);
-        fn dynamo_nvtx_mark(message: *const c_char);
-        fn dynamo_nvtx_mark_payload(message: *const c_char, payload: u64);
-        fn dynamo_nvtx_range_push(message: *const c_char);
-        fn dynamo_nvtx_range_pop();
-        fn dynamo_nvtx_name_thread(name: *const c_char);
-    }
+    use nvtx_sys::{EventAttributes, MessageType, MessageValue, PayloadType, PayloadValue};
+    use std::ffi::CString;
 
     /// Render a marker name into a NUL-terminated C string, infallibly.
     ///
@@ -188,53 +173,72 @@ mod ffi {
         CString::new(cleaned).unwrap_or_default()
     }
 
+    /// Event attributes carrying an ASCII message and a `u64` payload. `name` must outlive
+    /// the NVTX call the attributes are passed to.
+    fn payload_attributes(name: &CString, payload: u64) -> EventAttributes {
+        EventAttributes {
+            version: nvtx_sys::NVTX_VERSION as u16,
+            size: nvtx_sys::NVTX_EVENT_ATTRIBUTES_SIZE as u16,
+            category: 0,
+            colorType: 0, // NVTX_COLOR_UNKNOWN
+            color: 0,
+            payloadType: PayloadType::NVTX_PAYLOAD_TYPE_UNSIGNED_INT64 as i32,
+            reserved0: 0,
+            payload: PayloadValue { ullValue: payload },
+            messageType: MessageType::NVTX_MESSAGE_TYPE_ASCII as i32,
+            message: MessageValue {
+                ascii: name.as_ptr(),
+            },
+        }
+    }
+
+    /// The calling thread's OS id, which is what `nvtxNameOsThread` expects.
+    #[cfg(target_os = "linux")]
+    fn os_thread_id() -> u32 {
+        // SAFETY: gettid has no preconditions and cannot fail.
+        unsafe { libc::gettid() as u32 }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn os_thread_id() -> u32 {
+        let mut tid: u64 = 0;
+        // SAFETY: a null thread means the calling thread; `tid` is a valid out pointer.
+        unsafe { libc::pthread_threadid_np(0, &mut tid) };
+        tid as u32
+    }
+
     pub fn range_push<M: std::fmt::Display>(name: M) {
-        let name = c_name(name);
-        // SAFETY: signature matches `void dynamo_nvtx_range_push(const char *)` in
-        // shim.c; the pointer is valid for the call's duration.
-        unsafe { dynamo_nvtx_range_push(name.as_ptr()) };
+        let _ = nvtx_sys::range_push_ascii(&c_name(name));
     }
 
     pub fn range_pop() {
-        // SAFETY: signature matches `void dynamo_nvtx_range_pop(void)`.
-        unsafe { dynamo_nvtx_range_pop() };
+        let _ = nvtx_sys::range_pop();
     }
 
     pub fn range_start<M: std::fmt::Display>(name: M) -> u64 {
-        let name = c_name(name);
-        // SAFETY: signature matches `uint64_t dynamo_nvtx_range_start(const char *)`.
-        unsafe { dynamo_nvtx_range_start(name.as_ptr()) }
+        nvtx_sys::range_start_ascii(&c_name(name))
     }
 
     pub fn range_start_payload<M: std::fmt::Display>(name: M, payload: u64) -> u64 {
         let name = c_name(name);
-        // SAFETY: signature matches
-        // `uint64_t dynamo_nvtx_range_start_payload(const char *, uint64_t)`.
-        unsafe { dynamo_nvtx_range_start_payload(name.as_ptr(), payload) }
+        nvtx_sys::range_start_ex(&payload_attributes(&name, payload))
     }
 
     pub fn range_end(id: u64) {
-        // SAFETY: signature matches `void dynamo_nvtx_range_end(uint64_t)`. `id` is one
-        // previously returned by `range_start*`.
-        unsafe { dynamo_nvtx_range_end(id) };
+        nvtx_sys::range_end(id);
     }
 
     pub fn mark<M: std::fmt::Display>(name: M) {
-        let name = c_name(name);
-        // SAFETY: signature matches `void dynamo_nvtx_mark(const char *)`.
-        unsafe { dynamo_nvtx_mark(name.as_ptr()) };
+        nvtx_sys::mark_ascii(&c_name(name));
     }
 
     pub fn mark_payload<M: std::fmt::Display>(name: M, payload: u64) {
         let name = c_name(name);
-        // SAFETY: signature matches `void dynamo_nvtx_mark_payload(const char *, uint64_t)`.
-        unsafe { dynamo_nvtx_mark_payload(name.as_ptr(), payload) };
+        nvtx_sys::mark_ex(&payload_attributes(&name, payload));
     }
 
     pub fn name_thread<M: std::fmt::Display>(name: M) {
-        let name = c_name(name);
-        // SAFETY: signature matches `void dynamo_nvtx_name_thread(const char *)`.
-        unsafe { dynamo_nvtx_name_thread(name.as_ptr()) };
+        nvtx_sys::name_os_thread_ascii(os_thread_id(), &c_name(name));
     }
 }
 
