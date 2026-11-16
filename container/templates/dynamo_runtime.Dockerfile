@@ -9,6 +9,8 @@
 
 FROM dynamo_base AS runtime
 
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
+
 ARG PYTHON_VERSION
 
 # Create dynamo user with group 0 for OpenShift compatibility
@@ -61,10 +63,6 @@ COPY --from=wheel_builder /usr/local/include/google/protobuf/ /usr/local/include
 ENV PROTOC=/usr/local/bin/protoc
 RUN protoc --version && test -f /usr/local/include/google/protobuf/struct.proto
 
-{% if target not in ("dev", "local-dev") %}
-# Copy built artifacts (not needed for dev/local-dev; users build from source)
-COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
-{% endif %}
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 # Install Python for framework=none runtime (cuda-dl-base doesn't include Python)
@@ -115,21 +113,12 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 {% if target not in ("dev", "local-dev") %}
 # Install dynamo wheels (runtime packages only, no test dependencies)
 # uv handles its own locking for the cache, no need to add sharing=locked
-ARG ENABLE_KVBM
 RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
-        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
-        if [ -z "$KVBM_WHEEL" ]; then \
-            echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
-            exit 1; \
-        fi; \
-        uv pip install "$KVBM_WHEEL"; \
-    fi
+    /opt/dynamo/wheelhouse/nixl/nixl*.whl
 {% else %}
 # Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
 # Install NIXL wheel only (pre-built C++ binary, not buildable from source).

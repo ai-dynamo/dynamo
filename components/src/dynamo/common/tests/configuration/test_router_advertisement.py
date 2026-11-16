@@ -66,6 +66,7 @@ def test_frontend_only_arguments_are_not_offered_to_workers():
     assert "--router-min-initial-workers" not in flags
     assert "--enforce-disagg" not in flags
     assert "--admission-control" not in flags
+    assert "--router-session-affinity-max-entries" not in flags
     # ... while the ones a worker set genuinely advertises are present.
     assert "--router-mode" in flags
     assert "--router-session-affinity-ttl-secs" in flags
@@ -86,10 +87,125 @@ def test_router_arg_group_refuses_to_guess_its_caller():
         RouterArgGroup()  # type: ignore[call-arg]
 
 
+_ABSOLUTE_PREFILL_DEPRECATION = "--active-prefill-tokens-threshold is deprecated"
+
+
+@pytest.mark.parametrize("source", ["cli", "env"])
+def test_deprecated_absolute_prefill_threshold_warns_when_advertised(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    source: str,
+):
+    """A worker forwarding the deprecated threshold must see the migration notice.
+
+    Workers never run the frontend's validation, so the warning has to come
+    from the shared path that builds the advertisement, for the CLI flag and
+    the environment variable alike.
+    """
+    monkeypatch.delenv("DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD", raising=False)
+    argv = ["--router-mode", "kv"]
+    if source == "cli":
+        argv += ["--active-prefill-tokens-threshold", "123"]
+    else:
+        monkeypatch.setenv("DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD", "123")
+    caplog.set_level("WARNING")
+
+    config, _ = parse_worker_router_config(argv)
+    assert config.active_prefill_tokens_threshold == 123
+    assert _ABSOLUTE_PREFILL_DEPRECATION not in caplog.text
+
+    assert build_router_config(config) is not None
+    assert caplog.text.count(_ABSOLUTE_PREFILL_DEPRECATION) == 1
+
+
+def test_absolute_prefill_threshold_unset_or_unadvertised_stays_quiet(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    """No notice without a value, and none when the value is never forwarded.
+
+    A worker that omits --router-mode advertises nothing, so the threshold is
+    dropped along with every other router flag rather than forwarded.
+    """
+    monkeypatch.delenv("DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD", raising=False)
+    caplog.set_level("WARNING")
+
+    config, _ = parse_worker_router_config(["--router-mode", "kv"])
+    assert build_router_config(config) is not None
+
+    config, _ = parse_worker_router_config(["--active-prefill-tokens-threshold", "123"])
+    assert build_router_config(config) is None
+
+    assert _ABSOLUTE_PREFILL_DEPRECATION not in caplog.text
+
+
 def test_unknown_mode_is_rejected():
     config, _ = parse_worker_router_config([])
     config.router_mode = "nonsense"
     with pytest.raises(ValueError, match="unknown router mode"):
+        build_router_config(config)
+
+
+def _policy_config(tmp_path, worker_selection: str) -> str:
+    path = tmp_path / "router-policy.yaml"
+    path.write_text(f"worker_selection:\n{worker_selection}")
+    return str(path)
+
+
+@pytest.mark.parametrize("mode", ["round-robin", "least-loaded", "direct"])
+def test_hints_off_the_kv_path_are_rejected(tmp_path, mode):
+    """Only the KV path runs hints, so another mode would drop them silently."""
+    policy = _policy_config(
+        tmp_path,
+        "  aggregated:\n    type: dynamo-default-cost-fn\n"
+        "    hints:\n      - type: kv_fetch\n",
+    )
+    config, _ = parse_worker_router_config(
+        ["--router-mode", mode, "--router-policy-config", policy]
+    )
+    with pytest.raises(
+        ValueError,
+        match="the hints in worker_selection for aggregated run only on the KV path",
+    ):
+        build_router_config(config)
+
+
+@pytest.mark.parametrize(
+    "worker_selection",
+    [
+        "  aggregated:\n    type: dynamo-default-cost-fn\n    hints: []\n",
+        "  aggregated: dynamo-default-cost-fn\n",
+    ],
+)
+def test_default_hints_are_allowed_off_the_kv_path(tmp_path, worker_selection):
+    """An empty list, or an entry without hints, runs no hints that need the KV path."""
+    policy = _policy_config(tmp_path, worker_selection)
+    config, _ = parse_worker_router_config(
+        ["--router-mode", "round-robin", "--router-policy-config", policy]
+    )
+    assert build_router_config(config) is not None
+
+
+@pytest.mark.parametrize(
+    "document, message",
+    [
+        ("- type: kv_fetch\n", "--router-policy-config must contain a YAML mapping"),
+        (
+            "worker_selection:\n  - type: kv_fetch\n",
+            "worker_selection must contain a YAML mapping",
+        ),
+    ],
+)
+def test_malformed_policy_config_is_rejected_off_the_kv_path(
+    tmp_path, document, message
+):
+    """Off the KV path nothing else reads the file, so a bad shape would go unnoticed."""
+    path = tmp_path / "router-policy.yaml"
+    path.write_text(document)
+    config, _ = parse_worker_router_config(
+        ["--router-mode", "round-robin", "--router-policy-config", str(path)]
+    )
+    with pytest.raises(ValueError, match=message):
         build_router_config(config)
 
 

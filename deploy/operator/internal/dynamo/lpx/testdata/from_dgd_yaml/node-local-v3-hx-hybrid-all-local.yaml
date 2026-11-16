@@ -66,18 +66,61 @@ spec:
               value: "1"
             - name: GBUILD_MANIFEST_PATH
               value: /nfs/node-local-v3-hx-connected-lpx/manifest.v2.capnp.bin
+            - name: LPX_MODEL_PATH
+              value: /nfs/node-local-v3-hx-connected-lpx
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.labels['grove.io/podclique-pod-index']
+            image: example.invalid/gpu-runtime:test
+            livenessProbe:
+              failureThreshold: 1
+              httpGet:
+                path: /live
+                port: 9091
+              periodSeconds: 5
+              timeoutSeconds: 4
+            name: main
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: 9091
+              periodSeconds: 10
+              timeoutSeconds: 4
+            resources:
+              claims:
+              - name: gpu
+            startupProbe:
+              failureThreshold: 720
+              httpGet:
+                path: /live
+                port: 9091
+              periodSeconds: 10
+              timeoutSeconds: 5
+            volumeMounts:
+            - mountPath: /nfs
+              name: model-storage
+            - mountPath: /configs
+              name: config
+            - mountPath: /run/openengine
+              name: openengine
+            - mountPath: /dev/shm
+              name: shared-memory
+          initContainers:
+          - args:
+            - lpx
+            - --grpc-endpoint
+            - unix:///run/openengine/openengine.sock
+            - --model-path
+            - $(LPX_MODEL_PATH)/tokenizer
+            env:
+            - name: LPX_MODEL_PATH
+              value: /nfs/node-local-v3-hx-connected-lpx
             - name: DYN_COMPONENT
               value: decode
             - name: DYN_DISCOVERY_BACKEND
               value: kubernetes
-            - name: DYN_FORWARDPASS_METRIC_PORT
-              value: "20380"
-            - name: DYN_HEALTH_CHECK_ENABLED
-              value: "false"
             - name: DYN_NAMESPACE
               value: test-node-local-v3-hx-hybrid-all-local
             - name: DYN_PARENT_DGD_K8S_NAME
@@ -88,22 +131,10 @@ spec:
               value: "true"
             - name: DYN_SYSTEM_PORT
               value: "9090"
-            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-              value: '["generate"]'
             - name: ETCD_ENDPOINTS
               value: etcd-address
             - name: NATS_SERVER
               value: nats-address
-            - name: NIXL_TELEMETRY_ENABLE
-              value: "n"
-            - name: NIXL_TELEMETRY_EXPORTER
-              value: prometheus
-            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
-              value: "19090"
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -116,46 +147,41 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
-            image: example.invalid/gpu-runtime:test
+            image: example.invalid/dynamo-sidecar:test
             livenessProbe:
-              failureThreshold: 1
+              failureThreshold: 3
               httpGet:
                 path: /live
                 port: system
               periodSeconds: 5
               timeoutSeconds: 4
-            name: main
+            name: runtime
             ports:
             - containerPort: 9090
               name: system
-              protocol: TCP
-            - containerPort: 19090
-              name: nixl
               protocol: TCP
             readinessProbe:
               failureThreshold: 3
               httpGet:
                 path: /health
                 port: system
-              periodSeconds: 10
+              periodSeconds: 5
               timeoutSeconds: 4
-            resources:
-              claims:
-              - name: gpu
+            resources: {}
+            restartPolicy: Always
             startupProbe:
-              failureThreshold: 720
+              failureThreshold: 30
               httpGet:
                 path: /live
                 port: system
-              periodSeconds: 10
-              timeoutSeconds: 5
+              periodSeconds: 2
+              timeoutSeconds: 1
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
-            - mountPath: /configs
-              name: config
-            - mountPath: /dev/shm
-              name: shared-memory
+              readOnly: true
+            - mountPath: /run/openengine
+              name: openengine
           resourceClaims:
           - name: gpu
             resourceClaimTemplateName: decode-gpu
@@ -169,6 +195,8 @@ spec:
           - name: model-storage
             persistentVolumeClaim:
               claimName: model-storage
+          - emptyDir: {}
+            name: openengine
           - emptyDir:
               medium: Memory
               sizeLimit: 8Gi

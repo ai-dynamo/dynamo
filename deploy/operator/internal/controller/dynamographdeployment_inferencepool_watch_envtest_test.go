@@ -36,13 +36,13 @@ func TestDGDInferencePoolRecoversFromDeletionAndSpecDrift(t *testing.T) {
 	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}
 	env.StartManager(func(mgr ctrl.Manager) error {
 		return SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{
-			SetupOptions: SetupOptions{Config: config, RuntimeConfig: runtimeConfig},
+			Config: config, RuntimeConfig: runtimeConfig,
 		})
 	})
 
 	t.Log("Create an EPP graph and wait for its owned InferencePool")
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "pool-watch", Namespace: env.Namespace()},
+		Name: "pool-watch", Namespace: env.Namespace(),
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
@@ -99,7 +99,7 @@ func TestDGDControllerStartsWithoutInferencePoolAPI(t *testing.T) {
 	t.Log("Start and synchronize the DGD controller without an InferencePool watch")
 	env.StartManager(func(mgr ctrl.Manager) error {
 		return SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{
-			SetupOptions: SetupOptions{Config: config, RuntimeConfig: &commoncontroller.RuntimeConfig{}},
+			Config: config, RuntimeConfig: &commoncontroller.RuntimeConfig{},
 		})
 	})
 }

@@ -87,11 +87,12 @@ async def mixed_deployment(request, version_pairs, pair_index, scenario, namespa
 
 @pytest.mark.k8s
 @pytest.mark.deploy
-@pytest.mark.sglang
-@pytest.mark.framework_agnostic
 @pytest.mark.core
 @pytest.mark.post_merge
 @pytest.mark.e2e
+# No framework marker: cross-version-compatibility.yml selects this file with
+# -m k8s and supplies --frontend-image and --model-cache-pvc. A sglang marker
+# makes the sglang runtime jobs collect it without those options.
 @pytest.mark.gpu_1
 @pytest.mark.timeout(1500)
 @pytest.mark.parametrize("scenario", ["embedding", "chat"])

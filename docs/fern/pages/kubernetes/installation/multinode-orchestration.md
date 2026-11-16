@@ -4,11 +4,15 @@
 title: Multinode Orchestration
 ---
 
-Multinode deployments require either Grove + KAI Scheduler or an alternative orchestrator setup (LeaderWorkerSet + Volcano) to enable gang scheduling for workloads that span multiple nodes.
+Multinode deployments require an orchestrator for workloads that span multiple nodes. Gang scheduling is strongly recommended to schedule all required Pods together and avoid partial resource allocation that can leave workloads stalled.
 
-## Option 1: Grove + KAI Scheduler
+## Option 1: Grove
 
-Grove is the default and recommended orchestrator for multinode deployments. It requires KAI Scheduler as well. There are two ways to enable Grove and KAI Scheduler, either dynamo can install it automatically (recommended for development and testing), or you can install them separately (recommended for production).
+Grove is the default and recommended orchestrator for multinode deployments. Gang scheduling requires a compatible scheduling backend, but the Grove’s default backend, the standard Kubernetes scheduler, does not provide this capability.
+
+### Gang Scheduling with KAI Scheduler
+
+There are two ways to enable Grove and KAI Scheduler, either dynamo can install it automatically (recommended for development and testing), or you can install them separately (recommended for production).
 
 <Tabs>
   <Tab title="Managed Installation" value="managed">
@@ -53,9 +57,16 @@ Grove is the default and recommended orchestrator for multinode deployments. It 
 </Tabs>
 
 
-## Option 2: LeaderWorkerSet + Volcano
+## Option 2: LeaderWorkerSet
 
-If you are not using Grove for multinode, you can use [LeaderWorkerSet (LWS)](https://lws.sigs.k8s.io/docs/installation/) with [Volcano](https://github.com/volcano-sh/volcano#quick-start-guide) for gang scheduling. Use an LWS release that serves `disaggregatedset.x-k8s.io/v1` (the current Dynamo operator dependency is LWS `v0.10.0`) when enabling DS; the standard DCD pathway supports LWS `v0.7.0` or newer. Both must be installed before deploying multinode workloads.
+If you are not using Grove for multinode, you can use [LeaderWorkerSet (LWS)](https://lws.sigs.k8s.io/docs/installation/). Use an LWS release that serves `disaggregatedset.x-k8s.io/v1` (the current Dynamo operator dependency is LWS `v0.10.0`) when enabling DS; the standard DCD pathway supports LWS `v0.7.0` or newer. Both must be installed before deploying multinode workloads.
+
+> [!NOTE]
+> The native gang scheduling is available in LWS v0.11.0 and later, but Dynamo does not yet support this alpha feature.
+
+#### Gang Scheduling with Volcano
+
+LeaderWorkerSet can be combined with [Volcano](https://github.com/volcano-sh/volcano#quick-start-guide) for gang scheduling.
 
 1. Install Volcano:
 
@@ -227,3 +238,41 @@ The immutable operator origin version controls this behavior. An operator-only u
 the variables or change the command line of an existing DGD, so it does not roll that workload. To
 use the aliases, create the DGD with Dynamo Operator 1.6.0 or later. When Grove is managed outside
 the Dynamo platform chart, install Grove `v0.1.0-alpha.15` or later before creating the DGD.
+
+### Use the variables in a DGD created before 1.6.0
+
+A DGD that an operator older than 1.6.0 created does not receive `DYNAMO_RANK` and
+`DYNAMO_LEADER_ADDRESS`. An operator upgrade does not add them, and neither does a later edit of
+the DGD, such as a switch to sidecar mode. To run a manifest that references the variables, such as
+the multinode sidecar examples, choose one of these options:
+
+- Delete the DGD and create it again under the upgraded operator. The new DGD receives the
+  variables, so the manifest needs no change.
+- Keep the DGD and replace each variable reference with the provider's own variable, as described
+  below.
+
+> [!WARNING]
+> Before you create the replacement DGD under the same name, wait until every Pod of the old DGD
+> is gone. The leader keeps its hostname across the two DGDs. With the vLLM hybrid-LB example, a
+> worker that starts while the old leader terminates can handshake with the old leader. The vLLM
+> frontend then fails its ZMQ connection after 30 seconds and exits.
+
+For a Grove-managed DGD, `GROVE_PCSG_POD_INDEX` requires Grove `v0.1.0-alpha.15` or later and
+matching CRDs. Replace the variables with these values:
+
+| Variable | Grove | LeaderWorkerSet |
+|---|---|---|
+| `DYNAMO_RANK` | `$(GROVE_PCSG_POD_INDEX)` | `$(LWS_WORKER_INDEX)` |
+| `DYNAMO_LEADER_ADDRESS` | `$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-<component>-ldr-0.$(GROVE_HEADLESS_SERVICE)` | `$(LWS_LEADER_ADDRESS)` |
+
+Replace `<component>` with the component name in lowercase. For a component named `VllmWorker`,
+the value is `vllmworker`.
+
+Replace the variables in both the leader and the worker role template. Each engine reads them
+from these flags:
+
+| Engine | Rank flag | Leader address flag |
+|---|---|---|
+| vLLM tensor parallelism | `--node-rank` | `--master-addr` |
+| vLLM hybrid load balancing data parallelism | `--node-rank` | `--data-parallel-address` |
+| SGLang | `--node-rank` | `--dist-init-addr`, followed by `:29500` |

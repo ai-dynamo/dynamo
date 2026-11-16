@@ -243,7 +243,6 @@ spec:
           - --dyn-tool-call-parser
           - deepseek_v41
           - --dyn-enable-structural-tag
-          - --prefill-round-robin-balance
           command:
           - python3
           - -m

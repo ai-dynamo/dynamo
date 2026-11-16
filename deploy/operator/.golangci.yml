@@ -30,6 +30,7 @@ linters:
     - ineffassign
     - lll
     - misspell
+    - modernize
     - nakedret
     - prealloc
     - staticcheck
@@ -56,6 +57,13 @@ linters:
       exclude-types:
         - Call
         - CompositeLit
+    modernize:
+      # omitzero would rewrite `omitempty` to `omitzero` on JSON tags, which
+      # changes wire semantics (omitzero omits on the zero value, omitempty on
+      # the empty value) and is not a safe mechanical modernization for CRD
+      # API types. Keep the other modernize analyzers.
+      disable:
+        - omitzero
   exclusions:
     generated: lax
     rules:

@@ -10,14 +10,7 @@ use std::{
     time::Duration,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::time::Instant;
 use tokio_rustls::TlsAcceptor;
-
-/// Tombstone lifetime. Bridges the `register()` → `associate_instance()`
-/// window (sub-millisecond in practice); 5s bounds the set by recent worker
-/// churn rather than process lifetime, since etcd lease IDs are unique per
-/// restart and never get cleared by an `Added` event for the same identity.
-const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
 
 /// Bound best-effort worker notification after a response handshake is cancelled.
 const HANDSHAKE_CANCEL_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
@@ -42,6 +35,7 @@ use super::{
 use crate::discovery::EndpointInstanceId;
 use crate::engine::AsyncEngineContext;
 use crate::error::{DynamoError, ErrorType};
+use crate::pipeline::network::tombstones::InstanceTombstones;
 use crate::pipeline::{
     PipelineError,
     network::{
@@ -155,10 +149,8 @@ struct State {
     /// of `rx_subjects` / `tx_subjects` holds the registration so both halves
     /// of a bidirectional session get dropped together.
     instance_subjects: HashMap<EndpointInstanceId, HashSet<(StreamType, String)>>,
-    /// Tombstones (instance -> insertion time) close the
-    /// `cancel_instance_streams` vs `associate_instance` race; entries expire
-    /// after [`TOMBSTONE_TTL`].
-    removed_instances: HashMap<EndpointInstanceId, Instant>,
+    /// Close the `cancel_instance_streams` vs `associate_instance` race.
+    removed_instances: InstanceTombstones,
     handle: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
@@ -183,12 +175,6 @@ impl Drop for ResponseRegistrationGuard {
             TcpStreamServer::finish_response_stream(&self.state, &self.subject);
         }
     }
-}
-
-/// Drop tombstones older than [`TOMBSTONE_TTL`]. Called lazily on every
-/// `associate_instance` / `cancel_instance_streams` to bound the set size.
-fn prune_tombstones(tombstones: &mut HashMap<EndpointInstanceId, Instant>, now: Instant) {
-    tombstones.retain(|_, ts| now.saturating_duration_since(*ts) < TOMBSTONE_TTL);
 }
 
 impl TcpStreamServer {
@@ -269,9 +255,7 @@ impl TcpStreamServer {
         id: &EndpointInstanceId,
     ) -> bool {
         let mut state = self.state.lock();
-        let now = Instant::now();
-        prune_tombstones(&mut state.removed_instances, now);
-        if state.removed_instances.contains_key(id) {
+        if state.removed_instances.contains(id) {
             // Instance was already removed -- cancel immediately.
             tracing::warn!(
                 recv_subject,
@@ -309,9 +293,7 @@ impl TcpStreamServer {
     /// QUIC response mode still uses TCP for bidirectional request callbacks.
     pub async fn associate_request_instance(&self, subject: &str, id: &EndpointInstanceId) -> bool {
         let mut state = self.state.lock();
-        let now = Instant::now();
-        prune_tombstones(&mut state.removed_instances, now);
-        if state.removed_instances.contains_key(id) {
+        if state.removed_instances.contains(id) {
             state.tx_subjects.remove(subject);
             return false;
         }
@@ -368,9 +350,7 @@ impl TcpStreamServer {
     /// for the same id cancels too. Returns the number of streams cancelled.
     pub async fn cancel_instance_streams(&self, id: &EndpointInstanceId) -> usize {
         let mut state = self.state.lock();
-        let now = Instant::now();
-        prune_tombstones(&mut state.removed_instances, now);
-        state.removed_instances.insert(id.clone(), now);
+        state.removed_instances.insert(id);
         let subjects = match state.instance_subjects.remove(id) {
             Some(subjects) => subjects,
             None => return 0,
@@ -1240,7 +1220,7 @@ async fn tcp_listener(
 
         if connection
             .send(Ok(crate::pipeline::network::StreamReceiver {
-                rx: response_rx,
+                rx: response_rx.into(),
             }))
             .is_err()
         {
@@ -1449,6 +1429,7 @@ mod tests {
     use crate::pipeline::Context;
     use crate::pipeline::network::DEFAULT_SEND_BUFFER_COUNT;
     use crate::pipeline::network::tcp::client::TcpClient;
+    use crate::pipeline::network::tombstones::TOMBSTONE_TTL;
     use crate::tls_utils::test_certs::self_signed_pair;
     use crate::utils::ip_resolver::test_support::{ProbeOutcome, StubResolver};
     use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
@@ -2320,18 +2301,15 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_tombstone_expires_after_ttl() {
         // After TOMBSTONE_TTL elapses, a previously-tombstoned identity must
-        // accept new associations again, AND the entry must be physically
-        // pruned from `removed_instances` so the set remains bounded.
+        // accept new associations again. Pruning itself is covered by the
+        // shared `tombstones` tests.
         let server = test_server().await;
 
         let id = make_eid("ns", "comp", "generate", 42);
 
         // Tombstone the identity.
         server.cancel_instance_streams(&id).await;
-        {
-            let state = server.state.lock();
-            assert!(state.removed_instances.contains_key(&id));
-        }
+        assert!(server.state.lock().removed_instances.contains(&id));
 
         // Advance past the TTL.
         tokio::time::advance(TOMBSTONE_TTL + Duration::from_secs(1)).await;
@@ -2343,16 +2321,6 @@ mod tests {
             server.associate_instance(&subject, None, &id).await,
             "tombstone older than TTL should not block association"
         );
-
-        // The expired tombstone must have been pruned (lazy pruning fires on
-        // every associate_instance/cancel_instance_streams call).
-        {
-            let state = server.state.lock();
-            assert!(
-                !state.removed_instances.contains_key(&id),
-                "expired tombstone should be pruned, not retained"
-            );
-        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -2375,31 +2343,6 @@ mod tests {
         assert!(provider.await.is_err());
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn test_tombstone_lazy_prune_on_cancel() {
-        // Old tombstones must be pruned on the next cancel_instance_streams
-        // call, regardless of which identity is being tombstoned.
-        let server = test_server().await;
-
-        let id_old = make_eid("ns", "comp", "generate", 1);
-        let id_new = make_eid("ns", "comp", "generate", 2);
-
-        server.cancel_instance_streams(&id_old).await;
-        tokio::time::advance(TOMBSTONE_TTL + Duration::from_secs(1)).await;
-        server.cancel_instance_streams(&id_new).await;
-
-        let state = server.state.lock();
-        assert!(
-            !state.removed_instances.contains_key(&id_old),
-            "old tombstone should be pruned by the next cancel_instance_streams call"
-        );
-        assert!(
-            state.removed_instances.contains_key(&id_new),
-            "fresh tombstone should be retained"
-        );
-        assert_eq!(state.removed_instances.len(), 1);
-    }
-
     #[tokio::test]
     async fn test_clear_tombstone_only_affects_named_identity() {
         // Documents the monotonic-lease invariant: `clear_instance_tombstone`
@@ -2414,9 +2357,8 @@ mod tests {
         server.cancel_instance_streams(&id_a).await;
         server.clear_instance_tombstone(&id_b).await;
 
-        let state = server.state.lock();
         assert!(
-            state.removed_instances.contains_key(&id_a),
+            server.state.lock().removed_instances.contains(&id_a),
             "clearing a different identity must not remove id_a's tombstone"
         );
     }

@@ -16,13 +16,18 @@ name = "dynamo-ext-proc"
 path = "src/bin/dynamo-ext-proc.rs"
 
 [dependencies]
-dynamo-custom-policy-builtin = { workspace = true }
+dynamo-router-policies = { workspace = true }
 async-trait = { workspace = true }
+dynamo-kv-events = { workspace = true }
 dynamo-kv-router = { workspace = true, features = [
     "metrics",
-    "runtime-protocols",
-    "standalone-selection",
+    "ingest-zmq",
+    "replica-sync-zmq",
+    "peer-recovery",
 ] }
+dynamo-router-protocol = { workspace = true }
+dynamo-scheduler = { workspace = true }
+dynamo-session-affinity = { workspace = true }
 dynamo-protocols = { workspace = true }
 dynamo-runtime = { workspace = true }
 
@@ -42,9 +47,13 @@ reqwest = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `raw_value` lets the body rewrite borrow untouched top-level fields instead
+# of parsing them into a `Value` tree.
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+# `schedule-latency` lets the opt-in task metrics time how long a woken task
+# waits for a worker thread (`DYN_EPP_TASK_METRICS`).
+tokio = { workspace = true, features = ["schedule-latency"] }
 tokio-rustls = { workspace = true }
 tokio-util = { workspace = true }
 # `net` for TcpListenerStream (serve_with_incoming), `sync` for ReceiverStream.
@@ -68,7 +77,7 @@ ignored = ["prost"]
 tonic-build = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-dynamo-llm = { path = "../../../lib/llm" }
+dynamo-llm = { workspace = true, default-features = true }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-dynamo-llm = { path = "../../../lib/llm", default-features = false }
+dynamo-llm = { workspace = true }

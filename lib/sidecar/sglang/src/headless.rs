@@ -278,6 +278,12 @@ fn start_publishers(
                     // Same SGLang normalization contract as the full worker relay.
                     image_token_id: None,
                     video_token_id: None,
+                    liveness: None,
+                    expected_rank: None,
+                    // The sidecar cannot inspect the SGLang build. Unflagged
+                    // sources still exclude values that do not fit in u32.
+                    engine_owned_mm_identity: false,
+                    recovery: None,
                 }),
                 config.enable_local_indexer,
                 source.dp_rank,
@@ -595,7 +601,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_zmq_events_keep_global_rank_and_leader_identity_without_serving() {
-        use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, RouterEvent};
+        use dynamo_kv_events::event::{KV_EVENT_SUBJECT, RouterEvent};
         use dynamo_llm::discovery::KvEventSource;
         use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, EventSourceQuery};
         use dynamo_runtime::transports::event_plane::EventSubscriber;

@@ -175,6 +175,48 @@ async fn every_streamed_token_carries_a_logprob_when_requested() {
     }
 }
 
+/// The real servicer sends no `TokenOutput.text` when `extra.detokenize` is
+/// false, decodes `TokenInfo.token` only on the logprobs path, and refuses a
+/// non-boolean `detokenize`.
+#[tokio::test]
+async fn token_strings_follow_detokenize_and_logprobs() {
+    let service = service();
+    let detokenize = |kind| prost_types::Struct {
+        fields: [("detokenize".to_string(), Value { kind: Some(kind) })].into(),
+    };
+    for (request_id, extra, logprobs) in [
+        ("req-ids", Some(detokenize(Kind::BoolValue(false))), false),
+        ("req-lp", Some(detokenize(Kind::BoolValue(false))), true),
+        ("req-text", None, false),
+    ] {
+        let has_text = extra.is_none();
+        let mut request = request(request_id, 4);
+        request.extra = extra;
+        request.response = Some(pb::ResponseOptions {
+            return_output_logprobs: Some(logprobs),
+            ..Default::default()
+        });
+        let responses = drain(&service, request).await.unwrap();
+        let mut streamed = 0;
+        for event in events(&responses) {
+            if let pb::generate_response::Event::Token(token) = event {
+                assert_eq!(!token.text.is_empty(), has_text, "{request_id}");
+                let [info] = token.tokens.as_slice() else {
+                    panic!("{request_id}: expected one TokenInfo per event");
+                };
+                assert_eq!(!info.token.is_empty(), logprobs, "{request_id}");
+                streamed += 1;
+            }
+        }
+        assert_eq!(streamed, 4, "{request_id}");
+    }
+
+    let mut request = request("req-bad", 4);
+    request.extra = Some(detokenize(Kind::StringValue("false".to_string())));
+    let error = generate_error(&service, request).await;
+    assert_eq!(error.code(), Code::InvalidArgument);
+}
+
 /// Pins the terminal shape the sidecar requires: exactly one `finished`, never
 /// `UNSPECIFIED`, `output_index` always set, no prompt event, usage only at the
 /// end. A clean end without a terminal fails the request outright.
@@ -492,6 +534,9 @@ async fn control_reports_server_identity_and_load() {
         .unwrap()
         .into_inner();
     assert_eq!(load.instance_id, info.instance_id);
+    assert!(load.timestamp_unix_nanos.is_some());
+    assert_eq!(load.ranks.len(), 1);
+    assert_eq!(load.ranks[0].data_parallel_rank, Some(0));
     // KV sessions only exist in the disaggregated roles.
     assert_eq!(load.active_kv_sessions, None);
     assert!(load.total_kv_blocks.is_some());

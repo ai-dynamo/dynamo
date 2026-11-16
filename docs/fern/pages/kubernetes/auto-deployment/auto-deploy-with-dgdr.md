@@ -159,9 +159,8 @@ spec:
 
 GPU SKUs use **lowercase underscore format** (`h100_sxm`, not `H100-SXM5-80GB`). For the full list of accepted values and the PCIe-support caveat, see the [DGDR Reference — SKU Format](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#sku-format).
 
-**Large and MoE models that span nodes.** When a model needs more GPUs than one node provides, the deployment is multinode and requires a gang scheduler. Install an orchestrator first — the operator returns a hard error otherwise:
+**Large and MoE models that span nodes.** When a model needs more GPUs than one node provides, the deployment requires a multinode orchestrator such as Grove or LWS, with gang scheduling strongly recommended. See [Multinode Orchestration](../installation/multinode-orchestration.md) for installation prerequisites.
 
-- [Multinode Orchestration](../installation/multinode-orchestration.md) — install-time prerequisites (Grove + KAI, or LWS + Volcano).
 
 For **Mixture-of-Experts (MoE)** models (DeepSeek-R1, Qwen3-MoE), use **SGLang** for full support — vLLM and TensorRT-LLM have partial MoE support still under development. The profiler sweeps MoE models across up to **4 nodes**; beyond that, it selects the best config within range and you may need to adjust replica counts manually. See the [Profiler support matrix](../../developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md#support-matrix).
 
@@ -271,7 +270,7 @@ deploy the reviewed snapshot, enable `autoApply`:
 
 ```bash
 kubectl patch dgdr my-model -n <namespace> --type=merge \
-  -p '{"spec":{"runtimeVersionOverride":"1.5.0"}}'
+  -p '{"spec":{"runtimeVersionOverride":"1.6.0"}}'
 kubectl patch dgdr my-model -n <namespace> --type=merge \
   -p '{"spec":{"autoApply":true}}'
 ```

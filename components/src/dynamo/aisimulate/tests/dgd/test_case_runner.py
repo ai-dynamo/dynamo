@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +18,30 @@ pytestmark = [
     pytest.mark.planner,
     pytest.mark.parallel,
 ]
+
+
+@pytest.fixture
+def profiler_child(monkeypatch):
+    popen = subprocess.Popen
+    children = []
+
+    def substitute(script, *, stdin=None):
+        def launch(command, **kwargs):
+            assert command[1:3] == ["-m", "dynamo.profiler"]
+            child = popen(
+                [sys.executable, "-c", script, *command[3:]], stdin=stdin, **kwargs
+            )
+            children.append(child)
+            return child
+
+        monkeypatch.setattr(run_cases.subprocess, "Popen", launch)
+        return children
+
+    yield substitute
+    for child in children:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=5)
 
 
 def _write_case_and_hardware(tmp_path, monkeypatch, *, backend="vllm"):
@@ -65,22 +91,6 @@ def _write_case_and_hardware(tmp_path, monkeypatch, *, backend="vllm"):
     return case_path, hardware_path
 
 
-@pytest.fixture(autouse=True)
-def _stub_runtime_image_derivation(monkeypatch) -> None:
-    image_names = {
-        "vllm": "vllm-runtime",
-        "sglang": "sglang-runtime",
-        "trtllm": "tensorrtllm-runtime",
-    }
-
-    def derive(image, backend):
-        prefix, _, suffix = image.rpartition("/")
-        _, _, tag = suffix.partition(":")
-        return f"{prefix}/{image_names[backend]}:{tag}"
-
-    monkeypatch.setattr(run_cases, "_derive_runtime_image", derive)
-
-
 def test_merge_patch_merges_maps_replaces_lists_and_removes_nulls() -> None:
     base = {"map": {"kept": 1, "removed": 2}, "list": [1], "scalar": "old"}
     patch = {"map": {"removed": None, "added": 3}, "list": [2], "scalar": "new"}
@@ -94,11 +104,13 @@ def test_merge_patch_merges_maps_replaces_lists_and_removes_nulls() -> None:
 
 
 def test_dgd_name_is_stable_and_leaves_room_for_component_names() -> None:
+    name = "deepseek-r1-trtllm-disagg-wide-ep"
     assert run_cases._dgd_name("qwen") == "qwen"
-    shortened = run_cases._dgd_name("deepseek-r1-trtllm-disagg-wide-ep")
+    shortened = run_cases._dgd_name(name)
 
-    assert shortened == "deepseek-r1-trtllm-8c2e7a9a"
+    assert shortened == run_cases._dgd_name(name)
     assert len(shortened) <= 28
+    assert shortened != run_cases._dgd_name(name + "-other")
 
 
 def test_load_case_composes_hardware_and_derives_dgd_options(
@@ -117,6 +129,59 @@ def test_load_case_composes_hardware_and_derives_dgd_options(
     )
     assert case.generation_options.num_gpus_per_node == 8
     assert case.generated_dir == tmp_path / "output/h200-sxm-8gpu/qwen"
+
+
+def test_discovered_recipe_requirements_preserve_source_and_merge_proposals(
+    monkeypatch, tmp_path
+) -> None:
+    case_path, _ = _write_case_and_hardware(tmp_path, monkeypatch)
+    monkeypatch.setattr(run_cases, "_REPOSITORY_ROOT", tmp_path)
+    original = {
+        "source": "recipes/qwen/deploy.yaml",
+        "requirements": {
+            "h200-sxm-8gpu": {"gpus": 8},
+            "gb200-sxm-4gpu": {"gpus": 4, "notes": "Known working topology."},
+        },
+    }
+    recipe_path = case_path / "recipe.yaml"
+    original_text = "# Maintained recipe provenance.\n" + yaml.safe_dump(
+        original, sort_keys=False
+    )
+    recipe_path.write_text(original_text)
+    recipe = run_cases.load_recipe("qwen")
+    assert recipe is not None
+    proposal_path = case_path / "recipe.new.yaml"
+
+    assert (
+        run_cases.write_discovered_recipe_requirement(recipe, "h200-sxm-8gpu", 8)
+        is None
+    )
+    assert not proposal_path.exists()
+
+    assert (
+        run_cases.write_discovered_recipe_requirement(recipe, "h100-sxm-4gpu", 4)
+        == proposal_path
+    )
+    assert (
+        run_cases.write_discovered_recipe_requirement(recipe, "a100-sxm-2gpu", 2)
+        == proposal_path
+    )
+    assert yaml.safe_load(proposal_path.read_text()) == {
+        "source": original["source"],
+        "requirements": {
+            **original["requirements"],
+            "h100-sxm-4gpu": {"gpus": 4},
+            "a100-sxm-2gpu": {"gpus": 2},
+        },
+    }
+
+    proposal_text = proposal_path.read_text()
+    assert (
+        run_cases.write_discovered_recipe_requirement(recipe, "h200-sxm-8gpu", 8)
+        is None
+    )
+    assert proposal_path.read_text() == proposal_text
+    assert recipe_path.read_text() == original_text
 
 
 def test_case_environment_uses_output_cache_and_restores_process(
@@ -171,18 +236,17 @@ def test_load_suite_returns_explicit_case_hardware_pairs(tmp_path) -> None:
     )
 
 
-def test_main_does_not_execute_case_wide_skip(monkeypatch, tmp_path, capsys) -> None:
-    cases_root = tmp_path / "cases"
-    case_path = cases_root / "qwen"
-    case_path.mkdir(parents=True)
-    (case_path / "recipe.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "source": "recipes/qwen/deploy.yaml",
-                "requirements": {"h200-sxm-8gpu": {"gpus": 8}},
-            }
+def test_repository_suite_rows_have_paired_inputs(tmp_path) -> None:
+    for entry in run_cases.load_suite(run_cases._ROOT / "testsuite-issue-8469.yaml"):
+        assert run_cases.missing_case_inputs(entry.case) == (), entry.case
+        run_cases.load_case(
+            entry.case,
+            run_cases.load_hardware(entry.hardware),
+            output_root=tmp_path / "out",
         )
-    )
+
+
+def test_main_does_not_execute_case_wide_skip(monkeypatch, tmp_path, capsys) -> None:
     suite = tmp_path / "suite.yaml"
     suite.write_text(
         yaml.safe_dump(
@@ -199,8 +263,7 @@ def test_main_does_not_execute_case_wide_skip(monkeypatch, tmp_path, capsys) -> 
             }
         )
     )
-    monkeypatch.setattr(run_cases, "_CASES_ROOT", cases_root)
-    monkeypatch.setattr(run_cases, "_REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(run_cases, "_CASES_ROOT", tmp_path / "missing-cases")
 
     assert run_cases.main(["--suite", str(suite)]) == 0
     output = capsys.readouterr().out
@@ -208,7 +271,7 @@ def test_main_does_not_execute_case_wide_skip(monkeypatch, tmp_path, capsys) -> 
     assert "1 case(s) skipped" in output
 
 
-def test_load_suite_parses_nested_render_and_deploy_exceptions(tmp_path) -> None:
+def test_load_suite_parses_expected_renderer_failure(tmp_path) -> None:
     suite = tmp_path / "suite.yaml"
     suite.write_text(
         yaml.safe_dump(
@@ -222,15 +285,10 @@ def test_load_suite_parses_nested_render_and_deploy_exceptions(tmp_path) -> None
                                 "sweeper-direct": {
                                     "status": "broken",
                                     "reason": "Direct rendering lacks this topology.",
+                                    "match": "TEP.*not implemented",
                                     "links": [
                                         "https://github.com/ai-dynamo/dynamo/issues/8469"
                                     ],
-                                }
-                            },
-                            "deploy": {
-                                "recipe": {
-                                    "status": "skipped",
-                                    "reason": "The historical recipe was removed.",
                                 }
                             },
                         },
@@ -247,168 +305,153 @@ def test_load_suite_parses_nested_render_and_deploy_exceptions(tmp_path) -> None
         status="broken",
         reason="Direct rendering lacks this topology.",
         links=("https://github.com/ai-dynamo/dynamo/issues/8469",),
-    )
-    assert entry.exception_for("deploy", "recipe") == run_cases.SuiteException(
-        status="skipped", reason="The historical recipe was removed."
+        match="TEP.*not implemented",
     )
     assert entry.exception_for("render", "sweeper-aic") is None
 
 
-def test_recipe_hardware_discovery_writes_new_file_without_changing_source(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize(
+    ("stream", "diagnostic", "match", "expected_failure"),
+    [
+        ("stderr", "Known profiler failure", "Known profiler failure", False),
+        ("stdout", "Known profiler failure", "Known profiler failure", False),
+        ("stderr", "Unrelated profiler bug", "Known profiler failure", True),
+        ("stderr", "Unrelated profiler bug", "returned non-zero exit status", True),
+    ],
+    ids=["known-stderr", "known-stdout", "unrelated-error", "generic-exit-message"],
+)
+@pytest.mark.timeout(10)
+def test_profiler_failure_matches_child_diagnostic(
+    monkeypatch,
+    tmp_path,
+    capfd,
+    profiler_child,
+    stream,
+    diagnostic,
+    match,
+    expected_failure,
 ) -> None:
-    cases_root = tmp_path / "cases"
-    case_path = cases_root / "qwen"
-    case_path.mkdir(parents=True)
-    recipe_path = case_path / "recipe.yaml"
-    original = {
-        "source": "recipes/qwen/deploy.yaml",
-        "requirements": {"h200-sxm-8gpu": {"gpus": 8}},
-    }
-    recipe_path.write_text(yaml.safe_dump(original, sort_keys=False))
-    monkeypatch.setattr(run_cases, "_CASES_ROOT", cases_root)
-    monkeypatch.setattr(run_cases, "_REPOSITORY_ROOT", tmp_path)
-    recipe = run_cases.load_recipe("qwen")
-
-    assert recipe is not None
-    output = run_cases.write_discovered_recipe_requirement(recipe, "h100-sxm-4gpu", 4)
-
-    assert yaml.safe_load(recipe_path.read_text()) == original
-    assert output == case_path / "recipe.new.yaml"
-    assert yaml.safe_load(output.read_text()) == {
-        "source": "recipes/qwen/deploy.yaml",
-        "requirements": {
-            "h200-sxm-8gpu": {"gpus": 8},
-            "h100-sxm-4gpu": {"gpus": 4},
+    _write_case_and_hardware(tmp_path, monkeypatch)
+    case = run_cases.load_case(
+        "qwen", run_cases.load_hardware("h200-sxm-8gpu"), output_root=tmp_path / "out"
+    )
+    profiler_child(
+        "import sys; print('Profiler progress', flush=True); "
+        f"print({diagnostic!r}, file=sys.{stream}, flush=True); sys.exit(7)"
+    )
+    entry = run_cases.SuiteEntry(
+        case=case.name,
+        hardware=case.hardware.name,
+        exceptions={
+            "render": {
+                "profiler-v1beta1": run_cases.SuiteException(
+                    status="broken", reason="Known profiler failure.", match=match
+                ),
+                "sweeper": run_cases.SuiteException(
+                    status="skipped", reason="This case exercises the profiler process."
+                ),
+            }
         },
-    }
-
-
-@pytest.mark.parametrize("api_version", ["v1alpha1", "v1beta1"])
-def test_recipe_gpu_count_includes_replicas(monkeypatch, tmp_path, api_version) -> None:
-    cases_root = tmp_path / "cases"
-    case_path = cases_root / "qwen"
-    case_path.mkdir(parents=True)
-    recipe_dgd = tmp_path / "deploy.yaml"
-    if api_version == "v1alpha1":
-        spec = {
-            "services": {
-                "Worker": {
-                    "replicas": 3,
-                    "resources": {"limits": {"gpu": "2"}},
-                }
-            }
-        }
-    else:
-        spec = {
-            "components": [
-                {
-                    "name": "worker",
-                    "replicas": 3,
-                    "podTemplate": {
-                        "spec": {
-                            "containers": [
-                                {
-                                    "name": "main",
-                                    "resources": {"limits": {"nvidia.com/gpu": "2"}},
-                                }
-                            ]
-                        }
-                    },
-                }
-            ]
-        }
-    recipe_dgd.write_text(
-        yaml.safe_dump(
-            {
-                "apiVersion": f"nvidia.com/{api_version}",
-                "kind": "DynamoGraphDeployment",
-                "metadata": {"name": "qwen"},
-                "spec": spec,
-            }
-        )
     )
-    (case_path / "recipe.yaml").write_text(
-        yaml.safe_dump({"source": "deploy.yaml", "requirements": {}})
+
+    observed = f"Profiler progress\n{diagnostic}"
+    expected = [f"profiler-v1beta1: {observed}"] if expected_failure else []
+    assert run_cases.run_case(case, entry) == expected
+    assert (case.generated_dir / "error-profiler-v1beta1.txt").read_text() == (
+        observed + "\n"
     )
-    monkeypatch.setattr(run_cases, "_CASES_ROOT", cases_root)
-    monkeypatch.setattr(run_cases, "_REPOSITORY_ROOT", tmp_path)
-    recipe = run_cases.load_recipe("qwen")
-
-    assert recipe is not None
-    assert run_cases.recipe_gpu_count(recipe) == 6
+    output = capfd.readouterr()
+    assert "Profiler progress" in output.out + output.err
+    assert diagnostic in output.out + output.err
 
 
-def test_repository_learning_case_composes_without_case_local_hardware() -> None:
-    hardware = run_cases.load_hardware("h200-sxm-16gpu")
-    case = run_cases.load_case("qwen3-32b-vllm-disagg", hardware)
-
-    assert "hardware" not in yaml.safe_load(
-        (case.path / "dgdr-v1beta1.yaml").read_text()
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+@pytest.mark.timeout(10)
+def test_profiler_forwards_progress_before_child_exit(
+    monkeypatch, tmp_path, profiler_child, stream
+) -> None:
+    monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
+    _write_case_and_hardware(tmp_path, monkeypatch)
+    case = run_cases.load_case(
+        "qwen", run_cases.load_hardware("h200-sxm-8gpu"), output_root=tmp_path / "out"
     )
-    assert (
-        "hardware_sku"
-        not in yaml.safe_load((case.path / "sweeper.yaml").read_text())["search_space"]
+    run_cases._write_composed_inputs(case)
+    children = profiler_child(
+        "import select, sys\n"
+        "from pathlib import Path\n"
+        f"print('Profiler progress', file=sys.{stream})\n"
+        "ready, _, _ = select.select([sys.stdin], [], [], 5)\n"
+        "if not ready or sys.stdin.readline() != 'continue\\n':\n"
+        "    raise RuntimeError('Progress was not forwarded before profiler exit')\n"
+        "output = Path(sys.argv[sys.argv.index('--output-dir') + 1])\n"
+        "(output / 'final_config.yaml').write_text('kind: DynamoGraphDeployment\\n')\n",
+        stdin=subprocess.PIPE,
     )
-    assert case.recipe is not None
-    assert case.recipe.source == "recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml"
+    observed = []
+    original_print = print
+
+    def acknowledge_progress(*values, **kwargs):
+        original_print(*values, **kwargs)
+        if values and "Profiler progress" in values[0]:
+            child = children[0]
+            assert child.poll() is None, "Profiler output was buffered until child exit"
+            child.stdin.write("continue\n")
+            child.stdin.flush()
+            observed.append(values[0])
+
+    monkeypatch.setattr(run_cases, "print", acknowledge_progress, raising=False)
+
+    run_cases._run_v1_profiler(case)
+
+    assert observed == ["Profiler progress\n"]
+    assert (case.generated_dir / "dgd-profiler-v1beta1.yaml").is_file()
 
 
-def test_repository_suite_resolves_every_ashna_case() -> None:
-    suite_path = run_cases._ROOT / "testsuite-issue-8469.yaml"
-    entries = run_cases.load_suite(suite_path)
-
-    assert len(entries) == 29
-    for entry in entries:
-        assert run_cases.load_recipe(entry.case) is not None
-        assert run_cases.missing_case_inputs(entry.case) == ()
-        case = run_cases.load_case(entry.case, run_cases.load_hardware(entry.hardware))
-        assert case.recipe is not None
-
-
-def test_sweeper_runs_once_and_renders_same_candidate_twice(
-    monkeypatch, tmp_path
+@pytest.mark.timeout(10)
+def test_profiler_kills_child_if_forwarding_output_fails(
+    monkeypatch, tmp_path, profiler_child
 ) -> None:
     _write_case_and_hardware(tmp_path, monkeypatch)
     case = run_cases.load_case(
         "qwen", run_cases.load_hardware("h200-sxm-8gpu"), output_root=tmp_path / "out"
     )
     run_cases._write_composed_inputs(case)
-    config = SimpleNamespace(goal=SimpleNamespace(is_pareto=False), workload=object())
-    candidate = SimpleNamespace(
-        config={"backend": "vllm"},
-        score=3.0,
-        used_gpus=4,
-        metrics={"throughput": 3.0},
-        objectives=None,
+    children = profiler_child(
+        "import select, sys\n"
+        "print('Profiler progress', flush=True)\n"
+        "ready, _, _ = select.select([sys.stdin], [], [], 5)\n"
+        "if ready:\n"
+        "    sys.stdin.readline()\n"
+        "sys.exit(23)\n",
+        stdin=subprocess.PIPE,
     )
-    sweep_calls = []
-    render_calls = []
-    monkeypatch.setattr(run_cases, "load_sweep_config", lambda path: config)
+    original_print = print
 
-    def fake_sweep(received_config):
-        sweep_calls.append(received_config)
-        return SimpleNamespace(candidates=[candidate])
+    def fail_forwarding(*values, **kwargs):
+        if values == ("Profiler progress\n",):
+            raise BrokenPipeError("Profiler output consumer closed")
+        original_print(*values, **kwargs)
 
-    def fake_render(received, workload, options, *, dgd_name, renderer):
-        render_calls.append((received, workload, options, dgd_name, renderer))
-        return f"kind: DynamoGraphDeployment\nrenderer: {renderer}\n"
+    monkeypatch.setattr(run_cases, "print", fail_forwarding, raising=False)
 
-    monkeypatch.setattr(run_cases, "run_sweep", fake_sweep)
-    monkeypatch.setattr(run_cases, "render_dgd", fake_render)
+    with pytest.raises(BrokenPipeError, match="Profiler output consumer closed"):
+        run_cases._run_v1_profiler(case)
 
-    assert run_cases._run_sweeper_renderers(case) == []
-    assert sweep_calls == [config]
-    assert [call[0] for call in render_calls] == [candidate, candidate]
-    assert [call[-1] for call in render_calls] == ["aic", "direct"]
-    assert (case.generated_dir / "candidate-sweeper.yaml").is_file()
-    for renderer in ("aic", "direct"):
-        rendered = case.generated_dir / f"dgd-sweeper-{renderer}.yaml"
-        assert rendered.is_file()
-        assert rendered.read_text().startswith(run_cases._YAML_SPDX_HEADER)
+    assert children[0].returncode is not None and children[0].returncode < 0
 
 
-def test_renderer_failure_keeps_other_renderer_output(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("match", "expected_failures"),
+    [
+        (None, ["sweeper-aic: missing bridge"]),
+        ("missing bridge", []),
+        ("unsupported topology", ["sweeper-aic: missing bridge"]),
+    ],
+    ids=["unqualified-failure", "expected-failure", "unrelated-regression"],
+)
+def test_renderer_failure_keeps_other_renderer_output(
+    monkeypatch, tmp_path, match, expected_failures
+) -> None:
     _write_case_and_hardware(tmp_path, monkeypatch)
     case = run_cases.load_case(
         "qwen", run_cases.load_hardware("h200-sxm-8gpu"), output_root=tmp_path / "out"
@@ -418,12 +461,18 @@ def test_renderer_failure_keeps_other_renderer_output(monkeypatch, tmp_path) -> 
     candidate = SimpleNamespace(
         config={"backend": "vllm"}, score=3.0, used_gpus=4, metrics={}, objectives=None
     )
+    sweep_calls = []
+    render_calls = []
     monkeypatch.setattr(run_cases, "load_sweep_config", lambda path: config)
-    monkeypatch.setattr(
-        run_cases, "run_sweep", lambda received: SimpleNamespace(candidates=[candidate])
-    )
+
+    def sweep(received):
+        sweep_calls.append(received)
+        return SimpleNamespace(candidates=[candidate])
+
+    monkeypatch.setattr(run_cases, "run_sweep", sweep)
 
     def render(received, workload, options, *, dgd_name, renderer):
+        render_calls.append((received, renderer))
         if renderer == "aic":
             raise RuntimeError("missing bridge")
         return f"kind: DynamoGraphDeployment\nname: {dgd_name}\n"
@@ -432,47 +481,24 @@ def test_renderer_failure_keeps_other_renderer_output(monkeypatch, tmp_path) -> 
     stale_aic_output = case.generated_dir / "dgd-sweeper-aic.yaml"
     stale_aic_output.write_text("stale\n")
 
-    assert run_cases._run_sweeper_renderers(case) == ["sweeper-aic: missing bridge"]
-    assert (case.generated_dir / "error-sweeper-aic.txt").read_text() == (
-        "missing bridge\n"
-    )
-    assert not stale_aic_output.exists()
-    assert (case.generated_dir / "dgd-sweeper-direct.yaml").is_file()
-
-
-def test_broken_renderer_failure_does_not_fail_case(monkeypatch, tmp_path) -> None:
-    _write_case_and_hardware(tmp_path, monkeypatch)
-    case = run_cases.load_case(
-        "qwen", run_cases.load_hardware("h200-sxm-8gpu"), output_root=tmp_path / "out"
-    )
-    run_cases._write_composed_inputs(case)
-    config = SimpleNamespace(goal=SimpleNamespace(is_pareto=False), workload=object())
-    candidate = SimpleNamespace(
-        config={"backend": "vllm"}, score=3.0, used_gpus=4, metrics={}, objectives=None
-    )
-    monkeypatch.setattr(run_cases, "load_sweep_config", lambda path: config)
-    monkeypatch.setattr(
-        run_cases, "run_sweep", lambda received: SimpleNamespace(candidates=[candidate])
-    )
-
-    def render(received, workload, options, *, dgd_name, renderer):
-        if renderer == "direct":
-            raise RuntimeError("unsupported topology")
-        return f"kind: DynamoGraphDeployment\nname: {dgd_name}\n"
-
-    monkeypatch.setattr(run_cases, "render_dgd", render)
     entry = run_cases.SuiteEntry(
         case="qwen",
         hardware="h200-sxm-8gpu",
         exceptions={
             "render": {
-                "sweeper-direct": run_cases.SuiteException(
-                    status="broken", reason="Direct rendering lacks this topology."
+                "sweeper-aic": run_cases.SuiteException(
+                    status="broken", reason="Known renderer failure.", match=match
                 )
             }
         },
     )
 
-    assert run_cases._run_sweeper_renderers(case, entry) == []
-    assert (case.generated_dir / "dgd-sweeper-aic.yaml").is_file()
-    assert not (case.generated_dir / "dgd-sweeper-direct.yaml").exists()
+    assert run_cases._run_sweeper_renderers(case, entry) == expected_failures
+    assert sweep_calls == [config]
+    assert [renderer for _, renderer in render_calls] == ["aic", "direct"]
+    assert all(received is candidate for received, _ in render_calls)
+    assert (case.generated_dir / "error-sweeper-aic.txt").read_text() == (
+        "missing bridge\n"
+    )
+    assert not stale_aic_output.exists()
+    assert (case.generated_dir / "dgd-sweeper-direct.yaml").is_file()

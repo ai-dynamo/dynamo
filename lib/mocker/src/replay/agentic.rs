@@ -150,7 +150,7 @@ mod tests {
     fn snapshot_sampling_keeps_source_clock_and_requested_lane_count() {
         let build = |speedup| {
             AgenticReplayOptions {
-                snapshot: Some(AgenticSnapshotOptions { seed: 7 }),
+                snapshot: Some(serde_json::from_value(json!({"seed": 7})).unwrap()),
                 arrival_speedup_ratio: speedup,
                 ..Default::default()
             }
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn warmup_defers_profile_clock_until_runtime_barrier() {
         let options = AgenticReplayOptions {
-            snapshot: Some(AgenticSnapshotOptions { seed: 7 }),
+            snapshot: Some(serde_json::from_value(json!({"seed": 7})).unwrap()),
             warmup: true,
             profile: Some(AgenticProfileOptions {
                 duration_seconds: 0.5,
@@ -261,7 +261,7 @@ mod tests {
             ),
             (
                 AgenticReplayOptions {
-                    snapshot: Some(AgenticSnapshotOptions { seed: 7 }),
+                    snapshot: Some(serde_json::from_value(json!({"seed": 7})).unwrap()),
                     ..Default::default()
                 },
                 None,
@@ -270,7 +270,7 @@ mod tests {
             ),
             (
                 AgenticReplayOptions {
-                    snapshot: Some(AgenticSnapshotOptions { seed: 7 }),
+                    snapshot: Some(serde_json::from_value(json!({"seed": 7})).unwrap()),
                     profile: Some(AgenticProfileOptions::default()),
                     ..Default::default()
                 },
