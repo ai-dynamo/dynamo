@@ -390,7 +390,7 @@ where
                 Migrated::Streaming(manager) => {
                     let Some(stream) = manager.next_stream.as_mut() else {
                         // `RetryManager::build` starts an attempt, and nothing clears it.
-                        tracing::error!("Migration has no active attempt");
+                        tracing::error!(parent: &manager.span, "Migration has no active attempt");
                         *this = Migrated::Ended;
                         return Poll::Ready(Some(Annotated::from_error("next_stream is None")));
                     };
@@ -619,6 +619,8 @@ where
     /// stream put it.
     fn accept(&mut self, response: &mut Annotated<Resp>) -> bool {
         if let Some(err) = response.error.as_ref() {
+            // The stream is polled outside the dispatch span; a failure is handled in it.
+            let _entered = self.span.enter();
             if is_migratable_for_request(&self.request, err) {
                 return false;
             }
@@ -3887,9 +3889,10 @@ mod tests {
 
     /// The HTTP response body polls the migration stream without entering the request span.
     /// A mid-stream retry, its events and its dispatch must still run in the span the request
-    /// was dispatched in.
+    /// was dispatched in. So must the events of a failure that a worker pin keeps from being
+    /// retried.
     #[tokio::test]
-    async fn mid_stream_retry_runs_in_the_dispatch_span() {
+    async fn mid_stream_failure_handling_runs_in_the_dispatch_span() {
         use std::sync::Mutex;
         use tracing_subscriber::layer::{Context as LayerContext, Layer, SubscriberExt};
         use tracing_subscriber::registry::LookupSpan;
@@ -3946,33 +3949,46 @@ mod tests {
         let _subscriber = tracing::subscriber::set_default(
             tracing_subscriber::registry().with(EventSpans(event_spans.clone())),
         );
-        let engine = Arc::new(FailOnceEngine::default());
-        let request = Context::with_id_and_metadata(
-            create_mock_request(10),
-            uuid::Uuid::new_v4().to_string(),
-            BTreeMap::new(),
-        );
-        let migration = Migration::new(1, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
-        let stream = migration
-            .generate(request, engine.clone())
-            .instrument(tracing::info_span!("http-request"))
-            .await
-            .unwrap();
-        event_spans.lock().unwrap().clear();
-        let responses: Vec<_> = stream.collect().await;
+        for pinned in [false, true] {
+            let engine = Arc::new(FailOnceEngine::default());
+            let mut request = create_mock_request(10);
+            if pinned {
+                request.routing = Some(RoutingHints {
+                    backend_instance_id: Some(7),
+                    ..Default::default()
+                });
+            }
+            let request = Context::with_id_and_metadata(
+                request,
+                uuid::Uuid::new_v4().to_string(),
+                BTreeMap::new(),
+            );
+            let migration =
+                Migration::new(1, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
+            let stream = migration
+                .generate(request, engine.clone())
+                .instrument(tracing::info_span!("http-request"))
+                .await
+                .unwrap();
+            event_spans.lock().unwrap().clear();
+            let responses: Vec<_> = stream.collect().await;
 
-        assert_eq!(responses.len(), 2);
-        assert!(responses.iter().all(|response| response.error.is_none()));
-        assert_eq!(
-            *engine.dispatch_spans.lock().unwrap(),
-            [Some("http-request"), Some("http-request")]
-        );
-        let event_spans = event_spans.lock().unwrap();
-        assert!(!event_spans.is_empty());
-        assert!(
-            event_spans.iter().all(|span| *span == Some("http-request")),
-            "{event_spans:?}"
-        );
+            // A pin vetoes the retry, so the client gets the failure instead.
+            assert_eq!(responses.len(), 2, "pinned={pinned}");
+            assert!(responses[0].error.is_none(), "pinned={pinned}");
+            assert_eq!(responses[1].error.is_some(), pinned);
+            let dispatches = if pinned { 1 } else { 2 };
+            assert_eq!(
+                *engine.dispatch_spans.lock().unwrap(),
+                vec![Some("http-request"); dispatches]
+            );
+            let event_spans = event_spans.lock().unwrap();
+            assert!(!event_spans.is_empty(), "pinned={pinned}");
+            assert!(
+                event_spans.iter().all(|span| *span == Some("http-request")),
+                "pinned={pinned}: {event_spans:?}"
+            );
+        }
     }
 
     /// The `migration retries exhausted` event must name the attempt that
