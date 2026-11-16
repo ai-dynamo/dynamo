@@ -12,17 +12,17 @@ use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_hashing::LocalBlockHash;
-use dynamo_kv_indexer::backend::test_util::store_event;
-use dynamo_kv_indexer::backend::{Indexer, IndexerPolicy};
+use dynamo_kv_indexer::testing::store_event;
+use dynamo_kv_indexer::{Indexer, IndexerPolicy};
+use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::WorkerId;
-use dynamo_scheduler::config::RouterConfig;
-use dynamo_scheduler::identity::RoutingPartitionId;
-use dynamo_scheduler::protocols::RoutingConstraints;
-use dynamo_scheduler::selection::{
+use dynamo_scheduler::RouterConfig;
+use dynamo_scheduler::RoutingConstraints;
+use dynamo_scheduler::WorkerSelectionPolicyFactory;
+use dynamo_scheduler::{
     HostCache, KvIndexSource, PromptRequest, SelectRequest, SelectionCacheConfig, SelectionCore,
     SelectionError, SelectionHost, WorkerLifecycle, WorkerRequest,
 };
-use dynamo_scheduler::types::WorkerSelectionPolicyFactory;
 use dynamo_session_affinity::{SessionAffinityConfig, SessionAffinityMode};
 use std::collections::HashSet;
 
@@ -42,7 +42,7 @@ fn test_config(use_kv_events: bool) -> KvRouterConfig {
     }
 }
 
-fn reference_factory() -> dynamo_scheduler::types::WorkerSelectionPolicyFactory {
+fn reference_factory() -> dynamo_scheduler::WorkerSelectionPolicyFactory {
     Arc::new(|config, role, _| {
         dynamo_worker_selection::WorkerSelectionPolicy::reference(
             config.clone(),
@@ -132,7 +132,7 @@ fn core_with(
     let tracking_hash =
         Arc::new(tracking_hash_context(&config).expect("valid tracking hash configuration"));
     let indexer_policy =
-        IndexerPolicy::from_config(&dynamo_kv_indexer::config::IndexerConfig::from(&config))
+        IndexerPolicy::from_config(&dynamo_kv_indexer::IndexerConfig::from(&config))
             .expect("indexer policy");
     let config = RouterConfig::from(&config)
         .validate()
@@ -393,9 +393,9 @@ async fn equivalent_mm_identity_defaults_preserve_cached_overlap() {
 /// for every configuration the indexer accepts.
 #[tokio::test]
 async fn config_predicts_kv_transfer_chain_retention() {
-    use dynamo_kv_indexer::backend::create_indexer_with_policy;
-    use dynamo_kv_indexer::config::{ApproximateCachePolicyKind, IndexerConfig};
+    use dynamo_kv_indexer::create_indexer_with_policy;
     use dynamo_kv_indexer::host::KvIndexerMetrics;
+    use dynamo_kv_indexer::{ApproximateCachePolicyKind, IndexerConfig};
 
     for use_kv_events in [true, false] {
         for router_predicted_ttl_secs in [None, Some(1.0)] {

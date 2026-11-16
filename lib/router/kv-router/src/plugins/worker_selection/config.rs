@@ -12,7 +12,11 @@
 //!     type: dynamo-default-cost-fn             # a policy type with parameters
 //!     parameters:
 //!       router_temperature: 0.5
+//!     hints:                                   # optional: the role's hints, in run order
+//!       - type: my_hint                        # any linked hint policy
 //! ```
+//!
+//! A role whose entry lists no `hints` runs its default hints; `hints: []` runs none.
 //!
 //! The older `instances:` list, which named a `{type, parameters}` pair once and referenced it
 //! from each role by name, is deprecated and still accepted.
@@ -21,8 +25,10 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
+use crate::plugins::hint_policy::{HintPolicyEntry, RawHintPolicyEntry, resolve_hints};
 use crate::scheduling::policy_config::RouterPolicyConfigError;
 use crate::scheduling::policy_config::validate_identifier;
+use dynamo_router_protocol::WorkerType;
 
 /// Process-wide configuration for worker selection.
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +56,18 @@ impl WorkerSelectionConfig {
 
     pub(crate) fn encode(&self) -> Option<&WorkerSelectionPolicySelection> {
         self.encode.as_ref()
+    }
+
+    /// The hints a role's entry lists, in order; `None` when it lists none, so the role runs its
+    /// default hints. Only the inline mapping form lists hints.
+    pub fn hints(&self, worker_type: WorkerType) -> Option<&[HintPolicyEntry]> {
+        match worker_type {
+            WorkerType::Aggregated => self.aggregated(),
+            WorkerType::Prefill => self.prefill(),
+            WorkerType::Decode => self.decode(),
+            WorkerType::Encode => self.encode(),
+        }
+        .and_then(WorkerSelectionPolicySelection::hints)
     }
 
     /// Look up one named instance from the deprecated `instances:` list.
@@ -88,13 +106,23 @@ impl WorkerSelectionPolicySelection {
             Self::Inline(instance) => instance.policy_type(),
         }
     }
+
+    /// The hints an inline spec lists; `None` for a bare string, which takes no hints.
+    pub(crate) fn hints(&self) -> Option<&[HintPolicyEntry]> {
+        match self {
+            Self::Named(_) => None,
+            Self::Inline(instance) => instance.hints(),
+        }
+    }
 }
 
-/// One parameterized worker-selection policy: a registered type plus its YAML parameters.
+/// One parameterized worker-selection policy: a registered type plus its YAML parameters, and the
+/// hints an inline spec lists.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkerSelectionInstance {
     policy_type: String,
     parameters: serde_yaml::Value,
+    hints: Option<Vec<HintPolicyEntry>>,
 }
 
 impl WorkerSelectionInstance {
@@ -106,6 +134,11 @@ impl WorkerSelectionInstance {
     /// YAML parameters owned and validated by the linked policy crate.
     pub fn parameters(&self) -> &serde_yaml::Value {
         &self.parameters
+    }
+
+    /// The entry's `hints`, in order; `None` when it has none, so the role runs its defaults.
+    pub fn hints(&self) -> Option<&[HintPolicyEntry]> {
+        self.hints.as_deref()
     }
 }
 
@@ -151,6 +184,8 @@ struct RawInlineSelection {
     policy_type: String,
     #[serde(default = "empty_parameters")]
     parameters: serde_yaml::Value,
+    #[serde(default)]
+    hints: Option<Vec<RawHintPolicyEntry>>,
 }
 
 impl RawWorkerSelectionConfig {
@@ -184,6 +219,7 @@ impl RawWorkerSelectionConfig {
             let instance = resolve_instance(
                 raw.policy_type,
                 raw.parameters,
+                None,
                 &format!("worker_selection instance {:?}", raw.name),
             )?;
             if instances.insert(raw.name.clone(), instance).is_some() {
@@ -216,9 +252,14 @@ impl RawWorkerSelectionConfig {
                             "{location} type 'default' takes no parameters; write `{role}: default`"
                         )));
                     }
+                    let hints = inline
+                        .hints
+                        .map(|hints| resolve_hints(&format!("{location}.hints"), hints))
+                        .transpose()?;
                     Some(WorkerSelectionPolicySelection::Inline(resolve_instance(
                         inline.policy_type,
                         inline.parameters,
+                        hints,
                         &location,
                     )?))
                 }
@@ -238,6 +279,7 @@ impl RawWorkerSelectionConfig {
 fn resolve_instance(
     policy_type: String,
     parameters: serde_yaml::Value,
+    hints: Option<Vec<HintPolicyEntry>>,
     location: &str,
 ) -> Result<WorkerSelectionInstance, RouterPolicyConfigError> {
     validate_identifier(&policy_type, "policy type", location)?;
@@ -249,6 +291,7 @@ fn resolve_instance(
     Ok(WorkerSelectionInstance {
         policy_type,
         parameters,
+        hints,
     })
 }
 

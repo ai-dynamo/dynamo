@@ -18,10 +18,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::config::{CacheHitWeights, RouterConfig, Validated};
+use crate::hint_policy::HintPolicyFactory;
 use crate::identity::RoutingPartitionId;
-use crate::kv_hints::{
-    KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource, KvTransferCandidates,
-};
+use crate::kv_hints::{KvHint, KvTransferCandidates};
 use crate::overlap_summary::MooncakeOverlapSummary;
 use crate::protocols::WorkerConfigLike;
 use crate::queue::SchedulerBookingDescriptor;
@@ -30,29 +29,30 @@ use crate::replication::{
     ReplicaSyncConfig, SchedulerLoadSink, ScopedReplicaEvent, ScopedSequencePublisher,
     setup_scoped_replica_sync,
 };
+use crate::resolve::RouterResponsibilities;
 use crate::selector::{WorkerSelectionPolicy, WorkerSelector};
 use crate::shared_cache::SharedKvCache;
 use crate::tracking_hash::{TrackingHashContext, TrackingHashScope};
+use crate::types::{PotentialLoad, RejectThresholdsProvider, SessionContext};
 use crate::{
     KvSchedulerError, LocalScheduler, OverlapAnalysis, OverlapSignals, OverloadedWorkerProvider,
-    PotentialLoad, PrefillLoadEstimator, RejectThresholdsProvider, ScheduleMode, ScheduleRequest,
-    SessionContext, TieredOverlapRefresher, WorkerAvailabilityProvider, effective_prefill_tokens,
-    prefill_load_hint_from_effective_tokens,
+    PrefillLoadEstimator, ScheduleMode, ScheduleRequest, TieredOverlapRefresher,
+    WorkerAvailabilityProvider, effective_prefill_tokens, prefill_load_hint_from_effective_tokens,
 };
 use dynamo_kv_hashing::LocalBlockHash;
-use dynamo_kv_indexer::backend::{Indexer, IndexerPolicy};
-use dynamo_kv_indexer::registry::IndexRegistry;
+use dynamo_kv_indexer::IndexRegistry;
+use dynamo_kv_indexer::{Indexer, IndexerPolicy};
 use dynamo_kv_indexer::{LowerTierQueryOptions, RoutingDecisionHashes, TieredMatchDetails};
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_session_affinity::WorkerAffinityTarget;
-use dynamo_slot_tracker::wire::PrefillLoadHint;
+use dynamo_slot_tracker::PrefillLoadHint;
 use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, ReplicaRequestLeaseObserver,
     ReplicaWorkerPolicy, SequenceRequest, SequenceTrackerOptions, active_request_expiry_duration,
 };
 use dynamo_worker_selection::SharedCacheHits;
 use dynamo_worker_selection::WorkerInputs;
-use dynamo_worker_selection::lora_filter::{LoraWorkerFilter, narrow_allowed_worker_ids_by_lora};
+use dynamo_worker_selection::{LoraWorkerFilter, narrow_allowed_worker_ids_by_lora};
 
 mod hint;
 mod operation;
@@ -74,7 +74,7 @@ use super::catalog::WorkerCatalog;
 use super::error::SelectionError;
 use super::ingress::{KvEventIngress, LocalIndexIngress};
 use super::input::{PromptView, TrackingHashInput};
-use super::pending::{PendingSelection, SelectionCache, SelectionCacheConfig};
+use super::pending::{PendingKvCopy, PendingSelection, SelectionCache, SelectionCacheConfig};
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
@@ -130,8 +130,11 @@ struct SelectionEntry {
     workers_tx: watch::Sender<HashMap<WorkerId, SelectionWorkerConfig>>,
     /// Whether a worker in `workers_tx` consumes router hints, set on publish.
     hint_capable_workers: AtomicBool,
-    /// Whether the selection policy scores fetchable prefixes (`KV_TRANSFER`).
-    scores_kv_transfer: bool,
+    /// What the router does for this partition's role, from its plugins' declarations.
+    responsibilities: RouterResponsibilities,
+    /// Warns once when this partition's workers advertise router hints but its KV index can't
+    /// keep the block chain that copy sources need.
+    copy_sources_warning: std::sync::Once,
     scheduler: SelectionScheduler,
     replica_inbox: Option<ReplicaInbox>,
     affinity: OnceCell<SessionAffinity>,
@@ -181,6 +184,15 @@ pub struct SelectionHost {
     pub eligibility: HostEligibility,
     pub telemetry: HostTelemetry,
     pub replication: HostReplication,
+    pub hints: HostHints,
+}
+
+/// Hint policies the core instantiates for every partition.
+#[derive(Clone, Default)]
+pub struct HostHints {
+    /// The resolved hint policies; `None` runs no hint policies. Each partition's role resolves
+    /// them with its worker-selection policy (see [`crate::plugins::resolve::resolve_role`]).
+    pub policies: Option<HintPolicyFactory>,
 }
 
 /// Load signals the host knows and the partition scheduler does not.
