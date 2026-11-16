@@ -31,9 +31,11 @@
 //! to treat an eligible affinity target as exclusive, so the host narrows the candidates to the
 //! bound worker and the tiers above see only that worker. The host's eligibility rules, shared with
 //! the built-in selector, decide when a binding stops constraining selection; the tiers then apply
-//! to unbound requests only. Without busy thresholds a live target is never ineligible, so the
-//! load tier does not move a bound session. Without the exclusive target, the tiers would ignore
-//! the binding, and a session would stay put only when its worker happened to win.
+//! to unbound requests only. Only the host's model-level busy thresholds, an overload report, or
+//! unavailability make a live target ineligible; past a class's queue busy thresholds a bound
+//! request waits for its worker. Either way the load tier does not move a bound session. Without
+//! the exclusive target, the tiers would ignore the binding, and a session would stay put only
+//! when its worker happened to win.
 
 use std::cell::RefCell;
 use std::sync::Arc;
