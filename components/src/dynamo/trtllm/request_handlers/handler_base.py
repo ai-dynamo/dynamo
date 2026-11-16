@@ -1477,7 +1477,11 @@ class HandlerBase(BaseGenerativeHandler):
                                     "prompt_logprobs"
                                 ] = prompt_logprobs_payload
 
-                            num_input_tokens = len(res.prompt_token_ids)
+                            # Multimodal prompts expand; encoder-decoder prompts shrink.
+                            num_input_tokens = max(
+                                len(request.get("token_ids", [])),
+                                len(res.prompt_token_ids or []),
+                            )
                             total_completion_tokens = sum(
                                 len(o.token_ids) for o in res.outputs
                             )

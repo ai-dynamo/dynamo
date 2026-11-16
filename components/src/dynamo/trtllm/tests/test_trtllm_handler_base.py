@@ -924,7 +924,9 @@ class TestGenerateLocally:
 
             res = MagicMock()
             res.outputs = [output]
-            res.prompt_token_ids = list(prompt_token_ids)
+            res.prompt_token_ids = (
+                None if prompt_token_ids is None else list(prompt_token_ids)
+            )
             res.finished = index == last_index
             if cached_tokens is not mock.sentinel.unset:
                 res.cached_tokens = cached_tokens
@@ -1059,6 +1061,36 @@ class TestGenerateLocally:
         assert usage["prompt_tokens"] == 104
         assert usage["prompt_tokens_details"]["cached_tokens"] == 96
         assert usage["total_tokens"] == 105
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "engine_prompt_ids",
+        [[0, 2], [11, 12, 13, 14, 15], None],
+        ids=["encoder-decoder", "text", "no-engine-prompt"],
+    )
+    async def test_usage_keeps_request_length_for_shorter_engine_prompt(
+        self, engine_prompt_ids
+    ):
+        # An encoder-decoder engine prompt is only the decoder start tokens.
+        handler = self._make_handler()
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result_sequence(
+                [[]], cached_tokens=4, prompt_token_ids=engine_prompt_ids
+            )
+        )
+        request = {
+            "token_ids": [11, 12, 13, 14, 15],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+        usage = chunks[-1]["completion_usage"]
+        assert usage["prompt_tokens"] == 5
+        assert usage["prompt_tokens_details"]["cached_tokens"] == 4
+        assert usage["total_tokens"] == 6
 
     @pytest.mark.asyncio
     async def test_health_check_gets_priority_1(self):
