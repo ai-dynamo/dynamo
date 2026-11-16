@@ -251,6 +251,40 @@ class TestClassifyWorkerHandler:
 
         assert seen_prompt["prompt_token_ids"] == [101, 102]
 
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    @pytest.mark.parametrize("is_pooling", [False, True])
+    @pytest.mark.parametrize("failure_stage", ["setup", "prompt"])
+    async def test_tokenization_errors_are_public_invalid_argument(
+        self, is_pooling, failure_stage
+    ):
+        from vllm.exceptions import VLLMValidationError
+        from vllm.renderers import TokenizeParams
+
+        handler = _make_handler()
+        handler.engine_client.renderer.default_cmpl_tok_params = TokenizeParams(
+            max_total_tokens=8, truncate_prompt_tokens=None
+        )
+        handler.engine_client.renderer.tokenizer = SimpleNamespace(
+            truncation_side="left"
+        )
+        request = {"input": list(range(9)), "model": "test-model"}
+        if failure_stage == "setup":
+            request["input"] = "hello"
+            request["truncate_prompt_tokens"] = 9
+            message = "truncate_prompt_tokens"
+        else:
+            message = "maximum context length"
+        if is_pooling:
+            request["encoding_format"] = "float"
+
+        with pytest.raises(InvalidArgument, match=message) as error:
+            async for _ in handler.generate(request, _make_context()):
+                pass
+
+        assert isinstance(error.value.__cause__, VLLMValidationError)
+        handler.engine_client.encode.assert_not_called()
+
 
 class TestPoolingWorkerHandler:
     @pytest.mark.asyncio
@@ -428,25 +462,11 @@ class TestPoolingBatchExecution:
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
-    @pytest.mark.parametrize("handler_kind", ["embedding", "classify"])
-    async def test_vllm_validation_error_is_public_invalid_argument(self, handler_kind):
-        # vLLM rejects a bad pooling request (for example, dimensions on a
-        # model without Matryoshka support) with a VLLMValidationError raised
-        # from encode; its reason must reach the client.
+    async def test_vllm_validation_error_is_public_invalid_argument(self):
         from vllm.exceptions import VLLMValidationError
 
         message = "Model 'test-model' does not support Matryoshka embeddings"
-        if handler_kind == "classify":
-            handler = _make_handler()
-        else:
-            with patch.object(base_handlers, "VllmEngineMonitor"):
-                handler = base_handlers.EmbeddingWorkerHandler(
-                    runtime=MagicMock(),
-                    engine=MagicMock(),
-                    config=MagicMock(served_model_name="test-model"),
-                )
-            handler.engine_client = MagicMock()
-            handler.engine_client.abort = AsyncMock()
+        handler = _make_handler()
 
         async def fake_encode(prompt, pooling_params, request_id, **kwargs):
             raise VLLMValidationError(message)
