@@ -571,6 +571,80 @@ def _dump_disagg_config_section(disagg_config: dict[str, Any]) -> str:
     return temp_path
 
 
+def _pad_default_decode_cuda_graph_max_bs(parsed_args: Namespace) -> None:
+    """Keep one aligned decode CUDA graph size when --max-running-requests is small.
+
+    SGLang clamps its default decode graph sizes to --max-running-requests. When
+    the decode runner needs a gathered buffer (for example an MoE all-to-all
+    backend at TP16), it then keeps only sizes that are a multiple of the
+    attention-TP width. Below that width no size is left, and every rank fails
+    with ``AssertionError: capture_bs=[]`` after the weights load. Whether the
+    gather is needed is known only inside the scheduler, so pad to the largest
+    alignment this layout can need. Without the gather, SGLang drops the sizes
+    above the running limit and captures the same graphs as before.
+
+    Remove once the pinned SGLang keeps an aligned top bucket in
+    get_batch_sizes_to_capture (sgl-project/sglang#47391).
+    """
+    max_running_requests = getattr(parsed_args, "max_running_requests", None)
+    # SGLang older than 0.5.20 (the XPU pin) has no per-phase decode flags.
+    if max_running_requests is None or not hasattr(
+        parsed_args, "cuda_graph_max_bs_decode"
+    ):
+        return
+    decode_config = (getattr(parsed_args, "cuda_graph_config", None) or {}).get(
+        "decode", {}
+    )
+    if (
+        getattr(parsed_args, "disable_cuda_graph", False)
+        or getattr(parsed_args, "disable_decode_cuda_graph", False)
+        or getattr(parsed_args, "cuda_graph_backend_decode", None) == "disabled"
+        or decode_config.get("backend") == "disabled"
+    ):
+        return
+    # An explicit decode graph size from the user wins.
+    if (
+        parsed_args.cuda_graph_max_bs_decode is not None
+        or getattr(parsed_args, "cuda_graph_bs_decode", None) is not None
+        or decode_config.get("max_bs") is not None
+        or decode_config.get("bs") is not None
+    ):
+        return
+
+    # Same order as SGLang's handle_deprecated_dp_attention.
+    attn_dp_size = getattr(parsed_args, "attn_dp_size", 1) or 1
+    if attn_dp_size == 1 and getattr(parsed_args, "enable_dp_attention", False):
+        attn_dp_size = getattr(parsed_args, "dp_size", 1) or 1
+    attn_cp_size = getattr(parsed_args, "attn_cp_size", 1) or 1
+    # Mirrors get_cuda_graph_batch_size_alignment with the gathered buffer;
+    # the attention-TP width is SGLang's derive_attn_tp_size.
+    alignment = (
+        (getattr(parsed_args, "tp_size", 1) or 1) // attn_dp_size // attn_cp_size
+    )
+    if getattr(parsed_args, "enable_two_batch_overlap", False):
+        alignment *= 2
+    if alignment % attn_cp_size != 0:
+        alignment *= attn_cp_size
+
+    per_rank_max_running_requests = max_running_requests // attn_dp_size
+    if per_rank_max_running_requests >= alignment:
+        return
+
+    parsed_args.cuda_graph_max_bs_decode = alignment
+    logging.warning(
+        "--max-running-requests %d gives %d running requests per attention-DP "
+        "rank, below the decode CUDA graph batch size alignment %d of this "
+        "layout. Setting the decode CUDA graph max batch size to %d, so decode "
+        "graphs are padded to %d. Set --cuda-graph-max-bs-decode or "
+        "--disable-decode-cuda-graph to override this.",
+        max_running_requests,
+        per_rank_max_running_requests,
+        alignment,
+        alignment,
+        alignment,
+    )
+
+
 async def parse_args(args: list[str]) -> Config:
     """Parse CLI arguments and return combined configuration.
     Download the model if necessary.
@@ -906,6 +980,7 @@ async def parse_args(args: list[str]) -> Config:
         parsed_args.kv_events_config = kv_events_config_with_dynamo_format(
             parsed_args.kv_events_config
         )
+        _pad_default_decode_cuda_graph_max_bs(parsed_args)
         server_args = ServerArgs.from_cli_args(parsed_args)
         _default_cuda_coredump_wait(server_args)
 

@@ -986,6 +986,59 @@ async def test_parse_args_applies_dynamo_defaults_before_resolution(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("extra_args", "expected"),
+    [
+        (["--tp-size", "16", "--max-running-requests", "1"], 16),
+        (["--tp-size", "16", "--max-running-requests", "16"], None),
+        (
+            ["--tp-size", "16", "--max-running-requests", "1"]
+            + ["--cuda-graph-max-bs-decode", "8"],
+            8,
+        ),
+        (
+            ["--tp-size", "16", "--max-running-requests", "1"]
+            + ["--cuda-graph-bs-decode", "1"],
+            None,
+        ),
+        (
+            ["--tp-size", "16", "--max-running-requests", "1"]
+            + ["--disable-cuda-graph"],
+            None,
+        ),
+        (
+            ["--tp-size", "16", "--dp-size", "16", "--enable-dp-attention"]
+            + ["--max-running-requests", "16"],
+            None,
+        ),
+    ],
+)
+async def test_parse_args_pads_small_default_decode_cuda_graph_max_bs(
+    monkeypatch, mock_sglang_cli, caplog, extra_args, expected
+):
+    """Below the attention-TP width, SGLang would keep no decode graph size."""
+    server_args = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm=None,
+        kv_events_config=None,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+    )
+
+    def resolve(parsed_args):
+        assert parsed_args.cuda_graph_max_bs_decode == expected
+        return server_args
+
+    monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
+    mock_sglang_cli("--model", "/tmp", *extra_args)
+
+    with caplog.at_level(logging.WARNING):
+        await parse_args(sys.argv[1:])
+
+    padded = expected == 16
+    assert ("decode CUDA graph max batch size to 16" in caplog.text) is padded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("snapshot_enabled", "expected"),
     [
         (False, False),
