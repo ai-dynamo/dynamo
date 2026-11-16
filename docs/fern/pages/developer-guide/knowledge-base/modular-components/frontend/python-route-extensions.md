@@ -203,8 +203,8 @@ Keep handlers fast and non-blocking:
   HTTP 413. `DYN_HTTP_BODY_LIMIT_MB` does not apply to extension routes.
 - Slow work in a synchronous handler delays other extension routes: it occupies a pool thread, and
   Python code holds the Global Interpreter Lock (GIL). In an async handler, a blocking call stalls
-  the Frontend's event loop, which also runs Python chat processors (`--dyn-chat-processor vllm` or
-  `sglang`) and shutdown handling. Await the work or move it to a thread.
+  the Frontend's event loop, which also runs Python chat processors (any `--dyn-chat-processor`
+  other than `dynamo`) and shutdown handling. Await the work or move it to a thread.
 
 ## Load multiple providers
 
