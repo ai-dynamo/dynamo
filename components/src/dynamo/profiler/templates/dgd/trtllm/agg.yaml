@@ -34,6 +34,7 @@ spec:
           - Qwen/Qwen3-0.6B
           - --extra-engine-args
           - ./examples/backends/trtllm/engine_configs/qwen3/agg.yaml
+          - --publish-kv-events
           command:
           - python3
           - -m

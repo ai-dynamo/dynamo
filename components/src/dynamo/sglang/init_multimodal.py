@@ -18,6 +18,7 @@ from dynamo.llm import (
     WorkerType,
 )
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import publish_server_args
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
@@ -60,12 +61,14 @@ async def init_multimodal_encode_worker(
         cache_publisher = MultimodalEmbeddingCachePublisher()
         await cache_publisher.create_endpoint(generate_endpoint)
 
+    publish_server_args(server_args, role="encoder")
     handler = MultimodalEncodeWorkerHandler(
         config,
         pd_worker_client,
         cache_publisher,
         shutdown_event,
     )
+    server_args = config.use_resolved_server_args(handler.encoder.server_args)
 
     if handler._embedding_cache is not None:
         register_embedding_cache_metrics(
@@ -77,45 +80,59 @@ async def init_multimodal_encode_worker(
 
     await pd_worker_client.wait_for_instances()
 
-    ready_event = asyncio.Event()
+    async def register_encoder() -> None:
+        await register_model_with_readiness_gate(
+            None,  # engine
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            input_type=ModelInput.Tokens,
+            # The encode worker is the OpenAI front door for sglang
+            # multimodal: it carries the Chat/Completions surface and
+            # delegates token generation to the internal PD worker via
+            # pd_worker_client. Its `worker_type=Encode` topology role gates
+            # serving on the downstream worker(s) — `needs` is a DNF: a P+D
+            # pair OR a single Aggregated peer — so the model is not
+            # advertised until the whole pipeline is live.
+            output_type=ModelType.Chat | ModelType.Completions,
+            worker_type=WorkerType.Encode,
+            needs=[
+                [WorkerType.Prefill, WorkerType.Decode],
+                [WorkerType.Aggregated],
+            ],
+        )
+        # Encode has no engine canary payload; publish process health only
+        # after initialization and model registration have succeeded.
+        runtime.set_health_status(True)
 
     register_model_taint_route(runtime, generate_endpoint)
-    try:
-        _ = await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate,
-                graceful_shutdown=True,
-                metrics_labels=[
-                    (prometheus_names.labels.MODEL, server_args.served_model_name),
-                    (prometheus_names.labels.MODEL_NAME, server_args.served_model_name),
-                ],
-            ),
-            register_model_with_readiness_gate(
-                None,  # engine
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                input_type=ModelInput.Tokens,
-                # The encode worker is the OpenAI front door for sglang
-                # multimodal: it carries the Chat/Completions surface and
-                # delegates token generation to the internal PD worker via
-                # pd_worker_client. Its `worker_type=Encode` topology role gates
-                # serving on the downstream worker(s) — `needs` is a DNF: a P+D
-                # pair OR a single Aggregated peer — so the model is not
-                # advertised until the whole pipeline is live.
-                output_type=ModelType.Chat | ModelType.Completions,
-                readiness_gate=ready_event,
-                worker_type=WorkerType.Encode,
-                needs=[
-                    [WorkerType.Prefill, WorkerType.Decode],
-                    [WorkerType.Aggregated],
-                ],
-            ),
+    registration_task = asyncio.create_task(register_encoder())
+    # Runtime endpoints return a Future today, while test and alternate runtime
+    # implementations may return a coroutine. ensure_future supports both.
+    serving_task = asyncio.ensure_future(
+        generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=[
+                (prometheus_names.labels.MODEL, server_args.served_model_name),
+                (prometheus_names.labels.MODEL_NAME, server_args.served_model_name),
+            ],
         )
+    )
+    try:
+        _ = await asyncio.gather(serving_task, registration_task)
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
+        serving_task.cancel()
+        registration_task.cancel()
+        await asyncio.gather(
+            serving_task,
+            registration_task,
+            return_exceptions=True,
+        )
+        runtime.set_health_status(False)
         handler.cleanup()
         if run_deferred_handlers is not None:
             logging.info("Running deferred handlers")
@@ -145,6 +162,7 @@ async def init_multimodal_worker(
     shutdown_endpoints[:] = [generate_endpoint]
 
     engine = sgl.Engine(server_args=server_args)
+    server_args = config.use_resolved_server_args(engine.server_args)
 
     if config.serving_mode == DisaggregationMode.DECODE:
         logging.info("Initializing prefill client for multimodal decode worker")
@@ -215,6 +233,7 @@ async def init_multimodal_prefill_worker(
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     engine = sgl.Engine(server_args=server_args)
+    server_args = config.use_resolved_server_args(engine.server_args)
 
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"

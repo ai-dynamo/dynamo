@@ -1,0 +1,7 @@
+cases/*/generated/
+cases/*/recipe.new.yaml
+/generated/manual/
+/generated/**/.cache/
+/generated/**/candidate-*.yaml
+/generated/**/*-composed.yaml
+/generated/**/error-*.txt

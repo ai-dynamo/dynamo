@@ -1,12 +1,12 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Sweep Configuration Providers
 subtitle: Extend Sweeper without adding application dependencies to its core
 ---
 
 > [!WARNING]
-> **Experimental.** The provider ABI is versioned but may change before AI Simulate stabilizes.
+> **Experimental.** The provider ABI is versioned but may change before AISimulate stabilizes.
 
 A `SweepConfigProvider` lets an optional feature package contribute search dimensions without
 making `aisimulate` depend on that package.

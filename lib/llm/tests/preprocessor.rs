@@ -17,6 +17,47 @@ use rstest::rstest;
 
 use std::path::PathBuf;
 
+#[test]
+fn inkling_model_type_selects_native_formatter_with_compact_tools() {
+    let model_dir = tempfile::tempdir().unwrap();
+    let source = std::path::Path::new("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+    for filename in [
+        "config.json",
+        "generation_config.json",
+        "tokenizer_config.json",
+        "tokenizer.json",
+    ] {
+        std::fs::copy(source.join(filename), model_dir.path().join(filename)).unwrap();
+    }
+    let config_path = model_dir.path().join("config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    config["model_type"] = serde_json::json!("inkling_mm_model");
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+
+    let mdc = ModelDeploymentCard::load_from_disk(model_dir.path(), None).unwrap();
+    let PromptFormatter::OAI(formatter) = prompt_formatter_from_mdc(&mdc).unwrap();
+    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "model": "customer-model-alias",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{"type": "function", "function": {
+            "name": "get_weather",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+        }}]
+    }))
+    .unwrap();
+
+    let rendered = formatter.render(&request).unwrap();
+    let (declaration, _) = rendered
+        .strip_prefix("<|message_system|>tool_declare<|content_xml|>")
+        .expect("Inkling must use its native formatter despite the fixture's Llama template")
+        .split_once("<|end_message|>")
+        .unwrap();
+    let tools: serde_json::Value = serde_json::from_str(declaration).unwrap();
+    assert_eq!(tools[0]["name"], "get_weather");
+    assert_eq!(declaration, serde_json::to_string(&tools).unwrap());
+}
+
 /// Gets the HF_TOKEN environment variable if it exists and is not empty.
 ///
 /// These tests require a Hugging Face token to be set in the environment variable `HF_TOKEN`.
@@ -257,6 +298,7 @@ impl Request {
         let inner = inner.build().unwrap();
 
         NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -264,6 +306,8 @@ impl Request {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
+            preserve_thinking: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -657,7 +701,7 @@ mod cached_multimodal_uuid {
     }
 
     #[tokio::test]
-    async fn preserves_url_and_uuid_only_slot_alignment() {
+    async fn preserves_multimodal_cache_uuid_alignment() {
         let messages = r#"[
             {
                 "role": "user",
@@ -672,6 +716,16 @@ mod cached_multimodal_uuid {
                         "type": "image_url",
                         "image_url": null,
                         "uuid": "image-b"
+                    },
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": "https://example.com/video.mp4"},
+                        "uuid": "video-a"
+                    },
+                    {
+                        "type": "audio_url",
+                        "audio_url": {"url": "https://example.com/audio.wav"},
+                        "uuid": "audio-a"
                     }
                 ]
             }
@@ -695,17 +749,24 @@ mod cached_multimodal_uuid {
             .await
             .unwrap();
 
-        let images = &preprocessed.multi_modal_data.as_ref().unwrap()["image_url"];
+        let media = preprocessed.multi_modal_data.as_ref().unwrap();
+        let uuids = preprocessed.multi_modal_uuids.as_ref().unwrap();
+        for (modality, expected_uuid) in [
+            ("image_url", "image-a"),
+            ("video_url", "video-a"),
+            ("audio_url", "audio-a"),
+        ] {
+            assert!(matches!(media[modality][0], MultimodalData::Url(_)));
+            assert_eq!(uuids[modality][0], Some(expected_uuid.to_string()));
+        }
+
+        let images = &media["image_url"];
         assert_eq!(images.len(), 2);
-        assert!(matches!(images[0], MultimodalData::Url(_)));
         assert!(matches!(
             &images[1],
             MultimodalData::UuidOnly(value) if value == "image-b"
         ));
-        assert_eq!(
-            preprocessed.multi_modal_uuids.as_ref().unwrap()["image_url"],
-            vec![Some("image-a".to_string()), Some("image-b".to_string())]
-        );
+        assert_eq!(uuids["image_url"][1], Some("image-b".to_string()));
         assert!(
             preprocessed
                 .extra_args
@@ -717,33 +778,28 @@ mod cached_multimodal_uuid {
     }
 
     #[tokio::test]
-    async fn rejects_audio_and_video_cache_uuids() {
-        for messages in [
-            r#"[{
-                "role": "user",
-                "content": [{
-                    "type": "video_url",
-                    "video_url": {"url": "https://example.com/video.mp4"},
-                    "uuid": "cached-video"
-                }]
-            }]"#,
-            r#"[{
-                "role": "user",
-                "content": [{
-                    "type": "audio_url",
-                    "audio_url": {"url": "https://example.com/audio.wav"},
-                    "uuid": "cached-audio"
-                }]
-            }]"#,
-        ] {
-            let request = Request::from(messages, None, None, "test-model".to_string());
+    async fn rejects_uuid_only_audio_and_video() {
+        for (part_type, uuid) in [("video_url", "cached-video"), ("audio_url", "cached-audio")] {
+            let messages = format!(
+                r#"[{{
+                    "role": "user",
+                    "content": [{{
+                        "type": "{part_type}",
+                        "{part_type}": null,
+                        "uuid": "{uuid}"
+                    }}]
+                }}]"#
+            );
+            let request = Request::from(&messages, None, None, "test-model".to_string());
             let error = make_preprocessor()
                 .preprocess_request(&request, None)
                 .await
-                .expect_err("audio and video cache UUIDs must be rejected");
+                .expect_err("UUID-only audio and video must be rejected");
 
             assert!(
-                format!("{error:#}").contains("supported only for image_url parts with vLLM"),
+                format!("{error:#}").contains(&format!(
+                    "UUID-only cache reuse is not supported for media modality `{part_type}`"
+                )),
                 "unexpected error: {error:#}"
             );
             assert_invalid_argument(&error);
@@ -933,6 +989,7 @@ mod context_length_validation {
         }
         let inner = builder.build().unwrap();
         NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -940,6 +997,8 @@ mod context_length_validation {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
+            preserve_thinking: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -1011,6 +1070,13 @@ mod context_length_validation {
             "error message should tell user what to do, got: {}",
             dynamo_err.message()
         );
+        let Some(dynamo_runtime::error::PublicDetails::ContextLength { limit, actual }) =
+            dynamo_err.public_details()
+        else {
+            panic!("context overflow should expose structured length details");
+        };
+        assert_eq!(*limit, 5);
+        assert!(actual.is_some_and(|actual| actual > *limit));
     }
 
     #[tokio::test]
@@ -1305,6 +1371,7 @@ mod embedding_without_chat_template {
             .build()
             .unwrap();
         NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -1313,6 +1380,8 @@ mod embedding_without_chat_template {
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
+            thinking_token_budget: None,
+            preserve_thinking: None,
         }
     }
 

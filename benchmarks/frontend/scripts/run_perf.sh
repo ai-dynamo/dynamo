@@ -409,7 +409,7 @@ for MN in "${MODEL_NAMES[@]}"; do
         fi
 
         MN_SAFE="${MN//\//_}"
-        HF_HUB_OFFLINE=1 DYN_SYSTEM_PORT=$WORKER_PORT DYN_EVENT_PLANE="$EVENT_PLANE" python -m dynamo.mocker._worker "${MOCKER_ARGS[@]}" \
+        HF_HUB_OFFLINE=1 DYN_SYSTEM_PORT=$WORKER_PORT DYN_EVENT_PLANE="$EVENT_PLANE" python -m dynamo.mocker "${MOCKER_ARGS[@]}" \
             > "$OUTPUT_DIR/logs/mocker_${MN_SAFE}_${i}.log" 2>&1 &
         ALL_PIDS+=($!)
         echo "  Worker $WORKER_IDX ($MN #$i): PID ${ALL_PIDS[-1]}, port $WORKER_PORT"
@@ -426,7 +426,6 @@ FRONTEND_ENV=(
     HF_HUB_OFFLINE=1
     DYN_HTTP_PORT="$FRONTEND_PORT"
     DYN_PERF_DIAG=1
-    DYN_ENABLE_NVTX=1
     DYN_REQUEST_PLANE="$REQUEST_PLANE"
     DYN_EVENT_PLANE="$EVENT_PLANE"
 )
@@ -443,14 +442,13 @@ if [[ -n "$TOKENIZER_BACKEND" ]]; then
     echo "  Tokenizer backend: $TOKENIZER_BACKEND (DYN_TOKENIZER=$_DYN_TOK_VAL)"
 fi
 
-# Enable Rust NVTX annotations when nsys profiling is active.
-# The Rust NVTX subsystem (lib/runtime/src/nvtx.rs) requires both the
-# compile-time "nvtx" feature AND this runtime env var. We only set it
-# when nsys is active to avoid the ~50ns/annotation overhead during
-# clean throughput runs.
+# Enable NVTX annotations when nsys profiling is active. DYN_NVTX switches
+# both the Rust ranges (lib/runtime/src/nvtx.rs, which also need the
+# compile-time "nvtx" feature) and the Python ones. We only set it when nsys
+# is active, so clean throughput runs don't pay the per-annotation cost.
 if [[ "$HAS_NSYS" == true ]]; then
-    FRONTEND_ENV+=(DYN_ENABLE_RUST_NVTX=1)
-    echo "  Rust NVTX annotations: enabled"
+    FRONTEND_ENV+=(DYN_NVTX=1)
+    echo "  NVTX annotations: enabled"
 fi
 
 if [[ "$HAS_NSYS" == true ]]; then

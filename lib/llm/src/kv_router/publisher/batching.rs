@@ -4,8 +4,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dynamo_kv_router::indexer::LocalKvIndexer;
-use dynamo_kv_router::protocols::{KvCacheEventData, Placement, PlacementEvent, RouterEvent};
+use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
+use dynamo_kv_events::placement::{Placement, PlacementEvent};
+use dynamo_kv_indexer::host::LocalKvIndexer;
 
 use super::dedup::{EventDedupFilter, EventDedupPolicy};
 use super::sinks::emit;
@@ -47,6 +48,7 @@ impl<K: Eq> PlacementEventCoalescer<K> {
         let can_merge = self.pending.as_ref().is_some_and(|(pending_key, pending)| {
             pending_key == &key
                 && pending.event.dp_rank == event.event.dp_rank
+                && pending.session_id == event.session_id
                 && compatible_data(&pending.event.data, &event.event.data)
         });
         if can_merge {
@@ -189,6 +191,7 @@ impl BatchingState {
     ) {
         let tier = placement_event.placement.tier;
         let domain = placement_event.placement.residency_domain;
+        let session_id = placement_event.session_id;
         let mut event = placement_event.event;
         event.data = match event.data {
             KvCacheEventData::Removed(data) => {
@@ -218,7 +221,16 @@ impl BatchingState {
             }
         };
         event.event_id = self.next_publish_id;
-        let _ = emit(local_indexer, worker_id, tier, domain, event, output).await;
+        let _ = emit(
+            local_indexer,
+            worker_id,
+            tier,
+            domain,
+            event,
+            session_id,
+            output,
+        )
+        .await;
         self.next_publish_id = self
             .next_publish_id
             .checked_add(1)
@@ -228,10 +240,12 @@ impl BatchingState {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheRemoveData, KvCacheStoreData,
-        KvCacheStoredBlockData, LocalBlockHash, Placement, ResidencyDomain, StorageTier,
+    use dynamo_kv_events::event::{
+        KvCacheEvent, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
     };
+    use dynamo_kv_events::placement::Placement;
+    use dynamo_kv_events::residency::{ResidencyDomain, StorageTier};
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 
     use super::*;
 
@@ -311,6 +325,36 @@ mod tests {
             .flatten()
             .collect::<Vec<_>>();
         assert_eq!(output.len(), 1);
+        assert!(matches!(
+            &output[0].event.data,
+            KvCacheEventData::Stored(data) if data.blocks.len() == 1
+        ));
+    }
+
+    #[test]
+    fn session_id_prevents_cross_session_coalescing() {
+        let mut coalescer = PlacementEventCoalescer::new(128);
+        let first = stored(None, 1).with_session_id("session-1");
+        let first_key = first.placement.clone();
+        assert!(
+            coalescer
+                .push(first_key, first)
+                .into_iter()
+                .flatten()
+                .next()
+                .is_none()
+        );
+
+        let second = stored(Some(1), 2).with_session_id("session-2");
+        let second_key = second.placement.clone();
+        let output = coalescer
+            .push(second_key, second)
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].session_id.as_deref(), Some("session-1"));
         assert!(matches!(
             &output[0].event.data,
             KvCacheEventData::Stored(data) if data.blocks.len() == 1

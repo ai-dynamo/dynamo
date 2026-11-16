@@ -5,9 +5,14 @@ import base64
 
 import pytest
 
-from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
+from tests.serve.conftest import (
+    MULTIMODAL_IMG_URL,
+    MULTIMODAL_VIDEO_URL,
+    get_multimodal_test_image_bytes,
+)
 from tests.utils.multimodal import (
     UuidPassthroughChatPayload,
+    make_mixed_image_video_payload,
     make_qwen35_custom_encoder_multi_image_payload,
 )
 
@@ -82,3 +87,18 @@ def test_qwen35_multi_image_payload_is_order_sensitive() -> None:
         + base64.b64encode(get_multimodal_test_image_bytes(color)).decode()
         for color in ("green", "red")
     ]
+
+
+def test_mixed_image_video_payload_requires_video_context() -> None:
+    payload = make_mixed_image_video_payload(["triangle"], frontend_decoding=True)
+    content = payload.body["messages"][0]["content"]
+
+    assert content[1] == {
+        "type": "image_url",
+        "image_url": {"url": MULTIMODAL_IMG_URL},
+    }
+    assert content[2] == {
+        "type": "video_url",
+        "video_url": {"url": MULTIMODAL_VIDEO_URL},
+    }
+    assert payload.expected_response == ["triangle"]

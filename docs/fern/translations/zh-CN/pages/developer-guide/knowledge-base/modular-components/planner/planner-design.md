@@ -22,7 +22,7 @@ Planner 是 Dynamo 的自动扩缩容控制器。它支持两种扩缩容模式�
 
 为了兼容现有配置和 DGDR 生成的 planner payload，`load_adjustment_interval_seconds` 和 `throughput_adjustment_interval_seconds` 仍然定义 builtin plugin 的 fire interval。基础 `scheduling.scale_interval_seconds` 默认是已启用 interval 的最大公约数，因此现有 load 和 throughput 的 fire time 会保持不变。
 
-![Planner plugin pipeline showing shared builtin state and OBSERVE, PREDICT, PROPOSE, RECONCILE, CONSTRAIN, and EXEC stages](../../../../../../../assets/img/planner-plugin-pipeline.png)
+![Planner plugin pipeline showing shared builtin state and OBSERVE, PREDICT, PROPOSE, RECONCILE, CONSTRAIN, and EXEC stages](../../../../../assets/img/planner-plugin-pipeline.png)
 
 ### 为什么需要两个 Scaling Loop
 
@@ -93,7 +93,7 @@ Planner 会预测下一个 interval 的三个流量形状值：
 3. `profile_results_dir` 中的 NPZ/JSON fallback data
 4. 没有 pre-deployment data 时的 live FPM regression warmup
 
-Planner 直接调用 `aiconfigurator_core.sdk.RustForwardPassPerfModel`，获取原生 AIC 估算、在线校正和回归回退。Planner 自有的引擎查询层据此前向计算抽象推导 queue drain、TTFT、ITL 和 capacity。KV hit rate 和 speculative accept length 等 runtime metadata 会作为输入特征使用，而不是作为持久 correction-factor flags。
+Planner 通过唯一构造接口 `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` 创建 `ais_perf_model.roles` 中各角色的模型。AISimulate 负责完整 schema、选择、调优和预测，Dynamo 绑定 worker 身份与运行时上限。新配置默认 `auto + deny`；auto 仍依次查找 op-level、FPM interpolation 和 regression。未提供配置时显式创建对应角色的冷启动 regression 模型。Planner 自有的引擎查询层据此前向计算抽象推导 queue drain、TTFT、ITL 和 capacity。KV hit rate 和 speculative accept length 等 runtime metadata 会作为输入特征使用，而不是作为持久 correction-factor flags。
 
 ### Step 4: Proposal 和 Lower Bound
 

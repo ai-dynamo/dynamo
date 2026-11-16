@@ -36,6 +36,7 @@ ARG SCCACHE_REGION=""
 # selection service uses for KV-event and replica-sync sockets.
 # python3 runs container/compliance/cargo_sbom.py in the build RUN below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     protobuf-compiler \
     libprotobuf-dev \
     libclang-dev \
@@ -69,6 +70,7 @@ COPY --from=dynamo examples/router/custom-policy-example/ examples/router/custom
 
 # Copy the ext-proc crate itself
 COPY --from=dynamo deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
+COPY --from=dynamo deploy/inference-gateway/sidecar/ deploy/inference-gateway/sidecar/
 
 # Compliance: emits the CycloneDX SBOM for /epp in the build step below.
 COPY --from=dynamo container/compliance/cargo_sbom.py /tmp/cargo_sbom.py
@@ -116,6 +118,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libstdc++6 \
     libzmq5 \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20260816ubuntu0.24.04.1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /

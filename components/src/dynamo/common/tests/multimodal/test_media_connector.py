@@ -3,7 +3,9 @@
 
 """Unit tests for DynamoMediaConnector and its ImageLoader integration."""
 
-from unittest.mock import AsyncMock
+import base64
+from io import BytesIO
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from PIL import Image
@@ -50,6 +52,71 @@ async def test_connector_does_not_fallback_on_client_error(client_error, monkeyp
     parent_fetch.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fetch", ["fetch_audio_async", "fetch_video_async"])
+async def test_connector_rejects_remote_urls_when_disabled(fetch, monkeypatch):
+    connector_class = getattr(media_connector_module, "DynamoMediaConnector", None)
+    if connector_class is None:
+        pytest.skip("vLLM is not installed")
+
+    monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", "0")
+    parent_load = AsyncMock()
+    monkeypatch.setattr(connector_class.__mro__[1], "load_from_url_async", parent_load)
+    connector = object.__new__(connector_class)
+    connector.media_io_kwargs = {}
+
+    with pytest.raises(UrlValidationError, match="DYN_MM_ALLOW_REMOTE_URLS"):
+        await getattr(connector, fetch)("https://example.com/media")
+
+    parent_load.assert_not_awaited()
+
+
+def test_connector_sync_load_rejects_remote_urls_when_disabled(monkeypatch):
+    connector_class = getattr(media_connector_module, "DynamoMediaConnector", None)
+    if connector_class is None:
+        pytest.skip("vLLM is not installed")
+
+    monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", "0")
+    parent_load = MagicMock()
+    monkeypatch.setattr(connector_class.__mro__[1], "load_from_url", parent_load)
+    connector = object.__new__(connector_class)
+
+    with pytest.raises(UrlValidationError, match="DYN_MM_ALLOW_REMOTE_URLS"):
+        connector.load_from_url("https://example.com/a.wav", MagicMock())
+
+    parent_load.assert_not_called()
+
+
+@pytest.mark.vllm
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exif_orientation", [None, 6])
+async def test_connector_image_matches_vllm_connector(exif_orientation, monkeypatch):
+    connector_class = getattr(media_connector_module, "DynamoMediaConnector", None)
+    if connector_class is None:
+        pytest.skip("vLLM is not installed")
+
+    # The loader is a process-wide singleton; build a fresh one for this test.
+    monkeypatch.setattr(media_connector_module, "_shared_image_loader", None)
+    image = Image.new("RGBA", (4, 2))
+    image.putpixel((0, 0), (0, 0, 0, 255))
+    exif = Image.Exif()
+    if exif_orientation is not None:
+        exif[0x0112] = exif_orientation
+    buf = BytesIO()
+    image.save(buf, format="PNG", exif=exif)
+    url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+    loaded = await connector_class().fetch_image_async(url)
+
+    vllm_connector_class = connector_class.__mro__[1]
+    expected = await vllm_connector_class().fetch_image_async(url)
+    assert (loaded.size, loaded.mode, loaded.tobytes()) == (
+        expected.size,
+        expected.mode,
+        expected.tobytes(),
+    )
+
+
 class TestImageLoaderCache:
     """Test the ImageLoader LRU cache used by DynamoMediaConnector."""
 
@@ -88,3 +155,12 @@ class TestImageLoaderCache:
         loader._cache_put("url1", img)
         loader._cache_put("url1", img)
         assert len(loader._image_cache) == 1
+
+    def test_cache_size_zero_disables_cache(self):
+        """A capacity of zero stores nothing rather than evicting from an empty cache."""
+        loader = ImageLoader(cache_size=0)
+
+        loader._cache_put("url1", _make_pil_image())
+        loader._cache_put("url2", _make_pil_image())
+
+        assert len(loader._image_cache) == 0

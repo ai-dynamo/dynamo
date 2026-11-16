@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The serving-readiness contract shared by the request plane and the KV DC Relay.
+//! The serving-readiness contract shared by the request plane and the Pool Relay.
 //!
-//! Both consumers must answer "can this namespace serve this model" identically, so the
-//! card normalization and the readiness evaluation live here as pure functions over
-//! [`ReadinessUnit`]s; `Model::evaluate_namespace` and the relay topology projection are
-//! adapters that build units from their own liveness sources.
+//! Equivalent [`ReadinessUnit`] inputs produce the same readiness answer. The frontend
+//! builds units from committed WorkerSet membership; the relay topology projection
+//! evaluates discovery independently. Under conflicting registrations, the relay can
+//! remain conservative while a frontend serves its selected incumbent.
 
 use std::collections::HashSet;
 

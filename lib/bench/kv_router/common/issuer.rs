@@ -52,6 +52,33 @@ pub fn pin_current_thread_to_cpus(cpus: &[usize]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Parse a CPU list such as `0-3,6,8-9` into sorted, unique CPU IDs.
+pub fn parse_cpu_list(value: &str) -> anyhow::Result<Vec<usize>> {
+    let mut cpus = Vec::new();
+    for part in value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let Some((start, end)) = part.split_once('-') else {
+            cpus.push(part.parse()?);
+            continue;
+        };
+        let start: usize = start.parse()?;
+        let end: usize = end.parse()?;
+        if start > end {
+            anyhow::bail!("invalid descending CPU range {part}");
+        }
+        cpus.extend(start..=end);
+    }
+    cpus.sort_unstable();
+    cpus.dedup();
+    if cpus.is_empty() {
+        anyhow::bail!("CPU list must not be empty");
+    }
+    Ok(cpus)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

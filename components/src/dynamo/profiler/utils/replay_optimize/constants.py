@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import os
 
-AIC_BACKEND_VERSIONS = {
-    "vllm": "0.14.0",
-    "sglang": "0.5.6.post2",
+from dynamo._internal.ais import DEFAULT_BACKEND_VERSIONS
+
+AIS_BACKEND_VERSIONS = {
+    backend: DEFAULT_BACKEND_VERSIONS[backend] for backend in ("vllm", "sglang")
 }
 
 DEFAULT_OVERLAP_SCORE_CREDITS = (1.0,)

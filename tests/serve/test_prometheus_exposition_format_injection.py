@@ -89,7 +89,7 @@ class TestPrometheusExpositionFormatInjection:
         # Get exposition format with label injection
         labels_to_inject = {
             prometheus_names.labels.NAMESPACE: "prod",
-            prometheus_names.labels.COMPONENT: "vllm-worker",
+            prometheus_names.labels.COMPONENT: "worker",
         }
         expfmt = get_prometheus_expfmt(registry, inject_custom_labels=labels_to_inject)
 
@@ -97,4 +97,4 @@ class TestPrometheusExpositionFormatInjection:
         assert 'status="success"' in expfmt
         assert 'method="GET"' in expfmt
         assert f'{prometheus_names.labels.NAMESPACE}="prod"' in expfmt
-        assert f'{prometheus_names.labels.COMPONENT}="vllm-worker"' in expfmt
+        assert f'{prometheus_names.labels.COMPONENT}="worker"' in expfmt

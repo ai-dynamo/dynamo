@@ -3,14 +3,15 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Mapping
 from typing import Any, Literal
 
 from dynamo.llm import KvRouterConfig
-from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.config import normalize_mocker_config, performance_config
 
-from .constants import AIC_BACKEND_VERSIONS
+from .constants import AIS_BACKEND_VERSIONS
 
 
 def _build_candidate_engine_args(
@@ -21,18 +22,25 @@ def _build_candidate_engine_args(
     backend: str,
     system: str,
     model: str,
-) -> MockEngineArgs:
-    payload = dict(base_args)
-    payload["worker_type"] = worker_type
-    payload["aic_backend"] = backend
-    payload["aic_system"] = system
-    payload["aic_backend_version"] = AIC_BACKEND_VERSIONS[backend]
-    payload["aic_tp_size"] = tp_size
-    payload["aic_model_path"] = model
-    # Keep engine args as user-intent data until this boundary. In particular,
-    # do not synthesize base-only fields here; if num_gpu_blocks was omitted,
-    # replay materialization will estimate capacity for the candidate TP shape.
-    return MockEngineArgs.from_json(json.dumps(payload))
+) -> dict[str, Any]:
+    payload = copy.deepcopy(dict(base_args))
+    engine = payload.setdefault("engine", {})
+    engine["backend"] = backend
+    engine["worker_type"] = worker_type
+    payload["tensor_parallel_size"] = tp_size
+    perf_config = dict(performance_config(payload) or {})
+    perf_config.update(
+        model=model, system=system, backend=backend, worker_type=worker_type, tp=tp_size
+    )
+    perf_config.setdefault("backend_version", AIS_BACKEND_VERSIONS[backend])
+    if "block_size" in engine:
+        perf_config.setdefault("kv_block_size", engine["block_size"])
+    engine["timing_model"] = {
+        "type": "external",
+        "provider": "ais",
+        "config": perf_config,
+    }
+    return normalize_mocker_config(payload)
 
 
 def _build_agg_candidate_engine_args(
@@ -42,7 +50,7 @@ def _build_agg_candidate_engine_args(
     backend: str,
     system: str,
     model: str,
-) -> MockEngineArgs:
+) -> dict[str, Any]:
     return _build_candidate_engine_args(
         base_args=base_args,
         tp_size=tp_size,

@@ -40,7 +40,6 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 )
 
 // DynamoGraphDeploymentScalingAdapterReconciler reconciles a DynamoGraphDeploymentScalingAdapter object
@@ -187,7 +186,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) SetupWithManager(mgr ctr
 			}),
 		).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)).
-		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeploymentScalingAdapter))
+		Complete(r)
 }
 
 // findAdaptersForDGD maps DGD changes to adapter reconcile requests.
@@ -211,10 +210,8 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) findAdaptersForDGD(ctx c
 			continue
 		}
 		requests = append(requests, reconcile.Request{
-			NamespacedName: types.NamespacedName{
-				Name:      adapterList.Items[i].Name,
-				Namespace: adapterList.Items[i].Namespace,
-			},
+			Name:      adapterList.Items[i].Name,
+			Namespace: adapterList.Items[i].Namespace,
 		})
 	}
 

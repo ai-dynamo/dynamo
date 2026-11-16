@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::{Arc, LazyLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::unified_client::RequestPlaneClient;
 use super::*;
@@ -12,7 +12,7 @@ use crate::component::Instance;
 use crate::discovery::EndpointInstanceId;
 use crate::dynamo_nvtx_range;
 use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data, EngineContextGuard};
-use crate::error::{DynamoError, ErrorType};
+use crate::error::{DynamoError, ErrorClass, ErrorType};
 use crate::logging::inject_trace_headers_into_map;
 use crate::metrics::frontend_perf::STAGE_DURATION_SECONDS;
 use crate::metrics::request_plane::{
@@ -22,18 +22,23 @@ use crate::metrics::request_plane::{
 use crate::pipeline::network::ConnectionInfo;
 use crate::pipeline::network::NetworkStreamWrapper;
 use crate::pipeline::network::PendingConnections;
+use crate::pipeline::network::RegisteredResponsePlane;
 use crate::pipeline::network::RegisteredStream;
 use crate::pipeline::network::RequestControlMessage;
 use crate::pipeline::network::RequestPlanePayloadCodec;
 use crate::pipeline::network::RequestType;
+use crate::pipeline::network::ResponsePlaneMode;
+use crate::pipeline::network::ResponseService;
 use crate::pipeline::network::ResponseType;
 use crate::pipeline::network::StreamOptions;
+use crate::pipeline::network::StreamPrologueError;
 use crate::pipeline::network::StreamProvider;
 use crate::pipeline::network::StreamReceiver;
 use crate::pipeline::network::StreamSender;
 use crate::pipeline::network::TwoPartCodec;
 use crate::pipeline::network::codec::TwoPartMessage;
 use crate::pipeline::network::tcp;
+use crate::pipeline::network::{quic_response, velo_response};
 use crate::pipeline::{ManyIn, ManyOut, PipelineError, ResponseStream, SingleIn};
 use crate::protocols::maybe_error::MaybeError;
 use crate::traits::DistributedRuntimeProvider;
@@ -46,6 +51,84 @@ use std::task::{Context, Poll};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
+
+/// Error reasons that must never be attached as the cause of a pre-stream
+/// failure, because migration classification walks the whole cause chain.
+///
+/// This must match `MIGRATION_BLOCKING_REASONS` in `lib/llm/src/migration.rs`.
+pub(crate) const MIGRATION_SENSITIVE_ERROR_REASONS: &[&str] = &[
+    "request.cancelled",
+    "request.deadline_exceeded",
+    "backend.cancelled",
+    "capacity.exhausted",
+    "capacity.pool_exhausted",
+];
+
+/// Whether any link of `err`'s chain carries a migration-sensitive reason.
+fn is_migration_sensitive(err: &DynamoError) -> bool {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(source) = current {
+        if let Some(error) = source.downcast_ref::<DynamoError>()
+            && MIGRATION_SENSITIVE_ERROR_REASONS.contains(&error.reason().as_str())
+        {
+            return true;
+        }
+        current = source.source();
+    }
+    false
+}
+
+/// Build the error returned when the worker fails before any response bytes.
+///
+/// A typed [`ErrorClass::InvalidRequest`] refusal from the worker's prologue is
+/// returned as the worker's own error. The worker is reachable and refused the
+/// request itself, so a [`ErrorType::CannotConnect`] ancestor would make fault
+/// detection quarantine a healthy worker and make migration resend the request
+/// to every other worker, which would refuse it too.
+///
+/// Every other failure keeps the outer [`ErrorType::CannotConnect`], so retry
+/// classification of the outer error is unchanged. A typed error from the
+/// worker's prologue is attached as the cause, which consumers reach with the
+/// semantic migration classifier.
+///
+/// Because that walk covers the whole chain, an attached cause is as visible as
+/// the outer type, so causes typed one of [`MIGRATION_SENSITIVE_ERROR_REASONS`]
+/// are withheld rather than attached. The worker's text stays in the message
+/// either way; only the machine-readable type is withheld.
+pub(crate) fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoError {
+    let builder = DynamoError::builder()
+        .error_type(ErrorType::CannotConnect)
+        .message(format!(
+            "Worker generate() failed before response stream: {error}"
+        ));
+
+    match error.typed_error {
+        Some(typed)
+            if !is_migration_sensitive(&typed) && typed.class() == ErrorClass::InvalidRequest =>
+        {
+            typed
+        }
+        Some(typed) if !is_migration_sensitive(&typed) => builder.cause(typed).build(),
+        _ => builder.build(),
+    }
+}
+
+/// White-box handles for the cross-crate tests in `dynamo-llm`. Gated so a
+/// normal build of this crate exposes no public API for them.
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub mod testing {
+    use super::{DynamoError, StreamPrologueError};
+
+    /// The semantic reason set is pinned by a cross-crate test in `lib/llm/src/migration.rs`.
+    pub fn migration_sensitive_error_reasons() -> &'static [&'static str] {
+        super::MIGRATION_SENSITIVE_ERROR_REASONS
+    }
+
+    pub fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoError {
+        super::pre_stream_failure_error(error)
+    }
+}
 
 const FIRST_RESPONSE_GUARD_CONTEXT_KEY: &str = "dynamo.request_plane.first_response_guard";
 // A timeout cannot safely release registered memory while a remote read may
@@ -111,16 +194,22 @@ fn try_acquire_retained_dispatch_permit(
 
 // Only dispatch and the first response are detached from the caller. The tail
 // is handed back so normal stream polling and cancellation stay on the caller.
+//
+// With `establish`, the caller stops waiting once the worker has ACKed and not
+// established its response stream within the timeout. The detached task keeps
+// the guard, permit, and response registration until the worker responds or
+// the stream closes, since a remote read of guarded memory may be active.
 async fn dispatch_with_first_response_guard<F, U>(
     dispatch: F,
     guard: EngineContextGuard,
     permit: OwnedSemaphorePermit,
+    establish: Option<(Duration, tokio::sync::oneshot::Receiver<()>)>,
 ) -> Result<ManyOut<U>, Error>
 where
     F: Future<Output = Result<ManyOut<U>, Error>> + Send + 'static,
     U: Data + MaybeError,
 {
-    let (dispatch_tx, dispatch_rx) = tokio::sync::oneshot::channel();
+    let (dispatch_tx, mut dispatch_rx) = tokio::sync::oneshot::channel();
 
     tokio::spawn(
         async move {
@@ -162,9 +251,55 @@ where
         .in_current_span(),
     );
 
-    dispatch_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("retained request dispatch ended before setup completed"))?
+    let setup_ended = || anyhow::anyhow!("retained request dispatch ended before setup completed");
+    let Some((timeout, acked)) = establish else {
+        return dispatch_rx.await.map_err(|_| setup_ended())?;
+    };
+    // A dispatch that fails before the ACK drops `acked`; its error still
+    // arrives on `dispatch_rx`.
+    let expired = async move {
+        if acked.await.is_err() {
+            std::future::pending::<()>().await;
+        }
+        tokio::time::sleep(timeout).await;
+    };
+    tokio::select! {
+        biased;
+        result = &mut dispatch_rx => result.map_err(|_| setup_ended())?,
+        () = expired => {
+            tracing::warn!(
+                timeout_secs = timeout.as_secs_f64(),
+                "worker accepted the request but did not establish its response stream before the timeout"
+            );
+            Err(establish_timeout_error(timeout))
+        }
+    }
+}
+
+/// How `dispatch_and_finalize` waits for the worker's response stream after
+/// the worker ACKs the request.
+enum PrologueWait {
+    /// Wait until the stream is established, fails, or the request is cancelled.
+    Unbounded,
+    /// Fail with `ResponseTimeout` if the stream is not established within this
+    /// long after the ACK. Expiry drops the response registration.
+    Deadline(Duration),
+    /// First-response-guarded dispatch: cancellation is deferred until the
+    /// prologue and the wait is unbounded here. `acked` fires after the ACK so
+    /// the caller can bound its own wait.
+    Retained {
+        acked: Option<tokio::sync::oneshot::Sender<()>>,
+    },
+}
+
+fn establish_timeout_error(timeout: Duration) -> Error {
+    DynamoError::builder()
+        .error_type(ErrorType::ResponseTimeout)
+        .message(format!(
+            "worker did not establish its response stream within {timeout:?} of accepting the request"
+        ))
+        .build()
+        .into()
 }
 
 /// Stream transformation helper that:
@@ -173,7 +308,7 @@ where
 /// - hands off the `InflightGuard` to a stream-lifetime `InflightDecStream` so
 ///   the inflight gauge stays accurate for the whole response lifetime.
 fn decode_response_stream<U>(
-    response_rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    response_rx: super::super::ByteReceiver,
     engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
     queue_start: Instant,
     tx_start: Instant,
@@ -186,8 +321,18 @@ where
     let engine_ctx_for_stream = engine_ctx.clone();
     let mut is_complete_final = false;
     let mut first_response = true;
-    let stream = StreamNotifyClose::new(ReceiverStream::new(response_rx)).filter_map(move |res| {
+    let stream = StreamNotifyClose::new(response_rx).filter_map(move |res| {
         if let Some(res_bytes) = res {
+            let res_bytes = match res_bytes {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    if is_complete_final || engine_ctx_for_stream.is_stopped() {
+                        return None;
+                    }
+                    is_complete_final = true; // Emit the transport error exactly once.
+                    return Some(U::from_err(error));
+                }
+            };
             if first_response {
                 first_response = false;
                 REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.observe(tx_start.elapsed().as_secs_f64());
@@ -458,10 +603,7 @@ impl<S> Drop for InflightDecStream<S> {
     }
 }
 
-/// Extract the TCP stream subject from a [`ConnectionInfo`], if it carries a
-/// well-formed [`tcp::TcpStreamConnectionInfo`]. Used for the pre-dispatch
-/// tombstone check.
-fn subject_of(conn_info: &ConnectionInfo) -> Option<String> {
+fn tcp_subject_of(conn_info: &ConnectionInfo) -> Option<String> {
     serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&conn_info.info)
         .ok()
         .map(|ci| ci.subject)
@@ -473,6 +615,9 @@ pub struct AddressedRequest<T> {
     /// Carries endpoint name + instance_id so cancellation is scoped to the
     /// exact (endpoint, instance) pair, not all endpoints on the same runtime.
     instance: Option<Instance>,
+    /// Bound on the wait for the worker's response stream, measured from the
+    /// worker's request-plane ACK. See [`Self::with_establish_timeout`].
+    establish_timeout: Option<Duration>,
 }
 
 impl<T> AddressedRequest<T> {
@@ -481,6 +626,7 @@ impl<T> AddressedRequest<T> {
             request,
             address,
             instance: None,
+            establish_timeout: None,
         }
     }
 
@@ -489,7 +635,21 @@ impl<T> AddressedRequest<T> {
             request,
             address,
             instance: Some(instance),
+            establish_timeout: None,
         }
+    }
+
+    /// Fail a unary dispatch with `ResponseTimeout` when the worker ACKs the
+    /// request but does not establish its response stream within `timeout`.
+    /// The deadline starts at the ACK, so time spent on local admission,
+    /// connection setup, and the send does not count against it.
+    pub fn with_establish_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.establish_timeout = timeout;
+        self
+    }
+
+    pub fn establish_timeout(&self) -> Option<Duration> {
+        self.establish_timeout
     }
 
     pub fn for_instance(request: T, instance: Instance) -> Self {
@@ -509,8 +669,15 @@ pub struct AddressedPushRouter {
     // Request transport (unified trait object - works with all transports)
     req_client: Arc<dyn RequestPlaneClient>,
 
-    // Response transport (TCP streaming - unchanged)
-    resp_transport: Arc<tcp::server::TcpStreamServer>,
+    request_callbacks: Arc<tcp::server::TcpStreamServer>,
+    responses: ResponseServer,
+}
+
+#[derive(Clone)]
+enum ResponseServer {
+    Tcp(Arc<tcp::server::TcpStreamServer>),
+    /// QUIC or Velo. Request streams still use `request_callbacks`.
+    Registered(Arc<dyn RegisteredResponsePlane>),
 }
 
 impl AddressedPushRouter {
@@ -520,12 +687,25 @@ impl AddressedPushRouter {
     /// The client is provided as a trait object, hiding the specific implementation.
     pub fn new(
         req_client: Arc<dyn RequestPlaneClient>,
-        resp_transport: Arc<tcp::server::TcpStreamServer>,
+        responses: Arc<tcp::server::TcpStreamServer>,
     ) -> Result<Arc<Self>> {
         Ok(Arc::new(Self {
             req_client,
-            resp_transport,
+            request_callbacks: responses.clone(),
+            responses: ResponseServer::Tcp(responses),
         }))
+    }
+
+    fn new_quic(
+        req_client: Arc<dyn RequestPlaneClient>,
+        request_callbacks: Arc<tcp::server::TcpStreamServer>,
+        responses: Arc<quic_response::QuicResponseServer>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            req_client,
+            request_callbacks,
+            responses: ResponseServer::Registered(responses),
+        })
     }
 
     pub async fn from_runtime_provider(
@@ -533,28 +713,60 @@ impl AddressedPushRouter {
     ) -> Result<Arc<Self>> {
         let manager = provider.drt().network_manager();
         let req_client = manager.create_client()?;
-        let resp_transport = provider.drt().tcp_server().await?;
+        let request_callbacks = provider.drt().tcp_server().await?;
 
         tracing::debug!(
             transport = req_client.transport_name(),
             "Creating AddressedPushRouter with request plane client"
         );
 
-        Self::new(req_client, resp_transport)
+        match provider.drt().response_plane() {
+            ResponsePlaneMode::Tcp => Self::new(req_client, request_callbacks),
+            ResponsePlaneMode::Velo => {
+                let responses = provider.drt().velo_response_service().await?;
+                Ok(Arc::new(Self {
+                    req_client,
+                    request_callbacks,
+                    responses: ResponseServer::Registered(responses),
+                }))
+            }
+            ResponsePlaneMode::Quic => {
+                let responses = provider.drt().quic_response_server().await?;
+                Ok(Self::new_quic(req_client, request_callbacks, responses))
+            }
+        }
     }
 
-    /// Cancel all pending response-stream registrations for an instance.
+    /// Cancel stream registrations for an instance. The TCP and Velo response
+    /// planes cancel pending handshakes and let established response streams
+    /// drain; the QUIC response plane also cancels active streams.
     pub async fn cancel_instance_streams(&self, instance_id: &EndpointInstanceId) -> usize {
-        self.resp_transport
-            .cancel_instance_streams(instance_id)
-            .await
+        match &self.responses {
+            ResponseServer::Tcp(responses) => responses.cancel_instance_streams(instance_id).await,
+            ResponseServer::Registered(responses) => {
+                let response_count = responses.cancel_instance_streams(instance_id).await;
+                response_count
+                    + self
+                        .request_callbacks
+                        .cancel_instance_streams(instance_id)
+                        .await
+            }
+        }
     }
 
     /// Clear the tombstone after an instance reappears in discovery.
     pub async fn clear_instance_tombstone(&self, instance_id: &EndpointInstanceId) {
-        self.resp_transport
-            .clear_instance_tombstone(instance_id)
-            .await
+        match &self.responses {
+            ResponseServer::Tcp(responses) => {
+                responses.clear_instance_tombstone(instance_id).await;
+            }
+            ResponseServer::Registered(responses) => {
+                responses.clear_instance_tombstone(instance_id).await;
+                self.request_callbacks
+                    .clear_instance_tombstone(instance_id)
+                    .await;
+            }
+        }
     }
 
     /// Bidirectional generation. Note that it doesn't implement the AsyncEngine trait directly
@@ -583,6 +795,7 @@ impl AddressedPushRouter {
             Some(&instance),
             None,
             Some(input_stream),
+            PrologueWait::Unbounded,
         )
         .await
     }
@@ -590,8 +803,8 @@ impl AddressedPushRouter {
     /// Shared dispatch core for both unary and bidirectional requests. Wire
     /// shape is inferred from the inputs:
     ///   - `input_stream = Some(_)` + `request = None` → bidirectional,
-    ///     header-only envelope. The worker dials back for both halves and
-    ///     pulls request frames off the spawned forwarder.
+    ///     header-only envelope. The worker opens the optional TCP request
+    ///     callback and sends responses over QUIC.
     ///   - `input_stream = None` + `request = Some(_)` → unary, two-part
     ///     `[ctrl, data]` envelope. The payload travels in the data part.
     async fn dispatch_and_finalize<T, U>(
@@ -601,12 +814,15 @@ impl AddressedPushRouter {
         instance: Option<&Instance>,
         request: Option<&T>,
         input_stream: Option<crate::engine::DataStream<T>>,
+        prologue_wait: PrologueWait,
     ) -> Result<ManyOut<U>, Error>
     where
         T: Data + Serialize,
         U: Data + for<'de> Deserialize<'de> + MaybeError,
     {
         let engine_ctx = context.context();
+        let defer_cancellation_until_prologue =
+            matches!(prologue_wait, PrologueWait::Retained { .. });
 
         let queue_start = Instant::now();
         REQUEST_PLANE_INFLIGHT.inc();
@@ -615,41 +831,69 @@ impl AddressedPushRouter {
         let enable_request_stream = input_stream.is_some();
         let payload_codec = payload_codec_for_worker(instance);
 
-        // Hold the `RegisteredStream` as their RAII cleanup stays armed while held,
-        // which simplifies the cancellation of registration on error. Each side is
-        // disarmed by `into_parts()` on awaiting stream provider: past that point the
-        // subject is reaped by the worker's dial-in (instance healthy) or the discovery
-        // watcher (instance dropped), so no cleanup is owed.
+        // Keep registration cleanup armed through dispatch errors. The response
+        // registration also stays armed while waiting for the response prologue;
+        // the request-stream registration is handed off to its forwarder below.
         let (send_registered, recv_registered) = self
-            .register_streams(engine_ctx.clone(), enable_request_stream, true)
+            .register_streams(
+                engine_ctx.clone(),
+                enable_request_stream,
+                defer_cancellation_until_prologue,
+            )
             .await?;
-        let recv_registered = recv_registered.ok_or_else(|| {
-            anyhow::anyhow!("response stream registration missing despite enable_response_stream")
-        })?;
 
         // Tombstone check: if discovery already removed the worker, fail fast
         // with a migratable error rather than writing to the request plane.
         // Dropping the held registrations on this return runs their cleanup.
-        let recv_subject = subject_of(&recv_registered.connection_info);
+        let response_registration = recv_registered.registration_id();
+        let response_subject = tcp_subject_of(&recv_registered.connection_info);
         let send_subject = send_registered
             .as_ref()
-            .and_then(|r| subject_of(&r.connection_info));
-        if let (Some(subject), Some(inst)) = (&recv_subject, instance)
-            && !self
-                .resp_transport
-                .associate_instance(
-                    subject,
-                    send_subject.as_deref(),
-                    &inst.endpoint_instance_id(),
-                )
-                .await
-        {
-            return Err(anyhow::anyhow!(
-                DynamoError::builder()
-                    .error_type(ErrorType::Disconnected)
-                    .message("Worker removed before request could be sent (tombstoned instance)")
-                    .build()
-            ));
+            .and_then(|r| tcp_subject_of(&r.connection_info));
+        if let Some(inst) = instance {
+            let instance_id = inst.endpoint_instance_id();
+            let associated = match &self.responses {
+                ResponseServer::Tcp(responses) => match response_subject.as_deref() {
+                    Some(subject) => {
+                        responses
+                            .associate_instance(subject, send_subject.as_deref(), &instance_id)
+                            .await
+                    }
+                    None => false,
+                },
+                ResponseServer::Registered(responses) => {
+                    let response_ok = match response_registration {
+                        Some(registration_id) => {
+                            responses
+                                .associate_instance(registration_id, &instance_id)
+                                .await
+                        }
+                        None => false,
+                    };
+                    let request_ok = match send_subject.as_deref() {
+                        Some(subject) => {
+                            self.request_callbacks
+                                .associate_request_instance(subject, &instance_id)
+                                .await
+                        }
+                        None => true,
+                    };
+                    if !request_ok && let Some(registration_id) = response_registration {
+                        responses.cancel_response(registration_id).await;
+                    }
+                    response_ok && request_ok
+                }
+            };
+            if !associated {
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Disconnected)
+                        .message(
+                            "Worker removed before request could be sent (tombstoned instance)"
+                        )
+                        .build()
+                ));
+            }
         }
 
         let buffer = build_request_envelope(
@@ -678,6 +922,17 @@ impl AddressedPushRouter {
             return Err(err.into());
         }
 
+        let establish_timeout = match prologue_wait {
+            PrologueWait::Unbounded => None,
+            PrologueWait::Deadline(timeout) => Some(timeout),
+            PrologueWait::Retained { acked } => {
+                if let Some(acked) = acked {
+                    let _ = acked.send(());
+                }
+                None
+            }
+        };
+
         // Spawn the forwarder before awaiting the response prologue so request
         // frames pre-load into the worker's input buffer while the engine
         // initialises in parallel. The response provider only resolves after
@@ -697,31 +952,39 @@ impl AddressedPushRouter {
             .await?;
         }
 
-        let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
+        let _nvtx_wait = dynamo_nvtx_range!("transport.response.wait_backend");
         tracing::trace!(request_id = context.id(), "awaiting transport handshake");
 
-        // Disarms the recv-side cleanup; see the holding rationale above.
-        let (_recv_conn_info, response_stream_provider) = recv_registered.into_parts();
+        // Dropping the pending wait on expiry removes the response registration.
+        let prologue = recv_registered.wait();
+        let prologue = match establish_timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, prologue).await {
+                Ok(prologue) => prologue,
+                Err(_) => {
+                    tracing::warn!(
+                        request_id = context.id(),
+                        instance_id = ?instance.map(|inst| inst.id()),
+                        timeout_secs = timeout.as_secs_f64(),
+                        "worker accepted the request but did not establish its response stream before the timeout"
+                    );
+                    return Err(establish_timeout_error(timeout));
+                }
+            },
+            None => prologue.await,
+        };
 
         // RecvError → migratable Disconnected (watcher cancelled the subject
         // or the worker died before establishing the response stream).
-        let response_stream = match response_stream_provider.await {
+        let response_stream = match prologue {
             Ok(Ok(stream)) => stream,
-            Ok(Err(e)) => {
-                // generate() failed before any response bytes; migrate via
-                // CannotConnect since the dominant cause is a worker-local
-                // setup/version issue. The wire prologue carries only an
-                // opaque string today, so app-level rejections also retry
-                // -- safe because no side effects are visible yet. Follow-up:
-                // structured prologue error type for finer routing.
-                return Err(anyhow::anyhow!(
-                    DynamoError::builder()
-                        .error_type(ErrorType::CannotConnect)
-                        .message(format!(
-                            "Worker generate() failed before response stream: {e}"
-                        ))
-                        .build()
+            Err(_) | Ok(Err(_)) if engine_ctx.is_stopped() || engine_ctx.is_killed() => {
+                return Ok(ResponseStream::new(
+                    Box::pin(futures::stream::empty()),
+                    engine_ctx,
                 ));
+            }
+            Ok(Err(e)) => {
+                return Err(anyhow::anyhow!(pre_stream_failure_error(e)));
             }
             Err(_recv_err) => {
                 // oneshot dropped: either the discovery watcher cancelled
@@ -746,32 +1009,53 @@ impl AddressedPushRouter {
         ))
     }
 
-    /// Register the requested halves of a data-plane stream with the response
-    /// transport. Returns `(send_stream, recv_stream)` mirroring the
-    /// `PendingConnections::into_parts` shape — either side is `None` when not
-    /// requested. Asserts post-registration that the transport produced
-    /// exactly the requested shape; a mismatch is a transport-layer bug, not
-    /// a runtime error path.
+    /// Register the optional TCP request callback and selected response stream.
     async fn register_streams(
         &self,
         engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
         enable_request_stream: bool,
-        enable_response_stream: bool,
-    ) -> Result<
-        (
-            Option<RegisteredStream<StreamSender>>,
-            Option<RegisteredStream<StreamReceiver>>,
-        ),
-        Error,
-    > {
-        let options = StreamOptions::builder()
-            .context(engine_ctx)
-            .enable_request_stream(enable_request_stream)
-            .enable_response_stream(enable_response_stream)
-            .build()?;
-
-        let pending: PendingConnections = self.resp_transport.register(options).await;
-        let (send_stream, recv_stream) = pending.into_parts();
+        defer_cancellation_until_prologue: bool,
+    ) -> Result<(
+        Option<RegisteredStream<StreamSender>>,
+        RegisteredStream<StreamReceiver>,
+    )> {
+        let (send_stream, recv_stream) = match &self.responses {
+            ResponseServer::Tcp(responses) => {
+                let options = StreamOptions::builder()
+                    .context(engine_ctx)
+                    .enable_request_stream(enable_request_stream)
+                    .enable_response_stream(true)
+                    .defer_cancellation_until_prologue(defer_cancellation_until_prologue)
+                    .build()?;
+                let pending: PendingConnections = responses.register(options).await;
+                pending.into_parts()
+            }
+            ResponseServer::Registered(responses) => {
+                let send_stream = if enable_request_stream {
+                    let options = StreamOptions::builder()
+                        .context(engine_ctx.clone())
+                        .enable_request_stream(true)
+                        .enable_response_stream(false)
+                        .build()?;
+                    let pending: PendingConnections =
+                        self.request_callbacks.register(options).await;
+                    pending.send_stream
+                } else {
+                    None
+                };
+                (
+                    send_stream,
+                    Some(
+                        responses
+                            .clone()
+                            .register_stream(engine_ctx, defer_cancellation_until_prologue)?,
+                    ),
+                )
+            }
+        };
+        let recv_stream = recv_stream.ok_or_else(|| {
+            anyhow::anyhow!("response stream registration missing despite response being enabled")
+        })?;
 
         // Transport-layer invariant: the data plane produces exactly the halves
         // we requested. A mismatch is a bug in the transport, not a runtime
@@ -781,12 +1065,6 @@ impl AddressedPushRouter {
             enable_request_stream,
             "data-plane registration: request-stream presence does not match request"
         );
-        debug_assert_eq!(
-            recv_stream.is_some(),
-            enable_response_stream,
-            "data-plane registration: response-stream presence does not match request"
-        );
-
         Ok((send_stream, recv_stream))
     }
 
@@ -826,15 +1104,18 @@ impl AddressedPushRouter {
 /// normal responses, including the empty "queued" ACK.
 fn detect_worker_rejection_response(res_bytes: &[u8]) -> Option<DynamoError> {
     const OVERLOAD_PREFIX: &[u8] = b"Server overloaded:";
-    const UNAVAILABLE_PREFIX: &[u8] = b"Server unavailable:";
+    let unavailable_prefix = crate::pipeline::network::ACK_UNAVAILABLE_PREFIX.as_bytes();
 
     let error_type = if res_bytes.starts_with(OVERLOAD_PREFIX) {
         // This ACK came from the one worker addressed by this dispatch. It says
         // nothing about capacity elsewhere in the eligible pool, so preserve
         // worker scope for migration instead of reporting pool exhaustion.
         ErrorType::WorkerOverloaded
-    } else if res_bytes.starts_with(UNAVAILABLE_PREFIX) {
-        ErrorType::Unavailable
+    } else if res_bytes.starts_with(unavailable_prefix) {
+        // Same scope: the addressed server is up but has no handler for this
+        // instance, or is closing its worker pool. Other instances may still
+        // serve the endpoint, so this stays migratable.
+        ErrorType::WorkerUnavailable
     } else {
         return None;
     };
@@ -857,6 +1138,13 @@ mod rejection_detection_tests {
         let err = detect_worker_rejection_response(b"Server overloaded: worker at capacity")
             .expect("should detect overload");
         assert_eq!(err.error_type(), ErrorType::WorkerOverloaded);
+    }
+
+    #[test]
+    fn unavailable_payload_maps_to_worker_unavailable() {
+        let err = detect_worker_rejection_response(b"Server unavailable: unknown endpoint x")
+            .expect("should detect unavailable");
+        assert_eq!(err.error_type(), ErrorType::WorkerUnavailable);
     }
 
     #[test]
@@ -887,6 +1175,7 @@ where
 {
     async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
         let (addressed_request, context) = request.transfer(());
+        let establish_timeout = addressed_request.establish_timeout();
         let (request, address, instance_info) = addressed_request.into_parts();
 
         let first_response_guard = context
@@ -896,6 +1185,13 @@ where
         if let Some(guard) = first_response_guard.and_then(|guard| guard.take()) {
             let permit =
                 try_acquire_retained_dispatch_permit(&RETAINED_FIRST_RESPONSE_DISPATCH_PERMITS)?;
+            let (acked, establish) = match establish_timeout {
+                Some(timeout) => {
+                    let (acked_tx, acked_rx) = tokio::sync::oneshot::channel();
+                    (Some(acked_tx), Some((timeout, acked_rx)))
+                }
+                None => (None, None),
+            };
             let router = self.clone();
             let dispatch = async move {
                 router
@@ -905,18 +1201,24 @@ where
                         instance_info.as_ref(),
                         Some(&request),
                         None,
+                        PrologueWait::Retained { acked },
                     )
                     .await
             };
-            return dispatch_with_first_response_guard(dispatch, guard, permit).await;
+            return dispatch_with_first_response_guard(dispatch, guard, permit, establish).await;
         }
 
+        let prologue_wait = match establish_timeout {
+            Some(timeout) => PrologueWait::Deadline(timeout),
+            None => PrologueWait::Unbounded,
+        };
         self.dispatch_and_finalize::<T, U>(
             &context,
             address,
             instance_info.as_ref(),
             Some(&request),
             None,
+            prologue_wait,
         )
         .await
     }
@@ -955,8 +1257,7 @@ where
         input: ManyIn<T>,
     ) -> Result<ManyOut<U>, Error>;
 
-    /// Discovery-driven cleanup when an instance leaves — the request plane
-    /// cancels its call-home streams; another transport frees per-instance state.
+    /// Release per-instance transport state when discovery removes an instance.
     async fn on_instance_removed(&self, _id: &EndpointInstanceId) {}
 
     /// Discovery-driven notification when an instance (re)appears — the request
@@ -997,7 +1298,7 @@ where
                 endpoint = %id.endpoint,
                 instance_id = id.instance_id,
                 cancelled = n,
-                "Cancelled pending response streams for removed instance (discovery-driven cleanup)"
+                "Cancelled stream registrations for removed instance (discovery-driven cleanup)"
             );
         }
     }
@@ -1010,17 +1311,24 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, FIRST_RESPONSE_GUARD_CONTEXT_KEY,
-        FirstResponseGuard, RequestControlMessage, RequestPlanePayloadCodec, RequestType,
-        ResponseType, TwoPartCodec, attach_first_response_guard, build_request_envelope,
-        dispatch_with_first_response_guard, payload_codec_for_worker,
-        propagate_first_response_guard, serialize_control_message,
+        AddressedPushRouter, AddressedRequest, CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo,
+        FIRST_RESPONSE_GUARD_CONTEXT_KEY, FirstResponseGuard, RequestControlMessage,
+        RequestPlaneClient, RequestPlanePayloadCodec, RequestType, ResponseType, TwoPartCodec,
+        attach_first_response_guard, build_request_envelope, dispatch_with_first_response_guard,
+        payload_codec_for_worker, propagate_first_response_guard, serialize_control_message,
         try_acquire_retained_dispatch_permit,
     };
     use crate::{
         component::{Instance, TransportType},
+        engine::AsyncEngine,
         error::{ErrorType, match_error_chain},
-        pipeline::{AsyncEngineContextProvider, Context, ManyOut, ResponseStream},
+        pipeline::{
+            AsyncEngineContextProvider, Context, ManyOut, ResponseStream,
+            network::{
+                egress::unified_client::Headers,
+                tcp::{client::TcpClient, server::TcpStreamServer},
+            },
+        },
         protocols::annotated::Annotated,
     };
     use serde::{Deserialize, Serialize};
@@ -1057,6 +1365,203 @@ mod tests {
     #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
     struct TestRequest {
         value: u64,
+    }
+
+    #[tokio::test]
+    async fn quic_router_delivers_data_after_successful_wait() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::quic_router_delivers_data_after_successful_wait"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
+        use super::{
+            AddressedPushRouter, AddressedRequest, RequestPlaneClient, quic_response, tcp,
+        };
+        use crate::pipeline::{AsyncEngine, SingleIn};
+        use bytes::Bytes;
+        use tokio::sync::mpsc;
+        use tokio_util::sync::CancellationToken;
+
+        // Capture the request envelope, but exercise the real router and QUIC response plane.
+        struct CaptureRequest(mpsc::Sender<RequestControlMessage>);
+
+        #[async_trait::async_trait]
+        impl RequestPlaneClient for CaptureRequest {
+            async fn send_request(
+                &self,
+                _address: String,
+                payload: Bytes,
+                _headers: super::super::unified_client::Headers,
+            ) -> anyhow::Result<Bytes> {
+                let message = TwoPartCodec::default().decode_message(payload)?;
+                let control = serde_json::from_slice(&message.header)?;
+                self.0.send(control).await?;
+                Ok(Bytes::new())
+            }
+
+            fn transport_name(&self) -> &'static str {
+                "test"
+            }
+
+            fn is_healthy(&self) -> bool {
+                true
+            }
+        }
+
+        let shutdown = CancellationToken::new();
+        let _shutdown_guard = shutdown.clone().drop_guard();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let address = "127.0.0.1:0".parse().unwrap();
+            let responses =
+                quic_response::QuicResponseServer::new(address, address, shutdown).unwrap();
+            // The router also needs a TCP request-callback server. Isolate its TLS
+            // configuration from tests that change the process-wide environment.
+            let callbacks = temp_env::async_with_vars(
+                [
+                    ("DYN_TCP_TLS_CERT_PATH", None::<&str>),
+                    ("DYN_TCP_TLS_KEY_PATH", None),
+                    ("DYN_TCP_TLS_CLIENT_CA_CERT_PATH", None),
+                ],
+                tcp::server::TcpStreamServer::new(
+                    tcp::server::ServerOptions::builder()
+                        .interface(Some("127.0.0.1".to_string()))
+                        .build()
+                        .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+            let (request_tx, mut request_rx) = mpsc::channel(1);
+            let router = AddressedPushRouter::new_quic(
+                Arc::new(CaptureRequest(request_tx)),
+                callbacks,
+                responses,
+            );
+            let request = SingleIn::new(AddressedRequest::new(42_u64, "test".to_string()));
+            let pool = quic_response::QuicResponseClientPool::from_env().unwrap();
+            let (response, (mut sender, payload_codec)) =
+                tokio::join!(router.generate(request), async {
+                    let control = request_rx.recv().await.unwrap();
+                    let worker_context =
+                        Context::with_id_and_metadata((), control.id, control.metadata);
+                    let mut sender = pool
+                        .sender(worker_context.context(), control.connection_info)
+                        .await
+                        .unwrap();
+                    sender.send_prologue(None).await.unwrap();
+                    (sender, control.payload_codec)
+                });
+
+            // Send data only after generate() returns through wait(), so cleanup on
+            // success cannot be hidden by data buffered before the handshake finishes.
+            let mut response: ManyOut<Annotated<u64>> = response.unwrap();
+            // The first item uses QUIC's priority lane; the second uses its bulk lane.
+            for value in [1_u64, 2] {
+                sender
+                    .send(
+                        payload_codec
+                            .encode(&super::NetworkStreamWrapper {
+                                data: Some(Annotated::from_data(value)),
+                                complete_final: value == 2,
+                            })
+                            .unwrap()
+                            .into(),
+                    )
+                    .await
+                    .unwrap();
+                let item = response
+                    .next()
+                    .await
+                    .expect("QUIC stream ended before delivering data");
+                assert!(
+                    item.error.is_none(),
+                    "unexpected QUIC response error: {:?}",
+                    item.error
+                );
+                assert_eq!(item.data, Some(value));
+            }
+            sender.finish().await.unwrap();
+            assert!(
+                response.next().await.is_none(),
+                "QUIC stream must end after all data"
+            );
+        })
+        .await
+        .expect("QUIC router did not deliver the established response stream");
+    }
+
+    #[tokio::test]
+    async fn velo_transport_error_is_reported_only_for_active_requests() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::velo_transport_error_is_reported_only_for_active_requests"
+            ),
+            &[("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")],
+        ) {
+            return;
+        }
+        let runtime = crate::Runtime::from_current().unwrap();
+        let service = runtime.velo_response_service().service().await.unwrap();
+        for state in ["active", "stopped", "killed", "complete"] {
+            let context = Context::new(()).context();
+            let registered = service.register_response(context.clone(), false).unwrap();
+            let mut sender = service
+                .sender(
+                    Context::new(()).context(),
+                    registered.connection_info.clone(),
+                    None,
+                )
+                .await
+                .unwrap();
+            sender.send_prologue(None).await.unwrap();
+            let receiver = registered.wait().await.unwrap().unwrap();
+            if state == "complete" {
+                sender
+                    .send(
+                        RequestPlanePayloadCodec::Json
+                            .encode(&super::NetworkStreamWrapper::<Annotated<u64>> {
+                                data: None,
+                                complete_final: true,
+                            })
+                            .unwrap()
+                            .into(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            sender.abort().await.unwrap();
+            match state {
+                "stopped" => context.stop_generating(),
+                "killed" => context.kill(),
+                _ => {}
+            }
+            super::REQUEST_PLANE_INFLIGHT.inc();
+            let mut response = super::decode_response_stream::<Annotated<u64>>(
+                receiver.rx,
+                context,
+                std::time::Instant::now(),
+                std::time::Instant::now(),
+                super::InflightGuard::new(),
+                RequestPlanePayloadCodec::Json,
+            );
+            if state == "active" {
+                assert_eq!(
+                    response.next().await.unwrap().error.unwrap().error_type(),
+                    ErrorType::Disconnected
+                );
+            }
+            assert!(
+                response.next().await.is_none(),
+                "unexpected error after {state}"
+            );
+        }
+        runtime.velo_response_service().shutdown().await;
     }
 
     #[test]
@@ -1147,6 +1652,163 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn first_response_guard_defers_cancellation_until_prologue() {
+        struct CapturingClient(tokio::sync::mpsc::Sender<ConnectionInfo>);
+
+        #[async_trait::async_trait]
+        impl RequestPlaneClient for CapturingClient {
+            async fn send_request(
+                &self,
+                _address: String,
+                payload: bytes::Bytes,
+                _headers: Headers,
+            ) -> anyhow::Result<bytes::Bytes> {
+                let message = TwoPartCodec::default().decode_message(payload)?;
+                let control: RequestControlMessage = serde_json::from_slice(&message.header)?;
+                self.0.send(control.connection_info).await?;
+                Ok(bytes::Bytes::new())
+            }
+
+            fn transport_name(&self) -> &'static str {
+                "capturing"
+            }
+
+            fn is_healthy(&self) -> bool {
+                true
+            }
+        }
+
+        temp_env::async_with_vars(
+            [
+                ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
+                ("DYN_VELO_RESPONSE_TRANSPORT", Some("tcp")),
+                ("DYN_TCP_TLS_CERT_PATH", None::<&str>),
+                ("DYN_TCP_TLS_KEY_PATH", None),
+                ("DYN_TCP_TLS_CLIENT_CA_CERT_PATH", None),
+                ("DYN_TCP_TLS_CA_CERT_PATH", None),
+                ("DYN_TCP_TLS_INSECURE", None),
+                ("DYN_TCP_TLS_CLIENT_CERT_PATH", None),
+                ("DYN_TCP_TLS_CLIENT_KEY_PATH", None),
+            ],
+            async {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    let runtime = crate::Runtime::from_current().unwrap();
+                    for velo in [false, true] {
+                        let service = if velo {
+                            Some(runtime.velo_response_service().service().await.unwrap())
+                        } else {
+                            None
+                        };
+                        let server = TcpStreamServer::new(
+                            TcpStreamServer::options_builder()
+                                .interface(Some("127.0.0.1".to_string()))
+                                .build()
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                        let (connection_tx, mut connection_rx) = tokio::sync::mpsc::channel(1);
+                        let client = Arc::new(CapturingClient(connection_tx));
+                        let router = if let Some(service) = &service {
+                            Arc::new(AddressedPushRouter {
+                                req_client: client,
+                                request_callbacks: server,
+                                responses: super::ResponseServer::Registered(service.clone()),
+                            })
+                        } else {
+                            AddressedPushRouter::new(client, server).unwrap()
+                        };
+                        let (guard_dropped_tx, mut guard_dropped_rx) = oneshot::channel();
+                        let mut request =
+                            Context::new(AddressedRequest::new(1_u64, "worker".into()));
+                        attach_first_response_guard(
+                            &mut request,
+                            Arc::new(DropSignal(Some(guard_dropped_tx))),
+                        );
+                        let context = request.context();
+                        let generation = tokio::spawn(async move {
+                            let response: ManyOut<Annotated<u64>> =
+                                router.generate(request).await?;
+                            Ok::<_, anyhow::Error>(response)
+                        });
+                        let connection_info = connection_rx.recv().await.unwrap();
+                        let worker_context = Context::with_id_and_metadata(
+                            (),
+                            context.id().to_string(),
+                            Default::default(),
+                        )
+                        .context();
+                        let (mut tcp_sender, mut velo_sender) = if let Some(service) = service {
+                            (
+                                None,
+                                Some(
+                                    service
+                                        .sender(worker_context.clone(), connection_info, None)
+                                        .await
+                                        .unwrap(),
+                                ),
+                            )
+                        } else {
+                            (
+                                Some(
+                                    TcpClient::create_response_stream(
+                                        worker_context.clone(),
+                                        connection_info,
+                                        None,
+                                    )
+                                    .await
+                                    .unwrap(),
+                                ),
+                                None,
+                            )
+                        };
+
+                        for kill in [false, true] {
+                            if kill {
+                                context.kill();
+                            } else {
+                                context.stop_generating();
+                            }
+                            tokio::time::pause();
+                            tokio::time::advance(Duration::from_millis(100)).await;
+                            tokio::time::resume();
+                            assert!(!worker_context.is_stopped());
+                            assert_eq!(guard_dropped_rx.try_recv(), Err(TryRecvError::Empty));
+                            assert!(!generation.is_finished());
+                        }
+
+                        if let Some(sender) = &mut tcp_sender {
+                            sender
+                                .send_prologue(Some("worker setup failed".into()))
+                                .await
+                                .unwrap();
+                        } else {
+                            velo_sender
+                                .as_mut()
+                                .unwrap()
+                                .send_prologue(Some(
+                                    crate::pipeline::network::StreamPrologueError::from_message(
+                                        "worker setup failed",
+                                    ),
+                                ))
+                                .await
+                                .unwrap();
+                        }
+                        let mut response = generation.await.unwrap().unwrap();
+                        assert!(response.context().is_killed());
+                        assert!(response.next().await.is_none());
+                        guard_dropped_rx.await.unwrap();
+                    }
+                    runtime.velo_response_service().shutdown().await;
+                })
+                .await
+                .expect("guarded dispatch did not complete after the error prologue");
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn first_response_guard_outlives_cancelled_dispatch_waiter() {
         let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(1);
         let response_context = Context::new(()).context();
@@ -1180,6 +1842,7 @@ mod tests {
             },
             guard,
             permit,
+            None,
         ));
 
         dispatch_started_rx.await.unwrap();
@@ -1212,6 +1875,102 @@ mod tests {
         drop(released_permit);
     }
 
+    /// The retained deadline starts at the ACK. On expiry the caller gets a
+    /// `ResponseTimeout` while the detached dispatch keeps its guard and permit
+    /// until the worker's first response.
+    #[tokio::test]
+    async fn retained_establish_timeout_starts_at_ack_and_keeps_guard() {
+        let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(1);
+        let response_context = Context::new(()).context();
+        let (acked_tx, acked_rx) = oneshot::channel();
+        let (ack_tx, ack_rx) = oneshot::channel::<()>();
+        let (release_dispatch_tx, release_dispatch_rx) = oneshot::channel::<()>();
+        let (guard_dropped_tx, mut guard_dropped_rx) = oneshot::channel();
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = try_acquire_retained_dispatch_permit(&permits).unwrap();
+        let timeout = Duration::from_millis(100);
+
+        let mut waiter = tokio::spawn(dispatch_with_first_response_guard(
+            async move {
+                let _ = ack_rx.await;
+                let _ = acked_tx.send(());
+                let _ = release_dispatch_rx.await;
+                let response: ManyOut<Annotated<u64>> =
+                    ResponseStream::new(Box::pin(ReceiverStream::new(raw_rx)), response_context);
+                Ok(response)
+            },
+            Arc::new(DropSignal(Some(guard_dropped_tx))),
+            permit,
+            Some((timeout, acked_rx)),
+        ));
+
+        assert!(
+            tokio::time::timeout(timeout * 3, &mut waiter)
+                .await
+                .is_err(),
+            "time before the ACK must not count against the establish timeout"
+        );
+
+        ack_tx.send(()).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter did not time out after the ACK")
+            .unwrap()
+            .expect_err("dispatch without a response stream must time out");
+        assert!(
+            match_error_chain(error.as_ref(), &[ErrorType::ResponseTimeout], &[]),
+            "expected ResponseTimeout, got: {error}"
+        );
+        assert_eq!(guard_dropped_rx.try_recv(), Err(TryRecvError::Empty));
+        assert!(try_acquire_retained_dispatch_permit(&permits).is_err());
+
+        release_dispatch_tx.send(()).unwrap();
+        raw_tx.send(Annotated::from_data(1_u64)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), guard_dropped_rx)
+            .await
+            .expect("guard was not released after the first worker response")
+            .unwrap();
+    }
+
+    /// A retained dispatch that fails before the ACK reports its own error,
+    /// not a response timeout.
+    #[tokio::test]
+    async fn retained_establish_timeout_passes_through_pre_ack_error() {
+        let (acked_tx, acked_rx) = oneshot::channel::<()>();
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = try_acquire_retained_dispatch_permit(&permits).unwrap();
+        let (guard_dropped_tx, _guard_dropped_rx) = oneshot::channel();
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            dispatch_with_first_response_guard::<_, Annotated<u64>>(
+                async move {
+                    drop(acked_tx);
+                    Err(anyhow::anyhow!(
+                        crate::error::DynamoError::builder()
+                            .error_type(ErrorType::ConnectionTimeout)
+                            .message("request plane send timed out")
+                            .build()
+                    ))
+                },
+                Arc::new(DropSignal(Some(guard_dropped_tx))),
+                permit,
+                Some((Duration::from_millis(50), acked_rx)),
+            ),
+        )
+        .await
+        .expect("waiter must resolve with the dispatch error")
+        .expect_err("dispatch error must propagate");
+        assert!(
+            match_error_chain(error.as_ref(), &[ErrorType::ConnectionTimeout], &[]),
+            "expected the dispatch error, got: {error}"
+        );
+        assert!(
+            !match_error_chain(error.as_ref(), &[ErrorType::ResponseTimeout], &[]),
+            "a pre-ACK failure must not be reported as a response timeout"
+        );
+    }
+
     #[tokio::test]
     async fn dropping_handed_off_tail_closes_upstream() {
         let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(1);
@@ -1227,6 +1986,7 @@ mod tests {
             },
             Arc::new(DropSignal(Some(guard_dropped_tx))),
             permit,
+            None,
         )
         .await
         .unwrap();

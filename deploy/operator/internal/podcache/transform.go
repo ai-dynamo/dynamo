@@ -10,6 +10,7 @@ package podcache
 import (
 	"fmt"
 
+	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -148,45 +149,52 @@ func projectTopologyVolumes(in []corev1.Volume) []corev1.Volume {
 
 		out = append(out, corev1.Volume{
 			Name: in[i].Name,
-			VolumeSource: corev1.VolumeSource{
-				DownwardAPI: &corev1.DownwardAPIVolumeSource{
-					Items:       items,
-					DefaultMode: in[i].DownwardAPI.DefaultMode,
-				},
+			DownwardAPI: &corev1.DownwardAPIVolumeSource{
+				Items:       items,
+				DefaultMode: in[i].DownwardAPI.DefaultMode,
 			},
 		})
 	}
 	return out
 }
 
+// projectStatus keeps the Pod status fields that controllers read.
 func projectStatus(in corev1.PodStatus) corev1.PodStatus {
 	return corev1.PodStatus{
 		// Failover, DGDR diagnostics, and Recreate drain barriers require the
 		// lifecycle phase.
 		Phase: in.Phase,
-		// Model endpoint classification requires the Kubernetes Ready condition.
-		Conditions: projectReadyConditions(in.Conditions),
-		// DGDR diagnostics inspect container failures.
-		ContainerStatuses: projectContainerStatuses(in.ContainerStatuses),
-		// GMS Pod replacement also requires init-sidecar restart counts.
-		InitContainerStatuses: projectInitContainerStatuses(in.InitContainerStatuses),
+		// Model endpoint classification requires Ready; Snapshot-aware GMS
+		// replacement requires the public restore outcome.
+		Conditions: projectConditions(in.Conditions),
+		// DGDR diagnostics inspect container failures; GMS Pod replacement and
+		// DCD crash-loop detection inspect restarts.
+		ContainerStatuses:     projectContainerStatuses(in.ContainerStatuses),
+		InitContainerStatuses: projectContainerStatuses(in.InitContainerStatuses),
 	}
 }
 
-func projectReadyConditions(in []corev1.PodCondition) []corev1.PodCondition {
+func projectConditions(in []corev1.PodCondition) []corev1.PodCondition {
 	out := make([]corev1.PodCondition, 0, len(in))
 	for i := range in {
-		if in[i].Type != corev1.PodReady {
+		if in[i].Type != corev1.PodReady &&
+			in[i].Type != corev1.PodConditionType(podcontract.RestoredCondition) {
 			continue
 		}
-		out = append(out, corev1.PodCondition{
+		condition := corev1.PodCondition{
 			Type:   in[i].Type,
 			Status: in[i].Status,
-		})
+		}
+		if in[i].Type == corev1.PodConditionType(podcontract.RestoredCondition) {
+			condition.Reason = in[i].Reason
+		}
+		out = append(out, condition)
 	}
 	return out
 }
 
+// projectContainerStatuses keeps each container's state, restart count and
+// last termination.
 func projectContainerStatuses(in []corev1.ContainerStatus) []corev1.ContainerStatus {
 	if len(in) == 0 {
 		return nil
@@ -194,21 +202,24 @@ func projectContainerStatuses(in []corev1.ContainerStatus) []corev1.ContainerSta
 	out := make([]corev1.ContainerStatus, len(in))
 	for i := range in {
 		out[i] = corev1.ContainerStatus{
-			Name:  in[i].Name,
-			State: projectContainerState(in[i].State),
+			Name:                 in[i].Name,
+			State:                projectContainerState(in[i].State),
+			LastTerminationState: projectLastTerminationState(in[i].LastTerminationState),
+			RestartCount:         in[i].RestartCount,
 		}
 	}
 	return out
 }
 
-func projectInitContainerStatuses(in []corev1.ContainerStatus) []corev1.ContainerStatus {
-	out := projectContainerStatuses(in)
-	for i := range out {
-		if in[i].Name == gms.ServerContainerName {
-			out[i].RestartCount = in[i].RestartCount
-		}
+// projectLastTerminationState keeps the exit code and reason of the last termination.
+func projectLastTerminationState(in corev1.ContainerState) corev1.ContainerState {
+	if in.Terminated == nil {
+		return corev1.ContainerState{}
 	}
-	return out
+	return corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+		ExitCode: in.Terminated.ExitCode,
+		Reason:   in.Terminated.Reason,
+	}}
 }
 
 func projectContainerState(in corev1.ContainerState) corev1.ContainerState {

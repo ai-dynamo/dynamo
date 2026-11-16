@@ -2,11 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for configuration utility functions."""
+
 import argparse
 
 import pytest
 
 from dynamo.common.configuration.utils import (
+    ArgEnv,
+    Deprecated,
     add_argument,
     add_negatable_bool_argument,
     env_or_default,
@@ -333,3 +336,103 @@ class TestAddNegatableBool:
 
         help_text = parser.format_help()
         assert "False" in help_text or "false" in help_text
+
+
+@pytest.mark.parametrize(
+    "action, extra, argv, expected",
+    [
+        ("store", {}, ["--old", "7"], "7"),
+        ("append", {}, ["--old", "a", "--old", "b"], ["a", "b"]),
+        ("count", {"arg_type": None}, ["--old", "--old"], 2),
+        (argparse.BooleanOptionalAction, {"arg_type": None}, ["--no-old"], False),
+        (argparse.BooleanOptionalAction, {"arg_type": None}, ["--no-legacy"], False),
+    ],
+)
+def test_deprecated_argument_preserves_actions(
+    monkeypatch, action, extra, argv, expected
+):
+    monkeypatch.delenv("TEST_OLD", raising=False)
+    parser = argparse.ArgumentParser()
+    add_argument(
+        parser,
+        flag_name="--old",
+        obsolete_flag="--legacy",
+        env_var="TEST_OLD",
+        default=None,
+        help="Old setting",
+        action=action,
+        deprecated=Deprecated("--new", remove_in="v2.0"),
+        **extra,
+    )
+    with pytest.warns(FutureWarning) as records:
+        args = parser.parse_args(argv)
+    assert args.old == expected
+    assert str(records[0].message) == (
+        f"{argv[0]} is deprecated and will be removed in v2.0; use --new."
+    )
+    assert len(records) == sum(value.startswith("--") for value in argv)
+    assert "removed in v2.0; use --new." in " ".join(parser.format_help().split())
+
+
+def test_deprecated_argument_env_and_cli_precedence(monkeypatch):
+    monkeypatch.setenv("TEST_OLD", "3")
+    parser = argparse.ArgumentParser()
+    with pytest.warns(FutureWarning, match="TEST_OLD is deprecated"):
+        add_argument(
+            parser,
+            flag_name="--old",
+            env_var="TEST_OLD",
+            default=1,
+            help="Old",
+            arg_type=int,
+            deprecated=Deprecated("--new", remove_in="v2.0"),
+        )
+    assert parser.parse_args([]).old == 3
+    with pytest.warns(FutureWarning, match="--old is deprecated"):
+        assert parser.parse_args(["--old", "4"]).old == 4
+
+
+def test_arg_env_replaces_os_environ_and_skips_deprecation(monkeypatch, recwarn):
+    monkeypatch.setenv("TEST_OLD", "3")
+    env = ArgEnv(environ={"TEST_FLAG": "false", "TEST_OLD": "5"})
+    parser = argparse.ArgumentParser()
+    add_argument(
+        parser,
+        flag_name="--old",
+        env_var="TEST_OLD",
+        default=1,
+        help="Old",
+        arg_type=int,
+        deprecated=Deprecated("--new", remove_in="v2.0"),
+        env=env,
+    )
+    add_negatable_bool_argument(
+        parser,
+        flag_name="--flag",
+        env_var="TEST_FLAG",
+        default=True,
+        help="Flag",
+        env=env,
+    )
+    assert vars(parser.parse_args([])) == {"old": 5, "flag": False}
+    assert parser.parse_args(["--old", "4"]).old == 4
+    assert env.env_dests == {"TEST_OLD": "old", "TEST_FLAG": "flag"}
+    assert env_or_default("TEST_OLD", 0, env=ArgEnv(environ={})) == 0
+    assert not recwarn
+
+
+def test_deprecated_hidden_argument_is_quiet_unless_used(monkeypatch, recwarn):
+    monkeypatch.delenv("TEST_OLD", raising=False)
+    parser = argparse.ArgumentParser()
+    add_argument(
+        parser,
+        flag_name="--old",
+        env_var="TEST_OLD",
+        default=1,
+        help=argparse.SUPPRESS,
+        arg_type=int,
+        deprecated=Deprecated("--new", remove_in="v2.0"),
+    )
+    assert parser.parse_args([]).old == 1
+    assert not recwarn
+    assert "--old" not in " ".join(parser.format_help().split())

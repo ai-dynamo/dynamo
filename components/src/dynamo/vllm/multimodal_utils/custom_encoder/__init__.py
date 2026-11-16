@@ -17,6 +17,7 @@ from dynamo.vllm.multimodal_utils.custom_encoder.backend import (
     RawT,
     VisionEncoderBackend,
 )
+from dynamo.vllm.multimodal_utils.custom_encoder.handoff import ExternalEncoderHandoff
 
 __all__ = [
     "AsyncVisionEncoder",
@@ -24,6 +25,7 @@ __all__ = [
     "build_mixed_embeds",
     "CustomEncoderAdapter",
     "create_custom_encoder_adapter",
+    "ExternalEncoderHandoff",
     "ItemT",
     "Preprocessed",
     "Qwen3VLImageEncoding",

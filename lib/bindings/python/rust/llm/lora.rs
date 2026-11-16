@@ -40,9 +40,7 @@ impl LoRADownloader {
             Arc::new(HuggingFaceLoRASource::from_env()),
         ];
 
-        if let Ok(s3_source) = S3LoRASource::from_env() {
-            sources.push(Arc::new(s3_source));
-        }
+        sources.push(Arc::new(S3LoRASource::from_env()));
 
         let downloader = RsLoRADownloader::new(sources, cache.clone());
         Ok(Self {
@@ -62,7 +60,7 @@ impl LoRADownloader {
         lora_uri: String,
     ) -> PyResult<Bound<'p, PyAny>> {
         let downloader = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let path = downloader
                 .download_if_needed(&lora_uri)
                 .await

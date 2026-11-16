@@ -5,10 +5,25 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 from collections.abc import Iterable, Mapping
 from pathlib import Path
+
+# vLLM's per-engine PyNvVideoCodec reservation: PYNVVIDEOCODEC_DEFAULT_HW_DECODERS
+# x PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
+# (vllm/multimodal/video_decoders). Kept as a literal because importing vLLM at
+# collection mutates the environment; test_vllm.py checks it against vLLM.
+PYNVVIDEOCODEC_RESERVED_BYTES = 2 * 128 * 1024**2 + int(1.8 * 1024 * 1024**2)
+
+
+def pynvvideocodec_reserved_bytes() -> int:
+    """Return the per-engine bytes vLLM subtracts from the KV cache for
+    PyNvVideoCodec, or 0 when the image selects another video loader."""
+    if os.environ.get("VLLM_VIDEO_LOADER_BACKEND") != "pynvvideocodec":
+        return 0
+    return PYNVVIDEOCODEC_RESERVED_BYTES
 
 
 def map_cuda_visible_devices(
@@ -67,6 +82,14 @@ def build_gpu_mem_args(
 ) -> list[str]:
     """Call a backend memory-args function that returns shell-style CLI args."""
     return shlex.split(_call_gpu_utils_function(function_name, env=env))
+
+
+def build_vllm_gpu_mem_args(default_utilization: str = "0.4") -> list[str]:
+    """Return scheduler-aware vLLM memory args with a local fallback."""
+    return build_gpu_mem_args("build_vllm_gpu_mem_args") or [
+        "--gpu-memory-utilization",
+        default_utilization,
+    ]
 
 
 def build_trtllm_override_args(env: Mapping[str, str] | None = None) -> list[str]:

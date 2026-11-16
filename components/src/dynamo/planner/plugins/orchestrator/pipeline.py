@@ -104,6 +104,17 @@ class PipelineOutcome:
     reconcile_outcome: Optional[MergeOutcome] = None
     constrain_outcome: Optional[MergeOutcome] = None
     proposed_components: frozenset[ComponentKey] = field(default_factory=frozenset)
+    # Components explicitly targeted by a scaling override in PROPOSE or
+    # RECONCILE. Unlike the merged proposal, this excludes baseline-filled
+    # targets. CONSTRAIN bounds remain available separately in
+    # ``constrain_results`` so native targets can be clamped identically.
+    targeted_components: frozenset[ComponentKey] = field(default_factory=frozenset)
+    # Startup reversal needs both intent and evaluation provenance: an idle
+    # plugin tick is not a fresh hold, and a CONSTRAIN ceiling is not demand.
+    propose_results: Optional[list[PluginResult]] = None
+    reconcile_results: Optional[list[PluginResult]] = None
+    constrain_results: Optional[list[PluginResult]] = None
+    evaluated_proposal_plugins: Optional[frozenset[str]] = None
     audit_events: list[str] = field(default_factory=list)
 
 
@@ -262,6 +273,16 @@ def _proposed_component_mask(
     )
 
 
+def _targeted_component_mask(
+    *plugin_result_groups: list[PluginResult],
+) -> frozenset[ComponentKey]:
+    """Return components explicitly targeted across mutating stages."""
+
+    return frozenset().union(
+        *(_proposed_component_mask(results) for results in plugin_result_groups)
+    )
+
+
 def _stage_request(
     stage: str,
     ctx: PipelineContext,
@@ -390,6 +411,7 @@ async def _run_fanout_stage(
     clock: Clock,
     metrics: Optional[PluginFrameworkMetrics] = None,
     propose_results: Optional[list[ProposeResult]] = None,
+    evaluated_plugins: Optional[set[str]] = None,
 ) -> tuple[MergeOutcome, list[PluginResult]]:
     """PROPOSE / RECONCILE / CONSTRAIN fan-out-and-merge helper.
 
@@ -414,6 +436,8 @@ async def _run_fanout_stage(
     """
     active = scheduler.compute_active_set(tick_now, stage, ctx=ctx)
     plugins: list[RegisteredPlugin] = list(active.triggered)
+    if evaluated_plugins is not None:
+        evaluated_plugins.update(plugin.plugin_id for plugin in plugins)
     method = _STAGE_METHOD[stage]
     request = _stage_request(stage, ctx, proposals=propose_results)
 
@@ -738,7 +762,7 @@ async def run_pipeline(
     baseline: Mapping[ComponentKey, int],
     clock: Clock,
     tick_now: float,
-    tick_max_duration_seconds: float,
+    tick_max_duration_seconds: Optional[float],
     metrics: Optional[PluginFrameworkMetrics] = None,
 ) -> PipelineOutcome:
     """Run one tick through the 4 stages and return a PipelineOutcome.
@@ -752,13 +776,16 @@ async def run_pipeline(
         baseline: Current replicas per ComponentKey — fed to every
             ``type_aware_merge`` call for recommendation fallback and
             AT_LEAST/AT_MOST clamping.
-        clock: Used only for the whole-tick deadline guard.
+        clock: Times the tick and the plugin calls for ``metrics``. The
+            deadline runs on the event loop's wall clock, not on ``clock``.
         tick_now: Monotonic timestamp the active set + record_result use
             for "due" detection and HOLD_LAST cache age.
         tick_max_duration_seconds: Outermost deadline — wraps the entire
             4-stage pipeline in a single ``asyncio.wait_for``. Per-stage
             plugins each enforce their own deadline inside
-            ``PluginTransport.call``.
+            ``PluginTransport.call``. ``None`` runs the pipeline to
+            completion: replay passes it, because a wall-clock deadline
+            would make the simulated decisions depend on host speed.
     """
 
     async def _body() -> PipelineOutcome:
@@ -791,6 +818,7 @@ async def run_pipeline(
             current_ctx = current_ctx.model_copy(update={"predictions": ca.prediction})
 
         # ---- PROPOSE stage ----
+        evaluated_proposal_plugins: set[str] = set()
         propose, propose_plugin_results = await _run_fanout_stage(
             stage="propose",
             scheduler=scheduler,
@@ -801,8 +829,10 @@ async def run_pipeline(
             set_allowed=True,
             clock=clock,
             metrics=metrics,
+            evaluated_plugins=evaluated_proposal_plugins,
         )
         proposed_components = _proposed_component_mask(propose_plugin_results)
+        targeted_components = proposed_components
         if propose.short_circuited:
             return PipelineOutcome(
                 execute_action="skip_short_circuit",
@@ -811,6 +841,7 @@ async def run_pipeline(
                 predict_outcome=ca,
                 propose_outcome=propose,
                 proposed_components=proposed_components,
+                targeted_components=targeted_components,
                 audit_events=audit,
             )
         if propose.proposal is not None:
@@ -823,7 +854,7 @@ async def run_pipeline(
         # than only seeing the post-merge ctx.proposal).
         reconcile_baseline = _proposal_to_baseline(propose.proposal, baseline)
         propose_proposals = [_to_propose_result(pr) for pr in propose_plugin_results]
-        reconcile, _ = await _run_fanout_stage(
+        reconcile, reconcile_plugin_results = await _run_fanout_stage(
             stage="reconcile",
             scheduler=scheduler,
             circuit_breaker=circuit_breaker,
@@ -834,6 +865,11 @@ async def run_pipeline(
             clock=clock,
             metrics=metrics,
             propose_results=propose_proposals,
+            evaluated_plugins=evaluated_proposal_plugins,
+        )
+        targeted_components = _targeted_component_mask(
+            propose_plugin_results,
+            reconcile_plugin_results,
         )
         if reconcile.short_circuited:
             return PipelineOutcome(
@@ -844,6 +880,7 @@ async def run_pipeline(
                 propose_outcome=propose,
                 reconcile_outcome=reconcile,
                 proposed_components=proposed_components,
+                targeted_components=targeted_components,
                 audit_events=audit,
             )
         if reconcile.proposal is not None:
@@ -854,7 +891,7 @@ async def run_pipeline(
         # ---- CONSTRAIN stage ----
         # Baseline flows from RECONCILE's output.
         constrain_baseline = _proposal_to_baseline(reconcile.proposal, baseline)
-        constrain, _ = await _run_fanout_stage(
+        constrain, constrain_plugin_results = await _run_fanout_stage(
             stage="constrain",
             scheduler=scheduler,
             circuit_breaker=circuit_breaker,
@@ -875,6 +912,10 @@ async def run_pipeline(
                 reconcile_outcome=reconcile,
                 constrain_outcome=constrain,
                 proposed_components=proposed_components,
+                targeted_components=targeted_components,
+                propose_results=propose_plugin_results,
+                reconcile_results=reconcile_plugin_results,
+                constrain_results=constrain_plugin_results,
                 audit_events=audit,
             )
 
@@ -892,6 +933,10 @@ async def run_pipeline(
                 reconcile_outcome=reconcile,
                 constrain_outcome=constrain,
                 proposed_components=proposed_components,
+                targeted_components=targeted_components,
+                propose_results=propose_plugin_results,
+                reconcile_results=reconcile_plugin_results,
+                constrain_results=constrain_plugin_results,
                 audit_events=audit,
             )
 
@@ -903,11 +948,17 @@ async def run_pipeline(
             reconcile_outcome=reconcile,
             constrain_outcome=constrain,
             proposed_components=proposed_components,
+            targeted_components=targeted_components,
+            propose_results=propose_plugin_results,
+            reconcile_results=reconcile_plugin_results,
+            constrain_results=constrain_plugin_results,
+            evaluated_proposal_plugins=frozenset(evaluated_proposal_plugins),
             audit_events=audit,
         )
 
     # Outermost safety deadline — this is the ONLY asyncio.wait_for in
     # this module, and it wraps the entire pipeline, not a single stage.
+    # A ``None`` deadline (replay) awaits the body unbounded.
     try:
         # tick_duration_seconds histogram — measured around the outer
         # wait_for so it includes every stage + the timeout machinery
@@ -922,6 +973,9 @@ async def run_pipeline(
                 )
         return outcome
     except asyncio.TimeoutError:
+        if tick_max_duration_seconds is None:
+            # No deadline expired: the body raised it.
+            raise
         if metrics is not None:
             metrics.tick_timeout_total.inc()
         log.warning(

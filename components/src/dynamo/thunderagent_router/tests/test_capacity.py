@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Optional
 
 import pytest
@@ -34,12 +35,15 @@ class _FakeClient:
 
 
 def _make_provider(
-    cards: dict[str, str],
-) -> tuple[WorkerCapacityProvider, _FakeSubscriber]:
+    cards: Optional[dict[str, str]],
+) -> tuple[WorkerCapacityProvider, Optional[_FakeSubscriber]]:
+    """Build a provider over *cards*; ``None`` leaves the subscriber unset."""
     provider = WorkerCapacityProvider(  # type: ignore[arg-type]
         endpoint=None,
         client=_FakeClient(),
     )
+    if cards is None:
+        return provider, None
     subscriber = _FakeSubscriber(cards)
     provider._subscriber = subscriber  # type: ignore[assignment]
     return provider, subscriber
@@ -49,6 +53,8 @@ def _card(
     block_size: Optional[int],
     total_blocks: Optional[int],
     host_total_tokens: Optional[int] = None,
+    dp_size: Optional[int] = None,
+    start_rank: Optional[int] = None,
 ) -> str:
     body: dict = {}
     if block_size is not None:
@@ -59,17 +65,38 @@ def _card(
         body.setdefault("runtime_config", {}).setdefault("runtime_data", {})[
             "native_offloading_capacity"
         ] = {"total_tokens": host_total_tokens}
+    if dp_size is not None:
+        body.setdefault("runtime_config", {})["data_parallel_size"] = dp_size
+    if start_rank is not None:
+        body.setdefault("runtime_config", {})["data_parallel_start_rank"] = start_rank
     return json.dumps(body)
 
 
 def test_snapshot_extracts_kv_pool_tokens():
     provider, _ = _make_provider({"1": _card(16, 1000), "2": _card(8, 2000)})
-    assert provider.snapshot() == {1: 16_000, 2: 16_000}
+    assert provider.snapshot() == {(1, 0): 16_000, (2, 0): 16_000}
+
+
+@pytest.mark.parametrize(
+    "dp_size, start_rank, expected_ranks",
+    [
+        (4, None, [0, 1, 2, 3]),
+        (4, 2, [2, 3, 4, 5]),
+        (1, None, [0]),
+    ],
+    ids=["implicit_start", "declared_start", "single_rank"],
+)
+def test_snapshot_fans_out_one_entry_per_dp_rank(dp_size, start_rank, expected_ranks):
+    """total_kv_blocks is per rank, so a D-rank worker yields D entries of it."""
+    provider, _ = _make_provider(
+        {"1": _card(16, 1000, dp_size=dp_size, start_rank=start_rank)}
+    )
+    assert provider.snapshot() == {(1, rank): 16_000 for rank in expected_ranks}
 
 
 def test_snapshot_adds_native_offloading_tokens_to_retention_budget():
     provider, _ = _make_provider({"1": _card(16, 1_000, host_total_tokens=300)})
-    assert provider.snapshot() == {1: 16_300}
+    assert provider.snapshot() == {(1, 0): 16_300}
 
 
 def test_snapshot_ignores_invalid_native_offloading_capacity():
@@ -78,7 +105,7 @@ def test_snapshot_ignores_invalid_native_offloading_capacity():
         "native_offloading_capacity": {"total_tokens": "300"}
     }
     provider, _ = _make_provider({"1": json.dumps(card)})
-    assert provider.snapshot() == {1: 16_000}
+    assert provider.snapshot() == {(1, 0): 16_000}
 
 
 def test_snapshot_skips_malformed_cards():
@@ -92,7 +119,7 @@ def test_snapshot_skips_malformed_cards():
             "6": _card(16, "abc"),  # type: ignore[arg-type]
         }
     )
-    assert provider.snapshot() == {1: 16_000}
+    assert provider.snapshot() == {(1, 0): 16_000}
 
 
 def test_snapshot_skips_unparseable_worker_ids():
@@ -100,17 +127,19 @@ def test_snapshot_skips_unparseable_worker_ids():
     assert provider.snapshot() == {}
 
 
-def test_parsed_cards_cache_hits_on_repeat_snapshot():
-    """The MDC body never changes per worker; a repeat snapshot should
-    hit the cache instead of re-parsing JSON."""
-    cards = {"1": _card(16, 1000)}
+def test_one_cache_entry_serves_every_field_of_a_card():
+    """Parsed once for all fields. Sentinel-checked by mutating the cached record: a
+    re-read of any field -- pool tokens, rank count, start rank -- would lose it."""
+    cards = {"1": _card(16, 1000, dp_size=4)}
     provider, _ = _make_provider(cards)
     provider.snapshot()
-    assert cards["1"] in provider._parsed
-    # Second snapshot returns same result without touching json.loads;
-    # we sentinel-check by mutating the cached value.
-    provider._parsed[cards["1"]] = 999_999
-    assert provider.snapshot() == {1: 999_999}
+
+    cached = provider._parsed[cards["1"]]
+    provider._parsed[cards["1"]] = replace(
+        cached, pool_tokens=999_999, start_rank=7, dp_size=2
+    )
+
+    assert provider.snapshot() == {(1, 7): 999_999, (1, 8): 999_999}
 
 
 def test_snapshot_returns_empty_when_subscriber_unset():
