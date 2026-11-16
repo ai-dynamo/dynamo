@@ -31,6 +31,14 @@ from functools import lru_cache
 from types import ModuleType
 from typing import Any
 
+try:
+    from sglang.srt.parser.template_detection import detect_reasoning_pattern
+except ModuleNotFoundError as exc:
+    if exc.name != "sglang.srt.parser.template_detection":
+        raise
+    # XPU SGLang 0.5.11 predates template detection. Remove after its pin is upgraded.
+    detect_reasoning_pattern = None
+
 from dynamo.llm.exceptions import InvalidArgument
 
 try:
@@ -553,6 +561,25 @@ def supports_require_reasoning(engine: Any) -> bool:
     )
 
 
+@lru_cache(maxsize=16)
+def template_always_reasons(template: str) -> bool:
+    if detect_reasoning_pattern is None:
+        return False
+    _, config = detect_reasoning_pattern(template)
+    return config is not None and config.special_case == "always"
+
+
+def supports_full_assistant_ebnf() -> bool:
+    """Return whether SGLang applies EBNF to the complete assistant turn."""
+    try:
+        sampling_params = importlib.import_module(
+            "sglang.srt.sampling.sampling_params"
+        ).SamplingParams
+        return "ebnf_full_assistant" in inspect.signature(sampling_params).parameters
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return False
+
+
 __all__ = [
     "ConfigArgumentMerger",
     "add_sglang_cli_compat",
@@ -569,6 +596,8 @@ __all__ = [
     "sglang_default_mla_attention_backend",
     "sglang_uses_mla_backend",
     "supports_require_reasoning",
+    "supports_full_assistant_ebnf",
+    "template_always_reasons",
     "supports_external_mm_hashes",
     "sglang_uses_engine_owned_mm_identity",
     "sglang_has_wide_mm_pad_values",

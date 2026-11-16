@@ -24,6 +24,7 @@ else:
 
 from dynamo._core import Endpoint
 from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.constants import SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY
 from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
 from dynamo.common.token_budget import TokenBudget, publish_token_budget
 from dynamo.common.utils.media_decoder import (
@@ -45,6 +46,7 @@ from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     sglang_uses_mla_backend,
     supports_disagg_prefill_cancel_anytime,
+    supports_full_assistant_ebnf,
 )
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
@@ -652,6 +654,10 @@ async def get_runtime_config(
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
+    if llm_handler and supports_full_assistant_ebnf():
+        runtime_config.set_engine_specific(
+            SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY, json.dumps(True)
+        )
     # Frontend-decoded media uses the regular LLM handlers, which forward the
     # reasoning gate. Dedicated multimodal pipelines register through an encoder;
     # diffusion handlers do not forward the gate.

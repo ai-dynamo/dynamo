@@ -45,6 +45,14 @@ Recipe encoding rejects `continue_final_message=true` combined with thinking bec
 
 Dynamo continues to own sampling settings, constrained decoding, and output parsing. Image URLs must match the recipe's placeholder order; requests with a different order or UUID-only images are rejected before inference.
 
+## GLM Output Compatibility
+
+With `--tool-call-parser glm47` and either `--reasoning-parser glm45` or no reasoning parser, Dynamo follows the installed SGLang detectors separately for streaming and non-streaming output. Streaming requests emit tool names and argument fragments as they arrive. Non-streaming requests use the batch parsers. An always-thinking GLM-5.3 template keeps its initial reasoning state even when a request supplies `enable_thinking=false`.
+
+Dynamo retains two recovery protections: it filters empty or unoffered tool names, and it can recover later complete calls after malformed arguments. Recovery requires nonempty object arguments that pass the offered tool schema, rejects ambiguous closing tags, and never rewrites arguments already sent to the client. These protections deliberately differ from native SGLang on malformed output. Literal control markers inside arguments retain the installed detector's behavior, including its limitations.
+
+SGLang workers that support full-assistant EBNF advertise that capability. The frontend then preserves the native GLM grammar for automatic, required, and named tool choices, including its boundary before reasoning. Older workers keep the existing guided-output fallback. Compatible detectors do not by themselves guarantee identical model generation, prompt tokens, or HTTP framing.
+
 ## Frontend Arguments
 
 These arguments are passed to the **frontend** (not the worker) when using `--dyn-chat-processor sglang`:

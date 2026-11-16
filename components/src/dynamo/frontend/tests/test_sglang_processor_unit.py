@@ -46,6 +46,7 @@ from dynamo.common.backend.logprobs import (
     extract_from_sglang_meta,
     extract_prompt_logprobs_from_sglang_meta,
 )
+from dynamo.frontend.sglang_glm import GlmOutputParser
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
@@ -2461,6 +2462,54 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
 
         assert seen["tool_call_parser"] == "minimax-m3"
         assert guided == {"structural_tag": {"type": "object"}}
+
+    def test_glm47_native_guidance_requires_worker_capability(self):
+        raw_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "f",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"x": {"type": "string"}},
+                    },
+                },
+            }
+        ]
+        guided = build_tool_call_guided_decoding(
+            {"tools": raw_tools, "tool_choice": "auto"},
+            tool_call_parser_name="glm47",
+            sglang_tools=convert_tools(raw_tools),
+            full_assistant_ebnf_supported=False,
+        )
+        assert guided is None
+
+    @pytest.mark.parametrize("schema_mode", ["auto", "strict"])
+    def test_glm47_native_guidance_preserves_enabled_schema_policy(self, schema_mode):
+        raw_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "f",
+                    "strict": False,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"x": {"type": "string"}},
+                        "required": ["x"],
+                    },
+                },
+            }
+        ]
+        guided = build_tool_call_guided_decoding(
+            {"tools": raw_tools, "tool_choice": "required"},
+            tool_call_parser_name="glm47",
+            sglang_tools=convert_tools(raw_tools),
+            structural_tag_mode="on",
+            structural_tag_schema=schema_mode,
+            full_assistant_ebnf_supported=True,
+        )
+        assert ("structural_tag" in guided) is (schema_mode == "strict")
+        assert raw_tools[0]["function"]["strict"] is False
 
     @pytest.mark.parametrize(
         "tool_choice_field",
@@ -7256,3 +7305,396 @@ def test_preprocess_preserves_responses_native_tools(native, choice, exclude):
         assert rendered_tools[0]["type"] == "function"
         assert rendered_tools[0]["function"]["name"] == "read"
     assert request["tools"][0]["function"]["name"] == "read"
+
+
+class TestGlmNativeOutput:
+    @staticmethod
+    def _assembled(delta):
+        calls = {}
+        for call in delta.get("tool_calls", []):
+            target = calls.setdefault(call["index"], {"name": "", "arguments": ""})
+            target["name"] += call["function"].get("name") or ""
+            target["arguments"] += call["function"].get("arguments") or ""
+        return calls
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stream", [True, False])
+    @pytest.mark.parametrize(
+        "tool_choice",
+        ["auto", "required", {"type": "function", "function": {"name": "get_weather"}}],
+    )
+    async def test_reasoning_and_tool_output_follow_request_mode(
+        self, tokenizer, stream, tool_choice
+    ):
+        text = (
+            "done</think><tool_call>get_weather<arg_key>city</arg_key>"
+            "<arg_value><think>Paris</think></arg_value></tool_call>"
+        )
+        token_ids = tokenizer.encode(text, add_special_tokens=False)
+        engine = FakeRoutedEngine(
+            items=[{"token_ids": token_ids, "finish_reason": "stop"}]
+        )
+        processor = SglangProcessor(
+            tokenizer,
+            engine,
+            "glm47",
+            "glm45",
+            [tokenizer.eos_token_id],
+            full_assistant_ebnf_supported=True,
+        )
+        request = {
+            "model": "test",
+            "messages": [{"role": "user", "content": "weather"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+            "stream": stream,
+            "tool_choice": tool_choice,
+        }
+        choices = []
+        async for envelope in processor._generator_inner(request):
+            choices.extend(envelope.get("data", {}).get("choices", []))
+        calls = self._assembled(
+            {
+                "tool_calls": [
+                    call
+                    for choice in choices
+                    for call in choice["delta"].get("tool_calls", [])
+                ]
+            }
+        )
+        city = json.loads(calls[0]["arguments"])["city"]
+        assert city == ("Paris</think>" if stream else "<think>Paris</think>")
+        assert choices[-1]["finish_reason"] == "tool_calls"
+        assert engine.requests[0]["sampling_options"]["guided_decoding"][
+            "ebnf_full_assistant"
+        ]
+        assert engine.requests[0]["require_reasoning"] is False
+
+    def test_native_guidance_survives_worker_preprocessing(
+        self, tokenizer, monkeypatch
+    ):
+        for name, value in {
+            "_w_tokenizer": tokenizer,
+            "_w_tool_call_parser_name": "glm47",
+            "_w_reasoning_parser_name": "glm45",
+            "_w_full_assistant_ebnf_supported": True,
+            "_w_structural_tag_mode": "off",
+            "_w_prompt_renderer": build_prompt_renderer(
+                tokenizer, tool_call_parser_name="glm47", reasoning_parser_name="glm45"
+            ),
+        }.items():
+            monkeypatch.setattr(sglang_processor_module, name, value)
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "f",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"x": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+            "tool_choice": "required",
+        }
+        result = _preprocess_worker(request, MODEL, [tokenizer.eos_token_id])
+        guided = result.dynamo_preproc["sampling_options"]["guided_decoding"]
+        assert guided["ebnf_full_assistant"] is True
+        assert result.dynamo_preproc["require_reasoning"] is False
+        parser, _ = create_parsers(
+            result.request,
+            tool_call_parser_name="glm47",
+            reasoning_parser_name="glm45",
+            force_reasoning=result.force_reasoning,
+            guided_decoding=guided,
+            tokenizer=tokenizer,
+        )
+        assert isinstance(parser, FunctionCallParser)
+
+    def test_always_thinking_template_overrides_enable_thinking_false(self):
+        template = (
+            "[gMASK]<sop>Reasoning Effort: Max <tool_call><arg_key><arg_value>"
+            "<|assistant|><think>"
+        )
+        force = sglang_prepost_module.detect_force_reasoning_from_template(template)
+        assert force
+        assert resolve_request_force_reasoning(
+            {"chat_template_kwargs": {"enable_thinking": False}},
+            "glm45",
+            force,
+            template=template,
+        )
+
+    def test_glm45_template_keeps_thinking_opt_out(self):
+        template = (
+            "[gMASK]<sop><tool_call><arg_key><arg_value>"
+            "{% if enable_thinking %}<|assistant|><think>{% endif %}"
+        )
+        force = sglang_prepost_module.detect_force_reasoning_from_template(template)
+        assert not resolve_request_force_reasoning(
+            {"chat_template_kwargs": {"enable_thinking": False}},
+            "glm45",
+            force,
+            template=template,
+        )
+
+    @pytest.mark.parametrize("batch_size", [1, 10000])
+    def test_tool_fragments_arrive_before_finish(self, tokenizer, batch_size):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "f",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"x": {"type": "string"}},
+                        },
+                    },
+                }
+            ]
+        )
+        parser = create_parsers(
+            {"tools": [tool.model_dump() for tool in tools]},
+            tool_call_parser_name="glm47",
+            reasoning_parser_name=None,
+        )[0]
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=parser,
+            reasoning_parser=None,
+            sglang_tools=tools,
+            tool_call_parser_name="glm47",
+            native_glm_stream=True,
+        )
+        ids = tokenizer.encode(
+            "<tool_call>f<arg_key>x</arg_key><arg_value>one</arg_value></tool_call>After.",
+            add_special_tokens=False,
+        )
+        choices = [
+            post.process_output({"token_ids": ids[i : i + batch_size]})
+            for i in range(0, len(ids), batch_size)
+        ]
+        tool_positions = [
+            i for i, c in enumerate(choices) if c and c["delta"].get("tool_calls")
+        ]
+        assert tool_positions
+        if batch_size == 1:
+            text_positions = [
+                i for i, c in enumerate(choices) if c and c["delta"].get("content")
+            ]
+            assert text_positions and tool_positions[0] < text_positions[0]
+        terminal = post.process_output({"token_ids": [], "finish_reason": "stop"})
+        assert terminal["finish_reason"] == "tool_calls"
+
+    @pytest.mark.parametrize("bad_name", ["", "unoffered"])
+    def test_invalid_tool_names_are_not_exposed(self, bad_name):
+        tools = convert_tools([{"type": "function", "function": {"name": "f"}}])
+        output = GlmOutputParser(
+            reasoning_parser=None,
+            tool_parser=FunctionCallParser(tools, "glm47"),
+            tools=tools,
+            stream=True,
+        )
+        delta = output.parse(
+            (
+                "<tool_call>still thinking about it"
+                if not bad_name
+                else f"<tool_call>{bad_name}</tool_call>"
+            ),
+            "stop",
+        )
+        assert not delta.get("tool_calls")
+        assert not output.has_calls
+
+    @pytest.mark.parametrize("field", ["x", "missing_required_x"])
+    def test_recovery_only_appends_schema_valid_later_calls(self, field):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "f",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"x": {"type": "string"}},
+                            "required": ["x"],
+                        },
+                    },
+                }
+            ]
+        )
+        tools.extend(
+            convert_tools(
+                [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "bad",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"value": {"type": "object"}},
+                            },
+                        },
+                    }
+                ]
+            )
+        )
+        output = GlmOutputParser(
+            reasoning_parser=None,
+            tool_parser=FunctionCallParser(tools, "glm47"),
+            tools=tools,
+            stream=True,
+        )
+        text = (
+            '<tool_call>bad<arg_key>value</arg_key><arg_value>{"bad":"unfinished</arg_value></tool_call>'
+            f"<tool_call>f<arg_key>{field}</arg_key><arg_value>Paris</arg_value></tool_call>"
+        )
+        delta = output.parse(text, "stop")
+        calls = self._assembled(delta)
+        # Keep native malformed fragments unchanged; do not invent a repaired first call.
+        assert calls[0]["arguments"] == '{"value": {"bad":"unfinished}'
+        recovered = calls.get(1)
+        assert bool(recovered) is (field == "x")
+        if recovered:
+            assert json.loads(recovered["arguments"]) == {"x": "Paris"}
+
+    def test_recovery_does_not_promote_a_call_inside_an_argument(self):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "run",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"cmd": {"type": "string"}},
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                },
+            ]
+        )
+        output = GlmOutputParser(
+            reasoning_parser=None,
+            tool_parser=FunctionCallParser(tools, "glm47"),
+            tools=tools,
+            stream=True,
+        )
+        delta = output.parse(
+            "<tool_call>run<arg_key>cmd</arg_key><arg_value>before </tool_call>"
+            "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>"
+            " after</arg_value></tool_call>",
+            "stop",
+        )
+        assert [call["name"] for call in self._assembled(delta).values()] == ["run"]
+
+    def test_recovery_does_not_append_nonfinite_json(self):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "f",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"x": {"type": "number"}},
+                        },
+                    },
+                }
+            ]
+        )
+        tools.extend(
+            convert_tools(
+                [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "bad",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"value": {"type": "object"}},
+                            },
+                        },
+                    }
+                ]
+            )
+        )
+        output = GlmOutputParser(
+            reasoning_parser=None,
+            tool_parser=FunctionCallParser(tools, "glm47"),
+            tools=tools,
+            stream=True,
+        )
+        delta = output.parse(
+            '<tool_call>bad<arg_key>value</arg_key><arg_value>{"bad":"unfinished</arg_value></tool_call>'
+            "<tool_call>f<arg_key>x</arg_key><arg_value>1e999</arg_value></tool_call>",
+            "stop",
+        )
+        assert len(self._assembled(delta)) == 1
+
+    def test_recovery_requires_every_argument_to_be_closed(self):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "bad",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"value": {"type": "object"}},
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "echo",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "value": {"type": "string"},
+                                "extra": {"type": "string"},
+                            },
+                            "required": ["value"],
+                        },
+                    },
+                },
+            ]
+        )
+        output = GlmOutputParser(
+            reasoning_parser=None,
+            tool_parser=FunctionCallParser(tools, "glm47"),
+            tools=tools,
+            stream=True,
+        )
+        delta = output.parse(
+            '<tool_call>bad<arg_key>value</arg_key><arg_value>{"x":"unfinished</arg_value></tool_call>'
+            "<tool_call>echo<arg_key>value</arg_key><arg_value>Paris</arg_value>"
+            "<arg_key>extra</arg_key><arg_value>unfinished</tool_call>",
+            "stop",
+        )
+        assert all(call["name"] != "echo" for call in self._assembled(delta).values())

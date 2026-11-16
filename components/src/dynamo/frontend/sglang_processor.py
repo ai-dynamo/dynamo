@@ -20,6 +20,7 @@ from typing import Any, cast
 from sglang.srt.parser.conversation import chat_template_exists
 
 from dynamo._internal import ModelDeploymentCard
+from dynamo.common.constants import SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
@@ -331,6 +332,7 @@ _w_default_thinking_mode: str | None = None
 _w_structural_tag_mode: str = "off"
 _w_structural_tag_scope: str = "auto"
 _w_structural_tag_schema: str = "auto"
+_w_full_assistant_ebnf_supported: bool = False
 _w_prompt_renderer: PromptRenderer | None = None
 
 
@@ -386,8 +388,10 @@ def _init_worker(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    full_assistant_ebnf_supported: bool = False,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
+    global _w_full_assistant_ebnf_supported
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
     global _w_default_thinking_mode, _w_structural_tag_mode
@@ -403,6 +407,7 @@ def _init_worker(
     _w_structural_tag_mode = structural_tag_mode
     _w_structural_tag_scope = structural_tag_scope
     _w_structural_tag_schema = structural_tag_schema
+    _w_full_assistant_ebnf_supported = full_assistant_ebnf_supported
     _w_prompt_renderer = build_prompt_renderer(
         _w_tokenizer,
         model_path=model_path,
@@ -430,6 +435,7 @@ def _preprocess_worker(
         structural_tag_scope=_w_structural_tag_scope,
         structural_tag_schema=_w_structural_tag_schema,
         prompt_renderer=_w_prompt_renderer,
+        full_assistant_ebnf_supported=_w_full_assistant_ebnf_supported,
     )
 
     n = request.get("n", 1)
@@ -478,7 +484,9 @@ def _build_dynamo_preproc(
     """Build the Dynamo preprocessed request dict from request fields."""
     thinking_token_budget = resolve_thinking_token_budget(request)
     require_reasoning = require_reasoning or (
-        thinking_token_budget is not None and force_reasoning
+        thinking_token_budget is not None
+        and force_reasoning
+        and not (guided_decoding or {}).get("ebnf_full_assistant", False)
     )
     max_tokens = request.get("max_completion_tokens") or request.get("max_tokens")
 
@@ -609,6 +617,7 @@ class SglangProcessor:
         structural_tag_scope: str = "auto",
         structural_tag_schema: str = "auto",
         prompt_renderer: PromptRenderer | None = None,
+        full_assistant_ebnf_supported: bool = False,
     ):
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
@@ -636,6 +645,7 @@ class SglangProcessor:
         self.structural_tag_mode = structural_tag_mode
         self.structural_tag_scope = structural_tag_scope
         self.structural_tag_schema = structural_tag_schema
+        self.full_assistant_ebnf_supported = full_assistant_ebnf_supported
         self.prompt_renderer = prompt_renderer
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
@@ -718,6 +728,12 @@ class SglangProcessor:
             stop_strings=_request_stop_strings(request),
             skip_special_tokens=request.get("skip_special_tokens"),
             stop_token_ids=set(_request_stop_token_ids(request)),
+            native_glm_stream=(
+                request.get("stream", False)
+                if self.tool_call_parser_name == "glm47"
+                and self.reasoning_parser_name in (None, "glm45")
+                else None
+            ),
         )
 
     async def _generator_inner(
@@ -742,6 +758,7 @@ class SglangProcessor:
                 structural_tag_scope=self.structural_tag_scope,
                 structural_tag_schema=self.structural_tag_schema,
                 prompt_renderer=self.prompt_renderer,
+                full_assistant_ebnf_supported=self.full_assistant_ebnf_supported,
             )
 
             if self.debug_perf:
@@ -1277,12 +1294,18 @@ class SglangEngineFactory:
             self.reasoning_parser_name
             or _runtime_config_parser_name(mdc, "reasoning_parser")
         )
-        default_thinking_mode = runtime_default_thinking_mode(mdc.runtime_config())
+        runtime_config = mdc.runtime_config()
+        default_thinking_mode = runtime_default_thinking_mode(runtime_config)
         (
             structural_tag_mode,
             structural_tag_scope,
             structural_tag_schema,
-        ) = runtime_structural_tag_options(mdc.runtime_config())
+        ) = runtime_structural_tag_options(runtime_config)
+        runtime_data = runtime_config.get("runtime_data")
+        full_assistant_ebnf_supported = (
+            isinstance(runtime_data, dict)
+            and runtime_data.get(SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY) is True
+        )
 
         if tool_call_parser_name:
             logger.info("SGLang tool call parser: %s", tool_call_parser_name)
@@ -1322,6 +1345,7 @@ class SglangEngineFactory:
                     structural_tag_mode,
                     structural_tag_scope,
                     structural_tag_schema,
+                    full_assistant_ebnf_supported,
                 ),
             )
             futures = [
@@ -1362,6 +1386,7 @@ class SglangEngineFactory:
             structural_tag_scope=structural_tag_scope,
             structural_tag_schema=structural_tag_schema,
             prompt_renderer=prompt_renderer,
+            full_assistant_ebnf_supported=full_assistant_ebnf_supported,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

@@ -86,6 +86,9 @@ def _install_sglang_stubs(install_module, tokenizer_module):
     class _ReasoningParser:
         pass
 
+    _install_module(
+        install_module, "dynamo.sglang._compat", template_always_reasons=lambda _: False
+    )
     _install_module(install_module, "sglang")
     _install_module(install_module, "sglang.srt")
     _install_module(install_module, "sglang.srt.entrypoints")
@@ -93,6 +96,7 @@ def _install_sglang_stubs(install_module, tokenizer_module):
     _install_module(
         install_module,
         "sglang.srt.entrypoints.openai.protocol",
+        ChatCompletionRequest=type("ChatCompletionRequest", (), {}),
         Function=_Function,
         Tool=_Tool,
         ToolChoice=_ToolChoice,

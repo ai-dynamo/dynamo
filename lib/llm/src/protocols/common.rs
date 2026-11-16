@@ -466,11 +466,17 @@ pub struct SamplingOptions {
     pub guided_decoding: Option<GuidedDecodingOptions>,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Guided Decoding Options
 ///
 /// Only one constraint may be set: `json`, `regex`, `choice`, `grammar` or
 /// `structural_tag`. `backend` and `whitespace_pattern` are modifiers rather than
-/// constraints, so either may accompany a constraint. See [`Self::validate`].
+/// constraints, so either may accompany a constraint. `ebnf_full_assistant` is
+/// also a modifier and is only meaningful alongside `grammar`. See
+/// [`Self::validate`].
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct GuidedDecodingOptions {
     /// If specified, the output will follow the JSON schema. Can be a string, an object, or null.
@@ -488,6 +494,12 @@ pub struct GuidedDecodingOptions {
     /// If specified, the output will follow the context-free grammar. Can be a string or null.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grammar: Option<String>,
+
+    /// Whether an EBNF grammar owns the complete assistant response, including
+    /// reasoning and tool-call markup. SGLang uses this to select its
+    /// full-assistant grammar backend instead of constraining only output text.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ebnf_full_assistant: bool,
 
     /// If specified, the backend to use for guided decoding, can be backends like xgrammar or custom guided decoding backend
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -518,6 +530,7 @@ impl GuidedDecodingOptions {
             regex,
             choice,
             grammar,
+            ebnf_full_assistant: false,
             backend,
             whitespace_pattern,
             structural_tag,
@@ -593,6 +606,11 @@ impl GuidedDecodingOptions {
     /// constraint was requested at all, so a request carrying only a modifier engages no
     /// guided decoding rather than building a constraint-less object.
     pub fn validate(&self) -> Result<()> {
+        if self.ebnf_full_assistant && self.grammar.is_none() {
+            return Err(invalid_argument_error(
+                "ebnf_full_assistant requires a grammar constraint",
+            ));
+        }
         let constraints = [
             ("json", self.json.is_some()),
             ("regex", self.regex.is_some()),
@@ -1155,6 +1173,33 @@ mod tests {
         // All fields None (should be ok, but not useful)
         let opts = GuidedDecodingOptions::validated(None, None, None, None, None, None, None);
         assert!(opts.is_ok());
+    }
+
+    #[test]
+    fn test_guided_decoding_full_assistant_modifier_round_trips() {
+        let options = GuidedDecodingOptions {
+            grammar: Some("root ::= \"ok\"".to_string()),
+            ebnf_full_assistant: true,
+            ..Default::default()
+        };
+        options.validate().unwrap();
+        let invalid = GuidedDecodingOptions {
+            ebnf_full_assistant: true,
+            ..Default::default()
+        };
+        assert!(invalid.validate().is_err());
+
+        let json = serde_json::to_value(&options).unwrap();
+        assert_eq!(json["grammar"], "root ::= \"ok\"");
+        assert_eq!(json["ebnf_full_assistant"], true);
+        let decoded = serde_json::from_value::<GuidedDecodingOptions>(json).unwrap();
+        assert_eq!(decoded.grammar, options.grammar);
+        assert!(decoded.ebnf_full_assistant);
+
+        let msgpack = rmp_serde::to_vec_named(&options).unwrap();
+        let decoded = rmp_serde::from_slice::<GuidedDecodingOptions>(&msgpack).unwrap();
+        assert_eq!(decoded.grammar, options.grammar);
+        assert!(decoded.ebnf_full_assistant);
     }
 
     #[test]

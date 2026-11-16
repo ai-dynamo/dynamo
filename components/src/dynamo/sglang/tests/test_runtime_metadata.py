@@ -296,6 +296,11 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     monkeypatch.setattr(
         register, "supports_disagg_prefill_cancel_anytime", lambda _: runtime_supported
     )
+    monkeypatch.setattr(
+        register,
+        "supports_full_assistant_ebnf",
+        lambda: True,
+    )
     engine = None
     if runtime_supported:
 
@@ -331,6 +336,10 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     assert (reasoning_gate in runtime_config.runtime_data) is reasoning_gate_expected
     if reasoning_gate in runtime_config.runtime_data:
         assert json.loads(runtime_config.runtime_data[reasoning_gate]) is True
+    full_assistant = register.SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY
+    assert (full_assistant in runtime_config.runtime_data) is (
+        not worker_flags.get("enable_multimodal", False)
+    )
     assert "Failed to get runtime config" not in caplog.text
 
 

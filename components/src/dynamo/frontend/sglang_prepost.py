@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, TypeAlias
 
+from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 from sglang.srt.entrypoints.openai.protocol import Function as SglangFunction
 from sglang.srt.entrypoints.openai.protocol import Tool as SglangTool
 from sglang.srt.entrypoints.openai.protocol import ToolChoice as SglangToolChoice
@@ -28,8 +29,10 @@ from xgrammar import StructuralTag, StructuralTagItem
 from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
+from dynamo.sglang._compat import template_always_reasons
 
 from .responses_history import responses_history_recipients, responses_tools_request
+from .sglang_glm import GlmOutputParser
 from .sglang_prompt_renderer import (
     KimiK3PromptRenderer,
     PromptRenderer,
@@ -138,6 +141,8 @@ def resolve_request_force_reasoning(
     request: dict[str, Any],
     reasoning_parser_name: str | None,
     template_default: bool,
+    *,
+    template: str | None = None,
 ) -> bool:
     """Resolve the effective force_reasoning flag for a single request.
 
@@ -181,6 +186,13 @@ def resolve_request_force_reasoning(
         if reasoning_effort is None:
             reasoning_effort = kwargs.get("reasoning_effort")
         return reasoning_effort is not None and reasoning_effort != "none"
+
+    if (
+        reasoning_parser_name == "glm45"
+        and isinstance(template, str)
+        and template_always_reasons(template)
+    ):
+        return True
 
     if reasoning_parser_name in _THINKING_BY_DEFAULT:
         flag_key = (
@@ -338,7 +350,11 @@ def create_parsers(
     tool_call_parser: ToolCallParserType | None = None
     if sglang_tools and tool_choice != "none":
         if (tool_choice == "required" or _is_named_tool_choice(tool_choice)) and not (
-            guided_decoding is not None and "structural_tag" in guided_decoding
+            guided_decoding is not None
+            and (
+                "structural_tag" in guided_decoding
+                or guided_decoding.get("ebnf_full_assistant") is True
+            )
         ):
             tool_call_parser = JsonArrayParser()
         elif tool_call_parser_name:
@@ -355,10 +371,22 @@ def create_parsers(
     )
     if reasoning_parser_name and (not guided_decoding_active or force_reasoning):
         reasoning_parser_name = _normalize_sglang_parser_name(reasoning_parser_name)
+        native_request_kwargs = {}
+        if reasoning_parser_name == "glm45":
+            native_request_kwargs["request"] = ChatCompletionRequest(
+                model="",
+                messages=[],
+                chat_template_kwargs=request.get("chat_template_kwargs"),
+            )
         reasoning_parser = ReasoningParser(
             model_type=reasoning_parser_name,
-            stream_reasoning=True,
+            stream_reasoning=(
+                request.get("stream_reasoning", True)
+                if reasoning_parser_name == "glm45"
+                else True
+            ),
             force_reasoning=force_reasoning,
+            **native_request_kwargs,
             **_parser_tokenizer_kwargs(ReasoningParser, tokenizer),
         )
 
@@ -395,7 +423,10 @@ def _guided_output_requires_reasoning(
     guided_decoding: dict[str, Any] | None = None,
 ) -> bool:
     """Return whether SGLang should reason before guided output."""
-    if not force_reasoning:
+    if (
+        not force_reasoning
+        or (guided_decoding or {}).get("ebnf_full_assistant") is True
+    ):
         return False
 
     tool_choice = request.get("tool_choice", "auto")
@@ -557,6 +588,7 @@ def build_tool_call_guided_decoding(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    full_assistant_ebnf_supported: bool = False,
 ) -> dict[str, Any] | None:
     """Build native-SGLang-like tool call constraints for guided decoding."""
     if not sglang_tools:
@@ -589,11 +621,9 @@ def build_tool_call_guided_decoding(
     tool_choice_kind: ToolChoiceKind = (
         "required"
         if tool_choice == "required"
-        else "named"
-        if is_named_choice
-        else "auto"
-        if tool_choice == "auto"
-        else "other"
+        else (
+            "named" if is_named_choice else "auto" if tool_choice == "auto" else "other"
+        )
     )
     raw_tools = request.get("tools") or []
     attempt_structural_tag = should_attempt_structural_tag(
@@ -608,6 +638,34 @@ def build_tool_call_guided_decoding(
             "parallel_tool_calls" in request and parallel_tool_calls is False
         ),
     )
+
+    if (
+        full_assistant_ebnf_supported
+        and _normalize_sglang_parser_name(tool_call_parser_name) == "glm47"
+    ):
+        native_tools = (
+            convert_tools(raw_tools, structural_tag_schema=structural_tag_schema)
+            if attempt_structural_tag
+            else sglang_tools
+        )
+        parser = FunctionCallParser(
+            tools=native_tools,
+            tool_call_parser="glm47",
+            **_parser_tokenizer_kwargs(FunctionCallParser, tokenizer),
+        )
+        constraint = _call_structure_constraint(
+            parser.get_structure_constraint,
+            sglang_tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+            thinking_mode=(
+                not any(tool.function.strict for tool in native_tools or [])
+                and (request.get("chat_template_kwargs") or {}).get("enable_thinking")
+                is not False
+            ),
+        )
+        return _serialize_tool_constraint(
+            constraint, stop_after_first=parallel_tool_calls is False
+        )
 
     if attempt_structural_tag and tool_call_parser_name:
         guidance_tools = convert_tools(
@@ -687,6 +745,11 @@ def _serialize_tool_constraint(
         return None
     if constraint[0] == "json_schema":
         return {"json": constraint[1]}
+    if constraint[0] == "full_assistant_ebnf":
+        return {
+            "grammar": constraint[1],
+            "ebnf_full_assistant": True,
+        }
     if constraint[0] != "structural_tag":
         return None
 
@@ -773,6 +836,7 @@ def preprocess_chat_request(
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
     prompt_renderer: PromptRenderer | None = None,
+    full_assistant_ebnf_supported: bool = False,
 ) -> SglangPreprocessResult:
     """Preprocess a chat request using SGLang tokenizer and parser APIs.
 
@@ -835,6 +899,7 @@ def preprocess_chat_request(
         request,
         reasoning_parser_name,
         template_force_reasoning,
+        template=getattr(tokenizer, "chat_template", None),
     )
     effective_reasoning_parser_name = (
         reasoning_parser_name if _client_wants_separate_reasoning(request) else None
@@ -892,6 +957,7 @@ def preprocess_chat_request(
         structural_tag_scope=structural_tag_scope,
         structural_tag_schema=structural_tag_schema,
         tokenizer=tokenizer,
+        full_assistant_ebnf_supported=full_assistant_ebnf_supported,
     )
     # This path also never reads the legacy guided_json / guided_regex /
     # guided_grammar / guided_choice fields at all, so those are dropped silently
@@ -1089,6 +1155,7 @@ class SglangStreamingPostProcessor:
         stop_token_ids: set[int] | None = None,
         skip_special_tokens: bool | None = None,
         guided_json_is_content: bool = False,
+        native_glm_stream: bool | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -1134,6 +1201,17 @@ class SglangStreamingPostProcessor:
             for parser in (tool_call_parser, reasoning_parser)
         )
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
+        self._glm_output = (
+            GlmOutputParser(
+                reasoning_parser=reasoning_parser,
+                tool_parser=tool_call_parser,
+                tools=self._sglang_tools,
+                stream=native_glm_stream,
+            )
+            if native_glm_stream is not None
+            and not isinstance(tool_call_parser, JsonArrayParser)
+            else None
+        )
         # Required/named guided output may be either bare JSON or
         # reasoning followed by JSON. Delay only the ambiguous bracket-leading
         # prefix so bare JSON does not get trapped as reasoning.
@@ -1614,6 +1692,25 @@ class SglangStreamingPostProcessor:
                 decoded_text[:stop_end],
                 len(generated_ids) - len(token_ids),
             )
+
+        if self._glm_output is not None:
+            delta = self._glm_output.parse(delta_text, finish_reason)
+            for call in delta.get("tool_calls", []):
+                function = call["function"]
+                if function.get("name"):
+                    call["id"] = self._tool_call_id(function["name"], call["index"])
+                    call["type"] = "function"
+            effective_finish = finish_reason
+            if finish_reason == "stop" and self._glm_output.has_calls:
+                effective_finish = "tool_calls"
+            if delta or effective_finish:
+                return {
+                    "index": 0,
+                    "delta": self._with_initial_role(delta),
+                    "finish_reason": effective_finish,
+                    "logprobs": self._take_pending_logprobs(),
+                }
+            return None
 
         if self._fast_plain_text:
             if delta_text:
