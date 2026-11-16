@@ -1117,7 +1117,6 @@ def build_sampling_params_openai(
         and stop
         and all(isinstance(item, int) and not isinstance(item, bool) for item in stop)
     ):
-        # An all-integer `stop` array holds token IDs, not strings.
         sampling_params.stop_token_ids = stop
     elif stop is not None:
         sampling_params.stop = stop
