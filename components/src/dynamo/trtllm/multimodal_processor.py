@@ -824,9 +824,9 @@ class MultimodalRequestProcessor:
                 if len(processed_mm_data) > 1:
                     # With more than one modality, TRT-LLM needs the items'
                     # prompt order to give each item its own tokens and
-                    # embeddings. Without it, its multimodal hashing counts
-                    # the first modality's tokens only, and the assertion
-                    # that catches this stops the engine.
+                    # embeddings. Without it, its multimodal hashing fails
+                    # unless the model's processor derives the order from
+                    # the prompt.
                     processed_inputs["mm_item_order"] = _mm_item_order(
                         request.get("multi_modal_order"),
                         {m: len(items) for m, items in processed_mm_data.items()},
