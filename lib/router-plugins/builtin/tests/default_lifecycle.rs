@@ -424,3 +424,55 @@ worker_selection:
         );
     }
 }
+
+/// Under `dynamo-two-tier-cost-fn`, a soft affinity target wins over a less-loaded worker while it
+/// stays eligible, as it does under the built-in selector. Without an exclusive target, the
+/// two-tier picker would send the session to the least-loaded worker, since no worker holds the
+/// prompt.
+#[tokio::test]
+async fn two_tier_keeps_an_eligible_soft_affinity_target() {
+    let policy_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        policy_file.path(),
+        "worker_selection:\n  aggregated: dynamo-two-tier-cost-fn\n",
+    )
+    .unwrap();
+    let config = KvRouterConfig {
+        use_kv_events: true,
+        router_queue_threshold: None,
+        router_policy_config: Some(policy_file.path().display().to_string()),
+        ..Default::default()
+    };
+    let mut registry = default_registry();
+    register(&mut registry).unwrap();
+    let service = SelectionServiceBuilder::new(config, WorkerType::Aggregated, registry)
+        .indexer_threads(1)
+        .build()
+        .await
+        .unwrap();
+    for worker_id in [1, 2] {
+        service
+            .upsert_worker(WorkerRequest {
+                kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
+                ..worker(worker_id)
+            })
+            .await
+            .unwrap();
+    }
+    // One active request on worker 1, none on worker 2.
+    let mut load = reserve_request("load");
+    load.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+    service.select_and_reserve(load).await.unwrap();
+
+    let mut bound = prompt_request("bound");
+    bound.affinity_target = Some(WorkerAffinityTarget::new(1, None));
+    let response = service.select_and_reserve(bound).await.unwrap();
+    assert_eq!(response.worker_id, 1, "the eligible soft target must win");
+
+    // The same prompt without a target goes to the less-loaded worker.
+    let response = service
+        .select_and_reserve(prompt_request("unbound"))
+        .await
+        .unwrap();
+    assert_eq!(response.worker_id, 2);
+}

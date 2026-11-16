@@ -26,6 +26,12 @@
 //! Ties between equally ranked workers resolve on candidate row order, which the host leaves
 //! unspecified. This matches the ported implementation; note that Dynamo's built-in selector
 //! instead samples uniformly among ties.
+//!
+//! Soft session affinity behaves as it does under the built-in selector: the policy asks the host
+//! to treat an eligible affinity target as exclusive, so a bound session stays on its worker
+//! while that worker is not overloaded or full, and the tiers above choose among the remaining
+//! workers only when the target is ineligible. Without this, the tiers would ignore the binding,
+//! and a session would stay put only when its worker happened to win the cache tier.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -178,6 +184,7 @@ fn provider(
                 Vec::new(),
                 Box::new(TwoTierCostFnPicker { parameters }),
             )
+            .with_exclusive_affinity(true)
         },
     ))
 }
