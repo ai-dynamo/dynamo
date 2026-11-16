@@ -1233,16 +1233,20 @@ ResponseT = TypeVar("ResponseT")
 async def _translate_vllm_client_errors(
     generator: AsyncIterator[ResponseT],
 ) -> AsyncIterator[ResponseT]:
-    """Keep request-side vLLM errors client-visible on worker endpoints."""
+    """Keep request-side vLLM errors client-visible on worker endpoints.
+
+    A 400 is raised as ``InvalidArgument`` so its reason reaches the client;
+    404 and 422 keep their status as ``HttpError``.
+    """
     from vllm.exceptions import VLLMClientError
 
-    from .errors import vllm_client_error_to_http_error
+    from .errors import vllm_client_error_to_public_error
 
     try:
         async for chunk in generator:
             yield chunk
     except VLLMClientError as exc:
-        raise vllm_client_error_to_http_error(exc) from exc
+        raise vllm_client_error_to_public_error(exc) from exc
 
 
 def _as_exact_int(value: object) -> Optional[int]:
