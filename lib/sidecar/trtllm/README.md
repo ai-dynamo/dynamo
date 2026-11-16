@@ -31,7 +31,7 @@ supported, even when `--context-length` is supplied.
 > The standalone launch and deployment examples use
 > `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc4.dev202611130009`, which includes
 > image/video URL passthrough, audio input, native KVCM2 event streaming, OpenEngine routing load support,
-> and image-aware KV routing ([NVIDIA/TensorRT-LLM#21125](https://github.com/NVIDIA/TensorRT-LLM/pull/21125)).
+> and aggregated image-aware KV routing ([NVIDIA/TensorRT-LLM#21125](https://github.com/NVIDIA/TensorRT-LLM/pull/21125)).
 > The nightly CI job tests image, video, and audio passthrough against the latest regular upstream nightly;
 > it also supports manual dispatch. The examples below stay pinned to the validated version.
 
