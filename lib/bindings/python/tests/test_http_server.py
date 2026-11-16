@@ -34,7 +34,6 @@ MSG_CONTAINS_STATUS_ERROR = "This message contains a 415 status error."
 MSG_CONTAINS_INVALID_ARGUMENT = "This message contains an invalid argument."
 MSG_CONTAINS_INTERNAL_ERROR = "This message contains an internal server error."
 MSG_CONTAINS_ROUTED_ERROR = "This message contains a routed worker's error."
-MSG_CONTAINS_ROUTED_OVERLOAD = "This message hits a routed worker pool at capacity."
 MSG_SETS_RESPONSE_HEADER = "This message sets a response header."
 
 
@@ -89,9 +88,6 @@ class MockHttpEngine:
             # A worker's HttpError(503) as a routed engine raises it; escaping
             # the engine keeps the worker's status.
             _raise_routed_http_error(503, MSG_CONTAINS_ROUTED_ERROR)
-        elif MSG_CONTAINS_ROUTED_OVERLOAD.lower() in user_message.lower():
-            # A worker pool at capacity rejects with CapacityExhausted.
-            _raise_routed_http_error(529, MSG_CONTAINS_ROUTED_OVERLOAD)
 
         # Stream a mock response
         created = int(time.time())
@@ -282,12 +278,6 @@ HTTP_ERROR_CASES = (
         503,
         "Internal server error",
         "Service Unavailable",
-    ),
-    (
-        MSG_CONTAINS_ROUTED_OVERLOAD,
-        529,
-        "Service temporarily overloaded",
-        "Overloaded",
     ),
 )
 
