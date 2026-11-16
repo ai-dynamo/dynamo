@@ -84,7 +84,12 @@ pub async fn run(
             let manager = grpc_service.model_manager();
             let checksum = model.card().mdcsum();
             manager.add_completions_model(model.service_name(), checksum, engine.clone())?;
-            manager.add_chat_completions_model(model.service_name(), checksum, engine)?;
+            manager.add_chat_completions_model_with_card(
+                model.service_name(),
+                checksum,
+                model.card().clone(),
+                engine,
+            )?;
             grpc_service
         }
         EngineConfig::InProcessTokens {
@@ -102,7 +107,12 @@ pub async fn run(
                 NvCreateChatCompletionStreamResponse,
             >(model.card(), inner_engine.clone(), tokenizer.clone())
             .await?;
-            manager.add_chat_completions_model(model.service_name(), checksum, chat_pipeline)?;
+            manager.add_chat_completions_model_with_card(
+                model.service_name(),
+                checksum,
+                model.card().clone(),
+                chat_pipeline,
+            )?;
 
             let cmpl_pipeline =
                 common::build_completions_pipeline(model.card(), inner_engine, tokenizer)?;

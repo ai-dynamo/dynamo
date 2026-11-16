@@ -8,7 +8,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dynamo_protocols::types::ReasoningEffort;
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
 use dynamo_runtime::{
@@ -19,6 +18,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    chat_input::ChatInputPolicy,
     discovery::{LoadThresholdHandle, allocator::AllocatorTrimOnDrop},
     kv_router::{EncoderRouter, RoutingLoadContext, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
@@ -260,18 +260,13 @@ pub struct WorkerSet {
     allocator_trim: Option<Arc<AllocatorTrimOnDrop>>,
     allocator_trim_wrapped: bool,
 
-    /// The `reasoning_effort` Anthropic disabled thinking selects on a native Mistral card,
-    /// resolved from its `tekken.json` when the set is prepared.
-    mistral_disabled_thinking_effort: Option<ReasoningEffort>,
-    /// Follows the shared chat engine, even when an adapter card has no tokenizer.
-    is_native_mistral_renderer: bool,
+    input_policy: ChatInputPolicy,
     unsupported_unified_family: Option<&'static str>,
 }
 
 impl WorkerSet {
     /// Create an unbound set; engines and discovery admission are installed later.
     pub fn new(namespace: String, mdcsum: String, card: ModelDeploymentCard) -> Self {
-        let is_native_mistral_renderer = card.uses_native_mistral_renderer();
         Self {
             namespace,
             endpoint_id: None,
@@ -301,8 +296,7 @@ impl WorkerSet {
             lifecycle_cancellation: None,
             allocator_trim: None,
             allocator_trim_wrapped: false,
-            mistral_disabled_thinking_effort: None,
-            is_native_mistral_renderer,
+            input_policy: ChatInputPolicy::default(),
             unsupported_unified_family: None,
         }
     }
@@ -459,8 +453,12 @@ impl WorkerSet {
         !self.is_encode_set() && !self.has_any_serving_engine()
     }
 
-    pub(crate) fn set_mistral_disabled_thinking_effort(&mut self, effort: Option<ReasoningEffort>) {
-        self.mistral_disabled_thinking_effort = effort;
+    pub(crate) fn set_input_policy(&mut self, policy: ChatInputPolicy) {
+        self.input_policy = policy;
+    }
+
+    pub(crate) fn input_policy(&self) -> ChatInputPolicy {
+        self.input_policy.clone()
     }
 
     pub(crate) fn set_unsupported_unified_family(&mut self, family: Option<&'static str>) {
@@ -477,8 +475,6 @@ impl WorkerSet {
                 .get(crate::preprocessor::DEFAULT_THINKING_MODE_RUNTIME_KEY)
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
-            native_mistral_renderer: self.is_native_mistral_renderer,
-            mistral_disabled_thinking_effort: self.mistral_disabled_thinking_effort.clone(),
             unsupported_unified_family: self.unsupported_unified_family.map(str::to_string),
             structural_tag: self.card.runtime_config.structural_tag.clone(),
             exclude_tools_when_tool_choice_none: self
@@ -647,8 +643,7 @@ impl WorkerSet {
             allocator_trim: None,
             allocator_trim_wrapped: false,
             // An adapter renders through the base model's chat engine and tokenizer.
-            mistral_disabled_thinking_effort: self.mistral_disabled_thinking_effort.clone(),
-            is_native_mistral_renderer: self.is_native_mistral_renderer,
+            input_policy: self.input_policy.clone(),
             unsupported_unified_family: self.unsupported_unified_family,
         };
         if self.allocator_trim.is_some() {
@@ -770,7 +765,7 @@ mod tests {
     }
 
     #[test]
-    fn adapter_view_keeps_the_mistral_renderer_and_disabled_thinking_effort() {
+    fn adapter_view_keeps_the_base_input_policy() {
         let card = ModelDeploymentCard::load_from_disk(
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -780,7 +775,7 @@ mod tests {
         )
         .unwrap();
         let mut base = WorkerSet::new("ns1".to_string(), "abc123".to_string(), card);
-        base.set_mistral_disabled_thinking_effort(Some(ReasoningEffort::Low));
+        base.set_input_policy(ChatInputPolicy::from_card(base.card()).unwrap());
         let mut adapter_card = ModelDeploymentCard::with_name_only("adapter-model");
         adapter_card.lora = Some(crate::model_card::LoraInfo {
             name: "adapter-model".to_string(),
@@ -788,13 +783,8 @@ mod tests {
         });
         let adapter = base.adapter_view(adapter_card);
         assert!(adapter.card.tokenizer.is_none());
-        for set in [&base, &adapter] {
-            assert!(set.parsing_options().native_mistral_renderer);
-            assert_eq!(
-                set.parsing_options().mistral_disabled_thinking_effort,
-                Some(ReasoningEffort::Low)
-            );
-        }
+        assert_eq!(base.input_policy(), adapter.input_policy());
+        assert_ne!(adapter.input_policy(), ChatInputPolicy::Standard);
     }
 
     #[tokio::test]

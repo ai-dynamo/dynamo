@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -87,9 +88,10 @@ class MistralImagePlaceholders:
                     "Mistral image placeholders are sized from the image; "
                     "UUID-only image slots cannot be expanded."
                 )
-            # Stock vLLM normalizes EXIF first; only 5-8 swap the grid axes.
-            if image.getexif().get(274, 1) in (5, 6, 7, 8):
-                image = ImageOps.exif_transpose(image)
+            # Match stock vLLM: unreadable EXIF leaves the image unchanged.
+            with suppress(Exception):
+                if image.getexif().get(274, 1) in (5, 6, 7, 8):
+                    image = ImageOps.exif_transpose(image)
             ncols, nrows = self.encoder._image_to_num_tokens(image)
             grid = ([self.img] * ncols + [self.img_break]) * nrows
             grid[-1] = self.img_end

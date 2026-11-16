@@ -1625,6 +1625,25 @@ impl ModelManager {
             .get_chat_engine_with_parsing()
     }
 
+    pub(crate) fn get_chat_completions_engine_with_input_policy(
+        &self,
+        model: &str,
+    ) -> Result<
+        (
+            OpenAIChatCompletionsStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+            crate::chat_input::ChatInputPolicy,
+        ),
+        ModelManagerError,
+    > {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_chat_engine_with_input_policy()
+    }
+
     pub fn get_completions_engine_with_parsing(
         &self,
         model: &str,
@@ -1706,6 +1725,8 @@ impl ModelManager {
     ) -> Result<(), ModelManagerError> {
         card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
         card.needs = Vec::new();
+        let input_policy = crate::chat_input::ChatInputPolicy::from_card(&card)
+            .map_err(|error| ModelManagerError::ModelUnavailable(format!("{model}: {error:#}")))?;
         let _reservation = self.reservation_lock.lock();
         self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
@@ -1714,6 +1735,7 @@ impl ModelManager {
         }
         let namespace = format!("__local_chat_{}", model);
         let mut ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
+        ws.set_input_policy(input_policy);
         ws.chat_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         self.publish_catalog_locked();

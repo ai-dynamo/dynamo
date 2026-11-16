@@ -59,7 +59,7 @@ def _loader_image(orientation: int | None) -> Image.Image:
             return image.convert("RGB")
 
 
-def test_placeholders_expand_to_each_images_grid():
+def test_placeholders_expand_to_each_images_grid() -> None:
     result = _placeholders().expand(
         [1, _IMG, 7, _IMG, 2],
         [Image.new("RGB", (256, 256)), Image.new("RGB", (448, 224))],
@@ -68,7 +68,7 @@ def test_placeholders_expand_to_each_images_grid():
     assert result == [1, *_grid(10, 10), 7, *_grid(16, 8), 2]
 
 
-def test_grid_matches_mistral_common():
+def test_grid_matches_mistral_common() -> None:
     image_module = pytest.importorskip("mistral_common.tokens.tokenizers.image")
     encoder = image_module.ImageEncoder(
         image_module.ImageConfig(
@@ -124,6 +124,39 @@ def test_grid_matches_stock_vllm_exif_normalization(orientation: int | None) -> 
     assert image.getexif().get(274) == orientation
 
 
+def test_malformed_exif_uses_the_unrotated_mistral_grid() -> None:
+    image_module = pytest.importorskip("mistral_common.tokens.tokenizers.image")
+    chunk_module = pytest.importorskip("mistral_common.protocol.instruct.chunk")
+    encoder = image_module.ImageEncoder(
+        image_module.ImageConfig(
+            image_patch_size=14, max_image_size=1540, spatial_merge_size=2
+        ),
+        image_module.SpecialImageIDs(img=_IMG, img_break=_IMG_BREAK, img_end=_IMG_END),
+    )
+    with BytesIO() as image_bytes:
+        Image.new("RGB", (56, 28)).save(
+            image_bytes, format="JPEG", exif=b"Exif\x00\x00bad"
+        )
+        image_bytes.seek(0)
+        with Image.open(image_bytes) as loaded:
+            image = loaded.convert("RGB")
+    with pytest.raises(SyntaxError, match="not a TIFF file"):
+        image.getexif()
+    placeholders = MistralImagePlaceholders.from_tokenizer(_tokenizer(encoder))
+    assert placeholders is not None
+    expected = encoder(chunk_module.ImageChunk(image=image)).tokens
+    assert placeholders.expand([_IMG], [image]) == expected == _grid(2, 1)
+
+
+def test_encoder_errors_are_not_suppressed() -> None:
+    placeholders = _placeholders()
+    placeholders.encoder._image_to_num_tokens = MagicMock(
+        side_effect=ValueError("invalid dimensions")
+    )
+    with pytest.raises(ValueError, match="invalid dimensions"):
+        placeholders.expand([_IMG], [Image.new("RGB", (56, 28))])
+
+
 @pytest.mark.parametrize("orientation", [None, 1])
 def test_unoriented_images_skip_the_exif_pixel_copy(
     orientation: int | None, monkeypatch: pytest.MonkeyPatch
@@ -154,5 +187,7 @@ def test_mistral_encoder_requires_a_callable_sizing_helper(
     [SimpleNamespace(encode=MagicMock()), MagicMock(), None],
     ids=["no-mm-encoder", "mock-attributes", "none"],
 )
-def test_tokenizers_without_an_image_encoder_have_no_placeholders(tokenizer: object):
+def test_tokenizers_without_an_image_encoder_have_no_placeholders(
+    tokenizer: object,
+) -> None:
     assert MistralImagePlaceholders.from_tokenizer(tokenizer) is None

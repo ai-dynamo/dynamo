@@ -469,16 +469,6 @@ pub struct ParsingOptions {
     #[serde(default)]
     pub default_thinking_mode: Option<String>,
 
-    /// The model renders prompts with the native Mistral formatter: mistral-common's
-    /// message order, and `reasoning_effort` as the only reasoning control.
-    #[serde(default)]
-    pub native_mistral_renderer: bool,
-
-    /// The `reasoning_effort` Anthropic disabled thinking selects on the native Mistral
-    /// renderer: `none`, or `low` for a model without `none`. Unset keeps `none`.
-    #[serde(default)]
-    pub mistral_disabled_thinking_effort: Option<dynamo_protocols::types::ReasoningEffort>,
-
     /// The configured unified family this model's tokenizer cannot serve, resolved
     /// once per model (see `unified_parser::unsupported_family`); its raw output then
     /// keeps the legacy parsers, as the preprocessor's stream path does.
@@ -551,8 +541,6 @@ impl ParsingOptions {
             reasoning_disabled: false,
             structured_response: false,
             default_thinking_mode: None,
-            native_mistral_renderer: false,
-            mistral_disabled_thinking_effort: None,
             unsupported_unified_family: None,
             tool_choice: None,
             suppress_tool_calls: false,

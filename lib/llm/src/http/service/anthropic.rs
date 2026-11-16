@@ -48,7 +48,6 @@ use crate::protocols::anthropic::types::{
     AnthropicContentBlock, AnthropicCountTokensRequest, AnthropicCountTokensResponse,
     AnthropicCreateMessageRequest, AnthropicErrorBody, AnthropicErrorResponse, AnthropicMessage,
     AnthropicMessageContent, AnthropicTool, SystemContent, chat_completion_to_anthropic_response,
-    merge_inline_system_messages, reasoning_effort_from_anthropic,
 };
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
@@ -63,7 +62,6 @@ use crate::protocols::openai::chat_completions::{
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
-use dynamo_protocols::types::ReasoningEffort;
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::{
@@ -149,9 +147,11 @@ async fn anthropic_error_middleware(mut request: Request<Body>, next: Next) -> R
             .await
             .unwrap_or_default();
         let mut body = match serde_json::from_slice::<AnthropicErrorResponse>(&body_bytes) {
-            Ok(error) if error.object_type == "error" => {
-                serde_json::to_value(error).expect("Anthropic error is serializable")
-            }
+            // Keep the body as sent, with fields the typed envelope lacks (`error.details`).
+            Ok(error) if error.object_type == "error" => serde_json::from_slice(&body_bytes)
+                .unwrap_or_else(|_| {
+                    serde_json::to_value(error).expect("Anthropic error is serializable")
+                }),
             _ => {
                 if matches!(
                     parts.status,
@@ -359,6 +359,19 @@ impl AnthropicHandlerError {
     }
 }
 
+/// A message thread keeps the conversation on the server, so a continue request carries only
+/// the new messages. No thread is kept here, so refuse one rather than answer from those alone,
+/// with the code on which the Anthropic SDK tool runner resends the turn without `thread`.
+fn thread_unsupported_response() -> Response {
+    super::openai::record_local_failure(ErrorClass::InvalidRequest);
+    let mut body = serde_json::to_value(AnthropicErrorResponse::invalid_request(
+        "thread: message threads are not supported; send the full conversation without `thread`",
+    ))
+    .expect("Anthropic error is serializable");
+    body["error"]["details"] = serde_json::json!({"error_code": "thread_unsupported_request"});
+    (StatusCode::BAD_REQUEST, Json(body)).into_response()
+}
+
 fn validate_anthropic_messages(
     messages: &[AnthropicMessage],
 ) -> Result<(), AnthropicRequestValidationError> {
@@ -451,6 +464,10 @@ async fn handler_anthropic_messages(
         streaming,
         &request_id,
     );
+    if request.has_thread() {
+        inflight_guard.mark_error(ErrorType::NotImplemented);
+        return Err(thread_unsupported_response());
+    }
     if state.media_rejection().enabled() {
         let content_type = request.media_content_type(&headers).map_err(|error| {
             AnthropicHandlerError::validation(error).into_marked_response(&mut inflight_guard)
@@ -600,9 +617,9 @@ async fn anthropic_messages(
 
     // Looked up after the media refusal so a refused request gets the
     // configured status, not this lookup's 404/503.
-    let (engine, parsing_options) = state
+    let (engine, parsing_options, input_policy) = state
         .manager()
-        .get_chat_completions_engine_with_parsing(&model)
+        .get_chat_completions_engine_with_input_policy(&model)
         .map_err(|e| match e {
             // Registered but not ready to serve yet → retryable 503 (mapped to
             // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
@@ -626,36 +643,7 @@ async fn anthropic_messages(
             .into_marked_response(&mut inflight_guard),
         })?;
 
-    // The native Mistral renderer follows mistral-common's message order, and its
-    // only reasoning control is `reasoning_effort`.
-    let is_native_mistral = parsing_options.native_mistral_renderer;
-    let mistral_reasoning_effort = if is_native_mistral {
-        if merge_inline_system_messages(&mut orig_request) {
-            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
-            WARN_ONCE.call_once(|| {
-                tracing::warn!(
-                    model,
-                    "Inline system messages in /v1/messages are merged into the leading \
-                     system prompt for the native Mistral renderer; each new one changes the \
-                     prompt prefix, so the conversation misses the prefix cache"
-                );
-            });
-        }
-        reasoning_effort_from_anthropic(
-            orig_request.thinking.as_ref(),
-            orig_request.output_config.as_ref(),
-            parsing_options
-                .mistral_disabled_thinking_effort
-                .clone()
-                .unwrap_or(ReasoningEffort::None),
-        )
-        .map_err(|error| {
-            AnthropicHandlerError::validation(error.to_string())
-                .into_marked_response(&mut inflight_guard)
-        })?
-    } else {
-        None
-    };
+    input_policy.prepare_anthropic(&mut orig_request);
 
     // Anthropic exposes input usage in `message_start`, before the backend's
     // authoritative count is available. Seed the stream with the same
@@ -674,32 +662,29 @@ async fn anthropic_messages(
         .is_some_and(|t| t.thinking_type == "disabled");
 
     // Convert Anthropic request -> UnifiedRequest -> Chat Completion request
-    let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
-        tracing::error!(
-            request_id,
-            error = %e,
-            "Failed to convert AnthropicCreateMessageRequest to UnifiedRequest",
-        );
-        AnthropicHandlerError::validation(format!("Failed to convert request: {e}"))
-            .into_marked_response(&mut inflight_guard)
-    })?;
+    let mut unified_request: UnifiedRequest =
+        orig_request.try_into().map_err(|e: anyhow::Error| {
+            tracing::error!(
+                request_id,
+                error = %e,
+                "Failed to convert AnthropicCreateMessageRequest to UnifiedRequest",
+            );
+            AnthropicHandlerError::validation(format!("Failed to convert request: {e}"))
+                .into_marked_response(&mut inflight_guard)
+        })?;
+
+    input_policy
+        .normalize(&mut unified_request)
+        .map_err(|error| {
+            AnthropicHandlerError::validation(error.to_string())
+                .into_marked_response(&mut inflight_guard)
+        })?;
 
     // Extract the API context before consuming the UnifiedRequest — this
     // carries Anthropic-specific fields (thinking config, cache breakpoints,
     // etc.) that the stream converter needs for faithful response reconstruction.
     let anthropic_ctx = unified_request.anthropic_context().cloned();
     let mut chat_request = unified_request.into_inner();
-    if let Some(effort) = mistral_reasoning_effort {
-        chat_request.inner.reasoning_effort = Some(effort);
-        // State the effort in `chat_template_args` too, where Dynamo's own reasoning
-        // gates read it, as the OpenAI chat handler does at its HTTP boundary.
-        chat_request
-            .normalize_reasoning_template_args()
-            .map_err(|error| {
-                AnthropicHandlerError::validation(format!("Invalid thinking: {error}"))
-                    .into_marked_response(&mut inflight_guard)
-            })?;
-    }
     apply_anthropic_nvext_policy(&mut chat_request, &headers, state.nvext_enabled());
     // Native Anthropic stop reporting needs this internal metadata even when
     // client extensions are disabled. The converters consume it, never emit nvext.
@@ -1087,6 +1072,9 @@ async fn handler_count_tokens(
     headers: HeaderMap,
     request: ValidatedRequest<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
+    if request.has_thread() {
+        return Err(thread_unsupported_response());
+    }
     let mut request = request
         .into_request(&headers)
         .map_err(|error| AnthropicHandlerError::validation(error).into_response())?;

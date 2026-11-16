@@ -488,7 +488,7 @@ impl ModelWatcher {
         // Build the WorkerSet with all applicable engines
         let mut worker_set =
             WorkerSet::new(namespace.clone(), spec.mdc_checksum.clone(), card.clone());
-        worker_set.set_mistral_disabled_thinking_effort(card.mistral_disabled_thinking_effort()?);
+        worker_set.set_input_policy(crate::chat_input::ChatInputPolicy::from_card(card)?);
         let mut tokenizer = None;
         let needs_rust_chat_validation = should_validate_parser_version(card)
             && !(card.model_input == ModelInput::Tokens && self.chat_engine_factory.is_some());
@@ -2397,6 +2397,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_transition_preserves_the_existing_hf_or_native_cohort() {
+        mod fixture {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/common/mistral_model.rs"
+            ));
+        }
+        let dir = fixture::model_dir(true, "v15", &["low", "medium", "high"]);
+        let mut native = ModelDeploymentCard::load_from_disk(dir.path(), None).unwrap();
+        native.set_name("native-transition");
+        native.model_input = ModelInput::Text;
+        native.model_type = ModelType::Chat;
+        native.worker_type = Some(WorkerType::Aggregated);
+        let mut old_wire = serde_json::to_value(&native).unwrap();
+        old_wire.as_object_mut().unwrap().remove("tekken_tokenizer");
+        let hf: ModelDeploymentCard = serde_json::from_value(old_wire).unwrap();
+        assert_ne!(hf.mdcsum(), native.mdcsum());
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        drt.namespace("transition")
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("generate")
+            .register_endpoint_instance()
+            .await
+            .unwrap();
+        let worker_id = drt.discovery().instance_id();
+        for (first, second) in [(&hf, &native), (&native, &hf)] {
+            let manager = Arc::new(ModelManager::new());
+            let (events, task) =
+                watch_test_cards(drt.clone(), manager.clone(), RouterConfig::default());
+            apply_discovery_event(&events, discovered_card("transition", worker_id, first)).await;
+            wait_for_model(&manager, "native-transition", Model::is_ready_to_serve).await;
+            apply_discovery_event(
+                &events,
+                discovered_card("transition", worker_id + 1, second),
+            )
+            .await;
+            let model = manager.get_committed_model("native-transition").unwrap();
+            assert!(model.is_ready_to_serve());
+            assert_eq!(model.total_workers(), 1);
+            assert_eq!(manager.get_model_cards()[0].mdcsum(), first.mdcsum());
+            drop(events);
+            task.await.unwrap();
+        }
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
     async fn frontends_keep_their_locally_first_configuration() {
         let runtime = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -3729,7 +3781,11 @@ request_classifier:
 
         const SCENARIO: &str = "DYNAMO_FACTORY_PARSER_SCENARIO";
         let Ok(scenario) = std::env::var(SCENARIO) else {
-            for (scenario, version) in [("engine_native", "auto"), ("legacy_mistral", "2")] {
+            for (scenario, version) in [
+                ("engine_native", "auto"),
+                ("legacy_mistral", "2"),
+                ("native_mistral", "auto"),
+            ] {
                 assert!(crate::test_utils::run_isolated(
                     concat!(
                         module_path!(),
@@ -3741,7 +3797,8 @@ request_classifier:
             return;
         };
         let is_legacy_mistral = scenario == "legacy_mistral";
-        let (tool_parser, reasoning_parser) = if is_legacy_mistral {
+        let is_native_mistral = scenario == "native_mistral";
+        let (tool_parser, reasoning_parser) = if is_legacy_mistral || is_native_mistral {
             ("mistral", "mistral")
         } else {
             ("engine_native_tool", "openai_gptoss")
@@ -3757,6 +3814,9 @@ request_classifier:
             (3, ModelInput::Tokens, true, true, false, true),
             (4, ModelInput::Tokens, false, false, true, true),
         ] {
+            if is_native_mistral && !matches!(index, 2 | 3) {
+                continue;
+            }
             let manager = Arc::new(ModelManager::new());
             let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let callback: ChatEngineFactoryCallback = {
@@ -3794,8 +3854,11 @@ request_classifier:
                 .component("workers")
                 .unwrap()
                 .endpoint("generate");
-            let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+            let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(if is_native_mistral {
+                "tests/data/sample-models/mock-mistral-tekken"
+            } else {
+                "tests/data/sample-models/mock-llama-3.1-8b-instruct"
+            });
             let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
             card.set_name(&format!("parser-factory-model-{index}"));
             card.model_input = input;
@@ -3854,6 +3917,21 @@ request_classifier:
                 let prepared = prepared.unwrap();
                 let worker_set = prepared.worker_set.as_ref().unwrap();
                 assert_eq!(worker_set.card().mdcsum(), checksum);
+                if is_native_mistral {
+                    assert_ne!(
+                        worker_set.input_policy(),
+                        crate::chat_input::ChatInputPolicy::Standard
+                    );
+                    let mut request: crate::protocols::anthropic::types::AnthropicCreateMessageRequest = serde_json::from_value(serde_json::json!({
+                        "model":"test", "max_tokens":32, "messages":[
+                            {"role":"user","content":"hi"}, {"role":"assistant","content":"hello"},
+                            {"role":"system","content":"reminder"}
+                        ]
+                    })).unwrap();
+                    worker_set.input_policy().prepare_anthropic(&mut request);
+                    assert_eq!(request.system.unwrap().text, "reminder");
+                    assert_eq!(request.messages.len(), 2);
+                }
                 if is_legacy_mistral {
                     let options = worker_set.parsing_options();
                     assert_eq!(

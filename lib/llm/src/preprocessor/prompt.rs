@@ -403,7 +403,7 @@ impl MediaRequestExt for NvCreateCompletionRequest {
 pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
     // Mistral-native checkpoints ship no template; mistral-common's encoding
     // is reproduced natively from the tekken tokenizer's version and settings.
-    if let Some(TokenizerKind::TekkenJson(checked_file)) = &mdc.tokenizer {
+    if let Some(checked_file) = mdc.tokenizer.as_ref().and_then(TokenizerKind::tekken_file) {
         let metadata = TekkenMetadata::from_checked_file(checked_file)?;
         let version = metadata
             .version()

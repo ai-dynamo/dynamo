@@ -281,7 +281,12 @@ async fn run_with_router_plugins(
             let manager = http_service.model_manager();
             let checksum = model.card().mdcsum();
             manager.add_completions_model(model.display_name(), checksum, engine.clone())?;
-            manager.add_chat_completions_model(model.display_name(), checksum, engine)?;
+            manager.add_chat_completions_model_with_card(
+                model.display_name(),
+                checksum,
+                model.card().clone(),
+                engine,
+            )?;
 
             enable_in_process_model_endpoints(&http_service)?;
             http_service
@@ -301,7 +306,12 @@ async fn run_with_router_plugins(
                 NvCreateChatCompletionStreamResponse,
             >(model.card(), inner_engine.clone(), tokenizer.clone())
             .await?;
-            manager.add_chat_completions_model(model.display_name(), checksum, chat_pipeline)?;
+            manager.add_chat_completions_model_with_card(
+                model.display_name(),
+                checksum,
+                model.card().clone(),
+                chat_pipeline,
+            )?;
 
             let cmpl_pipeline =
                 common::build_completions_pipeline(model.card(), inner_engine, tokenizer)?;
