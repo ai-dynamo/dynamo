@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+{{- $h := .Values.history }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dynamo-search-ui
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: dynamo-search-ui
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- with .Values.commonLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  {{- if eq $h.backend "local" }}
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dynamo-search-ui
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dynamo-search-ui
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- if and (eq $h.backend "azblob") $h.azblob.workloadIdentityClientId }}
+        azure.workload.identity/use: "true"
+        {{- end }}
+        {{- with .Values.commonLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: dynamo-search-ui
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: search-ui
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --listen-addr=:{{ .Values.port }}
+            - --history-backend={{ $h.backend }}
+            {{- if .Values.watchNamespace }}
+            - --namespace={{ .Values.watchNamespace }}
+            {{- end }}
+            {{- if eq $h.backend "local" }}
+            - --history-dir={{ $h.local.path }}
+            {{- end }}
+            {{- if eq $h.backend "azblob" }}
+            - --azure-blob-account-url={{ required "history.azblob.accountUrl is required" $h.azblob.accountUrl }}
+            - --azure-blob-container={{ required "history.azblob.container is required" $h.azblob.container }}
+            {{- end }}
+            {{- if not .Values.dgdCreate.enabled }}
+            - --disable-dgd-create
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          {{- if eq $h.backend "local" }}
+          volumeMounts:
+            - name: history
+              mountPath: {{ $h.local.path }}
+          {{- end }}
+      {{- if eq $h.backend "local" }}
+      volumes:
+        - name: history
+          {{- if $h.local.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ $h.local.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

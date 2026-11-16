@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+{{- $rules := list
+  (dict "apiGroups" (list "nvidia.com") "resources" (list "dynamographdeploymentrequests" "dynamographdeploymentruns" "dynamographdeploymentcandidates") "verbs" (list "get" "list" "watch"))
+  (dict "apiGroups" (list "") "resources" (list "pods") "verbs" (list "get" "list" "watch"))
+  (dict "apiGroups" (list "") "resources" (list "pods/log") "verbs" (list "get"))
+}}
+{{- if .Values.dgdCreate.enabled }}
+{{- $rules = append $rules (dict "apiGroups" (list "nvidia.com") "resources" (list "dynamographdeployments") "verbs" (list "get" "create")) }}
+{{- end }}
+{{- if .Values.watchNamespace }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dynamo-search-ui
+  namespace: {{ .Values.watchNamespace }}
+  labels:
+    app.kubernetes.io/name: dynamo-search-ui
+    app.kubernetes.io/instance: {{ .Release.Name }}
+rules:
+{{ toYaml $rules | indent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dynamo-search-ui
+  namespace: {{ .Values.watchNamespace }}
+  labels:
+    app.kubernetes.io/name: dynamo-search-ui
+    app.kubernetes.io/instance: {{ .Release.Name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dynamo-search-ui
+subjects:
+  - kind: ServiceAccount
+    name: dynamo-search-ui
+    namespace: {{ .Release.Namespace }}
+{{- else }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Namespace }}-dynamo-search-ui
+  labels:
+    app.kubernetes.io/name: dynamo-search-ui
+    app.kubernetes.io/instance: {{ .Release.Name }}
+rules:
+{{ toYaml $rules | indent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Namespace }}-dynamo-search-ui
+  labels:
+    app.kubernetes.io/name: dynamo-search-ui
+    app.kubernetes.io/instance: {{ .Release.Name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Namespace }}-dynamo-search-ui
+subjects:
+  - kind: ServiceAccount
+    name: dynamo-search-ui
+    namespace: {{ .Release.Namespace }}
+{{- end }}
