@@ -1112,11 +1112,7 @@ def build_sampling_params_openai(
 
     # Handle stop sequences
     stop = request.get("stop")
-    if (
-        isinstance(stop, list)
-        and stop
-        and all(isinstance(item, int) and not isinstance(item, bool) for item in stop)
-    ):
+    if isinstance(stop, list) and stop and all(_is_token_id(item) for item in stop):
         sampling_params.stop_token_ids = stop
     elif stop is not None:
         sampling_params.stop = stop
