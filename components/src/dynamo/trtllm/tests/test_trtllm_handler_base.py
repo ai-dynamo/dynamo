@@ -893,17 +893,24 @@ class TestDisaggRequestId:
         assert params.request_type == "context_and_generation"
 
     @pytest.mark.parametrize(
-        ("request_extra", "expected"),
-        [({"elapsed_since_arrival_ms": 1500.0}, 1.5), ({}, None)],
-        ids=["stamped", "unstamped"],
+        ("request_extra", "has_field", "expected"),
+        [
+            ({"elapsed_since_arrival_ms": 1500.0}, True, 1.5),
+            ({}, True, None),
+            ({"elapsed_since_arrival_ms": 1500.0}, False, None),
+        ],
+        ids=["stamped", "unstamped", "older-trtllm"],
     )
     def test_decode_passes_frontend_elapsed_as_orig_elapsed_s(
-        self, monkeypatch, request_extra, expected
+        self, monkeypatch, request_extra, has_field, expected
     ):
-        """A decode leg orders by its arrival at the frontend, when the router stamped it."""
+        """A decode leg orders by its arrival at the frontend, when the router stamped it.
+
+        A TRT-LLM build without the field keeps its params untouched: they are slotted.
+        """
         monkeypatch.setattr(
             "dynamo.trtllm.request_handlers.handler_base.TRTLLM_HAS_ORIG_ELAPSED_S",
-            True,
+            has_field,
         )
         handler = self._make_decode_handler()
         handler._decode_disaggregated_params_from_prefill = MagicMock(
