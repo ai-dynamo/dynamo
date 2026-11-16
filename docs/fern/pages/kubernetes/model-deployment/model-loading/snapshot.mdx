@@ -106,14 +106,14 @@ kubectl get crd snapshotjobs.nvidia.com podsnapshots.nvidia.com
 For an existing platform release, use its name, namespace, and version.
 `--reuse-values` preserves its settings. The Snapshot chart creates an RWX
 artifact PVC; use `snapshot.storage.pvc` values to customize its size or reuse an
-existing claim. See [Snapshot storage configuration](https://github.com/ai-dynamo/snapshot/blob/main/docs/operations/storage.md).
+existing claim. See [Snapshot storage configuration](https://github.com/ai-dynamo/snapshot/blob/main/docs/operate/configure-storage.md).
 
 <Note>
 If Snapshot is already managed separately, keep `global.snapshot.install=false`
 and omit the `snapshot.storage.pvc` settings. Verify that its APIs and agents are
 ready before enabling `dynamo-operator.checkpoint.enabled`. Do not install a
 second cluster-wide Snapshot operator. Separate installation is recommended for
-production; see [Snapshot installation](https://github.com/ai-dynamo/snapshot/blob/main/docs/operations/install.md).
+production; see [Snapshot installation](https://github.com/ai-dynamo/snapshot/blob/main/docs/get-started/installation.md).
 </Note>
 
 </Step>
@@ -224,7 +224,7 @@ kubectl get pods -n "$NAMESPACE"
 - **Capture fails:** inspect the `SnapshotJob` failure reason and capture Pod logs.
   Keep the recipe's `OMPI_MCA_pml=ob1` and `OMPI_MCA_btl=tcp,self` settings.
 - **Restore fails:** inspect the worker's `nvidia.com/Restored` condition and
-  [Snapshot troubleshooting](https://github.com/ai-dynamo/snapshot/blob/main/docs/operations/troubleshooting.md).
+  [Snapshot troubleshooting](https://github.com/ai-dynamo/snapshot/blob/main/docs/troubleshooting/restores.md).
 
 ## Clean Up
 
