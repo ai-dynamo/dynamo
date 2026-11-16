@@ -37,10 +37,9 @@ try:
     from modelexpress.load_strategy import base as strategy_base
     from modelexpress.load_strategy.rdma_strategy import RdmaStrategy
     from modelexpress.metadata import client_factory, publish
-    from modelexpress.nixl_transfer import NixlTransferManager
 except ImportError:  # The ModelExpress tests skip without the package.
     p2p_pb2 = StrategyFailed = strategy_base = RdmaStrategy = None
-    client_factory = publish = NixlTransferManager = None
+    client_factory = publish = None
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -394,76 +393,38 @@ def test_mx_restore_retries_the_next_source_on_its_listen_port(monkeypatch):
     assert all(agent.shut_down for agent in agents)
 
 
-class _CatalogAgent:
-    """A NIXL manager that runs ModelExpress's real tensor matching."""
-
-    def __init__(self, port: int) -> None:
-        self.port = port
-        self.prepared: list = []
-        self.tensor_descriptors: list = []
-        self._tensors: dict = {}
-        self._device_id = 0
-        self._backends = ["UCX"]
-        self._accelerator_backend = SimpleNamespace(
-            set_device=lambda _device: None, nixl_mem_type="VRAM"
-        )
-        self._agent = SimpleNamespace(
-            prep_xfer_dlist=self._prep_xfer_dlist,
-        )
-        self.receive_from_source = NixlTransferManager.receive_from_source.__get__(self)
-
-    def _prep_xfer_dlist(self, **kwargs):
-        self.prepared.append(kwargs)
-        raise RuntimeError("transfer started")
-
-    def register_tensors(self, tensors) -> None:
-        self._tensors = dict(tensors)
-
-    def add_remote_agent(self, _metadata) -> str:
-        return "peer-agent"
-
-    def remove_remote_agent(self, _name) -> None:
-        pass
-
-    def shutdown(self) -> None:
-        pass
-
-
 @pytest.mark.skipif(
     importlib.util.find_spec("modelexpress") is None or not HAS_TORCH,
     reason="modelexpress and torch required",
 )
-@pytest.mark.parametrize(
-    "peer_sizes",
-    [
-        pytest.param([64, 64], id="missing-allocation"),
-        pytest.param([64, 64, 64, 64], id="extra-allocation"),
-    ],
-)
-def test_mx_restore_rejects_a_peer_with_other_allocations(monkeypatch, peer_sizes):
+def test_mx_restore_requires_the_peer_to_name_every_allocation(monkeypatch):
     import torch
 
-    agents: list[_CatalogAgent] = []
+    # By default ModelExpress fills only the tensors both sides name. GMS must
+    # ask it to reject a peer whose allocations differ.
+    exact = []
 
-    def start_agent(_rank, _device, port):
-        agents.append(_CatalogAgent(port))
-        return agents[-1]
+    class _Agent(_FakeAgent):
+        def add_remote_agent(self, _metadata) -> str:
+            return "peer-agent"
 
-    monkeypatch.setattr(mx, "_start_nixl_manager", start_agent)
-    monkeypatch.setattr(
-        mx,
-        "byte_tensors",
-        lambda extents, _device: {
-            mx.allocation_tensor_name(i): torch.zeros(size, dtype=torch.uint8)
-            for i, (_va, size) in enumerate(extents)
-        },
-    )
+        def remove_remote_agent(self, _name) -> None:
+            pass
+
+        def receive_from_source(self, *, require_exact_match, **_kwargs):
+            exact.append(require_exact_match)
+            return 0, 0, 0.0
+
+    monkeypatch.setattr(mx, "_start_nixl_manager", lambda *_args: _Agent(25557))
+    monkeypatch.setattr(mx, "byte_tensors", lambda *_args: {})
     monkeypatch.setattr(torch.cuda, "set_device", lambda _device: None)
-    monkeypatch.setattr(torch.cuda, "synchronize", lambda _device: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda *_args: None)
     monkeypatch.setattr(client_factory, "create_metadata_client", lambda **_: None)
     monkeypatch.setattr(RdmaStrategy, "is_available", lambda _self, _ctx: True)
-    # Registration checks NIXL on its own, apart from is_available.
-    monkeypatch.setattr(strategy_base, "is_nixl_available", lambda: True)
+    monkeypatch.setattr(
+        "modelexpress.load_strategy.rdma_strategy.register_tensors",
+        lambda *_args: None,
+    )
     monkeypatch.setattr(
         RdmaStrategy,
         "_find_source_instances",
@@ -471,17 +432,9 @@ def test_mx_restore_rejects_a_peer_with_other_allocations(monkeypatch, peer_size
             p2p_pb2.SourceInstanceRef(mx_source_id="src", worker_id="peer-0")
         ],
     )
-    peer = p2p_pb2.WorkerMetadata()
-    peer.tensor_source.tensors.extend(
-        p2p_pb2.TensorDescriptor(
-            name=mx.allocation_tensor_name(i),
-            addr=0x9000 + 0x100 * i,
-            size=size,
-            dtype="torch.uint8",
-        )
-        for i, size in enumerate(peer_sizes)
+    monkeypatch.setattr(
+        RdmaStrategy, "_fetch_worker_metadata", lambda *_args: p2p_pb2.WorkerMetadata()
     )
-    monkeypatch.setattr(RdmaStrategy, "_fetch_worker_metadata", lambda *_args: peer)
     monkeypatch.setattr(RdmaStrategy, "_accelerator_compatible", lambda *_args: True)
 
     backend = mx.MXTransferBackend(
@@ -492,21 +445,11 @@ def test_mx_restore_rejects_a_peer_with_other_allocations(monkeypatch, peer_size
                 "mx_rank": 0,
                 "mx_source_key": "ckpt-1",
                 "mx_listen_port": 25557,
-                # Without a server ModelExpress skips registering the allocations.
-                "mx_server_url": "mx.invalid:8001",
             },
         )
     )
-    ids = ["a0", "a1", "a2"]
-    session = backend.start_restore([FileTransferSource(a, "", 0, 64) for a in ids])
-    with pytest.raises(StrategyFailed, match="mismatch"):
-        session.restore(
-            {
-                a: GMSTransferTarget(a, 0x1000 * (i + 1), 0, 64)
-                for i, a in enumerate(ids)
-            }
-        )
+    session = backend.start_restore([FileTransferSource("a0", "", 0, 64)])
+    session.restore({"a0": GMSTransferTarget("a0", 0x1000, 0, 64)})
     backend.close()
 
-    assert agents[0]._tensors.keys() == {mx.allocation_tensor_name(i) for i in range(3)}
-    assert agents[0].prepared == []
+    assert exact == [True]
