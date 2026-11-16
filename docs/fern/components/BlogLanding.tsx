@@ -7,7 +7,7 @@ const ARTICLES = [
   {
     title: "Planner Retune: Staying on the Pareto Frontier as Traffic Drifts",
     description:
-      "Planner Retune replays recent traffic in AISimulate and applies better KV-router and Planner settings to a running deployment, with no restart.",
+      "Planner Retune replays recent traffic in AISim and applies better KV-router and Planner settings to a running deployment, with no restart.",
     href: "/dynamo/dev/digest/planner-retune",
     date: "November 2026",
     readTime: "15 min read",

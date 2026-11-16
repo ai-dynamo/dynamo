@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 title: "Planner Retune: Staying on the Pareto Frontier as Traffic Drifts"
 subtitle: "[Hongkuan Zhou](https://developer.nvidia.com/blog/author/hongkuanz/) — November 2026"
-description: "Planner Retune replays recent traffic in AISimulate, picks better KV-router and Planner settings, and applies them to a running Dynamo deployment: +13 % goodput per GPU on H200 with router retune, +4.6 % with router and Planner retune under autoscaling."
-keywords: Dynamo, Planner, Router, retune, AISimulate, DynoSim, autoscaling, goodput, Kubernetes
+description: "Planner Retune replays recent traffic in AISim, picks better KV-router and Planner settings, and applies them to a running Dynamo deployment: +13 % goodput per GPU on H200 with router retune, +4.6 % with router and Planner retune under autoscaling."
+keywords: Dynamo, Planner, Router, retune, AISim, autoscaling, goodput, Kubernetes
 last-updated: November 9, 2026
 hide-page-actions: true
 ---
@@ -29,7 +29,7 @@ Production traffic does not hold still: a RAG workload in the morning, reasoning
 fleet at night. The settings that were optimal at deploy time quietly drift away from the frontier.
 
 **Planner Retune** closes that gap. The Dynamo Planner records the traffic a deployment actually serves, replays the
-most recent window in AISimulate for a grid of KV-router and Planner settings, and switches the running deployment to
+most recent window in AISim for a grid of KV-router and Planner settings, and switches the running deployment to
 the winner, with no restart. Here is what it buys:
 
 - **Real H200, router retune:** **+13.1 % goodput per GPU** after the first decision, with SLA attainment up from 51 %
@@ -60,7 +60,7 @@ quickly to add or remove them. Both have a handful of knobs, and the right value
 </Frame>
 
 <Info icon="hand-point-up" className="fig-caption">
-Simulation (AISimulate replay). Each cell is goodput per GPU relative to the best setting in its row; blue marks the
+Simulation (AISim replay). Each cell is goodput per GPU relative to the best setting in its row; blue marks the
 best. (a) Twelve KV-router settings, DeepSeek-V4-Pro on a fixed fleet of 128 B300 GPUs, one day of each traffic type.
 (b) Five Planner scaling settings, Qwen3-32B with the Planner autoscaling between 1 and 8 H200 GPUs, two hours of each
 traffic type.
@@ -81,7 +81,7 @@ mix shifts. Tuning has to follow the traffic.
 
 ## 2. How retune works
 
-Retune turns the DynoSim workflow into a loop that runs next to the deployment.
+Retune turns the AISim workflow into a loop that runs next to the deployment.
 
 <Frame caption="Figure 2 — The retune loop">
   <img src="../_assets/planner-retune/fig2_retune_loop_light.png" alt="Five-step loop: record, window, sweep, decide, apply, with a measured timeline of about five minutes." />
@@ -97,9 +97,8 @@ were live at 4:50 and 5:04.
    prompt's KV blocks, which is what a KV-aware replay needs. The prompt text itself is not recorded.
 2. **Window.** Every `interval_seconds` (one hour in our runs), the Planner cuts the records of the window that just
    ended into one trace.
-3. **Sweep.** The Planner replays that window in AISimulate, the engine behind DynoSim, once for every candidate
-   router and Planner setting. On Kubernetes the replays run as DynamoGraphDeploymentRequests, in parallel, next to the
-   deployment.
+3. **Sweep.** The Planner replays that window in AISim once for every candidate router and Planner setting. On
+   Kubernetes the replays run as DynamoGraphDeploymentRequests, in parallel, next to the deployment.
 4. **Decide.** Each candidate is scored on goodput per GPU: requests that meet the time-to-first-token and
    inter-token-latency SLA, per GPU. The best candidate replaces the current settings only if it is more than 3 % better
    on the same window. The decision is written to a Kubernetes Lease before anything changes.
@@ -177,7 +176,7 @@ day, searching router settings and the Planner's load predictor.
 </Frame>
 
 <Info icon="hand-point-up" className="fig-caption">
-Simulation (AISimulate replay). Goodput per GPU with router and Planner retune versus without, per day; one retune
+Simulation (AISim replay). Goodput per GPU with router and Planner retune versus without, per day; one retune
 window is one day. Dashed lines mark decisions.
 </Info>
 
@@ -220,7 +219,7 @@ windows. A line breaks where 15 minutes pass without a request.
 </Frame>
 
 <Info icon="hand-point-up" className="fig-caption">
-Simulation (AISimulate replay). DeepSeek-V4-Pro on up to 128 B300 GPUs with SLA Planner autoscaling, one day of RAG
+Simulation (AISim replay). DeepSeek-V4-Pro on up to 128 B300 GPUs with SLA Planner autoscaling, one day of RAG
 traffic, retune every 6 hours. Black ticks mark the best fixed setting, found in hindsight. Both runs use the same
 settings in the first window, so the −1.8 % gap there is run-to-run randomness.
 </Info>
