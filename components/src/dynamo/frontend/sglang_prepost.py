@@ -1694,8 +1694,8 @@ class SglangStreamingPostProcessor:
             )
 
         if self._glm_output is not None:
-            delta = self._glm_output.parse(delta_text, finish_reason)
-            for call in delta.get("tool_calls", []):
+            glm_delta = self._glm_output.parse(delta_text, finish_reason)
+            for call in glm_delta.get("tool_calls", []):
                 function = call["function"]
                 if function.get("name"):
                     call["id"] = self._tool_call_id(function["name"], call["index"])
@@ -1703,10 +1703,10 @@ class SglangStreamingPostProcessor:
             effective_finish = finish_reason
             if finish_reason == "stop" and self._glm_output.has_calls:
                 effective_finish = "tool_calls"
-            if delta or effective_finish:
+            if glm_delta or effective_finish:
                 return {
                     "index": 0,
-                    "delta": self._with_initial_role(delta),
+                    "delta": self._with_initial_role(glm_delta),
                     "finish_reason": effective_finish,
                     "logprobs": self._take_pending_logprobs(),
                 }
