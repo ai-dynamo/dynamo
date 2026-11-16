@@ -332,6 +332,35 @@ def _kv_group_policy(group: Any) -> str:
     return "other"
 
 
+def _kv_manager_group(manager: Any, kv_cache_config: Any) -> Any:
+    """The KV cache group a single-type manager allocates for (newer vLLM)."""
+    group_id = getattr(manager, "kv_cache_group_id", None)
+    groups = getattr(kv_cache_config, "kv_cache_groups", None) or []
+    if isinstance(group_id, int) and 0 <= group_id < len(groups):
+        return groups[group_id]
+    return None
+
+
+def _kv_manager_specs(manager: Any, kv_cache_config: Any) -> list[Any]:
+    """The layer specs a single-type manager allocates for, on either vLLM KV API:
+    older managers hold one kv_cache_spec, newer ones a kv_cache_group_id."""
+    spec = getattr(manager, "kv_cache_spec", None)
+    if spec is not None:
+        return [spec]
+    group = _kv_manager_group(manager, kv_cache_config)
+    return _kv_group_specs(group) if group is not None else []
+
+
+def _kv_manager_checkpoint_blocks(manager: Any) -> int:
+    """Mamba prefill checkpoint blocks: on the spec in older vLLM, in the manager's
+    policy params in newer vLLM."""
+    spec = getattr(manager, "kv_cache_spec", None)
+    if spec is not None:
+        return getattr(spec, "num_prefill_checkpoint_blocks", 0)
+    params = getattr(getattr(manager, "manager_config", None), "params", None)
+    return getattr(params, "num_prefill_checkpoint_blocks", 0)
+
+
 def _bench_engine_kv_cache_spec(spec: Any) -> dict[str, Any]:
     """One kv_cache_spec's identity, geometry and observed attention retention."""
     entry: dict[str, Any] = {
@@ -371,6 +400,23 @@ def _bench_engine_kv_cache(cache_config: Any, kv_cache_config: Any) -> dict[str,
             kv_cache_specs={str(i): s for i, s in enumerate(specs)}
         )
         entry = _bench_engine_kv_cache_spec(spec)
+        if getattr(group, "kv_cache_spec", None) is None:
+            # Newer vLLM keeps retention on the group's manager policy, not the spec.
+            manager_cls = getattr(group, "manager_cls", None)
+            if manager_cls is not None:
+                entry["manager"] = manager_cls.__name__
+            params = getattr(getattr(group, "manager_config", None), "params", None)
+            if params is not None:
+                entry["manager_params"] = _json_safe(
+                    {
+                        name: getattr(params, name)
+                        for name in getattr(params, "__dataclass_fields__", {})
+                    }
+                )
+            try:
+                entry["sliding_window_reach"] = _json_safe(group.sliding_window_reach)
+            except Exception:  # noqa: BLE001 - not every policy defines a reach
+                pass
         # vLLM's UniformTypeKVCacheSpecs wraps several same-kind specs that
         # differ in per-layer attributes; its own dtype/head_size/
         # num_kv_heads are always None, so fan out the wrapped specs too.
@@ -3217,11 +3263,7 @@ class InstrumentedScheduler(AsyncScheduler):
                     "block_size": getattr(manager, "block_size", None),
                     "admission_cap": self._kvwarm_admission_cap(manager),
                     "mamba_cache_mode": getattr(manager, "mamba_cache_mode", None),
-                    "num_prefill_checkpoint_blocks": getattr(
-                        getattr(manager, "kv_cache_spec", None),
-                        "num_prefill_checkpoint_blocks",
-                        0,
-                    ),
+                    "num_prefill_checkpoint_blocks": _kv_manager_checkpoint_blocks(manager),
                     "num_speculative_blocks": getattr(
                         manager, "num_speculative_blocks", 0
                     ),
@@ -4022,11 +4064,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 # Bound the full state transition, not just the steady state:
                 # old/new states can coexist, and FlashKDA reserves an extra
                 # prefill checkpoint even without speculative decoding.
-                checkpoint_blocks = getattr(
-                    getattr(manager, "kv_cache_spec", None),
-                    "num_prefill_checkpoint_blocks",
-                    0,
-                )
+                checkpoint_blocks = _kv_manager_checkpoint_blocks(manager)
                 blocks = 2 + speculative_blocks + checkpoint_blocks
                 if resident_chain and num_tokens < block_size:
                     # A parked kvwarm chain below one cache block has not crossed a
@@ -6468,6 +6506,13 @@ class InstrumentedScheduler(AsyncScheduler):
         if self._kvwarm_admission_cap(manager) is None:
             return False
         spec = getattr(manager, "kv_cache_spec", None)
+        if spec is None:
+            # Newer vLLM: prefix caching is a property of the group's manager policy.
+            config = getattr(
+                getattr(self, "kv_cache_manager", None), "kv_cache_config", None
+            )
+            group = _kv_manager_group(manager, config)
+            return getattr(group, "prefix_cacheable", True) is False
         return getattr(spec, "participates_in_prefix_caching", True) is False
 
     def _kvwarm_live_state_manager(self, manager) -> bool:
@@ -6479,17 +6524,24 @@ class InstrumentedScheduler(AsyncScheduler):
         # manager class names, so a vLLM rename or subclass cannot silently route a
         # recurrent group to the positional path. The k-pool tail is not a recurrent
         # state table; it is served by the circular-table predicate.
-        spec = getattr(manager, "kv_cache_spec", None)
+        specs = self._kvwarm_manager_specs(manager)
         return (
             self._bench_hybrid_live_state
             and not self._bench_random_kda
-            and (isinstance(spec, MambaSpec) or "Mamba" in type(spec).__name__)
+            and any(
+                isinstance(spec, MambaSpec) or "Mamba" in type(spec).__name__
+                for spec in specs
+            )
         )
 
     def _kvwarm_random_state_manager(self, manager) -> bool:
-        return self._bench_random_kda and isinstance(
-            getattr(manager, "kv_cache_spec", None), MambaSpec
+        return self._bench_random_kda and any(
+            isinstance(spec, MambaSpec) for spec in self._kvwarm_manager_specs(manager)
         )
+
+    def _kvwarm_manager_specs(self, manager) -> list:
+        config = getattr(getattr(self, "kv_cache_manager", None), "kv_cache_config", None)
+        return _kv_manager_specs(manager, config)
 
     def _kvwarm_shadow_tail_blocks_for(self, ctx_len: int, headroom: int) -> int:
         """Private tail blocks one shadow at ``ctx_len`` takes across the KV-cache groups
