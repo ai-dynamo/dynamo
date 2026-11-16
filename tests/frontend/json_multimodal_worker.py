@@ -28,6 +28,8 @@ from tests.frontend.test_json_multimodal_content import (
     PLAIN_ENDPOINT_PATH,
     PLAIN_MODEL_NAME,
     RESPONSE_TOKEN_IDS,
+    TEXT_ENDPOINT_PATH,
+    TEXT_MODEL_NAME,
 )
 from tests.utils.constants import QWEN
 
@@ -123,6 +125,13 @@ async def generate_plain(request, context):
     yield {"token_ids": list(RESPONSE_TOKEN_IDS), "finish_reason": "stop"}
 
 
+async def generate_text(request, context):
+    raise _mismatch(
+        "custom content reached a Text-input worker", request.get("messages")
+    )
+    yield  # makes this an async generator, like the other handlers
+
+
 async def main():
     runtime = DistributedRuntime(asyncio.get_running_loop(), "etcd", "tcp")
 
@@ -152,9 +161,21 @@ async def main():
         ignore_weights=True,
     )
 
+    text_endpoint = runtime.endpoint(TEXT_ENDPOINT_PATH)
+    await register_model(
+        ModelInput.Text,
+        ModelType.Chat,
+        text_endpoint,
+        QWEN,
+        model_name=TEXT_MODEL_NAME,
+        worker_type=WorkerType.Aggregated,
+        ignore_weights=True,
+    )
+
     await asyncio.gather(
         endpoint.serve_endpoint(generate),
         plain_endpoint.serve_endpoint(generate_plain),
+        text_endpoint.serve_endpoint(generate_text),
     )
 
 

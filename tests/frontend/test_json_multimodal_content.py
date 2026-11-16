@@ -18,6 +18,8 @@ MODEL_NAME = "test-json-mm-data"
 ENDPOINT_PATH = "test.json_mm_data.generate"
 PLAIN_MODEL_NAME = "test-json-mm-data-plain"
 PLAIN_ENDPOINT_PATH = "test.json_mm_data.generate_plain"
+TEXT_MODEL_NAME = "test-json-mm-data-text"
+TEXT_ENDPOINT_PATH = "test.json_mm_data.generate_text"
 MISMATCH_STATUS = 422
 IMAGE_URL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 
@@ -81,7 +83,7 @@ class _WorkerProcess(ManagedProcess):
         except ValueError:
             return False
         listed = {m.get("id") for m in data.get("data", [])}
-        return {MODEL_NAME, PLAIN_MODEL_NAME} <= listed
+        return {MODEL_NAME, PLAIN_MODEL_NAME, TEXT_MODEL_NAME} <= listed
 
 
 @pytest.fixture(scope="function")
@@ -187,11 +189,14 @@ def test_omitted_payload_stays_absent(services: int) -> None:
     _assert_stub_answered(response)
 
 
-def test_worker_without_json_capability_rejects_custom_content(services: int) -> None:
+@pytest.mark.parametrize("model", [PLAIN_MODEL_NAME, TEXT_MODEL_NAME])
+def test_worker_without_json_capability_rejects_custom_content(
+    services: int, model: str
+) -> None:
     response = _chat(
         services,
         {
-            "model": PLAIN_MODEL_NAME,
+            "model": model,
             "nvext": {"token_data": [1, 2, 3]},
             "messages": [
                 {

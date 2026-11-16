@@ -161,7 +161,8 @@ handoffs, not public HTTP inputs for arbitrary custom tensors. Their serializati
 staging, copying, and buffer ownership remain unchanged; no zero-copy GPU claim
 is made for custom JSON.
 
-Selected workers must advertise `custom_json_v1`. Custom P/D, encoder
+The frontend sends custom content only to workers that advertise
+`custom_json_v1` and returns 400 when none does. Custom P/D, encoder
 disaggregation, speculative prefill, custom caching/KVBM, SGLang, TensorRT-LLM,
 and native vLLM sidecars are unsupported. Extending these paths requires a
 separate qualification of plugin payload identity and lifecycle.

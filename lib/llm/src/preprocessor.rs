@@ -1802,7 +1802,9 @@ fn custom_transport_error(message: &'static str) -> anyhow::Error {
         .into()
 }
 
-fn has_custom_content(request: &impl OAIChatLikeRequest) -> bool {
+pub(crate) const CUSTOM_CONTENT_UNSUPPORTED: &str = "Selected workers do not support custom JSON multimodal content; use an aggregated Python vLLM worker with --enable-multimodal";
+
+pub(crate) fn has_custom_content(request: &impl OAIChatLikeRequest) -> bool {
     request
         .typed_messages()
         .unwrap_or_default()
@@ -4312,7 +4314,7 @@ impl OpenAIPreprocessor {
                 crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
             )
         {
-            let message = "Selected workers do not support custom JSON multimodal content; use an aggregated Python vLLM worker with --enable-multimodal";
+            let message = CUSTOM_CONTENT_UNSUPPORTED;
             return Err(DynamoError::builder()
                 .error_type(ErrorType::InvalidArgument)
                 .message(message)
