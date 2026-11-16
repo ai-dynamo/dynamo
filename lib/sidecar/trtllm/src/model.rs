@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
+
 use dynamo_backend_common::{EngineConfig, LlmRegistration};
 use dynamo_llm::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
 
@@ -23,28 +25,29 @@ pub(crate) struct ConfiguredModel {
 
 impl ConfiguredModel {
     pub(crate) fn engine_config(&self) -> EngineConfig {
+        let mut runtime_data = HashMap::new();
+        runtime_data.insert(
+            "grpc_service".to_string(),
+            serde_json::Value::String("openengine.v1.Inference".to_string()),
+        );
+        if let Some(combined_limit) = self.context_length {
+            // TensorRT-LLM rejects prompt overflow but clamps oversized output budgets.
+            let token_budget = TokenBudget {
+                combined_limit,
+                reject_prompt_overflow: true,
+                reject_total_overflow: false,
+            };
+            runtime_data.insert(
+                TOKEN_BUDGET_RUNTIME_KEY.to_string(),
+                serde_json::to_value(token_budget).expect("token budget is serializable"),
+            );
+        }
+
         EngineConfig {
             model: self.source.clone(),
             served_model_name: None,
             model_aliases: Vec::new(),
-            runtime_data: [(
-                "grpc_service".to_string(),
-                serde_json::Value::String("openengine.v1.Inference".to_string()),
-            )]
-            .into_iter()
-            .chain(self.context_length.map(|combined_limit| {
-                (
-                    TOKEN_BUDGET_RUNTIME_KEY.to_string(),
-                    // TensorRT-LLM rejects prompt overflow but clamps oversized output budgets.
-                    serde_json::to_value(TokenBudget {
-                        combined_limit,
-                        reject_prompt_overflow: true,
-                        reject_total_overflow: false,
-                    })
-                    .expect("token budget is serializable"),
-                )
-            }))
-            .collect(),
+            runtime_data,
             llm: Some(LlmRegistration {
                 context_length: self.context_length,
                 kv_cache_block_size: self.kv_cache_block_size,
