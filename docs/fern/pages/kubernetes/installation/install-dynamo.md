@@ -56,6 +56,7 @@ Every Dynamo deployment requires accelerator support and the **Dynamo Platform**
 | Network Operator / RDMA | Disaggregated inference in production | Acceptable KV cache transfer performance (TCP fallback has ~200-500x degradation) |
 | kube-prometheus-stack | Autoscaling, metrics dashboards, or the Planner | Planner `sla` mode, KEDA/HPA autoscaling |
 | Shared storage (model cache) | Large models (>70B) or many replicas | Avoiding per-pod downloads and HuggingFace rate limits |
+| LPX (experimental) | Serving compiled models on LPX systems | `type: lpx` components in a DGD |
 
 **Grove + KAI Scheduler** — Grove is the default multinode orchestrator. The operator returns a hard error on multinode deployments if neither Grove nor [LeaderWorkerSet (LWS)](https://github.com/kubernetes-sigs/lws#installation) is available. KAI Scheduler is optional but recommended alongside Grove for GPU-aware scheduling. See [Multinode Orchestration](multinode-orchestration.md) for details.
 
@@ -64,6 +65,8 @@ Every Dynamo deployment requires accelerator support and the **Dynamo Platform**
 **kube-prometheus-stack** — Required for the Planner's `sla` optimization mode (it reads live TTFT/ITL metrics from Prometheus). Also required for KEDA/HPA-based autoscaling. The Planner's `throughput` mode can function without it using internal queue depth signals, but metrics-driven features will not work. See [Metrics](../operations/observability.mdx) for details.
 
 **Shared storage** — Prevents each pod from downloading model weights independently. Without it, large models (>70B) take hours to download per pod, and many replicas will hit HuggingFace rate limits. Not enforced by the operator — this is an operational concern. See the [Model Storage Overview](model-storage/overview.md) to choose a storage backend.
+
+**LPX** — **Experimental.** To serve compiled models on LPX systems, also follow [Set Up LPX Serving](lpx.mdx), which installs the LPX cluster components and model storage and enables LPX in Dynamo.
 
 <Steps toc={true} tocDepth={2}>
 
@@ -195,7 +198,7 @@ kubectl get pods -n $NAMESPACE
 
 <Step title="Install Optional Components">
 
-The Dynamo install command above includes commented flags for each optional component. Install the component first, then uncomment the corresponding flag before running `helm install` in Step 2 (or run `helm upgrade --reuse-values` with the flag if you've already installed Dynamo).
+The Dynamo install command above includes commented flags for each optional component. Install the component first, then uncomment the corresponding flag before running `helm install` in Step 2 (or run `helm upgrade --reuse-values` with the flag if you've already installed Dynamo). If the upgrade also changes the chart version, use `--reset-then-reuse-values` (Helm 3.14 or later) instead.
 
 ### Multinode:
 
@@ -210,7 +213,7 @@ There are two ways to enable Grove and KAI Scheduler, controlled by which flags 
 - **`install=true`** — Dynamo installs and manages Grove/KAI as bundled subcharts. Simplest path; recommended for dev/testing.
 - **`enabled=true`** — Tells Dynamo that Grove/KAI are already installed and externally managed. Use this when you install Grove/KAI separately (e.g., to manage their lifecycle independently or share them across namespaces). Recommended for production.
 
-For the `enabled=true` path, install Grove and KAI Scheduler separately first. See the [Grove installation guide](https://github.com/NVIDIA/grove/blob/main/docs/installation.md) and [KAI Scheduler deployment guide](https://github.com/NVIDIA/KAI-Scheduler) for instructions.
+For the `enabled=true` path, install Grove and KAI Scheduler separately first. See the [Grove installation guide](https://github.com/ai-dynamo/grove/blob/main/docs/installation.md) and [KAI Scheduler deployment guide](https://github.com/NVIDIA/KAI-Scheduler) for instructions.
 
 > [!NOTE]
 > **Compatibility matrix:**
@@ -223,6 +226,7 @@ For the `enabled=true` path, install Grove and KAI Scheduler separately first. S
 > | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.10 |
 > | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
 > | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.15 |
+> | 1.7.x           | >= v0.17.0    | >= v0.1.0-alpha.15 |
 >
 > Upgrade Grove in lockstep with Dynamo while the Grove APIs remain unstable. Dynamo 1.3.x expects
 > Grove's earlier `ClusterTopology` API and is incompatible with the newer
@@ -288,6 +292,10 @@ Set up a `ReadWriteMany` PVC so all pods share downloaded model weights instead 
 - GKE — Cloud Filestore (see [GKE guide](managed-kubernetes/gcp/gke-setup.mdx))
 
 For large clusters with frequent model updates, consider [ModelExpress](model-storage/overview.md) for P2P model distribution and ModelStreamer for direct streaming from object storage. See [Model Caching](model-storage/overview.md) for the full walkthrough including the download Job, mount configuration, and ModelExpress setup.
+
+### LPX
+
+**Experimental.** LPX needs the LPX node components, the LPX scheduler, ModelExpress with a shared cache volume, Grove with its `lpx-scheduler` profile, and Dynamo values that enable LPX. See [Set Up LPX Serving](lpx.mdx).
 
 </Step>
 

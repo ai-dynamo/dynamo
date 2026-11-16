@@ -27,7 +27,7 @@ Grove is the default and recommended orchestrator for multinode deployments. It 
   <Tab title="External Installation" value="external">
   The external installation is recommended for production or if it's already installed on your system. It allows you to install Grove and KAI Scheduler separately, and manage their lifecycle independently or share them across namespaces.
 
-  See the [Grove installation guide](https://github.com/NVIDIA/grove/blob/main/docs/installation.md) and [KAI Scheduler deployment guide](https://github.com/NVIDIA/KAI-Scheduler) for instructions.
+  See the [Grove installation guide](https://github.com/ai-dynamo/grove/blob/main/docs/installation.md) and [KAI Scheduler deployment guide](https://github.com/NVIDIA/KAI-Scheduler) for instructions.
 
   Then, run the following command to install or configure Dynamo to use the existing Grove and KAI Scheduler:
 
@@ -48,6 +48,7 @@ Grove is the default and recommended orchestrator for multinode deployments. It 
   > | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
   > | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
   > | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.15 |
+  > | 1.7.x           | >= v0.17.0    | >= v0.1.0-alpha.15 |
 
   </Tab>
 </Tabs>

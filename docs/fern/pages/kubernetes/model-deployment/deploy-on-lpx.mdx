@@ -1,0 +1,263 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Deploy a Model on LPX
+subtitle: Deploy a compiled model on LPX with a DynamoGraphDeployment and send a test request.
+---
+
+This tutorial deploys one compiled model on LPX with a `DynamoGraphDeployment` (DGD) that has a
+Dynamo frontend and an LPX component. The DGD below contains the settings that Dynamo needs; you
+add the agent and conductor settings from the LPX runtime documentation.
+
+<Warning>
+**Experimental.** Requires Dynamo 1.7.0 or later. LPX component fields and runtime settings can
+change incompatibly between Dynamo releases.
+</Warning>
+
+## Prerequisites
+
+- An LPX serving setup from [Set Up LPX Serving](../installation/lpx.mdx), including the
+  `lpx-model-cache` PersistentVolumeClaim (PVC) in your deployment namespace.
+- A compiled build published to Google Cloud Storage (GCS) with its tokenizer files. The build
+  must run entirely on LPX hardware; this tutorial does not cover builds that also need GPUs.
+- Agent and conductor images for your LPX hardware, and the LPX runtime documentation for their
+  settings.
+- `envsubst` from the GNU `gettext` package, which substitutes your variables into the DGD.
+
+<Steps toc={true} tocDepth={2}>
+
+<Step title="Set the Deployment Variables" id="set-the-deployment-variables">
+
+```bash
+export NAMESPACE=lpx-serving                   # namespace with the lpx-model-cache PVC
+export RELEASE_VERSION=1.7.0                   # your Dynamo Platform release
+export BUILD_ID=builds/my-model/2026-10-01     # build root, relative to modelRegistryURL
+export AGENT_IMAGE="<agent image>"
+export CONDUCTOR_IMAGE="<conductor image>"
+export MODEL_NAME=my-model                     # model name that the conductor registers
+```
+
+If the Dynamo Platform release does not set `dynamo-operator.lpx.modelRegistryURL`, set
+`BUILD_ID` to the build's full `gs://` URL, without a trailing slash. Publish every changed build
+under a new prefix, because ModelExpress never downloads a cached build again.
+
+</Step>
+
+<Step title="Create the DGD" id="create-the-dgd">
+
+Save this DGD as `lpx-model.yaml`. The `model` component serves one compiled build. Its `agent`
+role runs the compiled programs on the LPX nodes, and its `conductor` role coordinates the agents
+and registers the model with the frontend.
+
+The DGD needs Kubernetes discovery, the Dynamo Platform default. If your platform sets
+`dynamo-operator.discoveryBackend` to `etcd`, add the annotation
+`nvidia.com/dynamo-discovery-backend: kubernetes` under the DGD's `metadata.annotations`.
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: lpx-model
+spec:
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:${RELEASE_VERSION}
+    - name: model
+      type: lpx
+      replicas: 1                          # model instances
+      lpx:
+        buildId: ${BUILD_ID}
+      roles:
+        - name: agent                      # one agent Pod per node that the build uses
+          podTemplate:
+            spec:
+              # REPLACE_WITH_AGENT_POD_SETTINGS
+              containers:
+                - name: main
+                  image: ${AGENT_IMAGE}
+                  # REPLACE_WITH_AGENT_CONTAINER_SETTINGS
+                  volumeMounts:
+                    - name: model-storage
+                      mountPath: /models
+                      readOnly: true
+              volumes:
+                - name: model-storage
+                  persistentVolumeClaim:
+                    claimName: lpx-model-cache
+                    readOnly: true
+        - name: conductor
+          podTemplate:
+            spec:
+              # REPLACE_WITH_CONDUCTOR_POD_SETTINGS
+              containers:
+                - name: main
+                  image: ${CONDUCTOR_IMAGE}
+                  # REPLACE_WITH_CONDUCTOR_CONTAINER_SETTINGS
+                  volumeMounts:
+                    - name: model-storage
+                      mountPath: /models
+                      readOnly: true
+              volumes:
+                - name: model-storage
+                  persistentVolumeClaim:
+                    claimName: lpx-model-cache
+                    readOnly: true
+```
+
+Dynamo completes the LPX Pods from the build's manifest. It creates one agent Pod for each node
+that the build uses, sets the scheduler and the LPX device request, adds a `config` volume with
+the partition configuration, and mounts the DGD's client key and certificate at
+`/etc/lpx/identity` in each agent's `main` container. For the full list, see the
+[DynamoComponentDeployment reference](../../reference/kubernetes-api/dynamo-component-deployment.mdx#shared-component-spec).
+
+Keep the volume name `model-storage`, and mount it at the same path in every role. Dynamo derives
+the build paths that it gives the conductor from that path.
+
+</Step>
+
+<Step title="Add the Runtime Settings" id="add-the-runtime-settings">
+
+Replace each `REPLACE_WITH_` comment with the agent or conductor settings from the LPX runtime
+documentation for your hardware: the command and arguments, environment variables, probes, and Pod
+settings such as tolerations for your LPX nodes. Add the runtime's volumes and mounts, such as the
+`config` mount and the SSH key volume, to the existing `volumes` and `volumeMounts` lists. In the
+conductor settings, set the model name to `${MODEL_NAME}`; the next step substitutes it.
+
+Dynamo sets `LPX_ALLOCATION` and `LPX_MODEL_PATH` on the conductor's `main` container, and
+`DYN_NAMESPACE`, `POD_IP`, `POD_NAME`, `POD_NAMESPACE`, and `POD_UID` on every role's `main`
+container. Reference them with `$(VARIABLE)` in `command`, `args`, and `env` values:
+
+- `command` and `args` can reference all of them.
+- An `env` entry can reference `LPX_ALLOCATION` and `LPX_MODEL_PATH`, which Dynamo places first.
+  Dynamo sorts all other `env` entries by name, including your own, and an entry can reference
+  only those that sort before it. For example, an entry named `HOST_IP` cannot use `$(POD_IP)`.
+
+In each SSH key volume, set `secret.secretName` to the Secret named by the platform chart value
+`dynamo-operator.dynamo.mpiRun.secretName` (default `mpi-run-ssh-secret`). That Secret does not
+need to exist in your namespace: Dynamo replaces the reference with the DGD's own Secret,
+`lpx-id-<DGD UID>`, which holds the DGD's SSH key pair under the keys `private.key` and
+`private.key.pub`. See
+[LPX Client Identity](../../developer-guide/security/secure-deployment-guidelines.md#lpx-client-identity).
+
+Leave out these settings, because Dynamo sets or reserves them:
+
+- `schedulerName`, `nodeName`, `hostname`, `subdomain`, `topologySpreadConstraints`, and
+  `nvidia.com/lpu` resources in any role. Dynamo sets the scheduler and the device request, and
+  reserves Pod addressing and placement.
+- In the agent template, `nodeSelector`, `schedulingGates`, `resourceClaims`, and any affinity
+  other than required node affinity. The LPX scheduler chooses the agents' nodes.
+- A volume named `config`.
+- In the agent template, a volume named `lpx-identity` and any mount at `/etc/lpx/identity` in
+  the `main` container.
+
+</Step>
+
+<Step title="Apply the DGD" id="apply-the-dgd">
+
+Check that no `REPLACE_WITH_` comments remain. When none remain, this command prints nothing:
+
+```bash
+grep -n REPLACE_WITH lpx-model.yaml
+```
+
+Substitute your variables, validate the DGD on the server, and apply it. The explicit variable
+list leaves any other `${...}` text in your runtime settings unchanged:
+
+```bash
+export VARS='${RELEASE_VERSION} ${BUILD_ID} ${AGENT_IMAGE} ${CONDUCTOR_IMAGE} ${MODEL_NAME}'
+
+envsubst "${VARS}" < lpx-model.yaml \
+  | kubectl apply --namespace "${NAMESPACE}" --dry-run=server --filename -
+
+envsubst "${VARS}" < lpx-model.yaml \
+  | kubectl apply --namespace "${NAMESPACE}" --filename -
+```
+
+</Step>
+
+<Step title="Wait for the Model" id="wait-for-the-model">
+
+The first deployment of a build includes downloading it from GCS, which can take much longer than
+starting the Pods:
+
+```bash
+kubectl wait dynamographdeployment/lpx-model --namespace "${NAMESPACE}" \
+  --for=condition=Ready --timeout=30m
+```
+
+To follow the progress from another terminal with the same variables, read the DGD's `Ready`
+message and the placement request. Dynamo creates the request after the download finishes, and the
+request moves from `pending` to `bound` when the LPX scheduler places the agents:
+
+```bash
+kubectl get dynamographdeployment lpx-model --namespace "${NAMESPACE}" \
+  --output jsonpath='{.status.conditions[?(@.type=="Ready")].message}{"\n"}'
+
+kubectl get lpupipelinerequests --namespace "${NAMESPACE}" \
+  --selector nvidia.com/dynamo-graph-deployment-name=lpx-model \
+  --output custom-columns='NAME:.metadata.name,PHASE:.status.phase'
+```
+
+If `kubectl wait` times out while the message is `Waiting for model downloads to complete`, run
+it again; the download continues.
+
+</Step>
+
+<Step title="Send a Request" id="send-a-request">
+
+Forward the frontend's port:
+
+```bash
+kubectl port-forward --namespace "${NAMESPACE}" service/lpx-model-frontend 8000:8000
+```
+
+In another terminal with the same variables, list the models and send a short completion request.
+The model list should contain the value of `MODEL_NAME`:
+
+```bash
+curl --fail-with-body http://localhost:8000/v1/models
+
+curl --fail-with-body http://localhost:8000/v1/completions \
+  --header 'Content-Type: application/json' \
+  --data "{\"model\": \"${MODEL_NAME}\", \"prompt\": \"Hello\", \"max_tokens\": 16}"
+```
+
+</Step>
+
+<Step title="Clean Up" id="clean-up">
+
+Delete the DGD. The cached build stays in shared storage until ModelExpress evicts it:
+
+```bash
+kubectl delete dynamographdeployment lpx-model --namespace "${NAMESPACE}"
+```
+
+</Step>
+
+</Steps>
+
+## Scale the Deployment
+
+The LPX component's `replicas` field sets the number of model instances, and the LPX scheduler
+places each instance separately. The count does not change the build's batch size or
+partitioning. An explicit `replicas` value must be at least 1, and LPX components do not support
+the `scalingAdapter` field. To let an external scaler manage the number of instances, including
+scaling to zero, omit `replicas`. The scaler then sets the count through the `scale` subresource
+of the component's Grove PodCliqueScalingGroup, and Dynamo does not change it. If Dynamo replaces
+the scaling group, the count restarts from the component's
+[minimum availability](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#configure-native-minimum-availability),
+one instance by default, and the scaler must set it again. For how replica changes interact with
+rollouts, see [Grove rollout budget overrides](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-rollout-budget-overrides).
+
+## Next Steps
+
+- Look up LPX fields in the [DynamoComponentDeployment reference](../../reference/kubernetes-api/dynamo-component-deployment.mdx#shared-component-spec)
+  and the [DynamoGraphDeployment reference](../../reference/kubernetes-api/dynamo-graph-deployment.mdx).
+- Review [LPX Client Identity](../../developer-guide/security/secure-deployment-guidelines.md#lpx-client-identity)
+  before you give other teams access to the deployment namespace.

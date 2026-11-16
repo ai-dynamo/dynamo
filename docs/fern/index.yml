@@ -94,6 +94,9 @@ navigation:
           path: pages/kubernetes/installation/install-dynamo.md
         - page: Multinode Orchestration
           path: pages/kubernetes/installation/multinode-orchestration.md
+        - page: LPX (Experimental)
+          path: pages/kubernetes/installation/lpx.mdx
+          slug: lpx
         - page: Gateway API Inference Extension
           path: pages/kubernetes/installation/gateway-api-routing.mdx
         - page: Operator TLS
@@ -149,6 +152,9 @@ navigation:
             path: pages/kubernetes/model-deployment/expose-the-frontend.md
           - page: Deploy on Intel GPUs
             path: pages/kubernetes/model-deployment/deploy-on-intel-gpus.mdx
+          - page: Deploy on LPX (Experimental)
+            path: pages/kubernetes/model-deployment/deploy-on-lpx.mdx
+            slug: deploy-on-lpx
           - section: Model Loading
             collapsed: true
             contents:

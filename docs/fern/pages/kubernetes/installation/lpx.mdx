@@ -1,0 +1,603 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Set Up LPX Serving
+subtitle: Install the cluster components, model storage, and Dynamo settings that serve compiled models on LPX.
+---
+
+[LPX](https://www.nvidia.com/en-us/data-center/lpx/) is an NVIDIA rack-scale accelerator for
+low-latency inference. Its compiler determines the timing of every computation and data
+transfer, so you compile each model before you deploy it. NVIDIA Dynamo serves models on LPX
+through the same frontend and `DynamoGraphDeployment` (DGD) API that it uses for GPU models.
+After you complete this setup, deploy a model with
+[Deploy a Model on LPX](../model-deployment/deploy-on-lpx.mdx).
+
+<Warning>
+**Experimental.** Requires Dynamo 1.7.0 or later. The LPX Helm values, the LPX component fields,
+and the LPX scheduler's `LpuPipelineRequest` API can change incompatibly between Dynamo releases.
+</Warning>
+
+## Prerequisites
+
+You need cluster-administrator access. For Helm and `kubectl` setup, see the
+[Dynamo installation prerequisites](install-dynamo.md#prerequisites).
+
+- [Kubernetes](https://kubernetes.io/releases/) 1.35 or later, with your LPX nodes in the
+  cluster.
+- The [Dynamo Platform Helm chart](install-dynamo.md) 1.7.0 or later. With the values on this
+  page, it also installs [Grove](https://github.com/ai-dynamo/grove) in the version that matches
+  your Dynamo release. Chart 1.6.0 has an earlier LPX integration that this guide does not
+  cover, and charts before 1.6.0 ignore the LPX values on this page.
+- On the LPX nodes: [Node Feature Discovery (NFD)](https://kubernetes-sigs.github.io/node-feature-discovery/stable/get-started/index.html),
+  the LPX device plugin, and the LPX node metadata publisher.
+- The LPX scheduler.
+- [ModelExpress](https://github.com/ai-dynamo/modelexpress/blob/v0.7.0/helm/README.md) Helm
+  chart 0.7.0. The values on this page are for that version.
+- [Shared storage](model-storage/overview.md) that supports `ReadWriteMany` volumes.
+- [Google credentials](https://github.com/ai-dynamo/modelexpress/blob/v0.7.0/docs/DEPLOYMENT.md#google-cloud-storage-credentials)
+  that can list and read objects in your build bucket. Only ModelExpress uses them.
+
+To deploy a model afterward, you also need a [compiled build](#what-a-compiled-build-contains)
+and the LPX runtime images for your hardware. Get the LPX device plugin, node metadata
+publisher, scheduler, runtime images, and their documentation from NVIDIA.
+
+## How LPX Serving Works
+
+### Why Models Are Compiled
+
+With a GPU backend such as vLLM, workers load a model checkpoint, and the inference engine and
+the GPU decide at run time how to execute it. On LPX, the compiler makes those decisions in
+advance: for every cycle, it sets where each value is stored, when data moves between devices,
+and which units compute it. Because no caches or hardware schedulers change this plan at run
+time, execution is deterministic. A model is also too large for one device's on-chip memory, so
+the compiler splits it into **partitions**: pipeline stages that each run on a group of devices,
+often across several nodes.
+
+You therefore cannot deploy a checkpoint directory or a Hugging Face model ID on LPX. The
+compiler and some Kubernetes resources, such as the `nvidia.com/lpu` device resource, are named
+after the Language Processing Unit (LPU), the processor in LPX systems. The LPU Compiler SDK
+compiles the model and publishes the result to Google Cloud Storage (GCS). You need the SDK only
+to create builds, not to deploy them; get it and its documentation from NVIDIA.
+
+### What a Compiled Build Contains
+
+A **compiled build** is the directory that the compiler publishes for one model. It contains:
+
+- The compiled programs for every LPX device in every partition, with the model weights built
+  in. A deployment downloads the original checkpoint only for a build that also needs GPUs.
+- The model's tokenizer and configuration files. Publish them with the build: the
+  [conductor](#what-each-component-does) registers them with Dynamo, and the Dynamo frontend
+  uses them to tokenize requests.
+- A **manifest** at the top of the build: either `manifest.v2.capnp.bin`, or
+  `deployment.v1.capnp.bin` for builds that split the manifest into deployment and execution
+  files. A build has exactly one of the two. The manifest records how the model is partitioned,
+  how many devices and nodes each partition uses, and how they are connected. The build also
+  records settings fixed at compile time, such as batch size and maximum sequence length.
+
+Dynamo reads the manifest to decide how many Pods each copy of the model needs and where they can
+run, so you do not repeat these values in a deployment. To change any setting recorded in the
+build, such as the batch size, compile and publish a new build. A build's GCS location identifies
+it, and a DGD's LPX component references the build in its `lpx.buildId` field.
+
+### What Each Component Does
+
+Each running copy of a compiled model is a **model instance**, which the API reference calls an
+engine replica. These components serve it:
+
+| Component | Responsibility |
+| --- | --- |
+| Dynamo operator | Reads each build's manifest, creates the model's Pods, and requests their placement. |
+| Dynamo frontend | Serves the OpenAI-compatible API and forwards requests to the conductor. |
+| LPX scheduler | Places agent Pods on LPX nodes that match the build. |
+| Agent | Runs the compiled programs on one LPX node's devices. Each instance has one agent per node that its build uses. |
+| Conductor | Coordinates the agents and serves requests for one model instance. |
+| [ModelExpress](https://github.com/ai-dynamo/modelexpress) | Downloads builds from GCS into shared storage. |
+| [Grove](https://github.com/ai-dynamo/grove) | Starts each model instance's Pods as a group, conductor last. |
+
+The agent and conductor together form the LPX **runtime**. Dynamo does not ship their container
+images.
+
+When you deploy a model:
+
+1. You publish a build to GCS with the LPU Compiler SDK.
+2. You create a DGD whose LPX component sets `lpx.buildId` to that build.
+3. The Dynamo operator has ModelExpress download the build to shared storage and waits for the
+   download to finish.
+4. The operator reads the manifest through ModelExpress. It then creates the agent and conductor
+   Pods, and `LpuPipelineRequest` placement requests for each model instance's agents.
+5. The LPX scheduler binds the agent Pods to matching nodes. Grove starts the conductor once the
+   agents are ready.
+6. The conductor reads the build from shared storage, connects to its agents, and registers the
+   model. The frontend then routes requests to it.
+
+## Install and Configure
+
+<Steps toc={true} tocDepth={2}>
+
+<Step title="Set the Installation Variables" id="set-the-installation-variables">
+
+The commands on this page use these variables. Set `MODEL_BUCKET` to the bucket that holds your
+builds. If the Dynamo Platform is already installed, set `DYNAMO_SYSTEM_NAMESPACE` to the
+namespace of its release, which this command shows in the second column:
+
+```bash
+helm list --all-namespaces | grep dynamo-platform
+```
+
+Set the variables:
+
+```bash
+export DYNAMO_SYSTEM_NAMESPACE=dynamo-system   # Dynamo operator, Grove, and ModelExpress
+export NAMESPACE=lpx-serving                   # namespace for your model deployments
+export MODEL_BUCKET=example-model-bucket       # GCS bucket that holds your builds
+export RELEASE_VERSION=1.7.0                   # Dynamo Platform chart, 1.7.0 or later
+```
+
+</Step>
+
+<Step title="Prepare the LPX Nodes" id="prepare-the-lpx-nodes">
+
+Install NFD, the LPX device plugin, and the LPX node metadata publisher as their documentation
+describes. Then check that each LPX node is ready and reports its devices:
+
+```bash
+kubectl get nodes \
+  --output custom-columns='NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status,DEVICES:.status.allocatable.nvidia\.com/lpu,CORDONED:.spec.unschedulable'
+```
+
+Each LPX node should show `True` under `READY`, its number of LPX devices under `DEVICES`, and
+`<none>` under `CORDONED`. Nodes without LPX devices show `<none>` under `DEVICES`. Also check the
+labels that the node metadata publisher sets, as its documentation describes. The LPX scheduler
+places no work on a node that is not ready, is cordoned, lacks those labels, or reports a
+partial device count.
+
+</Step>
+
+<Step title="Install the LPX Scheduler" id="install-the-lpx-scheduler">
+
+Install the LPX scheduler and its admission policies as its installation guide describes. You do
+not create `LpuPipelineRequest` resources; the Dynamo operator creates them for your deployments.
+
+Install the scheduler before you enable LPX in Dynamo: when LPX is enabled, the Dynamo operator
+does not start until the `LpuPipelineRequest` API exists. The scheduler does not become ready
+until Grove runs, so if Grove is not installed yet, do not wait for the scheduler here. It
+becomes ready after you complete [Enable LPX and Grove in Dynamo](#enable-lpx-in-dynamo).
+
+Confirm that the API exists:
+
+```bash
+kubectl api-resources --api-group=scheduling.lpu.nvidia.com
+```
+
+```text
+NAME                  SHORTNAMES   APIVERSION                           NAMESPACED   KIND
+lpupipelinerequests   lpr          scheduling.lpu.nvidia.com/v1alpha1   true         LpuPipelineRequest
+```
+
+Each Dynamo release is built against a fixed version of this API. When you upgrade Dynamo,
+upgrade the LPX scheduler in the same maintenance window and rerun this check.
+
+</Step>
+
+<Step title="Configure Model Storage" id="configure-model-storage">
+
+ModelExpress downloads builds from GCS into a shared volume, and the agent and conductor Pods
+read them from that volume. Only ModelExpress needs GCS credentials and write access. The Dynamo
+operator needs neither and does not mount the volume; it uses only the ModelExpress API.
+
+### Publish Builds to GCS
+
+Publish each build with its tokenizer files, as the LPU Compiler SDK documentation describes.
+When you choose where to publish:
+
+- Use a new prefix for every build, for example by ending it with a version or date. ModelExpress
+  never downloads a cached build again, so files that you change under an existing prefix never
+  reach your deployments.
+- Do not nest one build's prefix inside another's. ModelExpress refuses to cache overlapping
+  locations.
+- Make sure that the prefix directly contains exactly one manifest, `manifest.v2.capnp.bin` or
+  `deployment.v1.capnp.bin`. Dynamo rejects a build with neither or both. This prefix is the
+  build root that a DGD references.
+
+For example, the build root `gs://example-model-bucket/builds/my-model/2026-10-01` directly
+contains its manifest:
+
+```text
+gs://example-model-bucket/builds/my-model/2026-10-01/manifest.v2.capnp.bin
+```
+
+### Create the Shared Cache Volume
+
+The cache is one directory on a shared file system. ModelExpress and the model Pods reach it
+through PersistentVolumeClaims (PVCs). Because PVCs belong to a namespace, create a PVC with the
+same name in the ModelExpress namespace and in each namespace where you deploy models. Every PVC
+must expose the same directory: Dynamo assumes that the root of each model Pod's volume is the
+root of the ModelExpress cache.
+
+The volume needs:
+
+- The `ReadWriteMany` access mode, because ModelExpress and the model Pods run on different
+  nodes.
+- Write access for ModelExpress, which runs as user ID (UID) 1000 and group ID (GID) 1000.
+  Kubernetes does not apply a Pod's `fsGroup` to Network File System (NFS) volumes. Before you
+  install ModelExpress, make the exported directory writable by that user or group, for example
+  with `chown 1000:1000 /exports/lpx-model-cache` on the NFS server. Do the same for other
+  storage whose driver does not apply `fsGroup`.
+- Enough capacity for the builds you deploy, including the checkpoints of builds that also need
+  GPUs. By default, ModelExpress deletes a cached build that no deployment has used for 7 days.
+
+A PersistentVolume (PV) binds to only one PVC, so each namespace needs its own PV that points to
+the same storage. For example, for an NFS export:
+
+```bash
+export NFS_SERVER=nfs.example.com          # NFS server that holds the cache
+export NFS_PATH=/exports/lpx-model-cache   # exported directory, used as the cache root
+
+for ns in "${DYNAMO_SYSTEM_NAMESPACE}" "${NAMESPACE}"; do
+  kubectl create namespace "${ns}" --dry-run=client --output yaml | kubectl apply --filename -
+  kubectl apply --filename - <<EOF
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: lpx-model-cache-${ns}
+spec:
+  capacity:
+    storage: 10Ti
+  accessModes: ["ReadWriteMany"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  nfs:
+    server: ${NFS_SERVER}
+    path: ${NFS_PATH}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lpx-model-cache
+  namespace: ${ns}
+spec:
+  accessModes: ["ReadWriteMany"]
+  storageClassName: ""
+  volumeName: lpx-model-cache-${ns}
+  resources:
+    requests:
+      storage: 10Ti
+EOF
+done
+```
+
+For other storage, replace the `nfs` source with your storage driver's volume source. To deploy
+models in another namespace later, set `NFS_SERVER` and `NFS_PATH` and run the loop again with
+only that namespace, for example `for ns in my-other-namespace; do`.
+
+### Install ModelExpress
+
+ModelExpress needs Google credentials that can list and read objects in your bucket, for example
+through the `roles/storage.objectViewer` role. To use a service account key, store it in a Secret
+in the ModelExpress namespace:
+
+```bash
+export GCS_KEY_FILE=path/to/service-account-key.json
+
+kubectl create secret generic modelexpress-gcs-key \
+  --namespace "${DYNAMO_SYSTEM_NAMESPACE}" \
+  --from-file=key.json="${GCS_KEY_FILE}"
+```
+
+Create the ModelExpress Helm values:
+
+```bash
+cat > modelexpress-values.yaml <<'EOF'
+persistence:
+  enabled: false                             # storage override
+extraVolumes:
+  - name: model-cache                        # storage override
+    persistentVolumeClaim:
+      claimName: lpx-model-cache
+  - name: gcs-key                            # GCS credentials
+    secret:
+      secretName: modelexpress-gcs-key
+extraVolumeMounts:
+  - name: model-cache                        # storage override
+    mountPath: /models
+  - name: gcs-key                            # GCS credentials
+    mountPath: /var/secrets/gcs
+    readOnly: true
+extraEnv:
+  - name: GOOGLE_APPLICATION_CREDENTIALS     # GCS credentials
+    value: /var/secrets/gcs/key.json
+env:
+  MODEL_EXPRESS_CACHE_DIRECTORY: /models     # storage override
+  MX_METADATA_BACKEND: kubernetes            # metadata backend
+serviceAccount:
+  rbac:
+    enabled: true                            # metadata backend
+EOF
+```
+
+The entries commented `storage override` replace the chart's default cache storage:
+
+- `persistence.enabled: false` stops the chart from creating its own `ReadWriteOnce` PVC and
+  removes the chart's `model-cache` volume and mount for that PVC.
+- The `model-cache` entries in `extraVolumes` and `extraVolumeMounts` mount your
+  `lpx-model-cache` PVC at `/models`. The chart adds these entries unchanged, so the volume is
+  mounted even though persistence is disabled.
+- `MODEL_EXPRESS_CACHE_DIRECTORY` makes the mount the cache root. It must equal the `mountPath`,
+  with no `subPath`, so that ModelExpress writes each build to
+  `<volume root>/gcs/<bucket>/<build path>`, where Dynamo tells the conductor to find it.
+
+The other entries set up GCS credentials and the metadata backend that ModelExpress requires:
+
+- The `gcs-key` entries and `GOOGLE_APPLICATION_CREDENTIALS` give ModelExpress the key Secret.
+  ModelExpress uses Google Application Default Credentials, so other credential sources, such as
+  Workload Identity, also work. To use one, skip the key Secret, leave out the `gcs-key` entries
+  and `extraEnv`, and give the `modelexpress` ServiceAccount read access to the bucket. See
+  [Google Cloud Storage Credentials](https://github.com/ai-dynamo/modelexpress/blob/v0.7.0/docs/DEPLOYMENT.md#google-cloud-storage-credentials).
+- ModelExpress does not start without `MX_METADATA_BACKEND`. The `kubernetes` backend records
+  download state in ModelExpress custom resources, and `serviceAccount.rbac.enabled` grants
+  access to them through a ClusterRole. For namespace-scoped permissions, set
+  `serviceAccount.rbac.enabled` to `false` and give the `modelexpress` ServiceAccount a Role like
+  the
+  [ModelExpress example Role](https://github.com/ai-dynamo/modelexpress/blob/v0.7.0/examples/p2p_transfer_k8s/server/kubernetes_backend/rbac-modelmetadata.yaml).
+
+Keep ModelExpress ServiceAccount authentication (`security.enabled`) disabled, because the Dynamo
+operator does not send a token.
+
+Apply the ModelExpress custom resource definitions (CRDs) from the chart. Helm creates missing
+CRDs but never updates existing ones, such as CRDs from an earlier ModelExpress release:
+
+```bash
+helm show crds https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/modelexpress-0.7.0.tgz \
+  | kubectl apply --filename -
+```
+
+Install ModelExpress with the release name `modelexpress`, which also names its Service:
+
+```bash
+helm install modelexpress \
+  https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/modelexpress-0.7.0.tgz \
+  --namespace "${DYNAMO_SYSTEM_NAMESPACE}" \
+  --values modelexpress-values.yaml \
+  --wait
+```
+
+Before you upgrade ModelExpress later, apply the new chart version's CRDs the same way.
+
+</Step>
+
+<Step title="Enable LPX and Grove in Dynamo" id="enable-lpx-in-dynamo">
+
+Create the Dynamo Platform values that enable LPX and install Grove with its `lpx-scheduler`
+profile:
+
+```bash
+cat > lpx-values.yaml <<EOF
+global:
+  grove:
+    install: true
+dynamo-operator:
+  modelExpressURL: http://modelexpress.${DYNAMO_SYSTEM_NAMESPACE}.svc.cluster.local:8001
+  lpx:
+    enabled: true
+    modelRegistryURL: gs://${MODEL_BUCKET}
+grove:
+  config:
+    scheduler:
+      profiles:
+        - name: default-scheduler
+        - name: lpx-scheduler
+EOF
+```
+
+The Dynamo operator runs each DGD's LPX Pods through Grove and sets
+`schedulerName: lpx-scheduler` on them. Grove accepts that scheduler name only when its
+`lpx-scheduler` profile is enabled, and its default profiles, `default-scheduler` and
+`kai-scheduler`, do not include it. Your profile list replaces the defaults, so any profile that
+you leave out is disabled:
+
+- If [KAI Scheduler](https://github.com/NVIDIA/KAI-Scheduler) is installed, add
+  `- name: kai-scheduler`. Grove then uses KAI to schedule the conductor and other Pods that
+  request no LPX devices, and keeps accepting GPU deployments that use KAI. For a separately
+  installed KAI Scheduler, also set `enabled: true` under `global.kai-scheduler` in
+  `lpx-values.yaml`, so that Dynamo sets the KAI queue that Grove requires. If KAI is not
+  installed, leave the profile out, because Grove would assign those Pods to a scheduler that
+  does not run.
+- Keep the profile list in your values for every later Dynamo upgrade. If an upgrade drops it,
+  Grove reverts to its defaults and rejects new and updated LPX deployments.
+
+If you add the `kai-scheduler` profile, disable KAI's stale PodGroup eviction, because Grove
+decides when its PodGroups end. For a separately installed KAI Scheduler, set
+`scheduler.args.default-staleness-grace-period` to `"-1s"` in that release's values. If the
+Dynamo Platform installs KAI (`global.kai-scheduler.install=true`), add this to `lpx-values.yaml`
+instead; Helm refuses to install or upgrade a release that installs both Grove and KAI without
+it:
+
+```yaml
+kai-scheduler:
+  scheduler:
+    args:
+      default-staleness-grace-period: "-1s"
+```
+
+<Note>
+This guide has the Dynamo Platform install Grove, so Grove's version always matches your Dynamo
+release. For production, [Install Dynamo](install-dynamo.md#grove--kai-scheduler) recommends
+installing Grove as its own Helm release, so that you control its version and upgrades. If Grove
+already runs that way in your cluster, keep it, because a second Grove cannot run alongside it.
+
+To use a separately installed Grove, replace `install: true` with `enabled: true` in
+`lpx-values.yaml` and remove the top-level `grove` section. Then add the same profile list to
+that Grove release's `config.scheduler.profiles` value, and install or upgrade it as the
+[Grove installation guide](https://github.com/ai-dynamo/grove/blob/main/docs/installation.md)
+describes. Use a Grove version that your Dynamo release supports, as listed in
+[Install Dynamo](install-dynamo.md#grove--kai-scheduler).
+
+Install or upgrade that Grove release, and wait for its rollout to finish, before you install or
+upgrade the Dynamo Platform. A Helm pre-install and pre-upgrade Job fails the Dynamo Platform
+command if Grove is missing, older than the chart requires, or still rolling out. The Job pulls
+`docker.io/library/python:3.12-slim`. If your cluster cannot pull from Docker Hub, set
+`dynamo-operator.grovePreflight.image` to a Python 3 image from your registry, and
+`dynamo-operator.grovePreflight.imagePullSecrets` if that registry needs credentials.
+</Note>
+
+| Value | Purpose |
+| --- | --- |
+| `global.grove.install` | Installs Grove with the Dynamo Platform, in the version that matches the chart, and connects Dynamo to it. The chart refuses to enable LPX without Grove. |
+| `grove.config.scheduler.profiles` | Grove's scheduler profiles. The `lpx-scheduler` profile lets Grove accept LPX Pods. |
+| `dynamo-operator.modelExpressURL` | ModelExpress gRPC endpoint, with the port and no path. `http://` uses plaintext and `https://` uses Transport Layer Security (TLS). |
+| `dynamo-operator.lpx.enabled` | Turns on the LPX integration. The operator does not start if the `LpuPipelineRequest` API is missing. |
+| `dynamo-operator.lpx.modelRegistryURL` | Optional `gs://` URL. When set, every `lpx.buildId` must be a path relative to it. |
+
+<Note>
+`modelExpressURL` applies to the whole operator: Dynamo also sets it as `MODEL_EXPRESS_URL` in
+the Pods of your other Dynamo deployments. A GPU worker that downloads a Hugging Face model then
+has this ModelExpress server download the model into the LPX cache volume first. If your cluster
+runs such GPU deployments, size the cache volume for their models too, or set
+`MODEL_EXPRESS_URL` in their containers to another ModelExpress server. A value that you set
+overrides the one Dynamo injects.
+</Note>
+
+Install or upgrade the Dynamo Platform with these values. For other platform options, see
+[Install Dynamo](install-dynamo.md).
+
+<Tabs>
+<Tab title="New installation">
+
+```bash
+helm install dynamo-platform \
+  "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz" \
+  --namespace "${DYNAMO_SYSTEM_NAMESPACE}" \
+  --create-namespace \
+  --values lpx-values.yaml
+```
+
+Add a `--values` flag for each other values file that your installation uses.
+
+</Tab>
+<Tab title="Existing installation">
+
+<Warning>
+The upgrade restarts the operator, and Dynamo rejects changes to DGDs and other Dynamo resources
+until the operator is ready. The operator then sets `MODEL_EXPRESS_URL` in the Pods of your
+existing DGDs, so it replaces those Pods. If those deployments serve traffic, upgrade in a
+maintenance window.
+
+If Dynamo did not use Grove before, the operator may restart a few more times until Grove's CRDs
+exist. New DGDs, including GPU deployments, then run through Grove; existing DGDs keep their
+current pathway. To keep a new GPU DGD off Grove, set the annotation
+`nvidia.com/enable-grove: "false"` on it.
+</Warning>
+
+Upgrade the release. If the first column of the `helm list` output in
+[Set the Installation Variables](#set-the-installation-variables) shows a release name other than
+`dynamo-platform`, use that name in this command and in the `app.kubernetes.io/instance`
+selectors in [Verify the Installation](#verify-the-installation):
+
+```bash
+helm upgrade dynamo-platform \
+  "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz" \
+  --namespace "${DYNAMO_SYSTEM_NAMESPACE}" \
+  --reset-then-reuse-values \
+  --values lpx-values.yaml
+```
+
+`--reset-then-reuse-values` (Helm 3.14 or later) keeps the values that you set before and applies
+the new chart's defaults. If you manage the release with values files or a GitOps tool, add
+these settings to those files instead.
+
+<Warning>
+Do not use `--reuse-values` for this upgrade. When the chart version changes, it keeps the
+previous chart's operator image, and this guide requires an operator from Dynamo 1.7.0 or later.
+</Warning>
+
+</Tab>
+</Tabs>
+
+</Step>
+
+<Step title="Verify the Installation" id="verify-the-installation">
+
+Check that the operator is running and that it installed the `LPXGraphDeployment` CRD. The
+operator creates an `LPXGraphDeployment` for each DGD with LPX components; you never create one
+yourself.
+
+```bash
+kubectl rollout status deployment --namespace "${DYNAMO_SYSTEM_NAMESPACE}" \
+  --selector app.kubernetes.io/name=dynamo-operator,app.kubernetes.io/instance=dynamo-platform \
+  --timeout 5m
+```
+
+```text
+deployment "dynamo-platform-dynamo-operator-controller-manager" successfully rolled out
+```
+
+```bash
+kubectl get crd lpxgraphdeployments.nvidia.com
+```
+
+```text
+NAME                             CREATED AT
+lpxgraphdeployments.nvidia.com   2026-10-15T08:00:00Z
+```
+
+Check the operator's feature gates. In the matching log line, `lpx` and `grove` must both be
+`true`:
+
+```bash
+kubectl logs --namespace "${DYNAMO_SYSTEM_NAMESPACE}" \
+  --selector app.kubernetes.io/name=dynamo-operator,app.kubernetes.io/instance=dynamo-platform \
+  --container manager --tail=-1 | grep 'Resolved operator feature gates'
+```
+
+Check that Grove is running and loaded the `lpx-scheduler` profile. The output of the second
+command should contain `name: lpx-scheduler`. For a separately installed Grove, use its
+namespace:
+
+```bash
+kubectl rollout status deployment/grove-operator --namespace "${DYNAMO_SYSTEM_NAMESPACE}"
+```
+
+```bash
+kubectl get configmap --namespace "${DYNAMO_SYSTEM_NAMESPACE}" \
+  --selector app.kubernetes.io/component=operator-configmap \
+  --output yaml | grep lpx-scheduler
+```
+
+Now that Grove runs, the LPX scheduler should become ready. Check it as its installation guide
+describes.
+
+Finally, check that ModelExpress is running:
+
+```bash
+kubectl rollout status deployment/modelexpress --namespace "${DYNAMO_SYSTEM_NAMESPACE}"
+```
+
+</Step>
+
+</Steps>
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| Helm reports `LPX requires Grove integration to be enabled` | Set `global.grove.install=true`, as `lpx-values.yaml` does, or `global.grove.enabled=true` for a separately installed Grove. |
+| Helm reports `bundled KAI Scheduler must disable stale PodGroup eviction` | Set `kai-scheduler.scheduler.args.default-staleness-grace-period` to `"-1s"`, as described in [Enable LPX and Grove in Dynamo](#enable-lpx-in-dynamo). |
+| A DGD's `Ready` message contains `no KAI queue is configured` | Grove has the `kai-scheduler` profile, but Dynamo's KAI integration is off. Set `global.kai-scheduler.enabled=true`, as described in [Enable LPX and Grove in Dynamo](#enable-lpx-in-dynamo). |
+| Helm reports that a Grove resource exists and cannot be imported into the release | Grove already runs as its own release. Keep it, as described in [Enable LPX and Grove in Dynamo](#enable-lpx-in-dynamo). |
+| The operator Pod restarts and logs that the `LpuPipelineRequest` API was not detected | The LPX scheduler is not installed. [Install the LPX scheduler](#install-the-lpx-scheduler). |
+| The operator log does not show `lpx` as `true` | The release lacks `lpx-values.yaml` or uses a chart older than 1.6.0. Rerun the installation or upgrade. |
+| The `lpxgraphdeployments.nvidia.com` CRD is missing although `lpx` is `true` | The chart applies no CRDs when `dynamo-operator.upgradeCRD=false` or when the operator is namespace-restricted. Apply the CRD as shown after this table. |
+| The ModelExpress Pod does not start and its log mentions `MX_METADATA_BACKEND` | Check `env.MX_METADATA_BACKEND` and `serviceAccount.rbac.enabled` in `modelexpress-values.yaml`, and apply the ModelExpress CRDs. |
+
+To apply the `LPXGraphDeployment` CRD yourself, use the version that matches your chart. For a
+namespace-restricted operator, you can instead enable LPX on the cluster-wide operator.
+
+```bash
+kubectl apply --server-side --filename \
+  "https://raw.githubusercontent.com/ai-dynamo/dynamo/v${RELEASE_VERSION}/deploy/operator/config/crd/bases/nvidia.com_lpxgraphdeployments.yaml"
+```
+
+## Next Steps
+
+- Deploy a model with [Deploy a Model on LPX](../model-deployment/deploy-on-lpx.mdx).
+- Look up LPX component fields in the [DynamoComponentDeployment reference](../../reference/kubernetes-api/dynamo-component-deployment.mdx#shared-component-spec).
