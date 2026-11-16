@@ -24,6 +24,7 @@ from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from .replay_utils import _vllm_args, _write_trace_and_args
 
 pytestmark = [
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.parallel,
     pytest.mark.pre_merge,

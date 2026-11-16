@@ -15,17 +15,19 @@ use crate::{Endpoint, to_pyerr};
 pub struct KvStateAgentHost {
     endpoint: dynamo_runtime::component::Endpoint,
     max_slots: usize,
+    slots_per_socket: usize,
     inner: Arc<OnceCell<Arc<llm_rs::kv_router::publisher::KvStateAgentHost>>>,
 }
 
 #[pymethods]
 impl KvStateAgentHost {
     #[new]
-    #[pyo3(signature = (endpoint, max_slots=8))]
-    fn new(endpoint: Endpoint, max_slots: usize) -> Self {
+    #[pyo3(signature = (endpoint, max_slots=8, slots_per_socket=1))]
+    fn new(endpoint: Endpoint, max_slots: usize, slots_per_socket: usize) -> Self {
         Self {
             endpoint: endpoint.inner,
             max_slots,
+            slots_per_socket,
             inner: Arc::new(OnceCell::new()),
         }
     }
@@ -33,6 +35,7 @@ impl KvStateAgentHost {
     fn start<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let endpoint = self.endpoint.clone();
         let max_slots = self.max_slots;
+        let slots_per_socket = self.slots_per_socket;
         let inner = self.inner.clone();
         crate::future_into_py(py, async move {
             inner
@@ -41,6 +44,7 @@ impl KvStateAgentHost {
                         llm_rs::kv_router::publisher::KvStateAgentHostConfig {
                             endpoint,
                             max_slots,
+                            slots_per_socket,
                         },
                     )
                     .await
@@ -92,6 +96,8 @@ struct AttachmentDescriptorInput {
     kv_state_endpoint: String,
     indexer_domain_id: String,
     kv_block_size: u32,
+    #[serde(default)]
+    ingress_protocol: Option<llm_rs::discovery::kv_state_agent::KvStateIngressProtocol>,
     raw_zmq_endpoint: String,
     #[serde(default)]
     raw_topic: String,
@@ -100,7 +106,9 @@ struct AttachmentDescriptorInput {
     #[serde(default)]
     video_token_id: Option<u32>,
     #[serde(default)]
-    router_hint_source: Option<dynamo_kv_router::protocols::RouterHintSourceMetadata>,
+    engine_owned_mm_identity: bool,
+    #[serde(default)]
+    router_hint_source: Option<dynamo_kv_indexer::host::RouterHintSourceMetadata>,
 }
 
 #[pyclass]
@@ -122,19 +130,21 @@ impl KvStateAttachmentOwner {
             .map(|input| {
                 Ok(llm_rs::kv_router::publisher::KvStateAttachmentDescriptor {
                     cache_owner_id: input.cache_owner_id.parse()?,
-                    worker: dynamo_kv_router::protocols::WorkerWithDpRank {
+                    worker: dynamo_router_protocol::worker::WorkerWithDpRank {
                         worker_id,
                         dp_rank: input.global_dp_rank,
                     },
                     kv_state_endpoint: input.kv_state_endpoint.parse()?,
                     indexer_domain_id: input.indexer_domain_id.parse()?,
                     kv_block_size: input.kv_block_size,
-                    ingress_protocol:
+                    ingress_protocol: input.ingress_protocol.unwrap_or(
                         llm_rs::discovery::kv_state_agent::KvStateIngressProtocol::VllmResidencyV1,
+                    ),
                     raw_zmq_endpoint: input.raw_zmq_endpoint,
                     raw_topic: input.raw_topic,
                     image_token_id: input.image_token_id,
                     video_token_id: input.video_token_id,
+                    engine_owned_mm_identity: input.engine_owned_mm_identity,
                     router_hint_source: input.router_hint_source,
                 })
             })

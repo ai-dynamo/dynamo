@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import sys
+import tomllib
 from importlib import metadata
 from pathlib import Path
 
@@ -18,12 +19,8 @@ from packaging.version import Version
 
 from tests.wheels.smoke_install import AISIMULATE_FIND_LINKS
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
-
 pytestmark = [
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.parallel,
     pytest.mark.planner,
@@ -132,6 +129,12 @@ def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
         "="
     ), "aisimulate-core must use one exact crates.io version"
     cargo_version = Version(cargo_requirement.removeprefix("="))
+
+    with (ROOT / "lib/bindings/python/Cargo.toml").open("rb") as handle:
+        bindings = tomllib.load(handle)
+    bindings_dependency = bindings["dependencies"]["aisimulate-core"]
+    assert not {"path", "git", "rev", "branch", "tag"} & bindings_dependency.keys()
+    assert bindings_dependency["version"] == cargo_requirement
 
     assert cargo_version == python_version
     assert all(_locked_cargo_version(path) == cargo_version for path in LOCKFILES)

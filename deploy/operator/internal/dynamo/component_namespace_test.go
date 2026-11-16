@@ -15,7 +15,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
 
@@ -100,9 +99,9 @@ func TestFrontendSidecarNamespacePrefixRuntimeCompatibility(t *testing.T) {
 				ComponentType:          v1beta1.ComponentTypeWorker,
 				RuntimeVersionOverride: tt.workerOverride,
 				FrontendSidecar:        &sidecarName,
-				PodTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				PodTemplate: &corev1.PodTemplateSpec{Annotations: map[string]string{
 					commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "container",
-				}}, Spec: corev1.PodSpec{Containers: []corev1.Container{
+				}, Spec: corev1.PodSpec{Containers: []corev1.Container{
 					{Name: commonconsts.MainContainerName, Image: tt.workerImage},
 					{Name: sidecarName, Image: tt.sidecarImage, Env: tt.sidecarEnv},
 					{Name: "other-sidecar", Image: "frontend:1.7.0"},

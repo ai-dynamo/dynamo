@@ -33,8 +33,9 @@ func configureNodeLocalConductorRuntime(
 	conductor.Env = env
 }
 
-// applyModelPaths binds nonempty canonical projections into a fresh runtime container.
-func applyModelPaths(container *corev1.Container, projections []*ModelProjection, modelStoragePath string) error {
+// applyModelPaths resolves nonempty canonical projections and rewrites each container's Env in place.
+func applyModelPaths(containerLists [][]corev1.Container, projections []*ModelProjection, modelStoragePath string) error {
+	// Single-model workloads publish one path; speculative workloads publish the first draft and final target.
 	type modelPathBinding struct {
 		name       string
 		projection *ModelProjection
@@ -45,20 +46,30 @@ func applyModelPaths(container *corev1.Container, projections []*ModelProjection
 		bindings = append(bindings, modelPathBinding{"LPX_TARGET_MODEL_PATH", projections[len(projections)-1]})
 	}
 
-	// Resolve all paths before publishing authoritative values ahead of authored references.
-	env := make([]corev1.EnvVar, 0, len(container.Env)+len(bindings))
+	// Resolve all paths once before changing any container's environment.
+	paths := make([]corev1.EnvVar, 0, len(bindings))
 	for _, binding := range bindings {
-		path, err := buildRuntimePath(lpuRuntimeBuildRef(binding.projection, modelStoragePath), modelStoragePath)
+		projection := binding.projection
+		path, err := buildRuntimePath(projection.configuredBuild.path, projection.runtimeBuildRef, modelStoragePath)
 		if err != nil {
 			return fmt.Errorf("resolve %s: %w", binding.name, err)
 		}
-		env = append(env, corev1.EnvVar{Name: binding.name, Value: path})
+		paths = append(paths, corev1.EnvVar{Name: binding.name, Value: path})
 	}
-	for _, variable := range container.Env {
-		if !slices.ContainsFunc(bindings, func(binding modelPathBinding) bool { return binding.name == variable.Name }) {
-			env = append(env, variable)
+
+	// Regular and init containers receive authoritative paths ahead of authored references.
+	for _, containers := range containerLists {
+		for i := range containers {
+			container := &containers[i]
+			env := make([]corev1.EnvVar, 0, len(paths)+len(container.Env))
+			env = append(env, paths...)
+			for _, variable := range container.Env {
+				if !slices.ContainsFunc(paths, func(path corev1.EnvVar) bool { return path.Name == variable.Name }) {
+					env = append(env, variable)
+				}
+			}
+			container.Env = env
 		}
 	}
-	container.Env = env
 	return nil
 }

@@ -61,7 +61,7 @@ fn main() -> anyhow::Result<()> {
         .into_dimensions()?;
     println!("image     = {} ({}x{})", image_path.display(), w, h);
 
-    let n = counter.count_tokens(w, h);
+    let n = counter.count_tokens(w, h)?;
     println!("tokens    = {}", n);
 
     Ok(())

@@ -47,6 +47,16 @@ runs:
         WATCHDOG_PID_FILE="${{ github.workspace }}/.vcluster-port-forward-watchdog.pid"
         KUBECONFIG_PATH="${{ github.workspace }}/.kubeconfig-vcluster"
         KUBECONFIG_TMP="${KUBECONFIG_PATH}.tmp"
+        PF_PID=""
+
+        cleanup_port_forward() {
+          if [ "$?" -ne 0 ] && [ -n "${PF_PID}" ]; then
+            kill "${PF_PID}" 2>/dev/null || true
+            wait "${PF_PID}" 2>/dev/null || true
+            rm -f "${PF_PID_FILE}"
+          fi
+        }
+        trap cleanup_port_forward EXIT
 
         start_port_forward() {
           printf '\n[%s] Starting vCluster API port-forward\n' "$(date -u +%FT%TZ)" >> "${PF_LOG}"
@@ -57,20 +67,27 @@ runs:
         }
 
         wait_for_port_forward() {
-          for attempt in $(seq 1 30); do
-            if [ -f "${PF_PID_FILE}" ]; then
-              PF_PID="$(cat "${PF_PID_FILE}")"
-              if [ -n "${PF_PID}" ] && ! kill -0 "${PF_PID}" 2>/dev/null; then
-                echo "::error::kubectl port-forward exited before local port was reachable"
-                tail -n 100 "${PF_LOG}" || true
-                exit 1
-              fi
+          local deadline=$((SECONDS + 60))
+          local remaining
+          while [ "${SECONDS}" -lt "${deadline}" ]; do
+            if ! kill -0 "${PF_PID}" 2>/dev/null; then
+              echo "::warning::Initial vCluster port-forward exited; restarting within the readiness deadline"
+              wait "${PF_PID}" 2>/dev/null || true
+              start_port_forward
             fi
-            if curl -sk --connect-timeout 1 --max-time 2 https://127.0.0.1:8443/healthz >/dev/null; then
-              echo "vCluster API reachable after ${attempt} attempt(s)"
+            remaining=$((deadline - SECONDS))
+            if [ "${remaining}" -le 0 ]; then
+              break
+            fi
+            if curl -fsk --connect-timeout 1 --max-time "$((remaining < 2 ? remaining : 2))" \
+              https://127.0.0.1:8443/healthz >/dev/null; then
+              echo "vCluster API reachable"
               return 0
             fi
-            sleep 2
+            remaining=$((deadline - SECONDS))
+            if [ "${remaining}" -gt 0 ]; then
+              sleep "$((remaining < 2 ? remaining : 2))"
+            fi
           done
           echo "::error::vCluster API did not become reachable within 60s"
           tail -n 100 "${PF_LOG}" || true
@@ -81,7 +98,7 @@ runs:
         # backgrounded `kubectl port-forward` to 127.0.0.1:8443 that survives across
         # steps. Reuse it instead of racing for the same local port (which would
         # fail with "address already in use" and break this step).
-        if curl -sk --connect-timeout 1 --max-time 2 https://127.0.0.1:8443/healthz >/dev/null; then
+        if curl -fsk --connect-timeout 1 --max-time 2 https://127.0.0.1:8443/healthz >/dev/null; then
           echo "Existing port-forward on 127.0.0.1:8443 detected; reusing"
         else
           # kubectl wait exits immediately when the StatefulSet is between pods, so
@@ -119,6 +136,8 @@ runs:
             --server=https://127.0.0.1:8443 \
             --print > "${KUBECONFIG_TMP}"; then
             mv "${KUBECONFIG_TMP}" "${KUBECONFIG_PATH}"
+            # Keep the tunnel available for failure diagnostics.
+            trap - EXIT
             break
           fi
 

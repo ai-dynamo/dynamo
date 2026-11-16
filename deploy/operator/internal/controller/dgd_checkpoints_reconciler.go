@@ -21,8 +21,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 
+	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/imdario/mergo"
 	corev1 "k8s.io/api/core/v1"
@@ -425,9 +427,7 @@ func buildAutomaticSnapshotJob(
 	// The generated PodSnapshot carries both lifecycle identity and immutable
 	// restore compatibility metadata; Snapshot owns its runtime fields.
 	snapshotLabels := make(map[string]string, len(labels))
-	for key, value := range labels {
-		snapshotLabels[key] = value
-	}
+	maps.Copy(snapshotLabels, labels)
 	snapshotAnnotations := map[string]string{
 		consts.CheckpointAutoAnnotation:               consts.KubeLabelValueTrue,
 		consts.CheckpointDeletionPolicyAnnotation:     string(deletionPolicy),
@@ -438,19 +438,15 @@ func buildAutomaticSnapshotJob(
 	}
 
 	return &snapshotv1alpha1.SnapshotJob{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: snapshotv1alpha1.GroupVersion.String(),
-			Kind:       "SnapshotJob",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        name,
-			Namespace:   dgd.Namespace,
-			Labels:      labels,
-			Annotations: annotations,
-		},
+		APIVersion:  snapshotv1alpha1.GroupVersion.String(),
+		Kind:        "SnapshotJob",
+		Name:        name,
+		Namespace:   dgd.Namespace,
+		Labels:      labels,
+		Annotations: annotations,
 		Spec: snapshotv1alpha1.SnapshotJobSpec{
 			PodTemplate:           podTemplate,
-			ActiveDeadlineSeconds: ptr.To(automaticSnapshotActiveDeadlineSeconds),
+			ActiveDeadlineSeconds: new(automaticSnapshotActiveDeadlineSeconds),
 			PodSnapshotTemplate: snapshotv1alpha1.PodSnapshotTemplate{
 				Metadata: &snapshotv1alpha1.PodSnapshotTemplateMetadata{
 					Labels:      snapshotLabels,
@@ -508,15 +504,11 @@ func (r *dgdCheckpointsReconciler) syncAutomaticSnapshotJob(
 	if updated.Labels == nil {
 		updated.Labels = map[string]string{}
 	}
-	for key, value := range desired.Labels {
-		updated.Labels[key] = value
-	}
+	maps.Copy(updated.Labels, desired.Labels)
 	if updated.Annotations == nil {
 		updated.Annotations = map[string]string{}
 	}
-	for key, value := range desired.Annotations {
-		updated.Annotations[key] = value
-	}
+	maps.Copy(updated.Annotations, desired.Annotations)
 	if deletionPolicy == nvidiacomv1alpha1.CheckpointDeletionPolicyDelete {
 		if err := controllerutil.SetControllerReference(dgd, updated, r.Scheme()); err != nil {
 			return nil, fmt.Errorf("set DGD owner on automatic SnapshotJob %s: %w", key, err)
@@ -627,7 +619,7 @@ func (r *dgdCheckpointsReconciler) resolveAutomaticSnapshotJob(
 	// Completion, not capture alone, is the restore boundary because helper
 	// containers such as the GMS saver may still be persisting state.
 	refConfig := config.DeepCopy()
-	refConfig.CheckpointRef = ptr.To(snapshotJob.Status.PodSnapshotName)
+	refConfig.CheckpointRef = new(snapshotJob.Status.PodSnapshotName)
 	resolved, err := checkpoint.ResolvePodSnapshotForService(
 		ctx,
 		r.Client,
@@ -743,6 +735,7 @@ func (r *dgdCheckpointsReconciler) adoptCheckpointGMSResourceClaimTemplate(
 	return nil
 }
 
+// prepareCheckpointGMSPodTemplate requires non-nil podTemplate and gmsSpec.
 func prepareCheckpointGMSPodTemplate(
 	podTemplate *corev1.PodTemplateSpec,
 	targetContainerName string,
@@ -766,7 +759,7 @@ func prepareCheckpointGMSPodTemplate(
 			return fmt.Errorf("gpuMemoryService client container %q: %w", clientContainerName, err)
 		}
 	}
-	ensureCheckpointGMSPodClaim(&podTemplate.Spec, checkpointGMSResourceClaimTemplateName(checkpointID))
+	dra.ApplyPodClaim(&podTemplate.Spec, checkpointGMSResourceClaimTemplateName(checkpointID))
 	checkpoint.EnsureIntraPodGPUMemoryService(
 		&podTemplate.Spec,
 		[]*corev1.Container{targetContainer},
@@ -774,36 +767,6 @@ func prepareCheckpointGMSPodTemplate(
 		true,
 	)
 	return nil
-}
-
-func ensureCheckpointGMSPodClaim(podSpec *corev1.PodSpec, claimTemplateName string) {
-	foundToleration := false
-	for i := range podSpec.Tolerations {
-		toleration := podSpec.Tolerations[i]
-		if toleration.Key == consts.KubeResourceGPUNvidia && toleration.Effect == corev1.TaintEffectNoSchedule {
-			foundToleration = true
-			break
-		}
-	}
-	if !foundToleration {
-		podSpec.Tolerations = append(podSpec.Tolerations, corev1.Toleration{
-			Key:      consts.KubeResourceGPUNvidia,
-			Operator: corev1.TolerationOpExists,
-			Effect:   corev1.TaintEffectNoSchedule,
-		})
-	}
-
-	podClaim := corev1.PodResourceClaim{
-		Name:                      dra.ClaimName,
-		ResourceClaimTemplateName: &claimTemplateName,
-	}
-	for i := range podSpec.ResourceClaims {
-		if podSpec.ResourceClaims[i].Name == dra.ClaimName {
-			podSpec.ResourceClaims[i] = podClaim
-			return
-		}
-	}
-	podSpec.ResourceClaims = append(podSpec.ResourceClaims, podClaim)
 }
 
 func (r *dgdCheckpointsReconciler) deleteAutoCheckpointsForDGD(
@@ -1046,21 +1009,15 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 	podLabels := map[string]string{}
 	podAnnotations := map[string]string{}
 	if componentForJob.PodTemplate != nil {
-		for k, v := range componentForJob.PodTemplate.Labels {
-			podLabels[k] = v
-		}
-		for k, v := range componentForJob.PodTemplate.Annotations {
-			podAnnotations[k] = v
-		}
+		maps.Copy(podLabels, componentForJob.PodTemplate.Labels)
+		maps.Copy(podAnnotations, componentForJob.PodTemplate.Annotations)
 	}
 	podLabels[consts.KubeLabelDynamoComponent] = componentName
 
 	podTemplate := corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{
-			Labels:      podLabels,
-			Annotations: podAnnotations,
-		},
-		Spec: *podSpec,
+		Labels:      podLabels,
+		Annotations: podAnnotations,
+		Spec:        *podSpec,
 	}
 	if checkpointConfig := dynamo.GetCheckpoint(component); checkpointConfig != nil && checkpointConfig.Job != nil {
 		if overrides := checkpointConfig.Job.PodTemplate; overrides != nil {
@@ -1068,17 +1025,13 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 				if podTemplate.Labels == nil {
 					podTemplate.Labels = make(map[string]string, len(overrides.Labels))
 				}
-				for k, v := range overrides.Labels {
-					podTemplate.Labels[k] = v
-				}
+				maps.Copy(podTemplate.Labels, overrides.Labels)
 			}
 			if len(overrides.Annotations) > 0 {
 				if podTemplate.Annotations == nil {
 					podTemplate.Annotations = make(map[string]string, len(overrides.Annotations))
 				}
-				for k, v := range overrides.Annotations {
-					podTemplate.Annotations[k] = v
-				}
+				maps.Copy(podTemplate.Annotations, overrides.Annotations)
 			}
 
 			overlay := overrides.Spec.DeepCopy()
@@ -1133,16 +1086,16 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 	// Snapshot preloads cuInterpose by prefixing the target command with its
 	// launcher, so capture covers CUDA memory shared between processes, such as
 	// NCCL cuMem and NVLS buffers. An explicit DGD annotation takes precedence.
-	if _, set := podTemplate.Annotations[consts.CUDASharedMemorySupportAnnotation]; !set {
-		podTemplate.Annotations[consts.CUDASharedMemorySupportAnnotation] = "enabled"
+	if _, set := podTemplate.Annotations[podcontract.CuInterposeAnnotation]; !set {
+		podTemplate.Annotations[podcontract.CuInterposeAnnotation] = "enabled"
 	}
-	if strings.TrimSpace(podTemplate.Annotations[consts.CUDASharedMemorySupportAnnotation]) == "enabled" {
+	if strings.TrimSpace(podTemplate.Annotations[podcontract.CuInterposeAnnotation]) == "enabled" {
 		target, err := findPodTemplateContainer(&podTemplate, targetContainerName)
 		if err != nil {
 			return corev1.PodTemplateSpec{}, err
 		}
 		if len(target.Command) == 0 {
-			return corev1.PodTemplateSpec{}, fmt.Errorf("checkpoint target container %q must set command for Snapshot's cuInterpose launcher, or the DGD must set %s: disabled", targetContainerName, consts.CUDASharedMemorySupportAnnotation)
+			return corev1.PodTemplateSpec{}, fmt.Errorf("checkpoint target container %q must set command for Snapshot's cuInterpose launcher, or the DGD must set %s: disabled", targetContainerName, podcontract.CuInterposeAnnotation)
 		}
 	}
 

@@ -953,9 +953,16 @@ class TestToolCallingMultiTurn:
             messages=messages,
             tools=TOOLS_SEARCH + TOOLS_CALCULATOR,
             tool_choice={"type": "function", "function": {"name": "search_web"}},
+            # A named tool_choice still allows parallel calls; without this the
+            # model repeats <tool_call> blocks until max_tokens ('length').
+            parallel_tool_calls=False,
+            # Greedy decoding for every step: with sampling, Qwen3-0.6B sometimes
+            # leaves an argument string or extra key open and runs to max_tokens.
+            temperature=0,
+            seed=0,
         )
         assert_finish_reason(step1, {"tool_calls"})
-        assert len(step1.tool_calls) >= 1
+        assert len(step1.tool_calls) == 1
         parse_and_validate_tool_call(
             step1.tool_calls[0], schemas, expected_name="search_web"
         )
@@ -981,9 +988,12 @@ class TestToolCallingMultiTurn:
             messages=messages,
             tools=TOOLS_SEARCH + TOOLS_CALCULATOR,
             tool_choice={"type": "function", "function": {"name": "calculate"}},
+            parallel_tool_calls=False,
+            temperature=0,
+            seed=0,
         )
         assert_finish_reason(step2, {"tool_calls"})
-        assert len(step2.tool_calls) >= 1
+        assert len(step2.tool_calls) == 1
         parse_and_validate_tool_call(
             step2.tool_calls[0], schemas, expected_name="calculate"
         )
@@ -997,11 +1007,15 @@ class TestToolCallingMultiTurn:
             }
         )
 
+        # With sampling the model sometimes rewrites the tool result as
+        # "1.396 million", which the numeric check below rejects.
         step3 = stream_chat(
             client,
             model,
             messages=messages,
             tools=TOOLS_SEARCH + TOOLS_CALCULATOR,
+            temperature=0,
+            seed=0,
         )
         assert_finish_reason(step3, {"stop"})
         assert step3.tool_calls == []

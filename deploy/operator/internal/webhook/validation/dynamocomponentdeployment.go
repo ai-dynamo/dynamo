@@ -59,11 +59,9 @@ func (v *DynamoComponentDeploymentValidator) validate(
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoComponentDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                                ctx,
-			runtimeVersionSource:               runtimeVersionSource,
-			allowMissingRuntimeVersionOverride: true,
-		},
+		ctx:                                ctx,
+		runtimeVersionSource:               runtimeVersionSource,
+		allowMissingRuntimeVersionOverride: true,
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(dcd, nil)
@@ -87,12 +85,10 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoComponentDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                                ctx,
-			runtimeVersionSource:               runtimeVersionSource,
-			ratchetRuntimeVersion:              true,
-			allowMissingRuntimeVersionOverride: true,
-		},
+		ctx:                                ctx,
+		runtimeVersionSource:               runtimeVersionSource,
+		ratchetRuntimeVersion:              true,
+		allowMissingRuntimeVersionOverride: true,
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(newDCD, oldDCD)
@@ -165,10 +161,13 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 	oldDCD *nvidiacomv1beta1.DynamoComponentDeployment,
 ) field.ErrorList {
 	var oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSpec
+	var oldMeta *metav1.ObjectMeta
 	if oldDCD != nil {
 		oldSpec = &oldDCD.Spec
+		oldMeta = &oldDCD.ObjectMeta
 	}
-	return v.validateDynamoComponentDeploymentSpec(&dcd.Spec, oldSpec, field.NewPath("spec"))
+	allErrs := v.validateObjectMeta(&dcd.ObjectMeta, oldMeta, field.NewPath("metadata"))
+	return append(allErrs, v.validateDynamoComponentDeploymentSpec(&dcd.Spec, oldSpec, field.NewPath("spec"))...)
 }
 
 // validateDynamoComponentDeploymentSpec validates spec. spec and fldPath must not be nil.
@@ -205,11 +204,12 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentU
 	newDCD *nvidiacomv1beta1.DynamoComponentDeployment,
 	oldDCD *nvidiacomv1beta1.DynamoComponentDeployment,
 ) field.ErrorList {
-	return v.validateDynamoComponentDeploymentSpecUpdate(
+	allErrs := v.validateObjectMetaUpdate(&newDCD.ObjectMeta, &oldDCD.ObjectMeta, field.NewPath("metadata"))
+	return append(allErrs, v.validateDynamoComponentDeploymentSpecUpdate(
 		&newDCD.Spec,
 		&oldDCD.Spec,
 		field.NewPath("spec"),
-	)
+	)...)
 }
 
 // validateDynamoComponentDeploymentSpecUpdate validates a spec update.

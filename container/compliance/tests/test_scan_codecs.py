@@ -58,6 +58,53 @@ def test_in_tree_ffmpeg_is_allowed(tmp_path: Path):
     }
 
 
+def test_nim_ffmpeg_is_a_nim_exception(tmp_path: Path):
+    """NIM's FFmpeg libraries are waived as NIM's, not allowed as ours."""
+    for rel in (
+        "usr/local/lib/libavcodec-nimlgpl.so.63",
+        "usr/local/lib/libswscale-nimlgpl.so.10",
+    ):
+        _touch(tmp_path, rel)
+    violations, exceptions, allowed = scan_filesystem(tmp_path, _POLICY)
+    assert violations == [] and allowed == []
+    assert {e["path"] for e in exceptions} == {
+        "/usr/local/lib/libavcodec-nimlgpl.so.63",
+        "/usr/local/lib/libswscale-nimlgpl.so.10",
+    }
+
+
+def test_nim_suffixed_non_ffmpeg_codec_lib_is_denied(tmp_path: Path):
+    """The NIM exception covers only its libav*/libsw* FFmpeg libraries."""
+    rels = sorted(
+        f"usr/local/lib/{name}"
+        for name in (
+            "libx264-nimlgpl.so.164",
+            "libx265-nimlgpl.so.199",
+            "libfdk-aac-nimlgpl.so.2",
+        )
+    )
+    for rel in rels:
+        _touch(tmp_path, rel)
+    violations, exceptions, allowed = scan_filesystem(tmp_path, _POLICY)
+    assert exceptions == [] and allowed == []
+    assert sorted(v["path"] for v in violations) == ["/" + rel for rel in rels]
+
+
+def test_unsuffixed_usr_local_codec_lib_is_denied(tmp_path: Path):
+    """allow_paths covers only the _dynamo libraries under /usr/local/lib."""
+    for rel in (
+        "usr/local/lib/libavcodec.so.62",
+        "usr/local/lib/libswscale.so.9",
+    ):
+        _touch(tmp_path, rel)
+    violations, _exceptions, allowed = scan_filesystem(tmp_path, _POLICY)
+    assert allowed == []
+    assert {v["path"] for v in violations} == {
+        "/usr/local/lib/libavcodec.so.62",
+        "/usr/local/lib/libswscale.so.9",
+    }
+
+
 def test_third_party_suffixed_codec_lib_is_denied(tmp_path: Path):
     # allow_paths re-permits the suffixed names by /usr/local path prefix only.
     # The same soname vendored by a wheel is still a violation — otherwise the
@@ -83,14 +130,17 @@ def test_third_party_suffixed_codec_lib_is_denied(tmp_path: Path):
 
 
 def test_dali_bundled_ffmpeg_is_a_logged_exception(tmp_path: Path):
-    # DALI's whole vendored .libs/ is waived — both libavcodec and the libsw*
+    # DALI's vendored ffmpeg families are waived — libavcodec and the libsw*
     # companions (the latter regressed the trtllm build when the glob was libav* only).
+    # Any other codec library in the same .libs/ must still fail.
     dali = "usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs"
     _touch(tmp_path, f"{dali}/libavcodec-73c99a8b.so.62")
     _touch(tmp_path, f"{dali}/libswscale-8cfd67c4.so.9")
+    _touch(tmp_path, f"{dali}/libpostproc-0123abcd.so.58")
+    _touch(tmp_path, f"{dali}/libx264-0123abcd.so.164")
     violations, exceptions, _allowed = scan_filesystem(tmp_path, _POLICY)
-    assert violations == []
-    assert len(exceptions) == 2
+    assert [v["path"] for v in violations] == [f"/{dali}/libx264-0123abcd.so.164"]
+    assert len(exceptions) == 3
     assert all("DALI" in (e["detail"] or "") for e in exceptions)
 
 
@@ -203,7 +253,7 @@ def test_fail_on_findings_exit_code(tmp_path: Path):
 
 
 def test_clean_tree_passes(tmp_path: Path):
-    _touch(tmp_path, "usr/local/lib/libavcodec.so.62")  # ours -> allowed
+    _touch(tmp_path, "usr/local/lib/libavcodec_dynamo.so.63")  # ours -> allowed
     assert main(["--root", str(tmp_path), "--fail-on-findings"]) == 0
 
 

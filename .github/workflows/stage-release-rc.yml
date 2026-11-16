@@ -33,7 +33,7 @@ on:
         type: string
         default: all
       wheels:
-        description: 'Wheels to stage: all | none | csv of ai-dynamo,ai-dynamo-runtime,kvbm.'
+        description: 'Wheels to stage: all | none | csv of ai-dynamo,ai-dynamo-runtime.'
         required: false
         type: string
         default: all
@@ -201,7 +201,7 @@ jobs:
           FRAMEWORKS = {"vllm", "sglang", "trtllm"}
           VARIANTS = {"runtime", "efa"}
           COMPONENTS = {"frontend", "operator", "planner", "sidecar"}
-          WHEEL_TOKENS = {"ai-dynamo", "ai-dynamo-runtime", "kvbm"}
+          WHEEL_TOKENS = {"ai-dynamo", "ai-dynamo-runtime"}
           HELM_TOKENS = {"platform"}
 
           def fail(msg):
@@ -407,8 +407,7 @@ jobs:
           done
 
   # STAGE ARTIFACTS + TRIGGER GITLAB (release.yml in on-demand mode). release.yml's
-  # own authorize + approval gate covers the publish path for every caller; the
-  # approval is NOT duplicated here.
+  # own authorize gate covers the publish path for every caller.
   invoke-release:
     name: Stage release
     needs: [resolve-target, await-post-merge]

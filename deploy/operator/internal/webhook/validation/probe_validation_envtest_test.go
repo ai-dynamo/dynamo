@@ -32,13 +32,12 @@ func containerProbeAdmissionCases(deployment runtime.Object, container *corev1.C
 	}{
 		{name: "omitted"},
 		{name: "timing only", probe: &corev1.Probe{PeriodSeconds: 5}, invalid: true},
-		{name: "multiple handlers", probe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
-			Exec: &corev1.ExecAction{Command: []string{"true"}}, GRPC: &corev1.GRPCAction{Port: 8000},
-		}}, invalid: true},
-		{name: "exec", probe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"true"}}}}},
-		{name: "http", probe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromInt(8000)}}}},
-		{name: "tcp", probe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(8000)}}}},
-		{name: "grpc", probe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{GRPC: &corev1.GRPCAction{Port: 8000}}}},
+		{name: "multiple handlers", probe: &corev1.Probe{
+			Exec: &corev1.ExecAction{Command: []string{"true"}}, GRPC: &corev1.GRPCAction{Port: 8000}}, invalid: true},
+		{name: "exec", probe: &corev1.Probe{Exec: &corev1.ExecAction{Command: []string{"true"}}}},
+		{name: "http", probe: &corev1.Probe{HTTPGet: &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromInt(8000)}}},
+		{name: "tcp", probe: &corev1.Probe{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(8000)}}},
+		{name: "grpc", probe: &corev1.Probe{GRPC: &corev1.GRPCAction{Port: 8000}}},
 	}
 
 	// Apply each probe independently, with an omitted probe as the update seed.

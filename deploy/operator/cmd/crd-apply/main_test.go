@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -17,17 +18,18 @@ import (
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
 
-func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
-	const objectType = "object"
+const objectType = "object"
 
+func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 	t.Log("Start a local API server with its default request and storage limits")
-	env := &envtest.Environment{UseExistingCluster: ptr.To(false)}
+	env := &envtest.Environment{UseExistingCluster: new(false)}
 	config, err := env.Start()
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +100,132 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 		}
 	}
 
+	t.Log("Verify the disabled DGDR v1beta2 gate installs only complete legacy Request schemas")
+	verifyDisabledDGDRV1Beta2(t, client)
+
+	t.Log("Enable DGDR v1beta2 and verify discovery plus complete conversion schemas")
+	enableDGDRV1Beta2(t, installer, kubeconfig)
+	verifyEnabledDGDRV1Beta2(t, client, config)
+
 	t.Log("Verify installed schemas preserve DGD placement and keep model downloads on the private child")
+	verifyInstalledCRDSchemas(t, client)
+}
+
+func verifyDisabledDGDRV1Beta2(
+	t *testing.T,
+	client *apiextensionsclient.Clientset,
+) {
+	t.Helper()
+	requestCRD, err := client.ApiextensionsV1().CustomResourceDefinitions().Get(
+		t.Context(), dgdrCRDName, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Len(t, requestCRD.Spec.Versions, 2)
+	for _, version := range requestCRD.Spec.Versions {
+		require.NotEqual(t, dgdrV1Beta2Version, version.Name)
+		spec := version.Schema.OpenAPIV3Schema.Properties["spec"]
+		status := version.Schema.OpenAPIV3Schema.Properties["status"]
+		require.NotContains(t, spec.Properties, dgdrV1Beta2Version)
+		require.NotContains(t, status.Properties, dgdrV1Beta2Version)
+		rules := append([]apiextensionsv1.ValidationRule{}, version.Schema.OpenAPIV3Schema.XValidations...)
+		rules = append(rules, spec.XValidations...)
+		rules = append(rules, status.XValidations...)
+		for _, rule := range rules {
+			require.NotContains(t, rule.Rule, dgdrV1Beta2Version)
+		}
+		require.Contains(t, spec.Required, "model")
+		if version.Name == apiV1Alpha1Version {
+			require.Contains(t, spec.Required, "backend")
+			require.Contains(t, spec.Required, "profilingConfig")
+		}
+	}
+	for _, name := range []string{dgdrRunCRDName, dgdrCandidateCRD} {
+		_, err := client.ApiextensionsV1().CustomResourceDefinitions().Get(
+			t.Context(), name, metav1.GetOptions{})
+		require.True(t, apierrors.IsNotFound(err), "%s must be absent while disabled: %v", name, err)
+	}
+}
+
+func enableDGDRV1Beta2(t *testing.T, installer, kubeconfig string) {
+	t.Helper()
+	enableDGDRV1Beta2 := exec.CommandContext(t.Context(), installer,
+		"--crds-dir", "../../config/crd/bases",
+		"--version", "schema-test",
+		"--dgdr-v1beta2-enabled=true",
+		"--conversion-webhook-service-name", "dynamo-operator-webhook-service",
+		"--conversion-webhook-service-namespace", "dynamo-system",
+	)
+	enableDGDRV1Beta2.Env = append(os.Environ(), "KUBECONFIG="+kubeconfig)
+	if output, err := enableDGDRV1Beta2.CombinedOutput(); err != nil {
+		t.Fatalf("enable DGDR v1beta2 CRDs: %v\n%s", err, output)
+	}
+}
+
+func verifyEnabledDGDRV1Beta2(
+	t *testing.T,
+	client *apiextensionsclient.Clientset,
+	config *rest.Config,
+) {
+	t.Helper()
+	requestCRD, err := client.ApiextensionsV1().CustomResourceDefinitions().Get(
+		t.Context(), dgdrCRDName, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Len(t, requestCRD.Spec.Versions, 3)
+	for _, version := range requestCRD.Spec.Versions {
+		spec := version.Schema.OpenAPIV3Schema.Properties["spec"]
+		status := version.Schema.OpenAPIV3Schema.Properties["status"]
+		switch version.Name {
+		case apiV1Alpha1Version, "v1beta1":
+			require.Contains(t, spec.Properties, dgdrV1Beta2Version)
+			require.Contains(t, status.Properties, dgdrV1Beta2Version)
+		case dgdrV1Beta2Version:
+			require.True(t, version.Served)
+			require.False(t, version.Storage)
+		default:
+			t.Fatalf("unexpected DGDR version %q", version.Name)
+		}
+	}
+	for _, name := range []string{dgdrRunCRDName, dgdrCandidateCRD} {
+		standalone, err := client.ApiextensionsV1().CustomResourceDefinitions().Get(
+			t.Context(), name, metav1.GetOptions{})
+		require.NoError(t, err)
+		if name == dgdrRunCRDName {
+			runSpec := standalone.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"]
+			require.NotContains(t, runSpec.Properties, "v1beta1")
+			require.Condition(t, func() bool {
+				for _, rule := range runSpec.XValidations {
+					if strings.Contains(rule.Rule, "has(self.model)") {
+						return true
+					}
+				}
+				return false
+			}, "Run spec must require its native model")
+			for _, rule := range runSpec.XValidations {
+				require.NotContains(t, rule.Rule, "v1beta1")
+			}
+		}
+	}
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
+	require.NoError(t, err)
+	resources, err := discoveryClient.ServerResourcesForGroupVersion("nvidia.com/v1beta2")
+	require.NoError(t, err)
+	discovered := make(map[string]bool)
+	for _, resource := range resources.APIResources {
+		discovered[resource.Name] = true
+	}
+	for _, resource := range []string{
+		"dynamographdeploymentrequests",
+		"dynamographdeploymentruns",
+		"dynamographdeploymentcandidates",
+	} {
+		require.True(t, discovered[resource], "%s is not discoverable", resource)
+	}
+}
+
+func verifyInstalledCRDSchemas(
+	t *testing.T,
+	client *apiextensionsclient.Clientset,
+) {
+	t.Helper()
 	for _, name := range []string{
 		"dynamographdeployments.nvidia.com", "dynamocomponentdeployments.nvidia.com", "lpxgraphdeployments.nvidia.com",
 	} {
@@ -113,7 +240,7 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 			t.Log("Keep the private LGD exclusively alpha, without conversion")
 			require.Len(t, crd.Spec.Versions, 1)
 			version := crd.Spec.Versions[0]
-			require.Equal(t, "v1alpha1", version.Name)
+			require.Equal(t, apiV1Alpha1Version, version.Name)
 			require.True(t, version.Served)
 			require.True(t, version.Storage)
 			require.Equal(t, []string{version.Name}, crd.Status.StoredVersions)
@@ -131,7 +258,7 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 				require.NotContains(t, spec.Properties, "lpx")
 
 				templateField := "podTemplate"
-				if version.Name == "v1alpha1" {
+				if version.Name == apiV1Alpha1Version {
 					templateField = "extraPodSpec"
 				}
 				template := spec.Properties[templateField]
@@ -148,7 +275,7 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 				spec := version.Schema.OpenAPIV3Schema.Properties["spec"]
 				var component *apiextensionsv1.JSONSchemaProps
 				typeField := "type"
-				if version.Name == "v1alpha1" {
+				if version.Name == apiV1Alpha1Version {
 					component = spec.Properties["services"].AdditionalProperties.Schema
 					typeField = "componentType"
 				} else {

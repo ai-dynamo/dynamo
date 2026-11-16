@@ -11,7 +11,9 @@ use clap::ValueEnum;
 use dynamo_mocker::common::protocols::{
     EngineType, KvEventPublishers, MockerConfig, OutputSignal, WorkerType,
 };
-use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, LiveRequest, stable_request_uuid};
+use dynamo_mocker::live::{
+    LiveEngine, LiveEngineConfig, LiveRequest, RequestOutputBuffering, stable_request_uuid,
+};
 use dynamo_mocker::scheduler::MockerMetrics;
 use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
 use dynamo_vllm_sidecar::proto as pb;
@@ -27,11 +29,6 @@ mod request;
 const DP_RANK: u32 = 0;
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 256;
 type BoxedStatusResult<T> = Result<T, Box<Status>>;
-
-enum GenerationEvent {
-    Output(OutputSignal),
-    Aborted,
-}
 
 /// Wire-level role exposed by one mock server process.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -191,7 +188,8 @@ impl VllmMockerService {
             })
             .into_iter()
             .collect();
-        let engine = LiveEngine::start_with_config(
+        // Buffer the full response so a slow gRPC consumer is never shed, as in the TRT-LLM mock.
+        let engine = LiveEngine::start_with_config_and_request_output_buffering(
             engine_args,
             DP_RANK,
             LiveEngineConfig {
@@ -201,6 +199,7 @@ impl VllmMockerService {
                 ),
                 ..Default::default()
             },
+            RequestOutputBuffering::FullResponse,
         )?;
         Ok(Self {
             config: Arc::new(config),
@@ -311,37 +310,6 @@ impl pb::inference_server::Inference for VllmMockerService {
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStreamStream>, Status> {
         let (prepared, mut live, permit) = self.start_generation(request).await?;
-        // Decouple LiveEngine's small fixed per-request buffer from client and
-        // transport pacing. A pump drains the engine promptly into a buffer
-        // bounded by this request's own token budget, so a bursty producer
-        // racing ahead of a slow gRPC consumer no longer trips LiveEngine's
-        // slow-consumer shedding and surfaces as a spurious INTERNAL. The buffer
-        // cannot grow past the request's declared output length, and dropping
-        // the client stream still cancels unfinished scheduler work.
-        let (signal_tx, mut signal_rx) =
-            tokio::sync::mpsc::channel(prepared.max_output_tokens.saturating_add(1));
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    // The client dropped the stream: stop and let `live` drop,
-                    // which cancels any unfinished scheduler work promptly.
-                    _ = signal_tx.closed() => break,
-                    signal = live.recv() => {
-                        let Some(signal) = signal else {
-                            if live.is_aborted() {
-                                let _ = signal_tx.send(GenerationEvent::Aborted).await;
-                            }
-                            break;
-                        };
-                        let completed = signal.completed;
-                        if signal_tx.send(GenerationEvent::Output(signal)).await.is_err() || completed {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
         let stream = async_stream::try_stream! {
             let _permit = permit;
             yield pb::GenerateResponse {
@@ -350,15 +318,7 @@ impl pb::inference_server::Inference for VllmMockerService {
             };
 
             let mut generated = 0usize;
-            while let Some(event) = signal_rx.recv().await {
-                let GenerationEvent::Output(signal) = event else {
-                    yield pb::GenerateResponse {
-                        prompt_info: None,
-                        outputs: Some(prepared.aborted_output(&[])
-                            .with_total_output_tokens(generated)),
-                    };
-                    return;
-                };
+            while let Some(signal) = live.recv().await {
                 let token_id = checked_token(&signal).map_err(|status| *status)?;
                 generated += 1;
                 yield pb::GenerateResponse {
@@ -368,6 +328,14 @@ impl pb::inference_server::Inference for VllmMockerService {
                 if signal.completed {
                     return;
                 }
+            }
+            if live.is_aborted() {
+                yield pb::GenerateResponse {
+                    prompt_info: None,
+                    outputs: Some(prepared.aborted_output(&[])
+                        .with_total_output_tokens(generated)),
+                };
+                return;
             }
             Err(Status::internal(
                 "Mocker output channel closed before a terminal response",

@@ -6,7 +6,7 @@ subtitle: Health endpoints, status codes, paths, and active-check configuration
 ---
 
 Dynamo exposes two related health interfaces: HTTP status endpoints for external observers and
-optional canary requests that actively exercise idle worker endpoints. For a local procedure, see
+optional active checks for idle worker endpoints. For a local procedure, see
 [Observe a Local Deployment](../../cli/operations/observability.mdx#check-deployment-health).
 
 ## Endpoint Summary
@@ -14,7 +14,7 @@ optional canary requests that actively exercise idle worker endpoints. For a loc
 | Process | Default port | Path | Behavior |
 | --- | --- | --- | --- |
 | Frontend | `DYN_HTTP_PORT`, default `8000` | `/live` | Reports whether the HTTP service is running or shutting down |
-| Frontend | `DYN_HTTP_PORT`, default `8000` | `/health` | Reports frontend health plus discovered endpoints and instances |
+| Frontend | `DYN_HTTP_PORT`, default `8000` | `/health` | Reports frontend readiness; `?instances=true` adds discovered endpoints and instances |
 | Frontend | `DYN_HTTP_PORT`, default `8000` | `/v1/models/<model>/ready` | Reports whether the selected model has ready topology, a usable serving engine, and enabled HTTP routes |
 | Worker or standalone router | `DYN_SYSTEM_PORT`, disabled by default | `/live` | Reports system status |
 | Worker or standalone router | `DYN_SYSTEM_PORT`, disabled by default | `/health` | Reports system status |
@@ -37,12 +37,23 @@ During graceful shutdown, `/live` remains `200 OK` while the Frontend is drainin
 After the drain finishes or times out and the service enters the stopping state, `/live` returns
 `503 Service Unavailable` with status `shutting_down`.
 
-The frontend `/health` endpoint returns `200 OK` while ready and lists the endpoints and instances currently
-visible through discovery:
+The frontend `/health` endpoint returns `200 OK` while ready:
 
 ```json
 {
   "status": "healthy",
+  "stage": "ready"
+}
+```
+
+With the `instances=true` query parameter, the response also lists the endpoints and instances
+currently visible through discovery. Building the list serializes every discovered instance, so keep
+readiness probes on the default form:
+
+```json
+{
+  "status": "healthy",
+  "stage": "ready",
   "endpoints": [
     "dyn://dynamo.backend.generate"
   ],
@@ -146,12 +157,59 @@ selection in the current runtime.
 | `DYN_HEALTH_CHECK_ENABLED` | `false` | Enables active checks for registered worker endpoints |
 | `DYN_CANARY_WAIT_TIME` | `10` | Seconds without successful endpoint activity before sending a canary |
 | `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` | `3` | Seconds to wait for the canary response |
-| `DYN_HEALTH_CHECK_PAYLOAD` | Backend default | Optional JSON object or `@/path/to/file.json` payload override for unified backends |
+| `DYN_HEALTH_CHECK_PAYLOAD` | Backend default | Optional JSON object or `@/path/to/file.json` canary payload override |
 
-Each backend supplies a minimal inference payload. Dynamo marks the request as a health check and
-uses the backend's normal endpoint path, so the check covers request handling and engine execution
-rather than only process reachability. For the lifecycle and rationale, see
+LLM backends supply a minimal inference request that Dynamo sends through the registered worker
+endpoint. Successful response chunks from normal traffic reset the idle timer, including when client
+delivery fails. This reports engine progress, not completion of every request. For the lifecycle and
+rationale, see
 [Observability Architecture](../../developer-guide/knowledge-base/concepts/observability-architecture.md#active-worker-health-checks).
+
+For vLLM-Omni workers, see [vLLM-Omni Health Checks](#vllm-omni-health-checks).
+
+### vLLM-Omni Health Checks
+
+Applies only to aggregated [vLLM-Omni workers](../backends/vllm-omni-configuration.mdx).
+An aggregated worker serves the complete model pipeline through one Dynamo endpoint. A
+[stage worker](../../developer-guide/knowledge-base/modular-components/backends/vllm/vllm-omni-disaggregated-serving.md)
+runs a single stage in a disaggregated pipeline. The Omni orchestrator coordinates the pipeline;
+stage replicas are separate instances of a stage.
+
+With `DYN_HEALTH_CHECK_PAYLOAD` unset or set to `{}`, the worker calls the engine's native
+`AsyncOmni.check_health()` method to check the orchestrator and stage replicas without generating
+media.
+
+To test inference, set `DYN_HEALTH_CHECK_PAYLOAD` to a request validated against the exact model and
+output modality. Some audio models require a supported voice, instructions, or reference audio;
+image-editing or image-to-video models can require reference images. Set
+`DYN_HEALTH_CHECK_REQUEST_TIMEOUT` to allow the request to complete, including queueing under the
+expected load.
+
+Custom canaries read the full response and reject reported generation errors. The response must
+finish with a final result containing nonempty media data or a media URL, or with a completed chat
+response. Progress updates alone do not pass. The canary acknowledges success only after the selected
+inference request completes.
+
+An invalid JSON override, unreadable payload file, or payload that fails the Omni request schema
+stops worker initialization with a configuration error.
+
+#### Limits of Omni Health Signals
+
+Worker health responses report `ready` or `notready`; the interpretations below are not additional
+HTTP response fields.
+
+| Observation | Supported interpretation | Not established by this result |
+| --- | --- | --- |
+| Default native check passes | No failure was detected by the native orchestrator/stage checks | Inference is making progress or will complete |
+| A nonempty replicated stage pool passes its native check | The checked pool has at least one live replica | Every replica is healthy or full configured capacity is available |
+| Payload passes request-schema validation | The request has an accepted protocol shape | This checkpoint supports the task, voice, reference media, or other model-specific options |
+| Inference canary times out | This request did not complete within its deadline | Whether the cause is queueing, a deadlock, a slow operation, or GPU failure |
+| Inference canary succeeds | This request completed with media output or a chat response and no reported error | Every task works, generated media is semantically correct or decodable, returned URLs are reachable, or the HTTP frontend works |
+
+Decoding generated media, downloading URLs from
+[media storage](../backends/vllm-omni-configuration.mdx#media-storage), and sending a request through
+the HTTP frontend require separate checks. Use engine logs and metrics to investigate a failed check
+before deciding to restart the worker.
 
 ## Related Reference
 

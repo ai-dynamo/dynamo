@@ -815,8 +815,8 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			ports: workerPorts,
 			telemetryValueFrom: &corev1.EnvVarSource{
 				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
-					Key:                  "nixl-enable",
+					Name: "telemetry",
+					Key:  "nixl-enable",
 				},
 			},
 			containerGPUs: 8,
@@ -827,8 +827,8 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			ports: workerPorts,
 			telemetryValueFrom: &corev1.EnvVarSource{
 				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
-					Key:                  "nixl-enable",
+					Name: "telemetry",
+					Key:  "nixl-enable",
 				},
 			},
 			containerGPUs: 16,
@@ -840,8 +840,8 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			telemetryEnable: "y",
 			portValueFrom: &corev1.EnvVarSource{
 				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
-					Key:                  "nixl-port",
+					Name: "telemetry",
+					Key:  "nixl-port",
 				},
 			},
 			containerGPUs: 4,
@@ -852,14 +852,14 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			ports: workerPorts,
 			telemetryValueFrom: &corev1.EnvVarSource{
 				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
-					Key:                  "nixl-enable",
+					Name: "telemetry",
+					Key:  "nixl-enable",
 				},
 			},
 			portValueFrom: &corev1.EnvVarSource{
 				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
-					Key:                  "nixl-port",
+					Name: "telemetry",
+					Key:  "nixl-port",
 				},
 			},
 			containerGPUs: 8,
@@ -932,8 +932,8 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			telemetryEnable: "y",
 			exporterValueFrom: &corev1.EnvVarSource{
 				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
-					Key:                  "nixl-exporter",
+					Name: "telemetry",
+					Key:  "nixl-exporter",
 				},
 			},
 			containerGPUs: 16,

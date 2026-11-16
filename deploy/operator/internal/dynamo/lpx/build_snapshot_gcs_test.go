@@ -8,6 +8,7 @@ package lpx
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -22,68 +23,6 @@ func manifestV2Payload(t *testing.T) []byte {
 	payload, err := newManifestV2ContractFixture(t).Message().Marshal()
 	require.NoError(t, err)
 	return payload
-}
-
-func TestAcquireBuildSnapshotFencesCompilerMetadata(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Create two different revision-2 compiler metadata reads for one build")
-	const buildID = "model/build"
-	client := &fakeModelServiceClient{
-		list: &modelpb.ModelFileList{Files: []*modelpb.ModelFileInfo{
-			{RelativePath: gbuildManifestV2CapnpFile},
-		}},
-		fileStreams: []*fakeModelFileStream{
-			{chunks: modelFileChunks(gbuildManifestV2CapnpFile, "first")},
-			{chunks: modelFileChunks(gbuildManifestV2CapnpFile, "second")},
-		},
-	}
-	registry, err := NewModelRegistry("gs://bucket/registry", client)
-	require.NoError(t, err)
-
-	t.Log("Reject compiler metadata that changes during acquisition")
-	_, err = registry.AcquireBuildSnapshot(t.Context(), buildID)
-	require.ErrorIs(t, err, ErrBuildSnapshotInconsistent)
-	require.ErrorContains(t, err, "compiler metadata manifest.v2.capnp.bin changed while acquiring")
-}
-
-func TestAcquireBuildSnapshotClassifiesSelectedMemberDisappearance(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Define definitive and transient failures for both manifest reads")
-	payload := manifestV2Payload(t)
-	for _, testCase := range []struct {
-		name        string
-		failingRead int
-		readErr     error
-	}{
-		{name: "gRPC NotFound on first read", failingRead: 1, readErr: status.Error(codes.NotFound, "object disappeared")},
-		{name: "gRPC NotFound on duplicate read", failingRead: 2, readErr: status.Error(codes.NotFound, "object disappeared")},
-		{name: "transient gRPC failure on first read", failingRead: 1, readErr: status.Error(codes.Unavailable, "temporary object-store failure")},
-		{name: "transient gRPC failure on duplicate read", failingRead: 2, readErr: status.Error(codes.Unavailable, "temporary object-store failure")},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Log("Construct the selected Model Express read sequence")
-			streams := []*fakeModelFileStream{{err: testCase.readErr}}
-			if testCase.failingRead == 2 {
-				streams = append([]*fakeModelFileStream{
-					{chunks: modelFileChunks(gbuildManifestV2CapnpFile, string(payload))},
-				}, streams...)
-			}
-			client := &fakeModelServiceClient{
-				list:        &modelpb.ModelFileList{Files: []*modelpb.ModelFileInfo{{RelativePath: gbuildManifestV2CapnpFile}}},
-				fileStreams: streams,
-			}
-			registry, err := NewModelRegistry("gs://bucket/registry", client)
-			require.NoError(t, err)
-
-			t.Log("Preserve the transport error while classifying definitive absence as inconsistency")
-			_, err = registry.AcquireBuildSnapshot(t.Context(), "model/build")
-			require.Error(t, err)
-			require.Equal(t, status.Code(testCase.readErr) == codes.NotFound, errors.Is(err, ErrBuildSnapshotInconsistent))
-			require.ErrorIs(t, err, testCase.readErr)
-		})
-	}
 }
 
 func TestGCSModelRegistrySnapshotUsesManifestV2FromModelExpress(t *testing.T) {
@@ -105,30 +44,27 @@ func TestGCSModelRegistrySnapshotUsesManifestV2FromModelExpress(t *testing.T) {
 		t.Run(testCase.ref, func(t *testing.T) {
 			t.Log("Create an independent client and registry for this reference form")
 			client := &fakeModelServiceClient{
-				fileStreams: []*fakeModelFileStream{
-					{chunks: modelFileChunks(gbuildManifestV2CapnpFile, string(payload))},
-					{chunks: modelFileChunks(gbuildManifestV2CapnpFile, string(payload))},
+				files: map[string]*fakeModelFileStream{
+					gbuildManifestV2CapnpFile: {chunks: modelFileChunks(gbuildManifestV2CapnpFile, string(payload))},
 				},
-				list: &modelpb.ModelFileList{Files: []*modelpb.ModelFileInfo{{RelativePath: gbuildManifestV2CapnpFile}}},
 			}
 			registry, err := NewModelRegistry(testCase.registryURL, client)
 			require.NoError(t, err)
 
-			t.Log("Normalize the manifest and retain the current registry locator")
+			t.Log("Read and validate the manifest once, retaining the current registry locator")
 			started := time.Now()
 			build, err := normalizeRegistryFixtureBuild(testCase.ctx, registry, testCase.ref)
 			require.NoError(t, err)
-			require.Equal(t, "gs://bucket/registry/model/build", build.Path)
-			require.Len(t, build.Partitions, 1)
-			require.Equal(t, "part-0", build.Partitions[0].PartPath)
-			require.Len(t, client.listRequests, 2)
+			require.Equal(t, "gs://bucket/registry/model/build", build.path)
+			require.Len(t, build.partitions, 1)
+			require.Equal(t, "part-0", build.partitions[0].partPath)
+			require.Empty(t, client.listRequests)
 			require.Len(t, client.filesRequests, 2)
-			for _, request := range client.filesRequests {
-				require.Equal(t, []string{gbuildManifestV2CapnpFile}, request.GetFileSelector().GetPaths())
-			}
+			require.Equal(t, []string{gbuildManifestV2CapnpFile}, client.filesRequests[0].GetFileSelector().GetPaths())
+			require.Equal(t, []string{gbuildDeploymentV1CapnpFile}, client.filesRequests[1].GetFileSelector().GetPaths())
 
-			t.Log("Share a finite deadline across all metadata RPCs and release only their contexts")
-			require.Len(t, client.metadataContexts, 4)
+			t.Log("Bound both candidate reads to one acquisition deadline and release their contexts")
+			require.Len(t, client.metadataContexts, 2)
 			deadline, ok := client.metadataContexts[0].Deadline()
 			require.True(t, ok)
 			if parentDeadline, hasDeadline := testCase.ctx.Deadline(); hasDeadline {
@@ -145,4 +81,107 @@ func TestGCSModelRegistrySnapshotUsesManifestV2FromModelExpress(t *testing.T) {
 			require.NoError(t, testCase.ctx.Err())
 		})
 	}
+}
+
+func TestAcquireBuildRejectsInvalidGCSContracts(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name          string
+		files         []string
+		payload       string
+		missingAtRecv bool
+		wantErr       error
+		message       string
+	}{
+		{name: "neither format", wantErr: os.ErrNotExist, message: "missing build contract"},
+		{name: "missing at first receive", missingAtRecv: true, wantErr: os.ErrNotExist, message: "missing build contract"},
+		{
+			name: "both formats", files: []string{gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile},
+			payload: "invalid compiler bytes", wantErr: errInvalidBuildManifest, message: "ambiguous",
+		},
+		{
+			name: "empty manifest exists", files: []string{gbuildManifestV2CapnpFile},
+			wantErr: errInvalidBuildManifest, message: "parsing",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Expose candidate streams through strict Model Express path selection")
+			client := &fakeModelServiceClient{files: map[string]*fakeModelFileStream{}}
+			for _, name := range test.files {
+				client.files[name] = &fakeModelFileStream{chunks: modelFileChunks(name, test.payload)}
+			}
+			if test.missingAtRecv {
+				for _, name := range []string{gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile} {
+					client.files[name] = &fakeModelFileStream{err: status.Error(codes.NotFound, "manifest missing")}
+				}
+			}
+			registry, err := NewModelRegistry("gs://bucket/registry", client)
+			require.NoError(t, err)
+
+			t.Log("Read both alternatives and distinguish invalid publication from malformed bytes")
+			snapshot, err := registry.AcquireBuild(t.Context(), "model/build")
+			require.ErrorIs(t, err, test.wantErr)
+			require.ErrorContains(t, err, test.message)
+			require.Nil(t, snapshot)
+			require.Empty(t, client.listRequests)
+			require.Len(t, client.filesRequests, 2)
+		})
+	}
+}
+
+func TestAcquireBuildPreservesGCSReadFailures(t *testing.T) {
+	t.Parallel()
+
+	for _, readErr := range []error{
+		status.Error(codes.Unavailable, "object store unavailable"),
+		status.Error(codes.PermissionDenied, "access denied"),
+		status.Error(codes.DeadlineExceeded, "read deadline exceeded"),
+		status.Error(codes.Canceled, "read canceled"),
+		errors.New("transport failure"),
+	} {
+		for _, path := range []string{gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile} {
+			t.Run(readErr.Error()+"/"+path, func(t *testing.T) {
+				t.Log("Fail reading one alternative while the other format is available")
+				client := &fakeModelServiceClient{files: map[string]*fakeModelFileStream{
+					gbuildManifestV2CapnpFile:   {chunks: modelFileChunks(gbuildManifestV2CapnpFile, "compiler bytes")},
+					gbuildDeploymentV1CapnpFile: {chunks: modelFileChunks(gbuildDeploymentV1CapnpFile, "compiler bytes")},
+				}}
+				client.files[path] = &fakeModelFileStream{err: readErr}
+				registry, err := NewModelRegistry("gs://bucket/registry", client)
+				require.NoError(t, err)
+
+				t.Log("Preserve the read error instead of selecting or decoding the other format")
+				snapshot, err := registry.AcquireBuild(t.Context(), "model/build")
+				require.ErrorIs(t, err, readErr)
+				require.NotErrorIs(t, err, errInvalidBuildManifest)
+				require.NotErrorIs(t, err, os.ErrNotExist)
+				require.Nil(t, snapshot)
+				require.Empty(t, client.listRequests)
+			})
+		}
+	}
+}
+
+func TestAcquireBuildDoesNotTreatInterruptedStreamAsAbsent(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Return NotFound after receiving part of an existing manifest")
+	readErr := status.Error(codes.NotFound, "stream interrupted")
+	client := &fakeModelServiceClient{files: map[string]*fakeModelFileStream{
+		gbuildManifestV2CapnpFile: {
+			chunks: []*modelpb.FileChunk{{RelativePath: gbuildManifestV2CapnpFile, Data: []byte("partial")}},
+			err:    readErr,
+		},
+		gbuildDeploymentV1CapnpFile: {chunks: modelFileChunks(gbuildDeploymentV1CapnpFile, "compiler bytes")},
+	}}
+	registry, err := NewModelRegistry("gs://bucket/registry", client)
+	require.NoError(t, err)
+
+	t.Log("Preserve the interrupted read instead of falling back to the other contract")
+	build, err := registry.AcquireBuild(t.Context(), "model/build")
+	require.Nil(t, build)
+	require.ErrorIs(t, err, readErr)
+	require.NotErrorIs(t, err, os.ErrNotExist)
+	require.Len(t, client.filesRequests, 1)
 }

@@ -81,7 +81,7 @@ class StandaloneRouterHandler:
             logger.error(f"Failed to initialize KvRouter: {e}")
             raise
 
-    async def generate(self, request):
+    async def generate(self, request, context=None):
         """
         Generate tokens using the KV-aware router.
 
@@ -101,7 +101,8 @@ class StandaloneRouterHandler:
             preprocessed_request["routing"] = {"dp_rank": dp_rank}
 
         async for worker_output in await self.kv_router.generate_from_request(
-            preprocessed_request
+            preprocessed_request,
+            context=context,
         ):
             yield worker_output
 

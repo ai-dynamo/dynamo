@@ -7,6 +7,7 @@ import logging
 import os
 import time
 from typing import Optional
+from uuid import uuid4
 
 from kubernetes.client import ApiException
 from kubernetes.config.config_exception import ConfigException
@@ -15,7 +16,13 @@ from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.connectors.clients.remote_client import RemotePlannerClient
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
-from dynamo.planner.connectors.protocol import ScaleRequest, ScaleStatus
+from dynamo.planner.connectors.protocol import (
+    AllocationStatusRequest,
+    ManagedAllocationStatus,
+    ScaleRequest,
+    ScaleResponse,
+    ScaleStatus,
+)
 from dynamo.planner.errors import (
     DeploymentModelNameMismatchError,
     DeploymentValidationError,
@@ -35,6 +42,14 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
+def _recovery_required(response: ScaleResponse) -> bool:
+    """Whether a managed controller has frozen mutations for manual recovery."""
+    return (
+        response.allocation is not None
+        and response.allocation.phase == "recovery_required"
+    )
+
+
 class GlobalPlannerConnector(PlannerConnector):
     """
     Connector that delegates scaling decisions to a centralized GlobalPlanner.
@@ -51,6 +66,7 @@ class GlobalPlannerConnector(PlannerConnector):
         global_planner_namespace: str,
         global_planner_component: str = "GlobalPlanner",
         model_name: Optional[str] = None,
+        managed_allocation: bool = False,
     ):
         """
         Initialize GlobalPlannerConnector.
@@ -61,6 +77,8 @@ class GlobalPlannerConnector(PlannerConnector):
             global_planner_namespace: Namespace where GlobalPlanner is deployed
             global_planner_component: Component name of GlobalPlanner (default: "GlobalPlanner")
             model_name: Optional model name (will be managed remotely if not provided)
+            managed_allocation: GlobalPlanner runs managed allocation; poll its
+                allocation status alongside worker observations
         """
         self.runtime = runtime
         self.dynamo_namespace = dynamo_namespace
@@ -71,6 +89,11 @@ class GlobalPlannerConnector(PlannerConnector):
 
         # Cache for predicted load (will be set by planner before scaling)
         self.last_predicted_load: Optional[dict] = None
+        # Local demand remains distinct from the controller's allocation grant.
+        # Neither value substitutes for Kubernetes readiness observations.
+        self.last_desired_replicas: list[TargetReplica] = []
+        self.last_managed_allocation: Optional[ManagedAllocationStatus] = None
+        self.managed_allocation = managed_allocation
 
         # Lazily-initialized KubernetesConnector scoped to the pool's own DGD.
         # Used only to read pool-local MDC / DGD args for capability discovery
@@ -131,7 +154,50 @@ class GlobalPlannerConnector(PlannerConnector):
                 "GlobalPlannerConnector not initialized. Call async_init() first."
             )
 
-        # Get DGD info from environment variables
+        identity = self._allocation_status_request()
+        self.last_desired_replicas = [
+            target.model_copy(deep=True) for target in target_replicas
+        ]
+
+        # Generate the identifier once before transport. Connection retries send
+        # this same request; a later local decision is a new demand update.
+        request = ScaleRequest(
+            **identity.model_dump(),
+            target_replicas=self.last_desired_replicas,
+            blocking=blocking,
+            timestamp=time.time(),
+            predicted_load=self.last_predicted_load,
+            request_id=str(uuid4()),
+        )
+
+        logger.info(
+            "Delegating scale request to GlobalPlanner: DGD=%s, targets=%s",
+            identity.graph_deployment_name,
+            target_replicas,
+        )
+
+        response = await self.remote_client.send_scale_request(request)
+        self.last_managed_allocation = response.allocation
+
+        if response.status == ScaleStatus.SUCCESS:
+            logger.info("GlobalPlanner scaling successful: %s", response.message)
+        elif response.status == ScaleStatus.SCALING:
+            logger.info(
+                "GlobalPlanner demand accepted, scaling pending: %s", response.message
+            )
+        elif response.status == ScaleStatus.REJECTED:
+            # Over-budget rejection is a legitimate business outcome — keep running.
+            logger.warning(f"GlobalPlanner rejected scale request: {response.message}")
+        elif response.status == ScaleStatus.ERROR:
+            logger.error("GlobalPlanner scaling failed: %s", response.message)
+            if _recovery_required(response):
+                # The managed controller has explicitly frozen mutations. Keep
+                # observing and publishing demand so a later recovery can use it.
+                return
+            raise RuntimeError(f"GlobalPlanner scaling failed: {response.message}")
+
+    def _allocation_status_request(self) -> AllocationStatusRequest:
+        """Resolve the pool identity shared by demand and status RPCs."""
         graph_deployment_name = os.environ.get("DYN_PARENT_DGD_K8S_NAME")
         if not graph_deployment_name:
             raise ValueError(
@@ -145,40 +211,37 @@ class GlobalPlannerConnector(PlannerConnector):
                 "Please set POD_NAMESPACE to specify the Kubernetes namespace."
             )
 
-        # Create scale request
-        request = ScaleRequest(
+        return AllocationStatusRequest(
             caller_namespace=self.dynamo_namespace,
             graph_deployment_name=graph_deployment_name,
             k8s_namespace=k8s_namespace,
-            target_replicas=target_replicas,
-            blocking=blocking,
-            timestamp=time.time(),
-            predicted_load=self.last_predicted_load,
         )
 
-        logger.info(
-            f"Delegating scale request to GlobalPlanner: "
-            f"DGD={graph_deployment_name}, "
-            f"prefill={[r.desired_replicas for r in target_replicas if r.sub_component_type == SubComponentType.PREFILL]}, "
-            f"decode={[r.desired_replicas for r in target_replicas if r.sub_component_type == SubComponentType.DECODE]}"
-        )
-
-        # Send request to GlobalPlanner
-        response = await self.remote_client.send_scale_request(request)
-
-        # Check response status
-        if response.status == ScaleStatus.SUCCESS:
-            logger.info(f"GlobalPlanner scaling successful: {response.message}")
-        elif response.status == ScaleStatus.REJECTED:
-            # Over-budget rejection is a legitimate business outcome — keep running.
-            logger.warning(f"GlobalPlanner rejected scale request: {response.message}")
-        elif response.status == ScaleStatus.ERROR:
-            logger.error(f"GlobalPlanner scaling failed: {response.message}")
-            raise RuntimeError(f"GlobalPlanner scaling failed: {response.message}")
-        else:
-            logger.warning(
-                f"GlobalPlanner returned status '{response.status.value}': {response.message}"
+    async def get_allocation_status(self) -> Optional[ManagedAllocationStatus]:
+        """Refresh the controller's grant and transfer state without changing demand."""
+        if self.remote_client is None:
+            raise RuntimeError(
+                "GlobalPlannerConnector not initialized. Call async_init() first."
             )
+        request = self._allocation_status_request()
+        try:
+            response = await self.remote_client.get_allocation_status(request)
+        except (RuntimeError, TimeoutError) as exc:
+            # This read cannot have submitted a mutation. Losing the controller
+            # makes its cached allocation unknown, but must not stop independent
+            # Kubernetes observation. Keep polling after the controller returns.
+            self.last_managed_allocation = None
+            logger.warning("GlobalPlanner allocation status unavailable: %s", exc)
+            return None
+        self.last_managed_allocation = response.allocation
+        if response.status == ScaleStatus.ERROR:
+            if _recovery_required(response):
+                logger.error("GlobalPlanner requires recovery: %s", response.message)
+                return self.last_managed_allocation
+            raise RuntimeError(
+                f"GlobalPlanner allocation status failed: {response.message}"
+            )
+        return self.last_managed_allocation
 
     async def add_component(
         self, sub_component_type: SubComponentType, blocking: bool = True
@@ -296,6 +359,11 @@ class GlobalPlannerConnector(PlannerConnector):
         (e.g. running out-of-cluster), matching the existing capability-discovery
         fallback path so out-of-cluster callers aren't blocked.
         """
+        # The local planner already polls worker counts. Reuse that cadence for
+        # managed status, including donor changes initiated by another pool.
+        # Legacy deployments never call the new endpoint.
+        if self.managed_allocation:
+            await self.get_allocation_status()
         local = self._get_local_k8s_connector()
         if local is None:
             logger.debug(

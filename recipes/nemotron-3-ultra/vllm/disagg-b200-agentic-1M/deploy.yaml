@@ -81,7 +81,7 @@ spec:
   - name: NCCL_DEBUG
     value: WARN
   - name: DYN_LOG
-    value: info,dynamo_kv_router=debug,dynamo_llm::kv_router=debug
+    value: info,dynamo_kv_router=debug,dynamo_scheduler=debug,dynamo_kv_indexer=debug,dynamo_slot_tracker=debug,dynamo_session_affinity=debug,dynamo_admission=debug,dynamo_worker_selection=debug,dynamo_kv_hints=debug,dynamo_kv_events=debug,dynamo_llm::kv_router=debug
   components:
   - name: Frontend
     type: frontend

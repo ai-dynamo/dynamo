@@ -39,7 +39,6 @@ import (
 	apitest "k8s.io/apiextensions-apiserver/pkg/test"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -180,10 +179,13 @@ func TestRolePodTemplateRuntimeVersionRatcheting(t *testing.T) {
 	}
 
 	t.Run("v1beta1 unchanged legacy images remain valid", func(t *testing.T) {
-		oldSpec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{Roles: []nvidiacomv1beta1.ComponentRoleSpec{
-			{Name: nvidiacomv1beta1.ComponentRoleLeader, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
-			{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
-		}}
+		oldSpec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentType: consts.ComponentTypeWorker,
+			Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+				{Name: nvidiacomv1beta1.ComponentRoleLeader, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+				{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+			},
+		}
 		newSpec := oldSpec.DeepCopy()
 		validation := &sharedValidation{runtimeVersionSource: runtimeVersionSourceV1Beta1}
 
@@ -192,10 +194,13 @@ func TestRolePodTemplateRuntimeVersionRatcheting(t *testing.T) {
 	})
 
 	t.Run("v1beta1 changed legacy image requires override", func(t *testing.T) {
-		oldSpec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{Roles: []nvidiacomv1beta1.ComponentRoleSpec{
-			{Name: nvidiacomv1beta1.ComponentRoleLeader, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
-			{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
-		}}
+		oldSpec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentType: consts.ComponentTypeWorker,
+			Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+				{Name: nvidiacomv1beta1.ComponentRoleLeader, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+				{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+			},
+		}
 		newSpec := oldSpec.DeepCopy()
 		newSpec.Roles[1].PodTemplate.Spec.Containers[0].Image = "registry.example/runtime:other"
 		validation := &sharedValidation{runtimeVersionSource: runtimeVersionSourceV1Beta1}
@@ -205,10 +210,13 @@ func TestRolePodTemplateRuntimeVersionRatcheting(t *testing.T) {
 	})
 
 	t.Run("v1alpha1 changed legacy image requires override", func(t *testing.T) {
-		oldSpec := &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{Roles: []nvidiacomv1alpha1.ComponentRoleSpec{
-			{Name: nvidiacomv1alpha1.ComponentRoleLeader, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
-			{Name: nvidiacomv1alpha1.ComponentRoleWorker, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
-		}}
+		oldSpec := &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			ComponentType: consts.ComponentTypeWorker,
+			Roles: []nvidiacomv1alpha1.ComponentRoleSpec{
+				{Name: nvidiacomv1alpha1.ComponentRoleLeader, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+				{Name: nvidiacomv1alpha1.ComponentRoleWorker, PodTemplate: roleTemplate("registry.example/runtime:legacy")},
+			},
+		}
 		newSpec := oldSpec.DeepCopy()
 		newSpec.Roles[0].PodTemplate.Spec.Containers[0].Image = "registry.example/runtime:other"
 		validation := &sharedValidation{runtimeVersionSource: runtimeVersionSourceV1Alpha1}
@@ -270,9 +278,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 		ComponentType:          nvidiacomv1beta1.ComponentTypeEPP,
 		RuntimeVersionOverride: "1.1.0",
 		PodTemplate: &corev1.PodTemplateSpec{
-			ObjectMeta: metav1.ObjectMeta{
-				Annotations: map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid"},
-			},
+			Annotations: map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid"},
 			Spec: corev1.PodSpec{
 				Containers:     []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}, {Name: "sidecar"}},
 				InitContainers: []corev1.Container{{Name: "init"}},

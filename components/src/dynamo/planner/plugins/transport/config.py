@@ -84,6 +84,7 @@ def make_transport_for_endpoint(
     config: TransportConfig,
     *,
     in_process_instance: Any | None = None,
+    in_process_timeout: bool = True,
 ) -> PluginTransport:
     """Construct a ``PluginTransport`` from endpoint scheme + config.
 
@@ -93,6 +94,10 @@ def make_transport_for_endpoint(
         config: TransportConfig (timeouts + ``allow_insecure_grpc``)
         in_process_instance: required when ``endpoint`` starts with ``inproc://``;
             ignored otherwise. Bridges the ``register_internal`` path.
+        in_process_timeout: ``False`` runs ``inproc://`` calls to completion
+            instead of bounding them by ``config.request_timeout_seconds``.
+            Replay passes it, because an in-process call takes no simulated
+            time. ``grpc://`` calls are always bounded.
 
     Raises:
         ValueError: invalid endpoint scheme, missing instance for inproc,
@@ -112,7 +117,9 @@ def make_transport_for_endpoint(
                 f"endpoint={endpoint!r}): in_process_instance required for inproc://"
             )
         return InProcessTransport(
-            plugin_id, in_process_instance, timeout_seconds=timeout
+            plugin_id,
+            in_process_instance,
+            timeout_seconds=timeout if in_process_timeout else None,
         )
 
     if endpoint.startswith("grpc://"):

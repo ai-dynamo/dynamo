@@ -439,8 +439,10 @@ def _new_decode_handler(*, enable_frontend_decoding: bool):
     handler.enable_trace = False
     handler.serving_mode = DisaggregationMode.AGGREGATED
     handler.config = SimpleNamespace(
-        server_args=SimpleNamespace(served_model_name="test-model")
+        server_args=SimpleNamespace(served_model_name="test-model"),
+        dynamo_args=SimpleNamespace(enable_rl=False),
     )
+    handler._default_sampling_params = {}
     handler._routed_experts_kwargs = {}
     handler._enable_frontend_decoding = enable_frontend_decoding
     handler._first_token_source = None
@@ -696,7 +698,8 @@ def _enable_session_radix_cache(handler: Any) -> None:
     handler.config = SimpleNamespace(
         server_args=SimpleNamespace(
             served_model_name="test-model", enable_session_radix_cache=True
-        )
+        ),
+        dynamo_args=SimpleNamespace(enable_rl=False),
     )
 
 
@@ -713,8 +716,10 @@ def _new_prefill_handler() -> PrefillWorkerHandler:
             reasoning_parser="qwen3",
             skip_tokenizer_init=False,
             grammar_backend="xgrammar",
-        )
+        ),
+        dynamo_args=SimpleNamespace(enable_rl=False),
     )
+    handler._default_sampling_params = {}
     handler.bootstrap_host = "127.0.0.1"
     handler.bootstrap_port = 1234
     handler._generate_bootstrap_room = lambda: 7

@@ -118,6 +118,6 @@ func (s *disaggregatedSetWatchSetup) mapChildLWSToDGD(ctx context.Context, obj c
 	}
 
 	return []ctrl.Request{{
-		NamespacedName: types.NamespacedName{Name: owner.Name, Namespace: ds.GetNamespace()},
+		Name: owner.Name, Namespace: ds.GetNamespace(),
 	}}
 }

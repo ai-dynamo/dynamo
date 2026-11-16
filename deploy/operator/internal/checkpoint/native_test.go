@@ -17,7 +17,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -276,15 +275,13 @@ func TestResolvePodSnapshotForServiceRetainedAutomaticCheckpoint(t *testing.T) {
 
 func nativeTestPodSnapshot() *snapshotv1alpha1.PodSnapshot {
 	return &snapshotv1alpha1.PodSnapshot{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "snapshot-a",
-			Namespace: "test-ns",
-			UID:       types.UID("snapshot-uid"),
-			Annotations: map[string]string{
-				consts.SnapshotCompatibilityVersionAnnotation: consts.SnapshotCompatibilityVersion,
-				consts.SnapshotCompatibilityHashAnnotation:    "compatibility-v1",
-				consts.SnapshotGMSModeAnnotation:              consts.SnapshotGMSModeDisabled,
-			},
+		Name:      "snapshot-a",
+		Namespace: "test-ns",
+		UID:       types.UID("snapshot-uid"),
+		Annotations: map[string]string{
+			consts.SnapshotCompatibilityVersionAnnotation: consts.SnapshotCompatibilityVersion,
+			consts.SnapshotCompatibilityHashAnnotation:    "compatibility-v1",
+			consts.SnapshotGMSModeAnnotation:              consts.SnapshotGMSModeDisabled,
 		},
 		Spec: snapshotv1alpha1.PodSnapshotSpec{
 			Source: snapshotv1alpha1.PodSnapshotSource{
@@ -295,7 +292,7 @@ func nativeTestPodSnapshot() *snapshotv1alpha1.PodSnapshot {
 			},
 		},
 		Status: snapshotv1alpha1.PodSnapshotStatus{
-			BoundPodSnapshotContentName: ptr.To("content-a"),
+			BoundPodSnapshotContentName: new("content-a"),
 			Conditions: []metav1.Condition{{
 				Type:   snapshotv1alpha1.PodSnapshotConditionReady,
 				Status: metav1.ConditionTrue,
@@ -307,7 +304,7 @@ func nativeTestPodSnapshot() *snapshotv1alpha1.PodSnapshot {
 func nativeTestCheckpointConfig(name string) *nvidiacomv1alpha1.ServiceCheckpointConfig {
 	return &nvidiacomv1alpha1.ServiceCheckpointConfig{
 		Enabled:             true,
-		CheckpointRef:       ptr.To(name),
+		CheckpointRef:       new(name),
 		TargetContainerName: "engine-0",
 	}
 }
