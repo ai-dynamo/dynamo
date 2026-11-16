@@ -82,6 +82,7 @@ areas:
   - tests/router/configs/
   - lib/router-plugins/
   - examples/router/policy-class-queues.yaml
+  - examples/router/manual-weighted.yaml
   - examples/router/custom-policy-example/
 - label: global-router
   github_team: '@ai-dynamo/dynamo-global-router-codeowners'
