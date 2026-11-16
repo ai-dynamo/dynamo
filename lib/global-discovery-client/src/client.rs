@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::error::Error;
 use std::time::Duration;
 
 use dynamo_global_common::{
-    Lease, PoolRegistration, PoolsResponse, RouterReplica, RoutersResponse,
+    Lease, PoolRegistration, PoolsResponse, RouterRegistration, RouterReplica, RoutersResponse,
 };
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
@@ -77,13 +78,30 @@ impl GlobalDiscoveryClient {
     /// Calls `GET /routers` and returns every Global Router replica the
     /// service lists.
     ///
-    /// Each call returns the full current set. If any entry does not parse,
+    /// Each call returns the replicas the service currently knows. If any entry does not parse,
     /// the whole call fails, so a caller never acts on a partial list.
     pub async fn routers(&self) -> Result<Vec<RouterReplica>, DiscoveryClientError> {
+        Ok(self.router_listing().await?.routers)
+    }
+
+    /// Reads the router list with its completeness marker. Caches must keep
+    /// missing replicas until a complete snapshot confirms their removal.
+    pub async fn router_listing(&self) -> Result<RoutersResponse, DiscoveryClientError> {
         let url = &self.routers_url;
         let response = self.send(self.http.get(url.clone()), url).await?;
-        let body: RoutersResponse = read_json(response, url).await?;
-        Ok(body.routers)
+        read_json(response, url).await
+    }
+
+    /// Registers one router incarnation or renews its lease.
+    pub async fn register_router(
+        &self,
+        registration: &RouterRegistration,
+    ) -> Result<Lease, DiscoveryClientError> {
+        let url = &self.routers_url;
+        let response = self
+            .send(self.http.post(url.clone()).json(registration), url)
+            .await?;
+        read_json(response, url).await
     }
 
     /// Calls `GET /pools` and returns the pools the service lists, and whether
@@ -175,6 +193,18 @@ async fn read_json<T: DeserializeOwned>(
     })
 }
 
+/// The error and each of its causes, joined with `: `.
+pub(crate) fn error_chain(error: &dyn Error) -> String {
+    let mut chain = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        chain.push_str(": ");
+        chain.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    chain
+}
+
 /// `base_url` with `segment` appended, keeping any path it already has.
 fn endpoint(base_url: &Url, segment: &str) -> Result<Url, DiscoveryClientError> {
     let mut url = base_url.clone();
@@ -188,6 +218,24 @@ fn endpoint(base_url: &Url, segment: &str) -> Result<Url, DiscoveryClientError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_chain_joins_every_cause() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("request failed")]
+        struct Outer(#[source] Middle);
+        #[derive(Debug, thiserror::Error)]
+        #[error("connect failed")]
+        struct Middle(#[source] std::io::Error);
+        let error = Outer(Middle(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        )));
+        assert_eq!(
+            error_chain(&error),
+            "request failed: connect failed: connection refused"
+        );
+    }
 
     #[test]
     fn endpoint_keeps_the_base_path() {

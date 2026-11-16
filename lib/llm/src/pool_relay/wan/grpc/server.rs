@@ -46,6 +46,10 @@ pub(crate) struct GrpcTransport {
     cancel: CancellationToken,
     health: Arc<RwLock<GrpcTransportHealth>>,
     task: Mutex<Option<JoinHandle<()>>>,
+    global_view: Mutex<Option<tokio_util::task::AbortOnDropHandle<()>>>,
+    source: GrpcPublicationSource,
+    load_updates: LoadUpdateHub<super::protocol::KvPoolLoadUpdate>,
+    serving_load_updates: LoadUpdateHub<super::protocol::ServingLoadUpdate>,
     #[cfg(test)]
     accepted: Arc<AcceptedConnectionProbe>,
 }
@@ -280,13 +284,14 @@ impl GrpcTransport {
                 .context("KV Relay gRPC server failed")
         });
         let kv_load_publisher =
-            run_load_publisher(load_window, load_updates, cancel.clone(), move |sequence| {
-                load_update(relay, source.load_snapshots(), load_window, sequence)
+            run_load_publisher(load_window, load_updates.clone(), cancel.clone(), {
+                let source = source.clone();
+                move |sequence| load_update(relay, source.load_snapshots(), load_window, sequence)
             });
         // The aggregator snapshots once per `load_window`; each snapshot is one window.
         let serving_load_publisher = run_snapshot_publisher(
             serving_load,
-            serving_load_updates,
+            serving_load_updates.clone(),
             cancel.clone(),
             move |snapshot, sequence| serving_load_update(relay, snapshot, load_window, sequence),
         );
@@ -306,6 +311,10 @@ impl GrpcTransport {
             cancel,
             health,
             task: Mutex::new(Some(task)),
+            global_view: Mutex::new(None),
+            source,
+            load_updates,
+            serving_load_updates,
             #[cfg(test)]
             accepted,
         })
@@ -313,6 +322,22 @@ impl GrpcTransport {
 
     pub(crate) fn health(&self) -> GrpcTransportHealth {
         self.health.read().clone()
+    }
+
+    pub(crate) fn broadcast_global_views(
+        &self,
+        pool: dynamo_global_common::PoolKey,
+        routers: watch::Receiver<std::collections::HashSet<dynamo_global_common::RouterReplica>>,
+    ) {
+        let task = super::global_view::spawn(
+            pool,
+            routers,
+            self.source.clone(),
+            self.load_updates.clone(),
+            self.serving_load_updates.clone(),
+            self.cancel.clone(),
+        );
+        *self.global_view.lock() = Some(tokio_util::task::AbortOnDropHandle::new(task));
     }
 
     /// Waits until tonic first reads an accepted connection, then reports whether
@@ -326,6 +351,13 @@ impl GrpcTransport {
 
     pub(crate) async fn shutdown(&self) {
         self.cancel.cancel();
+        let global_view = self.global_view.lock().take();
+        if let Some(task) = global_view
+            && let Err(error) = task.await
+            && !error.is_cancelled()
+        {
+            tracing::warn!(%error, "Global Router publisher failed during shutdown");
+        }
         let task = self.task.lock().take();
         if let Some(task) = task
             && let Err(error) = task.await

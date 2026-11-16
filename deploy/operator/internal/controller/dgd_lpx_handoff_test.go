@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -51,7 +53,7 @@ func newLPXHandoffSource(t *testing.T, fixture string) *v1beta1.DynamoGraphDeplo
 func newLPXHandoffFixture(t *testing.T, fixture string) (*v1alpha1.LPXGraphDeployment, *v1beta1.DynamoGraphDeployment, client.Client) {
 	t.Helper()
 	source := newLPXHandoffSource(t, fixture)
-	kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+	kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues).
 		WithRESTMapper(groveScaleRESTMapper()).
 		WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}, &v1alpha1.LPXGraphDeployment{}).
 		WithObjects(source).Build()
@@ -62,6 +64,8 @@ func newLPXHandoffFixture(t *testing.T, fixture string) (*v1alpha1.LPXGraphDeplo
 	return child, source, kube
 }
 
+// TestGroveComponentSelectionDoesNotMutateDGD checks that ordinary Grove
+// readiness and restart observation preserve the complete LPX source graph.
 func TestGroveComponentSelectionDoesNotMutateDGD(t *testing.T) {
 	for _, test := range []struct {
 		name      string
@@ -90,6 +94,7 @@ func TestGroveComponentSelectionDoesNotMutateDGD(t *testing.T) {
 						Containers: []corev1.Container{{Name: "main", Image: "frontend"}},
 					}},
 				})
+				source.Spec.Restart = &v1beta1.Restart{ID: "restart-1"}
 			}
 			before := source.DeepCopy()
 			req := groveReconcileRequest{DGD: source, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}
@@ -110,6 +115,13 @@ func TestGroveComponentSelectionDoesNotMutateDGD(t *testing.T) {
 			}
 			pcs := &grovev1alpha1.PodCliqueSet{
 				Name: pcsName, Namespace: source.Namespace, Generation: 1,
+				Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
+						Name:        "ordinary-frontend",
+						Labels:      map[string]string{consts.KubeLabelDynamoComponent: "ordinary-frontend"},
+						Annotations: map[string]string{consts.RestartAnnotation: "restart-1"},
+					}},
+				}},
 				Status: grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: new(int64(1)), Conditions: []metav1.Condition{{
 					Type: groveconstants.ConditionTopologyLevelsUnavailable, Status: metav1.ConditionTrue,
 					Reason: groveconstants.ConditionReasonClusterTopologyNotFound, Message: "missing ordinary topology",
@@ -568,6 +580,8 @@ func TestLPXHandoffOrdinaryScalingPreservesReadiness(t *testing.T) {
 	require.Equal(t, v1beta1.DGDStatePending, pending.State)
 }
 
+// TestSpecDecodeRestartRollsTheSharedChildOnce checks that one graph restart
+// reaches the shared draft and target child once, including read retries.
 func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 	for _, scenario := range []struct {
 		name     string
@@ -670,6 +684,20 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 			groveReq := groveReconcileRequest{DGD: source, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}
 			pcs := &grovev1alpha1.PodCliqueSet{
 				Name: dynamo.PCSNameForDGD(groveReq.DGD, groveReq.IsDelegated), Namespace: source.Namespace, Generation: 2,
+				Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+						{
+							Name:        "frontend",
+							Labels:      map[string]string{consts.KubeLabelDynamoComponent: "frontend"},
+							Annotations: map[string]string{consts.RestartAnnotation: "pair-restart"},
+						},
+						{
+							Name:        "prefill",
+							Labels:      map[string]string{consts.KubeLabelDynamoComponent: "prefill"},
+							Annotations: map[string]string{consts.RestartAnnotation: "pair-restart"},
+						},
+					},
+				}},
 				Status: grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: new(int64(1))},
 			}
 			require.NoError(t, kube.Create(t.Context(), pcs))
@@ -707,7 +735,7 @@ func TestGroveProgramWithoutLPXDoesNotReadLPXChild(t *testing.T) {
 		}}},
 	}
 	childReads := 0
-	kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(source).
+	kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues).WithObjects(source).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 				if _, child := obj.(*v1alpha1.LPXGraphDeployment); child {

@@ -80,12 +80,22 @@ pub(crate) struct ModelLimits {
     /// Modalities advertised by both the portable and engine-specific capabilities.
     /// `None` is unresolved metadata; startup always resolves this.
     pub(crate) supported_media: Option<SupportedMedia>,
+    pub(crate) supports_image_routing: bool,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct ModelInfo {
     pub(crate) limits: ModelLimits,
     pub(crate) served_model_name: String,
+}
+
+pub(crate) fn has_image_routing_v1(info: &pb::ModelInfo) -> bool {
+    info.extra.as_ref().is_some_and(|extra| {
+        matches!(
+            extra.fields.get("trtllm_image_routing_version").and_then(|value| value.kind.as_ref()),
+            Some(prost_types::value::Kind::NumberValue(version)) if *version == 1.0
+        )
+    })
 }
 
 const TARGET_DP_RANK_METADATA_KEY: &str = "openengine-target-dp-rank";
@@ -262,6 +272,7 @@ impl TrtllmClient {
                 max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
                 supported_inputs,
                 supported_media: Some(supported_media),
+                supports_image_routing: supported_media.image && has_image_routing_v1(&info),
             },
             served_model_name: info.served_model_name,
         })

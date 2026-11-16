@@ -9,9 +9,11 @@ type LPXConfiguration struct {
 	// requires the scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API to
 	// be installed separately.
 	// +kubebuilder:default=false
+	// +optional
 	Enabled bool `json:"enabled"`
 
 	// ModelRegistryURL configures the location of the LPU model registry used by LPX.
 	// Supported values are an absolute local path (or file:// URL) and gs:// URLs.
+	// +required
 	ModelRegistryURL string `json:"modelRegistryURL"`
 }

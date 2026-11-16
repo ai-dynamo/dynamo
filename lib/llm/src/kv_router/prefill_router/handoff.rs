@@ -15,13 +15,14 @@ use tokio::task::JoinHandle;
 use tracing::Instrument;
 
 use super::PrefillError;
+use crate::kv_router::UnknownPolicyClassRefusal;
 use crate::protocols::{
     common::llm_backend::{FinishReason, LLMEngineOutput},
     response_merge::{PREFILL_OUTPUT_ANNOTATION, PrefillNeed},
 };
 
 /// Prefill's last `engine_data`.
-pub(super) type PrefillOutput = Option<serde_json::Value>;
+pub(super) type PrefillOutput = Option<Box<serde_json::Value>>;
 
 /// Dropping the observer detaches the task: client disconnects must not abort a
 /// prefill whose KV transfer may still be needed by the decode worker.
@@ -132,7 +133,7 @@ impl PrefillTask {
             result = &mut decode => match result {
                 Ok(response) => response,
                 Err(error) => {
-                    cancel_prefill_on_decode_rejection(error.as_ref(), prefill_context.as_ref());
+                    cancel_prefill_on_decode_error(&error, prefill_context.as_ref());
                     return Err(error);
                 }
             },
@@ -259,6 +260,19 @@ impl PrefillTask {
             }
         };
         Ok(ResponseStream::new(Box::pin(stream), context))
+    }
+}
+
+/// Cancel prefill when decode dispatch fails with an admission refusal, or because the decode
+/// router refused the request's unknown policy class at class entry. Neither has a receiver
+/// waiting for staged KV.
+fn cancel_prefill_on_decode_error(error: &anyhow::Error, prefill_context: &dyn AsyncEngineContext) {
+    if error.downcast_ref::<UnknownPolicyClassRefusal>().is_some() {
+        tracing::debug!(request_id = %prefill_context.id(), %error,
+            "Cancelling remote prefill after decode refused an unknown policy class");
+        prefill_context.stop_generating();
+    } else {
+        cancel_prefill_on_decode_rejection(error.as_ref(), prefill_context);
     }
 }
 
@@ -539,7 +553,10 @@ mod tests {
             let mut tx = Some(tx);
             let output = serde_json::json!({"sglang_response": {}});
             if prefill_first {
-                tx.take().unwrap().send(Ok(Some(output.clone()))).unwrap();
+                tx.take()
+                    .unwrap()
+                    .send(Ok(Some(Box::new(output.clone()))))
+                    .unwrap();
                 tokio::task::yield_now().await;
             }
             let decode: ManyOut<Annotated<LLMEngineOutput>> = ResponseStream::new(
@@ -560,11 +577,14 @@ mod tests {
                 .unwrap();
             if !prefill_first {
                 assert!(response.next().now_or_never().is_none());
-                tx.take().unwrap().send(Ok(Some(output.clone()))).unwrap();
+                tx.take()
+                    .unwrap()
+                    .send(Ok(Some(Box::new(output.clone()))))
+                    .unwrap();
             }
             let item = response.next().await.unwrap();
             assert_eq!(item.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
-            assert_eq!(item.data.unwrap().engine_data, Some(output));
+            assert_eq!(item.data.unwrap().engine_data, Some(Box::new(output)));
             assert!(
                 response
                     .next()
@@ -622,10 +642,10 @@ mod tests {
         tokio::pin!(terminal);
         assert!((&mut terminal).now_or_never().is_none());
         let output = serde_json::json!({"sglang_response": {}});
-        tx.send(Ok(Some(output.clone()))).unwrap();
+        tx.send(Ok(Some(Box::new(output.clone())))).unwrap();
         let item = terminal.await.unwrap();
         assert_eq!(item.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
-        assert_eq!(item.data.unwrap().engine_data, Some(output));
+        assert_eq!(item.data.unwrap().engine_data, Some(Box::new(output)));
         assert!(
             response
                 .next()
@@ -644,7 +664,7 @@ mod tests {
     async fn before_first_does_not_repoll_ended_decode() {
         for result in [
             Ok(None),
-            Ok(Some(serde_json::json!({"prefill": true}))),
+            Ok(Some(Box::new(serde_json::json!({"prefill": true})))),
             failure(),
         ] {
             let expected = result.as_ref().ok().cloned().flatten();
@@ -788,17 +808,14 @@ mod tests {
             .unwrap();
     }
 
-    async fn assert_ambiguous_decode_error_preserves_prefill(output: PrefillNeed) {
+    async fn assert_decode_error_preserves_prefill(output: PrefillNeed, error: anyhow::Error) {
         let (tx, task) = pending_prefill();
         let prefill_context = Arc::new(Controller::default());
         let request_context = Arc::new(Controller::default());
-        let error = dynamo_runtime::error::DynamoError::builder()
-            .error_type(dynamo_runtime::error::ErrorType::Disconnected)
-            .message("decode connection lost after possible dispatch")
-            .build();
+        let case = format!("{output:?}: {error}");
         let result = task
             .forward_decode(
-                async { Err(error.into()) },
+                async { Err(error) },
                 request_context,
                 output,
                 prefill_context.clone(),
@@ -807,7 +824,7 @@ mod tests {
         assert!(result.is_err());
         assert!(
             !prefill_context.is_stopped(),
-            "ambiguous failure must preserve KV transfer: {output:?}"
+            "failure must preserve KV transfer: {case}"
         );
         tx.send(Ok(None)).unwrap();
     }
@@ -855,7 +872,57 @@ mod tests {
             PrefillNeed::BeforeLast,
             PrefillNeed::BeforeFirst,
         ] {
-            assert_ambiguous_decode_error_preserves_prefill(output).await;
+            let error = dynamo_runtime::error::DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::Disconnected)
+                .message("decode connection lost after possible dispatch")
+                .build();
+            assert_decode_error_preserves_prefill(output, error.into()).await;
+        }
+    }
+
+    /// Only the decode router's own unknown-class refusal stops prefill, not other
+    /// invalid-argument errors or a classifier failure that carries the refusal as a cause.
+    #[tokio::test]
+    async fn other_invalid_argument_decode_errors_preserve_prefill_transfer() {
+        use dynamo_scheduler::host::KvSchedulerError;
+
+        let refusal = || {
+            crate::kv_router::map_scheduler_error(KvSchedulerError::UnknownPolicyClass(
+                "priority".to_string(),
+            ))
+        };
+        let refusal_error = refusal()
+            .downcast_ref::<dynamo_runtime::error::DynamoError>()
+            .unwrap()
+            .clone();
+        for output in [
+            PrefillNeed::None,
+            PrefillNeed::BeforeLast,
+            PrefillNeed::BeforeFirst,
+        ] {
+            let classifier_failure = dynamo_runtime::error::DynamoError::builder()
+                .error_type(ErrorType::Unknown)
+                .message("request classifier failed")
+                .cause(refusal_error.clone())
+                .build();
+            let worker_rejection = dynamo_runtime::error::DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("decode worker rejected the request")
+                .build();
+            for error in
+                [
+                    crate::session_affinity::invalid_argument(
+                        "nvext.decode_worker_id=7 does not identify a known worker",
+                    ),
+                    worker_rejection.into(),
+                    classifier_failure.into(),
+                    anyhow::Error::new(KvSchedulerError::RequestClassifierFailed(Arc::from(
+                        Box::<dyn std::error::Error + Send + Sync>::from(refusal()),
+                    ))),
+                ]
+            {
+                assert_decode_error_preserves_prefill(output, error).await;
+            }
         }
     }
 }

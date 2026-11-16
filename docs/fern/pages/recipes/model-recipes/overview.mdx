@@ -120,6 +120,15 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
     <div className="dynamo-model-tags"><span>SGLang</span><span>20x GB200</span><span>Long output / static ISL-OSL</span></div>
   <a className="dynamo-card-link" href="glm-5-nvfp4.mdx" aria-label="Open the GLM-5 NVFP4 recipe">Open recipe</a>
   </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="moonshot" data-runtime="sglang vllm" data-hardware="b200 gb300 vr200" data-technique="aggregated disaggregated kv-routing" data-workload="agentic-coding" data-targets="vllm-agg-gb300 vllm-agg-gb300-multimodal vllm-disagg-gb300 vllm-disagg-gb300-multimodal sglang-agg-gb300 sglang-disagg-gb300 vllm-agg-b200 vllm-agg-vr200 vllm-disagg-vr200">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/moonshotai.webp" alt="" />
+      <div><h3>Kimi-K3.1-Pro</h3><p>Moonshot / NVIDIA</p></div>
+    </div>
+    <p className="dynamo-model-summary">Kimi-K3.1-Pro recipes for aggregated and disaggregated serving with vLLM and SGLang.</p>
+    <div className="dynamo-model-tags"><span>SGLang · vLLM</span><span>Aggregated · Disaggregated</span><span>Experimental</span></div>
+  <a className="dynamo-card-link" href="kimi-k3-1-pro.mdx" aria-label="Open the Kimi-K3.1-Pro recipe">Open recipe</a>
+  </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="moonshot" data-runtime="sglang vllm" data-hardware="h200 gb200 gb300" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding" data-targets="vllm-agg-gb300 vllm-disagg-gb300 vllm-agg-gb200 vllm-agg-h200 sglang-agg-gb300 sglang-disagg-gb300 sglang-agg-gb200 sglang-disagg-gb200">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/moonshotai.webp" alt="" />
@@ -263,6 +272,15 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
     <p className="dynamo-model-summary">Experimental FP8 video-reasoning recipe comparing eight-worker round robin with per-video session affinity.</p>
     <div className="dynamo-model-tags"><span>vLLM</span><span>8x H200</span><span>Video understanding</span></div>
     <a className="dynamo-card-link" href="cosmos3-nano-reasoner.mdx" aria-label="Open the Cosmos3 Nano Reasoner recipe">Open recipe</a>
+  </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="vllm" data-hardware="h200" data-technique="aggregated prompt-caching session-affinity" data-workload="video-understanding" data-targets="agg-h200-round-robin agg-h200-session-affinity">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/nvidia.webp" alt="" />
+      <div><h3>Cosmos3 Super Reasoner</h3><p>NVIDIA</p></div>
+    </div>
+    <p className="dynamo-model-summary">Experimental FP8 video-reasoning recipe comparing eight-worker round robin with per-video session affinity.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>8x H200</span><span>Video understanding</span></div>
+    <a className="dynamo-card-link" href="cosmos3-super-reasoner.mdx" aria-label="Open the Cosmos3 Super Reasoner recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="vllm" data-hardware="h200 b200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse" data-targets="agg-b200-256k agg-b200-1m agg-gb200-256k agg-gb200-1m agg-h200-256k agg-h200-1m disagg-b200-256k disagg-b200-1m disagg-gb200-256k disagg-gb200-1m disagg-h200-256k disagg-h200-1m">
     <div className="dynamo-model-card-top">

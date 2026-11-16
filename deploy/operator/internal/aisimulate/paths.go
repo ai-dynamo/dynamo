@@ -49,11 +49,8 @@ var (
 	trafficStopRequests          = []string{"traffic", "stop", "requests"}
 )
 
-// TargetPareto is optimization.target for a multi-objective search.
-const TargetPareto = "pareto"
-
 // has reports whether obj contains the path, even with a null value. Applied to
-// spec.aisimulate.inputOverrides it tells whether the caller named a key, including to delete
+// spec.aisim.inputOverrides it tells whether the caller named a key, including to delete
 // it.
 func has(obj map[string]any, path ...string) bool {
 	_, found, _ := unstructured.NestedFieldNoCopy(obj, path...)

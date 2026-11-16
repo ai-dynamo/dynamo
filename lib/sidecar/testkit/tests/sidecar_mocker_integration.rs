@@ -952,7 +952,7 @@ fn assert_http_completed(outputs: Outputs, request_id: &str) {
     for (output, expected) in outputs.iter().zip(http::responses(native_id)) {
         assert_eq!(
             output.engine_data,
-            Some(json!({"sglang_response": expected}))
+            Some(Box::new(json!({"sglang_response": expected})))
         );
     }
 }

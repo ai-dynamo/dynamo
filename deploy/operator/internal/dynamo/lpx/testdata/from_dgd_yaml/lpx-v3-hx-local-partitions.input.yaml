@@ -27,6 +27,22 @@ spec:
             resourceClaims:
             - name: gpu
               resourceClaimTemplateName: decode-gpu
+            initContainers:
+            - name: runtime
+              image: example.invalid/dynamo-sidecar:test
+              restartPolicy: Always
+              args:
+              - lpx
+              - --grpc-endpoint
+              - unix:///run/openengine/openengine.sock
+              - --model-path
+              - $(LPX_MODEL_PATH)/tokenizer
+              volumeMounts:
+              - name: model-storage
+                mountPath: /nfs
+                readOnly: true
+              - name: openengine
+                mountPath: /run/openengine
             containers:
             - name: main
               image: example.invalid/gpu-runtime:test
@@ -38,21 +54,21 @@ spec:
                 failureThreshold: 720
                 httpGet:
                   path: /live
-                  port: system
+                  port: 9091
                 periodSeconds: 10
                 timeoutSeconds: 5
               readinessProbe:
                 failureThreshold: 3
                 httpGet:
                   path: /health
-                  port: system
+                  port: 9091
                 periodSeconds: 10
                 timeoutSeconds: 4
               livenessProbe:
                 failureThreshold: 1
                 httpGet:
                   path: /live
-                  port: system
+                  port: 9091
                 periodSeconds: 5
                 timeoutSeconds: 4
               volumeMounts:
@@ -60,6 +76,8 @@ spec:
                 mountPath: /nfs
               - name: config
                 mountPath: /configs
+              - name: openengine
+                mountPath: /run/openengine
               resources:
                 claims:
                 - name: gpu
@@ -72,6 +90,8 @@ spec:
             - name: model-storage
               persistentVolumeClaim:
                 claimName: model-storage
+            - name: openengine
+              emptyDir: {}
             securityContext:
               fsGroup: 1000
               fsGroupChangePolicy: OnRootMismatch

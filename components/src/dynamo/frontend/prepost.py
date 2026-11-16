@@ -25,7 +25,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.reasoning import ReasoningParser
-from vllm.renderers import ChatParams, merge_kwargs
+from vllm.renderers import ChatParams
 from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.renderers.hf import resolve_chat_template
 from vllm.sampling_params import SamplingParams
@@ -33,6 +33,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
+from xgrammar import StructuralTag
 
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
@@ -47,12 +48,18 @@ from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import legacy_guided_decoding
 
 get_model_structural_tag: Any
+limit_to_single_tool_call: Any
 try:
     from vllm.tool_parsers import structural_tag_registry
 except ImportError:  # Older supported vLLM releases do not expose this registry.
     get_model_structural_tag = None
+    limit_to_single_tool_call = None
 else:
     get_model_structural_tag = structural_tag_registry.get_model_structural_tag
+    # Older registries and parser hooks do not expose the typed limiter.
+    limit_to_single_tool_call = getattr(
+        structural_tag_registry, "limit_to_single_tool_call", None
+    )
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -273,6 +280,27 @@ def _request_for_vllm_structural_tag(
     return request.model_copy(update={"tools": tools})
 
 
+def _limit_structural_tag_to_single_call(tag: dict[str, Any]) -> None:
+    """Limit serialized tags from older vLLM hooks without the typed helper.
+
+    Only format children are visited, so argument schemas are left unchanged.
+    These three list formats repeat tool calls in vLLM's registered tags.
+    """
+    if tag.get("type") in (
+        "triggered_tags",
+        "token_triggered_tags",
+        "tags_with_separator",
+    ):
+        tag["stop_after_first"] = True
+    for key in ("format", "content"):
+        child = tag.get(key)
+        if isinstance(child, dict):
+            _limit_structural_tag_to_single_call(child)
+    for key in ("elements", "tags"):
+        for child in tag.get(key, []):
+            _limit_structural_tag_to_single_call(child)
+
+
 def build_tool_call_guided_decoding(
     request: ChatCompletionRequest,
     tool_parser: ToolParser | None,
@@ -340,11 +368,19 @@ def build_tool_call_guided_decoding(
             # or unconstrained compatibility path for the request.
             structural_tag = None
         if structural_tag is not None:
+            single_call = request.parallel_tool_calls is False
+            use_typed_limiter = limit_to_single_tool_call is not None and isinstance(
+                structural_tag, StructuralTag
+            )
+            if single_call and use_typed_limiter:
+                limit_to_single_tool_call(structural_tag)
             tag_value = (
                 structural_tag.model_dump()
                 if hasattr(structural_tag, "model_dump")
                 else structural_tag
             )
+            if single_call and not use_typed_limiter:
+                _limit_structural_tag_to_single_call(tag_value)
             return {"structural_tag": tag_value}
 
     if parser_guided_decoding is not None:
@@ -583,7 +619,6 @@ def _prepare_request(
     model_config: ModelConfig | None = None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
-    default_chat_template_kwargs: dict[str, Any] | None = None,
     default_thinking_mode: str | None = None,
     validated_request: ChatCompletionRequest | None = None,
     guidance_snapshots: dict[str, Any] | None = None,
@@ -657,14 +692,9 @@ def _prepare_request(
     raw_template_args = (
         request.get("chat_template_args") if isinstance(request, dict) else None
     )
-    # Reuse vLLM's merge so unset request values (None/"auto") keep the server
-    # default; copy the result since the default dict is shared across requests
-    # and we mutate reasoning_effort below.
+    # A copy, because reasoning_effort is written into it below.
     chat_template_kwargs = dict(
-        merge_kwargs(
-            default_chat_template_kwargs,
-            request_for_sampling.chat_template_kwargs or raw_template_args or {},
-        )
+        request_for_sampling.chat_template_kwargs or raw_template_args or {}
     )
     # reasoning_effort is a request-level thinking control. Put an explicit
     # value into the kwargs before applying the deployment default so the two
@@ -782,7 +812,6 @@ async def preprocess_chat_request(
     model_config: ModelConfig | None = None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
-    default_chat_template_kwargs: dict[str, Any] | None = None,
     default_thinking_mode: str | None = None,
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
@@ -817,7 +846,6 @@ async def preprocess_chat_request(
         model_config=model_config,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
         enable_auto_tool_choice=enable_auto_tool_choice,
-        default_chat_template_kwargs=default_chat_template_kwargs,
         default_thinking_mode=default_thinking_mode,
         validated_request=validated_request,
         guidance_snapshots=guidance_snapshots,
@@ -1089,6 +1117,7 @@ class StreamingPostProcessor:
         # this correctly, so we accumulate text here and fall back to the
         # non-streaming extract_tool_calls() once the buffer is complete.
         self._tool_text_buffer: str | None = None
+        self._pending_tool_opener = ""
         self._dynamo_json_fallback_chunks: dict[int, list[str]] = {}
 
     @property
@@ -1521,6 +1550,20 @@ class StreamingPostProcessor:
                 return None
             return self._build_choice(output, delta)
 
+        if self._pending_tool_opener:
+            delta_text = self._pending_tool_opener + delta_text
+            self._pending_tool_opener = ""
+            markers = self._tool_start_markers()
+            if any(delta_text.startswith(marker) for marker in markers):
+                self._tool_text_buffer = ""
+            elif any(marker.startswith(delta_text) for marker in markers):
+                if not output.finish_reason:
+                    self._pending_tool_opener = delta_text
+                    return None
+                return self._build_choice(
+                    output, {"role": "assistant", "content": delta_text}
+                )
+
         current_text = self.previous_text + delta_text
         current_token_ids = self.previous_token_ids + delta_token_ids
 
@@ -1636,7 +1679,21 @@ class StreamingPostProcessor:
                             None,
                         )
                 else:
-                    # Plain content (or no content) after reasoning end.
+                    if post_content and not output.finish_reason:
+                        # Hold only the trailing text that can complete a tool opener.
+                        # The preceding text can still be streamed immediately.
+                        prefix_length = max(
+                            (
+                                size
+                                for marker in tool_start_markers
+                                for size in range(1, len(marker))
+                                if post_content.endswith(marker[:size])
+                            ),
+                            default=0,
+                        )
+                        if prefix_length:
+                            self._pending_tool_opener = post_content[-prefix_length:]
+                            post_content = post_content[:-prefix_length]
                     delta_message = self._compose_delta_message(
                         reasoning=saved_reasoning,
                         content=post_content if post_content else None,

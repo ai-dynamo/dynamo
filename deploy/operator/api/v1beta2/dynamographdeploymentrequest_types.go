@@ -247,19 +247,18 @@ type WorkloadSpec struct {
 	// namespace. Admission supplies no static default when it is set. The Run Job mounts only the
 	// trace file, read-only through a subPath of the claim, at /var/run/aisimulate/trace/trace.jsonl,
 	// or trace.jsonl.gz when subPath ends in .gz. The trace lowers to the default traffic.source
-	// and traffic.load, which spec.aisimulate.inputOverrides can replace or delete.
+	// and traffic.load, which spec.aisim.inputOverrides can replace or delete.
 	// +optional
 	Trace *TraceWorkloadSpec `json:"trace,omitempty"`
 }
 
-// ObjectiveMode selects the optimization mode. Pareto is reserved for a future
-// release and is not admitted until Candidate publication supports Pareto fronts.
-// +kubebuilder:validation:Enum=Optimize
+// ObjectiveMode selects the optimization mode.
+// +kubebuilder:validation:Enum=Optimize;Pareto
 type ObjectiveMode string
 
 const (
 	ObjectiveModeOptimize ObjectiveMode = "Optimize"
-	// ObjectiveModePareto is reserved for the future Pareto API implementation.
+	// ObjectiveModePareto searches for a Pareto front across multiple objectives.
 	ObjectiveModePareto ObjectiveMode = "Pareto"
 )
 
@@ -290,11 +289,14 @@ type ObjectiveSLASpec struct {
 	E2EMs *float64 `json:"e2eMs,omitempty"`
 }
 
-// ObjectiveSpec defines scalar optimization. Pareto fields are reserved for a future release.
-// +kubebuilder:validation:XValidation:rule="!has(self.metrics)",message="metrics is reserved for the future Pareto implementation"
+// ObjectiveSpec defines the optimization objective. Use mode Optimize with a single metric
+// for scalar optimization, or mode Pareto with two metrics for multi-objective search.
 // +kubebuilder:validation:XValidation:rule="!(has(self.metric) && self.metric in ['Goodput', 'GoodputPerGPU']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Goodput and GoodputPerGPU require at least one SLA bound"
+// +kubebuilder:validation:XValidation:rule="!has(self.mode) || self.mode != 'Pareto' || !has(self.metric)",message="Pareto mode uses metrics, not metric"
+// +kubebuilder:validation:XValidation:rule="!has(self.mode) || self.mode != 'Optimize' || !has(self.metrics)",message="Optimize mode uses metric, not metrics"
 type ObjectiveSpec struct {
-	// Mode selects scalar optimization. Only Optimize is currently supported.
+	// Mode selects the optimization mode: Optimize for a single scalar target,
+	// Pareto for a multi-objective search across two metrics.
 	// +optional
 	Mode ObjectiveMode `json:"mode,omitempty"`
 
@@ -303,7 +305,10 @@ type ObjectiveSpec struct {
 	// +optional
 	Metric *ObjectiveMetric `json:"metric,omitempty"`
 
-	// Metrics is reserved for the future Pareto implementation.
+	// Metrics selects the two objectives for a Pareto search. Ignored when mode is not Pareto.
+	// When omitted in Pareto mode, AISimulate uses its default objectives
+	// [ThroughputPerGPU, ThroughputPerUser]. When set, the pair must be exactly
+	// [ThroughputPerGPU, ThroughputPerUser]; other pairs are unsupported.
 	// +optional
 	// +kubebuilder:validation:MinItems=2
 	// +kubebuilder:validation:MaxItems=2
@@ -312,21 +317,21 @@ type ObjectiveSpec struct {
 
 	// SLA defines per-request latency bounds used to calculate goodput. Admission defaults an
 	// omitted SLA to TTFT 2000 ms and ITL 30 ms. An explicit empty object opts out of those
-	// defaults. spec.aisimulate.inputOverrides.evaluation.sla overrides the bounds it names.
+	// defaults. spec.aisim.inputOverrides.evaluation.sla overrides the bounds it names.
 	// +optional
 	SLA *ObjectiveSLASpec `json:"sla,omitempty"`
 }
 
-// AISimulateSpec supplies public recommendation input to the AISimulate version in the operator's configured
+// AISimSpec supplies public recommendation input to the AISimulate version in the operator's configured
 // planner image.
-type AISimulateSpec struct {
+type AISimSpec struct {
 	// InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from
 	// the typed fields. It uses the upstream AISimulate JSON contract, including
 	// snake_case names. Values here take precedence, and null deletes a lowered
 	// field. The dgdr_run member must remain an object, and its operator-owned
 	// transport, identity, and runtime fields name, max_candidates, snapshot_dir,
 	// runtime_image, runtime_version_override, derive_runtime_images,
-	// num_gpus_per_node, and namespace are operator-owned. Request admission
+	// num_gpus_per_node, and namespace are operator-owned. Request and Run admission
 	// rejects them, and the Run controller enforces its values while lowering the
 	// immutable snapshot. A typed spec.workload.trace is an underlay like the other
 	// typed fields: it supplies the default traffic.source (type trace, format
@@ -336,10 +341,11 @@ type AISimulateSpec struct {
 	// parent object; the Run controller does not restore it. The typed
 	// PersistentVolumeClaim source alone decides the Run Job's trace mount and its
 	// claim dependency, so overriding a native path adds no volume mount.
-	// AISimulate validates the resulting input when the Run's Job starts; admission
-	// does not validate it against the AISimulate schema yet. The operator runs
-	// the AISimulate version from its configured planner image; Requests and Runs
-	// cannot select a different image or version.
+	// The operator runs the AISimulate version from its configured planner image;
+	// Requests and Runs cannot select a different image or version.
+	// Request and Run creation validate the merged input against the bundled AISimulate input
+	// schema. Request spec changes require the same validation; Run specs are immutable.
+	// Unchanged specs remain metadata-updatable after a bundled schema change.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
@@ -355,6 +361,32 @@ type RecommendationSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	MaxCandidates int32 `json:"maxCandidates,omitempty"`
+}
+
+// OverridesSpec patches the generated deployment independently for every selected Candidate.
+type OverridesSpec struct {
+	// DGD is one partial nvidia.com/v1beta1 DynamoGraphDeployment applied by the publisher
+	// using the DGD schema's Server-Side Apply merge rules. Other API versions are not supported.
+	// Components must already exist; named containers may be added. Atomic lists, including
+	// container command and args, replace the generated lists. The supported customization
+	// $patch: {args: append} on a container appends to its explicit generated args list;
+	// both the container and its args must already exist. No other $patch operation is supported.
+	// Application is atomic: a merge failure retains the unchanged generated deployment
+	// with Valid=False. A successful merge is checked by strict server-side dry-run;
+	// the dry-run response and its defaults are discarded. The Candidate retains the
+	// unpruned payload from before the check. Invalid Candidates count toward maxCandidates.
+	// Overrides may change any deployment configuration. Evaluation metrics are not
+	// recomputed and continue to describe the original AISimulate configuration.
+	// DGD labels and annotations become Candidate labels and annotations. A failed merge
+	// retains only the original generated metadata; a successful merge followed by failed
+	// dry-run validation retains the merged metadata on the invalid Candidate. Other metadata
+	// and publisher-owned keys cannot be overridden; such attempts fail atomically.
+	// The complete Candidate metadata must satisfy Kubernetes limits, including generated
+	// and reserved annotations. An override that exceeds those limits fails atomically.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:EmbeddedResource
+	DGD *runtime.RawExtension `json:"dgd,omitempty"`
 }
 
 // NativeSearchInput defines the v1beta2 search input shared by Requests and
@@ -383,7 +415,7 @@ type NativeSearchInput struct {
 	// an explicit empty workload receives the same shape. workload.static: {} opts out of all
 	// traffic defaults. Any other static object is completed with its missing defaults, and a
 	// trace workload receives no static default.
-	// spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over
+	// spec.aisim.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over
 	// every lowered traffic field it names, including the fields a trace lowers.
 	// The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction
 	// search. Lowering independently defaults optimizer.max_trials to 320.
@@ -396,13 +428,17 @@ type NativeSearchInput struct {
 	// +optional
 	Objective *ObjectiveSpec `json:"objective,omitempty"`
 
-	// AISimulate supplies public recommendation input to the operator's AISimulate execution bundle.
+	// AISim supplies public recommendation input to the operator's AISimulate execution bundle.
 	// +optional
-	AISimulate *AISimulateSpec `json:"aisimulate,omitempty"`
+	AISim *AISimSpec `json:"aisim,omitempty"`
 
 	// Recommendation controls bounded projection into DGDC resources.
 	// +optional
 	Recommendation *RecommendationSpec `json:"recommendation,omitempty"`
+
+	// Overrides customizes the generated DGD without changing AISimulate execution.
+	// +optional
+	Overrides *OverridesSpec `json:"overrides,omitempty"`
 }
 
 // DynamoGraphDeploymentRequestNativeSpec contains the native v1beta2 request fields.
@@ -413,7 +449,7 @@ type DynamoGraphDeploymentRequestNativeSpec struct {
 // DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
 // Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta1) != has(self.model)",message="exactly one of native v1beta2 fields or v1beta1 must be specified"
-// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisimulate) || has(self.recommendation))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisim) || has(self.recommendation) || has(self.overrides))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta1) == has(oldSelf.v1beta1) && (!has(self.v1beta1) || self.v1beta1 == oldSelf.v1beta1)",message="the conversion carrier is immutable"
 type DynamoGraphDeploymentRequestSpec struct {
 	DynamoGraphDeploymentRequestNativeSpec `json:",inline"`

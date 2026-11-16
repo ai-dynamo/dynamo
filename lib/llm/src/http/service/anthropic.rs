@@ -42,6 +42,7 @@ use super::{
     service_v2::{self, BackendErrorCheck},
 };
 use crate::engines::ValidateRequest;
+use crate::frontend_config::ChatTemplateDefaults;
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
     AnthropicContentBlock, AnthropicCountTokensRequest, AnthropicCountTokensResponse,
@@ -146,9 +147,11 @@ async fn anthropic_error_middleware(mut request: Request<Body>, next: Next) -> R
             .await
             .unwrap_or_default();
         let mut body = match serde_json::from_slice::<AnthropicErrorResponse>(&body_bytes) {
-            Ok(error) if error.object_type == "error" => {
-                serde_json::to_value(error).expect("Anthropic error is serializable")
-            }
+            // Keep the body as sent, with fields the typed envelope lacks (`error.details`).
+            Ok(error) if error.object_type == "error" => serde_json::from_slice(&body_bytes)
+                .unwrap_or_else(|_| {
+                    serde_json::to_value(error).expect("Anthropic error is serializable")
+                }),
             _ => {
                 if matches!(
                     parts.status,
@@ -356,6 +359,19 @@ impl AnthropicHandlerError {
     }
 }
 
+/// A message thread keeps the conversation on the server, so a continue request carries only
+/// the new messages. No thread is kept here, so refuse one rather than answer from those alone,
+/// with the code on which the Anthropic SDK tool runner resends the turn without `thread`.
+fn thread_unsupported_response() -> Response {
+    super::openai::record_local_failure(ErrorClass::InvalidRequest);
+    let mut body = serde_json::to_value(AnthropicErrorResponse::invalid_request(
+        "thread: message threads are not supported; send the full conversation without `thread`",
+    ))
+    .expect("Anthropic error is serializable");
+    body["error"]["details"] = serde_json::json!({"error_code": "thread_unsupported_request"});
+    (StatusCode::BAD_REQUEST, Json(body)).into_response()
+}
+
 fn validate_anthropic_messages(
     messages: &[AnthropicMessage],
 ) -> Result<(), AnthropicRequestValidationError> {
@@ -448,6 +464,10 @@ async fn handler_anthropic_messages(
         streaming,
         &request_id,
     );
+    if request.has_thread() {
+        inflight_guard.mark_error(ErrorType::NotImplemented);
+        return Err(thread_unsupported_response());
+    }
     if state.media_rejection().enabled() {
         let content_type = request.media_content_type(&headers).map_err(|error| {
             AnthropicHandlerError::validation(error).into_marked_response(&mut inflight_guard)
@@ -691,20 +711,11 @@ async fn anthropic_messages(
     let prompt_injected_reasoning =
         parsing_options.reasoning_parser.is_some() && !thinking_explicitly_disabled;
 
-    if prompt_injected_reasoning {
-        let args = chat_request
-            .chat_template_args
-            .get_or_insert_with(Default::default);
-        args.entry("enable_thinking".to_string())
-            .or_insert(serde_json::Value::Bool(true));
-        // Preserve reasoning from prior turns. Some templates (Nemotron)
-        // strip historical <think> content by default to save context.
-        // For agentic flows the model needs to see why it made prior decisions.
-        // Ref: NVIDIA's SWE training config also sets this to false:
-        // https://github.com/NVIDIA-NeMo/Nemotron/blob/main/src/nemotron/recipes/super3/stage2_rl/stage2_swe2/config/default.yaml#L287
-        args.entry("truncate_history_thinking".to_string())
-            .or_insert(serde_json::Value::Bool(false));
-    }
+    apply_anthropic_template_args(
+        &mut chat_request,
+        prompt_injected_reasoning,
+        state.chat_template_defaults(),
+    );
 
     let mut request = context.map(|_req| chat_request);
 
@@ -729,6 +740,11 @@ async fn anthropic_messages(
     request.insert(
         crate::preprocessor::REQUEST_PARSING_OPTIONS_CONTEXT_KEY,
         parsing_options.clone(),
+    );
+    // Clients get `tool_use_id`s, not backend IDs; request traces record them.
+    request.insert(
+        crate::request_trace::CLIENT_TOOL_CALL_IDS_CONTEXT_KEY,
+        crate::request_trace::ClientToolCallIds(crate::protocols::anthropic::types::tool_use_id),
     );
 
     // Computed before `request` moves into `generate`. Only a stream that can
@@ -1046,6 +1062,9 @@ async fn handler_count_tokens(
     headers: HeaderMap,
     request: ValidatedRequest<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
+    if request.has_thread() {
+        return Err(thread_unsupported_response());
+    }
     let mut request = request
         .into_request(&headers)
         .map_err(|error| AnthropicHandlerError::validation(error).into_response())?;
@@ -1340,6 +1359,35 @@ fn gate_anthropic_nvext(
 
     warn_nvext_disabled("anthropic_messages", discarded);
     Ok(())
+}
+
+fn apply_anthropic_template_args(
+    request: &mut NvCreateChatCompletionRequest,
+    prompt_injected_reasoning: bool,
+    chat_template_defaults: &ChatTemplateDefaults,
+) {
+    if prompt_injected_reasoning {
+        request
+            .chat_template_args
+            .get_or_insert_with(Default::default)
+            .entry("enable_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(true));
+    }
+    // After the thinking decision, so the defaults' thinking keys yield to it, and
+    // before the history fallback, so a default can still set that key.
+    chat_template_defaults.apply_to_request(request);
+    if prompt_injected_reasoning {
+        // Preserve reasoning from prior turns. Some templates (Nemotron)
+        // strip historical <think> content by default to save context.
+        // For agentic flows the model needs to see why it made prior decisions.
+        // Ref: NVIDIA's SWE training config also sets this to false:
+        // https://github.com/NVIDIA-NeMo/Nemotron/blob/main/src/nemotron/recipes/super3/stage2_rl/stage2_swe2/config/default.yaml#L287
+        request
+            .chat_template_args
+            .get_or_insert_with(Default::default)
+            .entry("truncate_history_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(false));
+    }
 }
 
 fn apply_anthropic_nvext_policy(
@@ -1728,6 +1776,36 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("unknown field `agent_context`"));
+    }
+
+    #[test]
+    fn anthropic_template_args_layer_defaults_between_thinking_and_history() {
+        let args = |defaults: serde_json::Value, prompt_injected_reasoning: bool| {
+            let mut template_defaults = ChatTemplateDefaults::default();
+            template_defaults.set_default_chat_template_kwargs(defaults.as_object().cloned());
+            let mut chat_request: NvCreateChatCompletionRequest =
+                request_with_nvext().try_into().unwrap();
+            apply_anthropic_template_args(
+                &mut chat_request,
+                prompt_injected_reasoning,
+                &template_defaults,
+            );
+            serde_json::to_value(chat_request.chat_template_args).unwrap()
+        };
+        let defaults = serde_json::json!({
+            "enable_thinking": false,
+            "truncate_history_thinking": true,
+        });
+
+        assert_eq!(
+            args(defaults.clone(), true),
+            serde_json::json!({"enable_thinking": true, "truncate_history_thinking": true})
+        );
+        assert_eq!(
+            args(serde_json::json!({}), true),
+            serde_json::json!({"enable_thinking": true, "truncate_history_thinking": false})
+        );
+        assert_eq!(args(defaults.clone(), false), defaults);
     }
 
     #[test]

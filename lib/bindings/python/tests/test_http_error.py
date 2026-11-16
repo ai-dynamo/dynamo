@@ -3,7 +3,9 @@
 
 import pytest
 
+from dynamo._core import _raise_routed_http_error
 from dynamo.llm import HttpError
+from dynamo.llm.exceptions import RoutedEngineError
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -39,3 +41,19 @@ def test_long_http_error_message():
     # Ensure the exception string uses the truncated message too.
     assert message[:8189] in str(error)
     assert "B" not in str(error)
+
+
+def test_routed_engine_error_is_a_value_error():
+    # Callers that caught the ValueError a routed stream raised before still
+    # catch it. test_http_server covers the status it keeps.
+    with pytest.raises(RoutedEngineError) as raised:
+        _raise_routed_http_error(503, "worker busy")
+    assert isinstance(raised.value, ValueError)
+
+
+def test_only_a_routed_engine_stream_raises_routed_engine_error():
+    # A worker that relays a `Client` or `KvRouter` stream must not forward the
+    # other worker's error as its own, so those streams keep a plain ValueError.
+    with pytest.raises(ValueError) as raised:
+        _raise_routed_http_error(503, "worker busy", routed_engine=False)
+    assert type(raised.value) is ValueError

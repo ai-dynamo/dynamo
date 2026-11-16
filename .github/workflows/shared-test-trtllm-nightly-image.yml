@@ -26,6 +26,8 @@ jobs:
       image: ${{ steps.config.outputs.image }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - name: Test nightly selection and media harness
         run: |
           python3 -m pip install 'PyYAML==6.0.3'
@@ -59,11 +61,11 @@ jobs:
           retention-days: 7
 
   test:
-    name: Upstream TRT-LLM ${{ matrix.media }} integration (1 GPU)
+    name: Upstream TRT-LLM ${{ matrix.scenario }} integration (1 GPU)
     strategy:
       fail-fast: false
       matrix:
-        media: [image, video, audio]
+        scenario: [image, video, audio, image-routing]
     needs: build
     runs-on: [gpu-1, amd64, v2, us-west-2]
     timeout-minutes: 30
@@ -80,6 +82,8 @@ jobs:
         TRTLLM_NO_USAGE_STATS: '1'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
         with:
           name: trtllm-image-tests-${{ github.sha }}
@@ -91,23 +95,23 @@ jobs:
           source lib/sidecar/trtllm/launch/common.sh
           trtllm_ensure_openengine_bindings python3
       - name: Install TRT-LLM video decoder
-        if: matrix.media == 'video'
+        if: matrix.scenario == 'video'
         run: >-
           python3 components/src/dynamo/common/utils/install_media_decoders.py trtllm
-      - name: Run live ${{ matrix.media }} integration test
+      - name: Run live ${{ matrix.scenario }} integration test
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SCENARIO: ${{ matrix.scenario }}
         run: >-
           python3 lib/sidecar/trtllm/ci/run_image_test.py
           --binary trtllm-image-tests/trtllm-image-tests
           --config trtllm-image-tests/nightly.json
-          --media ${{ matrix.media }}
-          --results test-results/trtllm-nightly-${{ matrix.media }}
+          --scenario "$SCENARIO"
       - name: Upload engine logs and test results
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
         with:
-          name: trtllm-nightly-${{ matrix.media }}-results-${{ github.sha }}
-          path: test-results/trtllm-nightly-${{ matrix.media }}/
+          name: trtllm-nightly-${{ matrix.scenario }}-results-${{ github.sha }}
+          path: test-results/trtllm-nightly-${{ matrix.scenario }}/
           if-no-files-found: warn
           retention-days: 7

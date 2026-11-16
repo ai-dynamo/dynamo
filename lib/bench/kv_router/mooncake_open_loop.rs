@@ -3,21 +3,22 @@
 
 use std::collections::BTreeMap;
 use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
-#[cfg(not(target_os = "linux"))]
-use std::time::Duration;
 use std::time::Instant;
 
-use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::indexer::{
+use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
+use dynamo_kv_events::residency::StorageTier;
+use dynamo_kv_hashing::LocalBlockHash;
+use dynamo_kv_indexer::host::{
     KvIndexerInterface, LowerTierIndexers, LowerTierMatchDetails, ObservationError, SyncIndexer,
     ThreadPoolIndexer, ThreadPoolObservationPlan, query_lower_tiers_with_options,
 };
-use dynamo_kv_router::protocols::{KvCacheEventData, RouterEvent, StorageTier};
 use serde::Serialize;
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::oneshot;
 
+use dynamo_bench::kv_router_common::clock::{BenchmarkClock, elapsed_ns};
+use dynamo_bench::kv_router_common::fixed_lane::{EMPTY_OPERATION_ID, FixedLane, LaneOverflow};
 pub use dynamo_bench::kv_router_common::issuer::parse_cpu_list;
 use dynamo_bench::kv_router_common::issuer::{contiguous_worker_issuer, pin_current_thread};
 
@@ -29,7 +30,6 @@ use super::mooncake_shared::{
 };
 
 const RESULT_SCHEMA_VERSION: u32 = 4;
-const EMPTY_OPERATION_ID: u32 = u32::MAX;
 
 #[derive(Clone, Debug)]
 pub struct OpenLoopConfig {
@@ -394,46 +394,6 @@ pub(crate) fn prepare_open_loop_trial(
     })
 }
 
-struct QueryLane {
-    slots: Box<[AtomicU32]>,
-    published: AtomicUsize,
-    closed: AtomicBool,
-    notify: Notify,
-}
-
-impl QueryLane {
-    fn new(capacity: usize) -> Self {
-        let slots = (0..capacity)
-            .map(|_| AtomicU32::new(EMPTY_OPERATION_ID))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        Self {
-            slots,
-            published: AtomicUsize::new(0),
-            closed: AtomicBool::new(false),
-            notify: Notify::new(),
-        }
-    }
-
-    fn write(&self, cursor: usize, id: u32) -> Result<(), IssuerFailure> {
-        let Some(slot) = self.slots.get(cursor) else {
-            return Err(IssuerFailure::QueryLaneOverflow);
-        };
-        slot.store(id, Ordering::Relaxed);
-        Ok(())
-    }
-
-    fn publish(&self, count: usize) {
-        self.published.store(count, Ordering::Release);
-        self.notify.notify_one();
-    }
-
-    fn close(&self) {
-        self.closed.store(true, Ordering::Release);
-        self.notify.notify_one();
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 struct QueryCompletion {
     id: u32,
@@ -490,19 +450,19 @@ fn lookup<T: SyncIndexer>(
 async fn query_lane_worker<T: SyncIndexer>(
     indexer: Arc<ThreadPoolIndexer<T>>,
     lower_tier: Option<Arc<LowerTierRun<T>>>,
-    lane: Arc<QueryLane>,
+    lane: Arc<FixedLane>,
     corpus: Arc<QueryCorpus>,
     epoch: Instant,
     ready: oneshot::Sender<()>,
 ) -> QueryLaneResult {
-    let mut completions = vec![QueryCompletion::default(); lane.slots.len()].into_boxed_slice();
+    let mut completions = vec![QueryCompletion::default(); lane.capacity()].into_boxed_slice();
     let mut consumed = 0usize;
     let mut failure = QueryLaneFailure::None;
     let _ = ready.send(());
     loop {
-        let published = lane.published.load(Ordering::Acquire);
+        let published = lane.published();
         while consumed < published {
-            let id = lane.slots[consumed].load(Ordering::Relaxed);
+            let id = lane.id(consumed);
             if id == EMPTY_OPERATION_ID {
                 failure = QueryLaneFailure::MissingPublishedId;
                 break;
@@ -545,16 +505,8 @@ async fn query_lane_worker<T: SyncIndexer>(
         if failure != QueryLaneFailure::None {
             break;
         }
-        if lane.closed.load(Ordering::Acquire) && consumed == lane.published.load(Ordering::Acquire)
-        {
+        if !lane.wait_for_more(consumed).await {
             break;
-        }
-
-        let notified = lane.notify.notified();
-        if consumed == lane.published.load(Ordering::Acquire)
-            && !lane.closed.load(Ordering::Acquire)
-        {
-            notified.await;
         }
     }
 
@@ -581,6 +533,12 @@ enum IssuerFailure {
     Affinity,
     DispatchMismatch,
     PeerFailed,
+}
+
+impl From<LaneOverflow> for IssuerFailure {
+    fn from(_: LaneOverflow) -> Self {
+        IssuerFailure::QueryLaneOverflow
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -642,7 +600,7 @@ struct IssuerAnalysisInput {
 }
 
 struct QueryIssuerContext<'a> {
-    lanes: &'a [Arc<QueryLane>],
+    lanes: &'a [Arc<FixedLane>],
     deadline_ready: &'a [AtomicBool],
     peer_failed: &'a AtomicBool,
     clock: &'a BenchmarkClock,
@@ -693,7 +651,7 @@ fn issue_queries(
                     if let Err(error) =
                         context.lanes[lane].write(storage.lane_cursors[lane], entry.id)
                     {
-                        failure = Some(error);
+                        failure = Some(error.into());
                         break;
                     }
                     storage.lane_cursors[lane] += 1;
@@ -867,7 +825,7 @@ fn wait_for_deadline_queries(
 }
 
 fn publish_touched(
-    lanes: &[Arc<QueryLane>],
+    lanes: &[Arc<FixedLane>],
     lane_cursors: &[usize],
     touched_flags: &mut [bool],
     touched_lanes: &[usize],
@@ -1115,7 +1073,7 @@ pub async fn run_open_loop<T: SyncIndexer>(
     let lanes = trial
         .lane_capacities
         .iter()
-        .map(|&capacity| Arc::new(QueryLane::new(capacity)))
+        .map(|&capacity| Arc::new(FixedLane::new(capacity)))
         .collect::<Vec<_>>();
     let mut ready_receivers = Vec::with_capacity(lanes.len());
     let mut query_tasks = Vec::with_capacity(lanes.len());
@@ -1317,7 +1275,7 @@ pub async fn run_open_loop<T: SyncIndexer>(
 
 fn last_completion_ns(
     query_results: &[QueryLaneResult],
-    snapshot: &dynamo_kv_router::indexer::ThreadPoolObservationSnapshot,
+    snapshot: &dynamo_kv_indexer::host::ThreadPoolObservationSnapshot,
 ) -> Option<u64> {
     let last_query = query_results
         .iter()
@@ -1346,7 +1304,7 @@ fn analyze_result(
     config: OpenLoopConfig,
     issuer: IssuerAnalysisInput,
     query_results: Vec<QueryLaneResult>,
-    snapshot: dynamo_kv_router::indexer::ThreadPoolObservationSnapshot,
+    snapshot: dynamo_kv_indexer::host::ThreadPoolObservationSnapshot,
     backend_timing_report: String,
     lower_tier: Option<(Footprint, u64)>,
 ) -> OpenLoopResult {
@@ -1675,103 +1633,6 @@ fn nearest_rank(values: &[u64], numerator: usize, denominator: usize) -> u64 {
     values[rank.saturating_sub(1).min(values.len() - 1)]
 }
 
-fn elapsed_ns(epoch: Instant) -> u64 {
-    epoch.elapsed().as_nanos().min(u64::MAX as u128) as u64
-}
-
-struct BenchmarkClock {
-    epoch: Instant,
-    spin_ns: u64,
-    #[cfg(target_os = "linux")]
-    monotonic_epoch_ns: u64,
-}
-
-impl BenchmarkClock {
-    fn new(spin_ns: u64) -> anyhow::Result<Self> {
-        #[cfg(target_os = "linux")]
-        let monotonic_epoch_ns = monotonic_now_ns()?;
-        Ok(Self {
-            epoch: Instant::now(),
-            spin_ns,
-            #[cfg(target_os = "linux")]
-            monotonic_epoch_ns,
-        })
-    }
-
-    fn epoch(&self) -> Instant {
-        self.epoch
-    }
-
-    fn now_ns(&self) -> u64 {
-        elapsed_ns(self.epoch)
-    }
-
-    fn wait_until(&self, target_ns: u64) {
-        let sleep_target = target_ns.saturating_sub(self.spin_ns);
-        let now = self.now_ns();
-        #[cfg(target_os = "linux")]
-        if sleep_target > now {
-            sleep_until_monotonic(self.monotonic_epoch_ns.saturating_add(sleep_target));
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            if sleep_target > now {
-                std::thread::sleep(Duration::from_nanos(sleep_target - now));
-            }
-        }
-        while self.now_ns() < target_ns {
-            std::hint::spin_loop();
-        }
-    }
-
-    fn timer_name(&self) -> &'static str {
-        if cfg!(target_os = "linux") {
-            "clock_nanosleep_monotonic_absolute"
-        } else {
-            "portable_sleep_spin_non_authoritative"
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn monotonic_now_ns() -> anyhow::Result<u64> {
-    let mut timestamp = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    let rc = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut timestamp) };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    Ok((timestamp.tv_sec as u64)
-        .saturating_mul(1_000_000_000)
-        .saturating_add(timestamp.tv_nsec as u64))
-}
-
-#[cfg(target_os = "linux")]
-fn sleep_until_monotonic(target_ns: u64) {
-    let request = libc::timespec {
-        tv_sec: (target_ns / 1_000_000_000) as libc::time_t,
-        tv_nsec: (target_ns % 1_000_000_000) as libc::c_long,
-    };
-    loop {
-        let rc = unsafe {
-            libc::clock_nanosleep(
-                libc::CLOCK_MONOTONIC,
-                libc::TIMER_ABSTIME,
-                &request,
-                std::ptr::null_mut(),
-            )
-        };
-        if rc == 0 {
-            return;
-        }
-        if rc != libc::EINTR {
-            return;
-        }
-    }
-}
-
 fn thread_cpu_time_ns() -> u64 {
     #[cfg(target_os = "linux")]
     {
@@ -1901,7 +1762,7 @@ mod tests {
             worker_id: u64::from(id),
             payload: DispatchPayload::Event(RouterEvent::new(
                 u64::from(id),
-                dynamo_kv_router::protocols::KvCacheEvent {
+                dynamo_kv_events::event::KvCacheEvent {
                     event_id: u64::from(id),
                     data: KvCacheEventData::Cleared,
                     dp_rank: 0,

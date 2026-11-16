@@ -4,16 +4,19 @@
 use std::collections::{HashMap, HashSet};
 use std::env::var;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock};
+use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes, HttpBody};
 use axum::http::{Response, Version, header};
 use axum::response::IntoResponse;
+use http_body::{Frame, SizeHint};
 
 use super::Metrics;
 use super::RouteDoc;
@@ -52,7 +55,8 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 use crate::frontend_config::{
-    DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, FrontendApiConfig, MediaRejectionConfig, MetricsConfig,
+    ChatTemplateDefaults, DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, FrontendApiConfig,
+    MediaRejectionConfig, MetricsConfig,
 };
 
 /// Middleware that echoes `x-request-id` from request to response headers.
@@ -175,7 +179,6 @@ async fn track_inflight_inference(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use futures::StreamExt;
     let state = &readiness.state;
 
     // Requests rejected during draining should not extend the drain window.
@@ -195,11 +198,39 @@ async fn track_inflight_inference(
     let (parts, body) = response.into_parts();
     // Keep the permit alive until the full response body, including streams,
     // finishes or is dropped.
-    let stream = body.into_data_stream().map(move |result| {
-        let _permit = &permit;
-        result
-    });
-    Response::from_parts(parts, Body::from_stream(stream))
+    Response::from_parts(
+        parts,
+        Body::new(InflightResponseBody {
+            body,
+            _permit: permit,
+        }),
+    )
+}
+
+/// Preserve framing metadata and trailers while holding the response's admission.
+struct InflightResponseBody {
+    body: Body,
+    _permit: InflightPermit,
+}
+
+impl HttpBody for InflightResponseBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.get_mut().body).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.body.size_hint()
+    }
 }
 
 /// HTTP service shared state
@@ -922,6 +953,10 @@ impl State {
     pub fn media_rejection(&self) -> MediaRejectionConfig {
         self.frontend_api_config.media_rejection()
     }
+
+    pub fn chat_template_defaults(&self) -> &ChatTemplateDefaults {
+        self.frontend_api_config.chat_template_defaults()
+    }
 }
 
 #[derive(Clone)]
@@ -1607,7 +1642,7 @@ impl HttpServiceConfigBuilder {
         }
 
         let model_manager = Arc::new(ModelManager::new());
-        let cancel_token = config.cancel_token.unwrap_or_default();
+        let cancel_token = config.cancel_token.unwrap_or_default().child_token();
         // Use the provided discovery client, or fall back to a no-op memory-backed one
         // (for in-process modes that don't need discovery)
         let discovery_client = config.discovery.unwrap_or_else(|| {
@@ -3065,6 +3100,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inflight_body_preserves_trailers_and_holds_admission() {
+        use http_body_util::{BodyExt, StreamBody};
+
+        let observer = Arc::new(ServiceObserver::default());
+        let trailers = axum::http::HeaderMap::from_iter([(
+            header::HeaderName::from_static("x-checksum"),
+            header::HeaderValue::from_static("done"),
+        )]);
+        let frames = futures::stream::iter([
+            Ok::<_, std::convert::Infallible>(Frame::data(Bytes::from_static(b"data"))),
+            Ok(Frame::trailers(trailers.clone())),
+        ]);
+        let mut body = InflightResponseBody {
+            body: Body::new(StreamBody::new(frames)),
+            _permit: observer.acquire_inflight(),
+        };
+
+        assert_eq!(body.size_hint().exact(), None);
+        assert!(!body.is_end_stream());
+        assert_eq!(observer.inflight_count(), 1);
+        let frame = body.frame().await.unwrap().unwrap();
+        assert_eq!(frame.into_data().unwrap(), "data");
+        assert_eq!(observer.inflight_count(), 1);
+        let frame = body.frame().await.unwrap().unwrap();
+        assert_eq!(frame.into_trailers().unwrap(), trailers);
+        assert!(body.frame().await.is_none());
+        assert_eq!(observer.inflight_count(), 1);
+        drop(body);
+        assert_eq!(observer.inflight_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn track_inflight_inference_preserves_length() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let service = HttpService::builder().build().unwrap();
+        let router = axum::Router::new()
+            .route("/", axum::routing::get(|| async { Body::from("data") }))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(InferenceReadinessState {
+                    state: service.state_clone(),
+                    mounted_protocols: HashMap::new(),
+                }),
+                track_inflight_inference,
+            ));
+
+        let response = router
+            .oneshot(axum::http::Request::new(Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = response.into_body();
+        assert_eq!(body.size_hint().exact(), Some(4));
+        assert_eq!(body.collect().await.unwrap().to_bytes(), "data");
+    }
+
+    #[tokio::test]
     async fn test_admin_routes_only_on_admin_listener() {
         // Off by default, and bound to loopback when enabled.
         assert!(HttpService::builder().build().unwrap().admin.is_none());
@@ -3373,6 +3466,76 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn shutdown_deadline_interrupts_handlers_and_response_bodies() {
+        temp_env::async_with_vars(
+            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1"))],
+            async {
+                for (tls, before_headers) in [(false, false), (true, true)] {
+                        let certificates = make_mtls_test_certificates();
+                        let parent = CancellationToken::new();
+                        let mut service = HttpService::builder()
+                            .host("127.0.0.1").port(0).enable_tls(tls)
+                            .cancel_token(Some(parent.clone()))
+                            .tls_cert_path(tls.then(|| certificates.server_cert.path().to_path_buf()))
+                            .tls_key_path(tls.then(|| certificates.server_key.path().to_path_buf()))
+                            .build().unwrap();
+                        let state = service.state_clone();
+                        let entered = CancellationToken::new();
+                        let released = CancellationToken::new();
+                        let handler_entered = entered.clone();
+                        let handler_released = released.clone();
+                        service.router = axum::Router::new().route("/blocked", axum::routing::get(move || {
+                            let entered = handler_entered.clone();
+                            let guard = handler_released.clone().drop_guard();
+                            async move {
+                                entered.cancel();
+                                if before_headers { std::future::pending::<()>().await; }
+                                Body::from_stream(async_stream::stream! {
+                                    let _guard = guard;
+                                    yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"first"));
+                                    std::future::pending::<()>().await;
+                                })
+                            }
+                        })).layer(axum::middleware::from_fn_with_state(
+                            Arc::new(InferenceReadinessState {
+                                state: state.clone(),
+                                mounted_protocols: HashMap::new(),
+                            }),
+                            track_inflight_inference,
+                        ));
+                        let cancel = CancellationToken::new();
+                        let server_cancel = cancel.clone();
+                        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                        let address = listener.local_addr().unwrap();
+                        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                            service.run_with_listener(server_cancel, listener).await
+                        }));
+                        let client = reqwest::Client::builder().no_proxy().danger_accept_invalid_certs(true)
+                            .timeout(Duration::from_secs(4)).build().unwrap();
+                        let request = client.get(format!("{}://{address}/blocked", if tls { "https" } else { "http" })).send();
+                        let mut request = Some(tokio::spawn(request));
+                        tokio::time::timeout(Duration::from_secs(2), entered.cancelled()).await.unwrap();
+                        let response = if before_headers { None } else { Some(request.take().unwrap().await.unwrap().unwrap()) };
+                        cancel.cancel();
+                        if let Some(response) = response {
+                            assert!(response.bytes().await.is_err(), "interruption must not look like EOF");
+                        }
+                        tokio::time::timeout(Duration::from_secs(3), task).await.unwrap().unwrap().unwrap();
+                        tokio::time::timeout(Duration::from_secs(1), released.cancelled()).await.unwrap();
+                        if let Some(request) = request
+                            && let Ok(response) = request.await.unwrap()
+                        {
+                            assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+                        }
+                        assert_eq!(state.inflight_count(), 0);
+                        assert!(!parent.is_cancelled(), "local deadline must not cancel the runtime");
+                }
+            },
+        ).await;
     }
 
     /// Verifies that an unsupported content type returns the standard JSON error

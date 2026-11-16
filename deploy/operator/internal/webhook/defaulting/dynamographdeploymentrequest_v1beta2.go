@@ -57,7 +57,7 @@ const (
 // defaults, and workload.trace suppresses the static default. objective.sla: {} opts out of the
 // latency defaults. hardware: {} opts out of cluster discovery and typed hardware defaults; a
 // nonempty object is completed.
-// spec.aisimulate.inputOverrides never changes a default. It overrides the defaulted typed
+// spec.aisim.inputOverrides never changes a default. It overrides the defaulted typed
 // values later, when the input is lowered.
 
 // defaultDynamoGraphDeploymentRequestV1beta2 defaults the v1beta2 spec that dgdr carries in
@@ -243,7 +243,7 @@ func defaultStaticWorkloadSpecV1beta2(static *nvidiacomv1beta2.StaticWorkloadSpe
 
 // defaultObjectiveSpecV1beta2 defaults the mode, the Optimize metric and an absent SLA.
 // Existing SLA objects are preserved, including the empty opt-out. It reads the typed objective
-// alone: spec.aisimulate.inputOverrides overrides the completed typed values when the input is
+// alone: spec.aisim.inputOverrides overrides the completed typed values when the input is
 // lowered, so it never suppresses these defaults.
 func defaultObjectiveSpecV1beta2(objective *nvidiacomv1beta2.ObjectiveSpec) {
 	if objective.Mode == "" {

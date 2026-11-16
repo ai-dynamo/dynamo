@@ -126,6 +126,7 @@ async def test_prefill_rejects_cache_uuid_before_building_media_kwargs(
     handler.bootstrap_port = 1234
     handler._generate_bootstrap_room = lambda: "room"
     handler._get_input_param = lambda request: {}
+    handler.use_sglang_tokenizer = False
     context = SimpleNamespace(
         id=lambda: "request-id",
         trace_id="trace-id",
@@ -196,6 +197,7 @@ async def test_prefill_forwards_first_token_logprob_options(wrapped, options, ex
     handler.enable_trace = False
     handler._generate_bootstrap_room = lambda: 1
     handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+    handler.use_sglang_tokenizer = False
     handler._resolve_lora = lambda request: None
     handler._priority_kwargs = lambda priority: {}
     request = {"token_ids": [1, 2, 3], "output_options": options}
@@ -245,6 +247,7 @@ async def test_prefill_applies_model_default_sampling_params(
     handler.enable_trace = False
     handler._generate_bootstrap_room = lambda: 1
     handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+    handler.use_sglang_tokenizer = False
     handler._resolve_lora = lambda request: None
     handler._priority_kwargs = lambda priority: {}
     request = {
@@ -1449,7 +1452,8 @@ def test_build_sampling_params_forwards_sampling_options_for_token_requests():
                 "top_p": 0.95,
                 "top_k": 40,
                 "min_p": 0.01,
-                "logit_bias": {"18": -10.0},
+                # The msgpack request plane decodes the Rust u32 keys as ints.
+                "logit_bias": {18: -10.0},
                 "seed": 1234,
             },
             "stop_conditions": {"max_tokens": 8},
@@ -1825,6 +1829,45 @@ def test_multimodal_build_sampling_params_maps_min_tokens():
     assert sampling_params["min_new_tokens"] == 64
     assert sampling_params["max_new_tokens"] == 64
     assert sampling_params["ignore_eos"] is True
+
+
+@pytest.mark.parametrize(
+    ("raw_options", "expected"),
+    [
+        ({}, None),
+        ({"logit_bias": {}}, {}),
+        # The msgpack request plane delivers int keys; JSON delivers str keys.
+        ({"logit_bias": {3862: 4}}, {"3862": 4.0}),
+        ({"logit_bias": {"3862": 4}}, {"3862": 4.0}),
+        ({"logit_bias": {"3862": 4, "18": -10}}, {"3862": 4.0, "18": -10.0}),
+        ({"logit_bias": {3862: 4, 18: -10}}, {"3862": 4.0, "18": -10.0}),
+    ],
+)
+def test_multimodal_logit_bias_survives_handoff_and_reaches_sampling_params(
+    raw_options, expected
+):
+    """Keep bias maps through the encoder handoff and forward non-empty maps."""
+    preprocessed = PreprocessedRequest.model_validate(
+        {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 2},
+            "sampling_options": {"temperature": 0.0, **raw_options},
+        }
+    )
+    request = SglangMultimodalRequest.model_validate_json(
+        SglangMultimodalRequest(request=preprocessed).model_dump_json()
+    )
+    expected_internal = (
+        None if expected is None else {int(key): bias for key, bias in expected.items()}
+    )
+    assert request.request.sampling_options.logit_bias == expected_internal
+
+    sampling_params = SglangUtils.build_sampling_params(request)
+
+    if expected:
+        assert sampling_params["logit_bias"] == expected
+    else:
+        assert "logit_bias" not in sampling_params
 
 
 @pytest.mark.parametrize("value", [True, "32", 1.0, -1, 2**32])
