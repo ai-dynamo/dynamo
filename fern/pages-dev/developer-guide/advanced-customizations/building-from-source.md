@@ -82,13 +82,13 @@ cd lib/bindings/python
 # Minimal build
 maturin develop --uv
 
-# Build with the release wheel features, except media-ffmpeg
-maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3,nvtx
+# Build with the same features as the release wheels
+maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3
 ```
 
-The minimal build leaves out the [release wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile) features: the standalone KV indexer, slot tracker and select service (some router tests start these), multimodal KV routing, the AISimulate perf model, S3 request traces, and the NVTX ranges for Nsight Systems profiles. The NVTX ranges stay off until you set `DYN_NVTX`; see [NVTX Profiling](../../reference/observability/nvtx-profiling.md).
+The minimal build leaves out the [release wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile) features: the standalone KV indexer, slot tracker and select service (some router tests start these), multimodal KV routing, the AISimulate perf model and S3 request traces.
 
-The main Linux release wheel also enables `media-ffmpeg`. The command above leaves it out because it needs the FFmpeg development libraries; add it to the feature list if you have them installed.
+To annotate Nsight Systems profiles, add `nvtx` to the feature list.
 
 ## 6. Install GPU Memory Service
 
