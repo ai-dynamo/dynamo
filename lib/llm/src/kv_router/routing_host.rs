@@ -641,7 +641,7 @@ impl RoutingHost {
                 budget,
             )
         };
-        let mut operation = self
+        let mut hold = self
             .acquire_affinity_slot(
                 affinity,
                 &session_id,
@@ -658,23 +658,23 @@ impl RoutingHost {
                 &self.policy,
                 RoutingPolicy::Hosted(_) | RoutingPolicy::DeviceAwareWeighted
             )
-            && operation
+            && hold
                 .target()
                 .is_some_and(|target| !self.inner.client.is_instance_discovered(target.worker_id))
         {
-            operation.invalidate();
-            operation = reacquire().await?;
+            hold.invalidate();
+            hold = reacquire().await?;
         }
-        let target = operation.target().map(from_table);
+        let target = hold.target().map(from_table);
         match select(target).await {
-            Ok(selection) => Ok((selection, Some(operation))),
+            Ok(selection) => Ok((selection, Some(hold))),
             Err(error) if is_cancelled(&error) => Err(error),
             Err(_error)
                 if self.session_affinity_mode == SessionAffinityMode::Hard
                     && explicit.is_none()
                     && target.is_some_and(|target| !self.affinity_target_is_valid(target)) =>
             {
-                operation.invalidate();
+                hold.invalidate();
                 let retry = reacquire().await?;
                 let selection = select(retry.target().map(from_table)).await?;
                 Ok((selection, Some(retry)))
@@ -696,9 +696,10 @@ impl RoutingHost {
             RoutingPolicy::Hosted(_)
             | RoutingPolicy::Direct
             | RoutingPolicy::DeviceAwareWeighted => {
-                let (metadata, stream) = self
-                    .select_and_dispatch_builtin(request, RequestPhase::Prefill, prepare)
+                let plan = self
+                    .plan_builtin_route(&request, RequestPhase::Prefill)
                     .await?;
+                let (metadata, stream) = self.dispatch_builtin_plan(request, plan, prepare).await?;
                 Ok(PrefillDispatch {
                     metadata,
                     stream,
@@ -743,9 +744,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // One cleanup budget for this request's whole route through the host.
         let budget = CleanupBudget::default();
         if !matches!(&self.policy, RoutingPolicy::Kv(_)) {
-            let phase = request.phase();
+            let plan = self.plan_builtin_route(&request, request.phase()).await?;
             return self
-                .select_and_dispatch_builtin(request, phase, |_, _| Ok(()))
+                .dispatch_builtin_plan(request, plan, |_, _| Ok(()))
                 .await
                 .map(|(_, stream)| stream);
         }
