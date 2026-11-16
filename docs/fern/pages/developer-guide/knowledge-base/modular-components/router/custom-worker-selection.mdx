@@ -751,9 +751,11 @@ The [runtime policy API](configuration-and-tuning.md#runtime-policy-updates) def
 patch, and reset semantics.
 
 Updates run between selection calls. A replacement cannot add worker-input groups beyond those
-declared at startup, change the worker label, or change exclusive-affinity behavior. Queues,
+declared at startup, change the worker label, change exclusive-affinity behavior, or enable or
+disable worker-weight control. Parameter patches and resets preserve the complete `WorkerWeights`
+state, including overrides, discovered membership, and its independent revision. Queues,
 worker discovery, cache indexes, and host accounting are retained. The replacement's filters,
-scorers, and picker are new instances, so state the previous instances held, such as a cursor,
+scorers, and picker are new instances, so other state the previous instances held, such as a cursor,
 does not carry over. A cancelled control request still waiting in the actor queue is skipped.
 
 The [simple-filter-score-pick example](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/simple-filter-score-pick/src/lib.rs)

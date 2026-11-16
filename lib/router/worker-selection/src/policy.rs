@@ -241,23 +241,21 @@ impl WorkerSelectionPolicy {
         members: &[dynamo_router_protocol::worker::WorkerId],
         update: Option<crate::WorkerWeightUpdate>,
     ) -> Result<crate::WorkerWeightConfig, RuntimePolicyError> {
-        #[allow(clippy::infallible_destructuring_match)]
-        let state = match &mut self.state {
-            WorkerSelectionPolicyState::Composed(state) => state,
-            #[cfg(any(test, feature = "testing", feature = "bench"))]
-            WorkerSelectionPolicyState::Reference(..) => {
-                return Err(RuntimePolicyError::Unsupported);
-            }
-        };
-        let weights = state
-            .get_mut()
-            .picker
+        let weights = self
             .worker_weights()
             .ok_or(RuntimePolicyError::Unsupported)?;
         weights.reconcile(members);
         match update {
             Some(update) => weights.update(update),
             None => Ok(weights.snapshot()),
+        }
+    }
+
+    fn worker_weights(&mut self) -> Option<&mut crate::WorkerWeights> {
+        match &mut self.state {
+            WorkerSelectionPolicyState::Composed(state) => state.get_mut().picker.worker_weights(),
+            #[cfg(any(test, feature = "testing", feature = "bench"))]
+            WorkerSelectionPolicyState::Reference(..) => None,
         }
     }
 
@@ -270,7 +268,8 @@ impl WorkerSelectionPolicy {
 
     /// Opt in to runtime parameter updates with a pure replacement builder.
     /// The initial parameters define the patchable keys and reset values. Replacements must
-    /// require no new worker-input groups and preserve affinity behavior; queue and tracking state are retained.
+    /// require no new worker-input groups and preserve affinity and weight-control capabilities.
+    /// Worker weights, their revision, and queue and tracking state are retained.
     pub fn with_runtime_config(
         mut self,
         parameters: serde_json::Map<String, serde_json::Value>,
@@ -312,6 +311,15 @@ impl WorkerSelectionPolicy {
             return Err(RuntimePolicyError::InvalidParameters(
                 "replacement changes routing requirements".into(),
             ));
+        }
+        match (self.worker_weights(), replacement.worker_weights()) {
+            (Some(current), Some(next)) => *next = std::mem::take(current),
+            (None, None) => {}
+            _ => {
+                return Err(RuntimePolicyError::InvalidParameters(
+                    "replacement changes worker-weight control capability".into(),
+                ));
+            }
         }
         let response = state.config();
         replacement.runtime = Some(Box::new(state));

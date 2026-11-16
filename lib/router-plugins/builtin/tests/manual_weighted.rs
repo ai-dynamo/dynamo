@@ -7,6 +7,7 @@ use dynamo_kv_router::plugins::prelude::*;
 use dynamo_scheduler::host::WorkerSelector;
 use dynamo_scheduler::test_utils::SimpleWorkerConfig;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 fn policy(role: WorkerType) -> WorkerSelectionPolicy {
     let mut registry = dynamo_router_policies::default_registry();
@@ -22,6 +23,134 @@ fn policy(role: WorkerType) -> WorkerSelectionPolicy {
         role,
         RoutingPartitionRef::new("model", "default"),
     )
+}
+
+fn runtime_policy(role: WorkerType) -> WorkerSelectionPolicy {
+    policy(role).with_runtime_config(
+        serde_json::Map::from_iter([("exclusive_affinity".into(), false.into())]),
+        Arc::new(move |parameters| {
+            Ok(policy(role)
+                .with_exclusive_affinity(parameters["exclusive_affinity"].as_bool().unwrap()))
+        }),
+    )
+}
+
+#[test]
+fn runtime_updates_preserve_worker_weights_and_revision() {
+    let mut policy = runtime_policy(WorkerType::Aggregated);
+    let (workers, mut request) = support::fixture(2, 32);
+    let initial = policy.control_worker_weights(&[0, 1], None).unwrap();
+    let configured = policy
+        .control_worker_weights(
+            &[0, 1],
+            Some(WorkerWeightUpdate::new(
+                initial.revision(),
+                BTreeMap::from([(0, Some(0.0)), (1, Some(0.25))]),
+            )),
+        )
+        .unwrap();
+    for update in [
+        RuntimePolicyUpdate::patch(
+            0,
+            serde_json::Map::from_iter([("exclusive_affinity".into(), false.into())]),
+        ),
+        RuntimePolicyUpdate::reset(1),
+    ] {
+        policy.update_runtime_config(update).unwrap();
+        let current = policy.control_worker_weights(&[0, 1], None).unwrap();
+        assert_eq!(current.weights(), configured.weights());
+        assert_eq!(current.revision(), configured.revision());
+        assert!(matches!(
+            policy.control_worker_weights(
+                &[0, 1],
+                Some(WorkerWeightUpdate::new(
+                    initial.revision(),
+                    BTreeMap::from([(0, None)]),
+                )),
+            ),
+            Err(RuntimePolicyError::Conflict { .. })
+        ));
+        request.pinned_worker = None;
+        assert_eq!(
+            policy
+                .select_worker(support::selection_input(&workers, &request, 16))
+                .unwrap()
+                .worker
+                .worker_id,
+            1
+        );
+        request.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
+        assert!(matches!(
+            policy.select_worker(support::selection_input(&workers, &request, 16)),
+            Err(dynamo_scheduler::KvSchedulerError::AllEligibleWorkersFiltered)
+        ));
+    }
+}
+
+#[test]
+fn runtime_updates_cannot_change_weight_control() {
+    struct UnweightedPicker;
+    impl WorkerPicker for UnweightedPicker {
+        fn pick(
+            &self,
+            _: &WorkerSelectionContext<'_>,
+            _: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            Ok(0)
+        }
+    }
+    let build = |weighted| {
+        if weighted {
+            policy(WorkerType::Aggregated)
+        } else {
+            WorkerSelectionPolicy::new(
+                Default::default(),
+                "aggregated",
+                vec![],
+                Box::new(UnweightedPicker),
+            )
+        }
+    };
+    for weighted in [false, true] {
+        let mut policy = build(weighted).with_runtime_config(
+            serde_json::Map::from_iter([("weighted".into(), weighted.into())]),
+            Arc::new(move |parameters| Ok(build(parameters["weighted"].as_bool().unwrap()))),
+        );
+        let runtime_before = policy.runtime_config().unwrap();
+        let before = policy
+            .control_worker_weights(&[1], None)
+            .ok()
+            .map(|config| {
+                policy
+                    .control_worker_weights(
+                        &[1],
+                        Some(WorkerWeightUpdate::new(
+                            config.revision(),
+                            BTreeMap::from([(1, Some(0.0))]),
+                        )),
+                    )
+                    .unwrap()
+            });
+        assert!(matches!(
+            policy.update_runtime_config(RuntimePolicyUpdate::patch(
+                0,
+                serde_json::Map::from_iter([("weighted".into(), (!weighted).into())]),
+            )),
+            Err(RuntimePolicyError::InvalidParameters(_))
+        ));
+        assert_eq!(policy.runtime_config().unwrap(), runtime_before);
+        match before {
+            Some(before) => {
+                let after = policy.control_worker_weights(&[1], None).unwrap();
+                assert_eq!(after.weights(), before.weights());
+                assert_eq!(after.revision(), before.revision());
+            }
+            None => assert!(matches!(
+                policy.control_worker_weights(&[1], None),
+                Err(RuntimePolicyError::Unsupported)
+            )),
+        }
+    }
 }
 
 #[test]
@@ -137,7 +266,7 @@ async fn zero_weight_workers_do_not_bypass_queue_backpressure() {
         1,
         Default::default(),
         SelectionCacheConfig::default(),
-        std::sync::Arc::new(|_, role, _| policy(role)),
+        Arc::new(|_, role, _| runtime_policy(role)),
     )
     .unwrap();
     for worker_id in [1, 2] {
@@ -187,8 +316,14 @@ async fn zero_weight_workers_do_not_bypass_queue_backpressure() {
     })
     .await
     .unwrap();
-    // The control command is a barrier after the enqueue. This checks state, not elapsed time.
-    control.worker_weights(None).await.unwrap();
+    let current = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        control.update(RuntimePolicyUpdate::reset(0)).await.unwrap();
+        control.worker_weights(None).await.unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(current.weights(), changed.weights());
+    assert_eq!(current.revision(), changed.revision());
     assert_eq!(partition.scheduler().pending_count(), 1);
     control
         .worker_weights(Some(WorkerWeightUpdate::new(
