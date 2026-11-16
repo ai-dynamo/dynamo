@@ -4,6 +4,7 @@ areas:
 - label: frontend
   github_team: '@ai-dynamo/dynamo-frontend-codeowners'
   path_globs:
+  - benchmarks/tool_calling/
   - components/src/dynamo/common/http/
   - components/src/dynamo/common/protocols/
   - components/src/dynamo/frontend/

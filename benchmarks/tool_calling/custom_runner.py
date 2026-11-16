@@ -99,6 +99,8 @@ def main(argv: list[str] | None = None) -> int:
         return int(report.main())
     finally:
         sys.argv = original_argv
+        report.probe.build_cases = original_build_cases
+        report.probe.validate_result = original_validate_result
 
 
 if __name__ == "__main__":

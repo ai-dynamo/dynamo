@@ -4896,7 +4896,7 @@ def request_chat(
         temperature=temperature,
         default_max_tokens=max_tokens,
     )
-    payload["messages"] = messages
+    payload["messages"] = list(messages)
     if stream:
         result = request_stream(
             url,

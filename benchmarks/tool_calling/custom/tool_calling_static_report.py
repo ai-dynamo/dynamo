@@ -44,7 +44,7 @@ def local_timestamp() -> str:
 
 def safe_slug(value: str) -> str:
     slug = "".join(ch if ch.isalnum() or ch in ".-" else "-" for ch in value)
-    return slug.strip("-")[:96] or "run"
+    return slug.strip(".-")[:96] or "run"
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -442,7 +442,7 @@ def main() -> int:
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0
 
-    model_slug = args.model_slug or safe_slug(args.model.split("/")[-1].lower())
+    model_slug = safe_slug(args.model_slug or args.model.split("/")[-1].lower())
     write_static_site(
         report,
         records,
