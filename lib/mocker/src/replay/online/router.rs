@@ -23,8 +23,9 @@ use dynamo_router_protocol::identity::RoutingPartitionRef;
 use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::WorkerId;
 use dynamo_scheduler::host::{
-    CacheHitWeights, OverlapAnalysis, RoutingConstraints, ScheduleMode, ScheduleRequest,
-    TrackingHashContext, TrackingHashScope,
+    CacheHitWeights, OverlapAnalysis, OverlapScoresRefresh, RefreshedOverlap, RoutingConstraints,
+    ScheduleMode, ScheduleRequest, TrackingHashContext, TrackingHashScope, WorkerSelector,
+    read_overlap_refresh_after,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -35,7 +36,7 @@ use crate::common::protocols::{
 };
 use crate::loadgen::local_block_hashes;
 use crate::replay::router_shared::{
-    ReplayScheduler, replay_router_config, replay_selector, replay_slots,
+    ReplayScheduler, ReplayWorkerConfig, replay_router_config, replay_selector, replay_slots,
     replay_workers_with_configs, request_cache_salt, salted_request_hashes,
 };
 use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode};
@@ -113,7 +114,9 @@ impl ReplayIndexer {
         sequence: Vec<LocalBlockHash>,
     ) -> Result<TieredMatchDetails> {
         let device = match &self.primary {
-            PrimaryIndexer::Single(indexer) => indexer.find_match_details(sequence.clone()).await?,
+            PrimaryIndexer::Single(indexer) => {
+                indexer.find_match_details(sequence.to_vec()).await?
+            }
             PrimaryIndexer::Concurrent(indexer) => indexer
                 .backend()
                 .find_match_details_impl_with_options(&sequence, false, false),
@@ -134,6 +137,36 @@ impl ReplayIndexer {
                 KvIndexerInterface::flush(indexer.as_ref()).await
             }
         }
+    }
+}
+
+struct ReplayOverlapRefresher {
+    indexer: ReplayIndexer,
+    weights: CacheHitWeights,
+    block_size: u32,
+}
+
+#[async_trait::async_trait]
+impl OverlapScoresRefresh for ReplayOverlapRefresher {
+    async fn refresh(
+        &self,
+        block_hashes: &[LocalBlockHash],
+        _retain_kv_transfer_chain: bool,
+    ) -> Option<RefreshedOverlap> {
+        if block_hashes.is_empty() {
+            return None;
+        }
+        let tiered = match self.indexer.find_matches_for_hashes(block_hashes.to_vec()).await {
+            Ok(tiered) => tiered,
+            Err(error) => {
+                tracing::warn!(%error, "online replay overlap refresh failed");
+                return None;
+            }
+        };
+        // Online replay does not request KV transfer hints.
+        Some(RefreshedOverlap::from_overlap(
+            OverlapAnalysis::new(&self.weights, self.block_size, &tiered).signals(),
+        ))
     }
 }
 
@@ -252,7 +285,8 @@ pub(crate) struct ReplayPlacement {
 pub(crate) struct KvReplayRouter {
     config: KvRouterConfig,
     block_size: u32,
-    scheduler: Arc<ReplayScheduler>,
+    scheduler: Arc<ReplayScheduler<ReplayOverlapRefresher>>,
+    refresh_overlap: bool,
     scheduler_cancel: CancellationToken,
     event_tx: Mutex<Option<mpsc::UnboundedSender<RouterEvent>>>,
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -288,6 +322,22 @@ impl KvReplayRouter {
         let profile = config
             .configured_policy_profile()
             .map_err(anyhow::Error::from)?;
+        let refresh_overlap =
+            WorkerSelector::<ReplayWorkerConfig>::required_worker_inputs(&selector)
+                .reads_kv_index()
+                && !config.use_remote_indexer
+                && profile
+                    .classes()
+                    .iter()
+                    .any(|class| class.queueing_enabled())
+                && read_overlap_refresh_after().is_some();
+        let refresher = refresh_overlap.then(|| {
+            Arc::new(ReplayOverlapRefresher {
+                indexer: indexer.clone(),
+                weights: CacheHitWeights::from(&config),
+                block_size: args.block_size as u32,
+            })
+        });
         let scheduler_cancel = CancellationToken::new();
         let scheduler = Arc::new(dynamo_scheduler::host::LocalScheduler::new(
             slots,
@@ -296,7 +346,7 @@ impl KvReplayRouter {
             args.block_size as u32,
             selector,
             prefill_load_estimator,
-            None,
+            refresher,
             None,
             None,
             None,
@@ -319,6 +369,7 @@ impl KvReplayRouter {
             config,
             block_size: args.block_size as u32,
             scheduler,
+            refresh_overlap,
             scheduler_cancel,
             event_tx: Mutex::new(Some(event_tx)),
             event_task: Mutex::new(Some(event_task)),
@@ -350,14 +401,16 @@ impl KvReplayRouter {
     async fn request_identities(
         &self,
         request: &DirectRequest,
-    ) -> Result<(TieredMatchDetails, Option<Vec<u64>>)> {
+    ) -> Result<(TieredMatchDetails, Option<Vec<u64>>, Option<Vec<LocalBlockHash>>)> {
         let cache_salt = request_cache_salt(request);
-        let salted_hashes = cache_salt.map(|cache_salt| {
+        let salted_hashes = if let Some(cache_salt) = cache_salt { Some({
             local_block_hashes(
                 salted_request_hashes(&request.tokens, self.block_size, cache_salt)
                     .local_block_hashes,
             )
-        });
+        }) } else if self.refresh_overlap {
+            Some(compute_block_hash_for_seq(&request.tokens, self.block_size, BlockHashOptions::default()))
+        } else { None };
         // Public tracking chains the salted block hashes, as the engine does.
         // Keyed identities never meet engine hashes; their namespace only
         // keeps one salt's active blocks apart from another's.
@@ -375,6 +428,7 @@ impl KvReplayRouter {
             },
             salted_hashes.as_deref(),
         );
+        let block_hashes = self.refresh_overlap.then(|| salted_hashes.clone()).flatten();
         let tiered = match salted_hashes {
             Some(hashes) => self.indexer.find_matches_for_hashes(hashes).await?,
             None => {
@@ -383,14 +437,14 @@ impl KvReplayRouter {
                     .await?
             }
         };
-        Ok((tiered, token_seq))
+        Ok((tiered, token_seq, block_hashes))
     }
 
     async fn select_worker(&self, request: &DirectRequest) -> Result<ReplayPlacement> {
         let uuid = request
             .uuid
             .ok_or_else(|| anyhow!("online replay requires requests to have stable UUIDs"))?;
-        let (tiered, token_seq) = self.request_identities(request).await?;
+        let (tiered, token_seq, block_hashes) = self.request_identities(request).await?;
         let overlap = OverlapAnalysis::new(
             &CacheHitWeights::from(&self.config),
             self.block_size,
@@ -406,7 +460,7 @@ impl KvReplayRouter {
                     request_id: uuid.to_string(),
                 },
                 token_seq,
-                block_hashes: None,
+                block_hashes,
                 isl_tokens: request.tokens.len(),
                 overlap,
                 kv_transfer_candidates: None,
@@ -797,6 +851,252 @@ mod tests {
 
         router.on_complete(request.uuid.unwrap()).await.unwrap();
         router.shutdown().await.unwrap();
+    }
+
+    #[rstest::rstest]
+    #[case::single(1)]
+    #[case::concurrent(2)]
+    #[tokio::test(start_paused = true)]
+    async fn online_queued_overlap_refresh_moves_worker(#[case] threads: u32) {
+        use dynamo_scheduler::host::TrackingHashAlgorithm;
+        use std::io::Write;
+
+        let clock_guard = keep_online_clock_paused();
+        let mut key = tempfile::NamedTempFile::new().unwrap();
+        key.write_all(&[0x39; 32]).unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {"block_size": 64, "max_num_batched_tokens": 64}
+        }))
+        .unwrap();
+        let router = Arc::new(
+            KvReplayRouter::new(
+                &args,
+                Some(KvRouterConfig {
+                    router_event_threads: threads,
+                    router_queue_threshold: Some(0.5),
+                    router_temperature: 0.0,
+                    overlap_score_credit: 100.0,
+                    router_tracking_hash: TrackingHashAlgorithm::KeyedXxh3V1,
+                    router_tracking_key_file: Some(key.path().to_path_buf()),
+                    router_tracking_key_id: Some("online-refresh".into()),
+                    ..Default::default()
+                }),
+                None,
+                2,
+            )
+            .unwrap(),
+        );
+        let first = router
+            .select_worker(&priority_request(1, 0, 0))
+            .await
+            .unwrap();
+        let second = router
+            .select_worker(&priority_request(2, 0, 0))
+            .await
+            .unwrap();
+        assert_ne!(first.worker_idx, second.worker_idx);
+        let request = priority_request(3, 0, 0);
+        let hash = compute_block_hash_for_seq(&request.tokens, 64, BlockHashOptions::default())[0];
+        router
+            .indexer
+            .apply_event(store_event(
+                first.worker_idx as u64,
+                1,
+                0,
+                hash,
+                StorageTier::Device,
+            ))
+            .await;
+        router.indexer.flush().await;
+        let queued = {
+            let router = Arc::clone(&router);
+            tokio::spawn(async move { router.select_worker(&request).await.unwrap() })
+        };
+        wait_for_online_queue(&router).await;
+        router
+            .indexer
+            .apply_event(remove_event(first.worker_idx as u64, 2, 1))
+            .await;
+        router
+            .indexer
+            .apply_event(store_event(
+                second.worker_idx as u64,
+                3,
+                0,
+                hash,
+                StorageTier::Device,
+            ))
+            .await;
+        router.indexer.flush().await;
+        let threshold = dynamo_scheduler::host::read_overlap_refresh_after();
+        tokio::time::advance(threshold.unwrap_or(Duration::from_secs(10))).await;
+        router.free(Uuid::from_u128(1)).await.unwrap();
+        router.free(Uuid::from_u128(2)).await.unwrap();
+        let selected = finish_online_admission(queued).await;
+        assert_eq!(
+            selected.worker_idx,
+            if threshold.is_some() {
+                second.worker_idx
+            } else {
+                first.worker_idx
+            }
+        );
+        router.free(Uuid::from_u128(3)).await.unwrap();
+        router.shutdown().await.unwrap();
+        clock_guard.abort();
+    }
+
+    #[rstest::rstest]
+    #[case::before_threshold(false, false, 1)]
+    #[case::at_threshold(true, false, 1)]
+    #[case::host_single(true, true, 1)]
+    #[case::host_concurrent(true, true, 2)]
+    #[tokio::test(start_paused = true)]
+    async fn online_queued_overlap_refresh_updates_load(
+        #[case] at_threshold: bool,
+        #[case] host: bool,
+        #[case] threads: u32,
+    ) {
+        let clock_guard = keep_online_clock_paused();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {"block_size": 64, "max_num_batched_tokens": 64}
+        }))
+        .unwrap();
+        let router = Arc::new(
+            KvReplayRouter::new(
+                &args,
+                Some(KvRouterConfig {
+                    router_queue_threshold: Some(0.5),
+                    router_track_prefill_tokens: true,
+                    router_event_threads: threads,
+                    host_cache_hit_weight: 0.5,
+                    ..Default::default()
+                }),
+                None,
+                1,
+            )
+            .unwrap(),
+        );
+        router
+            .select_worker(&priority_request(1, 0, 0))
+            .await
+            .unwrap();
+        let request = priority_request(2, 0, 0);
+        let hash = compute_block_hash_for_seq(&request.tokens, 64, BlockHashOptions::default())[0];
+        router
+            .indexer
+            .apply_event(store_event(0, 1, 0, hash, StorageTier::Device))
+            .await;
+        router.indexer.flush().await;
+        let queued = {
+            let router = Arc::clone(&router);
+            tokio::spawn(async move { router.select_worker(&request).await.unwrap() })
+        };
+        wait_for_online_queue(&router).await;
+        router.indexer.apply_event(remove_event(0, 2, 1)).await;
+        if host {
+            router
+                .indexer
+                .apply_event(store_event(0, 3, 0, hash, StorageTier::HostPinned))
+                .await;
+        }
+        router.indexer.flush().await;
+        let threshold = dynamo_scheduler::host::read_overlap_refresh_after();
+        let wait = threshold.unwrap_or(Duration::from_secs(10));
+        tokio::time::advance(if at_threshold { wait } else { wait / 2 }).await;
+        router.free(Uuid::from_u128(1)).await.unwrap();
+        finish_online_admission(queued).await;
+        let expected = if at_threshold && threshold.is_some() {
+            if host { 32 } else { 64 }
+        } else {
+            0
+        };
+        assert_eq!(
+            router.debug_potential_loads(0, true)[0].potential_prefill_tokens,
+            expected
+        );
+        router.free(Uuid::from_u128(2)).await.unwrap();
+        router.shutdown().await.unwrap();
+        clock_guard.abort();
+    }
+
+    #[rstest::rstest]
+    #[case::queue_disabled(false, false, true)]
+    #[case::remote_indexer(true, true, true)]
+    #[case::no_index_reads(true, false, false)]
+    #[tokio::test]
+    async fn online_queued_overlap_refresh_exclusions(
+        #[case] queue: bool,
+        #[case] remote: bool,
+        #[case] reads_index: bool,
+    ) {
+        let args = MockerConfig::default();
+        let router = KvReplayRouter::new(
+            &args,
+            Some(KvRouterConfig {
+                router_queue_threshold: queue.then_some(0.5),
+                use_remote_indexer: remote,
+                overlap_score_credit: if reads_index { 1.0 } else { 0.0 },
+                host_cache_hit_weight: 0.0,
+                disk_cache_hit_weight: 0.0,
+                ..Default::default()
+            }),
+            None,
+            1,
+        )
+        .unwrap();
+        assert!(!router.refresh_overlap);
+        router.shutdown().await.unwrap();
+    }
+
+    fn keep_online_clock_paused() -> tokio::task::JoinHandle<()> {
+        // Indexer workers run outside Tokio; idle auto-advance would count their CPU wait as queue time.
+        tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        })
+    }
+
+    async fn finish_online_admission<T>(task: tokio::task::JoinHandle<T>) -> T {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !task.is_finished() && std::time::Instant::now() < deadline {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            task.is_finished(),
+            "online scheduler did not finish admission"
+        );
+        task.await.unwrap()
+    }
+
+    async fn wait_for_online_queue(router: &KvReplayRouter) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            tokio::task::yield_now().await;
+            let scheduler = Arc::clone(&router.scheduler);
+            finish_online_admission(tokio::spawn(async move {
+                scheduler.admission_barrier().await.unwrap();
+            }))
+            .await;
+            if router.scheduler.pending_count() == 1 {
+                return;
+            }
+        }
+        panic!("request never entered the online scheduler queue");
+    }
+
+    fn remove_event(worker_id: WorkerId, event_id: u64, block_id: u64) -> RouterEvent {
+        RouterEvent::new(
+            worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Removed(dynamo_kv_events::event::KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(block_id)],
+                }),
+                dp_rank: 0,
+            },
+        )
     }
 
     #[tokio::test]
@@ -1411,7 +1711,7 @@ policy_classes:
         // Public tracking identities are the engine's sequence hashes.
         for cache_salt in [None, Some(""), Some("a"), Some("b")] {
             let request = cache_salt_request(0, cache_salt);
-            let (_, token_seq) = kv_router.request_identities(&request).await.unwrap();
+            let (_, token_seq, _) = kv_router.request_identities(&request).await.unwrap();
             assert_eq!(
                 token_seq,
                 Some(

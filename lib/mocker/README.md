@@ -62,3 +62,16 @@ decisions.
 
 - [Mocker CLI reference](../../docs/fern/pages/reference/components/mocker-cli-reference.mdx)
 - [Replay configuration reference](../../docs/fern/pages/reference/components/dynosim-replay-cli-reference.mdx)
+
+## Queued Overlap Refresh
+
+Online and offline KV-router replay refresh cache overlap before selecting a worker
+when a request has waited in the policy queue for at least
+`DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS` (default 10 seconds). Set it to `0` to
+disable refresh. Refresh uses current device and lower-tier residency and can
+change worker selection and prefill load accounting; queue priority stays unchanged.
+
+Refresh is enabled at startup only for selectors that read the KV index, with
+queueing enabled and remote indexing disabled. Online replay uses the scheduler's
+250 ms refresh timeout and retains arrival scores if refreshing fails or times out.
+Online replay's existing KV fetch-hint limitations remain unchanged.
