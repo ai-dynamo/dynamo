@@ -243,7 +243,7 @@ pub enum RouterResponse {
         overlap_blocks: u32,
     },
     QueueRejected {
-        rejection: dynamo_admission::queue::QueueRejection,
+        rejection: dynamo_admission::QueueRejection,
     },
     PrefillMarked {
         success: bool,
@@ -322,8 +322,6 @@ pub struct SelectionLogFields {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use serde_json;
 
     #[test]
     fn test_router_request_mark_free_backwards_compatible_deserialization() {
