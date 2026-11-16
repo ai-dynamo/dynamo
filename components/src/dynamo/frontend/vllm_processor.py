@@ -1589,9 +1589,8 @@ class VllmProcessor:
         except InvalidArgument:
             raise
         except RoutedEngineError:
-            # The worker's error keeps its class (for example CapacityExhausted,
-            # HTTP 529). An error envelope would turn it into a 500; let the
-            # binding restore the worker's status instead.
+            # Keep the worker's error class (for example CapacityExhausted, HTTP 529);
+            # an error envelope would turn it into a 500.
             raise
         except Exception as e:
             backend_error = backend_invalid_argument_to_http_error(e)
