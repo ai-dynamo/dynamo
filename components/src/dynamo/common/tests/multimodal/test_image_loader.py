@@ -807,6 +807,23 @@ async def test_to_rgb_receives_alpha_on_every_path(source: str) -> None:
     assert image.getpixel((1, 0)) == (1, 2, 3)
 
 
+async def test_per_call_to_rgb_bypasses_the_in_process_cache(
+    loader: ImageLoader,
+) -> None:
+    """A request-specific conversion neither reads nor fills the converted-image cache."""
+    url = "https://example.com/transparent.png"
+    custom = Image.new("RGB", (2, 1), (255, 0, 0))
+    mock_fetch = _mock_fetch_bytes(content=_rgba_png_bytes())
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        default = await loader.load_image(url)
+        converted = await loader.load_image(url, to_rgb=lambda image: custom)
+        cached = await loader.load_image(url)
+
+    assert converted is custom
+    assert cached is default
+    assert mock_fetch.call_count == 2
+
+
 async def test_to_rgb_runs_on_shared_cache_hit(monkeypatch) -> None:
     """The shared cache holds encoded bytes, so a hit still goes through the conversion."""
     _enable_shared_image_cache(monkeypatch)
@@ -824,6 +841,28 @@ async def test_to_rgb_runs_on_shared_cache_hit(monkeypatch) -> None:
     ):
         loader = ImageLoader(url_policy=_permissive_policy(), to_rgb=to_rgb)
         await loader.load_image("https://example.com/logo.png")
+
+    origin_fetch.assert_not_called()
+    assert seen == ["RGBA"]
+
+
+async def test_per_call_to_rgb_runs_on_shared_cache_hit(monkeypatch) -> None:
+    """A request-specific conversion still reads the shared cache of encoded bytes."""
+    _enable_shared_image_cache(monkeypatch)
+    client = AsyncMock()
+    client.get.return_value = _rgba_png_bytes()
+    seen: list[str] = []
+
+    def to_rgb(image: Image.Image) -> Image.Image:
+        seen.append(image.mode)
+        return image.convert("RGB")
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, _mock_fetch_bytes()) as origin_fetch,
+    ):
+        loader = ImageLoader(url_policy=_permissive_policy())
+        await loader.load_image("https://example.com/logo.png", to_rgb=to_rgb)
 
     origin_fetch.assert_not_called()
     assert seen == ["RGBA"]

@@ -15,6 +15,7 @@ Usage:
     os.environ["VLLM_MEDIA_CONNECTOR"] = "dynamo"
 """
 
+import functools
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -54,8 +55,10 @@ def _get_shared_image_loader(
 
 # Lazy registration — only register if vLLM is available.
 try:
-    from vllm.multimodal.image import convert_image_mode, normalize_image
     from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
+    from vllm.multimodal.media.image import ImageMediaIO
+
+    from dynamo.common.multimodal.vllm_image import vllm_rgb
 
     @MEDIA_CONNECTOR_REGISTRY.register("dynamo")
     class DynamoMediaConnector(MediaConnector):
@@ -70,9 +73,7 @@ try:
 
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
-            self._image_loader = _get_shared_image_loader(
-                lambda image: convert_image_mode(normalize_image(image), "RGB")
-            )
+            self._image_loader = _get_shared_image_loader(vllm_rgb)
 
         async def fetch_image_async(
             self,
@@ -81,8 +82,17 @@ try:
             image_mode: str = "RGB",
         ) -> Image.Image:
             """Async image fetch via dynamo's ImageLoader with LRU cache."""
+            # vLLM merges these options from the server config, its renderer
+            # and the request. The loader returns RGB, so only the background
+            # colour applies here; image_mode keeps its old handling below.
+            background = ImageMediaIO(
+                **self.media_io_kwargs.get("image", {})
+            ).rgba_background_color
+            to_rgb: Callable[[Image.Image], Image.Image] | None = None
+            if background != (255, 255, 255):
+                to_rgb = functools.partial(vllm_rgb, background=background)
             try:
-                img = await self._image_loader.load_image(image_url)
+                img = await self._image_loader.load_image(image_url, to_rgb=to_rgb)
             except (UrlValidationError, HttpStatusError, HttpConfigurationError):
                 # These are deliberate client-error verdicts, not signals that
                 # another loader should retry the same rejected URL.
