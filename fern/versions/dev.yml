@@ -1334,6 +1334,8 @@ navigation:
             path: ../pages-dev/reference/observability/forward-pass-metrics-traces.mdx
           - page: Request Traces
             path: ../pages-dev/reference/observability/request-traces.mdx
+          - page: NVTX Profiling
+            path: ../pages-dev/reference/observability/nvtx-profiling.md
           - page: Environment Variables
             path: ../pages-dev/reference/observability/environment-variables.mdx
           - page: Metrics Catalog
