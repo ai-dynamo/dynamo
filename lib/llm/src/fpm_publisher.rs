@@ -114,12 +114,24 @@ impl FpmEventRelay {
         let cancel_clone = cancel.clone();
 
         let trace = rt.block_on(init_fpm_trace(component));
+        // Every forward pass the engine reports is engine progress for this endpoint: feed it to
+        // the health checker so a busy endpoint is judged by progress instead of by a canary.
+        let system_health = component.drt().system_health();
+        let endpoint_name = endpoint.name().to_string();
 
         let publisher =
             rt.block_on(async { EventPublisher::for_endpoint(&endpoint, FPM_TOPIC).await })?;
 
         rt.spawn(async move {
-            Self::relay_loop(zmq_endpoint, publisher, cancel_clone, trace).await;
+            Self::relay_loop(
+                zmq_endpoint,
+                publisher,
+                cancel_clone,
+                trace,
+                system_health,
+                endpoint_name,
+            )
+            .await;
         });
 
         Ok(Self { cancel })
@@ -135,6 +147,8 @@ impl FpmEventRelay {
         publisher: EventPublisher,
         cancel: CancellationToken,
         trace: Option<crate::fpm_trace::FpmTrace>,
+        system_health: std::sync::Arc<parking_lot::Mutex<dynamo_runtime::SystemHealth>>,
+        endpoint_name: String,
     ) {
         let socket = match connect_sub_socket(&zmq_endpoint, None).await {
             Ok(socket) => socket,
@@ -160,6 +174,17 @@ impl FpmEventRelay {
                             // ZMQ multipart: [topic, seq, payload]
                             if frames.len() == 3 {
                                 let payload = bytes::Bytes::from(frames.swap_remove(2));
+                                // Only a completed forward pass is engine progress. The publisher
+                                // also emits a 1s idle heartbeat (wall_time == 0.0) when nothing is
+                                // running; counting that would let a frozen engine look alive, so
+                                // record progress only for a real forward pass. A decode failure
+                                // falls through without recording (the raw relay below is unaffected).
+                                if matches!(
+                                    rmp_serde::from_slice::<FpmProgressPeek>(payload.as_ref()),
+                                    Ok(fpm) if fpm.wall_time > 0.0
+                                ) {
+                                    system_health.lock().note_endpoint_progress(&endpoint_name);
+                                }
                                 tap_relay_fpm(&payload, trace.as_ref());
                                 if let Err(e) = publisher.publish_bytes_ref(&payload).await {
                                     tracing::warn!("FPM relay: event plane publish failed: {e}");
@@ -220,6 +245,15 @@ struct QueuedRequestMetricsSer {
     num_decode_requests: i32,
     sum_decode_kv_tokens: i64,
     var_decode_kv_tokens: f64,
+}
+
+/// Minimal peek at a relayed FPM payload: just enough to tell a real forward
+/// pass from the 1s idle heartbeat. The engine serializes the snapshot as a
+/// msgpack struct-map (see `serialize_fpm_into`), so decoding only `wall_time`
+/// works regardless of the other fields.
+#[derive(serde::Deserialize)]
+struct FpmProgressPeek {
+    wall_time: f64,
 }
 
 /// Top-level serialization struct matching Python `ForwardPassMetrics`.
@@ -465,6 +499,24 @@ mod tests {
         // Trace persistence is auxiliary. Reporting an initialization failure
         // must not turn it into a constructor error for either FPM publisher.
         assert!(report_fpm_trace_init(Err(anyhow::anyhow!("unwritable trace path"))).is_none());
+    }
+
+    #[test]
+    fn progress_peek_gates_idle_heartbeat() {
+        // The relay records progress only when wall_time > 0. A real forward
+        // pass must decode as progress; the 1s idle heartbeat (wall_time == 0.0)
+        // must not — otherwise a frozen engine would keep looking alive.
+        let heartbeat = serialize_fpm(&ForwardPassSnapshot::default(), "w", 0, 1).unwrap();
+        let peek: FpmProgressPeek = rmp_serde::from_slice(&heartbeat).unwrap();
+        assert_eq!(peek.wall_time, 0.0);
+
+        let real = ForwardPassSnapshot {
+            wall_time_secs: 0.025,
+            ..Default::default()
+        };
+        let real = serialize_fpm(&real, "w", 0, 2).unwrap();
+        let peek: FpmProgressPeek = rmp_serde::from_slice(&real).unwrap();
+        assert!(peek.wall_time > 0.0);
     }
 
     /// Verify that serialize_fpm produces valid msgpack that round-trips
