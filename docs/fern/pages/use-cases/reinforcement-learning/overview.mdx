@@ -42,6 +42,12 @@ Start with a specific bottleneck and a baseline metric. Measure cache reuse, wor
 Dynamo does not decide whether a trajectory is on-policy, accepted, or fresh enough for training. The framework must gate requests around synchronous updates or enforce its own bounded-staleness policy.
 </Info>
 
+## Decision Model
+
+**Experimental.** Use a decision model to classify text, estimate a predicate probability, or score an input against ordered levels through Dynamo. For RL workloads, your framework can use these results as evaluation signals; it still owns reward design, calibration, and trajectory acceptance. These are inference APIs, not a training or weight-update interface.
+
+Start with [Decision APIs](decision-model/apis.md) for OpenAI `/v1/decisions` and Jev `/v1/systemone`, including curl and official SDK examples. Use the [SGLang guide](decision-model/sglang.md) to launch the initial text-only worker profile. API compatibility does not establish model quality or equivalence to a hosted provider.
+
 ## Framework Integrations
 
 | Framework | Status | Start here |

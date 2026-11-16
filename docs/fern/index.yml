@@ -732,6 +732,14 @@ navigation:
             path: pages/use-cases/reinforcement-learning/weight-updates.md
           - page: RL Profiling and Simulation
             path: pages/use-cases/reinforcement-learning/operations-and-simulation.md
+          - section: Decision Model
+            slug: decision-model
+            collapsed: true
+            contents:
+              - page: APIs
+                path: pages/use-cases/reinforcement-learning/decision-model/apis.md
+              - page: SGLang
+                path: pages/use-cases/reinforcement-learning/decision-model/sglang.md
           - section: RL Framework Integrations
             skip-slug: true
             collapsed: open-by-default
