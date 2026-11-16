@@ -969,6 +969,54 @@ async def test_init_llm_worker_creates_multimodal_processor():
             )
 
 
+@pytest.mark.parametrize(
+    "cli_args",
+    [
+        [],
+        ["--modality", "multimodal"],
+        ["--modality", "multimodal", "--disaggregation-mode", "prefill"],
+        ["--modality", "multimodal", "--disaggregation-mode", "decode"],
+    ],
+    ids=["text", "multimodal", "multimodal-prefill", "multimodal-decode"],
+)
+@pytest.mark.asyncio
+async def test_init_llm_worker_turns_off_engine_detokenize(cli_args):
+    """Workers return token ids and the frontend detokenizes them, so the
+    engine must not also build output text, for text or multimodal requests."""
+    config = parse_args(["--model", "fake-model", *cli_args])
+    sampling_params = []
+
+    def _record_sampling_params(*args, **kwargs):
+        params = SamplingParams(*args, **kwargs)
+        sampling_params.append(params)
+        return params
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.AutoConfig.from_pretrained"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.MultimodalRequestProcessor"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.SamplingParams",
+            side_effect=_record_sampling_params,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured):
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+    assert len(sampling_params) == 1
+    assert sampling_params[0].detokenize is False
+
+
 # ---- Tests for _strip_postprocess_workers ----
 
 

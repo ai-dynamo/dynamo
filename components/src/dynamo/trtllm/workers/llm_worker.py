@@ -663,6 +663,9 @@ async def init_llm_worker(
             arg_map["model"], trust_remote_code=arg_map.get("trust_remote_code", False)
         )
     default_sampling_params = SamplingParams()
+    # Workers return token ids and the frontend detokenizes them, for text and
+    # multimodal requests alike, so TensorRT-LLM does not need to build text.
+    default_sampling_params.detokenize = False
 
     # Per-request performance metrics have their own opt-in: TensorRT-LLM
     # processes them for every finished request in this worker's serving
@@ -740,10 +743,6 @@ async def init_llm_worker(
             allowed_local_media_path=config.allowed_local_media_path,
             enable_frontend_decoding=config.frontend_decoding,
         )
-
-    else:
-        # We already detokenize inside HandlerBase. No need to also do it in TRTLLM.
-        default_sampling_params.detokenize = False
 
     connector = None
     needs_nixl = (
