@@ -7,8 +7,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_kv_router::indexer::LocalKvIndexer;
-use dynamo_kv_router::protocols::*;
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, RouterEvent};
+use dynamo_kv_indexer::host::LocalKvIndexer;
 
 use crate::kv_router::metrics::kv_publisher_metrics;
 

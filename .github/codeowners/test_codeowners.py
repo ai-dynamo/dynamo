@@ -1639,10 +1639,6 @@ class TestRealPolicyRoutingContracts:
                 ("operator", "gms"),
             ),
             (
-                "container/templates/sglang_xpu_framework.Dockerfile",
-                ("ops", "backend-sglang", "xpu"),
-            ),
-            (
                 "tests/router/test_router_e2e_with_vllm_xpu.py",
                 ("router", "backend-vllm", "xpu"),
             ),
