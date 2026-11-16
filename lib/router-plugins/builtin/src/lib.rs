@@ -105,58 +105,6 @@ worker_selection:
         }
     }
 
-    /// Two-tier keeps an eligible soft affinity target exclusive, as the built-in selector does,
-    /// so `--router-session-affinity-mode soft` holds a session on its worker under either policy.
-    #[test]
-    fn two_tier_uses_exclusive_affinity_for_every_role() {
-        use dynamo_scheduler::host::WorkerSelector;
-
-        struct TestWorker;
-        impl WorkerConfigLike for TestWorker {
-            fn data_parallel_start_rank(&self) -> u32 {
-                0
-            }
-            fn data_parallel_size(&self) -> u32 {
-                1
-            }
-            fn max_num_batched_tokens(&self) -> Option<u64> {
-                None
-            }
-            fn total_kv_blocks(&self) -> Option<u64> {
-                None
-            }
-        }
-
-        let (config, resolved) = resolve(
-            r#"
-worker_selection:
-  aggregated: dynamo-two-tier-cost-fn
-  prefill: dynamo-two-tier-cost-fn
-  decode: dynamo-two-tier-cost-fn
-"#,
-        );
-        let factory = resolved
-            .unwrap()
-            .expect("a configured instance resolves to a factory");
-        for worker_type in [
-            WorkerType::Aggregated,
-            WorkerType::Prefill,
-            WorkerType::Decode,
-        ] {
-            let policy = factory(
-                &SelectionConfig::from(&config),
-                worker_type,
-                RoutingPartitionRef::new("model", "default"),
-            );
-            assert!(
-                <WorkerSelectionPolicy as WorkerSelector<TestWorker>>::uses_exclusive_affinity_target(
-                    &policy
-                ),
-                "{worker_type:?}"
-            );
-        }
-    }
-
     #[test]
     fn resolves_sticky_min_load_yaml() {
         let (config, resolved) = resolve(

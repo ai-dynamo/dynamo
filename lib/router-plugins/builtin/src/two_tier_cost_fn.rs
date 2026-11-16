@@ -27,11 +27,13 @@
 //! unspecified. This matches the ported implementation; note that Dynamo's built-in selector
 //! instead samples uniformly among ties.
 //!
-//! Soft session affinity behaves as it does under the built-in selector: the policy asks the host
-//! to treat an eligible affinity target as exclusive, so a bound session stays on its worker
-//! while that worker is not overloaded or full, and the tiers above choose among the remaining
-//! workers only when the target is ineligible. Without this, the tiers would ignore the binding,
-//! and a session would stay put only when its worker happened to win the cache tier.
+//! Soft session affinity behaves as it does under the built-in selector. The policy asks the host
+//! to treat an eligible affinity target as exclusive, so the host narrows the candidates to the
+//! bound worker and the tiers above see only that worker. The host's eligibility rules, shared with
+//! the built-in selector, decide when a binding stops constraining selection; the tiers then apply
+//! to unbound requests only. Without busy thresholds a live target is never ineligible, so the
+//! load tier does not move a bound session. Without the exclusive target, the tiers would ignore
+//! the binding, and a session would stay put only when its worker happened to win.
 
 use std::cell::RefCell;
 use std::sync::Arc;
