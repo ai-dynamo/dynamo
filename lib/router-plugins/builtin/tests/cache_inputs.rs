@@ -3,11 +3,8 @@
 
 mod support;
 
-use dynamo_kv_router::{
-    KvRouterConfig, SharedCacheHits, WorkerCacheInput, WorkerCandidate, WorkerCandidates,
-    WorkerFilter, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelector,
-};
+use dynamo_kv_router::plugins::prelude::*;
+use dynamo_scheduler::host::WorkerSelector;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -83,7 +80,7 @@ impl WorkerFilter for InputProbe {
     }
 
     fn keep(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -99,7 +96,7 @@ impl WorkerScorer for InputProbe {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -125,7 +122,7 @@ impl WorkerPicker for InputProbe {
     }
 
     fn pick(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -210,7 +207,7 @@ fn each_component_can_only_read_its_own_inputs() {
                             calls: calls.clone(),
                         };
                         let policy = WorkerSelectionPolicy::new_with_filters(
-                            KvRouterConfig::default(),
+                            SelectionConfig::default(),
                             "test",
                             vec![
                                 Box::new(probe(filter_mask)),

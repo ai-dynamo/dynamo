@@ -186,6 +186,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         gpgsm \
         gpgv \
         keyboxd \
+        libgnutls30t64 \
         libssl3t64 \
         openssl \
     && apt-get clean \
@@ -245,6 +246,18 @@ COPY --from=licenses /legal/ /
 # daemon (see shared-build-sidecar.yml). Not used for any shipped image.
 FROM scratch AS sidecar-binaries
 COPY --from=sidecar-builder /out/bin/ /
+
+# ---- CI-only: live image integration test -----------------------------------
+# The live image test runs inside the upstream engine image, independently of
+# Dynamo's shared runtime. Keep test dependencies out of production artifacts.
+FROM builder-base AS trtllm-image-test-builder
+ARG TARGETARCH
+RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
+    bash lib/sidecar/trtllm/ci/build.sh
+
+FROM scratch AS sidecar-trtllm-image-tests
+COPY --from=trtllm-image-test-builder /out/tests/ /
 
 # ---- shipped runtime ---------------------------------------------------------
 FROM runtime-base AS runtime

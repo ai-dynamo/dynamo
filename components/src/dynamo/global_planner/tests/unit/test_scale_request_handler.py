@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from dynamo.global_planner.gpu_cost import GpuCostConfig
 from dynamo.global_planner.orchestrator import PoolIntent
+from dynamo.global_planner.priority import PriorityConfig
 from dynamo.global_planner.scale_handler import ScaleRequestHandler
 from dynamo.planner import KubernetesConnector, SubComponentType, TargetReplica
 from dynamo.planner.connectors.protocol import ScaleRequest
@@ -347,7 +349,7 @@ def _with_operator_gpu_status(components):
     for component in components:
         main = component["podTemplate"]["spec"]["containers"][0]
         gpu = main["resources"]["limits"]["nvidia.com/gpu"]
-        total_gpu = int(gpu) * component.get("multinode", {}).get("nodeCount", 1)
+        total_gpu = int(gpu or 0) * component.get("multinode", {}).get("nodeCount", 1)
         statuses[component["name"]] = {
             "gpusPerEngine": total_gpu,
             "gpusPerReplica": total_gpu,
@@ -622,7 +624,7 @@ async def test_pair_packs_both_partners_when_both_fit(mock_runtime):
     """Multi-partner packing: when same-DGD AND cross-DGD partners both fit
     within the budget band, BOTH are applied (the user's "larger groups of
     scaling decisions" property). Same-DGD partners are merged into the
-    request's DGD's atomic patch; cross-DGD partners get their own patch."""
+    request's DGD's connector call; cross-DGD partners get their own call."""
     handler = ScaleRequestHandler(
         runtime=mock_runtime,
         managed_namespaces=["default-dgd-a", "default-dgd-b"],
@@ -667,8 +669,7 @@ async def test_pair_packs_both_partners_when_both_fit(mock_runtime):
         t.sub_component_type.value: t.desired_replicas
         for t in connector_b.set_component_replicas.call_args[0][0]
     }
-    # DGD-A patch combines the request's prefill change with the same-DGD
-    # decode partner (one atomic call).
+    # DGD-A call includes both targets, but patches each component separately.
     assert a_targets == {"prefill": 2, "decode": 4}
     # DGD-B's cross-DGD partner is a separate patch.
     assert b_targets == {"decode": 4}
@@ -1278,9 +1279,12 @@ def test_read_all_pools_tolerates_concurrent_connector_insert(mock_runtime):
     # the iteration to simulate a concurrent first-time request.
     original = handler.orchestrator.capacity_manager._read_pools
 
-    def _mutating_read(connector):
+    calls: list[str] = []
+
+    def _mutating_read(participant_id, connector, role_hints=None):
         # Inject a new connector mid-iteration. Without the list() snapshot
         # this raises RuntimeError: dictionary changed size during iteration.
+        calls.append(participant_id)
         new_conn = MagicMock()
         new_conn.parent_dgd_name = "racy-dgd"
         new_conn.kube_api = MagicMock()
@@ -1290,12 +1294,17 @@ def test_read_all_pools_tolerates_concurrent_connector_insert(mock_runtime):
         handler.orchestrator.capacity_manager.connectors.setdefault(
             "default/racy-dgd", new_conn
         )
-        return original(connector)
+        return original(participant_id, connector, role_hints)
 
     handler.orchestrator.capacity_manager._read_pools = _mutating_read  # type: ignore[method-assign]
 
     # Should not raise.
     snapshot = handler.orchestrator.capacity_manager.observe()
+    # observe() swallows per-participant read errors, so a monkeypatch whose
+    # signature does not match would silently never run and this test would
+    # pass while exercising nothing. Assert it actually fired.
+    assert calls, "_read_pools monkeypatch never ran — signature drift"
+    assert "default/racy-dgd" in handler.orchestrator.capacity_manager.connectors
     # The pre-existing key is in the snapshot; the mid-iteration insert
     # may or may not appear (depends on snapshot timing) but the call
     # must complete cleanly.
@@ -1804,3 +1813,188 @@ async def test_untyped_worker_in_other_dgd_counts_toward_budget(mock_runtime):
     )
     assert results[0]["status"] == "rejected"
     connector_a.set_component_replicas.assert_not_called()
+
+
+# ---------------------------------------------------------------------------- #
+# Pool priority, end to end through the scale_request endpoint                 #
+# ---------------------------------------------------------------------------- #
+
+
+def _priority_handler(mock_runtime, pools):
+    """Handler with a fixed 12-GPU budget and a pool priority table."""
+    return ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-prod", "default-batch"],
+        k8s_namespace="default",
+        min_total_gpus=12,
+        max_total_gpus=12,
+        priority_config=PriorityConfig(pools=pools),
+    )
+
+
+async def _run_priority_transfer(mock_runtime, pools):
+    """Drive one over-ceiling scale-up against two equally-sized DGDs.
+
+    Both DGDs hold a pending scale-down, so packing must choose which one
+    absorbs the larger cut. Returns the targets each DGD was patched with.
+    """
+    handler = _priority_handler(mock_runtime, pools)
+    prod = _install_connector(
+        handler,
+        "default/prod",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="prod",
+    )
+    batch = _install_connector(
+        handler,
+        "default/batch",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="batch",
+    )
+
+    # Equal pending scale-downs, one per DGD: 3 -> 1 decode replicas.
+    now = time.time()
+    handler.orchestrator._intent_cache["default/prod/decode"] = PoolIntent(
+        last_desired=1, last_seen_at=now
+    )
+    handler.orchestrator._intent_cache["default/batch/decode"] = PoolIntent(
+        last_desired=1, last_seen_at=now
+    )
+
+    # prod wants two more prefill replicas: 14 GPUs standalone, over the ceiling.
+    results = await _run(
+        handler, _scale_req(dgd="prod", caller_ns="default-prod", prefill=5)
+    )
+    assert results[0]["status"] == "success", results[0]
+
+    def targets(connector):
+        return {
+            t.sub_component_type.value: t.desired_replicas
+            for t in connector.set_component_replicas.call_args[0][0]
+        }
+
+    return targets(prod), targets(batch)
+
+
+@pytest.mark.asyncio
+async def test_expendable_pool_absorbs_the_larger_cut(mock_runtime):
+    """End to end: the pool the operator marked expendable gives up more GPUs.
+
+    Both DGDs are identical and both have an equal pending scale-down, so the
+    only thing distinguishing them is the declared priority.
+    """
+    prod, batch = await _run_priority_transfer(
+        mock_runtime,
+        [
+            {"selector": "default/prod", "priority": 900},
+            {"selector": "default/batch", "priority": 10},
+        ],
+    )
+    # prod grows by 2 and gives back only 1 decode replica; batch gives 2.
+    assert prod == {"prefill": 5, "decode": 2}
+    assert batch == {"decode": 1}
+
+
+@pytest.mark.asyncio
+async def test_reversing_priorities_reverses_who_pays(mock_runtime):
+    """Same topology with the priorities swapped moves the cut to the other DGD,
+    which is what proves the outcome is driven by priority and not by
+    participant identity or observation order."""
+    prod, batch = await _run_priority_transfer(
+        mock_runtime,
+        [
+            {"selector": "default/prod", "priority": 10},
+            {"selector": "default/batch", "priority": 900},
+        ],
+    )
+    assert prod == {"prefill": 5, "decode": 1}
+    assert batch == {"decode": 2}
+
+
+# ---------------------------------------------------------------------------- #
+# Mocker topologies: GPU-free pools taking part in the budget                   #
+# ---------------------------------------------------------------------------- #
+
+# Two mocker DGDs, neither requesting GPUs, priced only by declared cost:
+#   dsv4-flash  2 prefill + 2 decode @ 8 GPU/replica = 32
+#   gpt-oss-120b 2 prefill + 2 decode @ 4 GPU/replica = 16
+# Fixed total of 48, tolerance 8 (the largest per-replica cost) -> band [40, 48].
+_MOCKER_GPU_COST = GpuCostConfig(
+    pools=[
+        {"selector": "default/dsv4-**", "gpu_per_replica": 8},
+        {"selector": "default/gpt-oss-**", "gpu_per_replica": 4},
+    ]
+)
+
+
+def _mocker_handler(mock_runtime, gpu_cost):
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-dsv4-flash", "default-gpt-oss-120b"],
+        k8s_namespace="default",
+        min_total_gpus=48,
+        max_total_gpus=48,
+        gpu_cost_config=gpu_cost,
+        priority_config=PriorityConfig(
+            pools=[
+                {"selector": "default/dsv4-**", "priority": 900},
+                {"selector": "default/gpt-oss-**", "priority": 10},
+            ]
+        ),
+    )
+    # gpu=None -> the DGD declares no nvidia.com/gpu, exactly like a mocker.
+    dsv4 = _install_connector(
+        handler,
+        "default/dsv4-flash",
+        _dgd_spec(2, 2, prefill_gpu=None, decode_gpu=None),
+        parent_dgd_name="dsv4-flash",
+    )
+    gpt = _install_connector(
+        handler,
+        "default/gpt-oss-120b",
+        _dgd_spec(2, 2, prefill_gpu=None, decode_gpu=None),
+        parent_dgd_name="gpt-oss-120b",
+    )
+    return handler, dsv4, gpt
+
+
+@pytest.mark.asyncio
+async def test_mocker_pools_cannot_be_budgeted_without_declared_cost(mock_runtime):
+    """Without a declared cost a GPU-free pool cannot be read at all, so every
+    scale request fails. This is the gap that made mocker-based testing of the
+    budget impossible."""
+    handler, _, _ = _mocker_handler(mock_runtime, gpu_cost=None)
+    results = await _run(
+        handler, _scale_req(dgd="dsv4-flash", caller_ns="default-dsv4-flash", decode=3)
+    )
+    assert results[0]["status"] == "error"
+    assert "zero-GPU shape" in results[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_mocker_pools_arbitrate_once_costs_are_declared(mock_runtime):
+    """End to end on a GPU-free topology: an over-ceiling request from the
+    important model is admitted by taking capacity from the expendable one, and
+    the cluster total is unchanged."""
+    handler, dsv4, gpt = _mocker_handler(mock_runtime, gpu_cost=_MOCKER_GPU_COST)
+
+    # gpt-oss has a pending scale-down worth 8 GPUs (2 decode replicas @ 4).
+    handler.orchestrator._intent_cache["default/gpt-oss-120b/decode"] = PoolIntent(
+        last_desired=0, last_seen_at=time.time()
+    )
+
+    # dsv4 wants a third decode replica: +8 GPUs, which alone would hit 56 > 48.
+    results = await _run(
+        handler, _scale_req(dgd="dsv4-flash", caller_ns="default-dsv4-flash", decode=3)
+    )
+    assert results[0]["status"] == "success", results[0]
+
+    def targets(connector):
+        return {
+            t.sub_component_type.value: t.desired_replicas
+            for t in connector.set_component_replicas.call_args[0][0]
+        }
+
+    assert targets(dsv4) == {"decode": 3}
+    assert targets(gpt) == {"decode": 0}
+    # dsv4 (2 + 3) * 8 = 40, gpt-oss-120b (2 + 0) * 4 = 8 -> 48, exactly the budget.

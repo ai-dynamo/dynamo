@@ -13,10 +13,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::replay::default_selector::DefaultWorkerSelectorControl;
 use anyhow::{Context, Result, anyhow, bail};
-use dynamo_custom_policy_builtin::DefaultWorkerSelectorControl;
-use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::plugins::worker_selection::{RuntimePolicyConfig, RuntimePolicyUpdate};
+use dynamo_router_protocol::WorkerType;
 use parking_lot::Mutex;
 
 /// Desired router policy parameters keyed by worker type (`aggregated`, `prefill` or `decode`),
@@ -164,8 +164,8 @@ pub fn parse_router_worker_type(name: &str) -> Result<WorkerType> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_custom_policy_builtin::DefaultWorkerSelector;
-    use dynamo_kv_router::KvRouterConfig;
+    use crate::replay::default_selector::DefaultWorkerSelector;
+    use dynamo_kv_router::config::KvRouterConfig;
     use dynamo_kv_router::plugins::worker_selection::RuntimePolicyError;
 
     fn registry_with(
@@ -175,7 +175,10 @@ mod tests {
         let selectors = controls
             .iter()
             .map(|(worker_type, config)| {
-                let selector = DefaultWorkerSelector::new(Some(config.clone()), "replay");
+                let selector = DefaultWorkerSelector::new(
+                    Some(dynamo_worker_selection::host::SelectionConfig::from(config)),
+                    "replay",
+                );
                 registry.register(*worker_type, selector.runtime_control());
                 selector
             })
@@ -327,5 +330,41 @@ mod tests {
                 .any(|cause| cause.downcast_ref::<RuntimePolicyError>().is_some()),
             "{error:#}"
         );
+    }
+
+    fn patch(parameters: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        parameters.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn selector_controls_share_runtime_state_and_clones_start_fresh() {
+        let config = KvRouterConfig {
+            router_temperature: 0.5,
+            ..Default::default()
+        };
+        let selector = DefaultWorkerSelector::new(
+            Some(dynamo_worker_selection::host::SelectionConfig::from(
+                &config,
+            )),
+            "replay",
+        );
+        let control = selector.runtime_control();
+        let initial = control.runtime_config().unwrap();
+        assert_eq!(initial.revision(), 0);
+
+        control
+            .update_runtime_config(RuntimePolicyUpdate::patch(
+                0,
+                patch(serde_json::json!({"router_temperature": 1.5})),
+            ))
+            .unwrap();
+        // A handle taken later reads the same policy.
+        let after = selector.runtime_control().runtime_config().unwrap();
+        assert_eq!(after.revision(), 1);
+        assert_eq!(after.parameters()["router_temperature"], 1.5);
+
+        let clone = selector.clone();
+        assert_eq!(clone.runtime_control().runtime_config().unwrap(), initial);
+        assert_eq!(control.runtime_config().unwrap().revision(), 1);
     }
 }

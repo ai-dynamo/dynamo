@@ -1,6 +1,6 @@
 # lib/llm/src/kv_router
 
-This module is the router's host layer around the `lib/kv-router` selection core. Read
+This module is the router's host layer around the `lib/router/kv-router` selection core. Read
 [`README.md`](README.md) before changing selection inputs, booking ownership, cancellation,
 prefill activation, or the encode and prefill hops; it explains the layer map, per-stage roles,
 and the booking lifecycle these rules protect.
@@ -10,9 +10,11 @@ and the booking lifecycle these rules protect.
 - `kv_router.rs`: `KvRouter`. Estimates how much of a request each worker already has cached,
   then asks the scheduler to choose a worker. It selects and books, but never sends a request.
 - `embedded.rs`: connects discovered workers and their load to one `SelectionService` partition
-  from `lib/kv-router`, and runs each selection through `SelectionCore`.
-- `indexer/`: tracks which KV-cache blocks each worker holds; lookups run in `lib/kv-router`.
+  from `lib/router/kv-router`, and runs each selection through `SelectionCore`.
+- `indexer/`: tracks which KV-cache blocks each worker holds; lookups run in `lib/router/kv-router`.
 - `publisher/`: receives KV-cache events and worker metrics from inference engines.
+- `active_load.rs`: `ActiveLoad`, the load message workers publish on the event plane. Written
+  by `publisher/`, read by `metrics_subscriber.rs`, `discovery/worker_monitor.rs`, and `pool_relay/`.
 - `metrics.rs`, `metrics_subscriber.rs`: router Prometheus metrics, and the subscription to
   workers' KV load metrics.
 - `sequence.rs`, `sequence/`: runtime glue for active-sequence tracking and its replica sync.
@@ -23,7 +25,7 @@ and the booking lifecycle these rules protect.
   and response cleanup for one worker set.
   - `routing_host/kv.rs`: the KV path: preview, plan, select, track, dispatch.
   - `routing_host/kv_selection.rs`: turns a request's routing inputs into a `KvRouter` call.
-  - `routing_host/builtin.rs`, `routing_host/occupancy.rs`: non-KV modes (random, round-robin,
+  - `routing_host/hosted.rs`, `routing_host/occupancy.rs`: non-KV modes (random, round-robin,
     load-based) and Direct mode.
   - `routing_host/request_guard.rs`: tracks a dispatched request's progress and releases its
     booking.

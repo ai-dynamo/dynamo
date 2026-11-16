@@ -23,10 +23,14 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
+	commoncapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/common/v1"
+	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/testfixture"
 	manifestcapnpv2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -68,6 +72,9 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 	runtimeConfig := &commoncontroller.RuntimeConfig{}
 
 	tests := []string{
+		"from_dgd_yaml/units-qwen",
+		"from_dgd_yaml/units-gpt-oss",
+
 		"from_dgd_yaml/lpx_v2_vllm",
 		"from_dgd_yaml/node-local-v2-lpu-only",
 		"from_dgd_yaml/node-local-v2-hybrid",
@@ -76,6 +83,7 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 		"from_dgd_yaml/node-local-v2-specdecode",
 		"from_dgd_yaml/node-local-v3-hx-lpu-only",
 		"from_dgd_yaml/node-local-v3-hx-specdecode",
+		"from_dgd_yaml/node-local-v3-hx-agent-specdecode",
 		"from_dgd_yaml/node-local-v3-hx-hybrid",
 		"from_dgd_yaml/node-local-v3-hx-hybrid-all-local",
 		"from_dgd_yaml/lpx-v3-hx-local-partitions",
@@ -113,6 +121,12 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 				require.NotNil(t, component)
 				require.True(t, component.IsLPX())
 				require.Equal(t, servingHash, clique.Labels[consts.KubeLabelDynamoWorkerHash])
+				// A runtime sidecar keeps the ordinary worker namespace and serving suffix.
+				if runtime := common.FindContainerByName(clique.Spec.PodSpec.InitContainers, consts.RuntimeContainerName); runtime != nil {
+					require.Contains(t, runtime.Env, corev1.EnvVar{Name: consts.DynamoNamespaceWorkerSuffixEnvVar, Value: servingHash})
+					require.Contains(t, runtime.Env, corev1.EnvVar{Name: consts.DynamoNamespaceEnvVar, Value: dynamoDeployment.GetDynamoNamespaceForComponent(component)})
+					continue
+				}
 				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: consts.DynamoNamespaceWorkerSuffixEnvVar})
 				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: consts.DynamoNamespaceEnvVar, Value: dynamoDeployment.GetDynamoNamespaceForComponent(component) + "-" + servingHash})
 			}
@@ -147,6 +161,9 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 					}
 					delete(clique.Labels, consts.KubeLabelDynamoWorkerHash)
 					container := &clique.Spec.PodSpec.Containers[0]
+					if runtime := common.FindContainerByName(clique.Spec.PodSpec.InitContainers, consts.RuntimeContainerName); runtime != nil {
+						container = runtime
+					}
 					container.Env = slices.DeleteFunc(container.Env, func(env corev1.EnvVar) bool { return env.Name == consts.DynamoNamespaceWorkerSuffixEnvVar })
 					index := slices.IndexFunc(container.Env, func(env corev1.EnvVar) bool { return env.Name == consts.DynamoNamespaceEnvVar })
 					container.Env[index].Value = clique.Labels[consts.KubeLabelDynamoNamespace]
@@ -338,11 +355,6 @@ func TestLPXAgentRuntimeSidecarKeepsAuthoredSystemPort(t *testing.T) {
 func TestLPXConductorRuntimeSidecarRendering(t *testing.T) {
 	t.Log("Render a hybrid model whose conductor hosts the runtime sidecar")
 	dgd := loadLPXInput(t, "node-local-v2-hybrid")
-	dgd.GetComponentByName("lpu").ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.InitContainers = []corev1.Container{{
-		Name: consts.RuntimeContainerName, Image: lpxSidecarImage, RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
-		Args:         []string{"lpx", "--model-path", "$(LPX_MODEL_PATH)/tokenizer"},
-		VolumeMounts: []corev1.VolumeMount{{Name: "model-storage", MountPath: "/nfs", ReadOnly: true}},
-	}}
 	_, serving := renderLPXServing(t, dgd)
 
 	t.Log("The serving conductor's first init container is the sidecar")
@@ -979,6 +991,10 @@ func newTestDataModelRegistry(t *testing.T, registryRoot string) lpx.ModelRegist
 		writeTestGraphBuild(t, registryRoot, buildID, testV3GraphManifestCapnp(t, fixture))
 	}
 
+	for _, name := range []string{"qwen", "gpt-oss"} {
+		writeUnitsGraphBuild(t, registryRoot, "units-"+name, name)
+	}
+
 	registry, err := lpx.NewModelRegistry(registryRoot, nil)
 	require.NoError(t, err)
 	return registry
@@ -1582,4 +1598,89 @@ func newLPXGPUClient(t *testing.T) client.Client {
 		&resourcev1.DeviceClass{Name: "gpu.nvidia.com", Spec: resourcev1.DeviceClassSpec{Selectors: []resourcev1.DeviceSelector{{CEL: &resourcev1.CELDeviceSelector{Expression: `device.driver == "gpu.nvidia.com"`}}}}},
 		&resourcev1.ResourceClaimTemplate{Name: "decode-gpu", Namespace: "test", Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{Name: "gpu", Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "gpu.nvidia.com", AllocationMode: resourcev1.DeviceAllocationModeExactCount, Count: 1}}}}}}},
 	).Build()
+}
+
+func writeUnitsGraphBuild(t *testing.T, root, buildID, shape string) {
+	t.Helper()
+	width, count := uint32(16), 1
+	mode := deploymentcapnpv1.CompilationMode_lpuOnly
+	extra := commoncapnpv1.DeviceType_lpu
+	switch shape {
+	case "qwen":
+		count, mode, extra = 2, deploymentcapnpv1.CompilationMode_lpx, commoncapnpv1.DeviceType_cpu
+	case "gpt-oss":
+		width, count, mode, extra = 8, 14, deploymentcapnpv1.CompilationMode_lpx, commoncapnpv1.DeviceType_cuda
+	}
+	writeLPXCheckpointTestBuild(t, root, buildID, mode, checkpointTestModel, checkpointTestRevision)
+	path := filepath.Join(root, buildID, "deployment.v1.capnp.bin")
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	message, err := capnp.Unmarshal(data)
+	require.NoError(t, err)
+	deployment, err := deploymentcapnpv1.ReadRootDeployment(message)
+	require.NoError(t, err)
+	writable, _ := capnp.NewSingleSegmentMessage(nil)
+	require.NoError(t, writable.SetRoot(deployment.ToPtr()))
+	deployment, err = deploymentcapnpv1.ReadRootDeployment(writable)
+	require.NoError(t, err)
+	config, err := deployment.Config()
+	require.NoError(t, err)
+	total := count
+	if extra != commoncapnpv1.DeviceType_lpu {
+		total++
+	}
+	partitions, err := deployment.NewPartitions(int32(total))
+	require.NoError(t, err)
+	for i := range count {
+		ref, err := partitions.At(i).NewPartition()
+		require.NoError(t, err)
+		ref.SetDeviceType(commoncapnpv1.DeviceType_lpu)
+		ref.SetPartitionId(uint32(i))
+		detail, err := partitions.At(i).Detail().NewLpu()
+		require.NoError(t, err)
+		require.NoError(t, detail.SetPath(fmt.Sprintf("part-%d", i)))
+		detail.SetDevicesPerNode(width)
+		detail.SetArchitecture(deploymentcapnpv1.LpuArchitecture_lp20)
+		if width == 16 {
+			detail.SetArchitecture(deploymentcapnpv1.LpuArchitecture_lp30)
+		}
+	}
+	if total != count {
+		ref, err := partitions.At(count).NewPartition()
+		require.NoError(t, err)
+		ref.SetDeviceType(extra)
+	}
+	groups := make([][][]uint32, count)
+	for i := range count {
+		groups[i] = [][]uint32{{uint32(i)}}
+	}
+	switch shape {
+	case "qwen":
+		groups = [][][]uint32{{{0}, {1}}}
+	case "gpt-oss":
+		groups = append(groups[:12], [][]uint32{{12}, {13}})
+	}
+	units := make([]testfixture.Unit, len(groups))
+	for i, group := range groups {
+		for _, members := range group {
+			reservation := testfixture.Reservation{IDs: members, Nodes: 1}
+			if width == 16 {
+				reservation.HX = []uint8{1, 1, 1}
+			}
+			units[i].Reservations = append(units[i].Reservations, reservation)
+		}
+		for j := 1; j < len(group); j++ {
+			connector := testfixture.Connector{HX: width == 16}
+			if connector.HX {
+				for device := range width {
+					connector.Pairs = append(connector.Pairs, [2]uint32{device, device})
+				}
+			}
+			units[i].Connectors = append(units[i].Connectors, connector)
+		}
+	}
+	testfixture.WriteUnits(t, config, units)
+	data, err = writable.Marshal()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
 }

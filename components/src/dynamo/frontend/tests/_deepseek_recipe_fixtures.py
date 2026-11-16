@@ -10,10 +10,12 @@ from dynamo.frontend import sglang_deepseek
 
 @pytest.fixture
 def recipe_tokenizer():
-    if sglang_deepseek.recipe_renderer is None:
-        pytest.skip("SGLang predates the recipe renderer")
-    recipe = pytest.importorskip("deepseek_recipe")
-    tokenizers = pytest.importorskip("tokenizers")
+    import deepseek_recipe as recipe
+    import tokenizers
+
+    assert (
+        sglang_deepseek.recipe_renderer is not None
+    ), "The supported SGLang installation must provide the recipe renderer"
     alphabet = sorted(tokenizers.pre_tokenizers.ByteLevel.alphabet())
     backend = tokenizers.Tokenizer(
         tokenizers.models.BPE(vocab={c: i for i, c in enumerate(alphabet)}, merges=[])

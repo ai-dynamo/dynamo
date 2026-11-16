@@ -12,21 +12,35 @@ homepage.workspace = true
 repository.workspace = true
 readme = "README.md"
 
+[package.metadata.cargo-machete]
+# flate2 only selects the deflate backend that zip uses; no code imports it.
+ignored = ["flate2"]
+
 [features]
 default = []
 profile = []
 # Benchmark builds for replay parity tooling. Canonical (seeded) replay needs no
 # feature: a caller opts in per replay with ReplayDeterminism::CanonicalV1.
-replay-bench = ["aisimulate-core/replay-bench", "dynamo-kv-router/bench"]
+replay-bench = ["aisimulate-core/replay-bench", "dynamo-kv-router/bench", "dynamo-kv-indexer/bench", "dynamo-scheduler/bench", "dynamo-slot-tracker/bench"]
 test-support = []
 zmq-events = ["dep:tmq"]
 
 [dependencies]
-dynamo-custom-policy-builtin = { workspace = true }
+dynamo-router-policies = { workspace = true }
 # repo
 aisimulate-core = { workspace = true }
+dynamo-admission = { workspace = true }
+dynamo-kv-events = { workspace = true }
+dynamo-kv-hashing = { workspace = true }
+dynamo-kv-hints = { workspace = true }
+dynamo-kv-indexer = { workspace = true }
 dynamo-kv-router = { workspace = true }
+dynamo-router-protocol = { workspace = true }
+dynamo-scheduler = { workspace = true }
+dynamo-session-affinity = { workspace = true }
+dynamo-slot-tracker = { workspace = true }
 dynamo-tokens = { workspace = true }
+dynamo-worker-selection = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
@@ -47,10 +61,16 @@ uuid = { workspace = true }
 validator = { workspace = true }
 
 # crate-specific
+# zip's deflate-flate2 picks no flate2 backend; flate2's default backend is miniz_oxide.
+flate2 = "1.1.9"
 ndarray = "0.16"
-ndarray-npy = "0.9"
+# Without its npz feature, which needs zip 2.x; perf_model.rs reads NPZ archives with zip.
+ndarray-npy = { version = "0.9", default-features = false }
 ndarray-interp = "0.5"
 rustc-hash = "2"
+fastrand = "2"
+# deflate-flate2 uses the miniz_oxide backend above; the zlib variants switch flate2 for all users.
+zip = { version = "9.1.3", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-timerfd = "0.2"

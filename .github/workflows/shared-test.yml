@@ -304,6 +304,7 @@ jobs:
         shell: bash
         env:
           LANE_SUITE: ${{ inputs.test_suite_name }}
+          LANE_FRAMEWORK: ${{ inputs.framework }}
           LANE_TYPE: ${{ inputs.test_type }}
           LANE_CUDA: ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}
           LANE_PLATFORM: ${{ matrix.platform }}
@@ -319,7 +320,11 @@ jobs:
             printf '%s' "${s%-}"
           }
           lane="$(slug "${LANE_SUITE}-${LANE_TYPE}-${LANE_CUDA}-${LANE_PLATFORM}")"
-          echo "DD_TAGS=team:dynamo,lane:${lane},test_suite:$(slug "${LANE_SUITE}")" >> "$GITHUB_ENV"
+          # Kept as two dimensions: test_suite_name is a suite label, not a
+          # framework (it also takes planner, triton, *-efa, xpu-*).
+          # Neither may be tagged test_suite: -- ddtrace reserves that key as
+          # an object and silently drops a conflicting string tag.
+          echo "DD_TAGS=team:dynamo,lane:${lane},framework:$(slug "${LANE_FRAMEWORK}"),suite:$(slug "${LANE_SUITE}")" >> "$GITHUB_ENV"
           echo "Datadog lane tag: ${lane}"
 
       - name: Run Sanity Check on Runtime Image
@@ -377,22 +382,6 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
         run: bash .github/scripts/pytest-local.sh
-      - name: Test pinned DeepSeek recipe adapter (CPU-only)
-        if: ${{ inputs.framework == 'sglang' && inputs.run_cpu_only_tests && matrix.platform == 'amd64' }}
-        timeout-minutes: 5
-        shell: bash
-        run: |
-          set -euo pipefail
-          recipe_deps="${RUNNER_TEMP}/sglang-recipe-deps"
-          python3 -m pip install --disable-pip-version-check --no-deps --target "${recipe_deps}" \
-            deepseek-recipe==0.2.0 tokenizers==0.23.2
-          while read -r revision digest; do
-            PYTHONPATH="${recipe_deps}${PYTHONPATH:+:${PYTHONPATH}}" \
-              python3 .github/scripts/run_sglang_recipe_tests.py \
-              --revision "${revision}" --sha256 "${digest}"
-          done <<'ADAPTERS'
-          a77998e15718b659135b0728e050468b5db6d648 4988310b364d007ecc9f0e41a2a9ddb1d1aa9d30ebdd8b79df18e7d217c9365a
-          ADAPTERS
       - name: Upload Coverage Data (CPU-only)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: ${{ always() && steps.cpu-only-tests.outcome != 'skipped' && inputs.enable_coverage == 'true' }}

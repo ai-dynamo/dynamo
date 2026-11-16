@@ -75,7 +75,8 @@ ROUTER_NOT_RETUNABLE: dict[str, str] = {
     "host_cache_hit_weight": _STARTUP_OVERLAP_ACCOUNTING,
     "disk_cache_hit_weight": _STARTUP_OVERLAP_ACCOUNTING,
     "shared_cache_multiplier": (
-        "replay reports no shared cache hits, so every value would score the same"
+        "a router started with it at 0 builds no KV fetch inputs and a runtime "
+        "update cannot add them, so retune keeps it at its startup value"
     ),
 }
 

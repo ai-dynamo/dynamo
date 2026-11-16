@@ -189,6 +189,8 @@ def main(argv: list[str] | None = None) -> None:
 
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.transfer_backend == TransferBackendKind.MX.value:
+        parser.error("--transfer-backend=mx requires DYN_GMS_USE_V1=true")
     if not args.checkpoint_dir:
         parser.error(
             f"--checkpoint-dir is required for --transfer-backend={args.transfer_backend}"

@@ -4,11 +4,13 @@
 """Recipe encoding against SGLang's real adapter, without loading a model."""
 
 import copy
+import importlib.util
 import json
 
 import pytest
 
-pytest.importorskip("sglang.srt.parser")
+if importlib.util.find_spec("sglang") is None:
+    pytest.skip("SGLang is not installed", allow_module_level=True)
 from dynamo.frontend import sglang_deepseek  # noqa: E402 -- optional SGLang guard
 
 pytest_plugins = ["_deepseek_recipe_fixtures"]

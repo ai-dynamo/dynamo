@@ -1,17 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The default policy credits blocks a worker can fetch from a KV transfer source.
+//! The `kvcr` preset credits blocks a worker can copy from a KV transfer source; the router
+//! commits the selected worker to that copy. The default policy credits no copy.
 
 mod support;
-use dynamo_custom_policy_builtin::DefaultWorkerSelector;
-use dynamo_kv_router::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
-use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvHintTransferWorkerMetadata, KvTransferEnforcement,
-    WorkerConfigLike, WorkerWithDpRank,
-};
-use dynamo_kv_router::scheduling::SchedulingRequest;
-use dynamo_kv_router::{KvRouterConfig, WorkerLoadProjection, WorkerSelector};
+use dynamo_kv_router::plugins::prelude::*;
+use dynamo_router_policies::{default_policy, default_policy_with_rng, kvcr_policy};
+use dynamo_scheduler::host::WorkerSelector;
 use std::collections::HashMap;
 
 const BLOCK_SIZE: u32 = 16;
@@ -112,6 +108,7 @@ fn request(workers: &[(u64, usize, usize, usize)]) -> SchedulingRequest {
             .filter(|(_, prefix_blocks, ..)| *prefix_blocks > 0)
             .map(|&(id, prefix_blocks, ..)| (worker(id).into(), prefix_blocks))
             .collect(),
+        source_intervals: Vec::new(),
         routing_snapshot: None,
     });
     request
@@ -125,13 +122,25 @@ fn config(multiplier: f64) -> KvRouterConfig {
     }
 }
 
-/// The selected worker and the source its fetch hint would name.
+/// The worker `kvcr` selects and the source its fetch hint would name.
 fn select(
     workers: &HashMap<u64, HintWorker>,
     request: &SchedulingRequest,
     multiplier: f64,
 ) -> (u64, Option<(KvTransferCandidateSource, usize)>) {
-    let selected = DefaultWorkerSelector::new(Some(config(multiplier)), "test")
+    select_with(
+        kvcr_policy(SelectionConfig::from(&config(multiplier)), "test"),
+        workers,
+        request,
+    )
+}
+
+fn select_with(
+    policy: WorkerSelectionPolicy,
+    workers: &HashMap<u64, HintWorker>,
+    request: &SchedulingRequest,
+) -> (u64, Option<(KvTransferCandidateSource, usize)>) {
+    let selected = policy
         .select_worker(support::selection_input(workers, request, BLOCK_SIZE))
         .unwrap();
     (
@@ -160,8 +169,17 @@ fn idle_worker_that_can_fetch_beats_a_busy_cached_one() {
     assert_eq!(select(&workers, &request, 0.0), (0, from_c));
     // At half credit A costs 17 and B costs 15: B wins and fetches everything from C.
     assert_eq!(select(&workers, &request, 0.5), (1, from_c));
+    // The default credits no fetch, so A still wins; the router still names C for it.
+    assert_eq!(
+        select_with(
+            default_policy(SelectionConfig::from(&config(0.5)), "test"),
+            &workers,
+            &request,
+        ),
+        (0, from_c)
+    );
     // Fetch credit only scores; it does not count as cached for prefill booking.
-    let selected = DefaultWorkerSelector::new(Some(config(0.5)), "test")
+    let selected = kvcr_policy(SelectionConfig::from(&config(0.5)), "test")
         .select_worker(support::selection_input(&workers, &request, BLOCK_SIZE))
         .unwrap();
     assert_eq!(selected.cached_tokens, 0);
@@ -191,6 +209,7 @@ fn credit_follows_the_target_island() {
     assert_eq!(select(&workers, &request, 0.5), (0, None));
 }
 
+/// The reference selector, like the default, gives copies no credit.
 #[test]
 fn seeded_selection_matches_reference_with_fetchable_prefixes() {
     let workers: HashMap<_, _> = (0..8)
@@ -216,12 +235,18 @@ fn seeded_selection_matches_reference_with_fetchable_prefixes() {
                 router_temperature: temperature,
                 ..config(multiplier)
             };
-            let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
-                Some(config.clone()),
+            let reference = dynamo_scheduler::host::DefaultWorkerSelector::new_seeded(
+                Some(SelectionConfig::from(&config)),
                 "test",
                 42,
             );
-            let plugin = DefaultWorkerSelector::new_seeded(Some(config), "test", 42);
+            let plugin = default_policy_with_rng(
+                SelectionConfig::from(&config),
+                "test",
+                Some(std::sync::Arc::new(parking_lot::Mutex::new(
+                    fastrand::Rng::with_seed(42),
+                ))),
+            );
             for _ in 0..32 {
                 let expected = reference
                     .select_worker(support::selection_input(&workers, &request, BLOCK_SIZE))
@@ -237,4 +262,29 @@ fn seeded_selection_matches_reference_with_fetchable_prefixes() {
             }
         }
     }
+}
+
+/// `kvcr` reads copy offers, which commits the selected worker to its copy, only when the
+/// multiplier gives copies credit. The default policy never reads them.
+#[test]
+fn kvcr_reads_copy_offers_only_with_a_positive_multiplier() {
+    use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+
+    let reads_offers =
+        |policy: dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy| {
+            WorkerSelector::<HintWorker>::required_worker_inputs(&policy)
+                .contains(WorkerInputs::KV_COPY)
+        };
+    assert!(!reads_offers(kvcr_policy(
+        SelectionConfig::from(&config(0.0)),
+        "test"
+    )));
+    assert!(reads_offers(kvcr_policy(
+        SelectionConfig::from(&config(0.5)),
+        "test"
+    )));
+    assert!(!reads_offers(default_policy(
+        SelectionConfig::from(&config(0.5)),
+        "test"
+    )));
 }

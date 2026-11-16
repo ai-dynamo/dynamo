@@ -8,15 +8,19 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"testing"
 
+	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
 
@@ -116,4 +120,72 @@ func roleAllowsRunFinalizerUpdate(rules []rbacv1.PolicyRule, runName string) boo
 		}
 	}
 	return false
+}
+
+func TestDGDRRunTraceClaimProtectionIsFencedByTheAPIServer(t *testing.T) {
+	env := sharedEnv.ForTest(t)
+	admin := env.Client()
+	ctx := t.Context()
+	reconciler := &DynamoGraphDeploymentRunV1beta2Reconciler{Client: admin}
+	first := &nvidiacomv1beta2.DynamoGraphDeploymentRun{Name: "first", UID: "first-uid"}
+	second := &nvidiacomv1beta2.DynamoGraphDeploymentRun{Name: "second", UID: "second-uid"}
+
+	t.Log("Create a trace claim that another finalizer keeps while it is deleted")
+	claim := &corev1.PersistentVolumeClaim{
+		Name: "request-traces", Namespace: env.Namespace(), Finalizers: []string{"example.com/hold"},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+			Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Mi")}},
+		},
+	}
+	if err := admin.Create(ctx, claim); err != nil {
+		t.Fatalf("create claim: %v", err)
+	}
+	t.Cleanup(func() {
+		stored := &corev1.PersistentVolumeClaim{}
+		if err := admin.Get(context.Background(), client.ObjectKeyFromObject(claim), stored); err != nil {
+			return
+		}
+		stored.Finalizers = nil
+		if err := admin.Update(context.Background(), stored); client.IgnoreNotFound(err) != nil {
+			t.Errorf("release claim: %v", err)
+		}
+	})
+	stale := claim.DeepCopy()
+
+	t.Log("The first Run protects the claim")
+	if err := reconciler.protectTraceClaim(ctx, first, claim, nil); err != nil {
+		t.Fatalf("protect claim: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(claim, dgdrRunTraceClaimFinalizer(first.UID)) {
+		t.Fatalf("finalizers = %v, want the first Run's", claim.Finalizers)
+	}
+	protected := claim.DeepCopy()
+
+	t.Log("A protection read from a stale claim conflicts and is retried")
+	err := reconciler.protectTraceClaim(ctx, second, stale, nil)
+	if !apierrors.IsConflict(err) || dgdrRunIsPermanentError(err) {
+		t.Fatalf("stale protection error = %v, want a retryable conflict", err)
+	}
+
+	t.Log("Delete the claim")
+	if err := admin.Delete(ctx, claim); err != nil {
+		t.Fatalf("delete claim: %v", err)
+	}
+
+	t.Log("A protected claim whose deletion the cache has not shown fails the fence before a Job is created")
+	err = reconciler.protectTraceClaim(ctx, first, protected, nil)
+	if !apierrors.IsConflict(err) || dgdrRunIsPermanentError(err) {
+		t.Fatalf("fence error for a stale protected claim = %v, want a retryable conflict", err)
+	}
+
+	t.Log("The API server refuses a new finalizer on the claim being deleted, and the refusal is retried")
+	deleting := &corev1.PersistentVolumeClaim{}
+	if err := admin.Get(ctx, client.ObjectKeyFromObject(claim), deleting); err != nil {
+		t.Fatalf("get claim: %v", err)
+	}
+	err = reconciler.protectTraceClaim(ctx, second, deleting, nil)
+	if !apierrors.IsInvalid(err) || dgdrRunIsPermanentError(err) {
+		t.Fatalf("protection error for a claim being deleted = %v, want a retryable Invalid", err)
+	}
 }
