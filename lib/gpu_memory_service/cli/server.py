@@ -134,7 +134,7 @@ def _run_v1_ranks(loader_argv: list[str] | None, confine: bool) -> int:
     signal.signal(signal.SIGTERM, _exit_on_signal)
     signal.signal(signal.SIGINT, _exit_on_signal)
     try:
-        ranks.start_ranks(_v1_gpus(), command, processes, confine=confine)
+        processes.extend(ranks.start_ranks(_v1_gpus(), command, confine=confine))
         return _supervise(processes)
     finally:
         # A signal must not cut the stop short, even when an exception got us here.
@@ -240,11 +240,12 @@ def main(argv: list[str] | None = None) -> None:
 
         if args.enable_loader is not None:
             loader_argv = list(args.enable_loader)
-            start_per_device(
-                "gpu_memory_service.cli.snapshot.loader",
-                loader_argv,
-                devices,
-                loaders,
+            loaders.extend(
+                start_per_device(
+                    "gpu_memory_service.cli.snapshot.loader",
+                    loader_argv,
+                    devices,
+                )
             )
 
         raise SystemExit(_supervise(servers, loaders))

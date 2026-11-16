@@ -22,37 +22,38 @@ logger = logging.getLogger(__name__)
 
 
 def start_ranks(
-    gpus: list[Gpu],
-    command: Callable[[int, Gpu], list[str]],
-    processes: list[subprocess.Popen],
-    *,
-    confine: bool,
-) -> None:
+    gpus: list[Gpu], command: Callable[[int, Gpu], list[str]], *, confine: bool
+) -> list[subprocess.Popen]:
     """Start ``command(n, gpu)`` for GMS device n on each GPU.
-
-    Each process is appended to ``processes`` as soon as it starts, so the
-    caller can stop the ones already started if start-up fails.
 
     With ``confine``, each process can open no GPU node but its own (see
     ``landlock``), so CUDA starts on that GPU alone. Such a process cannot
     list the other GPUs, so ``command`` must tell it which GPU is its own.
     """
-    for device, gpu in enumerate(gpus):
-        process = subprocess.Popen(
-            command(device, gpu),
-            env={**os.environ, "CUDA_VISIBLE_DEVICES": gpu.uuid},
-            preexec_fn=(
-                functools.partial(landlock.confine_to_gpu, gpu.minor)
-                if confine
-                else None
-            ),
-        )
-        processes.append(process)
-        logger.info(
-            "Started GMS V1 device=%d gpu=%s bus=%s confined=%s pid=%d",
-            device,
-            gpu.uuid,
-            gpu.bus_id,
-            confine,
-            process.pid,
-        )
+    processes = []
+    try:
+        for device, gpu in enumerate(gpus):
+            process = subprocess.Popen(
+                command(device, gpu),
+                env={**os.environ, "CUDA_VISIBLE_DEVICES": gpu.uuid},
+                preexec_fn=(
+                    functools.partial(landlock.confine_to_gpu, gpu.minor)
+                    if confine
+                    else None
+                ),
+            )
+            logger.info(
+                "Started GMS V1 device=%d gpu=%s bus=%s confined=%s pid=%d",
+                device,
+                gpu.uuid,
+                gpu.bus_id,
+                confine,
+                process.pid,
+            )
+            processes.append(process)
+    except BaseException:
+        # The caller never receives these processes, so stop them here.
+        for process in processes:
+            process.terminate()
+        raise
+    return processes

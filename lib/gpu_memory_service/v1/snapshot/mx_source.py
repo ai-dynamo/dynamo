@@ -138,16 +138,8 @@ def main(argv: list[str] | None = None) -> None:
     os.environ.setdefault("MX_PUBLISH_TIMEOUT_SECS", "0")
     init_vmm(VMMDeviceType.CUDA)
     stop = threading.Event()
-
-    def terminate(*_args) -> None:
-        # Event.set() holds a non-reentrant lock; a nested signal inside it
-        # would deadlock, so ignore further signals once stopping begins.
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-        stop.set()
-
-    signal.signal(signal.SIGTERM, terminate)
-    signal.signal(signal.SIGINT, terminate)
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
     gpu_uuid = device_identity.gpu_uuid(args.device)
     serve(
         device_identity.get_socket_path(gpu_uuid, "weights"),

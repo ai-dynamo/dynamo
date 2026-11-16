@@ -15,25 +15,26 @@ logger = logging.getLogger(__name__)
 
 
 def start_per_device(
-    module: str,
-    argv: list[str],
-    devices: list[int],
-    processes: list[subprocess.Popen],
-) -> None:
-    """Start ``module`` per device. Each process is appended to ``processes``
-    as soon as it starts, so the caller can stop the ones already started if
-    start-up fails."""
+    module: str, argv: list[str], devices: list[int]
+) -> list[subprocess.Popen]:
     scoped = any(
         argument in {"-h", "--help"}
         or argument == "--device"
         or argument.startswith("--device=")
         for argument in argv
     )
-    for device in [None] if scoped else devices:
-        extra = [] if device is None else ["--device", str(device)]
-        process = subprocess.Popen([sys.executable, "-m", module, *argv, *extra])
-        processes.append(process)
-        logger.info("Started %s device=%s pid=%d", module, device, process.pid)
+    processes = []
+    try:
+        for device in [None] if scoped else devices:
+            extra = [] if device is None else ["--device", str(device)]
+            process = subprocess.Popen([sys.executable, "-m", module, *argv, *extra])
+            logger.info("Started %s device=%s pid=%d", module, device, process.pid)
+            processes.append(process)
+    except BaseException:
+        # The caller never receives these processes, so stop them here.
+        _stop_all(processes)
+        raise
+    return processes
 
 
 def _stop_all(processes: list[subprocess.Popen]) -> None:
@@ -69,9 +70,8 @@ def run_per_device(
     # finally below, or, as a container's PID 1, be ignored until SIGKILL.
     # Either way the children would never get to clean up.
     signal.signal(signal.SIGTERM, _exit_on_sigterm)
-    processes: list[subprocess.Popen] = []
+    processes = start_per_device(module, argv, [] if scoped else devices)
     try:
-        start_per_device(module, argv, [] if scoped else devices, processes)
         pending = list(processes)
         while pending:
             for process in list(pending):

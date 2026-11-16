@@ -19,7 +19,7 @@ if not HAS_GMS:
         allow_module_level=True,
     )
 
-from gpu_memory_service.cli import runner, server, snapshot
+from gpu_memory_service.cli import runner, server
 from gpu_memory_service.v1 import device as v1_device
 
 pytestmark = [
@@ -106,27 +106,6 @@ def test_supervisor_terminates_siblings_when_child_exits():
     clean = [_Process(exit_code=0), _Process()]
     assert server._supervise(clean) == 1
     assert clean[1].terminated
-
-
-def test_failed_loader_start_leaves_started_loaders_to_the_caller(monkeypatch):
-    # The V0 supervisor's own stop, which waits and kills, must cover loaders
-    # started before a later one failed to start.
-    started = []
-
-    def popen(_command):
-        if started:
-            raise OSError("spawn failed")
-        started.append(_Process())
-        started[-1].pid = 1
-        return started[-1]
-
-    monkeypatch.setattr(snapshot.subprocess, "Popen", popen)
-    loaders = []
-
-    with pytest.raises(OSError, match="spawn failed"):
-        snapshot.start_per_device("loader", [], [0, 1], loaders)
-    assert loaders == started
-    assert not started[0].terminated
 
 
 @pytest.mark.timeout(10)

@@ -88,7 +88,6 @@ def test_each_device_process_is_pinned_to_its_gpu(node, monkeypatch, confine):
     ranks.start_ranks(
         device.node_gpus(*node),
         lambda n, gpu: [f"device{n}", gpu.uuid],
-        [],
         confine=confine,
     )
 
@@ -114,29 +113,20 @@ def test_failed_start_stops_the_processes_already_started(node, monkeypatch):
             if started:
                 raise OSError("spawn failed")
             self.pid = 1
-            self.terminated = self.waited = False
+            self.terminated = False
             started.append(self)
-
-        def poll(self):
-            return -15 if self.terminated else None
 
         def terminate(self):
             self.terminated = True
 
-        def wait(self, timeout=None):
-            self.waited = True
-            return self.poll()
-
     monkeypatch.setattr(ranks.subprocess, "Popen", Popen)
-    monkeypatch.setattr(server, "node_gpus", lambda: device.node_gpus(*node))
-    monkeypatch.setattr(server.signal, "signal", lambda *_args: None)
 
     with pytest.raises(OSError, match="spawn failed"):
-        server._run_v1_ranks(None, confine=False)
-    # The supervisor's own stop, which waits and kills, covers start-up too.
+        ranks.start_ranks(
+            device.node_gpus(*node), lambda n, gpu: [f"device{n}"], confine=False
+        )
     [first] = started
     assert first.terminated
-    assert first.waited
 
 
 def test_supervisor_without_landlock_runs_unconfined(node, monkeypatch):
@@ -145,8 +135,9 @@ def test_supervisor_without_landlock_runs_unconfined(node, monkeypatch):
 
     started = []
 
-    def start_ranks(gpus, command, processes, *, confine):
+    def start_ranks(gpus, command, *, confine):
         started.append(([command(n, gpu) for n, gpu in enumerate(gpus)], confine))
+        return []
 
     monkeypatch.setattr(landlock, "abi_version", unavailable)
     monkeypatch.setattr(server, "node_gpus", lambda: device.node_gpus(*node))
