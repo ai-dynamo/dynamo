@@ -3,6 +3,7 @@
 
 """Unit tests for fetch_embeddings_from_encoder."""
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -21,7 +22,10 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
     MultimodalEmbeddingCacheManager,
 )
-from dynamo.trtllm.multimodal.embedding_fetcher import fetch_embeddings_from_encoder
+from dynamo.trtllm.multimodal.embedding_fetcher import (
+    fetch_embeddings_from_encoder,
+    fetch_mm_items_from_encoder,
+)
 from dynamo.trtllm.multimodal.hasher import MultimodalHasher
 
 pytestmark = [
@@ -288,3 +292,105 @@ class TestFetchEmbeddingsFromEncoder:
 
         with pytest.raises(ValueError, match="image_urls must not be empty"):
             await fetch_embeddings_from_encoder([], {}, mock_client, encoder_cache)
+
+
+class _ItemEncoder:
+    """Encode worker stand-in for media items: one handle per item, with its
+    metadata, and records each request it gets."""
+
+    def __init__(self, metadata: dict[str, dict[str, Any]]):
+        self.metadata = metadata
+        self.requests: list[dict[str, Any]] = []
+
+    async def round_robin(self, request: dict[str, Any], context=None) -> Any:
+        self.requests.append(request)
+        urls = [
+            item["Url"]
+            for items in request["multi_modal_data"].values()
+            for item in items
+        ]
+        handles = [{"name": url, "metadata": dict(self.metadata[url])} for url in urls]
+
+        async def gen():
+            yield SimpleNamespace(
+                data=lambda: {
+                    "ep_disaggregated_params": {"multimodal_embedding_handles": handles}
+                }
+            )
+
+        return gen()
+
+
+def _extract_by_name(tensors: dict[str, torch.Tensor]) -> AsyncMock:
+    return AsyncMock(side_effect=lambda handles: [tensors[h["name"]] for h in handles])
+
+
+IMAGE, VIDEO = "http://example.com/a.jpg", "http://example.com/v.mp4"
+METADATA = {
+    IMAGE: {"image_grid_thw": [1, 4, 6], "multimodal_hash": [1] * 8},
+    VIDEO: {
+        "video_grid_thw": [2, 4, 4],
+        "video_timestamps": [0.5, 1.5],
+        "multimodal_hash": [2] * 8,
+    },
+}
+TENSORS = {IMAGE: torch.ones(6, 8), VIDEO: torch.ones(8, 8) * 2}
+
+
+class TestFetchMediaItems:
+    """Tests for fetch_mm_items_from_encoder (TRT-LLM item handoff)."""
+
+    @pytest.mark.asyncio
+    async def test_cache_stores_and_returns_metadata_and_hash(self, encoder_cache):
+        """Each item is cached with its grid, video timing and hash, under a
+        key with its modality; a hit gives them back without the encoder."""
+        encoder = _ItemEncoder(METADATA)
+        media = {"image": [IMAGE], "video": [VIDEO]}
+
+        with patch(
+            "dynamo.trtllm.multimodal.embedding_fetcher.extract_embeddings_from_handles",
+            _extract_by_name(TENSORS),
+        ):
+            miss = await fetch_mm_items_from_encoder(
+                media, {"messages": []}, encoder, encoder_cache
+            )
+            hit = await fetch_mm_items_from_encoder(
+                media, {"messages": []}, encoder, encoder_cache
+            )
+
+        assert len(encoder.requests) == 2  # the miss: one call per modality
+        for result in (miss, hit):
+            assert set(result) == {"image", "video"}
+            for modality, url in (("image", IMAGE), ("video", VIDEO)):
+                (item,) = result[modality]
+                assert torch.equal(item.pop("mm_embeddings"), TENSORS[url])
+                assert item == METADATA[url]
+        # The same URL as a video is not the cached image.
+        assert encoder_cache.stats["entries"] == 2
+        with patch(
+            "dynamo.trtllm.multimodal.embedding_fetcher.extract_embeddings_from_handles",
+            _extract_by_name({IMAGE: TENSORS[VIDEO]}),
+        ):
+            encoder.metadata = {IMAGE: METADATA[VIDEO]}
+            as_video = await fetch_mm_items_from_encoder(
+                {"video": [IMAGE]}, {"messages": []}, encoder, encoder_cache
+            )
+        assert len(encoder.requests) == 3
+        assert as_video["video"][0]["video_grid_thw"] == [2, 4, 4]
+
+    @pytest.mark.asyncio
+    async def test_item_count_mismatch_is_rejected(self, encoder_cache):
+        """A response with fewer embeddings than items is not cached."""
+        encoder = _ItemEncoder(METADATA)
+        real_round_robin = encoder.round_robin
+
+        async def drop_one(request, context=None):
+            request["multi_modal_data"]["image_url"].pop()
+            return await real_round_robin(request, context)
+
+        encoder.round_robin = drop_one  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="returned 1 embeddings for 2 image"):
+            await fetch_mm_items_from_encoder(
+                {"image": [IMAGE, IMAGE]}, {"messages": []}, encoder, encoder_cache
+            )
+        assert encoder_cache.stats["entries"] == 0

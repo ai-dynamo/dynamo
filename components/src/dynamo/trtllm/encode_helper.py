@@ -225,6 +225,8 @@ class EncodeHelper:
     #    - Encode worker runs TRT-LLM's MultimodalEncoder.generate()
     #    - Returns disaggregated_params to prefill worker
     #    - Use case: Standard VLM inference with TRT-LLM's encoder
+    #    - Without token_ids: media items alone (images or videos), for TRT-LLM
+    #      builds that can encode items without the prompt
     #
     # =========================================================================
 
@@ -295,6 +297,38 @@ class EncodeHelper:
             logging.debug("EncodeHelper completed readable operation.")
 
     @staticmethod
+    async def _run_encoder(engine, inputs: dict) -> Optional[dict]:
+        """Run TRT-LLM's MultimodalEncoder on one request.
+
+        Returns its disaggregated params, ready for network transfer, or None.
+        """
+        # NOTE: MultimodalEncoder.generate() is synchronous. Run it off-thread to avoid
+        # blocking the encode worker's event loop under concurrency.
+        encoder_outputs = await asyncio.to_thread(
+            lambda: list(engine.llm.generate([inputs]))
+        )
+
+        if not encoder_outputs:
+            logging.error("ENCODE WORKER: encoder_outputs is empty")
+            return None
+
+        ep_disaggregated_params = encoder_outputs[0].disaggregated_params
+        if ep_disaggregated_params is None:
+            logging.error(
+                "ENCODE WORKER: encoder_outputs[0].disaggregated_params is None"
+            )
+            return None
+
+        if ep_disaggregated_params.multimodal_embedding_handles is None:
+            logging.warning(
+                "ENCODE WORKER: ep_disaggregated_params.multimodal_embedding_handles is None"
+            )
+
+        # Prepare for network transfer
+        encoded_params = DisaggregatedParamsCodec.encode(ep_disaggregated_params)
+        return asdict(encoded_params)
+
+    @staticmethod
     async def _process_full_epd_flow(
         prompt_token_ids_from_request: list,
         image_urls: list,
@@ -336,41 +370,17 @@ class EncodeHelper:
             return
 
         processed_mm_data = {"image": pil_images}
-        inputs = [
+        params_dict = await EncodeHelper._run_encoder(
+            engine,
             {
                 "prompt_token_ids": prompt_token_ids_from_request,
                 "multi_modal_data": processed_mm_data,
                 "mm_processor_kwargs": mm_processor_kwargs or {},
-            }
-        ]
-
-        # NOTE: MultimodalEncoder.generate() is synchronous. Run it off-thread to avoid
-        # blocking the encode worker's event loop under concurrency.
-        encoder_outputs = await asyncio.to_thread(
-            lambda: list(engine.llm.generate(inputs))
+            },
         )
-
-        if not encoder_outputs:
-            logging.error("ENCODE WORKER: encoder_outputs is empty")
+        if params_dict is None:
             yield {"ep_disaggregated_params": None}
             return
-
-        ep_disaggregated_params = encoder_outputs[0].disaggregated_params
-        if ep_disaggregated_params is None:
-            logging.error(
-                "ENCODE WORKER: encoder_outputs[0].disaggregated_params is None"
-            )
-            yield {"ep_disaggregated_params": None}
-            return
-
-        if ep_disaggregated_params.multimodal_embedding_handles is None:
-            logging.warning(
-                "ENCODE WORKER: ep_disaggregated_params.multimodal_embedding_handles is None"
-            )
-
-        # Prepare for network transfer
-        encoded_params = DisaggregatedParamsCodec.encode(ep_disaggregated_params)
-        params_dict = asdict(encoded_params)
 
         # Extract processed prompt (includes <image> tokens) for prefill/decode consistency.
         # NOTE: processed_prompt will contain template/placeholder tokens
@@ -393,6 +403,47 @@ class EncodeHelper:
             "processed_prompt": processed_prompt,
             "prompt_token_ids": prompt_token_ids_from_request,
         }
+
+    @staticmethod
+    async def _process_item_encode_flow(
+        image_urls: list,
+        video_urls: list,
+        multimodal_processor,
+        engine,
+        mm_processor_kwargs: Optional[dict] = None,
+        cache_scope: str | None = None,
+    ):
+        """Encode media items with no prompt (TRT-LLM ``supports_mm_item_handoff``).
+
+        Each item is encoded as in a full request. The response has one
+        embedding handle per item, in request order, each with the item's
+        metadata (grid, video timing, ``multimodal_hash``). The prefill worker
+        builds the prompt and its positions. It sends one modality per request,
+        since some models (Qwen2.5-VL) cannot encode images and videos together.
+
+        Yields:
+            Response with ep_disaggregated_params
+        """
+        mm_data: Dict[str, Any] = {}
+        if image_urls:
+            mm_data["image"] = await EncodeHelper._get_image_loader().load_image_batch(
+                [{"Url": u} for u in image_urls], cache_scope=cache_scope
+            )
+        if video_urls:
+            mm_data["video"] = await multimodal_processor.load_videos(video_urls)
+        if not all(mm_data.values()):
+            logging.error("ENCODE WORKER: no media items loaded")
+            yield {"ep_disaggregated_params": None}
+            return
+
+        params_dict = await EncodeHelper._run_encoder(
+            engine,
+            {
+                "multi_modal_data": mm_data,
+                "mm_processor_kwargs": mm_processor_kwargs or {},
+            },
+        )
+        yield {"ep_disaggregated_params": params_dict}
 
     @staticmethod
     async def process_encode_request(
@@ -431,6 +482,14 @@ class EncodeHelper:
             embedding_paths,
         ) = multimodal_processor.extract_prompt_and_media_from_request(request)
 
+        # Without token_ids, the prefill worker sends media items alone
+        # (fetch_mm_items_from_encoder): images or videos.
+        media_urls = (
+            {}
+            if request.get("token_ids")
+            else multimodal_processor.media_urls_by_modality(request)
+        )
+
         # Flow 1: Embedding-path flow (pre-computed embeddings via NIXL)
         if embedding_paths:
             if connector is None:
@@ -441,8 +500,9 @@ class EncodeHelper:
             ):
                 yield response
 
-        # Flow 2: Full EPD flow (image URLs via MultimodalEncoder)
-        elif image_urls and request.get("token_ids"):
+        # Flow 2: Full EPD flow (image URLs via MultimodalEncoder), or media
+        # items with no prompt
+        elif (image_urls and request.get("token_ids")) or media_urls:
             if model_dir is None or model_type is None:
                 yield {
                     "error": "model_dir and model_type are required for full EPD encode"
@@ -458,10 +518,6 @@ class EncodeHelper:
                     )
                 }
                 return
-            # Use token_ids from request (Rust preprocessor already applied
-            # chat template and tokenized; token_ids then include image placeholder tokens
-            # if the model's tokenizer_config chat template emits them).
-            token_ids = token_ids_to_list(request.get("token_ids"))
             epd_mm_kwargs = resolve_mm_processor_kwargs(request)
             if epd_mm_kwargs is not None and not isinstance(epd_mm_kwargs, dict):
                 # Raise rather than yield an error payload: a yielded dict reads as a
@@ -472,6 +528,29 @@ class EncodeHelper:
                     "Malformed mm_processor_kwargs field: expected an object",
                     str(epd_mm_kwargs),
                 )
+            if media_urls:
+                if not multimodal_processor.supports_mm_item_handoff:
+                    yield {
+                        "error": (
+                            "This TensorRT-LLM build cannot encode media items "
+                            "without a prompt for this model"
+                        )
+                    }
+                    return
+                async for response in EncodeHelper._process_item_encode_flow(
+                    media_urls.get("image", []),
+                    media_urls.get("video", []),
+                    multimodal_processor,
+                    engine,
+                    mm_processor_kwargs=epd_mm_kwargs,
+                    cache_scope=image_cache_scope_from_request(request),
+                ):
+                    yield response
+                return
+            # Use token_ids from request (Rust preprocessor already applied
+            # chat template and tokenized; token_ids then include image placeholder tokens
+            # if the model's tokenizer_config chat template emits them).
+            token_ids = token_ids_to_list(request.get("token_ids"))
             async for response in EncodeHelper._process_full_epd_flow(
                 token_ids,  # type: ignore
                 image_urls,

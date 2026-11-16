@@ -301,12 +301,20 @@ class TestCachedEmbeddingNamedTuple:
         tensor = torch.randn(4, 4)
         grid = [[1, 2, 3]]
         entry = CachedEmbedding(tensor=tensor, image_grid_thw=grid)
-        t, image_grid, video_grid, second_per_grid_ts, video_timestamps = entry
+        (
+            t,
+            image_grid,
+            video_grid,
+            second_per_grid_ts,
+            video_timestamps,
+            metadata,
+        ) = entry
         assert torch.equal(t, tensor)
         assert image_grid == grid
         assert video_grid is None
         assert second_per_grid_ts is None
         assert video_timestamps is None
+        assert metadata is None
 
 
 class TestMakeRoomFor:

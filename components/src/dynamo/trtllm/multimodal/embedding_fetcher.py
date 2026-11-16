@@ -5,7 +5,8 @@
 Embedding fetcher utilities for multimodal processing with caching.
 
 Provides utility functions for fetching image embeddings from remote encoder
-with per-URL caching support.
+with per-URL caching support, and media items (images and videos) with a
+per-item cache when TRT-LLM can encode items without the prompt.
 """
 
 import json
@@ -21,6 +22,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.multimodal.image_loader import (
+    IMAGE_CACHE_SCOPE_KEY,
     image_cache_scope_from_request,
     image_cache_session_scoped_from_env,
     scope_image_cache_key,
@@ -133,6 +135,102 @@ async def _remote_encode_full_epd(
     return DisaggregatedParams(**params_dict)
 
 
+async def fetch_mm_items_from_encoder(
+    media_urls: Dict[str, List[str]],
+    request: Dict[str, Any],
+    encode_client: Any,
+    encoder_cache: Optional[MultimodalEmbeddingCacheManager] = None,
+    trace_context=None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Encode media items on their own, without the prompt, with a per-item cache.
+
+    For TRT-LLM builds whose input processor sets ``supports_mm_item_handoff``.
+    Each item is looked up in the cache by its modality, URL and processor
+    overrides. The encode worker gets only the missed items and no prompt, in
+    one call per modality (Qwen2.5-VL cannot encode images and videos in one
+    call). Each new item is cached with its metadata from the encoder: grid,
+    video timing and ``multimodal_hash``. Without a cache, every item is a miss.
+
+    Args:
+        media_urls: Media URLs by modality ("image", "video"), in request order
+        request: Request dict (processor overrides and cache scope)
+        encode_client: Client to call remote encode worker
+        encoder_cache: Optional cache for embeddings
+        trace_context: Optional Dynamo context for OTel trace propagation
+
+    Returns:
+        Items by modality for TRT-LLM's ``multi_modal_embeddings``, each
+        ``{"mm_embeddings": tensor, **metadata}``, in the order of
+        ``media_urls[modality]``: the order of that modality's placeholders in
+        the prompt. TRT-LLM builds the prompt and its positions from them.
+    """
+    mm_kwargs = _cache_mm_kwargs(request)
+    cache_scope = image_cache_scope_from_request(request)
+    session_scoped_cache = image_cache_session_scoped_from_env()
+
+    def _cache_key(modality: str, url: str) -> str | None:
+        # The same URL as an image and as a video gives different items.
+        cache_key = MultimodalHasher.hash_bytes(
+            json.dumps([modality, url, mm_kwargs], sort_keys=True, default=str).encode()
+        )
+        return scope_image_cache_key(
+            cache_key,
+            cache_scope,
+            session_scoped_cache=session_scoped_cache,
+        )
+
+    items: Dict[str, List[Any]] = {}
+    misses: Dict[str, List[Tuple[int, str, str | None]]] = {}
+    for modality, urls in media_urls.items():
+        items[modality] = [None] * len(urls)
+        for index, url in enumerate(urls):
+            key = _cache_key(modality, url) if encoder_cache is not None else None
+            cached = (
+                encoder_cache.get(key)
+                if encoder_cache is not None and key is not None
+                else None
+            )
+            if cached is not None and cached.metadata is not None:
+                items[modality][index] = cached
+            else:
+                misses.setdefault(modality, []).append((index, url, key))
+
+    for modality, missed in misses.items():
+        encode_request: Dict[str, Any] = {
+            "multi_modal_data": {
+                f"{modality}_url": [{"Url": url} for _, url, _ in missed]
+            }
+        }
+        if mm_kwargs:
+            encode_request["mm_processor_kwargs"] = mm_kwargs
+        if cache_scope is not None:
+            encode_request[IMAGE_CACHE_SCOPE_KEY] = cache_scope
+        params = await _remote_encode_full_epd(
+            encode_request,
+            encode_client,
+            update_request_for_decode=False,
+            trace_context=trace_context,
+        )
+        handles = params.multimodal_embedding_handles or []
+        if len(handles) != len(missed):
+            raise RuntimeError(
+                f"The encode worker returned {len(handles)} embeddings for "
+                f"{len(missed)} {modality} items"
+            )
+        metadata = [dict(handle.get("metadata") or {}) for handle in handles]
+        tensors = await extract_embeddings_from_handles(handles)
+        for (index, _, key), tensor, item_metadata in zip(missed, tensors, metadata):
+            entry = CachedEmbedding(tensor=tensor, metadata=item_metadata)
+            if encoder_cache is not None and key is not None:
+                encoder_cache.set(key, entry)
+            items[modality][index] = entry
+
+    return {
+        modality: [{"mm_embeddings": e.tensor, **(e.metadata or {})} for e in entries]
+        for modality, entries in items.items()
+    }
+
+
 async def _fetch_embeddings_with_cache(
     image_urls: List[str],
     request: Dict[str, Any],
@@ -168,20 +266,7 @@ async def _fetch_embeddings_with_cache(
 
     # Overrides change the embeddings for a URL, so they are part of cache
     # identity; without them the hash is unchanged, so existing entries stay valid.
-    mm_kwargs = (
-        resolve_mm_processor_kwargs(request) if isinstance(request, dict) else None
-    )
-    # Reject before the lookup, not after: normalizing a malformed value to None
-    # would hash the plain URL and serve a cache hit with 200, while the
-    # aggregated path 400s on the same input.
-    if mm_kwargs is not None and not isinstance(mm_kwargs, dict):
-        raise HttpStatusError(
-            400,
-            "Malformed mm_processor_kwargs field: expected an object",
-            str(mm_kwargs),
-        )
-    if not mm_kwargs:
-        mm_kwargs = None
+    mm_kwargs = _cache_mm_kwargs(request)
 
     cache_scope = image_cache_scope_from_request(request)
     session_scoped_cache = image_cache_session_scoped_from_env()
@@ -251,6 +336,25 @@ async def _fetch_embeddings_with_cache(
         embeddings_with_index.append((idx, entry))
 
     return _embedding_inputs(embeddings_with_index)
+
+
+def _cache_mm_kwargs(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The request's processor overrides, or None when it has none.
+
+    Reject before any cache lookup, not after: normalizing a malformed value to
+    None would hash the plain URL and serve a cache hit with 200, while the
+    aggregated path 400s on the same input.
+    """
+    mm_kwargs = (
+        resolve_mm_processor_kwargs(request) if isinstance(request, dict) else None
+    )
+    if mm_kwargs is not None and not isinstance(mm_kwargs, dict):
+        raise HttpStatusError(
+            400,
+            "Malformed mm_processor_kwargs field: expected an object",
+            str(mm_kwargs),
+        )
+    return mm_kwargs or None
 
 
 def _embedding_inputs(

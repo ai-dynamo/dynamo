@@ -19,7 +19,7 @@ Usage:
 
 import logging
 from collections import OrderedDict
-from typing import NamedTuple, Optional
+from typing import Any, NamedTuple, Optional
 
 import torch
 
@@ -32,6 +32,9 @@ class CachedEmbedding(NamedTuple):
     video_grid_thw: list | None = None
     second_per_grid_ts: float | None = None
     video_timestamps: list[float] | None = None
+    # The item's metadata from the engine's encoder, given back to the engine
+    # with the tensor (TRT-LLM: grid, video timing, multimodal_hash).
+    metadata: dict[str, Any] | None = None
 
 
 class CacheMutation(NamedTuple):

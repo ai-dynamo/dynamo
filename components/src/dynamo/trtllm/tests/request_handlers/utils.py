@@ -30,6 +30,7 @@ def setup_multimodal_config(config: MagicMock, image_urls: List[str]) -> None:
     config.multimodal_processor.extract_prompt_and_media_from_request = MagicMock(
         return_value=("text", image_urls, [])
     )
+    config.multimodal_processor.supports_mm_item_handoff = False
     config.encode_client = MagicMock()
 
 
