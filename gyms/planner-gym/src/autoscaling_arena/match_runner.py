@@ -34,8 +34,10 @@ from autoscaling_arena.match_config import (
     SimAutoscalerConfig,
     SimBackendConfig,
     SLAProfileConfig,
+    feasible_worker_targets,
 )
 from autoscaling_arena.measurement import AllocationConfig, MeasurementWindow
+from autoscaling_arena.policy_contracts import POLICY_CONTRACTS
 from autoscaling_arena.scorecard import SLOProfile
 from autoscaling_arena.trace_preparation import TracePreparationConfig, prepare_trace
 from autoscaling_arena.workloads import Workload, get_workload
@@ -802,6 +804,16 @@ def _run_sim_item(
                 },
             },
         }
+        if autoscaler.config.get("provider") == "self_hosted":
+            # The joint-fleet agent scores its own feedback with the scorer's rule.
+            factory_options["jev_context"][
+                "short_output_itl"
+            ] = config.metrics.short_output_itl
+    if autoscaler.type == "mpc":
+        factory_options = {
+            "feasible_targets": feasible_worker_targets(backend, autoscaler),
+            "short_output_itl": config.metrics.short_output_itl,
+        }
     factory = _build_sim_factory(
         autoscaler, topology=backend.topology, **factory_options
     )
@@ -936,6 +948,11 @@ def _run_sim_item(
             "planner_config": _redact_mapping_secrets(planner_config),
             "initial_replicas": asdict(autoscaler.start),
             "autoscaler_config": _redact_mapping_secrets(dict(autoscaler.config)),
+            "policy_contract": POLICY_CONTRACTS.get(
+                "knowline"
+                if autoscaler.config.get("provider") == "self_hosted"
+                else autoscaler.type
+            ),
         },
         "artifacts": {
             "directory": str(run_dir),
@@ -1481,6 +1498,8 @@ def _build_sim_factory(
     topology: str,
     decision_log: Path | None = None,
     jev_context: dict[str, Any] | None = None,
+    feasible_targets: tuple[tuple[int, int], ...] | None = None,
+    short_output_itl: str = "skip",
 ) -> Callable[[Any, Any], Any]:
     # Imports stay inside the sim path so a real-only install needs no Dynamo.
     if autoscaler.type == "planner":
@@ -1528,6 +1547,37 @@ def _build_sim_factory(
             del config
             return ReactiveAutoscaler(
                 mode=topology, capabilities=capabilities, **parameters
+            )
+
+        return factory
+    if autoscaler.type == "mpc":
+        from autoscaling_arena.adapters import mpc as mpc_module
+
+        capacity_spec = dict(parameters.pop("forward_model"))
+        capacity_type = capacity_spec.pop("type")
+
+        def factory(config, capabilities):
+            del config
+            decode_caps = getattr(capabilities, "decode", None)
+            caps_kwargs = {
+                "max_kv_tokens": getattr(decode_caps, "max_kv_tokens", None),
+                "max_num_seqs": getattr(decode_caps, "max_num_seqs", None),
+            }
+            if capacity_type == "ais":
+                capacity_model = mpc_module.AISCapacityModel(
+                    config=capacity_spec["config"],
+                    decode_config=capacity_spec["decode_config"],
+                    **caps_kwargs,
+                )
+            else:
+                capacity_model = mpc_module.RooflineCapacityModel(**caps_kwargs)
+            return mpc_module.MPCAutoscaler(
+                capacity_model=capacity_model,
+                mode=topology,
+                capabilities=capabilities,
+                feasible_targets=feasible_targets,
+                short_output_itl=short_output_itl,
+                **parameters,
             )
 
         return factory

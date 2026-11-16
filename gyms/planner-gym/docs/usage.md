@@ -476,6 +476,10 @@ directly. Reactive and KEDA configs include explicit `min_*`/`max_*` replica
 bounds; KEDA also exposes thresholds, tolerance, and stabilization windows.
 Omitted adapter settings are expanded to their effective defaults in the
 resolved config, and maximum fleets are checked against `gpu_budget`.
+Two further entry types are documented separately: `type: mpc` selects the
+[cloudAI-MPC controller](mpc.md), and `type: jev` with `provider: self_hosted`
+selects the [Cognitive Agent](cognitive-agent.md). Both consume replay
+telemetry, so they require `backend.replay.telemetry_sample_interval_s: 5`.
 `metrics.rank_by` chooses the leaderboard order; `metrics.include` selects the
 reported context columns. Publication supports console, JSON, and standalone
 HTML destinations, with raw diagnostics under `publish.artifact_root`:
@@ -828,7 +832,7 @@ the three built-in profiles.
 | --- | --- |
 | `autoscaling_arena.workloads` | Workload registry, axes, and trace materialization |
 | `autoscaling_arena.datasets` | Generic Dynamo request-trace validation and shard discovery |
-| `autoscaling_arena.adapters` | Static, reactive, and KEDA/HPA policy adapters |
+| `autoscaling_arena.adapters` | Static, reactive, KEDA/HPA, Jev/Cognitive Agent, and cloudAI-MPC policy adapters |
 | `autoscaling_arena.runners.sims` | One DynoSim match via `run_arena_replay()` |
 | `autoscaling_arena.runners.real` | Endpoint loading, AIPerf execution, and result parsing |
 | `autoscaling_arena.scorecard` | SLO goodput, efficiency, and stability metrics |

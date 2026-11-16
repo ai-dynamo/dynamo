@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# cloudAI-MPC beside Planner and the CPU baselines. MPC consumes replay telemetry
+# with completion feedback; see docs/mpc.md for the runtime requirement.
+schema_version: 1
+name: mpc-vs-baselines-sim
+description: Compare cloudAI-MPC with Planner, KEDA, reactive, and fixed-capacity baselines in DynoSim.
+
+backend:
+  type: sim
+  topology: agg
+  gpu_budget: 32
+
+  model:
+    name: openai/gpt-oss-120b
+    ais_model_path: openai/gpt-oss-120b
+
+  engines:
+    common:
+      system: h200_sxm
+      backend: vllm
+      backend_version: "0.24.0"
+      tp_size: 1
+      moe_tp_size: 1
+      moe_ep_size: 1
+      attention_dp_size: 1
+      runtime:
+        cold_start_delay_s: 30
+      extra_args:
+        num_gpu_blocks: 29920
+    aggregate: {}
+
+  router:
+    mode: round_robin
+
+  planner_config: planner.sim.example.yaml
+
+  replay:
+    ais_bootstrap: true
+    concurrency: null
+    telemetry_sample_interval_s: 5
+
+  autoscalers:
+    - name: planner
+      type: planner
+      start:
+        decode: 1
+
+    - name: keda-default
+      type: keda
+      start:
+        decode: 1
+      config:
+        poll_interval_s: 15
+        queue_threshold: 5
+        min_decode: 1
+        max_decode: 8
+        tolerance: 0.1
+        scale_up_stabilization_s: 0
+        scale_down_stabilization_s: 300
+
+    - name: reactive-default
+      type: reactive
+      start:
+        decode: 1
+      config:
+        poll_interval_s: 15
+        step: 1
+        agg_queue_up: 4
+        agg_queue_down: 1
+        min_decode: 1
+        max_decode: 8
+
+    - name: static-4
+      type: static
+      config:
+        num_decode: 4
+        poll_interval_s: 5
+
+    - name: cloudAI-MPC
+      type: mpc
+      start:
+        decode: 1
+      config:
+        forward_model: ais
+        poll_interval_s: 5
+        horizon: 5
+        slo_ttft_ms: 2000
+        slo_itl_ms: 50
+        scale_up_penalty: 0
+        scale_down_penalty: 0
+        reactive_queue_threshold: 6
+        min_replicas: 1
+        max_replicas: 8
+        cold_start_s: 30
+
+evaluations:
+  workloads: [flat, flash_crowd]
+  defaults:
+    seed: 0
+    max_requests: null
+    arrival_speedup: 1.0
+
+slo_profiles:
+  - name: relaxed
+    ttft_ms: 2000
+    itl_ms: 50
+
+metrics:
+  rank_by: goodput_per_gpu
+  include:
+    - goodput_per_gpu
+    - good_rate
+    - goodput_rps
+    - gpu_hours
+    - mean_ttft_ms
+    - p99_ttft_ms
+    - mean_itl_ms
+    - oscillation_count
+    - scale_events
+
+execution:
+  repetitions: 1
+  fail_fast: false
+  # 5 autoscalers x 2 workloads x 1 SLO profile x 1 repetition.
+  max_runs: 10
+
+publish:
+  artifact_root: ../runs/match-mpc/artifacts
+  destinations:
+    - type: console
+    - type: json
+      path: ../runs/match-mpc/results.json
+    - type: html
+      path: ../runs/match-mpc/report.html
