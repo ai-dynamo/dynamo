@@ -200,13 +200,6 @@ tonic-reflection = { version = "0.13.1" }
 # Request prost specifically so tonic-build properly compiles protobuf message
 prost = { version = "0.13.5" }
 
-# tokenizers
-tokenizers = { version = "0.23.2", default-features = false, features = [
-  "onig",
-  "esaxx_fast",
-  "rustls-tls",
-] }
-
 # backend
 galil-seiferas = { version = "0.1" }
 

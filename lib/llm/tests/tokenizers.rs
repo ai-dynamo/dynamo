@@ -395,13 +395,3 @@ fn test_tiktoken_create_from_file() {
         .expect("Failed to encode with factory-created tokenizer");
     assert!(!encoding.token_ids().is_empty());
 }
-
-#[test]
-fn test_tiktoken_encoding_variant_is_sp() {
-    let tokenizer = mock_tiktoken_tokenizer();
-    let encoding = tokenizer.encode("hello world").expect("Failed to encode");
-    match &encoding {
-        Encoding::Sp(_) => {}
-        other => panic!("Expected Encoding::Sp, got {:?}", other),
-    }
-}

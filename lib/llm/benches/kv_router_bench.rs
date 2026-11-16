@@ -27,7 +27,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokenizers::Tokenizer;
 use tokio::sync::{Mutex, Semaphore};
 
 use dynamo_kv_events::event::{
@@ -37,6 +36,7 @@ use dynamo_kv_hashing::routing::{compute_block_hash, compute_seq_hash_for_block}
 use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc;
+use dynamo_llm::tokenizers::{HuggingFaceTokenizer, traits::Encoder as _};
 use dynamo_mocker::loadgen::RouterSequence;
 use dynamo_renderer::{ChatTemplate, ContextMixins, OAIChatLikeRequest, PromptFormatter};
 use dynamo_router_protocol::worker::WorkerId;
@@ -211,6 +211,9 @@ fn compute_sequence_hashes(block_hashes: &[LocalBlockHash]) -> Vec<ExternalSeque
         .collect()
 }
 
+/// Shared by the threads that generate sequences.
+type Tokenizer = Arc<HuggingFaceTokenizer>;
+
 fn compute_hashes_for_content(
     content: &str,
     tokenizer: &Tokenizer,
@@ -224,10 +227,10 @@ fn compute_hashes_for_content(
     };
 
     let encoding = tokenizer
-        .encode(formatted_text.as_str(), false)
+        .encode(formatted_text.as_str())
         .map_err(|e| anyhow::anyhow!("Failed to tokenize request content: {}", e))?;
 
-    let token_ids: Vec<u32> = encoding.get_ids().to_vec();
+    let token_ids: Vec<u32> = encoding.token_ids().to_vec();
     let local_hashes = compute_block_hashes(&token_ids, kv_block_size);
     let external_hashes = compute_sequence_hashes(&local_hashes);
 
@@ -434,26 +437,30 @@ fn load_tokenizer(model_or_path: &str) -> Result<Tokenizer> {
 
     // If it's a file, load directly
     if path.is_file() {
-        return Tokenizer::from_file(path).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to load tokenizer from file '{}': {}",
-                model_or_path,
-                e
-            )
-        });
+        return HuggingFaceTokenizer::from_file(path)
+            .map(Arc::new)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to load tokenizer from file '{}': {}",
+                    model_or_path,
+                    e
+                )
+            });
     }
 
     // If it's a directory, look for tokenizer.json inside
     if path.is_dir() {
         let tokenizer_path = path.join("tokenizer.json");
         if tokenizer_path.exists() {
-            return Tokenizer::from_file(&tokenizer_path).map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to load tokenizer from '{}': {}",
-                    tokenizer_path.display(),
-                    e
-                )
-            });
+            return HuggingFaceTokenizer::from_file(&tokenizer_path)
+                .map(Arc::new)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to load tokenizer from '{}': {}",
+                        tokenizer_path.display(),
+                        e
+                    )
+                });
         }
         return Err(anyhow::anyhow!(
             "Directory '{}' does not contain tokenizer.json",
@@ -482,7 +489,8 @@ fn load_tokenizer(model_or_path: &str) -> Result<Tokenizer> {
         )
     })?;
 
-    Tokenizer::from_file(&tokenizer_path)
+    HuggingFaceTokenizer::from_file(&tokenizer_path)
+        .map(Arc::new)
         .map_err(|e| anyhow::anyhow!("Failed to load downloaded tokenizer: {}", e))
 }
 
@@ -515,10 +523,10 @@ impl PrefixData {
         };
 
         let encoding = tokenizer
-            .encode(formatted_text.as_str(), false)
+            .encode(formatted_text.as_str())
             .map_err(|e| anyhow::anyhow!("Failed to tokenize prefix: {}", e))?;
 
-        let token_ids: Vec<u32> = encoding.get_ids().to_vec();
+        let token_ids: Vec<u32> = encoding.token_ids().to_vec();
         let local_hashes = compute_block_hashes(&token_ids, kv_block_size);
 
         Ok(Self {

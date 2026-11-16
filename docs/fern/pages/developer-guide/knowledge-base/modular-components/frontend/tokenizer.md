@@ -11,13 +11,13 @@ The Dynamo Frontend supports multiple tokenizer backends for BPE-based `tokenize
 
 #### `default` HuggingFace Tokenizers
 
-The default backend uses the [HuggingFace `tokenizers`](https://github.com/huggingface/tokenizers) library (Rust).
-It supports features in `tokenizer.json` files (normalizers, pre-tokenizers, post-processors, decoders, added tokens with special-token flags, and byte-fallback).
+The default backend uses the [HuggingFace `tokenizers`](https://github.com/huggingface/tokenizers) library (Rust), at its 1.0 release candidate.
+It supports features in `tokenizer.json` files (normalizers, pre-tokenizers, post-processors, decoders, added tokens with special-token flags, and byte-fallback), except the configurations listed under [Compatibility notes](#compatibility-notes).
 
 #### `fastokens` High-Performance Encoder
 
 The `fastokens` backend uses the [`fastokens`](https://github.com/Atero-ai/fastokens) crate, a purpose-built encoder optimized for throughput on supported BPE `tokenizer.json` models.
-It is a _hybrid_ backend: encoding uses `fastokens` while decoding falls back to HuggingFace so that incremental detokenization, byte-fallback, and special-token handling work correctly.
+It is a _hybrid_ backend: encoding uses `fastokens` while decoding uses the HuggingFace backend, so that incremental detokenization, byte-fallback, and special-token handling match the default backend.
 It supports segmented encoding so renderers can distinguish trusted control tokens from ordinary content.
 
 Use this backend when tokenization is a measurable bottleneck, for example on high-concurrency prefill-heavy workloads.
@@ -34,19 +34,19 @@ The frontend selects the tokenizer backend as follows. When both `tokenizer.json
 flowchart TD
     A["Frontend resolves<br/>--tokenizer or DYN_TOKENIZER"] --> B{"Available tokenizer artifact?"}
     B -->|"tiktoken.model / *.tiktoken"| C["TikToken backend<br/>backend flag has no effect"]
-    B -->|"tokenizer.json"| L{"HuggingFace<br/>loads?"}
+    B -->|"tokenizer.json"| D{"Requested backend?"}
     B -->|"none"| K["Model load fails<br/>(dynamic discovery retries)"]
-    L -->|"no"| K
-    L -->|"yes"| D{"Requested backend?"}
-    D -->|"default"| E["HuggingFace<br/>encode + decode"]
-    D -->|"fastokens"| F{"fastokens loads?"}
+    D -->|"default"| L{"HuggingFace<br/>loads?"}
+    D -->|"fastokens"| F{"fastokens and its<br/>HuggingFace decoder load?"}
     D -->|"basetenkenizer"| G{"Baseten loads?"}
     F -->|"yes"| H["fastokens encode<br/>HuggingFace decode"]
     G -->|"yes"| I["Baseten encode<br/>Baseten decode"]
     F -->|"no"| J{"Fallback allowed?"}
     G -->|"no"| J
-    J -->|"yes, the default"| E
+    J -->|"yes, the default"| L
     J -->|"no"| K
+    L -->|"yes"| E["HuggingFace<br/>encode + decode"]
+    L -->|"no"| K
 
     style A fill:#d6e9f8,stroke:#7fb3d5
     style B fill:#fdf3d0,stroke:#e0c56e
@@ -66,6 +66,12 @@ flowchart TD
 
 - Works with standard BPE `tokenizer.json` files (Qwen, LLaMA, GPT-family, Mistral, DeepSeek, etc.).
 - If `fastokens` or `basetenkenizer` cannot load a particular tokenizer file, the frontend logs a warning and transparently falls back to HuggingFace by default. Use `--no-tokenizer-fallback` to reject incompatible tokenizers during model initialization.
+- The HuggingFace backend rejects a `tokenizer.json` that it cannot serve with the token IDs and text the file describes, and model initialization fails. `fastokens` decodes through the same backend, so it rejects the same files. The rejected configurations are:
+  - an added token with `normalized: true` whose normalized form differs from its content, for example an uppercase token under a lowercase normalizer;
+  - a byte-level BPE model whose decoder is anything other than `ByteLevel` alone;
+  - a byte-fallback BPE vocabulary that lacks any of the 256 `<0xNN>` byte tokens;
+  - a `ByteLevel` pre-tokenizer with `add_prefix_space: true`.
+- A `truncation` or `padding` block in `tokenizer.json` is ignored by the HuggingFace and `fastokens` backends. Prompts are never clipped or padded by the tokenizer.
 - Special tokens declared only in a sibling `tokenizer_config.json` are merged into the
   HuggingFace and Baseten paths, and into Dynamo's L1 prefix-cache boundaries. The FastTokenizer
   encoder loads `tokenizer.json` alone and cannot receive that merge, so a model that declares a
@@ -114,7 +120,6 @@ python -m dynamo.frontend --tokenizer basetenkenizer --no-tokenizer-fallback
 When a non-default backend is selected:
 
 1. The frontend resolves `--tokenizer` / `DYN_TOKENIZER` and passes the selected backend to the Rust runtime.
-2. `ModelDeploymentCard::tokenizer()` loads the HuggingFace tokenizer first for fallback behavior and L1 cache special-token metadata.
-3. Dynamo constructs `FastTokenizer` for `fastokens` or `BasetenTokenizer` for `basetenkenizer` from the same `tokenizer.json` file.
-4. If construction fails because the tokenizer uses unsupported features, Dynamo logs a warning and falls back to HuggingFace. With `--no-tokenizer-fallback`, model initialization fails and reports the backend loading error instead. In dynamic mode, discovery retries the load while the frontend continues running.
-5. When the L1 prefix cache is enabled, Dynamo wraps the selected backend with the same special-token boundary metadata and cache metrics used by the default path.
+2. `ModelDeploymentCard::tokenizer()` constructs `FastTokenizer` for `fastokens` or `BasetenTokenizer` for `basetenkenizer` from `tokenizer.json`. `FastTokenizer` also loads the HuggingFace backend from the same file, to decode.
+3. If construction fails because the tokenizer uses unsupported features, Dynamo logs a warning and falls back to HuggingFace. With `--no-tokenizer-fallback`, model initialization fails and reports the backend loading error instead. In dynamic mode, discovery retries the load while the frontend continues running.
+4. When the L1 prefix cache is enabled, Dynamo wraps the selected backend with the special-token boundaries that backend reports and the cache metrics used by the default path.

@@ -1497,19 +1497,25 @@ mod tests {
 
     #[tokio::test]
     async fn backend_finalizes_byte_fallback_at_each_terminal_boundary() {
-        let hf: tokenizers::Tokenizer = serde_json::from_value(serde_json::json!({
+        // `<0xNN>` is id NN: the Hugging Face reader requires every byte token of a
+        // byte-fallback vocabulary.
+        const A: u32 = 0x61;
+        const EOS: u32 = 256;
+        let mut vocab: serde_json::Map<String, serde_json::Value> = (0..256u32)
+            .map(|byte| (format!("<0x{byte:02X}>"), byte.into()))
+            .collect();
+        vocab.insert("<eos>".to_string(), EOS.into());
+        let config = serde_json::json!({
             "version": "1.0", "truncation": null, "padding": null,
-            "added_tokens": [{"id": 1, "content": "<eos>", "special": true,
+            "added_tokens": [{"id": EOS, "content": "<eos>", "special": true,
                 "single_word": false, "lstrip": false, "rstrip": false, "normalized": false}],
             "normalizer": null, "pre_tokenizer": null, "post_processor": null,
             "decoder": {"type": "Sequence", "decoders": [
                 {"type": "ByteFallback"}, {"type": "Fuse"}]},
-            "model": {"type": "BPE", "vocab": {"<0x61>": 0, "<eos>": 1},
-                "merges": [], "byte_fallback": true}
-        }))
-        .unwrap();
+            "model": {"type": "BPE", "vocab": vocab, "merges": [], "byte_fallback": true}
+        });
         let tokenizer: Arc<dyn traits::Tokenizer> =
-            Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf));
+            Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_json(config).unwrap());
 
         for boundary in ["length", "eof", "text", "hidden_token", "visible_token"] {
             for stop in [None, Some("a")] {
@@ -1522,24 +1528,24 @@ mod tests {
                 };
                 // Per-token text is only decoded for chunks that carry logprobs.
                 let mut outputs = vec![LLMEngineOutput {
-                    token_ids: vec![0],
+                    token_ids: vec![A],
                     log_probs: Some(vec![0.0]),
                     ..Default::default()
                 }];
                 match boundary {
                     "eof" => {}
                     "hidden_token" => {
-                        request.stop_conditions.stop_token_ids_hidden = Some(vec![1]);
+                        request.stop_conditions.stop_token_ids_hidden = Some(vec![EOS]);
                         outputs.push(LLMEngineOutput {
-                            token_ids: vec![1],
+                            token_ids: vec![EOS],
                             ..Default::default()
                         });
                     }
                     "visible_token" => {
-                        request.stop_conditions.stop_token_ids_visible = Some(vec![1]);
-                        request.stop_conditions.stop_token_ids_hidden = Some(vec![1]);
+                        request.stop_conditions.stop_token_ids_visible = Some(vec![EOS]);
+                        request.stop_conditions.stop_token_ids_hidden = Some(vec![EOS]);
                         outputs.push(LLMEngineOutput {
-                            token_ids: vec![1],
+                            token_ids: vec![EOS],
                             ..Default::default()
                         });
                     }
@@ -1572,7 +1578,7 @@ mod tests {
                     attributed_tokens
                         .first()
                         .map(|(id, token)| (*id, token.as_deref())),
-                    Some((0, Some("a"))),
+                    Some((A, Some("a"))),
                     "buffered text must remain attributed to its generating token"
                 );
                 let expected = if stop.is_some() {
@@ -1806,18 +1812,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_engine_text_logprobs_do_not_fabricate_lossy_token_bytes() {
-        let mut tokenizer = tokenizers::Tokenizer::from_file(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/data/sample-models/TinyLlama_v1.1/tokenizer.json"
-        ))
+        let mut config: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/data/sample-models/TinyLlama_v1.1/tokenizer.json"
+            ))
+            .unwrap(),
+        )
         .unwrap();
-        tokenizer
-            .add_tokens([tokenizers::AddedToken::from("\u{fffd}suffix", false)])
-            .unwrap();
-        let replacement_id = tokenizer.token_to_id("\u{fffd}suffix").unwrap();
-        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(
-            crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(tokenizer),
+        // The tokenizer numbers a new added token after the vocabulary; the id here is unused.
+        config["added_tokens"].as_array_mut().unwrap().push(
+            serde_json::json!({"id": 0, "content": "\u{fffd}suffix", "special": false,
+                "single_word": false, "lstrip": false, "rstrip": false, "normalized": false}),
         );
+        let tokenizer: Arc<dyn traits::Tokenizer> =
+            Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_json(config).unwrap());
+        let replacement_id = tokenizer.token_to_id("\u{fffd}suffix").unwrap().unwrap();
         let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
         // TinyLlama's byte-fallback IDs for E2 82 AC encode the euro sign together.
         let token_ids = vec![229, 133, 175, replacement_id];

@@ -60,3 +60,12 @@ dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
 cudarc = { version = "=0.19.8", features = ["cuda-version-from-build-system", "fallback-latest"], optional = true }
 
 [dev-dependencies]
+
+# dynamo-tokenizers 5.0.0 and dynamo-renderer 11.0.0 are not on crates.io yet. Until they are,
+# build them from the frontend-crates commit that introduces them. The renderer there depends on
+# its own workspace's dynamo-protocols, so that crate has to come from the same commit.
+# Remove this section, in every workspace that carries it, once both are published.
+[patch.crates-io]
+dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "df699be6110c961e9ec63f5770eb41fc11088477" }
+dynamo-renderer = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "df699be6110c961e9ec63f5770eb41fc11088477" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "df699be6110c961e9ec63f5770eb41fc11088477" }
