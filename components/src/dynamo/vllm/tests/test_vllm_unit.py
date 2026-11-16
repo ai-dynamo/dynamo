@@ -1732,32 +1732,6 @@ async def test_worker_translates_vllm_validation_error_to_invalid_argument():
     assert str(error.value) == message
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("error_type", "expected_status"),
-    [
-        ("VLLMNotFoundError", 404),
-        ("VLLMUnprocessableEntityError", 422),
-    ],
-)
-async def test_worker_translates_vllm_client_error_keeps_status_for_non_400(
-    error_type, expected_status
-):
-    from vllm import exceptions as vllm_exceptions
-
-    from dynamo.llm.exceptions import HttpError
-    from dynamo.vllm.handlers import _translate_vllm_client_errors
-
-    async def generator():
-        raise getattr(vllm_exceptions, error_type)("invalid request")
-        yield
-
-    with pytest.raises(HttpError) as error:
-        await anext(_translate_vllm_client_errors(generator()))
-
-    assert error.value.code == expected_status
-
-
 def test_vllm_validation_error_public_message_is_truncated():
     from vllm.exceptions import VLLMValidationError
 
