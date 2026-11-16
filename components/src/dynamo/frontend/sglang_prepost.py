@@ -23,6 +23,7 @@ from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.function_call.utils import get_json_schema_constraint
 from sglang.srt.parser.reasoning_parser import GptOssDetector, ReasoningParser
+from xgrammar import StructuralTag, StructuralTagItem
 
 from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
@@ -652,7 +653,9 @@ def build_tool_call_guided_decoding(
             # for auto, unconstrained generation.
             constraint = None
 
-    guided_decoding = _serialize_tool_constraint(constraint)
+    guided_decoding = _serialize_tool_constraint(
+        constraint, stop_after_first=parallel_tool_calls is False
+    )
     if guided_decoding is not None:
         return guided_decoding
 
@@ -676,7 +679,10 @@ def build_tool_call_guided_decoding(
     return _serialize_tool_constraint(constraint)
 
 
-def _serialize_tool_constraint(constraint: Any) -> dict[str, Any] | None:
+def _serialize_tool_constraint(
+    constraint: Any, *, stop_after_first: bool = False
+) -> dict[str, Any] | None:
+    """Serialize tool guidance for RPC, preserving schemas and single-call limits."""
     if not (isinstance(constraint, tuple) and len(constraint) == 2):
         return None
     if constraint[0] == "json_schema":
@@ -687,10 +693,31 @@ def _serialize_tool_constraint(constraint: Any) -> dict[str, Any] | None:
     tag_value = constraint[1]
     # SGLang returns a Pydantic model (LegacyStructuralTagResponseFormat)
     # here. Convert to a plain dict before it hits the RPC layer because
-    # msgpack/serde_json cannot serialize BaseModel instances.
+    # msgpack/serde_json cannot serialize BaseModel instances. Dump by alias:
+    # the backend reads only "schema"; "schema_" leaves arguments unconstrained.
     if hasattr(tag_value, "model_dump"):
-        tag_value = tag_value.model_dump()
+        tag_value = tag_value.model_dump(by_alias=True)
+    if stop_after_first and isinstance(tag_value, dict) and "structures" in tag_value:
+        tag_value = _legacy_structural_tag_with_one_call(tag_value)
     return {"structural_tag": tag_value}
+
+
+def _legacy_structural_tag_with_one_call(tag: dict[str, Any]) -> dict[str, Any]:
+    """Use XGrammar to convert a legacy tag and stop after its first call."""
+    converted = StructuralTag.from_legacy_structural_tag(
+        [
+            StructuralTagItem(
+                begin=structure["begin"],
+                schema=structure.get("schema") or {},
+                end=structure["end"],
+            )
+            for structure in tag["structures"]
+        ],
+        tag["triggers"],
+    )
+    converted.format.at_least_one = tag.get("at_least_one", False)
+    converted.format.stop_after_first = True
+    return converted.model_dump()
 
 
 def build_response_format_guided_decoding(

@@ -5,7 +5,7 @@ use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_session_affinity::WorkerAffinityTarget;
 
-use super::inputs::CacheSnapshot;
+use super::inputs::{CacheSnapshot, ResidentBlockSource};
 use super::shared_cache::SharedCacheHits;
 
 /// The view of one scheduling request that filters, scorers, and pickers may read.
@@ -27,16 +27,18 @@ pub struct WorkerSelectionContext<'a> {
     pub(crate) strict_priority: u32,
     pub(crate) shared_cache_hits: Option<&'a SharedCacheHits>,
     pub(crate) has_tier_matches: bool,
+    pub(crate) resident_blocks: Option<&'a dyn ResidentBlockSource>,
     pub(crate) preview: bool,
 }
 
 impl<'a> WorkerSelectionContext<'a> {
     /// A view of a request of `isl_tokens` routed in blocks of `block_size`, with every other
     /// field at its default: no request id, no pin, no session, no affinity target, no
-    /// expected output length, zero priority, no shared-cache hits, no tier matches, not a
-    /// preview, and prefill-load tracking off. The kernel sets what the request carries with
-    /// the `with_*` methods; a test builds exactly the view it needs. A `block_size` of 0, as
-    /// hosted selection without the KV path supplies, reads as zero request blocks.
+    /// expected output length, zero priority, no shared-cache hits, no tier matches, no
+    /// resident block counts, not a preview, and prefill-load tracking off. The kernel sets
+    /// what the request carries with the `with_*` methods; a test builds exactly the view it
+    /// needs. A `block_size` of 0, as hosted selection without the KV path supplies, reads as
+    /// zero request blocks.
     #[inline]
     pub fn new(isl_tokens: usize, block_size: u32) -> Self {
         Self {
@@ -57,6 +59,7 @@ impl<'a> WorkerSelectionContext<'a> {
             strict_priority: 0,
             shared_cache_hits: None,
             has_tier_matches: false,
+            resident_blocks: None,
             preview: false,
         }
     }
@@ -137,12 +140,24 @@ impl<'a> WorkerSelectionContext<'a> {
         self
     }
 
+    /// Per-rank resident block counts the host lends to this selection, read only by
+    /// components that declared `WorkerInputs::RESIDENT_BLOCKS`.
+    #[inline]
+    pub fn with_resident_blocks(
+        mut self,
+        resident_blocks: Option<&'a dyn ResidentBlockSource>,
+    ) -> Self {
+        self.resident_blocks = resident_blocks;
+        self
+    }
+
     /// Request-wide cache facts shared by every candidate row.
     #[inline]
     pub(crate) fn cache_snapshot(&self) -> CacheSnapshot<'a> {
         CacheSnapshot {
             shared_hits: self.shared_cache_hits,
             has_tier_matches: self.has_tier_matches,
+            resident_blocks: self.resident_blocks,
         }
     }
 
