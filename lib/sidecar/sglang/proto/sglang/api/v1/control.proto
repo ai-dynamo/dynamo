@@ -1,0 +1,32 @@
+// Forward-ported slice of SGLang's `sglang/api/v1/control.proto`: only the
+// pause/continue messages. They landed upstream (sgl-project/sglang
+// f01462f3b3d0) after the snapshot pinned in this directory
+// (37f3b2730bca), which has no control.proto.
+
+syntax = "proto3";
+
+package sglang.api.v1;
+
+import "sglang/json/v1/options.proto";
+
+// `/pause_generation`.
+message PauseGenerationRequest {
+  optional string mode = 1 [
+    (sglang.json.v1.field_json).null_policy = NULL_POLICY_RESETS_DEFAULT,
+    (sglang.json.v1.field_json).default_string = "abort"
+  ];
+}
+
+// `/continue_generation`.
+message ContinueGenerationRequest {
+  optional bool torch_empty_cache = 1 [
+    (sglang.json.v1.field_json).null_policy = NULL_POLICY_RESETS_DEFAULT,
+    (sglang.json.v1.field_json).default_bool = true
+  ];
+}
+
+// Python's `{"message": ..., "status": "ok"}` body for pause and continue.
+message GenerationPauseResponse {
+  string message = 1;
+  string status = 2;
+}

@@ -552,6 +552,36 @@ impl AbortRpc {
     }
 }
 
+/// Stops SGLang's scheduler; `mode` selects what happens to in-flight requests.
+pub async fn pause_generation(
+    client: &mut Client,
+    mode: String,
+    timeout: Duration,
+) -> Result<(), DynamoError> {
+    rpc_with_deadline(
+        "PauseGeneration",
+        Instant::now() + timeout,
+        client.pause_generation(pb::PauseGenerationRequest { mode: Some(mode) }),
+    )
+    .await
+    .map(|_| ())
+}
+
+pub async fn continue_generation(
+    client: &mut Client,
+    timeout: Duration,
+) -> Result<(), DynamoError> {
+    rpc_with_deadline(
+        "ContinueGeneration",
+        Instant::now() + timeout,
+        client.continue_generation(pb::ContinueGenerationRequest {
+            torch_empty_cache: None,
+        }),
+    )
+    .await
+    .map(|_| ())
+}
+
 pub(crate) async fn rpc_with_deadline<T, F>(
     rpc: &str,
     deadline: Instant,
