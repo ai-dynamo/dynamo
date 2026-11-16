@@ -28,6 +28,8 @@ RUN set -eux; \
 
 FROM ${BASE_IMAGE} AS test_image
 COPY --from=helm_binary --chmod=755 /out/helm /usr/local/bin/helm
+# Match container/context.yaml; supported system-Python images also need overrides.
+COPY --from=ghcr.io/astral-sh/uv:0.13.5 --chmod=755 /uv /opt/dynamo/test-tools/uv
 
 # Install test dependencies on top of runtime image.
 # No uv cache: this image is built from a SHA-tagged base, so the layer is
@@ -36,7 +38,17 @@ COPY --from=helm_binary --chmod=755 /out/helm /usr/local/bin/helm
 # download is a few seconds against a ~660MB cache, so UV_NO_CACHE keeps it out
 # of the layer rather than trading that for the version hazard.
 USER root
+# The generic Dynamo and Planner CI lanes own the AIS-dependent suites.
+# Serving-framework test images retain the ordinary optional-dependency contract.
+ARG DYNAMO_TEST_REQUIRE_AIS_RUNTIME=0
+ENV DYNAMO_TEST_REQUIRE_AIS_RUNTIME=${DYNAMO_TEST_REQUIRE_AIS_RUNTIME}
+# Check the complete newly resolved AIS environment in its owning lanes.
+# Backend test layers retain their existing dependency policy; this change
+# does not claim their inherited framework graphs pass a full pip check.
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    --mount=type=bind,source=./container/deps/requirements.aisimulate.txt,target=/tmp/requirements.aisimulate.txt \
+    --mount=type=bind,source=./tests/wheels/smoke_install.py,target=/tmp/smoke_install.py \
+    --mount=type=bind,source=./container/deps/overrides.planner.txt,target=/tmp/overrides.planner.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     --mount=type=secret,id=pip-index-url,env=PIP_INDEX_URL \
     --mount=type=secret,id=uv-default-index,env=UV_DEFAULT_INDEX \
@@ -44,12 +56,29 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
     export NETRC=/run/secrets/pypi-netrc \
         UV_NO_CACHE=1 UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     export PIP_CACHE_DIR=/root/.cache/pip && \
+    case "$DYNAMO_TEST_REQUIRE_AIS_RUNTIME" in 0|1) ;; *) exit 1 ;; esac && \
+    set -- --requirement /tmp/requirements.test.txt && \
+    if [ "$DYNAMO_TEST_REQUIRE_AIS_RUNTIME" = 1 ]; then \
+        set -- "$@" --find-links https://pypi.nvidia.com/aisimulate/ \
+            --only-binary=aisimulate --requirement /tmp/requirements.aisimulate.txt && \
+        for wheel in /opt/dynamo/wheelhouse/ai_dynamo*any.whl; do \
+            if [ -f "$wheel" ]; then set -- "$@" "${wheel}[ais]"; fi; \
+        done; \
+    fi && \
+    check_python=python3 && \
     if [ -n "$VIRTUAL_ENV" ]; then \
-        uv pip install \
-            --requirement /tmp/requirements.test.txt; \
+        check_python="$VIRTUAL_ENV/bin/python" && \
+        /opt/dynamo/test-tools/uv pip install --python "$check_python" \
+            --overrides /tmp/overrides.planner.txt \
+            "$@"; \
     else \
-        pip install --break-system-packages \
-            --requirement /tmp/requirements.test.txt; \
+        /opt/dynamo/test-tools/uv pip install --python "$check_python" \
+            --system --break-system-packages \
+            --overrides /tmp/overrides.planner.txt \
+            "$@"; \
+    fi && \
+    if [ "$DYNAMO_TEST_REQUIRE_AIS_RUNTIME" = 1 ]; then \
+        "$check_python" -c 'import runpy, sys; from pathlib import Path; runpy.run_path("/tmp/smoke_install.py")["pip_check"](Path(sys.executable), pillow_override=Path("/tmp/overrides.planner.txt"))'; \
     fi
 
 # Datadog's CI action shells out to `pip`. Images that run from a virtualenv
@@ -59,6 +88,20 @@ ENV PATH="/opt/dynamo/venv/bin:${PATH}"
 
 # Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
+# Stage the source contract for explicit AIS lane ownership.
+COPY --chmod=755 --chown=dynamo:0 container/Dockerfile.test /workspace/container/Dockerfile.test
+COPY --chmod=755 --chown=dynamo:0 .github/workflows/shared-build-image.yml /workspace/.github/workflows/shared-build-image.yml
+# Focused dependency tests read the same declared override used during installation.
+COPY --chmod=664 --chown=dynamo:0 container/deps/overrides.planner.txt /workspace/container/deps/overrides.planner.txt
+# Dependency contract tests inspect both templates in every component test image.
+COPY --chmod=664 --chown=dynamo:0 container/templates/planner.Dockerfile /workspace/container/templates/planner.Dockerfile
+# COPY's file mode can also reach newly created parent directories. The test
+# runner uses uid 1001, so give these exact metadata directories traversal
+# without changing the 664 files or the workspace write policy below.
+RUN python3 -c 'import os; \
+    os.chmod("/workspace/container", 0o755); \
+    os.chmod("/workspace/container/deps", 0o755); \
+    os.chmod("/workspace/container/templates", 0o755)'
 COPY --chmod=664 --chown=dynamo:0 tests/__init__.py /workspace/tests/__init__.py
 COPY --chmod=664 --chown=dynamo:0 tests/marker_categories.py /workspace/tests/marker_categories.py
 # Version-stamping and shell regression tests execute these workflow helpers.
@@ -120,10 +163,22 @@ USER dynamo
 
 FROM test_distroless AS test_planner
 
+# A required AIS lane must never silently inherit the optional default.
+RUN test "$DYNAMO_TEST_REQUIRE_AIS_RUNTIME" = 1
+
 # Keep Planner-only tests out of the production image. The Planner runtime
 # installs the AISimulate wheel, so its test image can execute the optional
 # Dynamo replay and Sweeper integration contracts.
 USER root
+# Run the complete AIS packaging contract in this required AIS-enabled lane.
+# Its readers compare the unchanged Python/container/Rust release declarations.
+COPY --chmod=664 --chown=dynamo:0 tests/dependencies/test_aisimulate_consistency.py /workspace/tests/dependencies/test_aisimulate_consistency.py
+COPY --chmod=664 --chown=dynamo:0 tests/wheels/smoke_install.py /workspace/tests/wheels/smoke_install.py
+COPY --chmod=664 --chown=dynamo:0 Cargo.toml Cargo.lock /workspace/
+COPY --chmod=664 --chown=dynamo:0 lib/bindings/python/Cargo.toml lib/bindings/python/Cargo.lock /workspace/lib/bindings/python/
+COPY --chmod=664 --chown=dynamo:0 lib/bindings/kvbm/Cargo.lock /workspace/lib/bindings/kvbm/Cargo.lock
+COPY --chmod=664 --chown=dynamo:0 container/deps/requirements.aisimulate.txt /workspace/container/deps/requirements.aisimulate.txt
+COPY --chmod=664 --chown=dynamo:0 container/templates/wheel_builder.Dockerfile /workspace/container/templates/wheel_builder.Dockerfile
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/aisimulate/tests/ /workspace/components/src/dynamo/aisimulate/tests/
 COPY --chmod=775 --chown=dynamo:0 lib/bindings/python/tests/replay/ /workspace/lib/bindings/python/tests/replay/
 COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/mocker/config.py /workspace/components/src/dynamo/mocker/config.py

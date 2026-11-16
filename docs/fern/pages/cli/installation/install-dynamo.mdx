@@ -146,6 +146,20 @@ This covers single-machine setups only. Multi-node disaggregated serving additio
   </Step>
 </Steps>
 
+## Optional AIS Features
+
+Before using AIS-based planning or performance models, profiling, replay, simulation
+providers, or the frontend AIS load model in a wheel environment, install the `ais`
+extra. Use the same Dynamo version and package index selected above:
+
+```bash
+uv pip install 'ai-dynamo[ais]==<dynamo-version>'
+```
+
+Replace `<dynamo-version>` with your installed Dynamo version. The AIS extra supports
+Python 3.11 through 3.13; follow your backend's Python requirements as well. Containers
+that enable AIS install its runtime explicitly.
+
 ## Discovery and events on a single machine
 
 Dynamo is a distributed runtime: the **frontend** (the OpenAI-compatible HTTP server) and the **worker** (the engine running your model) are separate processes that have to find each other. Two planes make that happen:

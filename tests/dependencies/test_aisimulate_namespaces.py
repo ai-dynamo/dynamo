@@ -90,6 +90,16 @@ def _requirements_file_names(path: Path) -> set[str]:
     return _requirement_names(requirements)
 
 
+def _aisimulate_requirement(project: dict) -> Requirement:
+    requirements = [
+        Requirement(item)
+        for item in project["optional-dependencies"]["ais"]
+        if canonicalize_name(Requirement(item).name) == "aisimulate"
+    ]
+    assert len(requirements) == 1, "the ais extra must declare one AISimulate pin"
+    return requirements[0]
+
+
 def test_no_manifest_installs_retired_aic_distributions() -> None:
     with (ROOT / "pyproject.toml").open("rb") as handle:
         root_project = tomllib.load(handle)["project"]
@@ -144,11 +154,7 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
         "optional": True,
         "features": ["python"],
     }
-    requirement = next(
-        Requirement(item)
-        for item in root_project["dependencies"]
-        if canonicalize_name(Requirement(item).name) == "aisimulate"
-    )
+    requirement = _aisimulate_requirement(root_project)
     if "git" in canonical_core:
         assert requirement.url == (
             f"git+{canonical_core['git']}@{canonical_core['rev']}"
