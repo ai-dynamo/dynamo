@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use dynamo_kv_indexer::metrics::KvIndexerMetrics;
+use dynamo_kv_indexer::host::KvIndexerMetrics;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::metrics::MetricsHierarchy;
 
@@ -27,7 +27,7 @@ pub trait KvIndexerMetricsExt {
 impl KvIndexerMetricsExt for KvIndexerMetrics {
     fn from_component(component: &Component) -> Arc<KvIndexerMetrics> {
         {
-            use dynamo_kv_indexer::metrics::{
+            use dynamo_kv_indexer::host::{
                 CKF_MUTATION_HELP, CKF_MUTATION_LABELS, KV_CACHE_EVENT_WARNINGS_HELP,
                 KV_CACHE_EVENT_WARNINGS_LABELS, KV_CACHE_EVENTS_APPLIED_HELP,
                 KV_CACHE_EVENTS_APPLIED_LABELS,
