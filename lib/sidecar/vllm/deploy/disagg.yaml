@@ -16,7 +16,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
+          image: <your-registry>/dynamo-frontend:1.6.0
   - name: prefill
     type: prefill
     replicas: 1
@@ -30,7 +30,7 @@ spec:
           - dynamo-vllm-sidecar
           args:
           - --grpc-endpoint
-          - 127.0.0.1:50051
+          - 127.0.0.1:30001
           - --disaggregation-mode
           - prefill
           restartPolicy: Always
@@ -45,24 +45,23 @@ spec:
               - SYS_RESOURCE
           startupProbe:
             grpc:
-              port: 50051
+              port: 30001
               # vLLM 0.28.0: overall health mirrors Control and Inference.
               # Reverify this behavior when upgrading vLLM.
               service: ""
-            periodSeconds: 5
+            periodSeconds: 10
             timeoutSeconds: 5
-            # Allow 30 minutes for model startup; increase for larger models.
-            failureThreshold: 360
+            failureThreshold: 180
           readinessProbe:
             grpc:
-              port: 50051
+              port: 30001
               service: ""
-            periodSeconds: 10
+            periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 3
           livenessProbe:
             grpc:
-              port: 50051
+              port: 30001
               service: ""
             periodSeconds: 10
             timeoutSeconds: 5
@@ -97,7 +96,7 @@ spec:
           - |
             VLLM_RS="$(python3 -c 'import os,vllm; print(os.path.join(os.path.dirname(vllm.__file__), "vllm-rs"))')"
             ulimit -l unlimited && exec "$VLLM_RS" serve Qwen/Qwen3-0.6B \
-              --host 0.0.0.0 --grpc-port 50051 --reasoning-parser none \
+              --host 0.0.0.0 --grpc-port 30001 --reasoning-parser none \
               --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
   - name: decode
     type: decode
@@ -112,7 +111,7 @@ spec:
           - dynamo-vllm-sidecar
           args:
           - --grpc-endpoint
-          - 127.0.0.1:50051
+          - 127.0.0.1:30001
           - --disaggregation-mode
           - decode
           restartPolicy: Always
@@ -127,24 +126,23 @@ spec:
               - SYS_RESOURCE
           startupProbe:
             grpc:
-              port: 50051
+              port: 30001
               # vLLM 0.28.0: overall health mirrors Control and Inference.
               # Reverify this behavior when upgrading vLLM.
               service: ""
-            periodSeconds: 5
+            periodSeconds: 10
             timeoutSeconds: 5
-            # Allow 30 minutes for model startup; increase for larger models.
-            failureThreshold: 360
+            failureThreshold: 180
           readinessProbe:
             grpc:
-              port: 50051
+              port: 30001
               service: ""
-            periodSeconds: 10
+            periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 3
           livenessProbe:
             grpc:
-              port: 50051
+              port: 30001
               service: ""
             periodSeconds: 10
             timeoutSeconds: 5
@@ -179,6 +177,6 @@ spec:
           - |
             VLLM_RS="$(python3 -c 'import os,vllm; print(os.path.join(os.path.dirname(vllm.__file__), "vllm-rs"))')"
             ulimit -l unlimited && exec "$VLLM_RS" serve Qwen/Qwen3-0.6B \
-              --host 0.0.0.0 --grpc-port 50051 --reasoning-parser none \
+              --host 0.0.0.0 --grpc-port 30001 --reasoning-parser none \
               --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
   backendFramework: vllm

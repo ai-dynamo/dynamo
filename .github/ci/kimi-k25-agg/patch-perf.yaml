@@ -6,6 +6,7 @@ kind: Job
 metadata:
   name: kimi-k25-agg-kv-eagle-bench
 spec:
+  backoffLimit: 0
   activeDeadlineSeconds: 900
   template:
     spec:
@@ -19,12 +20,27 @@ spec:
         effect: NoExecute
       containers:
       - name: perf
+        resources:
+          requests:
+            ephemeral-storage: 2Gi
+          limits:
+            ephemeral-storage: 16Gi
         env:
+        - name: AIPERF_OUTPUT_DIR
+          value: /aiperf
+        - name: ROOT_ARTIFACT_DIR
+          value: /aiperf/results
         - name: CONCURRENCIES
           value: "20"
         - name: BENCHMARK_DURATION
           value: "120"
+        volumeMounts:
+        - name: aiperf-output
+          mountPath: /aiperf
       volumes:
+      - name: aiperf-output
+        emptyDir:
+          sizeLimit: 16Gi
       - name: model-cache
         persistentVolumeClaim:
           claimName: shared-model-cache

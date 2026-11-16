@@ -293,8 +293,21 @@ impl Coordinator {
         }
         match event["type"].as_str() {
             Some("session.update") => {
+                let mut session = event["session"].clone();
+                if self.protocol == Protocol::Omni {
+                    if let Some(current) = &self.session {
+                        // Validate a complete candidate before publishing it:
+                        // a rejected patch must leave the accepted state intact.
+                        let mut candidate = current.clone();
+                        merge_session_update(&mut candidate, session);
+                        session = candidate;
+                    }
+                    if session.is_object() && session["output_modalities"].is_null() {
+                        session["output_modalities"] = json!(["audio"]);
+                    }
+                }
                 if let Err(error) =
-                    validate_session(&event["session"], self.protocol, &self.client.inner.model)
+                    validate_session(&session, self.protocol, &self.client.inner.model)
                 {
                     return self
                         .emit(events::invalid(
@@ -303,10 +316,6 @@ impl Coordinator {
                             &event,
                         ))
                         .await;
-                }
-                let mut session = event["session"].clone();
-                if self.protocol == Protocol::Omni && session["output_modalities"].is_null() {
-                    session["output_modalities"] = json!(["audio"]);
                 }
                 self.session = Some(session.clone());
                 self.emit(events::event(
@@ -635,6 +644,17 @@ async fn append(socket: &mut Socket, pcm: Vec<u8>) -> Result<(), Error> {
     Ok(())
 }
 
+fn merge_session_update(current: &mut Value, update: Value) {
+    match (current, update) {
+        (Value::Object(current), Value::Object(update)) => {
+            for (key, value) in update {
+                merge_session_update(current.entry(key).or_insert(Value::Null), value);
+            }
+        }
+        (current, update) => *current = update,
+    }
+}
+
 fn validate_session(session: &Value, protocol: Protocol, model: &str) -> Result<(), Error> {
     let invalid = |message: &str| Error::Invalid(message.into());
     if !session.is_object() {
@@ -702,6 +722,51 @@ fn validate_session(session: &Value, protocol: Protocol, model: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omni_session_update_merges_nested_objects_and_replaces_other_values() {
+        // The typed frontend schema requires complete audio input/output
+        // objects and omits some explicit nulls. Pin the internal merge rule
+        // separately without claiming that those nulls survive that boundary.
+        let mut session = json!({
+            "model": "test-model",
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": 24000},
+                    "transcription": {"model": "transcriber", "language": "en"}
+                },
+                "output": {"voice": "alloy"}
+            },
+            "instructions": "Keep replies short.",
+            "output_modalities": ["audio"],
+            "max_output_tokens": "inf"
+        });
+        merge_session_update(
+            &mut session,
+            json!({
+                "audio": {"input": {"transcription": null}},
+                "instructions": null,
+                "output_modalities": ["text"],
+                "max_output_tokens": 123
+            }),
+        );
+        assert_eq!(
+            session,
+            json!({
+                "model": "test-model",
+                "audio": {
+                    "input": {
+                        "format": {"type": "audio/pcm", "rate": 24000},
+                        "transcription": null
+                    },
+                    "output": {"voice": "alloy"}
+                },
+                "instructions": null,
+                "output_modalities": ["text"],
+                "max_output_tokens": 123
+            })
+        );
+    }
 
     #[tokio::test]
     async fn audio_backpressure_does_not_block_clear_or_commit() {

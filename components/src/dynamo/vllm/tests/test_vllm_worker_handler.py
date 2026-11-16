@@ -10,6 +10,7 @@
 import asyncio
 import base64
 import json
+import sqlite3
 from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -108,6 +109,7 @@ def _make_config(
     config.embedding_transfer_mode = EmbeddingTransferMode.LOCAL
     config.enable_multimodal = enable_multimodal
     config.enable_rl = False
+    config.artifact_router_profile = None
     config.multimodal_embedding_cache_capacity_gb = (
         multimodal_embedding_cache_capacity_gb
     )
@@ -1019,6 +1021,513 @@ async def test_engine_data_uses_effective_engine_prompt(
         assert metadata["completion_logprobs"] == pytest.approx([-0.1, -0.2])
     else:
         assert "engine_data" not in chunks[-1]
+
+
+@pytest.mark.asyncio
+async def test_generate_captures_artifact_without_emitting_raw_routes(monkeypatch):
+    from dynamo.artifacts.vllm import capture as artifact_capture
+    from dynamo.artifacts.vllm.format import decode_generation_artifact
+
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler.artifact_router_profile = ((3, 8, 2),)
+    handler.config.engine_args.enable_return_routed_experts = True
+    handler.engine_args = handler.config.engine_args
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._extract_logprobs = MagicMock(return_value=(None, None))
+    handler._abort_monitor = MagicMock(return_value=nullcontext())
+    request = {
+        "model": "test-model",
+        "token_ids": [10, 11],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 1},
+        "output_options": {},
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "inline_base64",
+                    "contents": ["moe_routes", "selected_logprobs"],
+                }
+            }
+        },
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[10, 11])
+    )
+    routed = np.asarray([[[1, 2]], [[3, 4]]], dtype=np.int64)
+    observed = {}
+
+    async def fake_generate(*args, **kwargs):
+        observed["logprobs"] = args[1].logprobs
+        yield SimpleNamespace(
+            prompt_token_ids=[10, 11],
+            prompt_logprobs=None,
+            num_cached_tokens=None,
+            outputs=[
+                SimpleNamespace(
+                    index=0,
+                    token_ids=[12],
+                    logprobs=[{12: Logprob(logprob=-0.2)}],
+                    routed_experts=routed,
+                    finish_reason="stop",
+                    stop_reason=None,
+                )
+            ],
+        )
+
+    handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
+    context = MagicMock()
+    context.id.return_value = "artifact-request"
+    chunks = [chunk async for chunk in handler.generate(request, context)]
+
+    assert len(chunks) == 1
+    assert observed["logprobs"] == 1
+    assert chunks[0]["token_ids"] == [12]
+    assert "routed_experts" not in chunks[0].get("engine_data", {})
+    artifact = chunks[0]["engine_data"]["metadata_upload"]
+    assert artifact["kind"] == "generation_artifact"
+    assert artifact["mode"] == "inline_base64"
+    choice = decode_generation_artifact(
+        base64.b64decode(artifact["data_base64"])
+    ).choices[0]
+    assert choice.sequence_token_ids.as_array().tolist() == [10, 11, 12]
+    assert {type(component).__name__ for component in choice.components} == {
+        "MoeRoutes",
+        "SelectedLogprobs",
+    }
+
+    monkeypatch.setattr(
+        artifact_capture,
+        "process_capture_budget",
+        lambda: artifact_capture.CaptureBudget(1),
+    )
+    with pytest.raises(mod.WorkerOverloaded, match="capture capacity"):
+        async for _ in handler.generate(request, context):
+            pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "engine_finish_reason",
+        "expected_finish_reason",
+        "should_submit",
+        "submit_error",
+        "client_logprobs",
+    ),
+    [
+        ("abort", "cancelled", False, None, None),
+        ("error: engine failed", "error: engine failed", False, None, None),
+        ("stop", "stop", True, None, None),
+        ("stop", "stop", True, sqlite3.OperationalError("database is locked"), None),
+        ("stop", "stop", True, None, 1025),
+    ],
+)
+async def test_artifact_terminal_delivery_only_on_success(
+    monkeypatch,
+    engine_finish_reason,
+    expected_finish_reason,
+    should_submit,
+    submit_error,
+    client_logprobs,
+):
+    from dynamo.artifacts.vllm import capture as artifact_capture
+
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler.artifact_router_profile = ()
+    handler.engine_args = handler.config.engine_args
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._extract_logprobs = MagicMock(return_value=(None, None))
+    handler._abort_monitor = MagicMock(return_value=nullcontext())
+    request = {
+        "model": "test-model",
+        "token_ids": [10, 11],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 2},
+        "output_options": (
+            {"logprobs": client_logprobs} if client_logprobs is not None else {}
+        ),
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "object_store",
+                    "contents": [],
+                    "destination": {"url": "https://example.invalid/upload"},
+                }
+            }
+        },
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[10, 11])
+    )
+    receipt = {
+        "kind": "generation_artifact",
+        "mode": "object_store",
+        "format": "generation_artifact_v1",
+        "contents": [],
+        "state": "pending",
+        "operation_id": "test-operation",
+    }
+    runtime = SimpleNamespace(
+        validate=MagicMock(), submit=AsyncMock(return_value=receipt)
+    )
+    if submit_error is not None:
+        runtime.submit.side_effect = submit_error
+    budget = artifact_capture.CaptureBudget(1 << 20)
+    monkeypatch.setattr(artifact_capture, "process_capture_budget", lambda: budget)
+    monkeypatch.setattr(
+        "dynamo.artifacts.runtime.configured_artifact_runtime", lambda: runtime
+    )
+    observations = []
+    observe_async = artifact_capture.VllmArtifactSession.observe_async
+
+    async def track_observation(self, output, prompt_token_ids):
+        observations.append(output.finish_reason)
+        await observe_async(self, output, prompt_token_ids)
+
+    monkeypatch.setattr(
+        artifact_capture.VllmArtifactSession, "observe_async", track_observation
+    )
+
+    async def fake_generate(*args, **kwargs):
+        for token, reason in ((12, None), (13, engine_finish_reason)):
+            yield SimpleNamespace(
+                prompt_token_ids=[10, 11],
+                prompt_logprobs=None,
+                num_cached_tokens=None,
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[token],
+                        logprobs=None,
+                        routed_experts=None,
+                        finish_reason=reason,
+                        stop_reason=None,
+                    )
+                ],
+            )
+
+    handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
+    context = MagicMock()
+    context.id.return_value = "artifact-request"
+
+    chunks = [chunk async for chunk in handler.generate(request, context)]
+
+    assert chunks[-1]["finish_reason"] == expected_finish_reason
+    if should_submit:
+        delivered = chunks[-1]["engine_data"]["metadata_upload"]
+        if submit_error is None:
+            assert delivered == receipt
+        else:
+            assert delivered["state"] == "failed"
+            assert delivered["error_code"] == "delivery_rejected"
+        runtime.submit.assert_awaited_once()
+        assert observations == [None, "stop"]
+    else:
+        assert "metadata_upload" not in chunks[-1].get("engine_data", {})
+        runtime.submit.assert_not_awaited()
+        assert observations == [None]
+    assert budget.used == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output_options", "expected_top_count", "route_start"),
+    [({}, None, None), ({"logprobs": 0}, 0, None), ({"logprobs": 1}, 2, 99)],
+)
+async def test_artifact_logprobs_do_not_widen_client_output(
+    monkeypatch, output_options, expected_top_count, route_start
+):
+    from dynamo.artifacts.vllm.format import decode_generation_artifact
+
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler.artifact_router_profile = ()
+    handler.engine_args = handler.config.engine_args
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._abort_monitor = MagicMock(return_value=nullcontext())
+    request = {
+        "model": "test-model",
+        "token_ids": [10, 11],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 1},
+        "output_options": output_options,
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "inline_base64",
+                    "contents": ["selected_logprobs"],
+                }
+            }
+        },
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[10, 11])
+    )
+    observed = {}
+
+    async def fake_generate(*args, **kwargs):
+        observed["logprobs"] = args[1].logprobs
+        yield SimpleNamespace(
+            prompt_token_ids=[10, 11],
+            prompt_logprobs=None,
+            num_cached_tokens=None,
+            outputs=[
+                SimpleNamespace(
+                    index=0,
+                    token_ids=[12],
+                    logprobs=[
+                        {
+                            12: Logprob(logprob=-0.2),
+                            13: Logprob(logprob=-0.3),
+                        }
+                    ],
+                    routed_experts=None,
+                    finish_reason="stop",
+                    stop_reason=None,
+                )
+            ],
+        )
+
+    handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
+    if route_start is not None:
+        build = mod.build_sampling_params
+
+        def with_route_start(*args, **kwargs):
+            sampling = build(*args, **kwargs)
+            sampling.routed_experts_prompt_start = route_start
+            return sampling
+
+        monkeypatch.setattr(mod, "build_sampling_params", with_route_start)
+    context = MagicMock()
+    context.id.return_value = "artifact-request"
+
+    chunks = [chunk async for chunk in handler.generate(request, context)]
+
+    assert observed["logprobs"] == 1
+    assert chunks[-1]["token_ids"] == [12]
+    artifact = chunks[-1]["engine_data"]["metadata_upload"]
+    choice = decode_generation_artifact(
+        base64.b64decode(artifact["data_base64"])
+    ).choices[0]
+    assert choice.components[0].logprobs.as_array().tolist() == pytest.approx([-0.2])
+    if expected_top_count is None:
+        assert "log_probs" not in chunks[-1]
+        assert "top_logprobs" not in chunks[-1]
+    else:
+        assert chunks[-1]["log_probs"] == pytest.approx([-0.2])
+        assert len(chunks[-1]["top_logprobs"][0]) == expected_top_count
+
+
+@pytest.mark.asyncio
+async def test_artifact_operation_status_validates_identifier_and_hides_store_errors(
+    monkeypatch,
+):
+    authority = SimpleNamespace(status=MagicMock(return_value={"state": "ready"}))
+    monkeypatch.setattr(
+        "dynamo.artifacts.runtime.configured_artifact_runtime", lambda: authority
+    )
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+
+    for body in ({}, {"operation_id": 3}, {"operation_id": "x" * 129}):
+        assert await handler.artifact_operation_status(body) == {
+            "status": "error",
+            "message": "invalid operation identifier",
+        }
+    authority.status.assert_not_called()
+
+    assert await handler.artifact_operation_status({"operation_id": "known"}) == {
+        "state": "ready"
+    }
+    authority.status.assert_called_once_with("known")
+
+    authority.status.side_effect = KeyError("missing")
+    assert await handler.artifact_operation_status({"operation_id": "missing"}) == {
+        "status": "error",
+        "message": "operation not found",
+    }
+
+    authority.status.side_effect = sqlite3.OperationalError("database is locked")
+    assert await handler.artifact_operation_status({"operation_id": "known"}) == {
+        "status": "error",
+        "message": "artifact status unavailable",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authority_state", ["missing", "closing"])
+async def test_artifact_authority_unavailable_returns_typed_error(
+    monkeypatch, authority_state
+):
+    from dynamo.artifacts.runtime import ArtifactAuthorityClosed
+
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler.artifact_router_profile = ()
+    handler.engine_args = handler.config.engine_args
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    request = {
+        "model": "test-model",
+        "token_ids": [10, 11],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 1},
+        "output_options": {},
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "object_store",
+                    "contents": [],
+                    "destination": {"kind": "managed_store"},
+                }
+            }
+        },
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[10, 11])
+    )
+    authority = None
+    if authority_state == "closing":
+        authority = SimpleNamespace(
+            validate=MagicMock(side_effect=ArtifactAuthorityClosed("closed"))
+        )
+    monkeypatch.setattr(
+        "dynamo.artifacts.runtime.configured_artifact_runtime", lambda: authority
+    )
+    expected = (
+        mod.InvalidArgument if authority_state == "missing" else mod.WorkerOverloaded
+    )
+    with pytest.raises(expected):
+        async for _ in handler.generate(request, MagicMock()):
+            pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "client_error"),
+    [
+        ("destination_denied", True),
+        ("invalid_target", True),
+        ("expired", True),
+        ("unsupported", False),
+    ],
+)
+async def test_artifact_destination_rejection_is_invalid_argument(
+    monkeypatch, code, client_error
+):
+    from dynamo.artifacts.storage import ArtifactStorageError
+    from dynamo.artifacts.vllm import capture as artifact_capture
+
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    handler.use_vllm_tokenizer = False
+    handler.artifact_router_profile = ()
+    handler.engine_args = handler.config.engine_args
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    request = {
+        "model": "test-model",
+        "token_ids": [10, 11],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 1},
+        "output_options": {},
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "object_store",
+                    "contents": [],
+                    "destination": {"kind": "managed_store"},
+                }
+            }
+        },
+    }
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=[10, 11])
+    )
+    authority = SimpleNamespace(
+        validate=MagicMock(side_effect=ArtifactStorageError(code, "policy says no")),
+        submit=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "dynamo.artifacts.runtime.configured_artifact_runtime", lambda: authority
+    )
+    budget = artifact_capture.CaptureBudget(1 << 20)
+    monkeypatch.setattr(artifact_capture, "process_capture_budget", lambda: budget)
+    handler.engine_client = SimpleNamespace(generate=MagicMock(), tokenizer=None)
+
+    expected = mod.InvalidArgument if client_error else ArtifactStorageError
+    with pytest.raises(expected, match="policy says no"):
+        async for _ in handler.generate(request, MagicMock()):
+            pass
+    handler.engine_client.generate.assert_not_called()
+    authority.submit.assert_not_called()
+    assert budget.used == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("worker_mode", "message"),
+    [
+        ("text", "token-in/token-out"),
+        ("prefill", "prefill-only worker"),
+    ],
+)
+async def test_artifact_request_rejects_unsupported_worker_mode(worker_mode, message):
+    request = {
+        "token_ids": [10, 11],
+        "extra_args": {
+            "nvext": {
+                "metadata_upload": {
+                    "kind": "generation_artifact",
+                    "mode": "inline_base64",
+                    "contents": [],
+                }
+            }
+        },
+    }
+    if worker_mode == "text":
+        handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+        handler.use_vllm_tokenizer = True
+        generate = handler.generate(request, MagicMock())
+    else:
+        generate = mod.PrefillWorkerHandler.generate(MagicMock(), request, MagicMock())
+
+    with pytest.raises(mod.InvalidArgument, match=message):
+        async for _ in generate:
+            pass
 
 
 @pytest.mark.asyncio(loop_scope="function")
@@ -2082,36 +2591,36 @@ class TestClassifyEmbeddingInput:
         assert result == [[1, 2], [3, 4, 5]]
 
     def test_mixed_str_and_int_rejected(self):
-        with pytest.raises(TypeError, match="mixes str and non-str"):
+        with pytest.raises(mod.InvalidArgument, match="mixes str and non-str"):
             mod._classify_embedding_input(["hello", 42])
 
     def test_mixed_int_and_str_rejected(self):
-        with pytest.raises(TypeError, match="mixes int and non-int"):
+        with pytest.raises(mod.InvalidArgument, match="mixes int and non-int"):
             mod._classify_embedding_input([1, "two"])
 
     def test_mixed_list_of_lists_with_str_rejected(self):
-        with pytest.raises(TypeError, match="must be a list of"):
+        with pytest.raises(mod.InvalidArgument, match="must be a list of"):
             mod._classify_embedding_input([[1, 2], "three"])
 
     def test_inner_list_with_non_int_rejected(self):
-        with pytest.raises(TypeError, match="must be a list of"):
+        with pytest.raises(mod.InvalidArgument, match="must be a list of"):
             mod._classify_embedding_input([[1, 2], [3.5, 4]])
 
     def test_bool_is_not_treated_as_int(self):
         # `bool` is a subclass of `int`; token ids must be real ints.
-        with pytest.raises(TypeError):
+        with pytest.raises(mod.InvalidArgument):
             mod._classify_embedding_input([True, False])
 
     def test_empty_list_rejected(self):
-        with pytest.raises(ValueError, match="must be non-empty"):
+        with pytest.raises(mod.InvalidArgument, match="must be non-empty"):
             mod._classify_embedding_input([])
 
     def test_unsupported_top_level_type_rejected(self):
-        with pytest.raises(TypeError, match="Invalid 'input' type"):
+        with pytest.raises(mod.InvalidArgument, match="Invalid 'input' type"):
             mod._classify_embedding_input({"text": "hi"})
 
     def test_unsupported_element_type_rejected(self):
-        with pytest.raises(TypeError, match="Unsupported 'input' element"):
+        with pytest.raises(mod.InvalidArgument, match="Unsupported 'input' element"):
             mod._classify_embedding_input([3.14, 2.71])
 
 
@@ -2303,7 +2812,9 @@ class TestEmbeddingWorkerHandlerCancellation:
         handler = self._make_embedding_handler()
         context = self._make_context()
 
-        with pytest.raises(ValueError, match="Invalid 'encoding_format' value"):
+        with pytest.raises(
+            mod.InvalidArgument, match="Invalid 'encoding_format' value"
+        ):
             async for _ in handler.generate(
                 {
                     "token_ids": [[11, 12, 13]],
@@ -2486,7 +2997,9 @@ class TestEmbeddingWorkerHandlerCancellation:
             "model": "test-model",
             "add_special_tokens": value,
         }
-        with pytest.raises(TypeError, match="Invalid 'add_special_tokens' type"):
+        with pytest.raises(
+            mod.InvalidArgument, match="Invalid 'add_special_tokens' type"
+        ):
             async for _ in handler.generate(request, context):
                 pass
 
@@ -2519,17 +3032,17 @@ class TestEmbeddingWorkerHandlerCancellation:
         ]
 
     @pytest.mark.parametrize(
-        ("truncate_prompt_tokens", "error_type", "match"),
+        ("truncate_prompt_tokens", "match"),
         [
-            ("2048", TypeError, "Invalid 'truncate_prompt_tokens' type"),
-            (True, TypeError, "Invalid 'truncate_prompt_tokens' type"),
-            (-2, ValueError, "truncate_prompt_tokens must be >= -1"),
+            ("2048", "Invalid 'truncate_prompt_tokens' type"),
+            (True, "Invalid 'truncate_prompt_tokens' type"),
+            (-2, "truncate_prompt_tokens must be >= -1"),
         ],
     )
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
     async def test_truncate_prompt_tokens_rejects_invalid_values(
-        self, truncate_prompt_tokens, error_type, match
+        self, truncate_prompt_tokens, match
     ):
         """Invalid truncation values fail before the request reaches vLLM."""
         handler = self._make_embedding_handler()
@@ -2540,7 +3053,7 @@ class TestEmbeddingWorkerHandlerCancellation:
             "model": "test-model",
             "truncate_prompt_tokens": truncate_prompt_tokens,
         }
-        with pytest.raises(error_type, match=match):
+        with pytest.raises(mod.InvalidArgument, match=match):
             async for _ in handler.generate(request, context):
                 pass
 
@@ -2598,7 +3111,9 @@ class TestEmbeddingWorkerHandlerCancellation:
         handler.engine_client.encode = fake_encode
 
         request = {"input": ["hello"], "model": "test-model", "dimensions": 2048}
-        with pytest.raises(ValueError, match="exceeds model embedding dimension"):
+        with pytest.raises(
+            mod.InvalidArgument, match="exceeds model embedding dimension"
+        ):
             async for _ in handler.generate(request, context):
                 pass
 

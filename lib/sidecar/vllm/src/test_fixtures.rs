@@ -71,6 +71,7 @@ pub(crate) fn server_info() -> pb::ServerInfo {
             sleep_mode_enabled: true,
             draft_weight_updates_enabled: true,
         }),
+        proto_version: pb::VERSION.to_string(),
     }
 }
 
@@ -103,7 +104,9 @@ pub(crate) fn sequence_response(
                 stop_reason: Some(pb::finish_info::StopReason::StopTokenId(2)),
                 kv_transfer_params,
                 ec_transfer_params: None,
+                num_cached_tokens: None,
             }),
+            ..Default::default()
         }),
     }
 }
@@ -152,7 +155,9 @@ pub(crate) fn encode_response(
                 stop_reason: None,
                 kv_transfer_params: None,
                 ec_transfer_params,
+                num_cached_tokens: None,
             }),
+            ..Default::default()
         }),
     }
 }

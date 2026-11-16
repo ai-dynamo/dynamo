@@ -33,6 +33,8 @@ import power_agent
 from actuator import _GpuIdentityMismatch
 from power_agent import PowerAgent
 
+from tests.actuator_double import actuator_double
+
 
 def _make_agent_with_actuator(actuator):
     """Build a PowerAgent without exercising __init__'s NVML/K8s deps."""
@@ -52,7 +54,7 @@ class TestReconcileGpuRoutesViaActuator(unittest.TestCase):
 
     def test_pid_enumeration_goes_through_actuator(self):
         """list_running_pids must be called on self._actuator, not pynvml."""
-        actuator = MagicMock()
+        actuator = actuator_double()
         actuator.list_running_pids.return_value = []  # no workload, early exit
         agent = _make_agent_with_actuator(actuator)
 
@@ -72,7 +74,7 @@ class TestReconcileGpuRoutesViaActuator(unittest.TestCase):
         mock_nvml.nvmlDeviceGetComputeRunningProcesses.assert_not_called()
 
     def test_no_pids_skips_apply_cap(self):
-        actuator = MagicMock()
+        actuator = actuator_double()
         actuator.list_running_pids.return_value = []
         agent = _make_agent_with_actuator(actuator)
 
@@ -84,7 +86,7 @@ class TestReconcileGpuRoutesViaActuator(unittest.TestCase):
     def test_non_k8s_pids_skip_apply_cap(self):
         """PIDs that don't resolve to a pod UID (e.g. host daemons) don't
         trigger an apply_cap."""
-        actuator = MagicMock()
+        actuator = actuator_double()
         actuator.list_running_pids.return_value = [9999]
         agent = _make_agent_with_actuator(actuator)
 
@@ -103,7 +105,7 @@ class TestReconcileGpuRoutesViaActuator(unittest.TestCase):
         cap path. This test pins the contract: the actuator
         receives the apply_cap call directly.
         """
-        actuator = MagicMock()
+        actuator = actuator_double()
         actuator.list_running_pids.return_value = [1234]
         agent = _make_agent_with_actuator(actuator)
 
@@ -125,7 +127,7 @@ class TestReconcileGpuRoutesViaActuator(unittest.TestCase):
 
     def test_safe_default_used_when_annotation_is_none(self):
         """Pod has no annotation → safe_default_watts via actuator."""
-        actuator = MagicMock()
+        actuator = actuator_double()
         actuator.list_running_pids.return_value = [1234]
         agent = _make_agent_with_actuator(actuator)
         agent.safe_default_watts = 450
@@ -149,7 +151,7 @@ class TestReconcileGpuRoutesViaActuator(unittest.TestCase):
         (apply_cap receives that exact UUID), closing the window where a DCGM
         reconnect between attribution and apply_cap's own capture could apply
         one GPU's workload-derived cap to another."""
-        actuator = MagicMock()
+        actuator = actuator_double()
         actuator.get_uuid.return_value = "GPU-A-uuid"
         actuator.list_running_pids.return_value = [1234]
         agent = _make_agent_with_actuator(actuator)
@@ -180,7 +182,7 @@ class TestReconcileGpuRoutesViaActuator(unittest.TestCase):
         GPU is skipped this cycle — no PID snapshot, no cap write — and retried
         next reconcile. Fail closed rather than attribute against an unknown
         GPU."""
-        actuator = MagicMock()
+        actuator = actuator_double()
         actuator.get_uuid.side_effect = RuntimeError("hostengine reconnecting")
         actuator.list_running_pids.return_value = [1234]
         agent = _make_agent_with_actuator(actuator)
@@ -201,7 +203,7 @@ class TestReconcileGpuRoutesViaActuator(unittest.TestCase):
         re-enumeration moved the index / the anchored GPU vanished), it raises
         `_GpuIdentityMismatch`; the reconcile must then skip the GPU this cycle
         — no cap derived from another GPU's workload is written."""
-        actuator = MagicMock()
+        actuator = actuator_double()
         actuator.get_uuid.return_value = "GPU-A-uuid"
         actuator.list_running_pids.side_effect = _GpuIdentityMismatch(
             "anchored UUID no longer resolvable"
@@ -262,7 +264,7 @@ class TestReconcileGpuDedupesByPodUid(unittest.TestCase):
         must produce ONE entry in the policy resolver's input, not
         three. Otherwise the resolver thinks three pods agreed on
         the same cap and bumps the multi-pod counter."""
-        actuator = MagicMock()
+        actuator = actuator_double()
         actuator.list_running_pids.return_value = [1111, 2222, 3333]
         agent = _make_agent_with_actuator(actuator)
 
@@ -298,7 +300,7 @@ class TestReconcileGpuDedupesByPodUid(unittest.TestCase):
         multiple PIDs must NOT bump multi_pod_gpu_total{agree} — that
         counter is meant for the operator-misconfig topology where
         two distinct pods share a GPU."""
-        actuator = MagicMock()
+        actuator = actuator_double()
         actuator.list_running_pids.return_value = [1111, 2222]
         agent = _make_agent_with_actuator(actuator)
 
@@ -326,7 +328,7 @@ class TestReconcileGpuDedupesByPodUid(unittest.TestCase):
         two PIDs (four PIDs total). After dedup, the resolver must
         see exactly TWO entries — one per pod — and the multi-pod
         WARNING / counter must still fire."""
-        actuator = MagicMock()
+        actuator = actuator_double()
         actuator.list_running_pids.return_value = [1, 2, 3, 4]
         agent = _make_agent_with_actuator(actuator)
 
@@ -353,7 +355,7 @@ class TestReconcileGpuDedupesByPodUid(unittest.TestCase):
         """Conflict branch survives the dedup: two pods with
         different caps each contributing multiple PIDs → safe default
         wins, conflict counter ticks once."""
-        actuator = MagicMock()
+        actuator = actuator_double()
         actuator.list_running_pids.return_value = [10, 11, 20, 21]
         agent = _make_agent_with_actuator(actuator)
         agent.safe_default_watts = 500
@@ -435,7 +437,7 @@ class TestReconcileOnceK8sListFailure(unittest.TestCase):
 
     def _make_agent(self):
         agent = object.__new__(PowerAgent)
-        agent._actuator = MagicMock()
+        agent._actuator = actuator_double()
         # reconcile_once re-snapshots the count from the actuator each cycle.
         agent._actuator.device_count.return_value = 4
         agent.metrics = MagicMock()
@@ -493,7 +495,7 @@ class TestReconcileGpuPolicyResolution(unittest.TestCase):
         power_agent._managed_gpu_indices.clear()
 
     def test_two_pods_agree(self):
-        actuator = MagicMock()
+        actuator = actuator_double()
         actuator.list_running_pids.return_value = [1111, 2222]
         agent = _make_agent_with_actuator(actuator)
 
@@ -509,7 +511,7 @@ class TestReconcileGpuPolicyResolution(unittest.TestCase):
         )
 
     def test_two_pods_disagree_uses_safe_default(self):
-        actuator = MagicMock()
+        actuator = actuator_double()
         actuator.list_running_pids.return_value = [1111, 2222]
         agent = _make_agent_with_actuator(actuator)
         agent.safe_default_watts = 500

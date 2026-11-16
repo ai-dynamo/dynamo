@@ -1,0 +1,187 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# AIPerf trace-replay benchmark for the Muse-Spark-open-816B-A42B recipes.
+# Set ENDPOINT, CONCURRENCY, and REQUEST_COUNT for the selected target.
+# Restart workers between independent runs to reset KV-cache and routing state.
+#
+# Prerequisites:
+# - The selected DynamoGraphDeployment is Ready.
+# - The shared-model-cache PVC contains the model and TRACE_FILE.
+#
+# Results: /model-cache/perf/<epoch>_<job-name>/
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: muse-spark-aiperf
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 10800
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: muse-spark-aiperf
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: perf
+          image: nvcr.io/nvidia/ai-dynamo/aiperf:0.12.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+          workingDir: /app
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              ulimit -n 600000
+              export COLUMNS=200
+
+              python3 - <<'PY'
+              import json
+              import os
+              import time
+              import urllib.request
+
+              endpoint = os.environ["ENDPOINT"]
+              model = os.environ["TARGET_MODEL"]
+              max_attempts = int(os.environ.get("WAIT_FOR_MODEL_MAX_ATTEMPTS", "720"))
+              url = f"http://{endpoint}/v1/models"
+
+              print(f"Waiting for model '{model}' at {url}")
+              for attempt in range(1, max_attempts + 1):
+                  try:
+                      with urllib.request.urlopen(url, timeout=5) as response:
+                          payload = json.load(response)
+                      if any(item.get("id") == model for item in payload.get("data", [])):
+                          raise SystemExit(0)
+                  except Exception:
+                      pass
+
+                  if attempt < max_attempts:
+                      time.sleep(5)
+
+              raise SystemExit(
+                  f"model '{model}' did not become ready after {max_attempts} attempts"
+              )
+              PY
+
+              if [ ! -f "${TRACE_FILE}" ]; then
+                echo "ERROR: trace file not found at ${TRACE_FILE}"
+                exit 1
+              fi
+
+              EPOCH=$(/busybox/date +%s)
+              ROOT_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
+              WARMUP_DIR="${ROOT_DIR}/warmup"
+              RUN_DIR="${ROOT_DIR}/trace_c${CONCURRENCY}"
+              TRACE_REQUEST_COUNT=$(/busybox/awk 'END {print NR}' "${TRACE_FILE}")
+              REQUEST_COUNT="${REQUEST_COUNT:-${TRACE_REQUEST_COUNT}}"
+              if ! [[ "${REQUEST_COUNT}" =~ ^[1-9][0-9]*$ ]] || (( REQUEST_COUNT > TRACE_REQUEST_COUNT )); then
+                echo "ERROR: REQUEST_COUNT must be between 1 and ${TRACE_REQUEST_COUNT}"
+                exit 1
+              fi
+              /busybox/mkdir -p "${WARMUP_DIR}" "${RUN_DIR}"
+
+              aiperf profile \
+                --model "${TARGET_MODEL}" \
+                --tokenizer "${TOKENIZER}" \
+                --tokenizer-trust-remote-code \
+                --url "http://${ENDPOINT}" \
+                --endpoint-type chat \
+                --streaming \
+                --ui simple \
+                --isl 8000 \
+                --osl 400 \
+                --concurrency 1 \
+                --request-count 5 \
+                --artifact-dir "${WARMUP_DIR}"
+
+              aiperf profile \
+                --model "${TARGET_MODEL}" \
+                --tokenizer "${TOKENIZER}" \
+                --tokenizer-trust-remote-code \
+                --input-file "${TRACE_FILE}" \
+                --custom-dataset-type mooncake_trace \
+                --request-count "${REQUEST_COUNT}" \
+                --no-allow-dataset-wrap \
+                --dataset-sampling-strategy sequential \
+                --url "http://${ENDPOINT}" \
+                --endpoint-type chat \
+                --streaming \
+                --use-server-token-count \
+                --extra-inputs ignore_eos:true \
+                --concurrency "${CONCURRENCY}" \
+                --workers-max "${CONCURRENCY}" \
+                --random-seed 42 \
+                --ui simple \
+                --artifact-dir "${RUN_DIR}" \
+                --request-timeout-seconds 3900 \
+                --export-http-trace
+          env:
+            # Set these values for the selected deployment target and trace.
+            - name: ENDPOINT
+              value: muse-spark-sglang-aggregate-gb200-frontend:8000
+            - name: CONCURRENCY
+              value: "12"
+            - name: REQUEST_COUNT
+              value: "3541"
+            - name: TRACE_FILE
+              value: /model-cache/agentic.jsonl
+            # Shared benchmark configuration.
+            - name: TARGET_MODEL
+              value: meta-models/Muse-Spark-Open-816B-A42B-NVFP4
+            - name: TOKENIZER
+              value: /model-cache
+            - name: ROOT_ARTIFACT_DIR
+              value: /model-cache/perf
+            - name: JOB_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.labels['job-name']
+            - name: AIPERF_HTTP_CONNECTION_LIMIT
+              value: "200"
+            - name: AIPERF_HTTP_SO_RCVTIMEO
+              value: "120"
+            - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
+              value: "3600"
+            - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
+              value: "3600"
+            - name: HF_HOME
+              value: /model-cache
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          resources:
+            requests:
+              cpu: "4"
+              memory: 8Gi
+            limits:
+              cpu: "16"
+              memory: 64Gi
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-cache
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache

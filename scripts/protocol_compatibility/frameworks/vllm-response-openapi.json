@@ -1,0 +1,55 @@
+{
+  "framework_name": "vllm",
+  "purpose": "Current source pin for request/response schema assessment; not a serving qualification",
+  "source": {
+    "repository": "https://github.com/vllm-project/vllm",
+    "revision": "338dab077c187e1bd421c4624af1169f95f60e06",
+    "tree": "d77801936cc445982bbc5c2d528b802229ab0754",
+    "selection": "Latest cu130 nightly wheel observed on 2026-10-15; immutable build snapshot, not a moving nightly alias",
+    "response_spec_pull_request": "https://github.com/vllm-project/vllm/pull/60926",
+    "response_spec_merge_revision": "6d1daa9fe53f39a7b494cf6c8e433a73eec78a76"
+  },
+  "response_contract": {
+    "openapi": "3.1.0",
+    "evidence_kind": "production_app_asgi_no_lifespan",
+    "registration": "vllm/entrypoints/serve/utils/api_utils.py",
+    "upstream_test": "tests/entrypoints/openai/test_openai_schema.py::test_openapi_exposes_completion_response_schemas",
+    "streams": [
+      {
+        "pointer": "#/paths/~1v1~1chat~1completions/post/responses/200/content/text~1event-stream/schema",
+        "interpretation": "event-schema"
+      },
+      {
+        "pointer": "#/paths/~1v1~1completions/post/responses/200/content/text~1event-stream/schema",
+        "interpretation": "event-schema"
+      }
+    ]
+  },
+  "wheel": {
+    "version": "0.32.0rc1.dev238+g338dab077",
+    "url": "https://wheels.vllm.ai/338dab077c187e1bd421c4624af1169f95f60e06/vllm-0.32.0rc1.dev238%2Bg338dab077-cp38-abi3-manylinux_2_28_x86_64.whl",
+    "sha256": "d983b1108fdd5024fb1b4fb3aa3159581a28075356dfe9e2c43498c5fe27f761",
+    "variant": "cu130",
+    "python": "3.12.3",
+    "platform": "Linux x86_64"
+  },
+  "capture": {
+    "kind": "production_app_asgi_no_lifespan",
+    "sha256": "8d87eb4b4916a7fe26e80ed3655944b3376a78f8a6db25c7bc2cc7abfccbb466",
+    "size_bytes": 287956,
+    "components": 400,
+    "paths": 23,
+    "resolved_local_reference_occurrences": 642,
+    "cuda_initialized": false,
+    "configuration": "build_app with supported_tasks=('generate',), model_config=None, no endpoint plugins; GET /openapi.json via TestClient without lifespan"
+  },
+  "qualification": {
+    "source_contains_response_spec": true,
+    "fresh_schema_capture": "pass",
+    "upstream_runtime_tests": "not_run",
+    "paired_inference": "not_run",
+    "assessment": "not_run",
+    "environment": "The recorded capture used the pinned upstream nightly wheel and a dependency freeze retained with its validation evidence, not in this repository; no model, engine, CUDA initialization or native-kernel execution",
+    "note": "New installations leave dependencies unpinned and can produce different schema bytes. The capture checksum and qualification describe the recorded capture only. Schema capture qualifies declarations, not inference behavior or native-kernel execution. Verify each new capture against its own source, wheel and recorded dependency versions."
+  }
+}

@@ -91,6 +91,10 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 <ParamField path="NIXL_TELEMETRY_ENABLE" type="string" default="n">
   Enables [NIXL](https://github.com/ai-dynamo/nixl) telemetry. NIXL metrics track KV cache and embedding data transfers and are populated only during disaggregated serving or multimodal embedding transfers.
 
+  In vLLM model workers with the `ai-dynamo` wheel installed, the `dynamo_nixl_telemetry` plugin unsets a false `NIXL_TELEMETRY_ENABLE`, sets `NIXL_TELEMETRY_EXPORTER` to `NOP`, and unsets `NIXL_TELEMETRY_DIR`. NIXL collects transfer statistics in-process without exporting them. An unset or true enable value is left unchanged.
+
+  If you set `VLLM_PLUGINS`, include `dynamo_nixl_telemetry`. Without it, Ray model actors keep the inherited false value. With NIXL 1.4, this can cause disaggregated inference to fail after a KV transfer.
+
   This variable alone does not produce a scrapeable endpoint: set `NIXL_TELEMETRY_EXPORTER` as well. `NIXL_TELEMETRY_PROMETHEUS_PORT` then chooses the port, and while it is optional, leaving it unset lands the exporter on a port the operator already uses. Both are described below.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>y</Badge> <Badge intent="note" minimal>1</Badge> <Badge intent="note" minimal>yes</Badge> <Badge intent="note" minimal>on</Badge> <Badge intent="note" minimal>true</Badge> <Badge intent="note" minimal>enable</Badge> <Badge intent="note" minimal>n</Badge> <Badge intent="note" minimal>0</Badge> <Badge intent="note" minimal>no</Badge> <Badge intent="note" minimal>off</Badge> <Badge intent="note" minimal>false</Badge> <Badge intent="note" minimal>disable</Badge></span>
@@ -106,6 +110,8 @@ Every Dynamo process reads its own environment at startup, so set these on each 
   NIXL telemetry exporter to use, e.g. `prometheus`.
 
   Required for a Prometheus endpoint, with the exact lowercase value `prometheus`. NIXL has no default exporter: when this variable is unset, telemetry is collected in-process without opening a Prometheus port. Other valid exporters, such as `doca`, use their own configuration; an exporter that NIXL cannot load makes agent construction fail.
+
+  In vLLM workers, the `dynamo_nixl_telemetry` plugin replaces this value with `NOP` when `NIXL_TELEMETRY_ENABLE` is false. See the `NIXL_TELEMETRY_ENABLE` entry above.
 
   **Operator preset:** `prometheus` on worker, prefill, and decode pods.
 </ParamField>
@@ -340,8 +346,8 @@ These variables tune the vLLM worker's self-benchmark collector (`--benchmark-mo
   Content source for synthetic benchmark prompts: unset keeps salt-seeded random token ids; `sharegpt` draws deterministic windows from a real-text token pool; `sharegpt_chain` reuses the KV warm-up chain texts so seeded and measured requests share one construction.
 </ParamField>
 
-<ParamField path="DYN_BENCH_PREFILL_REAL_SEED" type="string" default="off">
-  Real-KV seeding for prefill points that read past KV. Accepts `on`, `1`, or `true` (case-insensitive); anything else keeps the synthetic prefix blocks that are registered in the prefix cache but never computed. When on, the seeded prefix is first computed by a real, unbooked prefill pass (staging; slots already deep enough are not re-run), an unbooked same-shape warm shot follows, and only then does the timed request hit the real KV in the prefix cache. The expected hit length is validated before admission; on a miss the chain is re-staged once and the point is skipped on a second miss (`real_seed_injection_failed`, `real_seed_warm_injection_failed`, `real_seed_cache_validation_failed`). All ranks of an attention-DP group must agree on the setting (it is part of the grid-invariants digest). Dense-attention models measure the same either way; sparse-attention and hybrid-KV models need it for deep past-KV points.
+<ParamField path="DYN_BENCH_PREFILL_REAL_SEED" type="string" default="auto">
+  Real-KV seeding for prefill points that read past KV. Accepts `on`, `1`, or `true` to enable it, `auto` (the default) to enable it only when the KV-cache layout has a recurrent-state (Mamba, GDN, or KDA) group and there is a single attention-DP rank, and any other value to keep the synthetic prefix blocks that are registered in the prefix cache but never computed. Synthetic blocks carry no recurrent state, so on a hybrid layout every past-KV prefill point misses the prefix cache and is skipped (`fake_prefix_cache_validation_failed`), and the worker rejects the run. When on, the seeded prefix is first computed by a real, unbooked prefill pass (staging; slots already deep enough are not re-run), an unbooked same-shape warm shot follows, and only then does the timed request hit the real KV in the prefix cache. The expected hit length is validated before admission; on a miss the chain is re-staged once and the point is skipped on a second miss (`real_seed_injection_failed`, `real_seed_warm_injection_failed`, `real_seed_cache_validation_failed`). All ranks of an attention-DP group must agree on the setting (it is part of the grid-invariants digest). Dense-attention models measure the same either way. Hybrid-KV models need it for any past-KV point, and `auto` turns it on for them except under attention-DP, where real-seed retries are not yet coordinated across ranks. Sparse-attention models need it for deep past-KV points; set `on` for them explicitly.
 </ParamField>
 
 <ParamField path="DYN_BENCH_POOL_TAG" type="string">
@@ -359,7 +365,11 @@ See [Measurement Protocol in the Self-Benchmark Artifact](forward-pass-metrics-t
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_RECORDS" type="string" default="request_end,tool">
-  Comma-separated record types: `request_end`, `request_payload`, and `tool`.
+  Comma-separated record types: `request_end`, `request_payload`, `tool`, and `router_selection`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K" type="integer" default="16">
+  Lowest-cost candidates kept per `router_selection` row. `0` keeps every scored candidate; the selected worker is always kept.
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_SINKS" type="string" default="file">

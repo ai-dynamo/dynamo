@@ -41,7 +41,7 @@ func EvaluateLPXGroveReadiness(ctx context.Context, source *v1beta1.DynamoGraphD
 	completed := false
 	result := func(ready bool, message string) GroveReadiness {
 		if status.AvailableReplicas != nil {
-			status.AvailableReplicas = ptr.To(min(*status.AvailableReplicas, verifiedAvailable))
+			status.AvailableReplicas = new(min(*status.AvailableReplicas, verifiedAvailable))
 		}
 		statuses[component.ComponentName] = status
 		for name, memberStatus := range statuses {
@@ -68,11 +68,11 @@ func EvaluateLPXGroveReadiness(ctx context.Context, source *v1beta1.DynamoGraphD
 	}
 	status.ComponentNames = []string{pcsg.Name}
 	status.Replicas, status.UpdatedReplicas = pcsg.Status.Replicas, pcsg.Status.UpdatedReplicas
-	status.AvailableReplicas = ptr.To(pcsg.Status.AvailableReplicas)
+	status.AvailableReplicas = new(pcsg.Status.AvailableReplicas)
 	if pcsg.Status.ObservedGeneration == nil || *pcsg.Status.ObservedGeneration != pcsg.Generation {
 		return pending("Waiting for the exact observed LPX scaling group")
 	}
-	status.ScheduledReplicas = ptr.To(pcsg.Status.ScheduledReplicas)
+	status.ScheduledReplicas = new(pcsg.Status.ScheduledReplicas)
 	replicas := ptr.Deref(component.Replicas, pcsg.Spec.Replicas)
 	if pcsg.Spec.Replicas != replicas || pcsg.Status.CurrentPodCliqueSetGenerationHash == nil || *pcsg.Status.CurrentPodCliqueSetGenerationHash != *hash {
 		return pending("LPX scaling group has not applied the desired revision and capacity")
@@ -110,8 +110,8 @@ func EvaluateLPXGroveReadiness(ctx context.Context, source *v1beta1.DynamoGraphD
 				if readiness.status.ReadyReplicas != nil {
 					draft.Replicas += readiness.status.Replicas
 					draft.UpdatedReplicas += readiness.status.UpdatedReplicas
-					draft.ScheduledReplicas = ptr.To(ptr.Deref(draft.ScheduledReplicas, 0) + ptr.Deref(readiness.status.ScheduledReplicas, 0))
-					draft.ReadyReplicas = ptr.To(ptr.Deref(draft.ReadyReplicas, 0) + *readiness.status.ReadyReplicas)
+					draft.ScheduledReplicas = new(ptr.Deref(draft.ScheduledReplicas, 0) + ptr.Deref(readiness.status.ScheduledReplicas, 0))
+					draft.ReadyReplicas = new(ptr.Deref(draft.ReadyReplicas, 0) + *readiness.status.ReadyReplicas)
 				}
 				statuses[memberName] = draft
 			}

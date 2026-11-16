@@ -108,15 +108,15 @@ func staggerEmbeddedFlagValue(tokens []string, flag string, offset int) bool {
 		}
 
 		// Read only the integer prefix, leaving trailing launch arguments intact.
-		var portStr string
+		var portStr strings.Builder
 		for _, ch := range parts[1] {
 			if ch < '0' || ch > '9' {
 				break
 			}
-			portStr += string(ch)
+			portStr.WriteString(string(ch))
 		}
-		if port, err := strconv.Atoi(portStr); err == nil {
-			tokens[i] = strings.Replace(token, flag+" "+portStr, flag+" "+strconv.Itoa(port+offset), 1)
+		if port, err := strconv.Atoi(portStr.String()); err == nil {
+			tokens[i] = strings.Replace(token, flag+" "+portStr.String(), flag+" "+strconv.Itoa(port+offset), 1)
 			return true
 		}
 	}

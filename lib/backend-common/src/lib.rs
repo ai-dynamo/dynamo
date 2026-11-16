@@ -39,9 +39,9 @@ pub use engine::{
     HEALTH_CHECK_KEY, KV_HINT_TRANSFER_CAPABILITY_KEY, KvEventPublisher, KvEventSource, KvHint,
     KvHintAction, KvSourceLocationsPayload, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
     LlmRegistration, LogProbs, Metrics, MetricsBindings, MetricsCtx, MultimodalData,
-    OnPublisherReady, OnSnapshotPublisherReady, OutputOptions, PrefillResult, PreprocessedRequest,
-    PromptTokensDetails, RawEngine, SamplingOptions, StopConditions, StopReason, TopLogprob,
-    TopLogprobs, chunk, usage,
+    MultimodalItemRef, OnPublisherReady, OnSnapshotPublisherReady, OutputOptions, PrefillResult,
+    PreprocessedRequest, PromptTokensDetails, RawEngine, SamplingOptions, StopConditions,
+    StopReason, TopLogprob, TopLogprobs, chunk, usage,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};

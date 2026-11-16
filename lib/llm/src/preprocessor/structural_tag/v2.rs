@@ -10,6 +10,7 @@ use dynamo_parsers_v2::structural_tag::{
     StructuralTagToolChoice as StructuralTagToolChoiceV2,
 };
 
+#[cfg(test)]
 use crate::protocols::openai::chat_completions::tool_parser_v2;
 
 use super::StructuralTagBuildRequest;
@@ -19,10 +20,10 @@ pub(crate) struct StructuralTagBuilder(&'static InnerBuilder);
 
 impl StructuralTagBuilder {
     pub(super) fn for_parser(parser_name: &str) -> Option<Self> {
-        dynamo_parsers_v2::structural_tag_builder_for_family(tool_parser_v2::canonical_family(
+        let family = crate::protocols::openai::chat_completions::unified_parser::canonical_family(
             parser_name,
-        ))
-        .map(Self)
+        )?;
+        dynamo_parsers_v2::structural_tag_builder_for_family(family).map(Self)
     }
 
     pub(super) fn build(
@@ -77,6 +78,7 @@ fn to_v2_tool(tool: &ToolDefinition) -> Tool {
     }
 }
 
+#[cfg(test)]
 pub(super) fn enabled() -> bool {
     tool_parser_v2::enabled()
 }
@@ -105,6 +107,54 @@ mod tests {
     fn deepseek_v4_engine_aliases_select_the_structural_tag_builder() {
         for alias in ["deepseek_v4", "deepseek-v4", "deepseekv4"] {
             assert!(supports_family(alias), "unsupported alias: {alias}");
+        }
+    }
+    #[test]
+    fn deepseek_dialects_keep_their_framing_and_argument_styles() {
+        let tools = [ToolDefinition {
+            name: "get_weather".into(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"]
+            })),
+            strict: Some(true),
+        }];
+        let choice = ToolChoice::Named("get_weather".into());
+        let request = StructuralTagBuildRequest {
+            tool_choice: &choice,
+            tools: &tools,
+            parallel_tool_calls: Some(false),
+            schema_mode: dynamo_parsers::tool_calling::StructuralTagSchemaMode::Strict,
+            exclude_special_tokens: None,
+            reasoning_boundary: super::super::ResolvedReasoningBoundary::StructuralTag,
+            tool_arguments_any_order: false,
+            starts_in_reasoning: false,
+            structured_output_schema: None,
+        };
+        for (family, marker, style, other_marker) in [
+            (
+                "deepseek_v4",
+                "<｜DSML｜tool_calls>",
+                "deepseek_xml",
+                "<｜DSML｜ calls>",
+            ),
+            (
+                "deepseek_v41",
+                "<｜DSML｜ calls>",
+                "deepseek_v4_1_xml",
+                "<｜DSML｜tool_calls>",
+            ),
+        ] {
+            let tag = StructuralTagBuilder::for_parser(family)
+                .unwrap()
+                .build(&request)
+                .unwrap()
+                .unwrap();
+            let serialized = serde_json::to_string(&tag).unwrap();
+            assert!(serialized.contains(marker), "{family}: {serialized}");
+            assert!(serialized.contains(style), "{family}: {serialized}");
+            assert!(!serialized.contains(other_marker), "{family}: {serialized}");
         }
     }
 }

@@ -8,11 +8,12 @@
 set -e
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-export DYNAMO_HOME="${DYNAMO_HOME:-$(readlink -f "$SCRIPT_DIR/../../../..")}"
+# Resolved relative to this script, not via $DYNAMO_HOME: vllm_runtime.Dockerfile
+# bakes DYNAMO_HOME=/opt/dynamo, which has no examples/ directory.
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/gpu_utils.sh"   # build_vllm_gpu_mem_args
+source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"   # build_vllm_gpu_mem_args
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
+source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 LORA_NAME="${LORA_NAME:-codelion/Qwen3-0.6B-accuracy-recovery-lora}"
@@ -45,12 +46,13 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_SYSTEM_PORT1                Decode sidecar system port (default: 8081)"
             echo "  DYN_SYSTEM_PORT2                Prefill sidecar system port (default: 8082)"
             echo "  VLLM_DECODE_HTTP_PORT           Decode vLLM HTTP port (default: 8100)"
-            echo "  VLLM_DECODE_GRPC_PORT           Decode vLLM gRPC port (default: 50051)"
+            echo "  VLLM_DECODE_GRPC_PORT           Decode vLLM gRPC port (default: 30001)"
             echo "  VLLM_PREFILL_HTTP_PORT          Prefill vLLM HTTP port (default: 8110)"
-            echo "  VLLM_PREFILL_GRPC_PORT          Prefill vLLM gRPC port (default: 50052)"
+            echo "  VLLM_PREFILL_GRPC_PORT          Prefill vLLM gRPC port (default: 30011)"
             echo "  VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT  Decode NIXL port (default: 5600)"
             echo "  VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT Prefill NIXL port (default: 20097)"
             echo "  VLLM_PREFILL_KV_EVENT_ENDPOINT  KV event endpoint (default: private local IPC socket)"
+            echo "  VLLM_PREFILL_KV_REPLAY_ENDPOINT KV event replay endpoint (default: private local IPC socket)"
             echo "  VLLM_DECODE_GPU                 Decode GPU index (default: 0)"
             echo "  VLLM_PREFILL_GPU                Prefill GPU index (default: 1)"
             echo "  MAX_MODEL_LEN                   Maximum model length (default: 4096)"
@@ -71,6 +73,11 @@ KV_EVENT_DIR=""
 if [[ -z "${VLLM_PREFILL_KV_EVENT_ENDPOINT:-}" ]]; then
     KV_EVENT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dynamo-vllm-kv.XXXXXX")"
     VLLM_PREFILL_KV_EVENT_ENDPOINT="ipc://${KV_EVENT_DIR}/events"
+    VLLM_PREFILL_KV_REPLAY_ENDPOINT="${VLLM_PREFILL_KV_REPLAY_ENDPOINT:-ipc://${KV_EVENT_DIR}/replay}"
+fi
+KV_REPLAY_CONFIG=""
+if [[ -n "${VLLM_PREFILL_KV_REPLAY_ENDPOINT:-}" ]]; then
+    KV_REPLAY_CONFIG=",\"replay_endpoint\":\"${VLLM_PREFILL_KV_REPLAY_ENDPOINT}\""
 fi
 
 lora_exit_trap() {
@@ -87,9 +94,9 @@ MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 MAX_LORAS="${MAX_LORAS:-4}"
 MAX_LORA_RANK="${MAX_LORA_RANK:-64}"
 VLLM_DECODE_HTTP_PORT="${VLLM_DECODE_HTTP_PORT:-8100}"
-VLLM_DECODE_GRPC_PORT="${VLLM_DECODE_GRPC_PORT:-50051}"
+VLLM_DECODE_GRPC_PORT="${VLLM_DECODE_GRPC_PORT:-30001}"
 VLLM_PREFILL_HTTP_PORT="${VLLM_PREFILL_HTTP_PORT:-8110}"
-VLLM_PREFILL_GRPC_PORT="${VLLM_PREFILL_GRPC_PORT:-50052}"
+VLLM_PREFILL_GRPC_PORT="${VLLM_PREFILL_GRPC_PORT:-30011}"
 VLLM_DECODE_GPU="${VLLM_DECODE_GPU:-0}"
 VLLM_PREFILL_GPU="${VLLM_PREFILL_GPU:-1}"
 VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT="${VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT:-5600}"
@@ -169,7 +176,7 @@ vllm-rs serve "$MODEL" \
     --max-loras "$MAX_LORAS" \
     --max-lora-rank "$MAX_LORA_RANK" \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
-    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"${VLLM_PREFILL_KV_EVENT_ENDPOINT}\",\"enable_kv_cache_events\":true}" \
+    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"${VLLM_PREFILL_KV_EVENT_ENDPOINT}\"${KV_REPLAY_CONFIG},\"enable_kv_cache_events\":true}" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 

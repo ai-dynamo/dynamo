@@ -1,0 +1,240 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+metadata:
+  annotations:
+    lpx.nvidia.com/deployment-name: units-gpt-oss
+  labels:
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+    nvidia.com/dynamo-graph-deployment-name: units-gpt-oss
+  name: units-gpt-oss-1e60
+  namespace: test
+spec:
+  replicas: 1
+  template:
+    cliqueStartupType: CliqueStartupTypeExplicit
+    cliques:
+    - annotations:
+        lpx.nvidia.com/deployment-name: units-gpt-oss
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:74df87aa8f01416c86fac3eb6281095de5a10547a2c1c139d9c1cfbd767ef04a
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:6c965be47f64c02236e95f59cf713414e0ebea1bd59eabad97dab6f89cc3d4fe
+        scheduling.lpu.nvidia.com/model: default
+        scheduling.lpu.nvidia.com/role: agent
+        scheduling.lpu.nvidia.com/workload-mode: v2StrictHybrid
+      labels:
+        nvidia.com/dynamo-component: lpu
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: units-gpt-oss
+        nvidia.com/dynamo-namespace: test-units-gpt-oss
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: units-gpt-oss-lpu
+      name: agt
+      spec:
+        minAvailable: 3
+        podSpec:
+          containers:
+          - env:
+            - name: LPX_LOCAL_PARTITION_IDS
+              value: 0,2,3,4,5,6,7,8,9,10,11
+            - name: LPX_MODEL_PATH
+              value: /nfs/units-gpt-oss
+            - name: DYN_COMPONENT
+              value: lpx
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_NAMESPACE
+              value: test-units-gpt-oss
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: units-gpt-oss
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: MODEL_PATH
+              value: $(LPX_MODEL_PATH)
+            - name: NATS_SERVER
+              value: nats-address
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            image: example.invalid/hydra:test
+            name: main
+            resources:
+              limits:
+                lpu.nvidia.com/devices: "1"
+                lpu.nvidia.com/lpu: "8"
+              requests:
+                lpu.nvidia.com/lpu: "8"
+            volumeMounts:
+            - mountPath: /nfs
+              name: model-storage
+            - mountPath: /dev/shm
+              name: shared-memory
+          restartPolicy: Always
+          schedulerName: lpx-scheduler
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+        replicas: 3
+        roleName: agt
+    - annotations:
+        lpx.nvidia.com/deployment-name: units-gpt-oss
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:6c965be47f64c02236e95f59cf713414e0ebea1bd59eabad97dab6f89cc3d4fe
+        scheduling.lpu.nvidia.com/role: cyborg-worker
+      labels:
+        lpx.nvidia.com/serving: "true"
+        nvidia.com/dynamo-component: lpu
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: units-gpt-oss
+        nvidia.com/dynamo-namespace: test-units-gpt-oss
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: units-gpt-oss-lpu
+      name: cond
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - env:
+            - name: LPX_ALLOCATION
+              value: agt
+            - name: LPX_LOCAL_PARTITION_IDS
+              value: 0,2,3,4,5,6,7,8,9,10,11
+            - name: GBUILD_MANIFEST_PATH
+              value: /nfs/units-gpt-oss/deployment.v1.capnp.bin
+            - name: LPX_MODEL_PATH
+              value: /nfs/units-gpt-oss
+            - name: MODEL_PATH
+              value: $(LPX_MODEL_PATH)
+            image: example.invalid/cyborg:test
+            name: main
+            resources:
+              claims:
+              - name: gpu
+            volumeMounts:
+            - mountPath: /nfs
+              name: model-storage
+            - mountPath: /dev/shm
+              name: shared-memory
+          initContainers:
+          - args:
+            - lpx
+            - --model-path
+            - $(LPX_MODEL_PATH)/tokenizer
+            env:
+            - name: LPX_MODEL_PATH
+              value: /nfs/units-gpt-oss
+            - name: DYN_COMPONENT
+              value: decode
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_NAMESPACE
+              value: test-units-gpt-oss
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: units-gpt-oss
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: DYN_SYSTEM_ENABLED
+              value: "true"
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: NATS_SERVER
+              value: nats-address
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            image: example.invalid/dynamo-sidecar:test
+            livenessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 5
+              timeoutSeconds: 4
+            name: runtime
+            ports:
+            - containerPort: 9090
+              name: system
+              protocol: TCP
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: system
+              periodSeconds: 5
+              timeoutSeconds: 4
+            resources: {}
+            restartPolicy: Always
+            startupProbe:
+              failureThreshold: 30
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 2
+              timeoutSeconds: 1
+            volumeMounts:
+            - mountPath: /nfs
+              name: model-storage
+          resourceClaims:
+          - name: gpu
+            resourceClaimTemplateName: decode-gpu
+          restartPolicy: Always
+          schedulerName: lpx-scheduler
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+        replicas: 1
+        roleName: cond
+        startsAfter:
+        - agt
+    headlessServiceConfig:
+      publishNotReadyAddresses: true
+    podCliqueScalingGroups:
+    - annotations:
+        lpx.nvidia.com/deployment-name: units-gpt-oss
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:6c965be47f64c02236e95f59cf713414e0ebea1bd59eabad97dab6f89cc3d4fe
+      cliqueNames:
+      - agt
+      - cond
+      minAvailable: 1
+      name: lpx
+      replicas: 1
+    terminationDelay: 15m0s
+status:
+  availableReplicas: 0
+  updatedReplicas: 0

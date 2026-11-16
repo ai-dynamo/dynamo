@@ -21,6 +21,9 @@ func HelmConfigurations() ([]*admissionregistrationv1.MutatingWebhookConfigurati
 	objects, err := operatorchart.Render("templates/webhook-configuration.yaml", operatorchart.Options{
 		ReleaseName: "operatorenv",
 		Namespace:   "operatorenv",
+		Values: map[string]any{
+			"dgdrV1Beta2": map[string]any{"enabled": true},
+		},
 	})
 	if err != nil {
 		return nil, nil, err

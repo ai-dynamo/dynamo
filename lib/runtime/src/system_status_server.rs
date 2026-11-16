@@ -21,7 +21,7 @@ use axum::{
     body::Bytes,
     extract::{Json, Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{any, delete, get, post},
     serve::Listener,
 };
@@ -131,8 +131,18 @@ impl Clone for SystemStatusServerInfo {
 pub struct SystemStatusState {
     // global drt registry is for printing out the entire Prometheus format output
     root_drt: Arc<crate::DistributedRuntime>,
+    // Last /metrics render, behind the gate that serializes renders. Overlapping
+    // scrapes wait here on the runtime and share one blocking render.
+    last_scrape: Arc<tokio::sync::Mutex<LastScrape>>,
     // Discovery metadata (only for Kubernetes backend)
     discovery_metadata: Option<Arc<tokio::sync::RwLock<crate::discovery::DiscoveryMetadata>>>,
+}
+
+/// The most recent `/metrics` render and when it started collecting.
+#[derive(Default)]
+struct LastScrape {
+    started_at: Option<Instant>,
+    text: bytes::Bytes,
 }
 
 impl SystemStatusState {
@@ -143,6 +153,7 @@ impl SystemStatusState {
     ) -> anyhow::Result<Self> {
         Ok(Self {
             root_drt: drt,
+            last_scrape: Arc::new(tokio::sync::Mutex::new(LastScrape::default())),
             discovery_metadata,
         })
     }
@@ -293,7 +304,7 @@ fn build_system_status_router(
             "/engine/{*path}",
             any({
                 let state = Arc::clone(&server_state);
-                move |path, body| engine_route_handler(state, path, body)
+                move |path, method, body| engine_route_handler(state, path, method, body)
             }),
         );
 
@@ -530,18 +541,49 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     //
     // NOTE: We use a multi-registry model (e.g. one registry per endpoint) and merge at scrape time,
     // so /metrics traverses registered child registries and produces a single combined output.
-    let response = match state.drt().metrics().prometheus_expfmt() {
-        Ok(r) => r,
+    let registry = state.drt().get_metrics_registry().clone();
+    match render_scrape_at(state.last_scrape.clone(), registry, Instant::now()).await {
+        Ok(text) => (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            text,
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("Failed to get metrics from registry: {e}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to get metrics".to_string(),
-            );
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to get metrics").into_response()
         }
-    };
+    }
+}
 
-    (StatusCode::OK, response)
+/// Render `/metrics` for a scrape that arrived at `requested_at`. A render
+/// that started collecting after the scrape arrived is reused; otherwise the
+/// scrape renders on the blocking pool. The owned guard moves into the
+/// closure, so a cancelled request cannot release the gate before its render
+/// finishes and let the next scrape queue inside the pool.
+async fn render_scrape_at(
+    last_scrape: Arc<tokio::sync::Mutex<LastScrape>>,
+    registry: crate::metrics::MetricsRegistry,
+    requested_at: Instant,
+) -> anyhow::Result<bytes::Bytes> {
+    let mut last = last_scrape.lock_owned().await;
+    if last.started_at.is_some_and(|at| at >= requested_at) {
+        return Ok(last.text.clone());
+    }
+    tokio::task::spawn_blocking(move || {
+        let started_at = Instant::now();
+        let text = bytes::Bytes::from(registry.prometheus_expfmt_combined()?);
+        *last = LastScrape {
+            started_at: Some(started_at),
+            text: text.clone(),
+        };
+        Ok(text)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("metrics render task failed: {e}"))?
 }
 
 /// Metadata handler
@@ -868,67 +910,10 @@ fn parse_lora_response(response_data: &serde_json::Value) -> LoraResponse {
 async fn engine_route_handler(
     state: Arc<SystemStatusState>,
     Path(path): Path<String>,
+    method: axum::http::Method,
     body: Bytes,
-) -> impl IntoResponse {
-    tracing::trace!("Engine route request to /engine/{path}");
-
-    // Parse body as JSON (empty object for GET/empty body)
-    let body_json: serde_json::Value = if body.is_empty() {
-        serde_json::json!({})
-    } else {
-        match serde_json::from_slice(&body) {
-            Ok(json) => json,
-            Err(e) => {
-                tracing::warn!("Invalid JSON in request body: {e}");
-                return (
-                    StatusCode::BAD_REQUEST,
-                    json!({
-                        "error": "Invalid JSON",
-                        "message": format!("{}", e)
-                    })
-                    .to_string(),
-                )
-                    .into_response();
-            }
-        }
-    };
-
-    // Look up callback
-    let callback = match state.drt().engine_routes().get(&path) {
-        Some(cb) => cb,
-        None => {
-            tracing::debug!("Route /engine/{path} not found");
-            return (
-                StatusCode::NOT_FOUND,
-                json!({
-                    "error": "Route not found",
-                    "message": format!("Route /engine/{} not found", path)
-                })
-                .to_string(),
-            )
-                .into_response();
-        }
-    };
-
-    // Call callback (it's async, so await it)
-    match callback(body_json).await {
-        Ok(response) => {
-            tracing::trace!("Engine route handler succeeded for /engine/{path}");
-            (StatusCode::OK, response.to_string()).into_response()
-        }
-        Err(e) => {
-            tracing::error!("Engine route handler error for /engine/{}: {}", path, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({
-                    "error": "Handler error",
-                    "message": format!("{}", e)
-                })
-                .to_string(),
-            )
-                .into_response()
-        }
-    }
+) -> Response {
+    crate::engine_routes::dispatch(state.drt().engine_routes(), path, method, body).await
 }
 
 // Regular tests: cargo test system_status_server --lib
@@ -937,6 +922,79 @@ mod tests {
     use super::*;
     use crate::utils::ip_resolver::test_support::StubResolver;
     use tokio::time::Duration;
+
+    /// Engine callback whose renders block until the test releases them, and
+    /// which reports each render start, so the tests never sleep-and-hope.
+    fn held_registry() -> (
+        crate::metrics::MetricsRegistry,
+        tokio::sync::mpsc::UnboundedReceiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let registry = crate::metrics::MetricsRegistry::new();
+        let (started_tx, started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        registry.add_expfmt_callback(Arc::new(move || {
+            let _ = started_tx.send(());
+            release_rx.lock().unwrap().recv().expect("release");
+            Ok("engine_metric 1\n".to_string())
+        }));
+        (registry, started_rx, release_tx)
+    }
+
+    /// A scrape that arrives while a render is in flight waits on the runtime,
+    /// not in the blocking pool, and then renders once for every later arrival
+    /// to share; cancelling the active request does not release the gate.
+    #[test]
+    fn scrapes_queue_on_the_gate_and_share_the_next_render() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let (registry, mut started, release) = held_registry();
+            let last = Arc::new(tokio::sync::Mutex::new(LastScrape::default()));
+            let scrape = |last: &Arc<tokio::sync::Mutex<LastScrape>>| {
+                let (last, registry) = (last.clone(), registry.clone());
+                tokio::spawn(async move { render_scrape_at(last, registry, Instant::now()).await })
+            };
+
+            // First scrape starts a render, then its request is cancelled.
+            let first = scrape(&last);
+            started.recv().await.expect("first render started");
+            first.abort();
+            let _ = first.await;
+
+            // Two scrapes arrive during that render. They must wait on the gate,
+            // leaving the pool's other thread free for unrelated work.
+            let second = scrape(&last);
+            let third = scrape(&last);
+            tokio::time::timeout(Duration::from_secs(5), tokio::task::spawn_blocking(|| ()))
+                .await
+                .expect("a waiting scrape occupied a blocking thread")
+                .expect("probe");
+
+            // Releasing the cancelled render lets the second scrape render; the
+            // third arrived before that render started and shares it.
+            release.send(()).unwrap();
+            started.recv().await.expect("second render started");
+            release.send(()).unwrap();
+            let second = second.await.expect("task").expect("render");
+            let third = third.await.expect("task").expect("render");
+            assert_eq!(second, third);
+            assert!(
+                std::str::from_utf8(&second)
+                    .unwrap()
+                    .contains("engine_metric 1")
+            );
+            assert!(
+                started.try_recv().is_err(),
+                "the third scrape must share the second render, not start its own"
+            );
+        });
+    }
 
     #[test]
     fn advertised_address_stays_in_the_bound_family() {

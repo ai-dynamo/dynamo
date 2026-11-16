@@ -25,11 +25,6 @@ func (w *Workload) Digest() WorkloadDigest {
 	return w.digest
 }
 
-// BuildFamily returns the workload's build family.
-func (w *Workload) BuildFamily() BuildFamily {
-	return w.modelProjections[0].configuredBuild.Family
-}
-
 // Pipeline returns the workload's runtime pipeline.
 func (w *Workload) Pipeline() Pipeline {
 	return w.modelProjections[0].pipeline
@@ -50,4 +45,8 @@ func (w *Workload) ComponentNames() []string {
 // ServingComponentName returns the conductor owner, placed last by ResolveWorkload.
 func (w *Workload) ServingComponentName() string {
 	return w.modelProjections[len(w.modelProjections)-1].stage
+}
+
+func (w *Workload) placesLPUUnits() bool {
+	return w.modelProjections[0].placesLPUUnits()
 }

@@ -8,6 +8,7 @@ package lpx
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
@@ -19,7 +20,7 @@ import (
 
 // configureHybridCyborg consumes a fresh hybrid clique from an admitted source
 // whose conductor resources were validated during workload selection.
-// cyborgConfigMap is the nonnil Agent-address ConfigMap rendered for that workload.
+// A nil cyborgConfigMap selects compiler-owned units instead of legacy addresses.
 func configureHybridCyborg(
 	cyborg *grovev1alpha1.PodCliqueTemplateSpec,
 	projection *ModelProjection,
@@ -46,16 +47,19 @@ func configureHybridCyborg(
 		return err
 	}
 	applyLocalPartitionIDs(container, projection)
+	applyCyborgWeightsPath(container, projection, modelStoragePath)
 
 	cyborg.Annotations = roleAnnotations(
 		cyborg.Annotations,
 		lpxv1alpha1.PodRoleCyborgWorker,
 		workloadDigest,
 	)
-	if err := withLPUConfigVolume(&cyborg.Spec.PodSpec, cyborgConfigMap.Name, true); err != nil {
-		return err
+	if cyborgConfigMap != nil {
+		ensureLPUConfigVolume(&cyborg.Spec.PodSpec, cyborgConfigMap.Name)
+		cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash] = cyborgConfigHash
+	} else {
+		configureNodeLocalConductorRuntime(&cyborg.Spec.PodSpec, strings.Join(agentTemplateNames, ":"))
 	}
-	cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash] = cyborgConfigHash
 	cyborg.Spec.StartsAfter = slices.Clone(agentTemplateNames)
 	return nil
 }

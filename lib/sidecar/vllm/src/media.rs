@@ -63,6 +63,7 @@ impl MediaArgs {
             || self.common.custom_jinja_template.is_some()
             || self.common.dyn_tool_call_parser.is_some()
             || self.common.dyn_reasoning_parser.is_some()
+            || self.common.structural_tag(false).is_some()
         {
             return Err(invalid_argument(format!(
                 "media sidecars require a nonempty model, only the {endpoint} endpoint, and aggregated mode without token-pipeline options"
@@ -415,6 +416,50 @@ mod tests {
                 ])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn media_rejects_enabled_structural_tags_before_upstream_startup() {
+        for mode in ["realtime", "speech"] {
+            for (flags, accepted) in [
+                (&[][..], true),
+                (&["--dyn-structural-tag", "false"][..], true),
+                (&["--dyn-structural-tag"][..], false),
+                (&["--dyn-structural-tag", "true"][..], false),
+                (
+                    &["--dyn-structural-tag", r#"{"scope":"always"}"#][..],
+                    false,
+                ),
+            ] {
+                let mut argv = vec![
+                    "sidecar",
+                    mode,
+                    "--http-endpoint",
+                    "http://localhost:8001",
+                    "--model",
+                    "test-model",
+                ];
+                if mode == "realtime" {
+                    argv.extend(["--protocol", "omni"]);
+                }
+                argv.extend_from_slice(flags);
+                let matches = crate::command().try_get_matches_from(argv).unwrap();
+                let result = match Mode::from_arg_matches(&matches).unwrap() {
+                    Mode::Realtime(args) => RealtimeEngine::bootstrap(args).map(|_| ()),
+                    Mode::Speech(args) => crate::speech::SpeechEngine::bootstrap(args).map(|_| ()),
+                };
+                assert_eq!(result.is_ok(), accepted, "mode={mode}, flags={flags:?}");
+                if let Err(error) = result {
+                    assert_eq!(
+                        error.error_type(),
+                        dynamo_backend_common::ErrorType::Backend(
+                            dynamo_backend_common::BackendError::InvalidArgument
+                        )
+                    );
+                    assert!(error.to_string().contains("without token-pipeline options"));
+                }
+            }
+        }
     }
 
     #[tokio::test]

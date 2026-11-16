@@ -17,9 +17,7 @@ import (
 	resourcev1 "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -42,6 +40,7 @@ var deviceDriverEqualityPattern = regexp.MustCompile(`(?:^|&&)\s*\(*\s*device\.d
 // ApplyClaim replaces the first container's scalar GPU resources with a shared
 // DRA ResourceClaim. Every container that references this claim name will share
 // the same physical GPUs.
+// podSpec must be non-nil and contain at least one container.
 func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
 	if len(podSpec.Containers) == 0 {
 		return fmt.Errorf("pod spec must have at least one container for DRA claim")
@@ -63,6 +62,14 @@ func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
 		container.Resources.Claims = append(container.Resources.Claims, corev1.ResourceClaim{Name: ClaimName})
 	}
 
+	ApplyPodClaim(podSpec, claimTemplateName)
+	return nil
+}
+
+// ApplyPodClaim adds the GPU NoSchedule toleration and the shared DRA claim
+// template to the pod. It never changes container resources.
+// podSpec must be non-nil; it may have no containers.
+func ApplyPodClaim(podSpec *corev1.PodSpec, claimTemplateName string) {
 	// GPU nodes are typically tainted with nvidia.com/gpu=NoSchedule. DRA
 	// bypasses the device-plugin toleration injection, so add it explicitly.
 	hasToleration := false
@@ -88,11 +95,10 @@ func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
 	for i := range podSpec.ResourceClaims {
 		if podSpec.ResourceClaims[i].Name == ClaimName {
 			podSpec.ResourceClaims[i] = claim
-			return nil
+			return
 		}
 	}
 	podSpec.ResourceClaims = append(podSpec.ResourceClaims, claim)
-	return nil
 }
 
 // ResourceClaimTemplateName returns the deterministic name for the
@@ -354,7 +360,7 @@ func ResolvePodSetGPUCount(
 			namespace,
 			&corev1.PodSpec{ResourceClaims: []corev1.PodResourceClaim{{
 				Name:              directName,
-				ResourceClaimName: ptr.To(directName),
+				ResourceClaimName: new(directName),
 			}}},
 			corev1.ResourceRequirements{Claims: selection.claims},
 		)
@@ -636,10 +642,8 @@ func GenerateResourceClaimTemplate(
 	deviceClassName string,
 ) (*resourcev1.ResourceClaimTemplate, bool, error) {
 	template := &resourcev1.ResourceClaimTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      claimTemplateName,
-			Namespace: namespace,
-		},
+		Name:      claimTemplateName,
+		Namespace: namespace,
 	}
 
 	if gpuCount <= 0 {

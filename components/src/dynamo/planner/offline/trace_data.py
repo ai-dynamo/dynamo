@@ -3,11 +3,23 @@
 
 import glob
 import gzip
+import io
 import json
 import math
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Literal, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from dynamo.planner.core.types import TrafficObservation
 
@@ -45,7 +57,9 @@ def _resolve_trace_paths(dataset: str) -> List[Path]:
         paths = sorted(Path(match) for match in glob.glob(dataset, recursive=True))
         paths = [candidate for candidate in paths if candidate.is_file()]
     else:
-        paths = [path]
+        # A missing path matches nothing; any other path, a named pipe
+        # included, is read as given.
+        paths = [path] if path.exists() else []
 
     paths = _reject_duplicate_copies(paths)
     if not paths:
@@ -59,7 +73,7 @@ def _open_trace(path: Path):
     return path.open("r", encoding="utf-8")
 
 
-def _load_json_line(path: Path, line_number: int, line: str) -> Dict[str, Any]:
+def _load_json_line(path: str | Path, line_number: int, line: str) -> Dict[str, Any]:
     try:
         record = json.loads(line)
     except json.JSONDecodeError as error:
@@ -94,18 +108,25 @@ def detect_trace_format(dataset: str) -> Optional[TraceFormat]:
     """
     for path in _resolve_trace_paths(dataset):
         with _open_trace(path) as source:
-            for line_number, line in enumerate(source, start=1):
-                if not line.strip():
-                    continue
-                record = _load_json_line(path, line_number, line)
-                trace_format = _detect_record_format(record)
-                if trace_format is None:
-                    if _event_type(record) not in (None, "request_end"):
-                        continue
-                    raise ValueError(
-                        f"Unsupported warmup trace format at {path}:{line_number}"
-                    )
+            trace_format = _detect_lines_format(source, str(path))
+            if trace_format is not None:
                 return trace_format
+    return None
+
+
+def _detect_lines_format(lines: Iterable[str], source: str) -> Optional[TraceFormat]:
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        record = _load_json_line(source, line_number, line)
+        trace_format = _detect_record_format(record)
+        if trace_format is None:
+            if _event_type(record) not in (None, "request_end"):
+                continue
+            raise ValueError(
+                f"Unsupported warmup trace format at {source}:{line_number}"
+            )
+        return trace_format
     return None
 
 
@@ -167,35 +188,58 @@ def _iter_trace_rows(
 ) -> Iterator[TraceRow]:
     for path in paths:
         with _open_trace(path) as source:
-            for line_number, line in enumerate(source, start=1):
-                if not line.strip():
-                    continue
-                location = f"{path}:{line_number}"
-                record = _load_json_line(path, line_number, line)
-                if trace_format == "dynamo" and _event_type(record) not in (
-                    None,
-                    "request_end",
-                ):
-                    continue
-                actual_format = _detect_record_format(record)
-                if actual_format != trace_format:
-                    raise ValueError(
-                        f"Mixed or unsupported warmup trace format at {location}: "
-                        f"expected {trace_format}, found {actual_format or 'unknown'}"
-                    )
-                row = (
-                    _parse_mooncake_row(record, location)
-                    if trace_format == "mooncake"
-                    else _parse_dynamo_row(record, location)
-                )
-                if row is not None:
-                    yield row
+            yield from _iter_trace_lines(source, trace_format, str(path))
+
+
+def _iter_trace_lines(
+    lines: Iterable[str], trace_format: TraceFormat, source: str
+) -> Iterator[TraceRow]:
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        location = f"{source}:{line_number}"
+        record = _load_json_line(source, line_number, line)
+        if trace_format == "dynamo" and _event_type(record) not in (
+            None,
+            "request_end",
+        ):
+            continue
+        actual_format = _detect_record_format(record)
+        if actual_format != trace_format:
+            raise ValueError(
+                f"Mixed or unsupported warmup trace format at {location}: "
+                f"expected {trace_format}, found {actual_format or 'unknown'}"
+            )
+        row = (
+            _parse_mooncake_row(record, location)
+            if trace_format == "mooncake"
+            else _parse_dynamo_row(record, location)
+        )
+        if row is not None:
+            yield row
 
 
 def _extract_metrics(
     paths: Sequence[Path],
     trace_format: TraceFormat,
     throughput_adjustment_interval_seconds: int,
+    *,
+    max_intervals: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    return _extract_metrics_from_rows(
+        lambda: _iter_trace_rows(paths, trace_format),
+        trace_format,
+        throughput_adjustment_interval_seconds,
+        max_intervals=max_intervals,
+    )
+
+
+def _extract_metrics_from_rows(
+    rows: Callable[[], Iterator[TraceRow]],
+    trace_format: TraceFormat,
+    throughput_adjustment_interval_seconds: int,
+    *,
+    max_intervals: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     if throughput_adjustment_interval_seconds <= 0:
         raise ValueError("throughput_adjustment_interval_seconds must be positive")
@@ -207,18 +251,13 @@ def _extract_metrics(
     origin_ms = 0.0
     if trace_format == "dynamo":
         origin_ms = min(
-            (
-                timestamp_ms
-                for timestamp_ms, _, _ in _iter_trace_rows(paths, trace_format)
-            ),
+            (timestamp_ms for timestamp_ms, _, _ in rows()),
             default=0.0,
         )
 
     interval_ms = throughput_adjustment_interval_seconds * 1000
     interval_groups: Dict[int, List[int]] = defaultdict(lambda: [0, 0, 0])
-    for timestamp_ms, input_length, output_length in _iter_trace_rows(
-        paths, trace_format
-    ):
+    for timestamp_ms, input_length, output_length in rows():
         interval_index = int((timestamp_ms - origin_ms) // interval_ms)
         interval_start = interval_index * throughput_adjustment_interval_seconds
         aggregate = interval_groups[interval_start]
@@ -231,6 +270,11 @@ def _extract_metrics(
         return metrics
 
     sorted_starts = sorted(interval_groups)
+    interval_count = (
+        sorted_starts[-1] - sorted_starts[0]
+    ) // throughput_adjustment_interval_seconds + 1
+    if max_intervals is not None and interval_count > max_intervals:
+        raise ValueError(f"warmup trace exceeds {max_intervals} aggregation intervals")
     for interval_start in range(
         sorted_starts[0],
         sorted_starts[-1] + 1,
@@ -252,7 +296,10 @@ def _extract_metrics(
 
 
 def extract_metrics_from_trace(
-    dataset: str, throughput_adjustment_interval_seconds: int
+    dataset: str,
+    throughput_adjustment_interval_seconds: int,
+    *,
+    max_intervals: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Extract warmup metrics from auto-detected Mooncake or Dynamo v1 traces.
 
@@ -263,7 +310,12 @@ def extract_metrics_from_trace(
     trace_format = detect_trace_format(dataset)
     if trace_format is None:
         return []
-    return _extract_metrics(paths, trace_format, throughput_adjustment_interval_seconds)
+    return _extract_metrics(
+        paths,
+        trace_format,
+        throughput_adjustment_interval_seconds,
+        max_intervals=max_intervals,
+    )
 
 
 def extract_metrics_from_trace_paths(
@@ -286,18 +338,50 @@ def extract_metrics_from_trace_paths(
 
 
 def extract_traffic_observations_from_trace(
-    dataset: str, throughput_adjustment_interval_seconds: int
+    dataset: str,
+    throughput_adjustment_interval_seconds: int,
+    *,
+    max_intervals: Optional[int] = None,
+) -> List[TrafficObservation]:
+    return _traffic_observations(
+        extract_metrics_from_trace(
+            dataset, throughput_adjustment_interval_seconds, max_intervals=max_intervals
+        ),
+        throughput_adjustment_interval_seconds,
+    )
+
+
+def extract_traffic_observations_from_bytes(
+    data: bytes,
+    throughput_adjustment_interval_seconds: int,
+    *,
+    max_intervals: Optional[int] = None,
+) -> List[TrafficObservation]:
+    """Parse an already-bounded JSONL buffer without reopening a filesystem path."""
+    text = data.decode("utf-8")
+    trace_format = _detect_lines_format(io.StringIO(text), "warmup trace")
+    if trace_format is None:
+        return []
+    metrics = _extract_metrics_from_rows(
+        lambda: _iter_trace_lines(io.StringIO(text), trace_format, "warmup trace"),
+        trace_format,
+        throughput_adjustment_interval_seconds,
+        max_intervals=max_intervals,
+    )
+    return _traffic_observations(metrics, throughput_adjustment_interval_seconds)
+
+
+def _traffic_observations(
+    metrics: List[Dict[str, Any]], interval: int
 ) -> List[TrafficObservation]:
     return [
         TrafficObservation(
-            duration_s=throughput_adjustment_interval_seconds,
+            duration_s=interval,
             num_req=float(metric["request_count"]),
             isl=float(metric["avg_isl"]),
             osl=float(metric["avg_osl"]),
         )
-        for metric in extract_metrics_from_trace(
-            dataset, throughput_adjustment_interval_seconds
-        )
+        for metric in metrics
     ]
 
 

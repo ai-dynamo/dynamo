@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
 /// Decode JSON without discarding repeated keys at any object depth.
-struct UniqueJsonValue(Value);
+pub(crate) struct UniqueJsonValue(pub(crate) Value);
 
 impl<'de> Deserialize<'de> for UniqueJsonValue {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -114,6 +114,19 @@ impl<'de> Deserialize<'de> for MetadataUpload {
             .ok_or_else(|| serde::de::Error::custom("metadata_upload must be an object"))?;
         match object.get("kind") {
             None => {
+                if object
+                    .keys()
+                    .any(|name| name != "url" && name != "fallback_url")
+                {
+                    return Err(serde::de::Error::custom(
+                        "unknown legacy metadata_upload field",
+                    ));
+                }
+                if !object.contains_key("url") {
+                    return Err(serde::de::Error::custom(
+                        "missing legacy metadata_upload url",
+                    ));
+                }
                 let mut upload: LegacyMetadataUpload =
                     serde_json::from_value(value).map_err(|_| {
                         serde::de::Error::custom("invalid legacy metadata_upload shape")

@@ -168,9 +168,13 @@ async fn round_trip() {
             )
         })
         .unwrap();
-    let router = PushRouter::<Value, Annotated<Value>>::from_client(client, RouterMode::RoundRobin)
-        .await
-        .unwrap();
+    let router = PushRouter::<Value, Annotated<Value>>::from_client_with_options(
+        client,
+        RouterMode::RoundRobin,
+        dynamo_llm::kv_router::plugins::push_router_options(),
+    )
+    .await
+    .unwrap();
     let (input, receiver) = tokio::sync::mpsc::channel(4);
     input
         .send(json!({"type": "session.update", "session": {

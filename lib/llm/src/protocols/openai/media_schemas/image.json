@@ -1,0 +1,516 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Dynamo media protocol",
+    "version": "1"
+  },
+  "paths": {},
+  "components": {
+    "schemas": {
+      "ImageAccounting": {
+        "type": "object",
+        "description": "Per-request accounting in image units.\n\n`output_images` counts what the response carries, not the requested `n`.\nThe image counts are always present; only `num_inference_steps` can be\nomitted, and an unknown step count is omitted, never written as 0. See\n[`ImageAccounting::merge`] for how a multi-chunk response treats each field.",
+        "required": [
+          "output_images"
+        ],
+        "properties": {
+          "output_images": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Images generated and returned in `data`.",
+            "minimum": 0
+          },
+          "input_images": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Reference images the request consumed: 0 for text-to-image, 1 for an\n`input_reference` or an `/v1/images/edits` request.",
+            "default": 0,
+            "minimum": 0
+          },
+          "num_inference_steps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The step count the backend ran. Omitted when the backend does not\nknow it.",
+            "minimum": 0
+          }
+        }
+      },
+      "ImageBackground": {
+        "type": "string",
+        "description": "Requested background of the generated images",
+        "enum": [
+          "auto",
+          "transparent",
+          "opaque"
+        ]
+      },
+      "ImageData": {
+        "type": "object",
+        "description": "One generated image. The worker sets one of `url` and `b64_json`.",
+        "properties": {
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "URL of the generated image (if response_format is \"url\")"
+          },
+          "b64_json": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base64-encoded image (if response_format is \"b64_json\")"
+          },
+          "revised_prompt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The prompt the model used, when it rewrote the original prompt"
+          }
+        }
+      },
+      "ImageModeration": {
+        "type": "string",
+        "description": "Content-moderation level of the generation",
+        "enum": [
+          "auto",
+          "low"
+        ]
+      },
+      "ImageNvExt": {
+        "type": "object",
+        "description": "NVIDIA extensions to the OpenAI Images API",
+        "properties": {
+          "annotations": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Annotations\nUser requests triggers which result in the request issue back out-of-band information in the SSE\nstream using the `event:` field."
+          },
+          "negative_prompt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A text description of the undesired image(s)."
+          },
+          "num_inference_steps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The number of denoising steps, at least 1. More denoising steps usually lead to a higher quality image at the expense of slower inference.",
+            "minimum": 1
+          },
+          "guidance_scale": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "The CFG scale. Higher values usually lead to more coherent images."
+          },
+          "seed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The seed for the random number generator.\ni64 to match PyTorch's torch.manual_seed() accepted range."
+          }
+        }
+      },
+      "ImageOutputFormat": {
+        "type": "string",
+        "description": "File format of the generated images",
+        "enum": [
+          "png",
+          "jpeg",
+          "webp"
+        ]
+      },
+      "ImageQuality": {
+        "type": "string",
+        "description": "Quality of the generated images",
+        "enum": [
+          "standard",
+          "hd",
+          "high",
+          "medium",
+          "low",
+          "xhigh",
+          "max",
+          "auto"
+        ]
+      },
+      "ImageReferences": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        ],
+        "description": "The wire shape of [`NvCreateImageRequest::input_reference`]: one\nreference as a string, two or more as an array. The field itself is a\nlist, which is what a worker reads. One reference goes out as a string\nso a worker whose model has the string field of an earlier release keeps\nreading it. An empty array and a blank reference are rejected, and the\nerror does not repeat the references."
+      },
+      "ImageResponseBackground": {
+        "type": "string",
+        "description": "Actual background of the generated images",
+        "enum": [
+          "transparent",
+          "opaque"
+        ]
+      },
+      "ImageStyle": {
+        "type": "string",
+        "description": "Style of the generated images",
+        "enum": [
+          "vivid",
+          "natural"
+        ]
+      },
+      "ImageTokenDetails": {
+        "type": "object",
+        "description": "A token count split by kind.",
+        "required": [
+          "text_tokens",
+          "image_tokens"
+        ],
+        "properties": {
+          "text_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "image_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "ImageUsage": {
+        "type": "object",
+        "description": "Token usage of an image generation. Keeps the wire format of the OpenAI\n`ImageGenUsage`, including the singular `output_token_details`.",
+        "required": [
+          "input_tokens",
+          "total_tokens",
+          "output_tokens",
+          "input_tokens_details"
+        ],
+        "properties": {
+          "input_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Tokens (image and text) in the input prompt",
+            "minimum": 0
+          },
+          "total_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Tokens (image and text) used for the generation",
+            "minimum": 0
+          },
+          "output_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Tokens the model generated",
+            "minimum": 0
+          },
+          "output_token_details": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageTokenDetails",
+                "description": "The output tokens by kind"
+              }
+            ]
+          },
+          "input_tokens_details": {
+            "$ref": "#/components/schemas/ImageTokenDetails",
+            "description": "The input tokens by kind"
+          }
+        }
+      },
+      "ImagesResponseNvExt": {
+        "type": "object",
+        "description": "NVIDIA extensions to the OpenAI Images API response. Omitted from the\nwire when the worker reports nothing.",
+        "properties": {
+          "usage": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageAccounting",
+                "description": "Image-based accounting for models that have no token usage."
+              }
+            ]
+          }
+        }
+      },
+      "MediaDelivery": {
+        "type": "string",
+        "description": "Delivery mode of generated media: a URL to the file, or the bytes as\nbase64 text.\n\nThe set has two values. A request with an unknown value fails to parse.",
+        "enum": [
+          "url",
+          "b64_json"
+        ]
+      },
+      "NvCreateImageRequest": {
+        "type": "object",
+        "description": "Request for image generation (/v1/images/generations and /v1/images/edits).\n\nThe OpenAI fields keep the wire format of the OpenAI `CreateImageRequest`;\nthe module documentation says why they are declared here and not wrapped.\n`model` and `size` are free text, because the OpenAI type accepts any\nstring there.",
+        "required": [
+          "prompt"
+        ],
+        "properties": {
+          "prompt": {
+            "type": "string"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "n": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Number of images to generate, 1 to 10 as the OpenAI API documents.\nThe frontend rejects a value outside the range, so a worker never\nsees one and needs no range check of its own.",
+            "maximum": 10,
+            "minimum": 1
+          },
+          "quality": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageQuality"
+              }
+            ]
+          },
+          "response_format": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MediaDelivery",
+                "description": "Delivery mode of the generated images"
+              }
+            ]
+          },
+          "output_format": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageOutputFormat"
+              }
+            ]
+          },
+          "output_compression": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Compression level of jpeg and webp output, 0 to 100 percent as the\nOpenAI API documents. The frontend rejects a value outside the range,\nso a worker never sees one.",
+            "maximum": 100,
+            "minimum": 0
+          },
+          "stream": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "partial_images": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Number of partial images to stream before the final image, 0 to 3 as\nthe OpenAI API documents. The frontend rejects a value outside the\nrange, so a worker never sees one.",
+            "maximum": 3,
+            "minimum": 0
+          },
+          "size": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Image size in WxH format, or \"auto\""
+          },
+          "moderation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageModeration"
+              }
+            ]
+          },
+          "background": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageBackground"
+              }
+            ]
+          },
+          "style": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageStyle"
+              }
+            ]
+          },
+          "user": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input_reference": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageReferences",
+                "description": "Ordered references of the images to edit, for image-to-image and\n`/v1/images/edits`. On the wire one reference is a string and two or\nmore are an array: see [`ImageReferences`]."
+              }
+            ]
+          },
+          "nvext": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageNvExt"
+              }
+            ]
+          },
+          "extra_args": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Worker-boundary passthrough. The frontend nests unknown top-level request fields (an OpenAI client's extra_body) under the \"media_passthrough\" key.",
+            "additionalProperties": true
+          }
+        }
+      },
+      "NvImagesResponse": {
+        "type": "object",
+        "description": "Response for image generation.\n\nKeeps the wire format of the OpenAI `ImagesResponse`, which writes every\nabsent optional field as null. `nvext` is Dynamo's response extension;\nthe key is omitted when the worker reports nothing.",
+        "required": [
+          "created",
+          "data"
+        ],
+        "properties": {
+          "created": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Unix timestamp of creation",
+            "minimum": 0
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImageData"
+            }
+          },
+          "background": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageResponseBackground"
+              }
+            ]
+          },
+          "output_format": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageOutputFormat"
+              }
+            ]
+          },
+          "size": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Image size in WxH format"
+          },
+          "quality": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageQuality"
+              }
+            ]
+          },
+          "usage": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageUsage",
+                "description": "Token usage of the generation, when the model reports it"
+              }
+            ]
+          },
+          "nvext": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImagesResponseNvExt",
+                "description": "Image accounting for models without token usage"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

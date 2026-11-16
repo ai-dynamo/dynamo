@@ -4,7 +4,7 @@
 use std::{sync::Arc, time::Duration};
 
 use base64::{Engine, prelude::BASE64_STANDARD};
-use dynamo_protocols::types::realtime::RealtimeServerEvent;
+use dynamo_protocols::types::realtime::{DynamoRealtimeClientEvent, RealtimeServerEvent};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::{
@@ -33,6 +33,13 @@ fn omni_session() -> Value {
     json!({"type": "session.update", "session": {
         "type": "realtime", "model": MODEL, "output_modalities": ["audio"],
     }})
+}
+
+fn typed_client_event(event: Value) -> Value {
+    // Match the frontend's deserialize/serialize boundary: omitted optional
+    // session fields must stay absent, rather than acquire test-only defaults.
+    serde_json::to_value(serde_json::from_value::<DynamoRealtimeClientEvent>(event).unwrap())
+        .unwrap()
 }
 
 fn audio() -> Value {
@@ -399,6 +406,136 @@ async fn omni_turns_generate_concurrently_but_output_does_not_interleave() {
     );
     server.await.unwrap();
     client.shutdown().await;
+}
+
+async fn check_omni_partial_session_update(include_model: bool) {
+    let (listener, client, input, mut session) = setup(Protocol::Omni).await;
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        send(
+            &mut socket,
+            json!({"type": "session.created", "session": {}}),
+        )
+        .await;
+        let update = receive(&mut socket).await;
+        assert_eq!(update["type"], "session.update");
+        assert_eq!(update["session"]["model"], MODEL);
+        assert_eq!(update["session"]["output_modalities"], json!(["text"]));
+        assert_eq!(update["session"]["instructions"], "Keep replies short.");
+        assert_eq!(update["session"]["max_output_tokens"], 123);
+        send(
+            &mut socket,
+            json!({"type": "session.updated", "session": update["session"]}),
+        )
+        .await;
+        assert_eq!(
+            receive(&mut socket).await["type"],
+            "input_audio_buffer.append"
+        );
+        assert_eq!(
+            receive(&mut socket).await["type"],
+            "input_audio_buffer.commit"
+        );
+        assert_eq!(receive(&mut socket).await["type"], "response.create");
+        send(
+            &mut socket,
+            json!({"type": "response.done", "event_id": "done", "response": {
+                "id": "upstream-response", "object": "realtime.response",
+                "output": [], "output_modalities": ["text"], "status": "completed",
+                "max_output_tokens": 123
+            }}),
+        )
+        .await;
+    });
+
+    // Model omission is valid only after the initial setup established it.
+    input
+        .send(typed_client_event(
+            json!({"type": "session.update", "session": {
+                "type": "realtime", "instructions": "Not configured yet."
+            }}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(next(&mut session).await["error"]["code"], "invalid_session");
+    input
+        .send(typed_client_event(
+            json!({"type": "session.update", "session": {
+                "type": "realtime", "model": MODEL, "output_modalities": ["text"],
+                "instructions": "Keep replies short."
+            }}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(next(&mut session).await["type"], "session.updated");
+    let mut patch = json!({"type": "session.update", "session": {
+        "type": "realtime", "max_output_tokens": 123
+    }});
+    if include_model {
+        patch["session"]["model"] = MODEL.into();
+    }
+    let patch = typed_client_event(patch);
+    assert!(patch["session"].get("output_modalities").is_none());
+    assert!(patch["session"].get("instructions").is_none());
+    assert_eq!(patch["session"].get("model").is_some(), include_model);
+    input.send(patch).await.unwrap();
+    let updated = next(&mut session).await;
+    assert_eq!(updated["type"], "session.updated");
+    assert_eq!(updated["session"]["model"], MODEL);
+    assert_eq!(updated["session"]["output_modalities"], json!(["text"]));
+    assert_eq!(updated["session"]["instructions"], "Keep replies short.");
+    assert_eq!(updated["session"]["max_output_tokens"], 123);
+
+    // A rejected patch must not partially mutate the state used by the next
+    // upstream turn, including otherwise-valid fields in the same update.
+    for rejected in [
+        json!({"type": "realtime", "model": "other-model", "output_modalities": ["audio"],
+            "instructions": "Do not keep this model patch."}),
+        json!({"type": "realtime", "model": MODEL, "output_modalities": ["invalid"],
+            "instructions": "Do not keep this invalid config."}),
+    ] {
+        input
+            .send(typed_client_event(
+                json!({"type": "session.update", "session": rejected}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(next(&mut session).await["error"]["code"], "invalid_session");
+    }
+    input.send(typed_client_event(audio())).await.unwrap();
+    input
+        .send(typed_client_event(
+            json!({"type": "input_audio_buffer.commit"}),
+        ))
+        .await
+        .unwrap();
+    drop(input);
+    let done = next(&mut session).await;
+    assert_eq!(done["type"], "response.done");
+    assert_eq!(done["response"]["status"], "completed");
+    assert_eq!(done["response"]["output_modalities"], json!(["text"]));
+    assert!(
+        tokio::time::timeout(DEADLINE, session.next())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    tokio::time::timeout(DEADLINE, server)
+        .await
+        .unwrap()
+        .unwrap();
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn omni_partial_session_update_preserves_fields_without_repeating_model() {
+    check_omni_partial_session_update(false).await;
+}
+
+#[tokio::test]
+async fn omni_partial_session_update_preserves_fields_when_model_is_repeated() {
+    check_omni_partial_session_update(true).await;
 }
 
 #[tokio::test]

@@ -14,6 +14,11 @@ controller and invoked in the scheduler process with that scheduler's own
 arguments. The wrapper below fixes up the environment and then calls SGLang's
 real entry point. See ``dynamo.common.utils.nixl_telemetry`` for the
 derivation.
+
+The same wrapper also points every pure data-parallel scheduler's KV metrics
+socket at the one address Dynamo's publisher listens on; see
+``scheduler_metrics_ipc_name``. Because that fix-up is needed with telemetry
+off too, the wrapper is installed whenever SGLang offers the override point.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from __future__ import annotations
 import inspect
 import logging
 import os
+import tempfile
 from typing import Any
 
 from dynamo.common.utils.nixl_telemetry import (
@@ -126,8 +132,8 @@ def _assign_nixl_prometheus_port(target: Any, args: tuple, kwargs: dict) -> None
     # the scheduler is handed: resolution is where attention data parallelism is
     # turned on, so the raw values would fold ``dp_rank`` in a second time and
     # send later ranks past the reserved range. Imported here because the module
-    # is imported to reach ``install_per_rank_nixl_prometheus_ports()``, which
-    # must stay a no-op without SGLang when telemetry is off.
+    # is imported to reach ``install_scheduler_process_wrapper()``, which
+    # validates the NIXL environment before importing SGLang.
     from dynamo.sglang._compat import resolved_server_args
 
     server_args = resolved_server_args(arguments["server_args"])
@@ -153,8 +159,42 @@ def _assign_nixl_prometheus_port(target: Any, args: tuple, kwargs: dict) -> None
     )
 
 
-def run_scheduler_process_with_nixl_port(*args: Any, **kwargs: Any) -> Any:
-    """SGLang scheduler entry point that first claims this rank's exporter port.
+def scheduler_metrics_ipc_name(server_args: Any, port_args: Any) -> str:
+    """Return the address the schedulers push KV metrics to and Dynamo pulls from.
+
+    Under pure data parallelism SGLang's data-parallel controller builds a fresh
+    ``PortArgs`` per rank and does not copy ``metrics_ipc_name`` from the parent,
+    so each scheduler pushes to its own random ``ipc://`` file that nothing reads,
+    and the publisher, bound to the parent's address, receives nothing. The
+    controller does copy ``instance_id``, so both sides derive one shared address
+    from it. Every other layout (one rank, attention DP's shared TCP address) is
+    returned unchanged. Can be removed once SGLang copies the address itself.
+    """
+    name = port_args.metrics_ipc_name
+    dp_size, enable_dp_attention = sglang_dp_layout(server_args)
+    if dp_size <= 1 or enable_dp_attention or not name.startswith("ipc://"):
+        return name
+    # XPU's SGLang 0.5.11 has no instance_id. Remove this fallback when the XPU
+    # pin provides the shared identity needed to derive a pure-DP address.
+    instance_id = getattr(port_args, "instance_id", "")
+    if not instance_id:
+        return name
+    path = os.path.join(tempfile.gettempdir(), f"dynamo-sglang-metrics-{instance_id}")
+    return f"ipc://{path}"
+
+
+def _share_scheduler_metrics_ipc_name(target: Any, args: tuple, kwargs: dict) -> None:
+    bound = inspect.signature(target).bind(*args, **kwargs)
+    from dynamo.sglang._compat import resolved_server_args
+
+    port_args = bound.arguments["port_args"]
+    port_args.metrics_ipc_name = scheduler_metrics_ipc_name(
+        resolved_server_args(bound.arguments["server_args"]), port_args
+    )
+
+
+def run_scheduler_process_with_rank_fixups(*args: Any, **kwargs: Any) -> Any:
+    """SGLang scheduler entry point that first applies Dynamo's per-rank fix-ups.
 
     Must stay a module-level function: ``spawn`` pickles the process target by
     module and qualified name.
@@ -162,20 +202,20 @@ def run_scheduler_process_with_nixl_port(*args: Any, **kwargs: Any) -> Any:
     from sglang.srt.managers.scheduler import run_scheduler_process
 
     _assign_nixl_prometheus_port(run_scheduler_process, args, kwargs)
+    _share_scheduler_metrics_ipc_name(run_scheduler_process, args, kwargs)
     return run_scheduler_process(*args, **kwargs)
 
 
-def install_per_rank_nixl_prometheus_ports() -> None:
-    """Point SGLang's scheduler launches at the wrapper, when telemetry is on.
+def install_scheduler_process_wrapper() -> None:
+    """Point SGLang's scheduler launches at the wrapper.
 
-    A no-op when NIXL Prometheus telemetry is disabled, so a deployment that
-    does not scrape NIXL keeps SGLang's own entry point. Raises ``ValueError``
-    for invalid NIXL environment values or an unusable fixed port, and
-    ``RuntimeError`` when telemetry is on but this SGLang offers no override
-    point.
+    Without NIXL Prometheus telemetry this is a silent no-op on an SGLang that
+    has no override point. Raises ``ValueError`` for invalid NIXL environment
+    values or an unusable fixed port, and ``RuntimeError`` when telemetry is on
+    but this SGLang offers no override point.
     """
-    if nixl_prometheus_base_port() is None:
-        return
+    # Validates the NIXL environment before SGLang is imported.
+    telemetry_enabled = nixl_prometheus_base_port() is not None
 
     # Take the class from the module that defines it: ``sglang.Engine`` is a
     # lazy proxy, so an assignment through it would land on the proxy object and
@@ -183,6 +223,8 @@ def install_per_rank_nixl_prometheus_ports() -> None:
     from sglang.srt.entrypoints.engine import Engine
 
     if not hasattr(Engine, "run_scheduler_process_func"):
+        if not telemetry_enabled:
+            return
         raise RuntimeError(
             f"this SGLang has no Engine.run_scheduler_process_func override "
             f"point, so co-located ranks cannot be given distinct "
@@ -193,5 +235,5 @@ def install_per_rank_nixl_prometheus_ports() -> None:
         )
 
     Engine.run_scheduler_process_func = staticmethod(
-        run_scheduler_process_with_nixl_port
+        run_scheduler_process_with_rank_fixups
     )

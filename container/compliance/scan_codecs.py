@@ -9,7 +9,7 @@ FILESYSTEM scan of the built image; an optional `--sbom` adds a CycloneDX
 component/version gate (an ffmpeg version floor).
 
 A denylist hit is classified as:
-  - ALLOWED    — under an `allow_paths` prefix (our own in-tree ffmpeg)
+  - ALLOWED    — matches `allow_exact_paths` or an `allow_paths` prefix
   - EXCEPTION  — matches a reasoned `exceptions` entry (logged, does not fail)
   - VIOLATION  — anything else
 
@@ -64,6 +64,7 @@ class CodecPolicy:
     def __init__(self, doc: dict):
         self.deny_globs: list[str] = doc.get("deny_globs", []) or []
         self.allow_paths: list[str] = doc.get("allow_paths", []) or []
+        self.allow_exact_paths: list[str] = doc.get("allow_exact_paths", []) or []
         self.deny_components: list[dict] = doc.get("deny_components", []) or []
         self.exceptions: list[dict] = doc.get("exceptions", []) or []
 
@@ -85,14 +86,14 @@ class CodecPolicy:
         # absolute path starts with "/" -- so a single missing "- " turns the
         # whole gate into a pass. Nothing downstream would report it, because
         # every finding comes back verdict "allowed".
-        allow_paths = doc.get("allow_paths")
-        if allow_paths is not None and (
-            not isinstance(allow_paths, list)
-            or not all(isinstance(p, str) and p for p in allow_paths)
-        ):
+        for key in ("allow_paths", "allow_exact_paths"):
+            paths = doc.get(key)
+            if paths is None:
+                continue
+            if isinstance(paths, list) and all(isinstance(p, str) and p for p in paths):
+                continue
             raise ValueError(
-                f"codec policy {path}: allow_paths must be a list of non-empty "
-                "strings (a bare string would allow-list every path)"
+                f"codec policy {path}: {key} must be a list of non-empty strings"
             )
         for exc in doc.get("exceptions") or []:
             if not all(exc.get(k) for k in ("glob", "reason", "owner")):
@@ -104,7 +105,9 @@ class CodecPolicy:
     def classify(self, abspath: str) -> tuple[str, str | None]:
         """Return (verdict, detail) for a path already known to hit a deny glob.
         verdict is 'allowed' | 'exception' | 'violation'."""
-        if any(abspath.startswith(p) for p in self.allow_paths):
+        if abspath in self.allow_exact_paths or any(
+            abspath.startswith(p) for p in self.allow_paths
+        ):
             return "allowed", None
         for exc in self.exceptions:
             if fnmatch.fnmatch(abspath, _glob_to_fullpath_pattern(exc.get("glob", ""))):

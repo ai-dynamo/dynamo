@@ -40,6 +40,10 @@ It also does not carry conversation history between turns. As in the existing
 Omni bridge, `conversation.item.*` and explicit `response.create` client events
 do not change that independent-turn behavior.
 
+Omni `session.update` events preserve omitted configuration fields. Successful
+updates apply to subsequently opened turns; invalid updates leave the accepted
+configuration unchanged.
+
 Omni's legacy `transcription.*` audio endpoint and its native duplex endpoint
 (`duplex=1`) use different contracts. They are not selected by `--protocol omni`.
 Native playback acknowledgement, overlap/barge-in, session resume, and capability
@@ -83,7 +87,8 @@ python -m dynamo.vllm.sidecar realtime \
 
 The existing `--grpc-endpoint` invocation still starts the LLM gRPC sidecar.
 Media modes require aggregated workers, register without tokenizer downloads, and
-reject token-pipeline parser, disaggregation, encoder-routing, and RL options.
+reject token-pipeline parsers, enabled structural tags, disaggregation,
+encoder-routing, and RL options.
 
 Use `DYN_SIDECAR_API_KEY` for upstream authentication. HTTP(S) base URLs can contain
 a reverse-proxy path prefix. Keys are sent in headers; redirects are not followed

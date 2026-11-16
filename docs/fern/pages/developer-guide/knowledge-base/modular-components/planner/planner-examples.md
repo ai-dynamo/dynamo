@@ -10,6 +10,24 @@ integrations. For DGDR manifests, see
 [DGDR Templates](../../../../recipes/kubernetes-templates/dgdr.mdx). For the full configuration
 reference, see the [Planner Guide](planner-guide.md).
 
+## Direct Deployments Without Profiling ConfigMaps
+
+The disaggregated [vLLM](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/disagg_planner.yaml),
+[SGLang](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/disagg_planner.yaml),
+and [TensorRT-LLM](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/disagg_planner.yaml)
+examples pass the Planner configuration as inline JSON through `--config`, with
+`pre_deployment_sweeping_mode: none`. They do not create or mount a Planner
+configuration or profiling-data ConfigMap.
+
+The Planner bootstraps from worker self-benchmark results when available. With a
+configured `ais_perf_model`, supported deployments can use native AISimulate
+estimates before live FPM regression is ready. These examples leave that setting
+unset, so without benchmark data the model learns from live Forward Pass Metrics
+(FPM), and SLA scaling can report `model_not_ready` during warmup. Update the inline
+configuration to tune the Planner; no placeholder profiling arrays are required. See
+[Tune the Planner](../../../../kubernetes/auto-deployment/dynamo-planner.mdx)
+for the deployment prerequisites and workflow.
+
 ## Compare Autoscaling Policies with Planner Gym
 
 **Experimental.** [Planner Gym](https://github.com/ai-dynamo/dynamo/tree/main/gyms/planner-gym)
@@ -22,6 +40,10 @@ Dynamo. No GPU or model weights are needed.
 Inspect SLO-qualified goodput per average GPU together with latency,
 good-request rate, GPU-hours, and scaling activity. The online backend uses
 AIPerf to compare existing endpoints; deployment cost telemetry is not collected.
+
+To replay a trace through one Planner configuration and inspect each scaling
+or retune decision, see
+[Simulate Planner Decisions with AISimulate](aisimulate-planner-replay.mdx).
 
 ## Custom Load Predictors
 

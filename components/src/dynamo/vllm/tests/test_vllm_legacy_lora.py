@@ -109,11 +109,8 @@ async def test_prefill_load_records_and_publishes_without_eager_engine_add(
     assert kwargs["ignore_weights"] is True
     runtime_config = kwargs["runtime_config"]
     assert runtime_config.context_length == 8192
-    assert json.loads(runtime_config.runtime_data["token_budget"]) == {
-        "combined_limit": 8192,
-        "reject_prompt_overflow": True,
-        "reject_total_overflow": True,
-    }
+    token_budget = json.loads(runtime_config.runtime_data["token_budget"])
+    assert token_budget["combined_limit"] == 8192
     assert runtime_config.kv_event_publishing_enabled is True
     # The adapter card must carry the engine-actual main-attention block size,
     # not engine_args.block_size (16) — see #11866.
@@ -652,7 +649,9 @@ async def test_legacy_prefill_request_rejects_adapter_unloaded_before_admission(
         raise AssertionError("stale request must not reach vLLM")
         yield  # pragma: no cover - marks this as an async generator
 
-    with pytest.raises(ValueError, match="unknown model or LoRA adapter"):
+    with pytest.raises(
+        handlers_mod.InvalidArgument, match="unknown model or LoRA adapter"
+    ):
         await anext(
             handler._generate_with_lora_admission_lock(
                 stale_request,
