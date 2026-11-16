@@ -60,6 +60,7 @@ mod request_guard;
 pub(crate) use builder::{EVERY_ROLE, check_hint_policies_route_on_kv_path, hosted_picker};
 pub use builder::{LlmDispatch, MultimodalCache, RoutingHostBuilder};
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
+use hosted::HostedBooking;
 pub(crate) use hosted::hosted_request;
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
@@ -71,14 +72,6 @@ const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 
 /// Bounds the wait for a worker's trailing typed error after a terminal frame.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
-
-pub(crate) struct PrefillDispatch<M> {
-    pub(crate) metadata: M,
-    pub(crate) stream: ManyOut<Annotated<LLMEngineOutput>>,
-    /// Early release for the prefill's scheduler booking, held by `stream`
-    /// until prefill finishes. `None` when the routing policy books nothing.
-    pub(crate) booking: Option<RequestAttemptRelease>,
-}
 
 pub(crate) fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
@@ -310,19 +303,34 @@ pub struct RoutingHost {
     routing_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
 }
 
-/// An admitted KV route awaiting dispatch: the selected worker, its booking,
-/// and the affinity hold, until [`RoutingHost::dispatch_kv_plan`] sends it or
-/// [`RoutePlan::abort`] gives it up.
+/// A route selected for one request but not sent yet, in any routing mode:
+/// the worker, what books it, and the affinity hold, until
+/// [`RoutingHost::dispatch_route`] sends it or [`RoutePlan::abort`] gives it up.
 pub(crate) struct RoutePlan {
     /// The phase the worker was selected for; dispatch tracks under it rather
     /// than re-reading the request.
     phase: RequestPhase,
-    selection: WorkerSelection,
-    cleanup: KvRequestCleanup,
+    /// Declared before `affinity` so the booking is released before the
+    /// affinity hold is dropped.
+    booking: PlanBooking,
     affinity: Option<Hold>,
     /// Carried forward from the [`RoutePreview`] this plan was admitted from, so
     /// preview, admission and dispatch draw on one budget instead of three.
     budget: CleanupBudget,
+}
+
+/// What holds a [`RoutePlan`]'s worker until dispatch.
+// Built once per request and moved straight into dispatch.
+#[allow(clippy::large_enum_variant)]
+enum PlanBooking {
+    /// KV routing: the admitted selection and its scheduler booking.
+    Kv {
+        selection: WorkerSelection,
+        cleanup: KvRequestCleanup,
+    },
+    /// Built-in modes: the hosted selection and the request guard holding its
+    /// occupancy reservation and any candidate-policy attempt lease.
+    Hosted(HostedBooking),
 }
 
 /// A KV route selected without scheduler admission.
@@ -365,23 +373,47 @@ impl RoutePlan {
         self.budget.remaining()
     }
 
-    pub(crate) fn worker(&self) -> WorkerWithDpRank {
-        self.selection.worker
+    /// The selected worker. A KV route is sent there exactly; a built-in route
+    /// moves to another instance if this one is gone by the send.
+    pub(crate) fn target(&self) -> AffinityTarget {
+        match &self.booking {
+            PlanBooking::Kv { selection, .. } => route_target(selection.worker),
+            PlanBooking::Hosted(booking) => booking.target(),
+        }
     }
 
-    /// Early release for the booking, taken before dispatch so a migration
-    /// retry can free it while the prefill stream still runs.
+    /// Early release for a KV booking, taken before dispatch so a migration
+    /// retry can free it while the stream still runs. `None` for built-in
+    /// modes, which book nothing in the scheduler.
     pub(crate) fn attempt_release(&self) -> Option<RequestAttemptRelease> {
-        self.cleanup.attempt_release()
+        match &self.booking {
+            PlanBooking::Kv { cleanup, .. } => cleanup.attempt_release(),
+            PlanBooking::Hosted(_) => None,
+        }
     }
 
     /// Give the route up before dispatch: abort the classifier lifecycle with
     /// `error` as its cause, release the booking, and drop the affinity hold.
-    pub(crate) async fn abort(mut self, error: Option<&Error>) {
-        if let Some(mut lifecycle) = self.selection.request_lifecycle.take() {
-            lifecycle.abort(error.map(|error| owned_abort_error(error.as_ref())));
+    // No non-test caller yet: the frontend dispatches every plan it makes. The
+    // EPP, which can give a reservation up, is the intended first one.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn abort(self, error: Option<&Error>) {
+        let Self {
+            booking, affinity, ..
+        } = self;
+        match booking {
+            PlanBooking::Kv {
+                mut selection,
+                cleanup,
+            } => {
+                if let Some(mut lifecycle) = selection.request_lifecycle.take() {
+                    lifecycle.abort(error.map(|error| owned_abort_error(error.as_ref())));
+                }
+                cleanup.finish().await;
+            }
+            PlanBooking::Hosted(booking) => booking.abort(error).await,
         }
-        self.cleanup.finish().await;
+        drop(affinity);
     }
 }
 
@@ -683,28 +715,63 @@ impl RoutingHost {
         }
     }
 
-    pub(crate) async fn select_and_dispatch_prefill<M, F>(
+    /// Select a worker for `request` in `phase` without sending to it. KV
+    /// routing admits and books the worker in the scheduler. Built-in modes
+    /// pick it and take their occupancy reservation and affinity hold.
+    pub(crate) async fn plan_route(
         &self,
-        request: SingleIn<PreprocessedRequest>,
+        request: &SingleIn<PreprocessedRequest>,
+        phase: RequestPhase,
+    ) -> Result<RoutePlan, Error> {
+        match &self.policy {
+            RoutingPolicy::Kv(_) => self.plan_kv_route_without_preview(request, phase).await,
+            RoutingPolicy::Hosted(_)
+            | RoutingPolicy::Direct
+            | RoutingPolicy::DeviceAwareWeighted => self.plan_builtin_route(request, phase).await,
+        }
+    }
+
+    /// Send a planned route. `prepare` runs once, with the worker the request
+    /// is sent to, and its result is returned with the stream. A `prepare`
+    /// failure gives the route up. A KV route is sent to its planned worker.
+    /// A built-in route can move to another instance if that one is gone,
+    /// and `prepare` then sees the new worker.
+    pub(crate) async fn dispatch_route<M, F>(
+        &self,
+        mut request: SingleIn<PreprocessedRequest>,
+        plan: RoutePlan,
         prepare: F,
-    ) -> Result<PrefillDispatch<M>, Error>
+    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
-        match &self.policy {
-            RoutingPolicy::Kv(_) => self.select_and_dispatch_kv_prefill(request, prepare).await,
-            RoutingPolicy::Hosted(_)
-            | RoutingPolicy::Direct
-            | RoutingPolicy::DeviceAwareWeighted => {
-                let plan = self
-                    .plan_builtin_route(&request, RequestPhase::Prefill)
-                    .await?;
-                let (metadata, stream) = self.dispatch_builtin_plan(request, plan, prepare).await?;
-                Ok(PrefillDispatch {
-                    metadata,
-                    stream,
-                    booking: None,
-                })
+        let RoutePlan {
+            phase,
+            booking,
+            affinity,
+            budget,
+        } = plan;
+        match booking {
+            booking @ PlanBooking::Kv { .. } => {
+                let plan = RoutePlan {
+                    phase,
+                    booking,
+                    affinity,
+                    budget,
+                };
+                let metadata = match prepare(&mut request, plan.target()) {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        plan.abort(Some(&error)).await;
+                        return Err(error);
+                    }
+                };
+                let stream = self.dispatch_kv_plan(request, plan).await?;
+                Ok((metadata, stream))
+            }
+            PlanBooking::Hosted(booking) => {
+                self.dispatch_builtin_plan(request, phase, booking, affinity, budget, prepare)
+                    .await
             }
         }
     }
@@ -746,7 +813,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         if !matches!(&self.policy, RoutingPolicy::Kv(_)) {
             let plan = self.plan_builtin_route(&request, request.phase()).await?;
             return self
-                .dispatch_builtin_plan(request, plan, |_, _| Ok(()))
+                .dispatch_route(request, plan, |_, _| Ok(()))
                 .await
                 .map(|(_, stream)| stream);
         }

@@ -297,10 +297,12 @@ async fn builtin_route_plan_holds_its_reservation_until_aborted() {
 
     let request = Context::new(request());
     let plan = host
-        .plan_builtin_route(&request, RequestPhase::Aggregated)
+        .plan_route(&request, RequestPhase::Aggregated)
         .await
         .unwrap();
-    let worker_id = plan.worker_id();
+    assert!(matches!(plan.booking, PlanBooking::Hosted(_)));
+    assert!(plan.attempt_release().is_none());
+    let worker_id = plan.target().worker_id;
     assert_eq!(
         host.inner.occupancy_for_test(worker_id),
         1,
@@ -362,16 +364,16 @@ async fn builtin_route_plan_prepares_for_the_worker_it_is_sent_to() {
 
     let request = Context::new(request());
     let plan = host
-        .plan_builtin_route(&request, RequestPhase::Aggregated)
+        .plan_route(&request, RequestPhase::Aggregated)
         .await
         .unwrap();
-    assert_eq!(plan.worker_id(), 101);
+    assert_eq!(plan.target().worker_id, 101);
 
     // The selection view still contains 101, but dispatch can only reach 202.
     source_tx.send(instances[1..].to_vec()).unwrap();
     assert!(!client.is_instance_live(101));
     let (prepared_for, mut stream) = host
-        .dispatch_builtin_plan(request, plan, |_, target| Ok(target.worker_id))
+        .dispatch_route(request, plan, |_, target| Ok(target.worker_id))
         .await
         .unwrap();
     while stream.next().await.is_some() {}
@@ -2946,7 +2948,10 @@ async fn planned_route_admission_classifies_and_carries_lifecycle() {
         .unwrap();
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 
-    let mut lifecycle = plan.selection.request_lifecycle.take().unwrap();
+    let PlanBooking::Kv { selection, .. } = &mut plan.booking else {
+        panic!("a KV host plans a KV booking");
+    };
+    let mut lifecycle = selection.request_lifecycle.take().unwrap();
     lifecycle.observe_context_tokens(1);
     lifecycle.complete();
     assert_eq!(
@@ -3496,7 +3501,7 @@ async fn route_plan_from_preview_holds_and_releases_the_decode_reservation() {
     let request = Context::new(request());
 
     let plan = plan_decode_route(&router, &request).await;
-    assert_eq!(plan.worker().worker_id, 7);
+    assert_eq!(plan.target().worker_id, 7);
     assert_eq!(
         router.request_metrics.requests_started_total.get(),
         0,
@@ -3555,7 +3560,7 @@ async fn route_plan_from_preview_admits_the_previewed_worker() {
         .plan_kv_route_from_preview(&request, preview)
         .await
         .unwrap();
-    assert_eq!(plan.worker(), previewed_worker);
+    assert_eq!(plan.target(), route_target(previewed_worker));
     let loads = potential_loads(&router).await;
     assert_eq!(
         active_requests_for(&loads, previewed_worker.worker_id, previewed_worker.dp_rank),
@@ -5275,7 +5280,7 @@ async fn unknown_explicit_workers_are_rejected_before_builtin_dispatch() {
         let mut content = request();
         content.routing =
             Some(serde_json::from_value(serde_json::json!({field: worker_id})).unwrap());
-        let Err(error) = host.plan_builtin_route(&Context::new(content), phase).await else {
+        let Err(error) = host.plan_route(&Context::new(content), phase).await else {
             panic!("an unknown {field} must be rejected at selection");
         };
         assert!(match_error_chain(
@@ -5900,13 +5905,19 @@ async fn builtin_hard_affinity_hit_logs_selected_worker() {
 async fn prefill_prepare_failure_releases_the_booking_before_the_request_counts() {
     let (router, runtime) = router(None).await;
     let started_before = router.request_metrics.requests_started_total.get();
-    let error = router
-        .select_and_dispatch_prefill(Context::new(request()), |_, _| -> Result<(), Error> {
+    let request = Context::new(request());
+    let plan = router
+        .plan_route(&request, RequestPhase::Prefill)
+        .await
+        .unwrap();
+    let result = router
+        .dispatch_route(request, plan, |_, _| -> Result<(), Error> {
             Err(anyhow::anyhow!("prepare failed"))
         })
-        .await
-        .err()
-        .expect("a failed prepare must fail the request");
+        .await;
+    let Err(error) = result else {
+        panic!("a failed prepare must fail the request");
+    };
     assert!(format!("{error:#}").contains("prepare failed"));
     assert_eq!(
         router.request_metrics.requests_started_total.get(),
@@ -5965,7 +5976,7 @@ async fn affinity_commit_failure_after_the_send_aborts_the_attempt() {
         )
         .await
         .unwrap();
-    assert_eq!(plan.worker().dp_rank, 0);
+    assert_eq!(plan.target().dp_rank, Some(0));
     plan.affinity = Some(hold);
 
     assert!(
