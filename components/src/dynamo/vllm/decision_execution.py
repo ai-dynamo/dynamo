@@ -118,6 +118,8 @@ def publish_vllm_decision_capability(
     Cache fields alone do not establish measurement provenance, so their installed
     source owners must match the qualified release before advertising support.
     """
+    if config.systemone_serial is not True:
+        return False
     if (
         native_generate_supported is not True
         or model_input != ModelInput.Tokens

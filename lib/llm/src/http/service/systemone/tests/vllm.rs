@@ -3,8 +3,17 @@
 
 use super::*;
 
-pub(super) fn terminal(ids: &[u32], tokens: usize) -> LLMEngineOutput {
-    serde_json::from_value(json!({
+#[derive(Clone, Copy)]
+pub(super) enum Outcome {
+    Success,
+    MissingCache,
+    MissingCandidate,
+    Cancelled,
+    Error,
+}
+
+pub(super) fn terminal(ids: &[u32], tokens: usize, outcome: Outcome) -> LLMEngineOutput {
+    let mut output: LLMEngineOutput = serde_json::from_value(json!({
         "token_ids": [99], "index": 0, "finish_reason": "length",
         "top_logprobs": [[
             {"rank": 2, "token_id": ids[0], "logprob": -2.0},
@@ -14,14 +23,39 @@ pub(super) fn terminal(ids: &[u32], tokens: usize) -> LLMEngineOutput {
         "completion_usage": {"prompt_tokens": tokens, "completion_tokens": 1,
             "total_tokens": tokens + 1, "prompt_tokens_details": {"cached_tokens": 0}}
     }))
-    .unwrap()
+    .unwrap();
+    match outcome {
+        Outcome::Success => {}
+        Outcome::MissingCache => {
+            output
+                .completion_usage
+                .as_mut()
+                .unwrap()
+                .prompt_tokens_details = None;
+        }
+        Outcome::MissingCandidate => {
+            output.top_logprobs.as_mut().unwrap()[0].remove(0);
+        }
+        Outcome::Cancelled | Outcome::Error => {
+            output = LLMEngineOutput {
+                finish_reason: Some(match outcome {
+                    Outcome::Cancelled => crate::protocols::common::FinishReason::Cancelled,
+                    _ => crate::protocols::common::FinishReason::Error(
+                        "private worker detail".into(),
+                    ),
+                }),
+                ..Default::default()
+            };
+        }
+    }
+    output
 }
 
 async fn run_causal(
     dialect: dynamo_decisions::Dialect,
-    missing_cache: bool,
+    outcome: Outcome,
 ) -> (Response, Arc<TestEngine>) {
-    let engine = TestEngine::new(EngineBehavior::Vllm { missing_cache });
+    let engine = TestEngine::new(EngineBehavior::Vllm(outcome));
     let mut selected = selection(engine.clone());
     selected.backend = ScoringBackend::Vllm;
     selected.card.runtime_config.max_num_seqs = Some(1);
@@ -76,7 +110,7 @@ async fn causal_dispatch_preserves_both_contracts_usage_and_pinned_placement() {
         dynamo_decisions::Dialect::OpenAi,
         dynamo_decisions::Dialect::Jev,
     ] {
-        let (response, engine) = run_causal(dialect, false).await;
+        let (response, engine) = run_causal(dialect, Outcome::Success).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_body(response).await;
         assert_eq!(body["usage"]["output_tokens"], 3);
@@ -97,9 +131,45 @@ async fn causal_dispatch_preserves_both_contracts_usage_and_pinned_placement() {
 }
 
 #[tokio::test]
-async fn malformed_causal_usage_does_not_become_a_successful_answer() {
-    let (response, engine) = run_causal(dynamo_decisions::Dialect::OpenAi, true).await;
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(response_body(response).await.get("answers").is_none());
-    assert_eq!(engine.observations.lock().unwrap().len(), 1);
+async fn malformed_causal_results_do_not_become_successful_answers() {
+    for dialect in [
+        dynamo_decisions::Dialect::OpenAi,
+        dynamo_decisions::Dialect::Jev,
+    ] {
+        for outcome in [Outcome::MissingCache, Outcome::MissingCandidate] {
+            let (response, engine) = run_causal(dialect, outcome).await;
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(response_body(response).await.get("answers").is_none());
+            assert_eq!(engine.observations.lock().unwrap().len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn worker_aborted_causal_scoring_is_unavailable_for_both_contracts() {
+    for dialect in [
+        dynamo_decisions::Dialect::OpenAi,
+        dynamo_decisions::Dialect::Jev,
+    ] {
+        for outcome in [Outcome::Cancelled, Outcome::Error] {
+            let (response, engine) =
+                tokio::time::timeout(Duration::from_secs(2), run_causal(dialect, outcome))
+                    .await
+                    .expect("worker abort must not wait for stream closure");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = response_body(response).await;
+            let error = if dialect == dynamo_decisions::Dialect::OpenAi {
+                &body["error"]
+            } else {
+                &body
+            };
+            assert_eq!(error["code"], "server_error");
+            assert!(body.get("answers").is_none());
+            assert!(!body.to_string().contains("private worker detail"));
+            let observations = engine.observations.lock().unwrap();
+            assert_eq!(observations.len(), 1);
+            assert!(observations[0].request_context.is_killed());
+            assert!(observations[0].stream_context.is_killed());
+        }
+    }
 }

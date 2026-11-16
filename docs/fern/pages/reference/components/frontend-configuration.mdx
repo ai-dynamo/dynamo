@@ -17,6 +17,8 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
 
 **Experimental.** `--enable-systemone-api` (environment variable `DYN_ENABLE_SYSTEMONE_API`, default `false`) enables both OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. The qualified backend is an aggregated, single-rank SGLang CUDA worker using the serialized scoring profile. See [Decision Models with SGLang](../../use-cases/decision-model/sglang.md) for launch commands and [Decision API Reference](../api/decision-apis.md) for wire contracts, usage accounting, and errors.
 
+For a qualified vLLM 0.33.0 causal worker, explicitly enable `--systemone-serial` on the worker together with `--max-num-seqs=1` and `--logprobs-mode=raw_logprobs`. This worker flag defaults to `false` and does not change engine scheduling settings. Without it, ordinary vLLM workers do not advertise decision capability or change model-discovery checksums for decision support. The frontend flag remains independently required to expose the APIs.
+
 | Environment variable | Default | Maximum | Meaning |
 | --- | --- | --- | --- |
 | `DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES` | 256 | 4,096 | Concurrent admitted question branches across requests |

@@ -10,13 +10,16 @@ from unittest.mock import Mock
 import pytest
 
 from dynamo.common.constants import DisaggregationMode
-from dynamo.llm import ModelInput, WorkerType
+from dynamo.llm import ModelInput, ModelRuntimeConfig, WorkerType
+from dynamo.vllm import decision_cache_provenance as cache
 from dynamo.vllm import decision_execution as decisions
+from dynamo.vllm.args import Config, _parse_cli_args
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.gpu_0,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.pre_merge,
 ]
 
@@ -32,6 +35,7 @@ def profile(monkeypatch):
         "worker_type": WorkerType.Aggregated,
         "native_generate_supported": True,
         "config": SimpleNamespace(
+            systemone_serial=True,
             disaggregation_mode=DisaggregationMode.AGGREGATED,
             enable_rl=False,
             route_to_encoder=False,
@@ -61,6 +65,42 @@ def profile(monkeypatch):
             ec_transfer_config=None,
         ),
     }
+
+
+def test_decisions_require_explicit_worker_opt_in(profile, monkeypatch):
+    profile["config"].systemone_serial = False
+    gates = ["_released_runtime", "verify_cache_sources", "_scoring_api_available"]
+    for gate in gates:
+        monkeypatch.setattr(decisions, gate, Mock(side_effect=AssertionError(gate)))
+
+    assert not decisions.publish_vllm_decision_capability(**profile)
+    profile["runtime_config"].set_engine_specific.assert_not_called()
+
+
+def test_disabled_worker_preserves_runtime_metadata(profile):
+    profile["config"].systemone_serial = False
+    runtime_config = ModelRuntimeConfig()
+    profile["runtime_config"] = runtime_config
+    original = dict(runtime_config.runtime_data)
+
+    assert not decisions.publish_vllm_decision_capability(**profile)
+    assert runtime_config.runtime_data == original
+    assert (
+        runtime_config.get_engine_specific(decisions.VLLM_CAUSAL_DECISION_CAPABILITY)
+        is None
+    )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_systemone_serial_is_explicit_and_does_not_reconfigure_engine(enabled):
+    config, engine_args = _parse_cli_args(["--systemone-serial"] if enabled else [])
+    assert config.systemone_serial is enabled
+    assert engine_args.logprobs_mode == "raw_logprobs"
+    assert engine_args.max_num_seqs is None
+
+
+def test_worker_config_defaults_decisions_to_disabled():
+    assert Config().systemone_serial is False
 
 
 @pytest.mark.parametrize(
@@ -203,8 +243,6 @@ def test_matching_sync_and_async_schedulers_are_supported(profile):
 
 
 def test_cache_source_verifier_checks_installed_bytes_and_missing_files(tmp_path):
-    from dynamo.vllm import decision_cache_provenance as cache
-
     content = b"cache accounting owner\n"
     source = tmp_path / "vllm" / "outputs.py"
     source.parent.mkdir()
@@ -227,8 +265,6 @@ def test_cache_source_verifier_checks_installed_bytes_and_missing_files(tmp_path
 def test_source_verification_resolves_the_installed_package(
     tmp_path, monkeypatch, missing
 ):
-    from dynamo.vllm import decision_cache_provenance as cache
-
     package = tmp_path / "vllm"
     package.mkdir()
     output = package / "outputs.py"
@@ -245,8 +281,6 @@ def test_source_verification_resolves_the_installed_package(
 
 
 def test_cache_verifier_uses_the_qualified_manifest(monkeypatch):
-    from dynamo.vllm import decision_cache_provenance as cache
-
     verifier = Mock(return_value=True)
     monkeypatch.setattr(cache, "verify_installed_sources", verifier)
     assert cache.verify_cache_sources()

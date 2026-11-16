@@ -479,9 +479,7 @@ async fn cancelled_stream_completion_is_not_a_malformed_response() {
 #[derive(Clone, Copy)]
 enum EngineBehavior {
     Success,
-    Vllm {
-        missing_cache: bool,
-    },
+    Vllm(vllm::Outcome),
     PlacementMismatch,
     MalformedWithPendingSibling,
     PendingGenerate,
@@ -540,7 +538,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let index: usize = request.id().rsplit('-').next().unwrap().parse().unwrap();
         let (native, label_ids): (Value, Vec<u32>) =
-            if matches!(self.behavior, EngineBehavior::Vllm { .. }) {
+            if matches!(self.behavior, EngineBehavior::Vllm(_)) {
                 let native = request.extra_args.as_ref().unwrap()["vllm_tito"].clone();
                 let ids =
                     serde_json::from_value(native["sampling_params"]["logprob_token_ids"].clone())
@@ -571,19 +569,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .unwrap()
             .record_worker(worker_id, Some(3), "decode");
         self.started.notify_one();
-        if let EngineBehavior::Vllm { missing_cache } = self.behavior {
-            let mut output = vllm::terminal(&label_ids, request.token_ids.len());
-            if missing_cache {
-                output
-                    .completion_usage
-                    .as_mut()
-                    .unwrap()
-                    .prompt_tokens_details = None;
+        if let EngineBehavior::Vllm(outcome) = self.behavior {
+            let output = vllm::terminal(&label_ids, request.token_ids.len(), outcome);
+            let outputs = stream::iter([Annotated::from_data(output)]);
+            if matches!(outcome, vllm::Outcome::Cancelled | vllm::Outcome::Error) {
+                return Ok(ResponseStream::new(
+                    Box::pin(outputs.chain(stream::pending())),
+                    stream_context,
+                ));
             }
-            return Ok(ResponseStream::new(
-                Box::pin(stream::iter([Annotated::from_data(output)])),
-                stream_context,
-            ));
+            return Ok(ResponseStream::new(Box::pin(outputs), stream_context));
         }
         if let EngineBehavior::RejectRequest {
             class,

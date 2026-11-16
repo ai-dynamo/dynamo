@@ -34,7 +34,8 @@ use crate::{
     protocols::{
         Annotated,
         common::{
-            llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest, timing::RequestTracker,
+            FinishReason, llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest,
+            timing::RequestTracker,
         },
         response_merge::PREFILL_OUTPUT_ANNOTATION,
         systemone::{
@@ -818,6 +819,12 @@ async fn read_branch(
         let prefill = delta.event.as_deref() == Some(PREFILL_OUTPUT_ANNOTATION);
         if let Some(output) = delta.into_data().map_err(stream_error)? {
             if let Some(collector) = vllm.as_mut() {
+                if matches!(
+                    output.finish_reason.as_ref(),
+                    Some(FinishReason::Cancelled | FinishReason::Error(_))
+                ) {
+                    return Err(DispatchError::unavailable("native scoring worker aborted"));
+                }
                 collector
                     .observe(&output)
                     .map_err(|cause| DispatchError::malformed(cause.to_string()))?;
