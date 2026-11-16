@@ -71,6 +71,10 @@ spec:
           - command:
             - /bin/quasar-entrypoint
             env:
+            - name: LPX_DRAFT_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-draft
+            - name: LPX_TARGET_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-target
             - name: BMC_SSH_ENABLED
               value: "false"
             - name: DYN_COMPONENT
@@ -152,6 +156,10 @@ spec:
           - command:
             - /bin/lp30-agent-v2-init
             env:
+            - name: LPX_DRAFT_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-draft
+            - name: LPX_TARGET_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-target
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
@@ -223,6 +231,10 @@ spec:
           - command:
             - /bin/quasar-entrypoint
             env:
+            - name: LPX_DRAFT_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-draft
+            - name: LPX_TARGET_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-target
             - name: BMC_SSH_ENABLED
               value: "false"
             - name: DYN_COMPONENT
@@ -304,6 +316,10 @@ spec:
           - command:
             - /bin/lp30-agent-v2-init
             env:
+            - name: LPX_DRAFT_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-draft
+            - name: LPX_TARGET_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-target
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
@@ -375,6 +391,10 @@ spec:
           - command:
             - /bin/quasar-entrypoint
             env:
+            - name: LPX_DRAFT_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-draft
+            - name: LPX_TARGET_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-target
             - name: BMC_SSH_ENABLED
               value: "false"
             - name: DYN_COMPONENT
@@ -456,6 +476,10 @@ spec:
           - command:
             - /bin/lp30-agent-v2-init
             env:
+            - name: LPX_DRAFT_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-draft
+            - name: LPX_TARGET_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-target
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
@@ -666,6 +690,11 @@ spec:
             - /tmp/dynamo-lpu-ssh/private.key
             command:
             - /bin/install
+            env:
+            - name: LPX_DRAFT_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-draft
+            - name: LPX_TARGET_MODEL_PATH
+              value: /nfs/node-local-v3-hx-sd-target
             image: example.invalid/lpu-runtime:test
             name: prepare-ssh-key
             resources: {}

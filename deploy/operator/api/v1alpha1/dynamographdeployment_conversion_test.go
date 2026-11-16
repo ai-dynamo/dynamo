@@ -122,7 +122,7 @@ func mustRestoreDGDSpokeServiceSave(t *testing.T, hub *v1beta1.DynamoGraphDeploy
 
 func TestDGD_RoundTrip_Empty(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "empty", Namespace: "ns"},
+		Name: "empty", Namespace: "ns",
 	}
 	got := roundTripFromV1beta1(t, src)
 	if diff := cmp.Diff(src, got); diff != "" {
@@ -134,7 +134,7 @@ func TestDGD_RoundTrip_Minimal(t *testing.T) {
 	replicas := int32(2)
 	minAvailable := int32(1)
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "min", Namespace: "ns"},
+		Name: "min", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -155,7 +155,7 @@ func TestDGD_RoundTrip_Minimal(t *testing.T) {
 
 func TestDGD_RoundTrip_RolePodTemplates(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "roles", Namespace: "ns"},
+		Name: "roles", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
@@ -188,7 +188,7 @@ func TestDGD_RoundTrip_RolePodTemplates(t *testing.T) {
 
 func TestDGD_IntermediateHubEditsWinOverPreservedSpoke(t *testing.T) {
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "edit", Namespace: "ns"},
+		Name: "edit", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -216,7 +216,7 @@ func TestDGD_IntermediateHubEditsWinOverPreservedSpoke(t *testing.T) {
 
 func TestDGD_IntermediateHubPodTemplateEditsRoundTripThroughSpoke(t *testing.T) {
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "hub-only-edit", Namespace: "ns"},
+		Name: "hub-only-edit", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -278,7 +278,7 @@ func TestDGD_IntermediateHubPodTemplateEditsRoundTripThroughSpoke(t *testing.T) 
 
 func TestDGD_IntermediateSpokeAlphaOnlyEditsSurvivePreservedHub(t *testing.T) {
 	original := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "alpha-only-edit", Namespace: "ns"},
+		Name: "alpha-only-edit", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
@@ -322,7 +322,7 @@ func TestDGD_SpokeSaveCarriesAlphaOnlyFieldsSparsely(t *testing.T) {
 	createTrue := true
 	name := "models"
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "sparse-spoke-save", Namespace: "ns"},
+		Name: "sparse-spoke-save", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			PVCs: []PVC{{
 				Create:           &createTrue,
@@ -367,7 +367,7 @@ func TestDGD_SpokeSaveCarriesAlphaOnlyFieldsSparsely(t *testing.T) {
 
 func TestDGD_SpokeSaveCarriesNilServicesSparsely(t *testing.T) {
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "nil-service-save", Namespace: "ns"},
+		Name: "nil-service-save", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"nil-service": nil,
@@ -405,7 +405,7 @@ func TestDGD_SpokeSaveCarriesNilServicesSparsely(t *testing.T) {
 
 func TestDGD_IntermediateHubStatusComponentNamesWinOverPreservedSpoke(t *testing.T) {
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "status-edit", Namespace: "ns"},
+		Name: "status-edit", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -443,7 +443,7 @@ func TestDGD_IntermediateHubStatusComponentNamesWinOverPreservedSpoke(t *testing
 
 func TestDGD_FromV1alpha1_StatusComponentNameWithoutComponentNames(t *testing.T) {
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "status-alpha", Namespace: "ns"},
+		Name: "status-alpha", Namespace: "ns",
 		Status: DynamoGraphDeploymentStatus{
 			Services: map[string]ServiceReplicaStatus{
 				"worker": {
@@ -466,7 +466,7 @@ func TestDGD_FromV1alpha1_StatusComponentNameWithoutComponentNames(t *testing.T)
 
 func TestDGD_FromExistingHubStatusPreservationRestoresComponentName(t *testing.T) {
 	hub := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "status-existing-hub", Namespace: "ns"},
+		Name: "status-existing-hub", Namespace: "ns",
 		Status: v1beta1.DynamoGraphDeploymentStatus{
 			Components: map[string]v1beta1.ComponentReplicaStatus{
 				"worker": {
@@ -501,7 +501,7 @@ func TestDGD_FromExistingHubStatusPreservationRestoresComponentName(t *testing.T
 
 func TestDGD_RoundTrip_SpecLevelFields(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "spec", Namespace: "ns"},
+		Name: "spec", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Annotations:       map[string]string{"a": "1"},
 			Labels:            map[string]string{"l": "v"},
@@ -531,7 +531,7 @@ func TestDGD_RoundTrip_SpecLevelFields(t *testing.T) {
 
 func TestDGD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "overlay", Namespace: "ns"},
+		Name: "overlay", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -539,20 +539,16 @@ func TestDGD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 					ComponentName: "worker",
 					ComponentType: v1beta1.ComponentTypeWorker,
 					PodTemplate: &corev1.PodTemplateSpec{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:        testHubOnlyTemplateName,
-							Labels:      map[string]string{"old": "label"},
-							Annotations: map[string]string{"old": "annotation"},
-						},
+						Name:        testHubOnlyTemplateName,
+						Labels:      map[string]string{"old": "label"},
+						Annotations: map[string]string{"old": "annotation"},
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{
 								Name:  "main",
 								Image: "worker:old",
 								Env:   []corev1.EnvVar{{Name: "OLD", Value: "old"}},
 								ReadinessProbe: &corev1.Probe{
-									ProbeHandler: corev1.ProbeHandler{
-										Exec: &corev1.ExecAction{Command: []string{"old"}},
-									},
+									Exec: &corev1.ExecAction{Command: []string{"old"}},
 								},
 								VolumeMounts: []corev1.VolumeMount{{
 									Name:      testModelPVCName,
@@ -580,9 +576,7 @@ func TestDGD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 		Annotations: map[string]string{"new": "annotation"},
 	}
 	spoke.Spec.Services["worker"].ReadinessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			Exec: &corev1.ExecAction{Command: []string{"new"}},
-		},
+		Exec: &corev1.ExecAction{Command: []string{"new"}},
 	}
 	spoke.Spec.Services["worker"].VolumeMounts = []VolumeMount{{Name: testModelPVCName, MountPoint: "/new-models"}}
 
@@ -632,7 +626,7 @@ func TestDGD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 
 func TestDGD_RoundTrip_MultipleServicesOrderStable(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "multi", Namespace: "ns"},
+		Name: "multi", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{ComponentName: "cc-planner", ComponentType: v1beta1.ComponentTypePlanner},
@@ -649,7 +643,7 @@ func TestDGD_RoundTrip_MultipleServicesOrderStable(t *testing.T) {
 
 func TestDGD_RoundTrip_Experimental(t *testing.T) {
 	clientPodTemplate := &corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"role": "loader"}},
+		Labels: map[string]string{"role": "loader"},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
 				Name:  "gms-loader",
@@ -658,7 +652,7 @@ func TestDGD_RoundTrip_Experimental(t *testing.T) {
 		},
 	}
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "exp", Namespace: "ns"},
+		Name: "exp", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
@@ -708,7 +702,7 @@ func TestDGD_RoundTrip_Experimental(t *testing.T) {
 
 func TestDGD_FromV1alpha1_GMSExtraClientsRoundTripsThroughHub(t *testing.T) {
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "alpha-gms-checkpoint", Namespace: "ns"},
+		Name: "alpha-gms-checkpoint", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -761,7 +755,7 @@ func TestDGD_RoundTrip_PodTemplate(t *testing.T) {
 	t.Log("Define native Pod metadata, scheduling fields and main-container settings")
 	shm := resource.MustParse("4Gi")
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "pt", Namespace: "ns"},
+		Name: "pt", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
@@ -769,10 +763,8 @@ func TestDGD_RoundTrip_PodTemplate(t *testing.T) {
 					ComponentType:    v1beta1.ComponentTypeWorker,
 					SharedMemorySize: &shm,
 					PodTemplate: &corev1.PodTemplateSpec{
-						ObjectMeta: metav1.ObjectMeta{
-							Annotations: map[string]string{"prom.io/scrape": annotationTrue},
-							Labels:      map[string]string{"tier": "gpu"},
-						},
+						Annotations: map[string]string{"prom.io/scrape": annotationTrue},
+						Labels:      map[string]string{"tier": "gpu"},
 						Spec: corev1.PodSpec{
 							NodeSelector:       map[string]string{"node-pool": "gpu"},
 							ServiceAccountName: "dynamo-sa",
@@ -782,10 +774,8 @@ func TestDGD_RoundTrip_PodTemplate(t *testing.T) {
 							},
 							Volumes: []corev1.Volume{
 								{
-									Name: "cache",
-									VolumeSource: corev1.VolumeSource{
-										EmptyDir: &corev1.EmptyDirVolumeSource{},
-									},
+									Name:     "cache",
+									EmptyDir: &corev1.EmptyDirVolumeSource{},
 								},
 							},
 							Containers: []corev1.Container{
@@ -798,25 +788,19 @@ func TestDGD_RoundTrip_PodTemplate(t *testing.T) {
 									EnvFrom: []corev1.EnvFromSource{
 										{
 											SecretRef: &corev1.SecretEnvSource{
-												LocalObjectReference: corev1.LocalObjectReference{Name: "aws-secret"},
+												Name: "aws-secret",
 											},
 										},
 									},
 									LivenessProbe: &corev1.Probe{
-										ProbeHandler: corev1.ProbeHandler{
-											HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstrFromInt32(8080)},
-										},
+										HTTPGet:             &corev1.HTTPGetAction{Path: "/healthz", Port: intstrFromInt32(8080)},
 										InitialDelaySeconds: 5,
 									},
 									ReadinessProbe: &corev1.Probe{
-										ProbeHandler: corev1.ProbeHandler{
-											HTTPGet: &corev1.HTTPGetAction{Path: "/ready", Port: intstrFromInt32(8080)},
-										},
+										HTTPGet: &corev1.HTTPGetAction{Path: "/ready", Port: intstrFromInt32(8080)},
 									},
 									StartupProbe: &corev1.Probe{
-										ProbeHandler: corev1.ProbeHandler{
-											HTTPGet: &corev1.HTTPGetAction{Path: "/startup", Port: intstrFromInt32(8080)},
-										},
+										HTTPGet:          &corev1.HTTPGetAction{Path: "/startup", Port: intstrFromInt32(8080)},
 										FailureThreshold: 30,
 									},
 									Resources: corev1.ResourceRequirements{
@@ -843,7 +827,7 @@ func TestDGD_RoundTrip_PodTemplate(t *testing.T) {
 
 func TestDGD_RoundTrip_CompilationCache(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "cc", Namespace: "ns"},
+		Name: "cc", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
@@ -876,7 +860,7 @@ func TestDGD_RoundTrip_CompilationCache(t *testing.T) {
 
 func TestDGD_RoundTrip_ScalingAdapter(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "sa", Namespace: "ns"},
+		Name: "sa", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
@@ -898,7 +882,7 @@ func TestDGD_FromV1alpha1_PVCsPreserved(t *testing.T) {
 	createTrue := true
 	name := testModelPVCName
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "pvc", Namespace: "ns"},
+		Name: "pvc", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			PVCs: []PVC{
 				{
@@ -922,7 +906,7 @@ func TestDGD_FromV1alpha1_PVCsPreserved(t *testing.T) {
 // Checkpoint survives via v1beta1 checkpoint.enabled=false.
 func TestDGD_FromV1alpha1_DisabledExperimental(t *testing.T) {
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "disabled", Namespace: "ns"},
+		Name: "disabled", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -951,7 +935,7 @@ func TestDGD_FromV1alpha1_DisabledExperimental(t *testing.T) {
 // without a v1beta1 first-class component type survives via sparse preservation.
 func TestDGD_FromV1alpha1_SubComponentType(t *testing.T) {
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "sub", Namespace: "ns"},
+		Name: "sub", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -979,12 +963,12 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 	now := metav1.NewTime(metav1.Now().Rfc3339Copy().Time)
 	later := metav1.NewTime(now.Time.Add(60 * time.Second))
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "status", Namespace: "ns"},
+		Name: "status", Namespace: "ns",
 		Status: v1beta1.DynamoGraphDeploymentStatus{
 			ObservedGeneration: 7,
 			State:              v1beta1.DGDStateSuccessful,
 			Placement: &v1beta1.PlacementStatus{
-				Score: ptr.To(0.87),
+				Score: new(0.87),
 				State: v1beta1.PlacementScoreStateReported,
 			},
 			Conditions: []metav1.Condition{
@@ -1003,13 +987,13 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 					RuntimeNamespace:     "ns-status-worker-abc123",
 					ServedModelName:      "Qwen/Qwen3-8B",
 					RuntimeComponentName: "custom-worker",
-					GPUPowerLimitWatts:   ptr.To(int64(300)),
-					GPUsPerEngine:        ptr.To(int64(2)),
-					GPUsPerReplica:       ptr.To(int64(3)),
+					GPUPowerLimitWatts:   new(int64(300)),
+					GPUsPerEngine:        new(int64(2)),
+					GPUsPerReplica:       new(int64(3)),
 					Replicas:             2,
 					UpdatedReplicas:      2,
-					ReadyReplicas:        ptr.To(int32(2)),
-					AvailableReplicas:    ptr.To(int32(2)),
+					ReadyReplicas:        new(int32(2)),
+					AvailableReplicas:    new(int32(2)),
 				},
 			},
 			Restart: &v1beta1.RestartStatus{
@@ -1045,7 +1029,7 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 // per-service TopologyConstraint, EPPConfig.
 func TestDGD_RoundTrip_FullSharedSpec(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "full", Namespace: "ns"},
+		Name: "full", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
@@ -1053,8 +1037,8 @@ func TestDGD_RoundTrip_FullSharedSpec(t *testing.T) {
 					ComponentType: v1beta1.ComponentTypeEPP,
 					EPPConfig: &v1beta1.EPPConfig{
 						ConfigMapRef: &corev1.ConfigMapKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: "epp-cfg"},
-							Key:                  "config.yaml",
+							Name: "epp-cfg",
+							Key:  "config.yaml",
 						},
 					}},
 				{
@@ -1065,14 +1049,14 @@ func TestDGD_RoundTrip_FullSharedSpec(t *testing.T) {
 					Roles: []v1beta1.ComponentRoleSpec{
 						{
 							Name:     v1beta1.ComponentRoleLeader,
-							Replicas: ptr.To(int32(1)),
+							Replicas: new(int32(1)),
 							PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
 								Name: "main", Image: "leader:latest",
 							}}}},
 						},
 						{
 							Name:     v1beta1.ComponentRoleWorker,
-							Replicas: ptr.To(int32(3)),
+							Replicas: new(int32(3)),
 							PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
 								Name: "main", Image: "worker:latest",
 							}}}},
@@ -1103,13 +1087,13 @@ func TestDGD_RoundTrip_FullSharedSpec(t *testing.T) {
 // FrontendSidecar string naming a sidecar container in podTemplate.containers.
 func TestDGD_RoundTrip_FrontendSidecar(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "fs", Namespace: "ns"},
+		Name: "fs", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
 					ComponentName:   "epp",
 					ComponentType:   v1beta1.ComponentTypeEPP,
-					FrontendSidecar: ptr.To("sidecar-frontend"),
+					FrontendSidecar: new("sidecar-frontend"),
 					PodTemplate: &corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
@@ -1133,13 +1117,13 @@ func TestDGD_RoundTrip_FrontendSidecar(t *testing.T) {
 
 func TestDGD_RoundTrip_FrontendSidecarWithoutPodTemplate(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "fs-ref-only", Namespace: "ns"},
+		Name: "fs-ref-only", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
 					ComponentName:   "epp",
 					ComponentType:   v1beta1.ComponentTypeEPP,
-					FrontendSidecar: ptr.To("sidecar-frontend"),
+					FrontendSidecar: new("sidecar-frontend"),
 				},
 			},
 		},
@@ -1155,7 +1139,7 @@ func TestDGD_RoundTrip_FrontendSidecarWithoutPodTemplate(t *testing.T) {
 func TestDGD_RoundTrip_SharedMemoryDisabledZero(t *testing.T) {
 	zero := resource.MustParse("0")
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "shm", Namespace: "ns"},
+		Name: "shm", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
@@ -1185,7 +1169,7 @@ func TestDGD_FromV1alpha1_SharedMemoryEdgeCases(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			src := &DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "shm-" + tc.name, Namespace: "ns"},
+				Name: "shm-" + tc.name, Namespace: "ns",
 				Spec: DynamoGraphDeploymentSpec{
 					Services: map[string]*DynamoComponentDeploymentSharedSpec{
 						"worker": {
@@ -1207,7 +1191,7 @@ func TestDGD_FromV1alpha1_SharedMemoryEdgeCases(t *testing.T) {
 // &ScalingAdapter{Enabled:false} shape round-trips via sparse spec preservation.
 func TestDGD_FromV1alpha1_ScalingAdapterDisabled(t *testing.T) {
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "sad", Namespace: "ns"},
+		Name: "sad", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -1228,7 +1212,7 @@ func TestDGD_FromV1alpha1_ScalingAdapterDisabled(t *testing.T) {
 func TestDGD_FromV1alpha1_CheckpointDisabled(t *testing.T) {
 	ref := "my-ckpt"
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "ckpt-disabled", Namespace: "ns"},
+		Name: "ckpt-disabled", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -1253,7 +1237,7 @@ func TestDGD_FromV1alpha1_CheckpointDisabled(t *testing.T) {
 func TestDGD_FromV1alpha1_DynamoNamespaceAndServiceName(t *testing.T) {
 	ns := "legacy-dyn-ns"
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "legacy", Namespace: "ns"},
+		Name: "legacy", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -1276,7 +1260,7 @@ func TestDGD_FromV1alpha1_DynamoNamespaceAndServiceName(t *testing.T) {
 // podTemplate.metadata alone) are preserved via sparse spec preservation.
 func TestDGD_FromV1alpha1_PerServiceAnnotationsAndLabels(t *testing.T) {
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "pa", Namespace: "ns"},
+		Name: "pa", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -1296,7 +1280,7 @@ func TestDGD_FromV1alpha1_PerServiceAnnotationsAndLabels(t *testing.T) {
 // TestDGD_FromV1alpha1_AutoscalingAndIngress covers both deprecated blocks.
 func TestDGD_FromV1alpha1_AutoscalingAndIngress(t *testing.T) {
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "ai", Namespace: "ns"},
+		Name: "ai", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -1328,7 +1312,7 @@ func TestDGD_FromV1alpha1_AutoscalingAndIngress(t *testing.T) {
 // to cover resourcesToNative's GPUType/Custom branches.
 func TestDGD_FromV1alpha1_Resources_ForwardOnly(t *testing.T) {
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "res", Namespace: "ns"},
+		Name: "res", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -1371,7 +1355,7 @@ func TestDGD_FromV1alpha1_Resources_ForwardOnly(t *testing.T) {
 
 func TestDGD_FromV1alpha1_EmptyResourcesRoundTrip(t *testing.T) {
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "empty-resources", Namespace: "ns"},
+		Name: "empty-resources", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -1390,7 +1374,7 @@ func TestDGD_FromV1alpha1_EmptyResourcesRoundTrip(t *testing.T) {
 
 func TestDGD_FromV1alpha1_UnrepresentableResourcesRoundTrip(t *testing.T) {
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "unrepresentable-resources", Namespace: "ns"},
+		Name: "unrepresentable-resources", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -1413,7 +1397,7 @@ func TestDGD_FromV1alpha1_UnrepresentableResourcesRoundTrip(t *testing.T) {
 func TestDGD_FromV1alpha1_EnvFromSecretRoundTrip(t *testing.T) {
 	secret := "worker-secret"
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "env-from-secret", Namespace: "ns"},
+		Name: "env-from-secret", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -1433,7 +1417,7 @@ func TestDGD_FromV1alpha1_EnvFromSecretRoundTrip(t *testing.T) {
 // envFromSecretRef constructs the native source for a dedicated alpha Secret.
 func envFromSecretRef(name string) corev1.EnvFromSource {
 	return corev1.EnvFromSource{SecretRef: &corev1.SecretEnvSource{
-		LocalObjectReference: corev1.LocalObjectReference{Name: name},
+		Name: name,
 	}}
 }
 
@@ -1460,12 +1444,12 @@ func TestDGD_FromV1alpha1_EnvFromSecretWithMainContainerEnvFrom(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			src := &DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "env-from-secret", Namespace: "ns"},
+				Name: "env-from-secret", Namespace: "ns",
 				Spec: DynamoGraphDeploymentSpec{
 					Services: map[string]*DynamoComponentDeploymentSharedSpec{
 						"worker": {
 							ComponentType: "worker",
-							EnvFromSecret: ptr.To("qa-probe-secret"),
+							EnvFromSecret: new("qa-probe-secret"),
 							ExtraPodSpec:  &ExtraPodSpec{MainContainer: &corev1.Container{EnvFrom: tt.mainEnvFrom}},
 						},
 					},
@@ -1501,7 +1485,7 @@ func TestDGD_FromV1beta1_EnvFromSecretAfterHubEdit(t *testing.T) {
 	prefixedA := envFromSecretRef("secret-a")
 	prefixedA.Prefix = "A_"
 	optionalA := envFromSecretRef("secret-a")
-	optionalA.SecretRef.Optional = ptr.To(true)
+	optionalA.SecretRef.Optional = new(true)
 	tests := []struct {
 		name              string
 		hubEnvFrom        []corev1.EnvFromSource
@@ -1512,24 +1496,24 @@ func TestDGD_FromV1beta1_EnvFromSecretAfterHubEdit(t *testing.T) {
 			name:              "unchanged",
 			hubEnvFrom:        []corev1.EnvFromSource{envFromSecretRef("secret-b"), envFromSecretRef("secret-a")},
 			wantMainEnvFrom:   []corev1.EnvFromSource{envFromSecretRef("secret-b")},
-			wantEnvFromSecret: ptr.To("secret-a"),
+			wantEnvFromSecret: new("secret-a"),
 		},
 		{
 			name:              "other entry edited",
 			hubEnvFrom:        []corev1.EnvFromSource{envFromSecretRef("secret-c"), envFromSecretRef("secret-a")},
 			wantMainEnvFrom:   []corev1.EnvFromSource{envFromSecretRef("secret-c")},
-			wantEnvFromSecret: ptr.To("secret-a"),
+			wantEnvFromSecret: new("secret-a"),
 		},
 		{
 			name:              "only the trailing duplicate is consumed",
 			hubEnvFrom:        []corev1.EnvFromSource{envFromSecretRef("secret-a"), envFromSecretRef("secret-b"), envFromSecretRef("secret-a")},
 			wantMainEnvFrom:   []corev1.EnvFromSource{envFromSecretRef("secret-a"), envFromSecretRef("secret-b")},
-			wantEnvFromSecret: ptr.To("secret-a"),
+			wantEnvFromSecret: new("secret-a"),
 		},
 		{
 			name:              "only the dedicated entry remains",
 			hubEnvFrom:        []corev1.EnvFromSource{envFromSecretRef("secret-a")},
-			wantEnvFromSecret: ptr.To("secret-a"),
+			wantEnvFromSecret: new("secret-a"),
 		},
 		{
 			name:            "trailing entry deleted",
@@ -1555,12 +1539,12 @@ func TestDGD_FromV1beta1_EnvFromSecretAfterHubEdit(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			src := &DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "env-from-secret", Namespace: "ns"},
+				Name: "env-from-secret", Namespace: "ns",
 				Spec: DynamoGraphDeploymentSpec{
 					Services: map[string]*DynamoComponentDeploymentSharedSpec{
 						"worker": {
 							ComponentType: "worker",
-							EnvFromSecret: ptr.To("secret-a"),
+							EnvFromSecret: new("secret-a"),
 							ExtraPodSpec: &ExtraPodSpec{MainContainer: &corev1.Container{
 								EnvFrom: []corev1.EnvFromSource{envFromSecretRef("secret-b")},
 							}},
@@ -1628,7 +1612,7 @@ func TestDGD_FromV1beta1_EnvFromSecretAfterHubEdit(t *testing.T) {
 
 func TestDGD_FromV1alpha1_EmptyExtraPodSpecRoundTrip(t *testing.T) {
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "empty-extra-pod-spec", Namespace: "ns"},
+		Name: "empty-extra-pod-spec", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -1654,7 +1638,7 @@ func TestDGD_FromV1alpha1_EmptyExtraPodSpecRoundTrip(t *testing.T) {
 // CRD validation, so the conversion code defends in depth.
 func TestDGD_ConvertFrom_DuplicateComponentNames(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "dup", Namespace: "ns"},
+		Name: "dup", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{ComponentName: "frontend"},
@@ -1680,7 +1664,7 @@ func TestDGD_JSONRoundTrip_Bytes(t *testing.T) {
 	shm := resource.MustParse("4Gi")
 	replicas := int32(2)
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "json", Namespace: "ns"},
+		Name: "json", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Env:              []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
@@ -1730,7 +1714,7 @@ func intstrFromInt32(v int32) intstr.IntOrString {
 func TestDGD_FromV1alpha1_FrontendSidecarFullRoundTrip(t *testing.T) {
 	secret := "frontend-secret"
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "fs-full", Namespace: "ns"},
+		Name: "fs-full", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"epp": {
@@ -1798,7 +1782,7 @@ func TestDGD_FromV1alpha1_FrontendSidecarFullRoundTrip(t *testing.T) {
 // through sparse spec preservation without being collapsed to nil.
 func TestDGD_FromV1alpha1_GMSEnabledFalseEmptyPayload(t *testing.T) {
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "gms-empty", Namespace: "ns"},
+		Name: "gms-empty", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -1828,7 +1812,7 @@ func TestDGD_FromV1alpha1_GMSEnabledFalseEmptyPayload(t *testing.T) {
 // sibling branch for Failover.
 func TestDGD_FromV1alpha1_FailoverEnabledFalseEmptyPayload(t *testing.T) {
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "fo-empty", Namespace: "ns"},
+		Name: "fo-empty", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -1859,7 +1843,7 @@ func TestDGD_FromV1alpha1_FailoverEnabledFalseEmptyPayload(t *testing.T) {
 // field.
 func TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload(t *testing.T) {
 	src := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "ckpt-empty", Namespace: "ns"},
+		Name: "ckpt-empty", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -1895,7 +1879,7 @@ func TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload(t *testing.T) {
 func newIdempotenceDGDFixture() *v1beta1.DynamoGraphDeployment {
 	replicas := int32(1)
 	return &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "conv-smoke", Namespace: "jsm"},
+		Name: "conv-smoke", Namespace: "jsm",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -1903,8 +1887,8 @@ func newIdempotenceDGDFixture() *v1beta1.DynamoGraphDeployment {
 					ComponentName:    "frontend",
 					ComponentType:    v1beta1.ComponentTypeFrontend,
 					Replicas:         &replicas,
-					FrontendSidecar:  ptr.To("sidecar-frontend"),
-					SharedMemorySize: ptr.To(resource.MustParse("0")),
+					FrontendSidecar:  new("sidecar-frontend"),
+					SharedMemorySize: new(resource.MustParse("0")),
 					PodTemplate: &corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
@@ -2004,7 +1988,7 @@ func TestDGD_ApplyIdempotence_EmptySharedMemoryOrigin(t *testing.T) {
 	// produced v1beta1 carries the sparse save we need to exercise the empty
 	// branch of shared-memory restoration.
 	a1 := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "shm-empty", Namespace: "ns"},
+		Name: "shm-empty", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -2154,7 +2138,7 @@ func TestDGD_ApplyIdempotence_CSAMergePatch(t *testing.T) {
 	// match, but Go's json.Marshal and apimachinery's unstructured decoder
 	// use different field ordering conventions; re-decoding via the same
 	// path the apiserver uses surfaces any residual structural drift.
-	var oldMap, newMap map[string]interface{}
+	var oldMap, newMap map[string]any
 	if err := json.Unmarshal(storedJSON, &oldMap); err != nil {
 		t.Fatalf("unmarshal stored spec: %v", err)
 	}
@@ -2171,7 +2155,7 @@ func TestDGD_ApplyIdempotence_CSAMergePatch(t *testing.T) {
 func TestDGD_RoundTrip_KvTransferPolicy(t *testing.T) {
 	t.Run("v1beta1_roundtrip", func(t *testing.T) {
 		src := &v1beta1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "topo", Namespace: "ns"},
+			Name: "topo", Namespace: "ns",
 			Spec: v1beta1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
 				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -2194,7 +2178,7 @@ func TestDGD_RoundTrip_KvTransferPolicy(t *testing.T) {
 
 	t.Run("v1beta1_roundtrip_preferred_policy", func(t *testing.T) {
 		src := &v1beta1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "topo-preferred", Namespace: "ns"},
+			Name: "topo-preferred", Namespace: "ns",
 			Spec: v1beta1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
 				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -2218,7 +2202,7 @@ func TestDGD_RoundTrip_KvTransferPolicy(t *testing.T) {
 
 	t.Run("v1beta1_roundtrip_cluster_topology_policy", func(t *testing.T) {
 		src := &v1beta1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "topo-cluster", Namespace: "ns"},
+			Name: "topo-cluster", Namespace: "ns",
 			Spec: v1beta1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
 				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -2241,7 +2225,7 @@ func TestDGD_RoundTrip_KvTransferPolicy(t *testing.T) {
 
 	t.Run("v1alpha1_roundtrip", func(t *testing.T) {
 		src := &DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "topo-alpha", Namespace: "ns"},
+			Name: "topo-alpha", Namespace: "ns",
 			Spec: DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
 				Services: map[string]*DynamoComponentDeploymentSharedSpec{
@@ -2264,7 +2248,7 @@ func TestDGD_RoundTrip_KvTransferPolicy(t *testing.T) {
 
 	t.Run("v1alpha1_roundtrip_cluster_topology_policy", func(t *testing.T) {
 		src := &DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "topo-alpha-cluster", Namespace: "ns"},
+			Name: "topo-alpha-cluster", Namespace: "ns",
 			Spec: DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
 				Services: map[string]*DynamoComponentDeploymentSharedSpec{
@@ -2287,7 +2271,7 @@ func TestDGD_RoundTrip_KvTransferPolicy(t *testing.T) {
 
 	t.Run("nil_policy_roundtrip", func(t *testing.T) {
 		src := &v1beta1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "no-topo", Namespace: "ns"},
+			Name: "no-topo", Namespace: "ns",
 			Spec: v1beta1.DynamoGraphDeploymentSpec{
 				BackendFramework: backendFrameworkSGLang,
 				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -2303,7 +2287,7 @@ func TestDGD_RoundTrip_KvTransferPolicy(t *testing.T) {
 
 	t.Run("empty_experimental_roundtrip", func(t *testing.T) {
 		src := &v1beta1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "empty-experimental", Namespace: "ns"},
+			Name: "empty-experimental", Namespace: "ns",
 			Spec: v1beta1.DynamoGraphDeploymentSpec{
 				BackendFramework: backendFrameworkSGLang,
 				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{

@@ -11,7 +11,6 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/stretchr/testify/require"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -23,7 +22,7 @@ func newParallelRestartDGD(
 	components ...nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) *nvidiacomv1beta1.DynamoGraphDeployment {
 	return &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "parallel-restart", Namespace: "default", UID: "parallel-restart-uid"},
+		Name: "parallel-restart", Namespace: "default", UID: "parallel-restart-uid",
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 			Components: components,
 			Restart: &nvidiacomv1beta1.Restart{

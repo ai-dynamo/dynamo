@@ -362,13 +362,7 @@ spec:
           - args:
             - --dynamo-model-name
             - meta-llama/Llama-3.2-1B-Instruct
-            - --model-card
-            - /etc/cyborg/model-card.json
             - --use-disagg-prefill
-            - --nixl-kv-layout
-            - HND
-            - --num-layers
-            - "16"
             command:
             - /usr/local/bin/cyborg-entrypoint
             - --expand-hosts
@@ -377,18 +371,71 @@ spec:
             env:
             - name: GBUILD_MANIFEST_PATH
               value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c/manifest.v2.capnp.bin
+            - name: LPX_MODEL_PATH
+              value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.labels['grove.io/podclique-pod-index']
+            - name: GLUE_RDMA_PATH_MTU
+              value: "1024"
+            - name: RDMA_PORT
+              value: "19877"
+            - name: SERVER_HOSTS_FILE
+              value: /tmp/lpu_servers
+            image: example.invalid/gpu-runtime:test
+            livenessProbe:
+              failureThreshold: 1
+              httpGet:
+                path: /live
+                port: 9091
+              periodSeconds: 5
+              timeoutSeconds: 4
+            name: main
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: 9091
+              periodSeconds: 10
+              timeoutSeconds: 4
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+            startupProbe:
+              failureThreshold: 720
+              httpGet:
+                path: /live
+                port: 9091
+              periodSeconds: 10
+              timeoutSeconds: 5
+            volumeMounts:
+            - mountPath: /configs
+              name: config
+            - mountPath: /dev/infiniband
+              name: infiniband
+            - mountPath: /nfs
+              name: model-storage
+            - mountPath: /run/openengine
+              name: openengine
+            - mountPath: /dev/shm
+              name: shared-memory
+          initContainers:
+          - args:
+            - lpx
+            - --grpc-endpoint
+            - unix:///run/openengine/openengine.sock
+            - --model-path
+            - $(LPX_MODEL_PATH)/tokenizer
+            - --disaggregation-mode
+            - decode
+            env:
+            - name: LPX_MODEL_PATH
+              value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
             - name: DYN_COMPONENT
               value: decode
             - name: DYN_DISCOVERY_BACKEND
               value: kubernetes
-            - name: DYN_FORWARDPASS_METRIC_PORT
-              value: "20380"
-            - name: DYN_HEALTH_CHECK_ENABLED
-              value: "false"
             - name: DYN_NAMESPACE
               value: inference-engine-dgd-lpx-v2-vllm
             - name: DYN_PARENT_DGD_K8S_NAME
@@ -399,24 +446,10 @@ spec:
               value: "true"
             - name: DYN_SYSTEM_PORT
               value: "9090"
-            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-              value: '["generate"]'
             - name: ETCD_ENDPOINTS
               value: etcd-address
-            - name: GLUE_RDMA_PATH_MTU
-              value: "1024"
             - name: NATS_SERVER
               value: nats-address
-            - name: NIXL_TELEMETRY_ENABLE
-              value: "n"
-            - name: NIXL_TELEMETRY_EXPORTER
-              value: prometheus
-            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
-              value: "19090"
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -429,56 +462,41 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
-            - name: RDMA_PORT
-              value: "19877"
-            - name: SERVER_HOSTS_FILE
-              value: /tmp/lpu_servers
-            image: example.invalid/gpu-runtime:test
+            image: example.invalid/dynamo-sidecar:test
             livenessProbe:
-              failureThreshold: 1
+              failureThreshold: 3
               httpGet:
                 path: /live
                 port: system
               periodSeconds: 5
               timeoutSeconds: 4
-            name: main
+            name: runtime
             ports:
             - containerPort: 9090
               name: system
-              protocol: TCP
-            - containerPort: 19090
-              name: nixl
               protocol: TCP
             readinessProbe:
               failureThreshold: 3
               httpGet:
                 path: /health
                 port: system
-              periodSeconds: 10
+              periodSeconds: 5
               timeoutSeconds: 4
-            resources:
-              limits:
-                nvidia.com/gpu: "1"
+            resources: {}
+            restartPolicy: Always
             startupProbe:
-              failureThreshold: 720
+              failureThreshold: 30
               httpGet:
                 path: /live
                 port: system
-              periodSeconds: 10
-              timeoutSeconds: 5
+              periodSeconds: 2
+              timeoutSeconds: 1
             volumeMounts:
-            - mountPath: /configs
-              name: config
-            - mountPath: /etc/cyborg/model-card.json
-              name: cyborg-model-card
-              readOnly: true
-              subPath: model-card.json
-            - mountPath: /dev/infiniband
-              name: infiniband
             - mountPath: /nfs
               name: model-storage
-            - mountPath: /dev/shm
-              name: shared-memory
+              readOnly: true
+            - mountPath: /run/openengine
+              name: openengine
           restartPolicy: Always
           schedulerName: lpx-scheduler
           securityContext:
@@ -489,9 +507,6 @@ spec:
           - key: nvidia.com/gpu
             operator: Exists
           volumes:
-          - configMap:
-              name: dgd-lpx-v2-vllm-cyborg-model-card
-            name: cyborg-model-card
           - hostPath:
               path: /dev/infiniband
               type: Directory
@@ -499,6 +514,8 @@ spec:
           - name: model-storage
             persistentVolumeClaim:
               claimName: model-storage
+          - emptyDir: {}
+            name: openengine
           - emptyDir:
               medium: Memory
               sizeLimit: 8Gi

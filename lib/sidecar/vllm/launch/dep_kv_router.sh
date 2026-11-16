@@ -40,6 +40,7 @@ while [[ $# -gt 0 ]]; do
             echo "  VLLM_RS_HTTP_PORT       vLLM HTTP port (default: 8100)"
             echo "  VLLM_GRPC_PORT          vLLM gRPC port (default: 30001)"
             echo "  VLLM_KV_EVENT_PORT      First KV-event port; rank N publishes on this port + N (default: 20080)"
+            echo "  VLLM_KV_REPLAY_PORT     First KV-event replay port; rank N replays on this port + N (default: 20180)"
             echo "  VLLM_DATA_PARALLEL_SIZE Number of local data-parallel ranks (default: 2)"
             echo "  VLLM_BLOCK_SIZE         KV-event block size (default: 64)"
             echo "  MAX_MODEL_LEN           Maximum model length (default: 4096)"
@@ -64,6 +65,7 @@ MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 VLLM_RS_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 1 "${VLLM_RS_HTTP_PORT:-8100}")
 VLLM_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${VLLM_GRPC_PORT:-30001}")
 VLLM_KV_EVENT_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${VLLM_KV_EVENT_PORT:-20080}")
+VLLM_KV_REPLAY_PORT=$(dyn_port DYN_VLLM_KV_REPLAY_PORT 1 "${VLLM_KV_REPLAY_PORT:-20180}")
 VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-2}"
 VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-64}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
@@ -76,7 +78,7 @@ if [[ -z "$GPU_MEM_ARGS" ]]; then
     GPU_MEM_ARGS="--kv-cache-memory-bytes $DEFAULT_KV_CACHE_BYTES --gpu-memory-utilization 0.01"
 fi
 
-KV_EVENTS_CONFIG="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}"
+KV_EVENTS_CONFIG="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_KV_EVENT_PORT}\",\"replay_endpoint\":\"tcp://*:${VLLM_KV_REPLAY_PORT}\",\"enable_kv_cache_events\":true}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching vLLM Native-gRPC Sidecar with DEP KV Routing (${VLLM_DATA_PARALLEL_SIZE} GPUs)" "$MODEL" "$HTTP_PORT" \

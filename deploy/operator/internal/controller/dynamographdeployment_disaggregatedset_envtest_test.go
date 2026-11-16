@@ -24,10 +24,12 @@ import (
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	disaggregatedsetutils "sigs.k8s.io/lws/pkg/utils/disaggregatedset"
@@ -154,7 +156,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 			Expect(k8sClient.Update(ctx, current)).To(Succeed())
 
 			By("failing the DS write and persisting the returned restart status")
-			conflictingClient := &dsRestartWriteConflictClient{Client: k8sClient, failWrite: true}
+			conflictingClient := &restartWriteConflictClient{Client: k8sClient, gvk: disaggregatedSetGVK, failWrite: true}
 			reconciler.Client = conflictingClient
 			program := reconciler.newDisaggregatedSetProgram()
 			result, err := program.Reconcile(ctx, workloadProgramRequest{DGD: current})
@@ -219,6 +221,46 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 
 		Expect(current.Annotations[consts.KubeAnnotationWorkloadProvider]).To(Equal(consts.WorkloadProviderComponent))
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(current), Namespace: current.Namespace}, newDisaggregatedSetObject()))).To(BeTrue())
+	})
+
+	It("fails the graph while a non-DisaggregatedSet DCD reports a crash-looping container", func() {
+		ctx := context.Background()
+		dgd := newEnvtestDSHappyPathDGD("demo-ds-frontend-crash-loop")
+		dgd.Spec.Components = append(dgd.Spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName:          "frontend",
+			ComponentType:          nvidiacomv1beta1.ComponentTypeFrontend,
+			RuntimeVersionOverride: "1.0.0",
+			PodTemplate:            envtestDSTestPodTemplate(),
+		})
+		Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, dgd) })
+		reconciler := newEnvtestDSReconcilers()
+
+		By("converging the DisaggregatedSet roles and lowering the frontend to a DCD")
+		_, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		markDisaggregatedSetReady(ctx, current)
+		dcds := ownedEnvtestCutoverDCDs(ctx, current)
+		Expect(dcds).To(HaveLen(1))
+
+		By("reporting a crash loop from the frontend DCD's current generation")
+		frontend := &dcds[0]
+		frontend.Status.ObservedGeneration = frontend.Generation
+		frontend.Status.Conditions = []metav1.Condition{{
+			Type:               nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
+			Status:             metav1.ConditionFalse,
+			Reason:             dcdReasonContainerCrashLooping,
+			Message:            "pod frontend-a container main restarted 2 times, last exit code 1",
+			LastTransitionTime: metav1.Now(),
+		}}
+		Expect(k8sClient.Status().Update(ctx, frontend)).To(Succeed())
+
+		By("failing the graph with the frontend's diagnosis")
+		result, _ := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStateFailed))
+		ready := apiMeta.FindStatusCondition(result.Status.Conditions, "Ready")
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Reason).To(Equal(string(reasonComponentCrashLooping)))
+		Expect(ready.Message).To(Equal("Component frontend is crash-looping: pod frontend-a container main restarted 2 times, last exit code 1"))
 	})
 
 	It("does not rewrite API-defaulted stable Services on a no-op reconcile", func() {
@@ -350,7 +392,7 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 			ComponentName:          "extra-worker",
 			ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
 			RuntimeVersionOverride: "1.0.0",
-			Replicas:               ptr.To(int32(1)),
+			Replicas:               new(int32(1)),
 			PodTemplate:            envtestDSTestPodTemplate(),
 		})
 		Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
@@ -391,11 +433,9 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 			PodTemplate:            envtestDSTestPodTemplate(),
 		}
 		historicalDCD := &nvidiacomv1beta1.DynamoComponentDeployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:            dynamo.GetDCDResourceName(current, historicalComponent.ComponentName, ""),
-				Namespace:       current.Namespace,
-				OwnerReferences: []metav1.OwnerReference{*dgdControllerOwnerReference(current)},
-			},
+			Name:            dynamo.GetDCDResourceName(current, historicalComponent.ComponentName, ""),
+			Namespace:       current.Namespace,
+			OwnerReferences: []metav1.OwnerReference{*dgdControllerOwnerReference(current)},
 			Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 				BackendFramework:                    current.Spec.BackendFramework,
 				DynamoComponentDeploymentSharedSpec: historicalComponent,
@@ -422,18 +462,50 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 	})
 })
 
-type dsRestartWriteConflictClient struct {
+// restartWriteConflictClient fails non-dry-run writes of one workload kind so
+// tests can persist the restart status chosen before a failed first write.
+type restartWriteConflictClient struct {
 	client.Client
+	gvk       schema.GroupVersionKind
 	failWrite bool
 }
 
-func (c *dsRestartWriteConflictClient) Patch(ctx context.Context, object client.Object, patch client.Patch, options ...client.PatchOption) error {
-	patchOptions := &client.PatchOptions{}
-	for _, option := range options {
-		option.ApplyToPatch(patchOptions)
+// injectConflict rejects real writes of the selected workload kind while
+// allowing dry runs and unrelated resources to reach the underlying client.
+func (c *restartWriteConflictClient) injectConflict(object client.Object, dryRun []string) error {
+	if !c.failWrite || len(dryRun) > 0 {
+		return nil
 	}
-	if c.failWrite && object.GetObjectKind().GroupVersionKind() == disaggregatedSetGVK && len(patchOptions.DryRun) == 0 {
-		return apierrors.NewConflict(disaggregatedsetv1.Resource("disaggregatedsets"), object.GetName(), fmt.Errorf("injected restart write conflict"))
+	gvk, err := apiutil.GVKForObject(object, c.Scheme())
+	if err != nil || gvk != c.gvk {
+		return nil
+	}
+	return apierrors.NewConflict(schema.GroupResource{Group: gvk.Group, Resource: gvk.Kind}, object.GetName(), fmt.Errorf("injected restart write conflict"))
+}
+
+func (c *restartWriteConflictClient) Create(ctx context.Context, object client.Object, options ...client.CreateOption) error {
+	createOptions := &client.CreateOptions{}
+	createOptions.ApplyOptions(options)
+	if err := c.injectConflict(object, createOptions.DryRun); err != nil {
+		return err
+	}
+	return c.Client.Create(ctx, object, options...)
+}
+
+func (c *restartWriteConflictClient) Update(ctx context.Context, object client.Object, options ...client.UpdateOption) error {
+	updateOptions := &client.UpdateOptions{}
+	updateOptions.ApplyOptions(options)
+	if err := c.injectConflict(object, updateOptions.DryRun); err != nil {
+		return err
+	}
+	return c.Client.Update(ctx, object, options...)
+}
+
+func (c *restartWriteConflictClient) Patch(ctx context.Context, object client.Object, patch client.Patch, options ...client.PatchOption) error {
+	patchOptions := &client.PatchOptions{}
+	patchOptions.ApplyOptions(options)
+	if err := c.injectConflict(object, patchOptions.DryRun); err != nil {
+		return err
 	}
 	return c.Client.Patch(ctx, object, patch, options...)
 }
@@ -523,18 +595,16 @@ func markDisaggregatedSetReady(
 		desiredReplicas := ptr.Deref(role.Spec.Replicas, int32(1))
 		for slice := range sliceCount {
 			child := &leaderworkersetv1.LeaderWorkerSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      disaggregatedsetutils.GenerateName(ds.GetName(), slice, revision, role.Name),
-					Namespace: ds.GetNamespace(),
-					Labels:    disaggregatedsetutils.GenerateLabels(ds.GetName(), slice, revision, role.Name),
-					OwnerReferences: []metav1.OwnerReference{{
-						APIVersion: disaggregatedsetv1.GroupVersion.String(),
-						Kind:       "DisaggregatedSet",
-						Name:       ds.GetName(),
-						UID:        ds.GetUID(),
-						Controller: ptr.To(true),
-					}},
-				},
+				Name:      disaggregatedsetutils.GenerateName(ds.GetName(), slice, revision, role.Name),
+				Namespace: ds.GetNamespace(),
+				Labels:    disaggregatedsetutils.GenerateLabels(ds.GetName(), slice, revision, role.Name),
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: disaggregatedsetv1.GroupVersion.String(),
+					Kind:       "DisaggregatedSet",
+					Name:       ds.GetName(),
+					UID:        ds.GetUID(),
+					Controller: new(true),
+				}},
 				Spec: role.Spec,
 			}
 			Expect(k8sClient.Create(ctx, child)).To(Succeed())
@@ -575,13 +645,11 @@ func ownedEnvtestCutoverDCDs(
 
 func newEnvtestDSHappyPathDGD(name string) *nvidiacomv1beta1.DynamoGraphDeployment {
 	return &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: envtestNamespace,
-			UID:       types.UID(fmt.Sprintf("%s-uid", name)),
-			Annotations: map[string]string{
-				consts.KubeAnnotationEnableDisaggregatedSet: consts.KubeLabelValueTrue,
-			},
+		Name:      name,
+		Namespace: envtestNamespace,
+		UID:       types.UID(fmt.Sprintf("%s-uid", name)),
+		Annotations: map[string]string{
+			consts.KubeAnnotationEnableDisaggregatedSet: consts.KubeLabelValueTrue,
 		},
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",

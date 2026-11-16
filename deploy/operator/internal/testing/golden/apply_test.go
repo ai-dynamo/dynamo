@@ -12,7 +12,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -57,7 +56,7 @@ metadata:
 	if len(objects) != 3 {
 		t.Fatalf("ApplyManifests() returned %d objects, want 3", len(objects))
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if objects[i].GetNamespace() != "test" {
 			t.Fatalf("object %d namespace = %q, want test", i, objects[i].GetNamespace())
 		}
@@ -103,7 +102,7 @@ metadata:
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{corev1.SchemeGroupVersion})
 	mapper.Add(corev1.SchemeGroupVersion.WithKind("ConfigMap"), meta.RESTScopeNamespace)
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "test"}},
+		&corev1.Namespace{Name: "test"},
 	).WithRESTMapper(mapper).Build()
 
 	t.Log("Apply the manifest without changing its explicit namespace")

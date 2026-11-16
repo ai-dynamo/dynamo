@@ -25,7 +25,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/utils/ptr"
 )
 
 func TestGroveAPIVersionMatchesCompiledSchema(t *testing.T) {
@@ -43,7 +42,7 @@ func TestExpectedTarget(t *testing.T) {
 	}
 	forcedScalingGroup := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 		Experimental: &nvidiacomv1beta1.ExperimentalSpec{
-			Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)},
+			Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: new(true)},
 		},
 	}
 	interPodGMS := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{

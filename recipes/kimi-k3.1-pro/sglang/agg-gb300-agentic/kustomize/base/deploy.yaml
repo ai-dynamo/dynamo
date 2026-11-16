@@ -1,0 +1,175 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Kimi-K3.1-Pro Dynamo + SGLang aggregated recipe (GB300): EXPERIMENTAL, FUNCTIONAL-ONLY. Not tuned, no performance claim.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: kimi-k3-1-pro-sglang-gb300-agg-agentic
+spec:
+  backendFramework: sglang
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --http-host
+          - 0.0.0.0
+          - --http-port
+          - '8000'
+          - --dyn-chat-processor
+          - dynamo
+          - --router-session-affinity-ttl-secs
+          - '900'
+          - --trust-remote-code
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          env:
+          - name: DYN_ROUTER_MODE
+            value: round-robin
+          - name: DYN_SGL_FRONTEND_DECODING
+            value: 'true'
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS
+            value: '3600'
+          - name: DYN_TOKENIZER_CACHE_BYTES
+            value: '8589934592'
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:e7392b04e4b1e1142dbf0e4d31285a16728f430b6f9a331ac339682bb014d84d
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources:
+            requests:
+              cpu: '16'
+              memory: 128Gi
+    replicas: 1
+    type: frontend
+  - multinode:
+      nodeCount: 2
+    name: Worker
+    podTemplate:
+      spec:
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: kimi-k3-1-pro-sglang-gb300-agg-agentic-compute-domain-channel
+        containers:
+        # Required by the 1.7.0-kimi-k3.1-pro-dev.1 image: stage a model card with model_type rewritten.
+        - args:
+          - |
+            set -euo pipefail
+
+            MODEL_PATH="$(python3 -c 'from huggingface_hub import snapshot_download; print(snapshot_download("moonshotai/Kimi-K3.1-Pro", local_files_only=True))')"
+            export MODEL_PATH
+
+            # Model-card staging required by this image's registration shim (kimi_k31 -> kimi_k3 tokenizer mapping)
+            STAGE=/tmp/kimi-k3-1-model-card; mkdir -p "$STAGE"
+            for f in "$MODEL_PATH"/* "$MODEL_PATH"/.[!.]*; do n=$(basename "$f"); [ -f "$f" ] || continue
+              case "$n" in config.json|*.safetensors|*.safetensors.index.json) continue;; esac
+              ln -sfn "$f" "$STAGE/$n"; done
+            STAGE="$STAGE" python3 -c 'import json,os; c=json.load(open(os.environ["MODEL_PATH"]+"/config.json")); c["model_type"]="kimi_k3"; json.dump(c, open(os.environ["STAGE"]+"/config.json","w"))'
+            ls "$STAGE" | wc -l
+
+            exec python3 -m dynamo.sglang \
+              --config /etc/sglang/agg.yaml \
+              --model-path "${MODEL_PATH}" \
+              --dyn-reasoning-parser kimi_k3 \
+              --dyn-structural-tag '{"reasoning_boundary":"backend"}' \
+              --dyn-tool-call-parser kimi_k3
+          command:
+          - /bin/bash
+          - -c
+          env:
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: DYN_SGL_FRONTEND_DECODING
+            value: 'true'
+          - name: SGLANG_CUSTOM_ALL_REDUCE_V2_MAX_SIZE_KB
+            value: '32768'
+          - name: SGLANG_UNBALANCED_MODEL_LOADING_TIMEOUT_S
+            value: '3600'
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: DYN_SELF_HOST_METADATA
+            value: '1'
+          - name: DYN_REQUEST_PLANE
+            value: tcp
+          - name: ETCD_LEASE_TTL
+            value: '120'
+          - name: NCCL_CUMEM_ENABLE
+            value: '1'
+          - name: NCCL_MNNVL_ENABLE
+            value: '1'
+          - name: NCCL_NVLS_ENABLE
+            value: '1'
+          - name: NCCL_P2P_LEVEL
+            value: NVL
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:e7392b04e4b1e1142dbf0e4d31285a16728f430b6f9a331ac339682bb014d84d
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources:
+            claims:
+            - name: compute-domain-channel
+            limits:
+              nvidia.com/gpu: '4'
+            requests:
+              cpu: '16'
+              ephemeral-storage: 64Gi
+              # Above the default; matches the validated benchmark configuration.
+              memory: 512Gi
+              nvidia.com/gpu: '4'
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+            runAsGroup: 0
+            runAsUser: 0
+          volumeMounts:
+          - mountPath: /shared-model-cache
+            name: shared-model-cache
+          - name: sglang-config
+            mountPath: /etc/sglang
+            readOnly: true
+        terminationGracePeriodSeconds: 60
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - name: sglang-config
+          configMap:
+            name: kimi-k3-1-pro-sglang-gb300-agg-agentic-sglang-config
+    replicas: 1
+    sharedMemorySize: 64Gi
+    type: worker
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: kimi-k3-1-pro-sglang-gb300-agg-agentic-compute-domain
+spec:
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: kimi-k3-1-pro-sglang-gb300-agg-agentic-compute-domain-channel
+  numNodes: 0

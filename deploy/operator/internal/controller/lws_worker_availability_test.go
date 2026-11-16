@@ -21,12 +21,12 @@ import (
 	"context"
 	"testing"
 
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
@@ -62,7 +62,7 @@ func TestLWSAvailabilityDrivesWorkerGenerationCleanup(t *testing.T) {
 			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType: consts.ComponentTypeWorker,
-					Replicas:      ptr.To(tt.desired),
+					Replicas:      new(tt.desired),
 					Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
 				},
 			})
@@ -85,26 +85,24 @@ func TestLWSAvailabilityDrivesWorkerGenerationCleanup(t *testing.T) {
 			t.Log("Populate each DCD through the production LWS status mapping")
 			for _, generation := range generations {
 				dcd := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      dynamo.GetDCDResourceName(dgd, "worker", generation.hash),
-						Namespace: dgd.Namespace,
-						Labels: map[string]string{
-							consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-							consts.KubeLabelDynamoWorkerHash:          generation.hash,
-						},
+					Name:      dynamo.GetDCDResourceName(dgd, "worker", generation.hash),
+					Namespace: dgd.Namespace,
+					Labels: map[string]string{
+						consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+						consts.KubeLabelDynamoWorkerHash:          generation.hash,
 					},
 					Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName:   "worker",
 							ComponentType: consts.ComponentTypeWorker,
-							Replicas:      ptr.To(tt.desired),
+							Replicas:      new(tt.desired),
 							Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
 						},
 					},
 				})
 				lws := &leaderworkersetv1.LeaderWorkerSet{
-					ObjectMeta: metav1.ObjectMeta{Name: dcd.Name},
-					Spec:       leaderworkersetv1.LeaderWorkerSetSpec{Replicas: ptr.To(tt.desired)},
+					Name: dcd.Name,
+					Spec: leaderworkersetv1.LeaderWorkerSetSpec{Replicas: new(tt.desired)},
 					Status: leaderworkersetv1.LeaderWorkerSetStatus{
 						Replicas:        tt.desired,
 						UpdatedReplicas: tt.desired,
@@ -132,10 +130,10 @@ func TestLWSAvailabilityDrivesWorkerGenerationCleanup(t *testing.T) {
 			require.NoError(t, r.scaleOldWorkerDCDs(ctx, dgd, rollout))
 			oldDCD := &nvidiacomv1beta1.DynamoComponentDeployment{}
 			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dcds[0]), oldDCD))
-			assert.Equal(t, ptr.To(tt.wantOld), oldDCD.Spec.Replicas)
+			assert.Equal(t, new(tt.wantOld), oldDCD.Spec.Replicas)
 			newDCD := &nvidiacomv1beta1.DynamoComponentDeployment{}
 			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dcds[1]), newDCD))
-			assert.Equal(t, ptr.To(tt.desired), newDCD.Spec.Replicas)
+			assert.Equal(t, new(tt.desired), newDCD.Spec.Replicas)
 
 			t.Log("Keep the old DCD while it still reports live replicas")
 			program := &componentProgram{rollout: r}
@@ -152,7 +150,7 @@ func TestLWSAvailabilityDrivesWorkerGenerationCleanup(t *testing.T) {
 			oldDCD.Generation = 2
 			oldDCD.Status.ObservedGeneration = 1
 			oldDCD.Status.Component.Replicas = 0
-			oldDCD.Status.Component.ReadyReplicas = ptr.To(int32(0))
+			oldDCD.Status.Component.ReadyReplicas = new(int32(0))
 			oldDCD.Status.Component.AvailableReplicas = nil
 			require.NoError(t, r.Update(ctx, oldDCD))
 			require.NoError(t, program.reconcileWorkerRollout(ctx, dgd, &programStatus))
@@ -164,18 +162,16 @@ func TestLWSAvailabilityDrivesWorkerGenerationCleanup(t *testing.T) {
 			oldDCD.Finalizers = []string{"test.dynamo.nvidia.com/hold-deletion"}
 			require.NoError(t, r.Update(ctx, oldDCD))
 			oldPod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "old-worker", Namespace: dgd.Namespace,
-					Labels: map[string]string{
-						consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-						consts.KubeLabelDynamoComponent:           "worker",
-						consts.KubeLabelDynamoWorkerHash:          testOldWorkerHash,
-						consts.KubeLabelDynamoComponentType:       consts.ComponentTypeWorker,
-						dcdWorkloadRoleLabel:                      string(dynamo.RoleWorker),
-					},
-					Finalizers: []string{"test.dynamo.nvidia.com/hold-deletion"},
+				Name: "old-worker", Namespace: dgd.Namespace,
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+					consts.KubeLabelDynamoComponent:           "worker",
+					consts.KubeLabelDynamoWorkerHash:          testOldWorkerHash,
+					consts.KubeLabelDynamoComponentType:       consts.ComponentTypeWorker,
+					dcdWorkloadRoleLabel:                      string(dynamo.RoleWorker),
 				},
-				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+				Finalizers: []string{"test.dynamo.nvidia.com/hold-deletion"},
+				Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 			}
 			oldLeader := oldPod.DeepCopy()
 			oldLeader.Name = "old-leader"
@@ -248,10 +244,10 @@ func TestDCDComponentStateAvailabilityFallback(t *testing.T) {
 	}{
 		{name: "missing status"},
 		{name: "missing replica signals", status: &nvidiacomv1beta1.ComponentReplicaStatus{}},
-		{name: "missing availability uses readiness", status: &nvidiacomv1beta1.ComponentReplicaStatus{ReadyReplicas: ptr.To(int32(3))}, wantAvailable: 3},
-		{name: "zero readiness stays unavailable", status: &nvidiacomv1beta1.ComponentReplicaStatus{ReadyReplicas: ptr.To(int32(0))}},
-		{name: "explicit zero availability preserves readiness delay", status: &nvidiacomv1beta1.ComponentReplicaStatus{ReadyReplicas: ptr.To(int32(3)), AvailableReplicas: ptr.To(int32(0))}},
-		{name: "reported availability takes precedence", status: &nvidiacomv1beta1.ComponentReplicaStatus{ReadyReplicas: ptr.To(int32(3)), AvailableReplicas: ptr.To(int32(1))}, wantAvailable: 1},
+		{name: "missing availability uses readiness", status: &nvidiacomv1beta1.ComponentReplicaStatus{ReadyReplicas: new(int32(3))}, wantAvailable: 3},
+		{name: "zero readiness stays unavailable", status: &nvidiacomv1beta1.ComponentReplicaStatus{ReadyReplicas: new(int32(0))}},
+		{name: "explicit zero availability preserves readiness delay", status: &nvidiacomv1beta1.ComponentReplicaStatus{ReadyReplicas: new(int32(3)), AvailableReplicas: new(int32(0))}},
+		{name: "reported availability takes precedence", status: &nvidiacomv1beta1.ComponentReplicaStatus{ReadyReplicas: new(int32(3)), AvailableReplicas: new(int32(1))}, wantAvailable: 1},
 	}
 
 	for _, tt := range tests {
@@ -295,7 +291,7 @@ func TestLWSCleanupWaitsForEveryReplacementWorker(t *testing.T) {
 				}
 				components[name] = &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 					ComponentType: consts.ComponentTypeWorker,
-					Replicas:      ptr.To(int32(2)),
+					Replicas:      new(int32(2)),
 					Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
 					Annotations:   annotations,
 				}
@@ -318,25 +314,23 @@ func TestLWSCleanupWaitsForEveryReplacementWorker(t *testing.T) {
 			for i, name := range []string{"prefill", "decode"} {
 				for _, hash := range []string{testOldWorkerHash, newHash} {
 					dcd := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
-						ObjectMeta: metav1.ObjectMeta{
-							Name: dynamo.GetDCDResourceName(dgd, name, hash), Namespace: dgd.Namespace,
-							Labels: map[string]string{
-								consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-								consts.KubeLabelDynamoWorkerHash:          hash,
-							},
+						Name: dynamo.GetDCDResourceName(dgd, name, hash), Namespace: dgd.Namespace,
+						Labels: map[string]string{
+							consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+							consts.KubeLabelDynamoWorkerHash:          hash,
 						},
 						Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
 							DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 								ServiceName: name, ComponentType: consts.ComponentTypeWorker,
-								Replicas: ptr.To(int32(2)), Multinode: &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
+								Replicas: new(int32(2)), Multinode: &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
 							},
 						},
 					})
-					dcd.Status.Component = &nvidiacomv1beta1.ComponentReplicaStatus{Replicas: 2, ReadyReplicas: ptr.To(int32(2))}
+					dcd.Status.Component = &nvidiacomv1beta1.ComponentReplicaStatus{Replicas: 2, ReadyReplicas: new(int32(2))}
 					if hash == newHash {
-						dcd.Spec.Replicas = ptr.To(tt.newSpec)
+						dcd.Spec.Replicas = new(tt.newSpec)
 						dcd.Status.Component.Replicas = tt.newSpec
-						dcd.Status.Component.ReadyReplicas = ptr.To(tt.ready[i])
+						dcd.Status.Component.ReadyReplicas = new(tt.ready[i])
 						newDCDs = append(newDCDs, dcd)
 					} else {
 						oldDCDs = append(oldDCDs, dcd)
@@ -355,10 +349,10 @@ func TestLWSCleanupWaitsForEveryReplacementWorker(t *testing.T) {
 			require.NoError(t, r.scaleOldWorkerDCDs(ctx, dgd, rollout))
 			for _, dcd := range oldDCDs {
 				require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dcd), dcd))
-				assert.Equal(t, ptr.To(int32(0)), dcd.Spec.Replicas)
+				assert.Equal(t, new(int32(0)), dcd.Spec.Replicas)
 				dcd.Status.ObservedGeneration = dcd.Generation
 				dcd.Status.Component.Replicas = 0
-				dcd.Status.Component.ReadyReplicas = ptr.To(int32(0))
+				dcd.Status.Component.ReadyReplicas = new(int32(0))
 				require.NoError(t, r.Update(ctx, dcd))
 			}
 
@@ -375,9 +369,9 @@ func TestLWSCleanupWaitsForEveryReplacementWorker(t *testing.T) {
 
 			t.Log("Reach the full DGD desired count for every replacement component before deleting old DCDs")
 			for _, dcd := range newDCDs {
-				dcd.Spec.Replicas = ptr.To(int32(2))
+				dcd.Spec.Replicas = new(int32(2))
 				dcd.Status.Component.Replicas = 2
-				dcd.Status.Component.ReadyReplicas = ptr.To(int32(2))
+				dcd.Status.Component.ReadyReplicas = new(int32(2))
 				require.NoError(t, r.Update(ctx, dcd))
 			}
 			require.NoError(t, program.reconcileWorkerRollout(ctx, dgd, &status))
@@ -405,7 +399,7 @@ func TestWorkerRecreateIgnoresCheckpointCapturePods(t *testing.T) {
 			t.Log("Create drained old DCD and unstarted replacement for a Recreate update")
 			component := &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeWorker,
-				Replicas:      ptr.To(int32(1)),
+				Replicas:      new(int32(1)),
 				Annotations: map[string]string{
 					KubeAnnotationDeploymentStrategy: string(common.DeploymentStrategyRecreate),
 				},
@@ -424,37 +418,33 @@ func TestWorkerRecreateIgnoresCheckpointCapturePods(t *testing.T) {
 			dcds := make([]*nvidiacomv1beta1.DynamoComponentDeployment, 0, 2)
 			for _, hash := range []string{testOldWorkerHash, newHash} {
 				dcd := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:       dynamo.GetDCDResourceName(dgd, "worker", hash),
-						Namespace:  dgd.Namespace,
-						Generation: 1,
-						Labels: map[string]string{
-							consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-							consts.KubeLabelDynamoWorkerHash:          hash,
-						},
+					Name:       dynamo.GetDCDResourceName(dgd, "worker", hash),
+					Namespace:  dgd.Namespace,
+					Generation: 1,
+					Labels: map[string]string{
+						consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+						consts.KubeLabelDynamoWorkerHash:          hash,
 					},
 					Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: *component.DeepCopy(),
 					},
 				})
 				dcd.Spec.ComponentName = "worker"
-				dcd.Spec.Replicas = ptr.To(int32(0))
+				dcd.Spec.Replicas = new(int32(0))
 				dcd.Status.ObservedGeneration = 1
-				dcd.Status.Component = &nvidiacomv1beta1.ComponentReplicaStatus{ReadyReplicas: ptr.To(int32(0))}
+				dcd.Status.Component = &nvidiacomv1beta1.ComponentReplicaStatus{ReadyReplicas: new(int32(0))}
 				dcds = append(dcds, dcd)
 			}
 			oldDCD, newDCD := dcds[0], dcds[1]
 
 			t.Log("Index both a serving worker and a checkpoint capture with the same old hash")
 			worker := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "old-worker", Namespace: dgd.Namespace,
-					Labels: map[string]string{
-						consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-						consts.KubeLabelDynamoComponent:           "worker",
-						consts.KubeLabelDynamoComponentType:       consts.ComponentTypeWorker,
-						consts.KubeLabelDynamoWorkerHash:          testOldWorkerHash,
-					},
+				Name: "old-worker", Namespace: dgd.Namespace,
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+					consts.KubeLabelDynamoComponent:           "worker",
+					consts.KubeLabelDynamoComponentType:       consts.ComponentTypeWorker,
+					consts.KubeLabelDynamoWorkerHash:          testOldWorkerHash,
 				},
 				Status: corev1.PodStatus{Phase: corev1.PodRunning},
 			}
@@ -462,19 +452,17 @@ func TestWorkerRecreateIgnoresCheckpointCapturePods(t *testing.T) {
 				worker.Labels[consts.KubeLabelDynamoSelector] = oldDCD.Name
 			}
 			capture := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "checkpoint-capture", Namespace: dgd.Namespace,
-					Labels: map[string]string{
-						consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-						consts.KubeLabelDynamoComponent:           "worker",
-						consts.KubeLabelDynamoWorkerHash:          testOldWorkerHash,
-					},
+				Name: "checkpoint-capture", Namespace: dgd.Namespace,
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+					consts.KubeLabelDynamoComponent:           "worker",
+					consts.KubeLabelDynamoWorkerHash:          testOldWorkerHash,
 				},
 				Status: corev1.PodStatus{Phase: corev1.PodRunning},
 			}
 			r := createTestReconcilerWithStatus(dgd, withObjects(oldDCD, newDCD, worker, capture))
 			ctx := context.Background()
-			pods, err := r.listDGDComponentPods(ctx, dgd, "worker")
+			pods, err := podcontroller.ListComponentPods(ctx, r, dgd.Namespace, dgd.Name, "worker")
 			require.NoError(t, err)
 			require.Len(t, pods, 2, "capture pods share the DGD/component index")
 
@@ -501,9 +489,9 @@ func TestWorkerRecreateIgnoresCheckpointCapturePods(t *testing.T) {
 
 			t.Log("A ready replacement can retire the drained DCD without waiting for capture")
 			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(newDCD), newDCD))
-			newDCD.Spec.Replicas = ptr.To(int32(1))
+			newDCD.Spec.Replicas = new(int32(1))
 			newDCD.Status.Component.Replicas = 1
-			newDCD.Status.Component.ReadyReplicas = ptr.To(int32(1))
+			newDCD.Status.Component.ReadyReplicas = new(int32(1))
 			require.NoError(t, r.Update(ctx, newDCD))
 			program := &componentProgram{rollout: r}
 			require.NoError(t, program.reconcileWorkerRollout(ctx, dgd, &dgd.Status))

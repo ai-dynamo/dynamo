@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Replace <tag> with a supported SGLang image tag before deploying.
 # EXPERIMENTAL: engine-primary disaggregated SGLang with the Dynamo native sidecar
 
 apiVersion: nvidia.com/v1beta1
@@ -39,7 +40,7 @@ spec:
               optional: true
         containers:
         - name: main
-          image: lmsysorg/sglang:v0.5.22
+          image: lmsysorg/sglang:<tag>
           securityContext:
             capabilities:
               add: ["IPC_LOCK"]
@@ -126,7 +127,7 @@ spec:
               optional: true
         containers:
         - name: main
-          image: lmsysorg/sglang:v0.5.22
+          image: lmsysorg/sglang:<tag>
           securityContext:
             capabilities:
               add: ["IPC_LOCK"]

@@ -784,6 +784,17 @@ jobs:
           path: source-checkout
           fetch-depth: 1
 
+      - name: Checkout workflow scripts
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          # Scripts this workflow revision calls that may predate the tag, so a
+          # force_rebuild of an older release still finds them.
+          ref: ${{ github.sha }}
+          path: workflow-checkout
+          fetch-depth: 1
+          sparse-checkout: docs/fern/scripts/relink_shared_reference.py
+          sparse-checkout-cone-mode: false
+
       - name: Checkout docs-website branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -927,6 +938,11 @@ jobs:
             fi
           done < <(find "$SHARED" -type f)
           find "docs-checkout/fern/pages-$TAG/reference" -type d -empty -delete 2>/dev/null || true
+
+          # Snapshot pages still link to the copies just dropped; point them at
+          # the shared pages-dev/ files the nav serves instead.
+          python3 workflow-checkout/docs/fern/scripts/relink_shared_reference.py \
+            "docs-checkout/fern/pages-$TAG" docs-checkout/fern/pages-dev
 
       - name: Snapshot translation mirrors
         run: |

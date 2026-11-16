@@ -198,6 +198,10 @@ def test_tito_adapter_preserves_stop_strings_and_stop_token_ids():
     assert adapted.sampling_params.detokenize is False
 
 
+# vLLM's decode_mm_kwargs_item base64-decodes into immutable bytes, so
+# torch.frombuffer warns before vLLM clones the inline tensor. PyTorch warns
+# only once per process, which makes the failure depend on test order.
+@pytest.mark.filterwarnings("ignore:The given buffer is not writable:UserWarning")
 def test_tito_adapter_builds_preprocessed_image_input_without_reprocessing():
     from dynamo.vllm.engine_generate import adapt_engine_generate_request
 

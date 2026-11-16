@@ -23,6 +23,7 @@ from dynamo.planner.monitoring import aic_estimator
 from dynamo.planner.monitoring import aic_interpolation as aic_mod
 
 pytestmark = [
+    pytest.mark.planner,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.unit,

@@ -37,8 +37,8 @@ fn parsed_arguments_map_onto_the_worker_registration() {
         Some("disabled")
     );
     assert!(
-        !aggregated.enable_kv_routing,
-        "the sidecar has no KV events"
+        aggregated.enable_kv_routing,
+        "KV routing wiring is enabled; discovered sources control event publication"
     );
 
     for (mode, expected) in [

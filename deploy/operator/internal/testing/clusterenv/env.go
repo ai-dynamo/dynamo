@@ -242,7 +242,7 @@ type TestEnv struct {
 
 func newTestEnv(tb testing.TB, rt *runtimeEnv, opts Options) *TestEnv {
 	tb.Helper()
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "clusterenv-"}}
+	ns := &corev1.Namespace{GenerateName: "clusterenv-"}
 	if err := rt.client.Create(context.Background(), ns); err != nil {
 		tb.Fatalf("create cluster-test namespace: %v", err)
 	}
@@ -281,26 +281,36 @@ func (e *TestEnv) BlockReplicaSets() {
 
 func (e *TestEnv) blockQuota(quota *corev1.ResourceQuota) {
 	e.tb.Helper()
-	if err := e.rt.client.Create(context.Background(), quota); err != nil && !apierrors.IsAlreadyExists(err) {
-		e.tb.Fatalf("create cluster-test workload quota: %v", err)
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), e.opts.EventuallyTimeout)
 	defer cancel()
+	if err := blockQuota(ctx, e.rt.client, quota); err != nil {
+		e.tb.Fatalf("block cluster-test workloads: %v", err)
+	}
+}
+
+// blockQuota waits for quota admission to enforce every requested limit.
+func blockQuota(ctx context.Context, c client.Client, quota *corev1.ResourceQuota) error {
+	// Reuse an existing block when history preparation already installed it.
+	if err := c.Create(ctx, quota); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create cluster-test workload quota: %w", err)
+	}
+
+	// A stored quota is not effective until the quota controller initializes status.
 	if err := wait.PollUntilContextCancel(ctx, 100*time.Millisecond, true, func(ctx context.Context) (bool, error) {
 		current := &corev1.ResourceQuota{}
-		if err := e.rt.client.Get(ctx, client.ObjectKeyFromObject(quota), current); err != nil {
+		if err := c.Get(ctx, client.ObjectKeyFromObject(quota), current); err != nil {
 			return false, err
 		}
 		return quotaInitialized(current, quota.Spec.Hard), nil
 	}); err != nil {
-		e.tb.Fatalf("wait for cluster-test workload quota: %v", err)
+		return fmt.Errorf("wait for cluster-test workload quota: %w", err)
 	}
+	return nil
 }
 
 func replicaSetBlockQuota(namespace string) *corev1.ResourceQuota {
 	return &corev1.ResourceQuota{
-		ObjectMeta: metav1.ObjectMeta{Name: workloadBlockQuotaName, Namespace: namespace},
+		Name: workloadBlockQuotaName, Namespace: namespace,
 		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
 			corev1.ResourceName("count/replicasets.apps"): resource.MustParse("0"),
 		}},
@@ -436,7 +446,7 @@ func (e *TestEnv) logDiagnostics() {
 }
 
 func (e *TestEnv) deleteNamespace() error {
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: e.namespace}}
+	ns := &corev1.Namespace{Name: e.namespace}
 	if err := e.rt.client.Delete(context.Background(), ns); err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
