@@ -47,6 +47,8 @@ versions:
     path: ./index.yml
 
 redirects:
+  - source: "/dynamo/dev/reinforcement-learning/decision-model/v-llm"
+    destination: "/dynamo/dev/decision-model/vllm"
   - source: "/dynamo/dev/reinforcement-learning/decision-model/ap-is"
     destination: "/dynamo/dev/decision-model/apis"
   - source: "/dynamo/dev/reinforcement-learning/decision-model/sg-lang"

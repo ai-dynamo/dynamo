@@ -178,6 +178,8 @@ docker exec -it <container_id> bash
 
 The [Decision APIs guide](../../use-cases/decision-model/apis.md) explains the two contracts and provides curl, OpenAI SDK, and Jev/TypeSafe SDK examples. For admission limits and cache-sharing boundaries, see [Decision API Configuration](../../reference/components/frontend-configuration.mdx#decision-apis).
 
+The [vLLM decision-model guide](../../use-cases/decision-model/vllm.md) covers the separately tracked vLLM causal integration, its required build, and its different output-token accounting.
+
 ## Scaling and larger deployments
 
 The flow above is one worker on one node. To go bigger, you change **flags on the worker** — the frontend command never changes, and you still run just one frontend.
