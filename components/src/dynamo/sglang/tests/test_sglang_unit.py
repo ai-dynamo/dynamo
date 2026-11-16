@@ -1010,6 +1010,11 @@ async def test_parse_args_applies_dynamo_defaults_before_resolution(
             + ["--max-running-requests", "16"],
             None,
         ),
+        (
+            ["--tp-size", "16", "--dp-size", "16", "--enable-dp-attention"]
+            + ["--max-running-requests", "8"],
+            None,
+        ),
     ],
 )
 async def test_parse_args_pads_small_default_decode_cuda_graph_max_bs(

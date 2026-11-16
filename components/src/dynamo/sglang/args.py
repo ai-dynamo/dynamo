@@ -626,7 +626,8 @@ def _pad_default_decode_cuda_graph_max_bs(parsed_args: Namespace) -> None:
     if alignment % attn_cp_size != 0:
         alignment *= attn_cp_size
 
-    per_rank_max_running_requests = max_running_requests // attn_dp_size
+    # SGLang floors the per-rank pool at 1 (pool_configurator.py).
+    per_rank_max_running_requests = max(1, max_running_requests // attn_dp_size)
     if per_rank_max_running_requests >= alignment:
         return
 
