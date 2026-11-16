@@ -75,13 +75,15 @@ struct RegisteredHealthCheckTarget {
     target: HealthCheckTarget,
     registration: u64,
     notifier: Arc<tokio::sync::Notify>,
+    progress: Arc<tokio::sync::Notify>,
 }
 
-/// The target, notifier, and identity for one canary registration.
+/// The target, activity and progress signals, and identity for one canary registration.
 #[derive(Clone)]
 pub struct CanaryHandles {
     pub target: HealthCheckTarget,
     pub notifier: Arc<tokio::sync::Notify>,
+    pub progress: Arc<tokio::sync::Notify>,
     pub registration: ProbedRegistration,
 }
 
@@ -352,6 +354,7 @@ impl SystemHealth {
                 target: HealthCheckTarget { instance, payload },
                 registration,
                 notifier: Arc::new(tokio::sync::Notify::new()),
+                progress: Arc::new(tokio::sync::Notify::new()),
             });
             replaced
         };
@@ -500,7 +503,24 @@ impl SystemHealth {
             .map(|registered| registered.notifier.clone())
     }
 
-    /// Read the current target, notifier, and identity under one lock.
+    /// Get the notifier an engine fires when it completes a forward pass.
+    ///
+    /// A canary waiting for its response restarts its timeout on it: a long
+    /// prefill streams nothing until it ends, and a canary queued behind it is
+    /// not answered until then. Firing it never changes the endpoint's health
+    /// status or the idle timer.
+    pub fn get_endpoint_progress_notifier(
+        &self,
+        endpoint_subject: &str,
+    ) -> Option<Arc<tokio::sync::Notify>> {
+        let targets = self.health_check_targets.read().unwrap();
+        targets
+            .get(endpoint_subject)
+            .and_then(|outstanding| outstanding.last())
+            .map(|registered| registered.progress.clone())
+    }
+
+    /// Read the current target, signals, and identity under one lock.
     pub fn get_canary_handles(&self, endpoint_subject: &str) -> Option<CanaryHandles> {
         let targets = self.health_check_targets.read().unwrap();
         targets
@@ -509,6 +529,7 @@ impl SystemHealth {
             .map(|registered| CanaryHandles {
                 target: registered.target.clone(),
                 notifier: registered.notifier.clone(),
+                progress: registered.progress.clone(),
                 registration: ProbedRegistration(registered.registration),
             })
     }
@@ -1140,6 +1161,8 @@ mod tests {
             .get_endpoint_health_check_notifier(ENDPOINT)
             .expect("the first registration's handler needs a notifier");
 
+        let earlier_progress = health.get_endpoint_progress_notifier(ENDPOINT).unwrap();
+
         let later =
             health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
         let later_notifier = health
@@ -1150,6 +1173,13 @@ mod tests {
             "a restart's handler must not be handed the outgoing incarnation's notifier"
         );
 
+        let later_progress = health.get_endpoint_progress_notifier(ENDPOINT).unwrap();
+        assert!(!Arc::ptr_eq(&earlier_progress, &later_progress));
+        assert!(Arc::ptr_eq(
+            &health.get_canary_handles(ENDPOINT).unwrap().progress,
+            &later_progress,
+        ));
+
         health.release_health_check_target(later);
         let re_exposed = health
             .get_endpoint_health_check_notifier(ENDPOINT)
@@ -1159,12 +1189,18 @@ mod tests {
             "the re-exposed registration is signalled on the notifier its own handler holds"
         );
 
+        assert!(Arc::ptr_eq(
+            &health.get_endpoint_progress_notifier(ENDPOINT).unwrap(),
+            &earlier_progress,
+        ));
+
         health.release_health_check_target(earlier);
         assert!(
             health
                 .get_endpoint_health_check_notifier(ENDPOINT)
                 .is_none()
         );
+        assert!(health.get_endpoint_progress_notifier(ENDPOINT).is_none());
     }
 
     #[test]
@@ -1243,5 +1279,23 @@ mod tests {
             HealthStatus::Ready
         ));
         assert!(health.get_canary_handles(ENDPOINT).is_none());
+    }
+
+    /// Engine progress must not reach the activity notifier, which marks the
+    /// endpoint ready: a completed forward pass is not a successful response.
+    #[test]
+    fn engine_progress_does_not_notify_activity() {
+        use futures::FutureExt;
+
+        let health = system_health(true);
+        assert!(health.get_endpoint_progress_notifier(ENDPOINT).is_none());
+
+        let _ = health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let activity = health.get_endpoint_health_check_notifier(ENDPOINT).unwrap();
+        let progress = health.get_endpoint_progress_notifier(ENDPOINT).unwrap();
+
+        progress.notify_one();
+        assert!(activity.notified().now_or_never().is_none());
+        assert!(progress.notified().now_or_never().is_some());
     }
 }
