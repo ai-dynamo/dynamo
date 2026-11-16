@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::{
-    engine::AsyncEngineContext,
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
 };
@@ -10,6 +9,8 @@ use futures::{Stream, StreamExt, stream};
 use std::sync::Arc;
 
 use crate::grpc::service::dispatch_error_status;
+// Re-exported so the old per-module path keeps resolving for outside users.
+pub use crate::grpc::service::grpc_monitor_for_disconnects;
 use crate::http::service::metadata::extract_metadata_from_grpc;
 use crate::protocols::openai::ParsingOptions;
 use crate::protocols::openai::completions::{
@@ -22,8 +23,8 @@ use super::kserve::inference;
 
 // [gluo NOTE] These are common utilities that should be shared between frontends
 use crate::http::service::{
-    disconnect::{ConnectionHandle, create_connection_monitor},
-    metrics::{CancellationLabels, Endpoint, InflightGuard, process_response_and_observe_metrics},
+    disconnect::create_connection_monitor,
+    metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
 };
 use dynamo_protocols::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 
@@ -54,9 +55,8 @@ pub async fn completion_response_stream(
     ),
     Status,
 > {
-    // create the context for the request
-    // [WIP] from request id.
-    let request_id = get_or_create_request_id(request.inner.user.as_deref());
+    // Client ids remain in the payload; only a server-minted id may key in-flight state.
+    let request_id = uuid::Uuid::new_v4().to_string();
     let streaming = request.inner.stream.unwrap_or(false);
     let model_name = request.inner.model.clone();
     let cancellation_labels = CancellationLabels {
@@ -175,61 +175,6 @@ pub async fn completion_response_stream(
     connection_handle.disarm();
 
     Ok((stream, parsing_options))
-}
-
-/// This method will consume an AsyncEngineStream and monitor for disconnects or context cancellation.
-/// This is gRPC variant of `monitor_for_disconnects` as that implementation has SSE specific handling.
-/// Should decouple and reuse `monitor_for_disconnects`
-///
-/// Uses `tokio::select!` to choose between receiving responses from the source stream or detecting when
-/// the context is stopped. If the context is stopped, we break the stream. If the source stream ends
-/// naturally, we mark the request as successful and send the final `[DONE]` event.
-pub fn grpc_monitor_for_disconnects<T>(
-    stream: impl Stream<Item = Annotated<T>>,
-    context: Arc<dyn AsyncEngineContext>,
-    mut inflight_guard: InflightGuard,
-    mut stream_handle: ConnectionHandle,
-) -> impl Stream<Item = Annotated<T>> {
-    stream_handle.arm();
-    async_stream::stream! {
-        tokio::pin!(stream);
-        loop {
-            tokio::select! {
-                event = stream.next() => {
-                    match event {
-                        Some(response) => {
-                            yield response;
-                        }
-                        None => {
-                            // Stream ended normally
-                            inflight_guard.mark_ok();
-                            stream_handle.disarm();
-                            break;
-                        }
-                    }
-                }
-                _ = context.stopped() => {
-                    tracing::trace!("Context stopped; breaking stream");
-                    break;
-                }
-            }
-        }
-    }
-}
-
-/// Get the request ID from a primary source, or lastly create a new one if not present
-// TODO: Similar function exists in lib/llm/src/http/service/openai.rs but with different signature and more complex logic (distributed tracing, headers)
-fn get_or_create_request_id(primary: Option<&str>) -> String {
-    // Try to get the request ID from the primary source
-    if let Some(primary) = primary
-        && let Ok(uuid) = uuid::Uuid::parse_str(primary)
-    {
-        return uuid.to_string();
-    }
-
-    // Try to parse the request ID as a UUID, or generate a new one if missing/invalid
-    let uuid = uuid::Uuid::new_v4();
-    uuid.to_string()
 }
 
 impl TryFrom<inference::ModelInferRequest> for NvCreateCompletionRequest {

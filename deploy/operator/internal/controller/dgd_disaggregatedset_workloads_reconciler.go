@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"sort"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -179,7 +180,7 @@ func (r *disaggregatedSetWorkloadsReconciler) Reconcile(
 	}
 
 	resources := append([]Resource{syncedDSResource}, nonSelectedResources...)
-	result := checkResourcesReadiness(resources)
+	result := applyComponentCrashLoops(checkResourcesReadiness(resources), slices.Collect(maps.Values(dcds)))
 	if result.State == nvidiacomv1beta1.DGDStateSuccessful {
 		if err := r.stableResources.DeleteStale(ctx, dgd, selectedServiceNames); err != nil {
 			return ReconcileResult{}, err

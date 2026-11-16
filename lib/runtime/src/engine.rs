@@ -143,6 +143,8 @@ pub trait AsyncEngineContext: Send + Sync + Debug {
     /// This method is idempotent. This method does not invalidate results current in the
     /// stream. It might take some time for the engine to stop producing results. The caller
     /// can decided to drain the stream or drop the stream.
+    /// Implementations must preserve a killed state when `stop_generating()` or `stop()` is
+    /// called after `kill()`.
     fn stop_generating(&self);
 
     /// See [`AsyncEngineContext::stop_generating`].

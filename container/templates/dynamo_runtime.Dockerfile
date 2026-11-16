@@ -9,6 +9,8 @@
 
 FROM dynamo_base AS runtime
 
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
+
 ARG PYTHON_VERSION
 
 # Create dynamo user with group 0 for OpenShift compatibility

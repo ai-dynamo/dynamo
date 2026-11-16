@@ -488,6 +488,35 @@ class TestDiffusionFormatterImage:
         assert "Error" in chunk["choices"][0]["delta"]["content"]
 
 
+class TestImageOutputFormat:
+    def test_normalizer_returns_a_value_the_response_model_accepts(self):
+        """The normalizer casts its result to `ImageOutputFormat`; the cast is
+        honest only while the encoder table, the alias, and the generated
+        `NvImagesResponse.output_format` Literal name the same values."""
+        from typing import Literal, get_args, get_origin
+
+        from dynamo.common.protocols.image_protocol import NvImagesResponse
+        from dynamo.vllm.omni.output_formatter import (
+            _IMAGE_OUTPUT_FORMATS,
+            ImageOutputFormat,
+            _normalize_image_output_options,
+        )
+
+        allowed = set(get_args(ImageOutputFormat))
+        assert set(_IMAGE_OUTPUT_FORMATS) == allowed
+
+        response_annotation = NvImagesResponse.model_fields["output_format"].annotation
+        response_literal = next(
+            arg for arg in get_args(response_annotation) if get_origin(arg) is Literal
+        )
+        assert set(get_args(response_literal)) == allowed
+
+        for value in sorted(allowed):
+            assert _normalize_image_output_options(value, None) == value
+            assert _normalize_image_output_options(value.upper(), None) == value
+        assert _normalize_image_output_options(None, None) == "png"
+
+
 class TestDiffusionFormatterVideo:
     @pytest.mark.asyncio
     async def test_empty_frames_returns_video_error(self):
@@ -1065,6 +1094,42 @@ class TestAudioFormatterFormat:
         response = await formatter.format({}, "req-1", **state_arg)
 
         assert response is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [False, True])
+    async def test_delta_metadata_does_not_fail_valid_audio(self, streaming):
+        formatter = AudioFormatter("test", None, None)
+        state = AudioStreamState() if streaming else AudioAggregateState()
+        context = {
+            "audio_stream_state" if streaming else "audio_aggregate_state": state,
+            "output_format": "pcm",
+        }
+        # DELTA output can retain sr after the engine drains the audio key.
+        assert await formatter.format({"sr": 24000}, "req-1", **context) is None
+        response = await formatter.format(
+            {"audio": np.asarray([0.1, 0.2, 0.3], dtype=np.float32), "sr": 24000},
+            "req-1",
+            **context,
+        )
+        assert await formatter.format({"sr": 24000}, "req-1", **context) is None
+        if not streaming:
+            response = await formatter.finish_aggregate(
+                "req-1", state, output_format="pcm"
+            )
+        assert response["status"] == "completed"
+        assert len(base64.b64decode(response["data"][0]["b64_json"])) == 3 * 2
+
+    @pytest.mark.asyncio
+    async def test_delta_metadata_alone_cannot_complete_audio(self):
+        formatter = AudioFormatter("test", None, None)
+        state = AudioAggregateState()
+        assert (
+            await formatter.format({"sr": 24000}, "req-1", audio_aggregate_state=state)
+            is None
+        )
+        response = await formatter.finish_aggregate("req-1", state)
+        assert response["status"] == "failed"
+        assert "No audio generated" in response["error"]
 
     @pytest.mark.asyncio
     async def test_streaming_cumulative_chunks_emit_only_new_audio(self):

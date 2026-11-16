@@ -16,8 +16,11 @@ import logging
 import math
 from copy import deepcopy
 from dataclasses import asdict, dataclass
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Optional
 
+from aisimulate_core.datasets import prepare_execution_profile
 from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
 from dynamo.common.forward_pass_metrics import (
@@ -26,7 +29,7 @@ from dynamo.common.forward_pass_metrics import (
     QueuedRequestMetrics,
     ScheduledRequestMetrics,
 )
-from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.config.planner_config import AISPerfModelSpec, PlannerConfig
 from dynamo.planner.core.perf_model.base import _clamp_kv_hit_rate
 from dynamo.planner.core.perf_model.engine_query import (
     AISCoreEnginePerfModel,
@@ -102,6 +105,10 @@ class PlannerEnginePerfModel:
         self._capabilities = capabilities
         self._engine_model: Optional[AISCoreEnginePerfModel] = None
         self._engine_model_key: Optional[tuple[Any, ...]] = None
+        # Keep prepared inputs alive across limit changes and model rebuilds.
+        self._profile_directory: Optional[TemporaryDirectory] = None
+        self._profile_source: Optional[tuple[str, str]] = None
+        self._profile_config: Optional[dict[str, Any]] = None
         # Retained history is canonical; pending marks that the active engine
         # model has not successfully consumed the complete history.
         self._pending_iterations: list[list[ForwardPassMetrics]] = []
@@ -237,6 +244,37 @@ class PlannerEnginePerfModel:
             "max_kv_tokens": max_kv_tokens,
         }
 
+    def _configured_role(self) -> dict[str, Any]:
+        spec = self._config.ais_perf_model
+        if spec is None:
+            raise ValueError("AIS role configuration is absent")
+        source = spec.dataset_profiles.get(self._worker_type)
+        if source is None:
+            return spec.roles[self._worker_type]
+        key = (source.root, source.manifest)
+        if key != self._profile_source:
+            directory = TemporaryDirectory(prefix="dynamo-ais-profile-")
+            try:
+                prepared = prepare_execution_profile(
+                    Path(source.root),
+                    source.manifest,
+                    Path(directory.name) / "prepared",
+                )
+                normalized = AISPerfModelSpec(
+                    roles={self._worker_type: prepared}
+                ).roles[self._worker_type]
+            except BaseException:
+                directory.cleanup()
+                raise
+            if self._profile_directory is not None:
+                self._profile_directory.cleanup()
+            self._profile_directory = directory
+            self._profile_source = key
+            self._profile_config = normalized
+        if self._profile_config is None:
+            raise RuntimeError("AIS dataset profile was not prepared")
+        return self._profile_config
+
     def _build_ais_config(self) -> dict[str, Any]:
         spec = self._config.ais_perf_model
         if spec is None:
@@ -253,7 +291,7 @@ class PlannerEnginePerfModel:
                 )
             )
         else:
-            config = deepcopy(spec.roles[self._worker_type])
+            config = deepcopy(self._configured_role())
         if self._capabilities is not None:
             block_size = self._capabilities.kv_cache_block_size
             if block_size is not None:
@@ -314,7 +352,7 @@ class PlannerEnginePerfModel:
         spec = self._config.ais_perf_model
         if spec is None:
             return None
-        return spec.roles[self._worker_type]["attention_dp"]
+        return self._configured_role()["attention_dp"]
 
     # ------------------------------------------------------------------
     # Observation and bootstrap
@@ -375,7 +413,7 @@ class PlannerEnginePerfModel:
         spec = self._config.ais_perf_model
         if spec is None:
             return default
-        controls = spec.roles[self._worker_type].get("estimator_config", {})
+        controls = self._configured_role().get("estimator_config", {})
         return max(
             controls.get(estimator, {})
             .get("sampling", {})

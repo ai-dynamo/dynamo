@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from dynamo.common.http.url_validator import UrlValidationError
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     build_disagg_mm_kwargs,
@@ -78,6 +79,18 @@ def test_extract_media_urls_rejects_malformed_payloads():
 
     with pytest.raises(ValueError, match="must be a list"):
         extract_media_urls({"image_url": ""}, "image_url")
+
+
+def test_extract_media_urls_rejects_remote_urls_when_disabled(monkeypatch):
+    monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", "0")
+
+    with pytest.raises(UrlValidationError, match="DYN_MM_ALLOW_REMOTE_URLS"):
+        extract_media_urls(
+            {"audio_url": [{"Url": "https://example.com/a.wav"}]}, "audio_url"
+        )
+
+    inline = ["data:audio/wav;base64,AAAA", "file:///tmp/a.wav"]
+    assert extract_media_urls({"audio_url": inline}, "audio_url") == inline
 
 
 def test_extract_mm_hashes_preserves_legacy_image_protocol():
