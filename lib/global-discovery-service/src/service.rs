@@ -28,29 +28,37 @@
 //!   the pool list is complete: `GET /pools` says that in `complete`.
 //!
 //! The service reads and writes only through the [`crate::pool_discovery`]
-//! traits. It runs on `dynamo-http-server`, so it gets TLS the way the Dynamo
-//! frontend does. mTLS waits until `dynamo-global-discovery-client` can
-//! present a client certificate.
+//! traits. It serves axum routes over Hyper. TLS uses the runtime's certificate
+//! loading, which picks up a rotated certificate without a restart. mTLS
+//! waits until `dynamo-global-discovery-client` can present a client
+//! certificate.
 
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use crate::pool_discovery::{
     Completeness, DiscoveryError, PoolDirectory, PoolRegistrar, PoolRegistration, ReplicaDirectory,
     RouterRegistrar,
 };
+use crate::tls_listener::TlsListener;
+use anyhow::Context as _;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::serve::Listener;
 use axum::{Json, Router};
 use dynamo_global_common::{PoolsResponse, RouterRegistration, RoutersResponse};
-use dynamo_http_server::lifecycle::ServiceObserver;
-use dynamo_http_server::server::{HttpServer, HttpServerConfig};
+use dynamo_runtime::tls_utils::server_tls_config;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder;
+use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 /// The backend behind the API: where the pool and router lists come from,
@@ -104,31 +112,90 @@ pub fn routes(backend: PoolDiscoveryBackend) -> Router {
         }))
 }
 
+/// How long requests in flight have to finish once shutdown starts.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
 /// Serves until `shutdown` is cancelled. Then it stops taking connections and
-/// gives requests in flight up to `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`
-/// (5 s by default) to finish.
+/// gives requests in flight up to 5 s to finish, then aborts those still open.
+/// Dropping this future also aborts its connection tasks.
+///
+/// A certificate or key that cannot be loaded fails here, before serving.
 pub async fn serve(
     listener: TcpListener,
     backend: PoolDiscoveryBackend,
     tls: Option<Tls>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
-    let address = listener.local_addr()?;
-    let config = HttpServerConfig {
-        host: address.ip().to_string(),
-        port: address.port(),
-        enable_tls: tls.is_some(),
-        tls_cert_path: tls.as_ref().map(|tls| tls.cert.clone()),
-        tls_key_path: tls.map(|tls| tls.key),
-        tls_client_ca_cert_path: None,
-    };
-    // The observer counts inference requests, and this service has none, so
-    // shutdown goes straight to letting open requests finish.
-    let observer = Arc::new(ServiceObserver::default());
-    HttpServer::prepare(routes(backend), config, Some(listener))
-        .await?
-        .serve(observer, CancellationToken::new(), shutdown)
-        .await
+    let app = routes(backend);
+    match tls {
+        None => serve_on(listener, app, shutdown, SHUTDOWN_GRACE).await,
+        Some(tls) => {
+            let config = server_tls_config(&tls.cert, &tls.key, None)
+                .context("load the TLS certificate and key")?;
+            let listener = TlsListener::new(listener, config)?;
+            serve_on(listener, app, shutdown, SHUTDOWN_GRACE).await
+        }
+    }
+}
+
+async fn serve_on<L>(
+    mut listener: L,
+    app: Router,
+    shutdown: CancellationToken,
+    grace: Duration,
+) -> anyhow::Result<()>
+where
+    L: Listener,
+{
+    let app = app.with_state(());
+    let graceful = CancellationToken::new();
+    // Own the tasks so dropping this future also closes their connections.
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "HTTP connection task failed");
+                }
+            }
+            (io, _) = listener.accept() => {
+                let service = TowerToHyperService::new(app.clone());
+                let shutdown = graceful.child_token();
+                connections.spawn(async move {
+                    let builder = Builder::new(TokioExecutor::new());
+                    let connection = builder.serve_connection_with_upgrades(TokioIo::new(io), service);
+                    tokio::pin!(connection);
+                    let result = tokio::select! {
+                        result = &mut connection => result,
+                        () = shutdown.cancelled() => {
+                            connection.as_mut().graceful_shutdown();
+                            connection.await
+                        }
+                    };
+                    if let Err(error) = result {
+                        tracing::debug!(%error, "HTTP connection failed");
+                    }
+                });
+            }
+        }
+    }
+    drop(listener);
+    graceful.cancel();
+    if tokio::time::timeout(grace, async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        tracing::warn!(
+            grace_ms = grace.as_millis(),
+            "requests were still open when the shutdown grace period ended"
+        );
+        connections.shutdown().await;
+    }
+    Ok(())
 }
 
 /// The body is checked after the registrar, so that a backend without one
@@ -595,5 +662,269 @@ mod tests {
         shutdown.cancel();
         server.await.unwrap().unwrap();
         assert!(reqwest::get(&healthz).await.is_err());
+    }
+
+    /// A directory whose answer never comes.
+    struct Hangs {
+        entered: CancellationToken,
+        dropped: CancellationToken,
+    }
+
+    #[async_trait]
+    impl<T: Send + 'static, K: Send + Sync + 'static> Directory<T, K> for Hangs {
+        async fn list(&self) -> Result<Snapshot<T>, DiscoveryError> {
+            let _on_drop = self.dropped.clone().drop_guard();
+            self.entered.cancel();
+            std::future::pending().await
+        }
+
+        async fn list_and_watch(
+            &self,
+            _cancel_token: Option<CancellationToken>,
+        ) -> Result<WatchStream<T, K>, DiscoveryError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_does_not_wait_past_the_grace_period() {
+        for tls in [false, true] {
+            assert_hung_request_closed(tls, false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_serve_closes_connections() {
+        for tls in [false, true] {
+            assert_hung_request_closed(tls, true).await;
+        }
+    }
+
+    async fn assert_hung_request_closed(tls: bool, abort: bool) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cert = tls.then(test_cert);
+        let client = cert
+            .as_ref()
+            .map_or_else(reqwest::Client::new, |cert| https_client(&cert.pem));
+        let scheme = if tls { "https" } else { "http" };
+        let pools = format!("{scheme}://localhost:{port}/pools");
+        let entered = CancellationToken::new();
+        let dropped = CancellationToken::new();
+        let hangs = Arc::new(Hangs {
+            entered: entered.clone(),
+            dropped: dropped.clone(),
+        });
+        let app = routes(PoolDiscoveryBackend {
+            pools: hangs.clone(),
+            routers: hangs,
+            registrar: None,
+            router_registrar: None,
+        });
+        let shutdown = CancellationToken::new();
+        let cancel = shutdown.clone();
+        let grace = Duration::from_millis(200);
+        let config = cert
+            .as_ref()
+            .map(|cert| server_tls_config(&cert.tls.cert, &cert.tls.key, None).unwrap());
+        let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            match config {
+                Some(config) => {
+                    serve_on(
+                        TlsListener::new(listener, config).unwrap(),
+                        app,
+                        cancel,
+                        grace,
+                    )
+                    .await
+                }
+                None => serve_on(listener, app, cancel, grace).await,
+            }
+        }));
+        let stuck = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            client.get(pools).send().await
+        }));
+        tokio::time::timeout(Duration::from_secs(5), entered.cancelled())
+            .await
+            .expect("request reaches the handler");
+
+        if abort {
+            server.abort();
+        } else {
+            shutdown.cancel();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("serve stops");
+        if abort {
+            assert!(result.unwrap_err().is_cancelled());
+        } else {
+            result.unwrap().unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(1), dropped.cancelled())
+            .await
+            .expect("shutdown drops the pending handler");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), stuck)
+                .await
+                .expect("shutdown closes the client connection")
+                .unwrap()
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_allows_inflight_requests_to_finish() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let entered = CancellationToken::new();
+        let release = CancellationToken::new();
+        let app = Router::new().route(
+            "/",
+            get({
+                let entered = entered.clone();
+                let release = release.clone();
+                move || {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        entered.cancel();
+                        release.cancelled().await;
+                        "finished"
+                    }
+                }
+            }),
+        );
+        let shutdown = CancellationToken::new();
+        let mut server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(serve_on(
+            listener,
+            app,
+            shutdown.clone(),
+            Duration::from_secs(5),
+        )));
+        let request = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(reqwest::get(url)));
+        tokio::time::timeout(Duration::from_secs(5), entered.cancelled())
+            .await
+            .unwrap();
+        shutdown.cancel();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut server)
+                .await
+                .is_err()
+        );
+        release.cancel();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let response = request.await.unwrap().unwrap();
+            assert_eq!(response.text().await.unwrap(), "finished");
+            server.await.unwrap().unwrap();
+        })
+        .await
+        .expect("request finishes within the grace period");
+    }
+
+    /// A self-signed certificate for `localhost`, written where `serve` can
+    /// read it.
+    struct TestCert {
+        _dir: tempfile::TempDir,
+        tls: Tls,
+        pem: String,
+    }
+
+    fn test_cert() -> TestCert {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let tls = Tls {
+            cert: dir.path().join("tls.crt"),
+            key: dir.path().join("tls.key"),
+        };
+        let pem = cert.cert.pem();
+        std::fs::write(&tls.cert, &pem).unwrap();
+        std::fs::write(&tls.key, cert.key_pair.serialize_pem()).unwrap();
+        TestCert {
+            _dir: dir,
+            tls,
+            pem,
+        }
+    }
+
+    fn https_client(pem: &str) -> reqwest::Client {
+        reqwest::Client::builder()
+            .add_root_certificate(reqwest::Certificate::from_pem(pem.as_bytes()).unwrap())
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn serves_https_and_refuses_plain_http() {
+        let cert = test_cert();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let shutdown = CancellationToken::new();
+        let server = tokio::spawn(serve(
+            listener,
+            registrations_backend(),
+            Some(cert.tls.clone()),
+            shutdown.clone(),
+        ));
+
+        let response = https_client(&cert.pem)
+            .get(format!("https://localhost:{port}/healthz"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let plain = reqwest::get(format!("http://localhost:{port}/healthz")).await;
+        assert!(plain.is_err(), "{plain:?}");
+
+        shutdown.cancel();
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stalled_handshake_does_not_block_other_clients() {
+        let cert = test_cert();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = CancellationToken::new();
+        let server = tokio::spawn(serve(
+            listener,
+            registrations_backend(),
+            Some(cert.tls.clone()),
+            shutdown.clone(),
+        ));
+
+        // Connects and never starts the handshake.
+        let _stalled = tokio::net::TcpStream::connect(address).await.unwrap();
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            https_client(&cert.pem)
+                .get(format!("https://localhost:{}/healthz", address.port()))
+                .send(),
+        )
+        .await
+        .expect("another client is served while one handshake stalls")
+        .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        shutdown.cancel();
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_missing_certificate_fails_before_serving() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tls = Tls {
+            cert: "/nonexistent/tls.crt".into(),
+            key: "/nonexistent/tls.key".into(),
+        };
+        let error = serve(
+            listener,
+            registrations_backend(),
+            Some(tls),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("TLS"), "{error:#}");
     }
 }

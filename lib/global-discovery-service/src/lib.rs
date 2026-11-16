@@ -15,6 +15,7 @@
 pub mod backends;
 pub mod pool_discovery;
 pub mod service;
+mod tls_listener;
 
 pub use backends::clock::{Clock, ManualClock, SystemClock};
 pub use backends::dynamodb::{ConnectError, DynamoDbConfig, DynamoDbPoolStore};
