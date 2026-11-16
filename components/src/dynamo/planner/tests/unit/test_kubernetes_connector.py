@@ -86,6 +86,7 @@ def mock_kube_api():
     mock_api.pending_startup_replicas = Mock(return_value={})
     mock_api.is_spec_generation_observed = Mock(return_value=False)
     mock_api.non_planner_components_stable = Mock(return_value=(True, []))
+    mock_api.only_frontend_unready = Mock(return_value=False)
     mock_api.pcsg_pods_within_desired_replicas = Mock(return_value=True)
     # Default: no terminating pods; tests that want to simulate terminating pods
     # override this per-test.

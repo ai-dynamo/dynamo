@@ -46,6 +46,7 @@ type LPXGraphDeploymentSpec struct {
 	// inputRevision hashes only effective LPX inputs, including its selected
 	// restart token. Unrelated component edits do not create an LPX revision.
 	// +kubebuilder:validation:Pattern="^sha256:[a-f0-9]{64}$"
+	// +required
 	InputRevision string `json:"inputRevision"`
 }
 
@@ -122,9 +123,11 @@ type CheckpointDownloadStatus struct {
 // by users. It owns one LPX PCS and its build/placement resources.
 // It serves only v1alpha1 and has no conversion contract.
 type LPXGraphDeployment struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
-	Spec              LPXGraphDeploymentSpec `json:"spec"`
+	// +required
+	Spec LPXGraphDeploymentSpec `json:"spec"`
 	// +optional
 	Status LPXGraphDeploymentStatus `json:"status,omitempty"`
 }

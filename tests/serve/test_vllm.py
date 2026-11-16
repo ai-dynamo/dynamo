@@ -23,12 +23,14 @@ from tests.serve.multimodal_profiles.vllm import (
 )
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.gpu_args import PYNVVIDEOCODEC_RESERVED_BYTES
 from tests.utils.multimodal import make_multimodal_configs
 from tests.utils.payload_builder import (
     chat_payload,
     chat_payload_default,
     chat_payload_with_logprobs,
     classify_payload,
+    completion_payload,
     completion_payload_default,
     completion_payload_with_logprobs,
     embedding_payload,
@@ -37,10 +39,14 @@ from tests.utils.payload_builder import (
     lora_chat_payload,
     metric_payload_default,
     pooling_payload,
+    responses_payload_with_logprobs,
+    responses_stream_payload_with_logprobs,
     router_cached_tokens_chat_payload,
     router_selection_chat_payload_default,
 )
 from tests.utils.payloads import (
+    ChatPayload,
+    CompletionPayload,
     EmbeddingMultiWorkerDispatchPayload,
     EmbeddingPayload,
     ToolCallingChatPayload,
@@ -90,6 +96,42 @@ for _profile in VLLM_MULTIMODAL_PROFILES:
         make_multimodal_configs(_profile, VLLMConfig, vllm_dir, VLLM_TOPOLOGY_SCRIPTS)
     )
 
+
+@dataclass
+class CompletionLimitPayload(CompletionPayload):
+    expected_tokens: int = 16
+
+    def validate(self, response, content):
+        super().validate(response, content)
+        result = response.json()
+        assert result["choices"][0]["finish_reason"] == "length", result
+        assert result["usage"]["completion_tokens"] == self.expected_tokens, result
+
+
+class ChatContextPayload(ChatPayload):
+    def validate(self, response, content):
+        super().validate(response, content)
+        result = response.json()
+        assert result["choices"][0]["finish_reason"] == "length", result
+        assert result["usage"]["completion_tokens"] > 16, result
+        assert result["usage"]["total_tokens"] == 256, result
+
+
+def completion_default_payload(limit, expected_tokens):
+    payload = completion_payload("Hello", repeat_count=1, temperature=0.0)
+    payload.body.pop("max_tokens")
+    payload.body.update(limit)
+    payload.body["ignore_eos"] = True
+    return CompletionLimitPayload(**vars(payload), expected_tokens=expected_tokens)
+
+
+def chat_context_payload():
+    payload = chat_payload("Write a long story.", temperature=0.0)
+    payload.body.pop("max_tokens")
+    payload.body["ignore_eos"] = True
+    return ChatContextPayload(**vars(payload))
+
+
 # vLLM test configurations
 # NOTE: pytest.mark.gpu_1 tests take ~5.5 minutes total to run sequentially (with models pre-cached)
 # TODO: Now that these tests use dynamic ports and each config has VRAM markers,
@@ -98,6 +140,53 @@ for _profile in VLLM_MULTIMODAL_PROFILES:
 # concurrently without exceeding available VRAM.
 vllm_configs = {
     **_mm_configs,
+    "completion_defaults": VLLMConfig(
+        name="completion_defaults",
+        directory=vllm_dir,
+        script_name="agg.sh",
+        script_args=["--generation-config", "vllm"],
+        env={"MAX_MODEL_LEN": "256"},
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(3.8),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
+            pytest.mark.timeout(360),
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            completion_default_payload({}, 16),
+            completion_default_payload({"max_tokens": None}, 16),
+            completion_default_payload({"max_tokens": 64}, 64),
+            chat_context_payload(),
+        ],
+    ),
+    "completion_configured_default": VLLMConfig(
+        name="completion_configured_default",
+        directory=vllm_dir,
+        script_name="agg.sh",
+        script_args=[
+            "--generation-config",
+            "vllm",
+            "--override-generation-config",
+            '{"max_new_tokens": 32}',
+        ],
+        env={"MAX_MODEL_LEN": "256"},
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(3.8),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
+            pytest.mark.timeout(360),
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            completion_default_payload({}, 32),
+            completion_default_payload({"max_tokens": 64}, 64),
+        ],
+    ),
     "aggregated": VLLMConfig(
         name="aggregated",
         directory=vllm_dir,
@@ -222,6 +311,23 @@ vllm_configs = {
                 max_tokens=30,
                 temperature=0.0,
                 logprobs=5,
+            ),
+            # Responses API scores ride on output_text. Thinking is disabled so the
+            # budget produces visible text, and the budget lets the answer finish,
+            # since the Responses payload requires status "completed".
+            responses_payload_with_logprobs(
+                expected_response=["AI", "knock", "joke"],
+                max_tokens=200,
+                temperature=0.0,
+                top_logprobs=3,
+                extra_body={"chat_template_args": {"enable_thinking": False}},
+            ),
+            responses_stream_payload_with_logprobs(
+                expected_response=["AI", "knock", "joke"],
+                max_tokens=200,
+                temperature=0.0,
+                top_logprobs=3,
+                extra_body={"chat_template_args": {"enable_thinking": False}},
             ),
         ],
     ),
@@ -859,6 +965,24 @@ def test_serve_deployment(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+@pytest.mark.vllm
+@pytest.mark.unit
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
+def test_pynvvideocodec_reservation_matches_vllm():
+    """The multimodal profiles' decoder reservation must match vLLM's."""
+    from vllm.multimodal.video_decoders.base import PYNVVIDEOCODEC_DEFAULT_HW_DECODERS
+    from vllm.multimodal.video_decoders.pynvvideocodec import (
+        PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
+        PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
+    )
+
+    assert PYNVVIDEOCODEC_RESERVED_BYTES == (
+        PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES * PYNVVIDEOCODEC_DEFAULT_HW_DECODERS
+        + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
+    )
 
 
 # LoRA Test Directory

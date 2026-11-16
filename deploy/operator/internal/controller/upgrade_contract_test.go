@@ -82,7 +82,7 @@ func upgradeSafetyError(generationChanged bool, before, after []unstructured.Uns
 					return fmt.Errorf("DGD rollout intent changed: %s", diff)
 				}
 			}
-		case "Deployment", "LeaderWorkerSet":
+		case "Deployment", "LeaderWorkerSet", "DisaggregatedSet":
 			if err := upgradeComponentWorkloadSafetyError(old, current); err != nil {
 				return err
 			}
@@ -131,7 +131,7 @@ func upgradeComponentWorkloadSafetyError(old, current unstructured.Unstructured)
 }
 
 func isUpgradeWorkload(kind string) bool {
-	return kind == upgradePodCliqueSetKind || kind == "Deployment" || kind == "LeaderWorkerSet"
+	return kind == upgradePodCliqueSetKind || kind == "Deployment" || kind == "LeaderWorkerSet" || kind == "DisaggregatedSet"
 }
 
 func upgradeWorkerTemplates(object unstructured.Unstructured) (map[string]any, error) {
@@ -221,7 +221,7 @@ func TestUpgradeScenarioNamespaces(t *testing.T) {
 // Hash expectations come from the frozen golden spec, never from candidate output.
 func upgradeLatestVariables(t *testing.T, path, version string) golden.Variables {
 	t.Helper()
-	variables := golden.Variables{"operator-version": version, "worker-hash": "pending", "pcs-spec-hash": "pending"}
+	variables := golden.Variables{"operator-version": version, "worker-hash": "pending", "pcs-spec-hash": "pending", "ds-revision": "pending"}
 	raw, err := golden.ReadManifests(path)
 	require.NoError(t, err)
 	for _, object := range raw {
@@ -251,12 +251,17 @@ func upgradeLatestVariables(t *testing.T, path, version string) golden.Variables
 		upgradeWorkerStringVariables(object.Object, variables["worker-hash"], variables)
 	}
 
-	// Rebind the golden PCS template before deriving its exact spec digest.
+	// Derive provider revisions from reviewed templates after rebinding worker identity.
 	objects, err = golden.ReadManifestsWithVariables(path, variables)
 	require.NoError(t, err)
 	for _, object := range objects {
 		if object.GetKind() == upgradePodCliqueSetKind {
 			variables["pcs-spec-hash"], err = common.GetSpecHash(&object)
+			require.NoError(t, err)
+		}
+		if object.GetKind() == "DisaggregatedSet" {
+			spec := unstructured.Unstructured{Object: map[string]any{"spec": object.Object["spec"]}}
+			variables["ds-revision"], err = disaggregatedSetTargetRevision(&spec)
 			require.NoError(t, err)
 		}
 	}

@@ -17,6 +17,47 @@ use rstest::rstest;
 
 use std::path::PathBuf;
 
+#[test]
+fn inkling_model_type_selects_native_formatter_with_compact_tools() {
+    let model_dir = tempfile::tempdir().unwrap();
+    let source = std::path::Path::new("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+    for filename in [
+        "config.json",
+        "generation_config.json",
+        "tokenizer_config.json",
+        "tokenizer.json",
+    ] {
+        std::fs::copy(source.join(filename), model_dir.path().join(filename)).unwrap();
+    }
+    let config_path = model_dir.path().join("config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    config["model_type"] = serde_json::json!("inkling_mm_model");
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+
+    let mdc = ModelDeploymentCard::load_from_disk(model_dir.path(), None).unwrap();
+    let PromptFormatter::OAI(formatter) = prompt_formatter_from_mdc(&mdc).unwrap();
+    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "model": "customer-model-alias",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{"type": "function", "function": {
+            "name": "get_weather",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+        }}]
+    }))
+    .unwrap();
+
+    let rendered = formatter.render(&request).unwrap();
+    let (declaration, _) = rendered
+        .strip_prefix("<|message_system|>tool_declare<|content_xml|>")
+        .expect("Inkling must use its native formatter despite the fixture's Llama template")
+        .split_once("<|end_message|>")
+        .unwrap();
+    let tools: serde_json::Value = serde_json::from_str(declaration).unwrap();
+    assert_eq!(tools[0]["name"], "get_weather");
+    assert_eq!(declaration, serde_json::to_string(&tools).unwrap());
+}
+
 /// Gets the HF_TOKEN environment variable if it exists and is not empty.
 ///
 /// These tests require a Hugging Face token to be set in the environment variable `HF_TOKEN`.
@@ -257,6 +298,7 @@ impl Request {
         let inner = inner.build().unwrap();
 
         NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -265,6 +307,7 @@ impl Request {
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             thinking_token_budget: None,
+            preserve_thinking: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -946,6 +989,7 @@ mod context_length_validation {
         }
         let inner = builder.build().unwrap();
         NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -954,6 +998,7 @@ mod context_length_validation {
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             thinking_token_budget: None,
+            preserve_thinking: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -1326,6 +1371,7 @@ mod embedding_without_chat_template {
             .build()
             .unwrap();
         NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -1335,6 +1381,7 @@ mod embedding_without_chat_template {
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
             thinking_token_budget: None,
+            preserve_thinking: None,
         }
     }
 

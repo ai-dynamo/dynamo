@@ -29,6 +29,7 @@ from dynamo.common.utils.prometheus import (
     register_embedding_cache_metrics,
     register_image_loader_metrics,
 )
+from dynamo.frontend.thinking import apply_default_thinking_mode_to_template_kwargs
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, Endpoint
 
@@ -47,6 +48,7 @@ from .health_check import (
     VllmEmbeddingHealthCheckPayload,
     VllmHealthCheckPayload,
     VllmPrefillHealthCheckPayload,
+    VllmTranscriptionHealthCheckPayload,
 )
 from .instrumented_scheduler import (
     ENV_FPM_BENCHMARK_OUTPUT_PATH,
@@ -59,6 +61,7 @@ from .pooling_handlers import ClassifyWorkerHandler
 from .publisher import StatLoggerFactory
 from .realtime import RealtimeHandler, RealtimeTextHandler, RealtimeTranscriptionHandler
 from .state_agent import StateAgentLifecycle, state_agent_settings
+from .transcription_handler import TranscriptionWorkerHandler
 
 
 def _register_request_cache_metrics(
@@ -223,6 +226,16 @@ def _validate_benchmark_rank_payload(data: dict, path: Path) -> str:
     status = data.get("status", "complete" if data.get("valid") is True else "failed")
 
     def invalid(reason: str) -> RuntimeError:
+        skipped_entries = data.get("skipped_points")
+        if isinstance(skipped_entries, list) and any(
+            isinstance(entry, dict)
+            and entry.get("reason") == "fake_prefix_cache_validation_failed"
+            for entry in skipped_entries
+        ):
+            reason += (
+                " (synthetic prefix blocks never hit the prefix cache on this "
+                "KV-cache layout; set DYN_BENCH_PREFILL_REAL_SEED=on)"
+            )
         return RuntimeError(
             f"Self-benchmark produced incomplete results at {path}: {reason}; "
             f"coverage={data.get('coverage')} "
@@ -1736,7 +1749,7 @@ class _WorkerLifecycle:
 
 
 class WorkerFactory:
-    """Factory for creating and initializing multimodal vLLM workers."""
+    """Factory for creating and initializing vLLM workers."""
 
     def __init__(
         self,
@@ -1799,10 +1812,20 @@ class WorkerFactory:
         shutdown_endpoints: list,
         snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
-        """Create the appropriate multimodal worker based on config flags."""
+        """Create the appropriate worker based on config flags."""
 
         if config.realtime:
             await self._create_realtime_worker(
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                snapshot_engine=snapshot_engine,
+            )
+            return
+
+        if config.transcription_worker:
+            await self._create_transcription_worker(
                 runtime,
                 config,
                 shutdown_event,
@@ -1862,7 +1885,6 @@ class WorkerFactory:
         snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """Initialize an aggregated vLLM realtime worker."""
-        del shutdown_event  # Connection cancellation is carried by Dynamo Context.
 
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
@@ -1875,7 +1897,7 @@ class WorkerFactory:
             (
                 engine_client,
                 vllm_config,
-                _default_sampling_params,
+                default_sampling_params,
                 prometheus_temp_dir,
                 _component_gauges,
             ) = engine_setup
@@ -1890,7 +1912,7 @@ class WorkerFactory:
             (
                 engine_client,
                 vllm_config,
-                _default_sampling_params,
+                default_sampling_params,
                 prometheus_temp_dir,
                 _component_gauges,
             ) = self.setup_vllm_engine(
@@ -1916,6 +1938,11 @@ class WorkerFactory:
                 model_name=model_name,
                 model_path=config.model_source_path,
                 chat_template_path=config.custom_jinja_template,
+                tool_parser=config.dyn_tool_call_parser,
+                reasoning_parser=config.dyn_reasoning_parser,
+                default_chat_template_kwargs=apply_default_thinking_mode_to_template_kwargs(
+                    {}, config.dyn_default_thinking_mode
+                ),
             )
         if "realtime" in supported_tasks:
             handlers["transcription"] = RealtimeTranscriptionHandler.from_engine(
@@ -1946,22 +1973,100 @@ class WorkerFactory:
             (prometheus_names.labels.MODEL, model_name),
             (prometheus_names.labels.MODEL_NAME, model_name),
         ]
+        serve_tasks = []
+        if config.endpoint_types != "none":
+            if "realtime" not in handlers:
+                raise ValueError(
+                    f"Serving {config.endpoint_types} endpoints with realtime "
+                    f"requires a text generation model, not {model_name!r}"
+                )
+            serve_tasks.append(
+                await self._realtime_chat_endpoint(
+                    runtime,
+                    config,
+                    engine_client,
+                    vllm_config,
+                    default_sampling_params,
+                    shutdown_event,
+                    shutdown_endpoints,
+                    metrics_labels,
+                )
+            )
         logger.info(
             "Starting realtime worker endpoint for model: %s",
             model_name,
         )
-        try:
-            await generate_endpoint.serve_bidirectional_endpoint(
+        serve_tasks.append(
+            generate_endpoint.serve_bidirectional_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
             )
+        )
+        try:
+            await asyncio.gather(*serve_tasks)
         except Exception as exc:
             logger.error("Realtime worker failed: %s", exc)
             raise
         finally:
             if prometheus_temp_dir is not None:
                 prometheus_temp_dir.cleanup()
+
+    async def _realtime_chat_endpoint(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        engine_client: Any,
+        vllm_config: Any,
+        default_sampling_params: Any,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,
+        metrics_labels: list,
+    ) -> Awaitable[None]:
+        """Register the realtime engine's OpenAI endpoints and return their serve task."""
+        chat_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}_chat"
+        )
+        shutdown_endpoints.append(chat_endpoint)
+        model_config = getattr(vllm_config, "model_config", None)
+        chat_handler = DecodeWorkerHandler(
+            runtime,
+            config,
+            engine_client,
+            default_sampling_params,
+            getattr(model_config, "max_model_len", None),
+            model_config=model_config,
+            enable_multimodal=False,
+            generate_endpoint=chat_endpoint,
+            use_vllm_tokenizer=config.use_vllm_tokenizer,
+            shutdown_event=shutdown_event,
+            enable_frontend_decoding=config.frontend_decoding,
+        )
+        chat_handler._first_token_source = await chat_endpoint.first_token_source(
+            WorkerType.Aggregated
+        )
+        await self.register_vllm_model(
+            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens,
+            parse_endpoint_types(config.endpoint_types),
+            chat_endpoint,
+            config,
+            engine_client,
+            vllm_config,
+            worker_type=WorkerType.Aggregated,
+            needs=[],
+        )
+        logger.info(
+            "Starting realtime chat endpoint with endpoint types: %s",
+            config.endpoint_types,
+        )
+        return chat_endpoint.serve_endpoint(
+            chat_handler.generate,  # type: ignore
+            graceful_shutdown=True,
+            metrics_labels=metrics_labels,
+            health_check_payload=VllmHealthCheckPayload(
+                engine_client, use_text_input=config.use_vllm_tokenizer
+            ).to_dict(),
+        )
 
     async def _create_multimodal_encode_worker(
         self,
@@ -2021,6 +2126,99 @@ class WorkerFactory:
             raise
         finally:
             handler.cleanup()
+
+    async def _create_transcription_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,
+        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
+    ) -> None:
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        shutdown_endpoints[:] = [generate_endpoint]
+
+        fpm_worker_id = str(generate_endpoint.connection_id())
+        if snapshot_engine is not None:
+            # A restored snapshot carries the engine together with the stat
+            # logger factory it was built with; bind that factory and retarget
+            # the FPM worker id the same way the realtime worker does.
+            engine_setup, stat_logger_factory = snapshot_engine
+            (
+                engine_client,
+                vllm_config,
+                _default_sampling_params,
+                prometheus_temp_dir,
+                _component_gauges,
+            ) = engine_setup
+            os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
+            stat_logger_factory.bind_endpoint(generate_endpoint)
+            await _sync_fpm_worker_id_or_shutdown(
+                engine_client, vllm_config, fpm_worker_id
+            )
+        else:
+            # Publish engine metrics like the realtime worker: without a stat
+            # logger factory the worker would report none.
+            stat_logger_factory = StatLoggerFactory(endpoint=generate_endpoint)
+            (
+                engine_client,
+                vllm_config,
+                _default_sampling_params,
+                prometheus_temp_dir,
+                _component_gauges,
+            ) = self.setup_vllm_engine(
+                config,
+                stat_logger_factory,
+                fpm_worker_id=fpm_worker_id,
+            )
+        _, dp_size = get_dp_range_for_worker(vllm_config)
+        stat_logger_factory.set_num_gpu_blocks_all(
+            per_rank_kv_blocks(vllm_config.cache_config.num_gpu_blocks, dp_size) or 0
+        )
+        stat_logger_factory.init_publish()
+        handler = TranscriptionWorkerHandler(
+            runtime=runtime,
+            engine=engine_client,
+            config=config,
+            shutdown_event=shutdown_event,
+        )
+        self.setup_metrics_collection(config, generate_endpoint, logger)
+        model_name = config.served_model_name or config.model
+        health_payload = VllmTranscriptionHealthCheckPayload(model_name).to_dict()
+        metric_labels = [
+            (prometheus_names.labels.MODEL, model_name),
+            (prometheus_names.labels.MODEL_NAME, model_name),
+        ]
+
+        register_model_taint_route(runtime, generate_endpoint)
+        logger.info("Starting to serve the transcription worker endpoint...")
+        try:
+            await asyncio.gather(
+                generate_endpoint.serve_endpoint(
+                    handler.generate,
+                    metrics_labels=metric_labels,
+                    health_check_payload=health_payload,
+                ),
+                self.register_vllm_model(
+                    ModelInput.Text,
+                    ModelType.Transcriptions,
+                    generate_endpoint,
+                    config,
+                    engine_client,
+                    vllm_config,
+                    worker_type=WorkerType.Aggregated,
+                    needs=[],
+                ),
+            )
+        except Exception:
+            logger.exception("Failed to serve transcription worker endpoint")
+            raise
+        finally:
+            handler.cleanup()
+            if prometheus_temp_dir is not None:
+                prometheus_temp_dir.cleanup()
 
     async def _create_embedding_worker(
         self,

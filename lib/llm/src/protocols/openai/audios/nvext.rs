@@ -6,6 +6,7 @@ use utoipa::ToSchema;
 
 /// NVIDIA extensions to the Audio Speech API
 #[derive(ToSchema, Serialize, Deserialize, Default, Debug, Clone)]
+#[schema(as = AudioNvExt)]
 pub struct NvExt {
     /// Annotations for SSE stream events
     #[serde(default, skip_serializing_if = "Option::is_none")]
