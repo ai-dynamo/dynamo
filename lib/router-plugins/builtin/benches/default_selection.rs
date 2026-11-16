@@ -43,6 +43,69 @@ fn allocations(mut select: impl FnMut()) -> usize {
     ALLOCATIONS.load(Ordering::Relaxed)
 }
 
+fn bench_manual_weighted(c: &mut Criterion) {
+    let mut registry = dynamo_router_policies::default_registry();
+    dynamo_router_policies::register(&mut registry).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        file.path(),
+        "worker_selection:\n  aggregated: dynamo-manual-weighted\n",
+    )
+    .unwrap();
+    let config = KvRouterConfig {
+        router_policy_config: Some(file.path().display().to_string()),
+        ..Default::default()
+    };
+    let factory = registry.resolve(&config).unwrap().unwrap();
+    let mut group = c.benchmark_group("manual_weighted");
+    group
+        .warm_up_time(Duration::from_millis(200))
+        .measurement_time(Duration::from_millis(500))
+        .sample_size(30);
+    for count in [8, 64, 256, 1024, 4096] {
+        let (workers, request) = support::fixture(count, 2048);
+        let mut policy = factory(
+            &SelectionConfig::from(&config),
+            WorkerType::Aggregated,
+            RoutingPartitionRef::new("model", "default"),
+        );
+        let members: Vec<_> = workers.keys().copied().collect();
+        let initial = policy.control_worker_weights(&members, None).unwrap();
+        policy
+            .control_worker_weights(
+                &members,
+                Some(WorkerWeightUpdate::new(
+                    initial.revision(),
+                    members
+                        .iter()
+                        .map(|&id| (id, Some(if id % 2 == 0 { 0.2 } else { 1.0 })))
+                        .collect(),
+                )),
+            )
+            .unwrap();
+        let allocated = allocations(|| {
+            black_box(
+                policy
+                    .select_worker(support::selection_input(&workers, &request, 16))
+                    .unwrap(),
+            );
+        });
+        eprintln!(
+            "manual_weighted workers={count}: {allocated} allocations per 100 warm selections"
+        );
+        group.bench_function(BenchmarkId::new("plugin", count), |b| {
+            b.iter(|| {
+                black_box(
+                    policy
+                        .select_worker(support::selection_input(&workers, &request, 16))
+                        .unwrap(),
+                )
+            })
+        });
+    }
+    group.finish();
+}
+
 fn bench(c: &mut Criterion) {
     let decay: f64 = std::env::var("DYN_BENCH_OVERLAP_DECAY")
         .unwrap_or_else(|_| "0".into())
@@ -403,5 +466,12 @@ fn kv_transfer(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench, stacked, shared_cache, kv_transfer);
+criterion_group!(
+    benches,
+    bench,
+    bench_manual_weighted,
+    stacked,
+    shared_cache,
+    kv_transfer
+);
 criterion_main!(benches);

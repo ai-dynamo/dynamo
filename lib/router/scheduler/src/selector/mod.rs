@@ -66,6 +66,14 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
         Err(RuntimePolicyError::Unsupported)
     }
 
+    fn control_worker_weights(
+        &mut self,
+        _members: &[WorkerId],
+        _update: Option<dynamo_worker_selection::WorkerWeightUpdate>,
+    ) -> Result<dynamo_worker_selection::WorkerWeightConfig, RuntimePolicyError> {
+        Err(RuntimePolicyError::Unsupported)
+    }
+
     /// Optional worker data required by this selector.
     fn required_worker_inputs(&self) -> WorkerInputs;
 
@@ -773,6 +781,14 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
         update: RuntimePolicyUpdate,
     ) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
         self.update_runtime_config(update)
+    }
+
+    fn control_worker_weights(
+        &mut self,
+        members: &[WorkerId],
+        update: Option<dynamo_worker_selection::WorkerWeightUpdate>,
+    ) -> Result<dynamo_worker_selection::WorkerWeightConfig, RuntimePolicyError> {
+        self.control_worker_weights(members, update)
     }
 
     fn uses_exclusive_affinity_target(&self) -> bool {

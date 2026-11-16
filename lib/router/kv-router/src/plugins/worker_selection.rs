@@ -32,7 +32,7 @@ pub use dynamo_worker_selection::{
     WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity,
     WorkerCopyInput, WorkerFilter, WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs,
     WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError,
+    WorkerSelectionPolicyError, WorkerWeightConfig, WorkerWeightUpdate, WorkerWeights,
 };
 #[cfg(any(test, feature = "bench"))]
 pub use dynamo_worker_selection::{DefaultPick, DefaultWorkerPicker};

@@ -5,6 +5,9 @@
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerSelectionPolicyError {
+    /// The policy deliberately excluded all eligible candidates, rather than failing internally.
+    #[error("the policy excluded every eligible worker")]
+    NoEligibleWorkers,
     #[error("worker selection policy failed: {0}")]
     Failed(String),
 

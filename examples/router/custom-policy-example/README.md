@@ -26,6 +26,20 @@ Preferred routing taints are optional candidate metadata. A filter, scorer, or p
 
 Declare `plugins::worker_selection::experimental::resident_blocks::RESIDENT_BLOCKS` together with `WorkerInputs::CACHE`, and import that module's `ResidentBlocks` trait to read `resident_blocks()` from a candidate, or `ResidentBlocksByRow` to read `input.resident_blocks(row)` in a picker. It returns how many blocks the router's indexer holds for that worker rank, including cached blocks no running request uses, as of the last event the indexer applied. Without the declaration, with a remote indexer, or for a rank the indexer has held no blocks for or has removed, it returns `None`; a cleared rank returns `0`. The `experimental` module has no compatibility guarantee.
 
+## Use the shipped weight policy
+
+For manual traffic shares, select `dynamo-manual-weighted` with
+[`manual-weighted.yaml`](../manual-weighted.yaml). It ships with the standard frontend and
+starts every worker at weight 1. The admin API changes individual weights in memory.
+Aggregated, prefill, and decode pools have independent state.
+
+The [picker implementation](../../../lib/router-plugins/builtin/src/manual_weighted.rs)
+shows `WorkerPicker::worker_weights`: it returns actor-owned `WorkerWeights` for membership
+reconciliation and control updates, then reads typed weights during selection. It performs no
+configuration I/O or configuration locking in `pick`. The
+[API contract](../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#per-worker-traffic-weights)
+describes revisions, zero weights, and the process-local scope.
+
 ## Pick a Starting Point
 
 | Crate | Use it for |

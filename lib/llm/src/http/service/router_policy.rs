@@ -8,7 +8,7 @@ use std::{sync::Arc, time::Duration};
 use axum::{
     Json, Router,
     extract::{
-        DefaultBodyLimit, Query, State,
+        DefaultBodyLimit, Path, Query, State,
         rejection::{JsonRejection, QueryRejection},
     },
     http::{Method, StatusCode},
@@ -16,7 +16,8 @@ use axum::{
     routing::get,
 };
 use dynamo_kv_router::plugins::worker_selection::{
-    RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
+    RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate, WorkerWeightConfig,
+    WorkerWeightUpdate,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -79,6 +80,8 @@ pub(crate) fn router_policy_router(manager: Arc<ModelManager>) -> (Vec<RouteDoc>
     let (mut docs, thresholds) =
         super::busy_threshold::router(manager.clone(), "/router_policy/busy_threshold");
     docs.extend([
+        RouteDoc::new(Method::GET, "/router_policy/{router_id}/worker_weights"),
+        RouteDoc::new(Method::PATCH, "/router_policy/{router_id}/worker_weights"),
         RouteDoc::new(Method::GET, "/router_policy"),
         RouteDoc::new(Method::PATCH, "/router_policy"),
     ]);
@@ -86,10 +89,60 @@ pub(crate) fn router_policy_router(manager: Arc<ModelManager>) -> (Vec<RouteDoc>
         docs,
         Router::new()
             .route("/router_policy", get(list).patch(update))
+            .route(
+                "/router_policy/{router_id}/worker_weights",
+                get(get_weights).patch(update_weights),
+            )
             .layer(DefaultBodyLimit::max(16 * 1024))
             .with_state(manager)
             .merge(thresholds),
     )
+}
+
+#[derive(Serialize)]
+struct WeightResponse {
+    #[serde(flatten)]
+    target: RouterPolicyTarget,
+    #[serde(flatten)]
+    configuration: WorkerWeightConfig,
+}
+
+async fn get_weights(State(manager): State<Arc<ModelManager>>, Path(id): Path<Uuid>) -> Response {
+    control_weights(&manager, id, None).await
+}
+
+async fn update_weights(
+    State(manager): State<Arc<ModelManager>>,
+    Path(id): Path<Uuid>,
+    payload: Result<Json<WorkerWeightUpdate>, JsonRejection>,
+) -> Response {
+    let Json(update) = match payload {
+        Ok(update) => update,
+        Err(rejection) => return error(rejection.status(), rejection.body_text()),
+    };
+    control_weights(&manager, id, Some(update)).await
+}
+
+async fn control_weights(
+    manager: &ModelManager,
+    id: Uuid,
+    update: Option<WorkerWeightUpdate>,
+) -> Response {
+    let Some((target, control)) = manager.router_policies.get(id) else {
+        return error(
+            StatusCode::NOT_FOUND,
+            "router instance not found; query /router_policy on this frontend",
+        );
+    };
+    match tokio::time::timeout(CONTROL_TIMEOUT, control.worker_weights(update)).await {
+        Ok(Ok(configuration)) => Json(WeightResponse {
+            target,
+            configuration,
+        })
+        .into_response(),
+        Ok(Err(error)) => policy_error(error),
+        Err(_) => policy_error(RuntimePolicyError::Unavailable),
+    }
 }
 
 async fn list(
@@ -184,6 +237,13 @@ mod tests {
     use tower::ServiceExt;
 
     async fn fixture(manager: Arc<ModelManager>) -> (Router, SelectionCore, Uuid, Uuid) {
+        fixture_with_factory(manager, default_factory()).await
+    }
+
+    async fn fixture_with_factory(
+        manager: Arc<ModelManager>,
+        factory: dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory,
+    ) -> (Router, SelectionCore, Uuid, Uuid) {
         let core = local_selection_core(
             KvRouterConfig {
                 use_kv_events: false,
@@ -192,7 +252,7 @@ mod tests {
             1,
             Default::default(),
             SelectionCacheConfig::default(),
-            default_factory(),
+            factory,
         )
         .unwrap();
         let mut ids = Vec::new();
@@ -521,6 +581,115 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(reset["configuration"]["revision"], 2);
         assert_eq!(reset["configuration"]["parameters"], startup);
+        core.shutdown();
+    }
+    #[tokio::test]
+    async fn worker_weights_update_live_selection_and_preserve_other_pools() {
+        use dynamo_kv_router::plugins::prelude::*;
+        use dynamo_scheduler::host::SelectRequest;
+        let mut registry = dynamo_router_policies::default_registry();
+        dynamo_router_policies::register(&mut registry).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            "worker_selection:\n  aggregated: dynamo-manual-weighted\n",
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(file.path().display().to_string()),
+            ..Default::default()
+        };
+        let manager = Arc::new(ModelManager::new());
+        let (app, core, first, second) =
+            fixture_with_factory(manager, registry.resolve(&config).unwrap().unwrap()).await;
+        core.upsert_worker(WorkerRequest {
+            worker_id: 3,
+            model_name: "first".into(),
+            endpoint: Some("http://worker-3:8000".into()),
+            block_size: Some(4),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let path = format!("/router_policy/{first}/worker_weights");
+        let (status, initial) = call(&app, Method::GET, &path, Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(initial["weights"], serde_json::json!({"1":1.0,"3":1.0}));
+        let (status, changed) = call(
+            &app,
+            Method::PATCH,
+            &path,
+            serde_json::json!({
+                "expected_revision":initial["revision"], "updates":{"1":0.0}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(changed["weights"]["3"], 1.0);
+        let request = || {
+            serde_json::from_value::<SelectRequest>(serde_json::json!({
+                "model_name":"first", "token_ids":[1,2,3,4]
+            }))
+            .unwrap()
+        };
+        for _ in 0..8 {
+            assert_eq!(core.select(request()).await.unwrap().worker_id, 3);
+        }
+        let (status, _) = call(
+            &app,
+            Method::PATCH,
+            &path,
+            serde_json::json!({
+                "expected_revision":initial["revision"], "updates":{"3":0.0}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, _) = call(
+            &app,
+            Method::PATCH,
+            &path,
+            serde_json::json!({
+                "expected_revision":changed["revision"], "updates":{"1":0.5,"999":0.0}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let (_, current) = call(&app, Method::GET, &path, Value::Null).await;
+        assert_eq!(current["weights"]["1"], 0.0);
+        let (_, other) = call(
+            &app,
+            Method::GET,
+            &format!("/router_policy/{second}/worker_weights"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(other["weights"]["2"], 1.0);
+        core.delete_worker(1).await.unwrap();
+        let (_, removed) = call(&app, Method::GET, &path, Value::Null).await;
+        assert!(removed["weights"].get("1").is_none());
+        core.upsert_worker(WorkerRequest {
+            worker_id: 1,
+            model_name: "first".into(),
+            endpoint: Some("http://worker-1:8000".into()),
+            block_size: Some(4),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let (_, readded) = call(&app, Method::GET, &path, Value::Null).await;
+        assert_eq!(readded["weights"]["1"], 1.0);
+        let (status, _) = call(
+            &app,
+            Method::PATCH,
+            &path,
+            serde_json::json!({
+                "expected_revision":readded["revision"], "updates":{"1":0.0,"3":0.0}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(core.select(request()).await.unwrap_err().status_code(), 503);
         core.shutdown();
     }
 }

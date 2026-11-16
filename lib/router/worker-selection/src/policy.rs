@@ -95,7 +95,10 @@ pub enum SelectionFailure {
 
 impl From<WorkerSelectionPolicyError> for SelectionFailure {
     fn from(error: WorkerSelectionPolicyError) -> Self {
-        Self::Policy(error)
+        match error {
+            WorkerSelectionPolicyError::NoEligibleWorkers => Self::AllFiltered,
+            error => Self::Policy(error),
+        }
     }
 }
 
@@ -229,6 +232,32 @@ impl WorkerSelectionPolicy {
                 max_raw_cached_tokens: 0,
                 row_buffers: Arc::new(ArrayQueue::new(ROW_BUFFERS)),
             })),
+        }
+    }
+
+    /// Apply worker-weight control between selections. A picker must explicitly opt in.
+    pub fn control_worker_weights(
+        &mut self,
+        members: &[dynamo_router_protocol::worker::WorkerId],
+        update: Option<crate::WorkerWeightUpdate>,
+    ) -> Result<crate::WorkerWeightConfig, RuntimePolicyError> {
+        #[allow(clippy::infallible_destructuring_match)]
+        let state = match &mut self.state {
+            WorkerSelectionPolicyState::Composed(state) => state,
+            #[cfg(any(test, feature = "testing", feature = "bench"))]
+            WorkerSelectionPolicyState::Reference(..) => {
+                return Err(RuntimePolicyError::Unsupported);
+            }
+        };
+        let weights = state
+            .get_mut()
+            .picker
+            .worker_weights()
+            .ok_or(RuntimePolicyError::Unsupported)?;
+        weights.reconcile(members);
+        match update {
+            Some(update) => weights.update(update),
+            None => Ok(weights.snapshot()),
         }
     }
 

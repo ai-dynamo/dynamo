@@ -11,6 +11,7 @@
 
 mod default;
 pub mod kv_fetch;
+mod manual_weighted;
 pub mod router_modes;
 mod sticky_min_load;
 mod thunderagent;
@@ -47,6 +48,7 @@ pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginR
     // kv_fetch names kvcr as a host, where it is on by default, so it registers with it.
     kv_fetch::register(registry)?;
     sticky_min_load::register(registry)?;
+    manual_weighted::register(registry)?;
     two_tier_cost_fn::register(registry)?;
     thunderagent::register(registry)?;
     Ok(())

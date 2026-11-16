@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOr
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use crossbeam_queue::{ArrayQueue, SegQueue};
 use parking_lot::Mutex;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -236,6 +236,8 @@ struct QueueEligibility {
     overloaded: Option<OverloadedWorkerProvider>,
     available: Option<Arc<AvailableWorkerIds>>,
     exclusive: bool,
+    // Only weight-capable policies publish this snapshot. Callers also prepare rows outside the actor.
+    disabled: Option<Arc<ArcSwap<HashSet<WorkerId>>>>,
 }
 
 impl QueueEligibility {
@@ -253,6 +255,8 @@ impl QueueEligibility {
             Option<&Arc<HashSet<WorkerId>>>,
         ) -> R,
     ) -> R {
+        let disabled = self.disabled.as_ref().map(|ids| ids.load());
+        let disabled = disabled.as_deref().map(|ids| ids.as_ref());
         let available = self.available.as_ref().and_then(|ids| ids.get(request));
         let exclusive = self.exclusive && request.affinity_target.is_some();
         let overloaded = if selection || exclusive {
@@ -263,10 +267,12 @@ impl QueueEligibility {
         let workers = workers.borrow();
         let base = request
             .eligibility()
-            .with_available_workers(available.as_deref());
+            .with_available_workers(available.as_deref())
+            .with_disabled_workers(disabled);
         let mut eligibility = request
             .eligibility_with_overloaded(overloaded.as_deref())
-            .with_available_workers(available.as_deref());
+            .with_available_workers(available.as_deref())
+            .with_disabled_workers(disabled);
         if selection || exclusive {
             eligibility = eligibility.with_full_worker_ranks(full_ranks);
         }
@@ -556,6 +562,12 @@ fn best_eligible_raw_cached_tokens<C: WorkerConfigLike>(
 
 #[allow(clippy::large_enum_variant)]
 enum AdmissionCommand {
+    WorkerWeights {
+        update: Option<dynamo_worker_selection::WorkerWeightUpdate>,
+        response: oneshot::Sender<
+            Result<dynamo_worker_selection::WorkerWeightConfig, RuntimePolicyError>,
+        >,
+    },
     PolicyConfig {
         update: Option<RuntimePolicyUpdate>,
         response: oneshot::Sender<Result<RuntimePolicyConfig, RuntimePolicyError>>,
@@ -586,6 +598,23 @@ pub struct RuntimePolicyControl {
 }
 
 impl RuntimePolicyControl {
+    /// Read or atomically update the selected plugin's per-worker weights.
+    pub async fn worker_weights(
+        &self,
+        update: Option<dynamo_worker_selection::WorkerWeightUpdate>,
+    ) -> Result<dynamo_worker_selection::WorkerWeightConfig, RuntimePolicyError> {
+        let (response, receiver) = oneshot::channel();
+        let sender = self.tx.upgrade().ok_or(RuntimePolicyError::Unavailable)?;
+        sender
+            .send(AdmissionCommand::WorkerWeights { update, response })
+            .await
+            .map_err(|_| RuntimePolicyError::Unavailable)?;
+        drop(sender);
+        receiver
+            .await
+            .map_err(|_| RuntimePolicyError::Unavailable)?
+    }
+
     pub async fn get(&self) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
         self.request(None).await
     }
@@ -1107,7 +1136,7 @@ impl<
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         profile: PolicyProfile,
         block_size: u32,
-        selector: Sel,
+        mut selector: Sel,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
@@ -1190,7 +1219,25 @@ impl<
                 Ok(())
             })
         };
+        let members = workers_with_configs
+            .borrow()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        let disabled = selector
+            .control_worker_weights(&members, None)
+            .ok()
+            .map(|config| {
+                Arc::new(ArcSwap::from_pointee(
+                    config
+                        .weights()
+                        .iter()
+                        .filter_map(|(&id, &weight)| (weight == 0.0).then_some(id))
+                        .collect(),
+                ))
+            });
         let eligibility = QueueEligibility {
+            disabled,
             overloaded: overloaded_worker_provider,
             available: available_worker_provider
                 .map(|provider| Arc::new(AvailableWorkerIds::new(provider))),
@@ -1813,6 +1860,7 @@ impl<
 {
     /// Runs one turn per command, capacity wake, or class timer until every sender is gone.
     async fn run(mut self) {
+        let mut watch_weights = self.eligibility.disabled.is_some();
         let mut commands_since_cleanup = 0usize;
         let capacity_updates = self.capacity_updates.clone();
         let mut affinity_recheck = tokio::time::interval(AFFINITY_RECHECK_INTERVAL);
@@ -1821,12 +1869,25 @@ impl<
             self.begin_turn();
             let due_at = self.class_timers.next_deadline();
             let has_affinity_backlog = self.pending.has_affinity_backlog();
-            let command = if capacity_updates.is_none() && due_at.is_none() && !has_affinity_backlog
+            let command = if capacity_updates.is_none()
+                && due_at.is_none()
+                && !has_affinity_backlog
+                && !watch_weights
             {
                 self.commands.next().await
             } else {
                 tokio::select! {
                     command = self.commands.next() => command,
+                    changed = self.workers_with_configs.changed(), if watch_weights => {
+                        if changed.is_err() {
+                            watch_weights = false;
+                            continue;
+                        }
+                        self.refresh_weight_members();
+                        self.workers_generation.fetch_add(1, AtomicOrdering::Release);
+                        self.handle_update(None).await;
+                        continue;
+                    }
                     _ = affinity_recheck.tick(), if has_affinity_backlog => {
                         self.pending.recheck_affinity_lanes();
                         self.handle_enqueued(None).await;
@@ -1913,6 +1974,7 @@ impl<
         command: AdmissionCommand,
         drain_cleanup: bool,
     ) -> (Drain, Option<CommandReply>) {
+        self.refresh_workers_generation();
         match command {
             AdmissionCommand::Enqueue {
                 request,
@@ -1951,6 +2013,27 @@ impl<
                     Drain::full_if(drain_cleanup && self.drain_cleanup()),
                     Some(CommandReply::SelectWithoutAdmission { resp_tx, result }),
                 )
+            }
+            AdmissionCommand::WorkerWeights { update, response } => {
+                if !response.is_closed() {
+                    let members = self
+                        .workers_with_configs
+                        .borrow()
+                        .keys()
+                        .copied()
+                        .collect::<Vec<_>>();
+                    let result = self.selector.control_worker_weights(&members, update);
+                    if let Ok(config) = &result {
+                        self.publish_weight_eligibility(config);
+                        self.workers_generation
+                            .fetch_add(1, AtomicOrdering::Release);
+                    }
+                    let _ = response.send(result);
+                }
+                if drain_cleanup {
+                    self.drain_cleanup();
+                }
+                (Drain::Full, None)
             }
             AdmissionCommand::PolicyConfig { update, response } => {
                 // A cancelled or timed-out caller must not leave a queued mutation behind.
@@ -2988,12 +3071,40 @@ impl<
         })
     }
 
+    fn publish_weight_eligibility(&self, config: &dynamo_worker_selection::WorkerWeightConfig) {
+        if let Some(disabled) = &self.eligibility.disabled {
+            disabled.store(Arc::new(
+                config
+                    .weights()
+                    .iter()
+                    .filter_map(|(&id, &weight)| (weight == 0.0).then_some(id))
+                    .collect(),
+            ));
+        }
+    }
+
     /// Advance the generation when the configuration changed since the actor
     /// last looked, so rows prepared against an earlier one are rebuilt.
     fn refresh_workers_generation(&mut self) {
-        if self.workers_with_configs.borrow_and_update().has_changed() {
+        let changed = self.workers_with_configs.borrow_and_update().has_changed();
+        if changed {
+            self.refresh_weight_members();
             self.workers_generation
                 .fetch_add(1, AtomicOrdering::Release);
+        }
+    }
+
+    fn refresh_weight_members(&mut self) {
+        if self.eligibility.disabled.is_some() {
+            let members = self
+                .workers_with_configs
+                .borrow()
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            if let Ok(config) = self.selector.control_worker_weights(&members, None) {
+                self.publish_weight_eligibility(&config);
+            }
         }
     }
 

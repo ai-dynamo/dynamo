@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# All discovered workers start at weight 1. Adjust weights through the frontend admin API.
+worker_selection:
+  aggregated: dynamo-manual-weighted
+  prefill: dynamo-manual-weighted
+  decode: dynamo-manual-weighted

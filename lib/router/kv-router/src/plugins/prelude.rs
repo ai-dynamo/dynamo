@@ -17,7 +17,8 @@ pub use crate::plugins::worker_selection::{
     WorkerCapacity, WorkerCopyInput, WorkerFilter, WorkerInfo, WorkerInputView, WorkerInputs,
     WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionConfig, WorkerSelectionContext,
     WorkerSelectionInstance, WorkerSelectionPolicy, WorkerSelectionPolicyError,
-    WorkerSelectionPolicyFactory, WorkerSelectionPolicySelection,
+    WorkerSelectionPolicyFactory, WorkerSelectionPolicySelection, WorkerWeightConfig,
+    WorkerWeightUpdate, WorkerWeights,
 };
 
 // Request-classifier contracts and the request they classify.
