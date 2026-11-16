@@ -13,9 +13,9 @@ use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
 use dynamo_kv_indexer::host::{
-    ConcurrentRadixTreeCompressed, KvIndexer, KvIndexerInterface, KvIndexerMetrics,
+    ConcurrentRadixTreeCompressed, KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError,
     LowerTierIndexers, LowerTierQueryOptions, MatchDetails, ThreadPoolIndexer, TieredMatchDetails,
-    query_lower_tiers_with_options,
+    TieredMatchProvider, query_lower_tiers_with_options,
 };
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::tracking_hash::tracking_hash_context;
@@ -23,8 +23,8 @@ use dynamo_router_protocol::identity::RoutingPartitionRef;
 use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::WorkerId;
 use dynamo_scheduler::host::{
-    CacheHitWeights, OverlapAnalysis, OverlapScoresRefresh, RefreshedOverlap, RoutingConstraints,
-    ScheduleMode, ScheduleRequest, TrackingHashContext, TrackingHashScope, WorkerSelector,
+    CacheHitWeights, OverlapAnalysis, RoutingConstraints, ScheduleMode, ScheduleRequest,
+    TieredOverlapRefresher, TrackingHashContext, TrackingHashScope, WorkerSelector,
     read_overlap_refresh_after,
 };
 use tokio::sync::mpsc;
@@ -83,14 +83,14 @@ impl ReplayIndexer {
                 ..Default::default()
             },
         );
-        self.find_matches_for_hashes(sequence).await
+        Ok(self.find_matches_for_hashes(sequence).await?)
     }
 
     /// Look up block hashes the caller already derived.
     async fn find_matches_for_hashes(
         &self,
         sequence: Vec<LocalBlockHash>,
-    ) -> Result<TieredMatchDetails> {
+    ) -> Result<TieredMatchDetails, KvRouterError> {
         // Until lower-tier residency arrives, the cheaper score-only lookup
         // gives the same device overlap.
         if self.lower_tier.all().is_empty() {
@@ -112,7 +112,7 @@ impl ReplayIndexer {
     async fn find_tiered_matches(
         &self,
         sequence: Vec<LocalBlockHash>,
-    ) -> Result<TieredMatchDetails> {
+    ) -> Result<TieredMatchDetails, KvRouterError> {
         let device = match &self.primary {
             PrimaryIndexer::Single(indexer) => {
                 indexer.find_match_details(sequence.to_vec()).await?
@@ -140,33 +140,13 @@ impl ReplayIndexer {
     }
 }
 
-struct ReplayOverlapRefresher {
-    indexer: ReplayIndexer,
-    weights: CacheHitWeights,
-    block_size: u32,
-}
-
 #[async_trait::async_trait]
-impl OverlapScoresRefresh for ReplayOverlapRefresher {
-    async fn refresh(
+impl TieredMatchProvider for ReplayIndexer {
+    async fn find_tiered_matches(
         &self,
-        block_hashes: &[LocalBlockHash],
-        _retain_kv_transfer_chain: bool,
-    ) -> Option<RefreshedOverlap> {
-        if block_hashes.is_empty() {
-            return None;
-        }
-        let tiered = match self.indexer.find_matches_for_hashes(block_hashes.to_vec()).await {
-            Ok(tiered) => tiered,
-            Err(error) => {
-                tracing::warn!(%error, "online replay overlap refresh failed");
-                return None;
-            }
-        };
-        // Online replay does not request KV transfer hints.
-        Some(RefreshedOverlap::from_overlap(
-            OverlapAnalysis::new(&self.weights, self.block_size, &tiered).signals(),
-        ))
+        sequence: &[LocalBlockHash],
+    ) -> Result<TieredMatchDetails, KvRouterError> {
+        self.find_matches_for_hashes(sequence.to_vec()).await
     }
 }
 
@@ -285,7 +265,7 @@ pub(crate) struct ReplayPlacement {
 pub(crate) struct KvReplayRouter {
     config: KvRouterConfig,
     block_size: u32,
-    scheduler: Arc<ReplayScheduler<ReplayOverlapRefresher>>,
+    scheduler: Arc<ReplayScheduler<TieredOverlapRefresher<ReplayIndexer>>>,
     refresh_overlap: bool,
     scheduler_cancel: CancellationToken,
     event_tx: Mutex<Option<mpsc::UnboundedSender<RouterEvent>>>,
@@ -332,11 +312,11 @@ impl KvReplayRouter {
                     .any(|class| class.queueing_enabled())
                 && read_overlap_refresh_after().is_some();
         let refresher = refresh_overlap.then(|| {
-            Arc::new(ReplayOverlapRefresher {
-                indexer: indexer.clone(),
-                weights: CacheHitWeights::from(&config),
-                block_size: args.block_size as u32,
-            })
+            Arc::new(TieredOverlapRefresher::new(
+                indexer.clone(),
+                CacheHitWeights::from(&config),
+                args.block_size as u32,
+            ))
         });
         let scheduler_cancel = CancellationToken::new();
         let scheduler = Arc::new(dynamo_scheduler::host::LocalScheduler::new(
