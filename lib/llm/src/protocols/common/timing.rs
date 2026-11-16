@@ -94,6 +94,10 @@ pub struct RequestTracker {
     /// When the request was received (wall clock time as epoch milliseconds)
     request_received_epoch_ms: u64,
 
+    /// How long the request had been in the system before this process received it, as stamped
+    /// by an upstream router. Zero for a request received from a client.
+    upstream_elapsed: Duration,
+
     /// When prefill started (for disaggregated serving) - set once via OnceLock
     prefill_start_time: OnceLock<Instant>,
 
@@ -230,6 +234,13 @@ impl RequestTracker {
 
     /// Create a new request tracker, capturing the current time as request received.
     pub fn new() -> Self {
+        Self::with_upstream_elapsed(Duration::ZERO)
+    }
+
+    /// Create a tracker for a request an upstream router dispatched `upstream_elapsed` after the
+    /// frontend received it. Only [`Self::elapsed_since_arrival`] counts that time; every other
+    /// timing starts when this process received the request.
+    pub fn with_upstream_elapsed(upstream_elapsed: Duration) -> Self {
         let now = Instant::now();
         let epoch_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -239,6 +250,7 @@ impl RequestTracker {
         RequestTracker {
             request_received: now,
             request_received_epoch_ms: epoch_ms,
+            upstream_elapsed,
             prefill_start_time: OnceLock::new(),
             first_token_time: OnceLock::new(),
             decode_first_token_time: OnceLock::new(),
@@ -371,9 +383,11 @@ impl RequestTracker {
         self.request_received_epoch_ms
     }
 
-    /// Time since the request was received, on the monotonic clock.
-    pub fn elapsed_since_received(&self) -> Duration {
-        self.request_received.elapsed()
+    /// Time since the frontend received the request, on the monotonic clock: the time since
+    /// this process received it plus the time upstream routers held it before that.
+    pub fn elapsed_since_arrival(&self) -> Duration {
+        self.upstream_elapsed
+            .saturating_add(self.request_received.elapsed())
     }
 
     /// KV cache hit rate as a ratio (0.0 to 1.0).

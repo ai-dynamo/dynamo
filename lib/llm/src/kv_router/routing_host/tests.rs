@@ -2403,7 +2403,7 @@ async fn kv_dispatch_stamps_elapsed_since_arrival() {
         let mut stream = router.generate(Context::new(input)).await.unwrap();
         while stream.next().await.is_some() {}
     }
-    let age_ms = tracker.elapsed_since_received().as_secs_f64() * 1000.0;
+    let age_ms = tracker.elapsed_since_arrival().as_secs_f64() * 1000.0;
 
     let stamps = dispatch.elapsed_since_arrival_ms.lock().unwrap().clone();
     assert_eq!(stamps.len(), 2, "{stamps:?}");
@@ -2412,6 +2412,41 @@ async fn kv_dispatch_stamps_elapsed_since_arrival() {
         "{stamps:?}, tracker age {age_ms} ms"
     );
     assert_eq!(stamps[1], Some(1234.5));
+    drop(router);
+    runtime.shutdown();
+}
+
+/// A request another router stamped crosses the wire without its tracker, and the receiving
+/// process gives it a new one. A dispatch then reports the upstream age plus the time spent
+/// here, and a retry of the stamped request does not count the first stamp again.
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_dispatch_adds_local_time_to_an_upstream_stamp() {
+    let (router, dispatch, _, runtime) =
+        router_with_recorded_dispatch("kv-elapsed-upstream-stamp").await;
+    let mut upstream = request();
+    upstream.elapsed_since_arrival_ms = Some(1500.0);
+    let mut relayed: PreprocessedRequest =
+        serde_json::from_value(serde_json::to_value(upstream).unwrap()).unwrap();
+    assert!(relayed.tracker.is_none());
+    let tracker = Arc::clone(relayed.ensure_tracker());
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let mut retried = relayed.clone();
+    retried.stamp_elapsed_since_arrival();
+    for input in [relayed, retried] {
+        let mut stream = router.generate(Context::new(input)).await.unwrap();
+        while stream.next().await.is_some() {}
+    }
+    let age_ms = tracker.elapsed_since_arrival().as_secs_f64() * 1000.0;
+
+    let stamps = dispatch.elapsed_since_arrival_ms.lock().unwrap().clone();
+    assert_eq!(stamps.len(), 2, "{stamps:?}");
+    for stamp in &stamps {
+        assert!(
+            stamp.is_some_and(|ms| (1505.0..=age_ms).contains(&ms)),
+            "{stamps:?}, tracker age {age_ms} ms"
+        );
+    }
     drop(router);
     runtime.shutdown();
 }
@@ -5263,7 +5298,7 @@ async fn builtin_dispatch_stamps_elapsed_since_arrival() {
 
     let mut stream = host.generate(Context::new(input)).await.unwrap();
     while stream.next().await.is_some() {}
-    let age_ms = tracker.elapsed_since_received().as_secs_f64() * 1000.0;
+    let age_ms = tracker.elapsed_since_arrival().as_secs_f64() * 1000.0;
 
     let stamps = dispatch.elapsed_since_arrival_ms.lock().unwrap().clone();
     assert_eq!(stamps.len(), 1, "{stamps:?}");
