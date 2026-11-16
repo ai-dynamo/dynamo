@@ -175,7 +175,7 @@ class TestPickedToAicKwargs:
         self._assert_identity(kw)
 
     def test_prefill_cp(self):
-        # DYN-5633: SGLang MoE prefill CP4 on 4 GPUs.
+        # SGLang MoE prefill CP4 on 4 GPUs.
         p = PickedParallelConfig(tp=1, dp=1, moe_tp=4, moe_ep=1, cp=4)
         kw = picked_to_aic_model_config_kwargs(p)
         assert kw["tp_size"] == 1

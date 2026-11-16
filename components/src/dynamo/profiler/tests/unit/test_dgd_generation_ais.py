@@ -475,7 +475,7 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         assert resolved_versions == [("h200_sxm", "vllm")]
 
     def test_ais_perf_model_keeps_selected_prefill_cp(self, monkeypatch):
-        # DYN-5633: the SGLang MoE RAPID pick, prefill CP4 and decode without CP.
+        # The SGLang MoE RAPID pick: prefill CP4 and decode without CP.
         monkeypatch.setattr(
             "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
             lambda **_: "0.5.15",
