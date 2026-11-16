@@ -77,6 +77,21 @@ spec:
           max_candidate_gpus: 8
 ```
 
+### v1beta2 AISimulate input overrides
+
+`spec.aisim.inputOverrides` applies an RFC 7386 JSON Merge Patch to the lowered
+AISimulate input. Values override the typed fields; `null` deletes a lowered field.
+Submit a Request containing null deletions with `kubectl create -f request.yaml`
+or `kubectl apply --server-side -f request.yaml`. Client-side `kubectl apply` can
+remove null values before sending the Request, so the operator never receives
+those deletion directives.
+
+A concrete `engine.mode: aggregated`, including `mode: {choices: [aggregated]}`,
+starts with only the `aggregated` worker. A concrete `disaggregated` mode starts
+with `prefill` and `decode`. An omitted mode or a search containing both modes
+starts with all three workers. Explicit worker overrides are still applied last;
+an incompatible worker supplied by the caller remains invalid.
+
 ### v1beta2 DGD Overrides
 
 **Experimental; for development only.** Enable `dynamo-operator.dgdrV1Beta2.enabled`

@@ -26,6 +26,8 @@ var (
 	engineModel          = []string{"engine", "model"}
 	engineBackendChoices = []string{"engine", "backend", "choices"}
 	engineHardware       = []string{"engine", "hardware"}
+	engineMode           = []string{"engine", "mode"}
+	engineModeChoices    = []string{"engine", "mode", "choices"}
 	engineWorkers        = []string{"engine", "workers"}
 
 	optimizationTarget         = []string{"optimization", "target"}
