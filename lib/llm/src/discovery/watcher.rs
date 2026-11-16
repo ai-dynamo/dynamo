@@ -1531,8 +1531,7 @@ fn validate_card_parser_version(
 }
 
 fn should_validate_parser_version(card: &ModelDeploymentCard) -> bool {
-    card.model_type.supports_chat()
-        && effective_worker_type(card.worker_type, card.model_type) != WorkerType::Prefill
+    card.has_validated_parser_pair()
 }
 
 /// A frontend in direct routing mode does not pick workers, so its handle

@@ -1146,6 +1146,25 @@ impl ModelDeploymentCard {
         Self::resolve_worker_type(self.worker_type, self.model_type)
     }
 
+    /// Whether a frontend validates this card's tool-call and reasoning parser pair.
+    /// Prefill workers and models without chat never parse chat output.
+    pub(crate) fn has_validated_parser_pair(&self) -> bool {
+        self.model_type.supports_chat()
+            && self.effective_worker_type() != crate::worker_type::WorkerType::Prefill
+    }
+
+    /// Worker-side check, run before the card is published: reject a parser pair that a
+    /// frontend refuses at every `DYN_PARSER_VERSION`, where the model would never become ready.
+    pub fn validate_parser_pair(&self) -> anyhow::Result<()> {
+        if !self.has_validated_parser_pair() {
+            return Ok(());
+        }
+        crate::protocols::openai::chat_completions::tool_parser_v2::validate_parser_pair_for_any_version(
+            self.runtime_config.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        )
+    }
+
     /// Resolve an explicit or legacy worker role without constructing a model card.
     pub fn resolve_worker_type(
         worker_type: Option<crate::worker_type::WorkerType>,

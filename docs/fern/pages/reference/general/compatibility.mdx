@@ -120,6 +120,8 @@ A 1.5.x or 1.6.x frontend admits the model. A 1.7 frontend rejects it at registr
 
 Before upgrading the frontend, set both selectors to names from the same family, or omit one.
 
+A 1.7 worker checks its own pair when it registers the model. It exits with an error that names both selectors when a frontend rejects the pair at every `DYN_PARSER_VERSION` value.
+
 #### Power-of-Two Router Mode
 
 - **Setting:** `--router-mode power-of-two` on a worker.

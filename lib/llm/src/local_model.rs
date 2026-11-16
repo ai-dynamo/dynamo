@@ -694,6 +694,7 @@ impl LocalModel {
         self.card.worker_type = worker_type;
         self.card.needs = needs;
         self.card.lora = lora_info.clone();
+        self.card.validate_parser_pair()?;
 
         let lora_name = self.card.lora.as_ref().map(|info| info.name.as_str());
         let model_suffix = derive_lora_suffix(lora_name);
@@ -1013,6 +1014,77 @@ mod local_source_tests {
             assert!(file.url().is_none(), "unexpected remote metadata: {file:?}");
             assert!(file.path().unwrap().starts_with(&canonical));
         }
+        drt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn attach_refuses_a_parser_pair_no_frontend_accepts() {
+        let runtime = dynamo_runtime::Runtime::from_current().unwrap();
+        let drt = dynamo_runtime::DistributedRuntime::new(
+            runtime,
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let endpoint = drt
+            .namespace("parser-pair")
+            .unwrap()
+            .component("worker")
+            .unwrap()
+            .endpoint("generate");
+        let mut model = LocalModelBuilder::default()
+            .model_path(model_dir())
+            .runtime_config(ModelRuntimeConfig {
+                tool_call_parser: Some("kimi_k25".to_string()),
+                reasoning_parser: Some("kimi".to_string()),
+                ..Default::default()
+            })
+            .self_host_metadata(false)
+            .build()
+            .await
+            .unwrap();
+        let published = || async {
+            drt.discovery()
+                .list(dynamo_runtime::discovery::DiscoveryQuery::AllModels)
+                .await
+                .unwrap()
+                .len()
+        };
+
+        let error = model
+            .attach(
+                &endpoint,
+                ModelType::Chat,
+                ModelInput::Tokens,
+                None,
+                Some(crate::worker_type::WorkerType::Aggregated),
+                Vec::new(),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        for expected in [
+            "every DYN_PARSER_VERSION setting",
+            "--dyn-tool-call-parser=\"kimi_k25\"",
+            "--dyn-reasoning-parser=\"kimi\"",
+        ] {
+            assert!(error.contains(expected), "missing {expected:?}: {error}");
+        }
+        assert_eq!(published().await, 0);
+
+        // A frontend does not check a prefill worker's pair, so the worker does not either.
+        model
+            .attach(
+                &endpoint,
+                ModelType::Chat,
+                ModelInput::Tokens,
+                None,
+                Some(crate::worker_type::WorkerType::Prefill),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(published().await, 1);
         drt.shutdown();
     }
 

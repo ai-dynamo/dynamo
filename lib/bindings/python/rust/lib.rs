@@ -900,6 +900,7 @@ fn register_model<'p>(
             card.runtime_config = rc;
             card.tensor_model_config = tensor_model_config;
             card.router_config = explicit_router_config.clone();
+            card.validate_parser_pair().map_err(to_pyerr)?;
 
             // Register the Model Deployment Card via discovery interface
             register_model_card(&endpoint.inner, &card)

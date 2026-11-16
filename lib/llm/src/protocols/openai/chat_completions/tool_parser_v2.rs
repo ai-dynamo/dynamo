@@ -99,6 +99,26 @@ pub(crate) fn validate_parser_version(
     validate_parser_version_for_mode(selected_version()?, tool_call_parser, reasoning_parser)
 }
 
+/// Reject a parser pair that [`validate_parser_version`] refuses at every `DYN_PARSER_VERSION`.
+///
+/// A worker cannot see its frontend's setting, so it refuses only what no setting accepts.
+pub(crate) fn validate_parser_pair_for_any_version(
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+) -> anyhow::Result<()> {
+    let [auto, v1, v2] =
+        [ParserVersion::Auto, ParserVersion::V1, ParserVersion::V2].map(|version| {
+            validate_parser_version_for_mode(version, tool_call_parser, reasoning_parser)
+        });
+    match (auto, v1, v2) {
+        (Err(error), Err(_), Err(_)) => anyhow::bail!(
+            "a frontend refuses this worker's parser pair at every {} setting; at the default: {error}",
+            env_llm::DYN_PARSER_VERSION
+        ),
+        _ => Ok(()),
+    }
+}
+
 pub(crate) fn validate_tool_request_mode(
     version: ParserVersion,
     effective_tool_call_parser: Option<&str>,
@@ -1798,6 +1818,53 @@ mod tests {
             "--dyn-tool-call-parser=\"hermes\"",
             "--dyn-reasoning-parser=\"qwen3\"",
             "same Unified V2 family",
+        ] {
+            assert!(error.contains(expected), "missing {expected:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn any_version_check_refuses_only_what_every_version_refuses() {
+        let refused = |version, tool, reasoning| {
+            validate_parser_version_for_mode(version, tool, reasoning).is_err()
+        };
+        for (tool, reasoning, refusing) in [
+            // No legacy tool-call parser, and no single unified family.
+            (Some("kimi_k25"), Some("kimi"), "auto 1 2"),
+            (Some("muse_glimmer"), Some("qwen3"), "auto 1 2"),
+            // Unified only.
+            (Some("kimi_k25"), Some("kimi_k25"), "1"),
+            // Legacy only.
+            (Some("hermes"), Some("qwen3"), "2"),
+            // Auto alone asks for Beam in both slots.
+            (Some("beam"), None, "auto 1"),
+            (Some("qwen3_coder"), Some("qwen3"), ""),
+            (None, None, ""),
+        ] {
+            let refusing_now = [
+                (ParserVersion::Auto, "auto"),
+                (ParserVersion::V1, "1"),
+                (ParserVersion::V2, "2"),
+            ]
+            .into_iter()
+            .filter(|(version, _)| refused(*version, tool, reasoning))
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>()
+            .join(" ");
+            assert_eq!(refusing_now, refusing, "{tool:?} {reasoning:?}");
+            assert_eq!(
+                validate_parser_pair_for_any_version(tool, reasoning).is_err(),
+                refusing == "auto 1 2",
+                "{tool:?} {reasoning:?}"
+            );
+        }
+        let error = validate_parser_pair_for_any_version(Some("kimi_k25"), Some("kimi"))
+            .unwrap_err()
+            .to_string();
+        for expected in [
+            "every DYN_PARSER_VERSION setting",
+            "--dyn-tool-call-parser=\"kimi_k25\"",
+            "--dyn-reasoning-parser=\"kimi\"",
         ] {
             assert!(error.contains(expected), "missing {expected:?}: {error}");
         }
