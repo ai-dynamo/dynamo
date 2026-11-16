@@ -47,7 +47,7 @@ mod worker_metrics;
 pub use axum;
 pub use frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
-    validate_extension_route_path,
+    validate_extension_route_method, validate_extension_route_path,
 };
 pub use metrics::Metrics;
 
