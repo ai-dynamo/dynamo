@@ -18,6 +18,7 @@ from tests.utils.pytest_parallel_gpu import (
     _GpuState,
     _priority_key,
     _select_launches,
+    _split_unschedulable,
     _TestEntry,
 )
 from tests.utils.vram_utils import VRAM_MULTI_PROC_MARGIN
@@ -185,6 +186,31 @@ def test_blocked_test_launches_once_occupant_frees():
     # 12 fits (19-3.8=15.2) and is highest priority; the extra 3.8 no longer fits
     # (19-15.8=3.2<3.8).
     assert launches == [(0, 0)]
+
+
+# --------------------------------------------------------------------------- #
+# _split_unschedulable
+# --------------------------------------------------------------------------- #
+def test_tests_larger_than_every_gpu_are_split_off():
+    gpus = {0: _gpu(0, 22.0), 1: _gpu(1, 24.0)}
+    tests = [_t("fits", 18.7), _t("largest", 24.0), _t("too_big", 24.1), _t("f", 0)]
+
+    fits, too_big = _split_unschedulable(tests, gpus)
+
+    assert [t.name for t in fits] == ["fits", "largest", "f"]
+    assert [t.name for t in too_big] == ["too_big"]
+
+
+def test_oversized_head_test_never_launches_and_blocks_the_queue():
+    # Without the split, a test larger than the card reserves the GPU and caps
+    # backfill at cap - required < 0, so nothing behind it ever starts.
+    gpus = {0: _gpu(0, 22.0)}
+    pending = [_t("too_big", 22.8), _t("small", 3.8)]
+
+    assert _select(pending, gpus, num_slots=8) == []
+
+    fits, _ = _split_unschedulable(pending, gpus)
+    assert _select(fits, gpus, num_slots=8) == [(0, 0)]
 
 
 # --------------------------------------------------------------------------- #
