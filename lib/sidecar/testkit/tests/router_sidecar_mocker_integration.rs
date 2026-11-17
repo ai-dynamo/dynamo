@@ -1842,11 +1842,12 @@ async fn sglang_round_robin_prefill_hands_off_on_both_nodes() {
                 &prefill,
                 &decode,
             ));
-            if ranks.len() == 2 {
+            if ranks.len() == 4 {
                 break;
             }
         }
-        assert_eq!(ranks, std::collections::BTreeSet::from([0, 2]));
+        // Each node spreads unranked prefills over both of its ranks.
+        assert_eq!(ranks, std::collections::BTreeSet::from([0, 1, 2, 3]));
         // `x-dynamo-prefill-instance-id` + `x-dynamo-prefill-dp-rank`.
         let routing = RoutingHints {
             prefill_worker_id: Some(workers[&2]),

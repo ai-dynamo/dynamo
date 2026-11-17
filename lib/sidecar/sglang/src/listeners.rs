@@ -6,6 +6,7 @@
 //! picks the listener.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dynamo_backend_common::{
@@ -46,6 +47,8 @@ pub(crate) struct NodeListeners {
     /// Every DP rank of the deployment.
     pub global_dp_size: u32,
     pub listeners: Vec<Listener>,
+    /// Round-robin position for requests that name no rank.
+    next: AtomicUsize,
 }
 
 impl NodeListeners {
@@ -55,6 +58,7 @@ impl NodeListeners {
             start_rank,
             global_dp_size,
             listeners,
+            next: AtomicUsize::new(0),
         }
     }
 
@@ -64,7 +68,8 @@ impl NodeListeners {
 
     /// Choose the listener for `request` by the rank the router named. A
     /// rank this node does not serve is refused before any stream opens,
-    /// which keeps the worker routable.
+    /// which keeps the worker routable. Only the KV router names a rank, so
+    /// other requests go round-robin over the node's listeners.
     pub(crate) fn select(
         &self,
         request: &PreprocessedRequest,
@@ -72,7 +77,7 @@ impl NodeListeners {
     ) -> Result<Dispatch, DynamoError> {
         let index = match validate_dp_rank(request, mode, self.ranks())? {
             Some(rank) => (rank - self.start_rank) as usize,
-            None => 0,
+            None => self.next.fetch_add(1, Ordering::Relaxed) % self.listeners.len(),
         };
         let carries_rank = mode.is_prefill() && self.global_dp_size > 1;
         Ok(Dispatch {
@@ -204,8 +209,6 @@ mod tests {
             (Decode, routed(Some(2), Some(3)), 2, None),
             // Prefill takes its own rank first.
             (Prefill, routed(Some(2), Some(3)), 3, Some(3)),
-            (Aggregated, request(), 2, None),
-            (Prefill, request(), 2, Some(2)),
         ] {
             let index = (rank - 2) as usize;
             assert_eq!(
@@ -231,6 +234,22 @@ mod tests {
                 .unwrap_err(),
             "serves DP ranks [2, 4)",
         );
+        // Requests that name no rank alternate over the node's listeners, and
+        // a prefill carries the rank it lands on.
+        for (mode, rank, prefill_rank) in [
+            (Aggregated, 2, None),
+            (Prefill, 3, Some(3)),
+            (Decode, 2, None),
+        ] {
+            assert_eq!(
+                listeners.select(&request(), mode).unwrap(),
+                Dispatch {
+                    index: (rank - 2) as usize,
+                    prefill_rank,
+                },
+                "{mode:?}"
+            );
+        }
         // A single-rank deployment carries no rank.
         assert_eq!(
             node(0, 1, 1)
