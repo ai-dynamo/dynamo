@@ -663,23 +663,15 @@ async fn anthropic_messages(
         .is_some_and(|t| t.thinking_type == "disabled");
 
     // Convert Anthropic request -> UnifiedRequest -> Chat Completion request
-    let mut unified_request: UnifiedRequest =
-        orig_request.try_into().map_err(|e: anyhow::Error| {
-            tracing::error!(
-                request_id,
-                error = %e,
-                "Failed to convert AnthropicCreateMessageRequest to UnifiedRequest",
-            );
-            AnthropicHandlerError::validation(format!("Failed to convert request: {e}"))
-                .into_marked_response(&mut inflight_guard)
-        })?;
-
-    input_policy
-        .normalize(&mut unified_request)
-        .map_err(|error| {
-            AnthropicHandlerError::validation(error.to_string())
-                .into_marked_response(&mut inflight_guard)
-        })?;
+    let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
+        tracing::error!(
+            request_id,
+            error = %e,
+            "Failed to convert AnthropicCreateMessageRequest to UnifiedRequest",
+        );
+        AnthropicHandlerError::validation(format!("Failed to convert request: {e}"))
+            .into_marked_response(&mut inflight_guard)
+    })?;
 
     // Extract the API context before consuming the UnifiedRequest — this
     // carries Anthropic-specific fields (thinking config, cache breakpoints,

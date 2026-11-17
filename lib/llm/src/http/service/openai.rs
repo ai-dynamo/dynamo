@@ -4268,41 +4268,32 @@ async fn chat_completions(
     let nvtx_lookup = dynamo_nvtx_range!("frontend.http.chat.engine_lookup");
     // Text-input WorkerSets never run the preprocessor gate, so admit custom
     // content only where a WorkerSet advertises it.
-    let (engine, parsing_options, input_policy) =
-        if crate::preprocessor::has_custom_content(request.content()) {
-            state
-                .manager()
-                .get_chat_completions_engine_with_input_policy_for_capability(
-                    &model,
-                    crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
-                )
-        } else {
-            state
-                .manager()
-                .get_chat_completions_engine_with_input_policy(&model)
-                .map(Some)
-        }
-        .map_err(|e| ErrorMessage::from_model_error(&e))
-        .and_then(|selected| {
-            selected.ok_or_else(|| {
-                ErrorMessage::from_anyhow(
-                    invalid_argument(crate::preprocessor::CUSTOM_CONTENT_UNSUPPORTED).into(),
-                    crate::preprocessor::CUSTOM_CONTENT_UNSUPPORTED,
-                )
-            })
+    let (engine, parsing_options) = if crate::preprocessor::has_custom_content(request.content()) {
+        state
+            .manager()
+            .get_chat_completions_engine_with_parsing_for_capability(
+                &model,
+                crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+            )
+    } else {
+        state
+            .manager()
+            .get_chat_completions_engine_with_parsing(&model)
+            .map(Some)
+    }
+    .map_err(|e| ErrorMessage::from_model_error(&e))
+    .and_then(|selected| {
+        selected.ok_or_else(|| {
+            ErrorMessage::from_anyhow(
+                invalid_argument(crate::preprocessor::CUSTOM_CONTENT_UNSUPPORTED).into(),
+                crate::preprocessor::CUSTOM_CONTENT_UNSUPPORTED,
+            )
         })
-        .inspect_err(|err_response| {
-            inflight_guard.mark_error(extract_error_type_from_response(err_response));
-        })?;
-    drop(nvtx_lookup);
-    input_policy.normalize_chat(&mut request).map_err(|error| {
-        let response = ErrorMessage::from_anyhow(
-            invalid_argument(error.to_string()).into(),
-            "Invalid thinking",
-        );
-        inflight_guard.mark_error(extract_error_type_from_response(&response));
-        response
+    })
+    .inspect_err(|err_response| {
+        inflight_guard.mark_error(extract_error_type_from_response(err_response));
     })?;
+    drop(nvtx_lookup);
 
     // Beam route, before generic validation (which rejects what this normalizes): a
     // legacy `builtin_tools` declaration is promoted into `tools` (see

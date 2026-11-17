@@ -1663,26 +1663,6 @@ impl ModelManager {
             .get_chat_engine_with_input_policy()
     }
 
-    pub(crate) fn get_chat_completions_engine_with_input_policy_for_capability(
-        &self,
-        model: &str,
-        capability: &str,
-    ) -> Result<
-        Option<(
-            OpenAIChatCompletionsStreamingEngine,
-            crate::protocols::openai::ParsingOptions,
-            crate::chat_input::ChatInputPolicy,
-        )>,
-        ModelManagerError,
-    > {
-        self.catalog
-            .load()
-            .models
-            .get(model)
-            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_chat_engine_with_input_policy_for_capability(capability)
-    }
-
     pub fn get_completions_engine_with_parsing(
         &self,
         model: &str,
@@ -1766,8 +1746,7 @@ impl ModelManager {
     ) -> Result<(), ModelManagerError> {
         card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
         card.needs = Vec::new();
-        let input_policy = crate::chat_input::ChatInputPolicy::from_card(&card)
-            .map_err(|error| ModelManagerError::ModelUnavailable(format!("{model}: {error:#}")))?;
+        let input_policy = crate::chat_input::ChatInputPolicy::from_card(&card);
         let _reservation = self.reservation_lock.lock();
         self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
