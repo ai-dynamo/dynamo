@@ -31,6 +31,19 @@ from gpu_memory_service.snapshot.transfer import (
 )
 from gpu_memory_service.v1.snapshot import loader, mx_source
 
+if HAS_TORCH:
+    import torch
+
+try:
+    from modelexpress import p2p_pb2
+    from modelexpress.adapter import StrategyFailed
+    from modelexpress.load_strategy import base as strategy_base
+    from modelexpress.load_strategy.rdma_strategy import RdmaStrategy
+    from modelexpress.metadata import client_factory, publish
+except ImportError:  # The ModelExpress tests skip without the package.
+    p2p_pb2 = StrategyFailed = strategy_base = RdmaStrategy = None
+    client_factory = publish = None
+
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
@@ -222,10 +235,6 @@ def test_mx_source_stops_advertising_before_releasing_its_weights(
 ):
     import threading
 
-    import torch
-    from modelexpress.load_strategy import base
-    from modelexpress.metadata import publish
-
     events = []
     ctx = SimpleNamespace(
         mx_client=None,
@@ -271,9 +280,9 @@ def test_mx_source_stops_advertising_before_releasing_its_weights(
     )
     monkeypatch.setattr(mx_source, "byte_tensors", lambda *_args: {})
     monkeypatch.setattr(mx_source, "mx_load_context", lambda *_args: ctx)
-    monkeypatch.setattr(base, "register_tensors", register)
+    monkeypatch.setattr(strategy_base, "register_tensors", register)
     monkeypatch.setattr(
-        base, "unpublish_metadata", lambda _ctx: events.append("unpublish")
+        strategy_base, "unpublish_metadata", lambda _ctx: events.append("unpublish")
     )
     monkeypatch.setattr(publish, "publish_metadata_and_ready", publish_and_ready)
     stop = threading.Event()
@@ -321,12 +330,6 @@ class _FakeAgent:
     reason="modelexpress and torch required",
 )
 def test_mx_restore_retries_the_next_source_on_its_listen_port(monkeypatch):
-    import torch
-    from modelexpress import p2p_pb2
-    from modelexpress.adapter import StrategyFailed
-    from modelexpress.load_strategy.rdma_strategy import RdmaStrategy
-    from modelexpress.metadata import client_factory
-
     agents: list[_FakeAgent] = []
 
     def start_agent(_rank, _device, port):
@@ -387,3 +390,63 @@ def test_mx_restore_retries_the_next_source_on_its_listen_port(monkeypatch):
     assert tried == [("peer-0", 25557), ("peer-1", 25557)]
     assert [agent.port for agent in agents] == [25557, 25557]
     assert all(agent.shut_down for agent in agents)
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("modelexpress") is None or not HAS_TORCH,
+    reason="modelexpress and torch required",
+)
+def test_mx_restore_requires_the_peer_to_name_every_allocation(monkeypatch):
+    # By default ModelExpress fills only the tensors both sides name. GMS must
+    # ask it to reject a peer whose allocations differ.
+    exact = []
+
+    class _Agent(_FakeAgent):
+        def add_remote_agent(self, _metadata) -> str:
+            return "peer-agent"
+
+        def remove_remote_agent(self, _name) -> None:
+            pass
+
+        def receive_from_source(self, *, require_exact_match, **_kwargs):
+            exact.append(require_exact_match)
+            return 0, 0, 0.0
+
+    monkeypatch.setattr(mx, "_start_nixl_manager", lambda *_args: _Agent(25557))
+    monkeypatch.setattr(mx, "byte_tensors", lambda *_args: {})
+    monkeypatch.setattr(torch.cuda, "set_device", lambda _device: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda *_args: None)
+    monkeypatch.setattr(client_factory, "create_metadata_client", lambda **_: None)
+    monkeypatch.setattr(RdmaStrategy, "is_available", lambda _self, _ctx: True)
+    monkeypatch.setattr(
+        "modelexpress.load_strategy.rdma_strategy.register_tensors",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        RdmaStrategy,
+        "_find_source_instances",
+        lambda _self, _ctx: [
+            p2p_pb2.SourceInstanceRef(mx_source_id="src", worker_id="peer-0")
+        ],
+    )
+    monkeypatch.setattr(
+        RdmaStrategy, "_fetch_worker_metadata", lambda *_args: p2p_pb2.WorkerMetadata()
+    )
+    monkeypatch.setattr(RdmaStrategy, "_accelerator_compatible", lambda *_args: True)
+
+    backend = mx.MXTransferBackend(
+        config=GMSSnapshotConfig(
+            device=0,
+            max_workers=1,
+            backend_config={
+                "mx_rank": 0,
+                "mx_source_key": "ckpt-1",
+                "mx_listen_port": 25557,
+            },
+        )
+    )
+    session = backend.start_restore([FileTransferSource("a0", "", 0, 64)])
+    session.restore({"a0": GMSTransferTarget("a0", 0x1000, 0, 64)})
+    backend.close()
+
+    assert exact == [True]

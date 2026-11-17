@@ -5,17 +5,22 @@
 
 use aisimulate_core::replay::{
     AggregatedRoundRobinPlacement, NoEngineEvents, NoReplayMetadata, PoolRoundRobinPlacement,
-    ReplayComposition, ReplayDeterminism, ReplayScalingPolicy, ReplaySpec, WorkerTopology,
+    ReplayComposition, ReplayDeterminism, ReplayEngineObservation, ReplayScalingPolicy, ReplaySpec,
+    WorkerTopology,
 };
 use anyhow::{Context, Result, bail};
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_router_protocol::WorkerType;
 use dynamo_scheduler::host::RouterPrefillLoadModel;
 use std::collections::HashSet;
+use std::marker::PhantomData;
 
 use super::{KvReplayMetadata, KvRouterPlacement};
 use crate::common::protocols::MockerConfig;
-use crate::replay::offline::extensions::kv_events::RouterEventObservation;
+use crate::replay::offline::extensions::kv_events::{
+    NoRouterEventObservation, RouterEventBatch, RouterEventObservation,
+};
 use crate::replay::{ConversationAffinityConfig, ReplayPrefillLoadEstimator, ReplayRouterControls};
 
 /// Round-robin placement with an optional Dynamo Planner scaling policy.
@@ -98,8 +103,9 @@ enum KvTopologyConfig {
     },
 }
 
-/// KV-aware placement plus an optional Dynamo Planner scaling policy.
-pub(in crate::replay) struct KvReplayComposition {
+/// KV-aware placement plus an optional Dynamo Planner scaling policy. `O` selects which engine KV
+/// events the router observes.
+pub(in crate::replay) struct KvReplayComposition<O = RouterEventObservation> {
     topology: KvTopologyConfig,
     conversation_affinity: Option<ConversationAffinityConfig>,
     router_config: Option<KvRouterConfig>,
@@ -115,6 +121,9 @@ pub(in crate::replay) struct KvReplayComposition {
     /// Captured from [`crate::replay::ReplayScope`] at construction. Each placement registers its
     /// selector control here under its worker type.
     router_controls: Option<ReplayRouterControls>,
+    /// Captured from [`crate::replay::ReplayScope`] at construction.
+    router_plugins: Option<RouterPluginRegistry>,
+    observation: PhantomData<O>,
 }
 
 impl KvReplayComposition {
@@ -140,6 +149,8 @@ impl KvReplayComposition {
             determinism: ReplayDeterminism::Random,
             kv_event_lag_ms: scope.kv_event_lag_ms,
             router_controls: scope.router_controls,
+            router_plugins: scope.router_plugins,
+            observation: PhantomData,
         }
     }
 
@@ -169,11 +180,39 @@ impl KvReplayComposition {
             determinism: ReplayDeterminism::Random,
             kv_event_lag_ms: scope.kv_event_lag_ms,
             router_controls: scope.router_controls,
+            router_plugins: scope.router_plugins,
+            observation: PhantomData,
+        }
+    }
+
+    pub(in crate::replay) fn reads_engine_kv_events(&self) -> bool {
+        self.router_config
+            .as_ref()
+            .is_none_or(|config| config.use_kv_events)
+    }
+
+    /// The same composition for a router without KV events: its engines export none, so engine
+    /// settings that cannot export them (an explicit `prefix_match_unit`) still replay.
+    pub(in crate::replay) fn without_engine_kv_events(
+        self,
+    ) -> KvReplayComposition<NoRouterEventObservation> {
+        KvReplayComposition {
+            topology: self.topology,
+            conversation_affinity: self.conversation_affinity,
+            router_config: self.router_config,
+            prefill_load_estimator: self.prefill_load_estimator,
+            scaling_policy: self.scaling_policy,
+            scaling_enabled: self.scaling_enabled,
+            determinism: self.determinism,
+            kv_event_lag_ms: self.kv_event_lag_ms,
+            router_controls: self.router_controls,
+            router_plugins: self.router_plugins,
+            observation: PhantomData,
         }
     }
 }
 
-impl KvReplayComposition {
+impl<O> KvReplayComposition<O> {
     fn register_router_control(&self, worker_type: WorkerType, placement: &KvRouterPlacement) {
         if let Some(controls) = &self.router_controls {
             controls.register(worker_type, placement.selector_control());
@@ -181,9 +220,11 @@ impl KvReplayComposition {
     }
 }
 
-impl ReplayComposition for KvReplayComposition {
+impl<O: ReplayEngineObservation<Batch = RouterEventBatch>> ReplayComposition
+    for KvReplayComposition<O>
+{
     type Metadata = KvReplayMetadata;
-    type Observation = RouterEventObservation;
+    type Observation = O;
     type AggregatedPlacement = KvRouterPlacement;
     type DisaggregatedPlacement = KvRouterPlacement;
 
@@ -218,6 +259,8 @@ impl ReplayComposition for KvReplayComposition {
             self.prefill_load_estimator.take(),
             &topology,
             self.determinism.selector_seed(),
+            WorkerType::Aggregated,
+            self.router_plugins.as_ref(),
         )?
         .with_kv_event_lag_ms(self.kv_event_lag_ms)?
         .with_conversation_affinity(self.conversation_affinity)?;
@@ -265,6 +308,8 @@ impl ReplayComposition for KvReplayComposition {
             self.prefill_load_estimator.take(),
             &prefill_topology,
             self.determinism.selector_seed(),
+            WorkerType::Prefill,
+            self.router_plugins.as_ref(),
         )
         .context("constructing prefill KV Router placement")?
         .with_kv_event_lag_ms(self.kv_event_lag_ms)?
@@ -275,6 +320,8 @@ impl ReplayComposition for KvReplayComposition {
             None,
             &decode_topology,
             self.determinism.selector_seed(),
+            WorkerType::Decode,
+            self.router_plugins.as_ref(),
         )
         .context("constructing decode KV Router placement")?
         .with_kv_event_lag_ms(self.kv_event_lag_ms)?
