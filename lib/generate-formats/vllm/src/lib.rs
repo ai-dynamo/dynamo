@@ -4,7 +4,8 @@
 //! vLLM's token-in/token-out `POST /inference/v1/generate`, as a generate format.
 //!
 //! The request stays opaque in `extra_args.vllm_tito` apart from the routing
-//! controls Dynamo projects, including multimodal KV routing hashes. The
+//! controls Dynamo projects, including multimodal KV routing hashes, and its
+//! `content_parts`, which become the worker's regular multimodal input. The
 //! unary response is assembled from the worker's typed outputs. Streaming and
 //! migration are not supported yet.
 
@@ -13,14 +14,18 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_runtime::error::DynamoError;
 use serde_json::{Value, json};
 
-use crate::generate::{GenerateAggregator, GenerateRequest, GenerateResponseOptions};
+use crate::generate::{
+    GenerateAggregator, GenerateContentPart, GenerateRequest, GenerateResponseOptions,
+};
 use dynamo_llm::generate_format::{
     Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Opened, Worker,
 };
 use dynamo_llm::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use dynamo_llm::protocols::common::preprocessed_mm_identifier;
-use dynamo_llm::protocols::common::preprocessor::MmRoutingInfo;
+use dynamo_llm::protocols::common::preprocessor::{
+    MmRoutingInfo, MultimodalData, MultimodalDataMap, MultimodalItemRef, MultimodalUuidMap,
+};
 
 mod errors;
 
@@ -335,6 +340,62 @@ fn generate_mm_routing_info(
     }))
 }
 
+/// `content_parts` as the worker's multimodal input: the media slots, cache
+/// identities, and prompt order the chat preprocessor produces, so the worker
+/// loads them through its shared multimodal path.
+#[derive(Default)]
+struct ContentMedia {
+    data: Option<MultimodalDataMap>,
+    uuids: Option<MultimodalUuidMap>,
+    order: Option<Vec<MultimodalItemRef>>,
+}
+
+impl ContentMedia {
+    fn new(parts: Vec<GenerateContentPart>) -> anyhow::Result<Self> {
+        if parts.is_empty() {
+            return Ok(Self::default());
+        }
+        let mut data = MultimodalDataMap::new();
+        let mut uuids = MultimodalUuidMap::new();
+        let mut order = Vec::with_capacity(parts.len());
+        for part in parts {
+            let uuid = part
+                .uuid
+                .or_else(|| part.url.as_deref().and_then(data_url_identity));
+            let slots = data.entry(part.kind.clone()).or_default();
+            order.push(MultimodalItemRef {
+                modality: part.kind.clone(),
+                index: slots.len(),
+            });
+            slots.push(match (part.url, &uuid) {
+                (Some(url), _) => MultimodalData::RawUrl(url),
+                (None, Some(uuid)) => MultimodalData::UuidOnly(uuid.clone()),
+                (None, None) => anyhow::bail!("{} part has neither url nor uuid", part.kind),
+            });
+            uuids.entry(part.kind).or_default().push(uuid);
+        }
+        let has_uuid = uuids.values().flatten().any(Option::is_some);
+        Ok(Self {
+            data: Some(data),
+            uuids: has_uuid.then_some(uuids),
+            order: Some(order),
+        })
+    }
+}
+
+/// Content-addressed identity of an inline `data:` URL. Identical payloads
+/// share vLLM's processor, encoder, and prefix caches across turns, and the
+/// worker skips hashing decoded pixels. A remote URL can change content, so
+/// vLLM keeps hashing those.
+fn data_url_identity(url: &str) -> Option<String> {
+    url.starts_with("data:").then(|| {
+        format!(
+            "xxh3-128:{:032x}",
+            xxhash_rust::xxh3::xxh3_128(url.as_bytes())
+        )
+    })
+}
+
 fn preprocessed_from_generate(
     mut request: GenerateRequest,
     model: &str,
@@ -375,6 +436,7 @@ fn preprocessed_from_generate(
     let skip_reading_prefix_cache = sampling.skip_reading_prefix_cache();
     // Keep the token buffer only in the routed request; workers reconstruct it.
     let token_ids = std::mem::take(&mut request.token_ids);
+    let media = ContentMedia::new(request.content_parts.take().unwrap_or_default())?;
     request.request_id = Some(request_id.to_string());
     if request.model.is_some() {
         request.model = Some(model.to_string());
@@ -412,6 +474,9 @@ fn preprocessed_from_generate(
         .stop_conditions(stop_conditions)
         .sampling_options(sampling_options)
         .output_options(output_options)
+        .multi_modal_data(media.data)
+        .multi_modal_uuids(media.uuids)
+        .multi_modal_order(media.order)
         .mm_routing_info(mm_routing_info)
         .routing(Some(
             dynamo_llm::protocols::common::preprocessor::RoutingHints {
