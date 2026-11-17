@@ -285,6 +285,24 @@ def compute_mm_uuids(
     return {modality: uuids}
 
 
+def _split_multimodal_data(
+    request: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    custom_data: dict[str, Any] = {}
+    media_data: dict[str, Any] = {}
+    for modality, items in (request.get("multi_modal_data") or {}).items():
+        if (
+            isinstance(items, list)
+            and items
+            and all(isinstance(item, dict) and set(item) == {"Json"} for item in items)
+        ):
+            values = [item["Json"] for item in items]
+            custom_data[modality] = values[0] if len(values) == 1 else values
+        else:
+            media_data[modality] = items
+    return custom_data, media_data
+
+
 def get_mm_processor_kwargs(request: dict[str, Any]) -> Optional[dict[str, Any]]:
     """Read processor kwargs from the canonical or router-compatible location."""
     value = request.get("mm_processor_kwargs")
@@ -303,6 +321,8 @@ class PreparedMultimodalInput:
     multi_modal_data: Optional[dict[str, Any]]
     mm_processor_kwargs: Optional[dict[str, Any]]
     pre_rendered_prompt: Any = None
+    # Custom JSON by engine modality; kept apart so media policy never reads it.
+    custom_data: Optional[dict[str, Any]] = None
 
 
 class MissingMultimodalHandoffError(ValueError):
@@ -916,6 +936,8 @@ class VllmMultimodalRequestProcessor:
         request: dict[str, Any],
         multi_modal_data: Optional[dict[str, Any]],
         mm_processor_kwargs: Optional[dict[str, Any]],
+        *,
+        custom_data: Optional[dict[str, Any]] = None,
     ) -> TokensPrompt:
         """Create a TokensPrompt with stable multimodal UUIDs."""
         extra_args = request.get("extra_args") or {}
@@ -954,6 +976,13 @@ class VllmMultimodalRequestProcessor:
             prompt_kwargs["multi_modal_uuids"] = mm_uuids
         if mm_processor_kwargs is not None:
             prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
+        if custom_data:
+            media = multi_modal_data or {}
+            if media.keys() & custom_data.keys():
+                raise InvalidArgument(
+                    "Custom JSON and media inputs target the same engine modality"
+                )
+            prompt_kwargs["multi_modal_data"] = {**media, **custom_data}
         return TokensPrompt(**prompt_kwargs)
 
     async def prepare_input(
@@ -969,6 +998,17 @@ class VllmMultimodalRequestProcessor:
         request before invoking this transformation. The handler validates at
         ``generate`` so text and token modes share the same security boundary.
         """
+        custom_data, media_data = _split_multimodal_data(request)
+        if custom_data:
+            if mode is not DisaggregationMode.AGGREGATED:
+                raise InvalidArgument(
+                    "Custom JSON content is supported only in aggregated serving; "
+                    "disaggregated payload cache identity is not supported"
+                )
+            request = {k: v for k, v in request.items() if k != "multi_modal_data"}
+            if media_data:
+                request["multi_modal_data"] = media_data
+
         mm_processor_kwargs = get_mm_processor_kwargs(request)
         request_for_prompt = dict(request)
         has_mm_data = request.get("multi_modal_data") is not None
@@ -1090,9 +1130,14 @@ class VllmMultimodalRequestProcessor:
                     ),
                 )
 
+        if custom_data and pre_rendered is not None:
+            raise InvalidArgument(
+                "Custom JSON cannot be merged into frontend-processed multimodal kwargs"
+            )
         return PreparedMultimodalInput(
             request=request_for_prompt,
             multi_modal_data=multi_modal_data,
             mm_processor_kwargs=mm_processor_kwargs,
             pre_rendered_prompt=pre_rendered,
+            custom_data=custom_data or None,
         )
