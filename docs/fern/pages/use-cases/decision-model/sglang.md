@@ -16,6 +16,9 @@ The worker capability gate accepts SGLang 0.5.19, 0.5.22, and 0.5.23, including 
 > [!WARNING]
 > Decision scoring requires `--max-running-requests 1 --disable-overlap-schedule`. The worker processes one inference request at a time, including any chat or completion requests sent to it. Dynamo does not advertise decision scoring if either scheduling requirement is violated. Use a separate worker for throughput-oriented chat traffic to avoid this serialization; separation is a serving recommendation, while the scheduling settings are requirements.
 
+> [!IMPORTANT]
+> Decision capability publication also requires an aggregated token-input worker, one data-parallel rank, and pipeline parallelism of one, with attention data parallelism, speculative decoding, diffusion execution, and priority preemption disabled. These are enforced eligibility checks, not tuning suggestions. CUDA is the qualified device for this guide; other devices and LoRA decision execution are not qualified here.
+
 ## Start the Frontend
 
 In the first terminal, select a dedicated namespace and enable both public routes:
@@ -44,7 +47,7 @@ python -m dynamo.sglang \
   --disable-piecewise-cuda-graph
 ```
 
-Wait for the `Published SGLang ... System One capability` message before sending requests. Keep attention data parallelism, pipeline parallelism, speculative/diffusion execution, LoRA, disaggregated serving, and priority preemption disabled. A worker that does not meet the profile is not eligible for decision scoring even if ordinary generation works.
+Wait for the `Published SGLang ... System One capability` message before sending requests. Ordinary generation can work even when the worker does not meet the decision eligibility requirements above.
 
 ## Verify Both APIs
 
