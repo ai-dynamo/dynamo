@@ -20,8 +20,8 @@ use dynamo_mocker::live::{
 };
 use dynamo_mocker::scheduler::MockerMetrics;
 use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
-use dynamo_sglang_sidecar::proto as pb;
 use futures::Stream;
+use sglang_api_types::api::v1 as pb;
 use tokio::sync::Semaphore;
 use tonic::{Request, Response, Status};
 
@@ -169,14 +169,19 @@ impl SglangMockerService {
         } else {
             None
         };
-        let kv_event_port = sink.as_ref().map(|sink| {
-            sink.endpoint()
-                .strip_prefix("tcp://")
-                .expect("ZMQ sink uses TCP")
-                .parse::<std::net::SocketAddr>()
-                .expect("ZMQ sink reports a bound socket address")
-                .port()
-        });
+        let kv_event_port = sink
+            .as_ref()
+            .map(|sink| {
+                let endpoint = sink.endpoint();
+                endpoint
+                    .strip_prefix("tcp://")
+                    .and_then(|address| address.parse::<std::net::SocketAddr>().ok())
+                    .map(|address| address.port())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("ZMQ sink endpoint {endpoint} is not a TCP address")
+                    })
+            })
+            .transpose()?;
         let discovery = DiscoveryMetadata {
             page_size,
             kv_event_port,
@@ -319,6 +324,7 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
         let stream = async_stream::stream! {
             let _permit = permit;
             let mut completion_tokens = 0_usize;
+            let mut cached_tokens = 0_usize;
             // The sidecar contract enables SGLang's incremental streaming output,
             // so each frame contains only this chunk's token and metadata.
             while let Some(signal) = live.recv().await {
@@ -330,10 +336,15 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
                     }
                 };
                 completion_tokens = completion_tokens.saturating_add(1);
+                // The scheduler reports prefix-cache hits on the first signal.
+                if let Some(tokens) = signal.cached_tokens {
+                    cached_tokens = tokens;
+                }
                 yield Ok(pb::GenerateStreamItem {
                     item: Some(pb::generate_stream_item::Item::Frame(prepared.frame(
                         &[token_id],
                         completion_tokens,
+                        cached_tokens,
                         completion_tokens == 1,
                         signal.completed,
                     ))),
@@ -404,7 +415,7 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
         request: Request<pb::AbortRequest>,
     ) -> Result<Response<pb::AbortResponse>, Status> {
         let request = request.into_inner();
-        if request.abort_all != request.rid.trim().is_empty() {
+        if request.abort_all != request.rid.is_empty() {
             return Err(Status::invalid_argument(
                 "provide either a nonempty rid or abort_all=true, not both",
             ));

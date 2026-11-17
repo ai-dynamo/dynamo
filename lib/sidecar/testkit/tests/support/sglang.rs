@@ -292,20 +292,6 @@ pub fn token_frame(
     }
 }
 
-/// One request's in-stream failure with SGLang's HTTP status code.
-pub fn error_item(code: u32, message: &str) -> pb::GenerateStreamItem {
-    pb::GenerateStreamItem {
-        item: Some(Item::Error(pb::GenerateStreamError {
-            error: Some(pb::ErrorBody {
-                message: message.to_string(),
-                code,
-                ..Default::default()
-            }),
-            index: None,
-        })),
-    }
-}
-
 impl WireFixture for Fixture {
     fn assert_stream(
         handle: &RequestHandle<Adapter>,
