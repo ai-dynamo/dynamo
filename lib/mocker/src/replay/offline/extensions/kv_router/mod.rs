@@ -4173,6 +4173,8 @@ policy_classes:
             None,
             &topology(2, 1, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         ) else {
             panic!("offline replay accepted the lru approximate cache policy");
         };
