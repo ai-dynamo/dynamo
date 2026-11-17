@@ -1079,8 +1079,8 @@ impl ErrorMessage {
         };
         if status.is_client_error() && status.as_u16() != 499 && status != overload_status_code() {
             tracing::debug!(status = %status, "Backend client error: {}", err.message);
-            err.message = status
-                .canonical_reason()
+            err.message = crate::lora::runtime::public_error_code(err.code, &err.message)
+                .or_else(|| status.canonical_reason())
                 .unwrap_or("Client error")
                 .to_string();
         }
@@ -3673,8 +3673,8 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
             if render_record_failure {
                 record_local_failure(backend_http_error_class(status));
             }
-            let message = status
-                .canonical_reason()
+            let message = crate::lora::runtime::public_error_code(status.as_u16(), &message)
+                .or_else(|| status.canonical_reason())
                 .unwrap_or("Client error")
                 .to_string();
             (
@@ -8584,6 +8584,52 @@ mod tests {
                     .unwrap()
                     .contains("secret")
             );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(failure_metrics)]
+    fn legacy_runtime_symbols_require_exact_status_and_message() {
+        use dynamo_runtime::error::{BackendError, ErrorType};
+
+        for (status, message, expected) in [
+            (422, "invalid_lora_adapter", "invalid_lora_adapter"),
+            (
+                422,
+                "invalid_lora_adapter token=secret",
+                "Unprocessable Entity",
+            ),
+            (400, "invalid_lora_adapter", "Bad Request"),
+        ] {
+            let direct = ErrorMessage::from_backend_http_error(HttpError {
+                code: status,
+                message: message.to_string(),
+            });
+            let event = Annotated::<serde_json::Value> {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Backend(BackendError::Unknown))
+                        .message(
+                            serde_json::json!({"code": status, "message": message}).to_string(),
+                        )
+                        .build(),
+                ),
+            };
+            let legacy =
+                backend_error_response(extract_backend_error_if_present(&event).unwrap(), false);
+            for response in [direct, legacy] {
+                assert_eq!(response.0.as_u16(), status);
+                assert_eq!(response.1.message, expected);
+                assert!(
+                    !serde_json::to_string(&response.1.0)
+                        .unwrap()
+                        .contains("secret")
+                );
+            }
         }
     }
 

@@ -1320,17 +1320,17 @@ mod tests {
     }
 
     #[test]
-    fn unprocessable_request_stream_error_keeps_status_and_validation_type() {
+    fn invalid_request_stream_error_uses_class_status_and_validation_type() {
         let error: DynamoError = serde_json::from_value(serde_json::json!({
             "class": "InvalidRequest",
             "error_type": "InvalidArgument",
-            "reason": "request.unprocessable_entity",
+            "reason": "request.invalid_argument",
             "diagnostic": "private token=secret",
         }))
         .unwrap();
         let (_, body) = openai_semantic_stream_error(&error);
         let body: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(body["error"]["code"], 422);
+        assert_eq!(body["error"]["code"], 400);
         assert_eq!(body["error"]["type"], "invalid_request_error");
         assert!(!body.to_string().contains("secret"));
     }
@@ -1361,13 +1361,13 @@ mod tests {
     }
 
     #[test]
-    fn unprocessable_stream_error_remains_validation_when_overload_status_is_422() {
-        const ISOLATED: &str = "DYNAMO_TEST_UNPROCESSABLE_STATUS_COLLISION";
+    fn invalid_request_stream_error_remains_validation_when_overload_status_is_400() {
+        const ISOLATED: &str = "DYNAMO_TEST_VALIDATION_STATUS_COLLISION";
         if std::env::var_os(ISOLATED).is_none() {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "http::service::disconnect::tests::unprocessable_stream_error_remains_validation_when_overload_status_is_422"])
+                .args(["--exact", "http::service::disconnect::tests::invalid_request_stream_error_remains_validation_when_overload_status_is_400"])
                 .env(ISOLATED, "1")
-                .env("DYN_HTTP_OVERLOAD_STATUS_CODE", "422")
+                .env("DYN_HTTP_OVERLOAD_STATUS_CODE", "400")
                 .output()
                 .unwrap();
             assert!(
@@ -1381,7 +1381,7 @@ mod tests {
         for (class, reason, expected) in [
             (
                 dynamo_runtime::error::ErrorClass::InvalidRequest,
-                dynamo_runtime::error::ErrorReason::unprocessable_entity(),
+                dynamo_runtime::error::ErrorReason::new("request.invalid_argument").unwrap(),
                 "invalid_request_error",
             ),
             (
@@ -1393,7 +1393,7 @@ mod tests {
             let error = DynamoError::builder().class(class).reason(reason).build();
             let (_, body) = openai_semantic_stream_error(&error);
             let body: serde_json::Value = serde_json::from_str(&body).unwrap();
-            assert_eq!(body["error"]["code"], 422);
+            assert_eq!(body["error"]["code"], 400);
             assert_eq!(body["error"]["type"], expected);
         }
     }

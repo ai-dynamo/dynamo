@@ -426,14 +426,20 @@ async def test_runtime_http_error_public_symbols(http_server, streaming):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "symbol", "expected_code"),
+    [(404, "lora_not_found", 404), (422, "invalid_lora_adapter", 400)],
+)
 @pytest.mark.timeout(60)
 @pytest.mark.forked
-async def test_runtime_http_error_public_symbol_after_headers(http_server):
+async def test_runtime_http_error_public_symbol_after_headers(
+    http_server, status, symbol, expected_code
+):
     base_url, model_name = http_server
     data = {
         "model": model_name,
         "messages": [
-            {"role": "user", "content": f"{RUNTIME_ERROR_PREFIX}404:lora_not_found"}
+            {"role": "user", "content": f"{RUNTIME_ERROR_PREFIX}{status}:{symbol}"}
         ],
         "stream": True,
     }
@@ -449,8 +455,8 @@ async def test_runtime_http_error_public_symbol_after_headers(http_server):
         json.loads(line[6:])["error"] for line in lines if line.startswith("data: {")
     ]
     assert len(errors) == 1
-    assert errors[0]["message"] == "lora_not_found"
-    assert errors[0]["code"] == 404
+    assert errors[0]["message"] == symbol
+    assert errors[0]["code"] == expected_code
 
 
 def expected_error_body(status: int, message: str, error_type: str) -> Dict:

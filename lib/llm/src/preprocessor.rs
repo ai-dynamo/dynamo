@@ -3863,7 +3863,7 @@ impl OpenAIPreprocessor {
             // Ensure routing hints exist when we have LoRA or a legacy
             // top-level cache_salt, even when nvext is absent.
             let routing_constraints = runtime_lora.map(|selection| {
-                let mut constraints = dynamo_kv_router::protocols::RoutingConstraints::default();
+                let mut constraints = dynamo_scheduler::host::RoutingConstraints::default();
                 constraints
                     .required_taints
                     .insert(selection.capability_taint());
