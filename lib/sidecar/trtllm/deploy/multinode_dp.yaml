@@ -127,15 +127,19 @@ spec:
               set -euo pipefail
               # The operator mounts the key group-readable; ssh insists on 0600.
               install -Dm600 /ssh-pk/private.key "$HOME/.ssh/id_rsa"
+              export OMPI_MCA_orte_keep_fqdn_hostnames=1
+              printf 'Host *\nPort 2222\nIdentityFile %s/.ssh/id_rsa\nStrictHostKeyChecking no\n' "$HOME" > "$HOME/.ssh/config"
+              MPI_ROOT_ARGS=()
+              if [ "$(id -u)" -eq 0 ]; then MPI_ROOT_ARGS+=(--allow-run-as-root); fi
               # Worker hostname: Grove swaps the role suffix, LeaderWorkerSet appends the
               # worker index. For nodeCount above 2, add each extra worker to -H and raise -n.
               case "$DYNAMO_LEADER_ADDRESS" in
                 *-ldr-0.*) WORKER="${DYNAMO_LEADER_ADDRESS/-ldr-0./-wkr-0.}" ;;
                 *) WORKER="${DYNAMO_LEADER_ADDRESS/./-1.}" ;;
               esac
-              until ssh -o StrictHostKeyChecking=no "$WORKER" true; do echo "waiting for sshd on $WORKER"; sleep 3; done
-              exec mpirun --bind-to none -n 4 -H "$DYNAMO_LEADER_ADDRESS:2,$WORKER:2" \
-                --mca pml ob1 ${HF_TOKEN:+-x HF_TOKEN} \
+              until ssh -F "$HOME/.ssh/config" "$WORKER" true; do echo "waiting for sshd on $WORKER"; sleep 3; done
+              exec mpirun "${MPI_ROOT_ARGS[@]}" --bind-to none -n 4 -H "$DYNAMO_LEADER_ADDRESS:2,$WORKER:2" \
+                --mca pml ob1 --mca plm_rsh_args "-p 2222 -o StrictHostKeyChecking=no -i $HOME/.ssh/id_rsa" ${HF_TOKEN:+-x HF_TOKEN} \
                 bash -c 'trtllm-llmapi-launch trtllm-serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
                   --grpc --grpc-protocol openengine --openengine-enable-load-metrics \
                   --host 0.0.0.0 --port 30001 --max_seq_len 2048 \
@@ -180,15 +184,22 @@ spec:
             - /bin/bash
             - -c
             args:
-            # The image ships no sshd, and apt does not create /run/sshd. Ranks run in
+            # The release image needs openssh-server; runtime images include it. Ranks run in
             # sshd sessions, so export the container environment to them: Triton JIT
             # needs the CUDA paths. Tokens stay out. The leader passes HF_TOKEN with mpirun -x.
             - |
               set -euo pipefail
               command -v sshd >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server; }
               install -Dm600 /ssh-pk/private.key.pub "$HOME/.ssh/authorized_keys"
-              mkdir -p /run/sshd
+              mkdir -p "$HOME/.ssh/host_keys" "$HOME/.ssh/run"
+              for kind in rsa ecdsa ed25519; do
+                key="$HOME/.ssh/host_keys/ssh_host_${kind}_key"
+                test -f "$key" || ssh-keygen -q -t "$kind" -f "$key" -N ''
+              done
+              # Only root sshd uses the system privilege-separation directory.
+              if [ "$(id -u)" -eq 0 ]; then mkdir -p /run/sshd; fi
+              printf 'Port 2222\nHostKey %s/.ssh/host_keys/ssh_host_rsa_key\nHostKey %s/.ssh/host_keys/ssh_host_ecdsa_key\nHostKey %s/.ssh/host_keys/ssh_host_ed25519_key\nPidFile %s/.ssh/run/sshd.pid\nStrictModes no\nPermitRootLogin yes\nPasswordAuthentication no\nPubkeyAuthentication yes\nAuthorizedKeysFile %s/.ssh/authorized_keys\nPermitUserEnvironment yes\n' "$HOME" "$HOME" "$HOME" "$HOME" "$HOME" > "$HOME/.ssh/sshd_config"
               env | grep -vE '^(HF_TOKEN|HUGGING_FACE_HUB_TOKEN|HF_HUB_TOKEN)=' > "$HOME/.ssh/environment"
-              exec /usr/sbin/sshd -D -e -o PermitUserEnvironment=yes
+              exec /usr/sbin/sshd -D -e -f "$HOME/.ssh/sshd_config"
             volumeMounts: *engineMounts
           volumes: *engineVolumes
