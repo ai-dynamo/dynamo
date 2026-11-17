@@ -390,53 +390,37 @@ pub struct NvtxRangeGuard {
 pub struct NvtxRangeGuard;
 
 impl NvtxRangeGuard {
+    /// Open a range named `name` if annotations are on. Prefer [`dynamo_nvtx_range!`].
     #[doc(hidden)]
     #[inline(always)]
     pub fn new<M: std::fmt::Display>(name: M) -> Self {
+        Self::new_keyed(name, None)
+    }
+
+    /// Open a range named `stage`, with `key` as the NVTX payload when it is `Some` and
+    /// without a payload when it is `None`, if annotations are on. Prefer
+    /// [`dynamo_nvtx_keyed_range!`] or [`dynamo_nvtx_request_range!`].
+    ///
+    /// The single place a guard opens a range: `stage` is rendered and the FFI is
+    /// called only when the `nvtx` feature is on and `DYN_NVTX` is set.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn new_keyed<M: std::fmt::Display>(stage: M, key: Option<u64>) -> Self {
         #[cfg(feature = "nvtx")]
         {
             // Re-checked rather than assumed: the macros gate on `enabled()`
-            // first, but `new` is public and must not open a range behind the
+            // first, but this is public and must not open a range behind the
             // switch's back.
-            let id = NVTX_ENABLED
-                .load(Ordering::Relaxed)
-                .then(|| ffi::range_start(name));
-            NvtxRangeGuard { id }
-        }
-        #[cfg(not(feature = "nvtx"))]
-        {
-            let _ = name;
-            NvtxRangeGuard
-        }
-    }
-
-    /// Open a request-scoped range (static `stage`, `key` as the NVTX payload) if
-    /// annotations are on. Prefer [`dynamo_nvtx_request_range!`].
-    #[doc(hidden)]
-    pub fn new_with_payload<M: std::fmt::Display>(stage: M, key: u64) -> Self {
-        #[cfg(feature = "nvtx")]
-        {
-            let id = NVTX_ENABLED
-                .load(Ordering::Relaxed)
-                .then(|| ffi::range_start_payload(stage, key));
+            let id = NVTX_ENABLED.load(Ordering::Relaxed).then(|| match key {
+                Some(key) => ffi::range_start_payload(stage, key),
+                None => ffi::range_start(stage),
+            });
             NvtxRangeGuard { id }
         }
         #[cfg(not(feature = "nvtx"))]
         {
             let _ = (stage, key);
             NvtxRangeGuard
-        }
-    }
-
-    /// Open a range named `stage`, with `key` as the NVTX payload when it is `Some` and
-    /// without a payload when it is `None`, if annotations are on. Prefer
-    /// [`dynamo_nvtx_keyed_range!`].
-    #[doc(hidden)]
-    #[inline(always)]
-    pub fn new_keyed<M: std::fmt::Display>(stage: M, key: Option<u64>) -> Self {
-        match key {
-            Some(key) => Self::new_with_payload(stage, key),
-            None => Self::new(stage),
         }
     }
 
@@ -707,7 +691,7 @@ pub fn request_range_impl(stage: &str, rid: &str, attrs: &[(&str, &str)]) -> Nvt
     }
     #[cfg(not(feature = "nvtx"))]
     let _ = attrs;
-    NvtxRangeGuard::new_with_payload(stage, key)
+    NvtxRangeGuard::new_keyed(stage, Some(key))
 }
 
 /// Record a request-scoped NVTX marker: message `<stage>`, payload [`rid_key`]`(rid)`.
@@ -1032,6 +1016,24 @@ mod tests {
 
         drop(disabled);
         drop(enabled);
+    }
+
+    /// The constructors own the runtime gate themselves (the macros' `enabled()`
+    /// check is only the fast path): called directly while disabled, both the keyed
+    /// and unkeyed arms of `new_keyed`, and `new`, must return an inactive guard.
+    #[cfg(feature = "nvtx")]
+    #[test]
+    fn constructors_gate_on_the_switch_without_the_macros() {
+        use super::NvtxRangeGuard;
+        let flag = EnabledFlag::set(false);
+        assert!(NvtxRangeGuard::new("test.ctor").id.is_none());
+        assert!(NvtxRangeGuard::new_keyed("test.ctor", None).id.is_none());
+        assert!(NvtxRangeGuard::new_keyed("test.ctor", Some(7)).id.is_none());
+
+        flag.store(true);
+        assert!(NvtxRangeGuard::new("test.ctor").id.is_some());
+        assert!(NvtxRangeGuard::new_keyed("test.ctor", None).id.is_some());
+        assert!(NvtxRangeGuard::new_keyed("test.ctor", Some(7)).id.is_some());
     }
 
     const PIN_A: u64 = 3_414_815_163_700_866_188;
