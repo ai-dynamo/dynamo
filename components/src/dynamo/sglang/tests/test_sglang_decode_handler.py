@@ -2539,6 +2539,59 @@ async def test_process_token_stream_preserves_cache_usage_before_metadata_clear(
 
 
 @pytest.mark.asyncio
+async def test_disagg_decode_drops_prompt_ids_once_dispatched():
+    handler = _new_decode_handler(serving_mode=DisaggregationMode.DECODE)
+    handler._enable_frontend_decoding = False
+    handler._mm_hashes_supported = False
+    handler._engine_supports_priority = False
+    handler._routed_experts_kwargs = {}
+    handler.enable_trace = False
+    input_params = []
+
+    def get_input_param(request):
+        input_params.append({"input_ids": request["token_ids"]})
+        return input_params[-1]
+
+    handler._get_input_param = get_input_param
+    handler._resolve_lora = lambda request: None
+    handler.engine = SimpleNamespace(
+        async_generate=AsyncMock(
+            return_value=_stream(
+                [
+                    {
+                        "output_ids": [68],
+                        "meta_info": {"id": "r", "finish_reason": {"type": "stop"}},
+                    }
+                ]
+            )
+        )
+    )
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        trace_id="trace-id",
+        is_stopped=lambda: False,
+        notify_first_token=lambda: None,
+    )
+    prompt = [1, 17]
+    request = {
+        "token_ids": prompt,
+        "stop_conditions": {"max_tokens": 1},
+        "bootstrap_info": {
+            "bootstrap_host": "prefill.invalid",
+            "bootstrap_port": 1234,
+            "bootstrap_room": 123,
+        },
+    }
+
+    chunks = await _collect(handler.generate(request, context))
+
+    assert [chunk["token_ids"] for chunk in chunks] == [[68]]
+    assert handler.engine.async_generate.await_args.kwargs["input_ids"] is prompt
+    assert "token_ids" not in request
+    assert input_params == [{}]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "mode", [DisaggregationMode.AGGREGATED, DisaggregationMode.DECODE]
 )

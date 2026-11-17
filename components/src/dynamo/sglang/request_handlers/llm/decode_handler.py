@@ -943,6 +943,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **agent_session_kwargs(self.engine, request),
                 **kv_hint_kwargs(self.engine, request),
             )
+            request.pop("token_ids", None)
+            input_param.clear()
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
                     decode,
