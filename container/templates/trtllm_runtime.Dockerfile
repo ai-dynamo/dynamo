@@ -149,6 +149,10 @@ ENV DYNAMO_HOME=/workspace \
 #   Nsight Systems and the /opt/nvidia Nsight Systems and Compute installs. The
 #   guard fails the build if any efa_metrics directory survives under /usr/local
 #   or /opt, so a base bump that moves the plugin cannot ship it silently.
+#   The same cleanup removes the pip in the Nsight Systems CLI's own Python and
+#   the onnx.egg-info that the base's PyTorch source tree keeps from its build.
+#   Nothing in the image runs either, and a second guard fails the build if
+#   either survives.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     set -eu; \
@@ -219,6 +223,22 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         echo "ERROR: an efa_metrics plugin directory survived removal; the globs no" >&2; \
         echo "       longer match the base image's Nsight layout." >&2; \
         find /usr/local /opt -xdev -type d -name efa_metrics >&2; \
+        exit 1; \
+    fi; \
+    rm -rf /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/python/lib/python3.12/site-packages/pip \
+        /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/python/lib/python3.12/site-packages/pip-*.dist-info \
+        /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/python/bin/pip3* \
+        /opt/nvidia/nsight-systems-cli/*/target-linux-*/python/lib/python3.12/site-packages/pip \
+        /opt/nvidia/nsight-systems-cli/*/target-linux-*/python/lib/python3.12/site-packages/pip-*.dist-info \
+        /opt/nvidia/nsight-systems-cli/*/target-linux-*/python/bin/pip3* \
+        /opt/pytorch/pytorch/third_party/onnx/onnx.egg-info; \
+    left=$(find /usr/local /opt -xdev \( -path '*/NsightSystems-cli-*/site-packages/pip*' \
+            -o -path '*/nsight-systems-cli/*/site-packages/pip*' \
+            -o -path '*/nsight-compute/*/site-packages/pip*' -o -name onnx.egg-info \) 2>/dev/null); \
+    if [ -n "$left" ]; then \
+        echo "ERROR: an Nsight pip or the PyTorch tree's onnx.egg-info survived" >&2; \
+        echo "       removal; the globs no longer match the base layout:" >&2; \
+        echo "$left" >&2; \
         exit 1; \
     fi
 
@@ -401,11 +421,15 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 # - certifi (CA bundle) and Pillow: no required dependencies, so each moves
 #   exactly one distribution.
 # - jupyter-server, jupyterlab, notebook, urllib3: the upstream developer stack.
-# - datasets, fsspec, filelock, pyasn1: datasets 4.7.0 caps fsspec at 2026.2.0,
-#   so datasets moves to 5.1.0. tensorrt-llm declares datasets unversioned;
-#   torchtitan caps it below 4.8.0 but tensorrt_llm does not import torchtitan.
-#   The filelock floor matches upstream TensorRT-LLM; the pyasn1 cap stays inside
-#   pyasn1-modules' range.
+# - datasets, fsspec, filelock, pyasn1, soupsieve, onnx, multidict, werkzeug:
+#   datasets 4.7.0 caps fsspec at 2026.2.0, so datasets moves to 5.1.0.
+#   tensorrt-llm declares datasets unversioned; torchtitan caps it below 4.8.0
+#   but tensorrt_llm does not import torchtitan. The filelock floor matches
+#   upstream TensorRT-LLM; the pyasn1 cap stays inside pyasn1-modules' range.
+#   soupsieve 4 needs Python 3.11.5 and no other package; requirements.trtllm.txt
+#   refreshes only the venv's own copy, so the venv check leaves it out. onnx
+#   1.22.0 needs typing_extensions 4.15.0 and ml_dtypes 0.5.4, which the base
+#   ships, and aiohttp caps multidict below 7.
 #
 # Guards assert exactly one dist-info directory in range, since that is what the
 # inventory reads and what a stale copy would leave behind; they compare
@@ -427,12 +451,13 @@ RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade pip==26.2.
     /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n.replace("-", "_") + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3' && \
     /usr/bin/python3 -m pip install --break-system-packages --upgrade \
         --report /tmp/system-site-refresh.json \
-        "datasets==5.1.0" "fsspec[http]==2026.7.0" "filelock>=4.2.1,<5" "pyasn1>=0.6.5,<0.7" && \
-    /usr/bin/python3 -c 'import json; d = json.load(open("/tmp/system-site-refresh.json")); changed = {p["metadata"]["name"].lower().replace("_", "-") for p in d["install"]}; print("upgraded system distributions:", sorted(changed)); assert changed <= {"datasets", "fsspec", "filelock", "pyasn1"}, "Unexpected transitive upgrade"' && \
+        "datasets==5.1.0" "fsspec[http]==2026.7.0" "filelock>=4.2.1,<5" "pyasn1>=0.6.5,<0.7" \
+        "soupsieve==4.1.1" "onnx==1.22.0" "multidict==6.9.1" "werkzeug==3.1.9" && \
+    /usr/bin/python3 -c 'import json; d = json.load(open("/tmp/system-site-refresh.json")); changed = {p["metadata"]["name"].lower().replace("_", "-") for p in d["install"]}; print("upgraded system distributions:", sorted(changed)); assert changed <= {"datasets", "fsspec", "filelock", "pyasn1", "soupsieve", "onnx", "multidict", "werkzeug"}, "Unexpected transitive upgrade"' && \
     rm /tmp/system-site-refresh.json && \
-    /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"datasets": ("5.1.0", "5.1.1"), "fsspec": ("2026.7.0", "2026.7.1"), "filelock": ("4.2.1", "5"), "pyasn1": ("0.6.5", "0.7")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import datasets, fsspec, filelock, pyasn1'{% if target not in ("dev", "local-dev") %} && \
+    /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"datasets": ("5.1.0", "5.1.1"), "fsspec": ("2026.7.0", "2026.7.1"), "filelock": ("4.2.1", "5"), "pyasn1": ("0.6.5", "0.7"), "soupsieve": ("4.1.1", "4.1.2"), "onnx": ("1.22.0", "1.22.1"), "multidict": ("6.9.1", "6.9.2"), "werkzeug": ("3.1.9", "3.1.10")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import datasets, fsspec, filelock, pyasn1, soupsieve, onnx, multidict, werkzeug'{% if target not in ("dev", "local-dev") %} && \
     /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m, sys; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3; print("runtime import paths:", sys.modules[ServerApp.__module__].__file__, sys.modules[LabApp.__module__].__file__, sys.modules[JupyterNotebookApp.__module__].__file__, urllib3.__file__)' && \
-    /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m; from packaging.version import Version; bounds = {"datasets": ("5.1.0", "5.1.1"), "fsspec": ("2026.7.0", "2026.7.1"), "filelock": ("4.2.1", "5"), "pyasn1": ("0.6.5", "0.7")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import datasets, fsspec, filelock, pyasn1; print("runtime import paths:", datasets.__file__, fsspec.__file__, filelock.__file__, pyasn1.__file__)'{% endif %}
+    /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m; from packaging.version import Version; bounds = {"datasets": ("5.1.0", "5.1.1"), "fsspec": ("2026.7.0", "2026.7.1"), "filelock": ("4.2.1", "5"), "pyasn1": ("0.6.5", "0.7"), "onnx": ("1.22.0", "1.22.1"), "multidict": ("6.9.1", "6.9.2"), "werkzeug": ("3.1.9", "3.1.10")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import datasets, fsspec, filelock, pyasn1, onnx, multidict, werkzeug; paths = [datasets.__file__, fsspec.__file__, filelock.__file__, pyasn1.__file__, onnx.__file__, multidict.__file__, werkzeug.__file__]; print("runtime import paths:", *paths); assert all(p.startswith("/usr/local/lib/python3.12/dist-packages/") for p in paths)'{% endif %}
 
 # Pull /workspace_src (incl. LICENSE) from the transport stage and
 # wire up the launch screen in a single RUN — saves the standalone workspace COPY layer.
