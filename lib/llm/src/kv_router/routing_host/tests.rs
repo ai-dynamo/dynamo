@@ -5266,7 +5266,6 @@ async fn unknown_explicit_workers_are_rejected_before_builtin_dispatch() {
     runtime.shutdown();
 }
 
-/// The non-KV modes stamp the request's time since arrival as they dispatch it too.
 #[tokio::test]
 #[serial_test::serial]
 async fn builtin_dispatch_stamps_elapsed_since_arrival() {
