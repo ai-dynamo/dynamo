@@ -5,9 +5,7 @@ building the other snapshot. Force an indexer package rebuild when sharing a
 Cargo target between archived source snapshots.
 
 ```sh
-CARGO_PROFILE_DEV_OPT_LEVEL=2 CARGO_PROFILE_DEV_DEBUG=0 \
-  CARGO_PROFILE_DEV_INCREMENTAL=false \
-  cargo build -p dynamo-kv-indexer --example hybrid_lookup --locked --offline
+cargo build --release -p dynamo-kv-indexer --example hybrid_lookup --locked --offline
 python3 lib/router/kv-indexer/benches/run_hybrid_lookup_ab.py \
   --baseline-bin /path/to/baseline-bin --final-bin /path/to/final-bin \
   --output /path/to/new-results --duration-ms 1000 --repeats 5
