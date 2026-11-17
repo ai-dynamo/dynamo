@@ -26,11 +26,15 @@
 // through the ordered candidate references on the run status, which this package does
 // not touch.
 //
-// The package is pure (no Kubernetes types, no I/O) so the diff can be tested on its
+// The package performs no I/O so the diff can be tested on its
 // own; callers fetch current state and apply the returned Actions.
 package dgdcreconcile
 
-import "fmt"
+import (
+	"fmt"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
 
 // DiffInputError means the desired or current set was malformed (e.g. a duplicate or
 // empty identity). Retrying will not fix it, so callers treat it as terminal.
@@ -53,6 +57,8 @@ type DesiredCandidate struct {
 	// DGDC status at creation.
 	Parameters map[string]any
 	Metrics    map[string]any
+	// Validity is the final publisher-owned outcome of override application and DGD dry-run.
+	Validity metav1.Condition
 }
 
 // CurrentDGDC is one DGDC observed in the cluster. ID is read back from the label

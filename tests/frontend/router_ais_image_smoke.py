@@ -39,7 +39,7 @@ def main() -> None:
     from dynamo.mocker.config import normalize_mocker_config
     from dynamo.replay import run_synthetic_trace_replay
 
-    config, _, _ = parse_args()
+    config, _, _, _ = parse_args()
     assert config.router_mode == "kv"
     assert config.router_prefill_load_model == "ais"
     perf = AisPerfConfig(**config.ais_perf_kwargs())

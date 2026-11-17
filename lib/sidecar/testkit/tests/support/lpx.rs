@@ -159,7 +159,7 @@ impl SidecarFixture for Fixture {
     }
 
     fn eof_error() -> BackendError {
-        BackendError::Unknown
+        BackendError::StreamIncomplete
     }
 
     /// An engine ends open streams with UNAVAILABLE. Another worker can

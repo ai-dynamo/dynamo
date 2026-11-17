@@ -19,8 +19,8 @@ use minijinja::value::Value;
 
 use dynamo_renderer::{
     ChatTemplate, ChatTemplateValue, ContextMixins, OAIChatLikeRequest, PromptFormatter,
-    PromptInput, RenderedPrompt, RenderedSegment, TextInput, TokenInput, deepseek_formatter_for,
-    kimi_k3_formatter_for, may_be_fix_tool_schema,
+    PromptInput, RenderedPrompt, RenderedSegment, TextInput, TokenInput, kimi_k3_formatter_for,
+    may_be_fix_tool_schema, native_formatter_for,
 };
 
 use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
@@ -415,7 +415,7 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
         return Ok(formatter);
     }
 
-    if let Some(formatter) = deepseek_formatter_for(&model_type_lower, &display_name_lower) {
+    if let Some(formatter) = native_formatter_for(&model_type_lower, &display_name_lower) {
         return Ok(formatter);
     }
 

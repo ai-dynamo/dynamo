@@ -2265,7 +2265,9 @@ body:has(input[name="recipe-variant"][value="vllm-disagg"]:checked) [data-varian
 body:has(input[name="recipe-variant"][value="standard"]:checked) [data-variant]:not([data-variant~="standard"]),
 body:has(input[name="recipe-variant"][value="efa"]:checked) [data-variant]:not([data-variant~="efa"]),
 body:has(input[name="recipe-variant"][value="kv-router"]:checked) [data-variant]:not([data-variant~="kv-router"]),
-body:has(input[name="recipe-variant"][value="kvbm"]:checked) [data-variant]:not([data-variant~="kvbm"]) {
+body:has(input[name="recipe-variant"][value="kvbm"]:checked) [data-variant]:not([data-variant~="kvbm"]),
+body:has(input[name="recipe-variant"][value="round-robin"]:checked) [data-variant]:not([data-variant~="round-robin"]),
+body:has(input[name="recipe-variant"][value="session-affinity"]:checked) [data-variant]:not([data-variant~="session-affinity"]) {
     display: none;
 }
 

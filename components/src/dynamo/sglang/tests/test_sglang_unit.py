@@ -5,36 +5,46 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import re
 import sys
 import tomllib
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import torch
 import yaml
 from packaging.requirements import Requirement
+from safetensors.torch import save_file
+from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
+from sglang.multimodal_gen.runtime.server_args import auto_tune
+from sglang.multimodal_gen.runtime.utils.precision import resolve_component_precision
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.managers.io_struct import ProfileReq
 
 import dynamo.sglang._compat as sglang_compat
 import dynamo.sglang._disagg as disagg_mod
 import dynamo.sglang.args as sglang_args
+import dynamo.sglang.init_llm as init_llm_mod
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang._compat import (
     add_sglang_cli_compat,
     cache_salt_kwargs,
+    diffusers_text_encoder_precision_kwargs,
     filter_supported_async_generate_kwargs,
     get_sglang_model_config,
     override_server_args,
     publish_server_args,
     require_reasoning_kwargs,
     resolved_server_args,
+    sglang_has_wide_mm_pad_values,
+    sglang_uses_engine_owned_mm_identity,
     sglang_uses_mla_backend,
     supports_external_mm_hashes,
 )
@@ -57,6 +67,12 @@ from dynamo.sglang.publisher import finish_worker_teardown
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
+
+try:
+    from sglang.multimodal_gen.runtime.loader.utils import checkpoint_component_sizes
+except ImportError:
+    # SGLang 0.5.22 has no sizing check. Remove when minimum is 0.5.23+.
+    checkpoint_component_sizes = None
 
 try:
     from dynamo.sglang import register as sglang_register
@@ -223,6 +239,119 @@ def test_diffusion_generator_kwargs_omits_unset_master_port():
 
     assert kwargs["num_gpus"] == 1
     assert "master_port" not in kwargs
+
+
+def _write_diffusers_checkpoint(root: Path, encoders: list[str]) -> str:
+    """Write metadata and tiny weights for SGLang's real checkpoint sizing."""
+    components = {name: ["transformers", "CLIPTextModel"] for name in encoders}
+    components |= {
+        "tokenizer": ["transformers", "CLIPTokenizer"],
+        "unet": ["diffusers", "UNet2DConditionModel"],
+        "vae": ["diffusers", "AutoencoderKL"],
+        "scheduler": ["diffusers", "EulerDiscreteScheduler"],
+    }
+    for name in components:
+        (root / name).mkdir()
+    for name in encoders:
+        save_file({"weight": torch.zeros(1)}, str(root / name / "model.safetensors"))
+    index = {
+        # No native SGLang pipeline, so SGLang falls back to Diffusers.
+        "_class_name": "StableDiffusionXLPipeline",
+        "_diffusers_version": "0.24.0",
+        "feature_extractor": [None, None],
+        **components,
+    }
+    (root / "model_index.json").write_text(json.dumps(index))
+    return str(root)
+
+
+def _resolve_text_encoder_precisions(kwargs: dict, encoders: list[str]) -> dict:
+    """Resolve each encoder's precision the way SGLang's memory sizing does."""
+    server_args = SimpleNamespace(
+        pipeline_config=PipelineConfig.from_kwargs(dict(kwargs)),
+        component_precisions=kwargs.get("component_precisions", {}),
+    )
+    return {name: resolve_component_precision(server_args, name) for name in encoders}
+
+
+@pytest.mark.parametrize(
+    "encoders",
+    [
+        pytest.param(["text_encoder", "text_encoder_2"], id="sdxl"),
+        pytest.param(
+            ["text_encoder", "text_encoder_2", "text_encoder_3"], id="three-encoders"
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "index_cached", [True, False], ids=["index-cached", "weights-only"]
+)
+@pytest.mark.skipif(
+    checkpoint_component_sizes is None,
+    reason="SGLang 0.5.22 has no memory sizing check",
+)
+def test_diffusers_text_encoder_precision_kwargs_sizes_every_encoder(
+    tmp_path, encoders, index_cached, monkeypatch
+):
+    """Keep cached multi-encoder checkpoints usable by SGLang's auto-tuner."""
+    kwargs = {
+        "model_path": _write_diffusers_checkpoint(tmp_path, encoders),
+        "num_gpus": 1,
+    }
+    # Exercise the auto-tuner too: a fix there must prompt shim removal even
+    # when the fallback precision tuple stays unchanged.
+    server_args = SimpleNamespace(
+        model_path=kwargs["model_path"],
+        pipeline_config=PipelineConfig.from_kwargs(dict(kwargs)),
+        component_precisions={},
+        performance_mode="auto",
+        batching_max_size=1,
+        quantization=None,
+        transformer_weights_path=None,
+        nunchaku_config=None,
+        component_paths={},
+        component_weights_paths={},
+        component_quantizations={},
+        model_subfolder=None,
+        revision=None,
+        tp_size=1,
+    )
+    monkeypatch.setattr(auto_tune.current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(auto_tune.current_platform, "is_mps", lambda: False)
+    monkeypatch.setattr(
+        auto_tune.current_platform, "device_shares_host_memory", lambda: False
+    )
+    tuner = SimpleNamespace(
+        server_args=server_args, _get_min_available_device_memory_gb=lambda: 80
+    )
+    with pytest.raises(
+        ValueError, match="No configured precision for 'text_encoder_2'"
+    ):
+        auto_tune.ServerArgsAutoTuner._fits_all_components_resident(tuner)
+
+    if not index_cached:
+        index_path = tmp_path / "model_index.json"
+        index = index_path.read_text()
+        index_path.unlink()
+        from_kwargs = PipelineConfig.from_kwargs
+
+        def resolve_config(config_kwargs):
+            # Stand in for the metadata fetch during SGLang config resolution.
+            index_path.write_text(index)
+            return from_kwargs(config_kwargs)
+
+        monkeypatch.setattr(PipelineConfig, "from_kwargs", resolve_config)
+
+    patched = diffusers_text_encoder_precision_kwargs(kwargs)
+
+    assert "component_precisions" not in kwargs
+    server_args.component_precisions = patched["component_precisions"]
+    assert auto_tune.ServerArgsAutoTuner._fits_all_components_resident(tuner)
+    # The fallback loads every component at dit_precision (bf16).
+    assert _resolve_text_encoder_precisions(patched, encoders) == {
+        "text_encoder": torch.float16,
+        **{name: torch.bfloat16 for name in encoders[1:]},
+    }
 
 
 def test_override_server_args_uses_declarative_resolution(monkeypatch):
@@ -624,6 +753,26 @@ async def test_parse_args_rejects_dcp_on_backend_without_dcp_support(
     assert "'fa3'" in message
     assert "--dcp-size 1" in message
     assert "automatically" in message
+
+
+@pytest.mark.asyncio
+async def test_parse_args_rejects_default_chat_template_kwargs(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args",
+        lambda _: _dcp_server_args_stub(
+            default_chat_template_kwargs={"clear_thinking": False}
+        ),
+    )
+    mock_sglang_cli(model=str(tmp_path))
+
+    with pytest.raises(ValueError) as excinfo:
+        await parse_args(sys.argv[1:])
+
+    message = str(excinfo.value)
+    assert "has no effect on a Dynamo worker" in message
+    assert "python -m dynamo.frontend" in message
 
 
 @pytest.mark.asyncio
@@ -1089,8 +1238,18 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
 
 
 @pytest.mark.asyncio
-async def test_external_mm_hashes_rebuild_padding_after_hash_override():
-    item = SimpleNamespace(pad_value=91, offsets=[(1, 2)])
+async def test_external_mm_hashes_rebuild_padding_after_hash_override(monkeypatch):
+    # Deferred so marker-only collection does not require SGLang runtime modules.
+    from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+
+    # The repair applies to SGLang builds that still derive pad values from
+    # caller hashes.
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_uses_engine_owned_mm_identity",
+        lambda mm_processor=None: False,
+    )
+    item = MultimodalDataItem(modality=Modality.IMAGE, pad_value=91, offsets=[(1, 2)])
     mm_inputs = SimpleNamespace(mm_items=[item], padded_input_ids=[1, 7, 7, 4])
     tokenized = SimpleNamespace(input_ids=[1, 2, 3, 4], mm_inputs=mm_inputs)
 
@@ -1120,6 +1279,59 @@ def test_external_mm_hashes_are_disabled_when_engine_lacks_kwarg():
             return None
 
     assert not supports_external_mm_hashes(LegacyEngine())
+
+
+def test_external_mm_hashes_are_disabled_for_engine_owned_mm_identity(monkeypatch):
+    # sgl-project/sglang#43043 builds derive wide pad values from their own
+    # identity; caller hashes no longer match Dynamo's pads and Kimi rejects them.
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_uses_engine_owned_mm_identity",
+        lambda mm_processor=None: True,
+    )
+
+    class MmHashEngine:
+        async def async_generate(self, mm_hashes=None):
+            return None
+
+    assert not supports_external_mm_hashes(MmHashEngine())
+
+
+@pytest.mark.parametrize("wide_schema", [False, True])
+def test_mm_identity_and_pad_format_capabilities(monkeypatch, wide_schema):
+    fields = ("hash", "pad_value", "modality")
+    if wide_schema:
+        fields += ("pad_values",)
+    mod = ModuleType("sglang.srt.managers.schedule_batch")
+    mod.MultimodalDataItem = type(
+        "MultimodalDataItem", (), {"__struct_fields__": fields}
+    )
+    monkeypatch.setitem(sys.modules, "sglang.srt.managers.schedule_batch", mod)
+
+    class KimiProcessor:
+        uses_wide_image_identity = True
+
+    class CustomProcessor(KimiProcessor):
+        pass
+
+    class MmHashEngine:
+        def __init__(self, processor):
+            self.tokenizer_manager = SimpleNamespace(mm_processor=processor)
+
+        async def async_generate(self, mm_hashes=None):
+            return None
+
+    # The inherited capability survives external processor overrides.
+    custom = CustomProcessor()
+    assert sglang_uses_engine_owned_mm_identity(custom) is wide_schema
+    assert supports_external_mm_hashes(MmHashEngine(custom)) is not wide_schema
+    assert sglang_uses_engine_owned_mm_identity() is wide_schema
+
+    # Qwen accepts caller hashes, but its event tokens still use the wide format.
+    qwen = SimpleNamespace()
+    assert not sglang_uses_engine_owned_mm_identity(qwen)
+    assert supports_external_mm_hashes(MmHashEngine(qwen))
+    assert sglang_has_wide_mm_pad_values() is wide_schema
 
 
 @pytest.mark.parametrize(
@@ -2007,6 +2219,8 @@ def test_systemone_serial_capability_registration_gate(
         ("0.5.20", False),
         ("0.5.22", True),
         ("0.5.22+cu130", True),
+        ("0.5.23", True),
+        ("0.5.23+cu130", True),
         ("0.5.19+debug", False),
         ("0.5.22+debug", False),
         ("0.5.22+cu130.debug", False),
@@ -2072,8 +2286,15 @@ def test_systemone_serial_profile_covers_pinned_sglang_version(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("serial", [False, True])
-@pytest.mark.parametrize("installed", ["0.5.19", "0.5.22+cu130"])
+@pytest.mark.parametrize(
+    ("serial", "installed"),
+    [
+        (False, "0.5.19"),
+        (True, "0.5.19"),
+        (True, "0.5.22+cu130"),
+        (True, "0.5.23"),
+    ],
+)
 async def test_systemone_serial_capability_published_only_when_isolated(
     monkeypatch, caplog, serial, installed
 ):
@@ -2694,6 +2915,152 @@ async def test_prefill_warmup_cancellation_cancels_metrics(monkeypatch):
             metrics_task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await metrics_task
+
+
+def _decode_warmup_engine(events, image=False):
+    async def async_generate(**kwargs):
+        events.append(("generate", kwargs))
+
+    async def freeze_gc():
+        events.append(("freeze_gc", {}))
+
+    return SimpleNamespace(
+        async_generate=async_generate,
+        tokenizer_manager=SimpleNamespace(
+            model_config=SimpleNamespace(is_image_understandable_model=image),
+            freeze_gc=freeze_gc,
+        ),
+    )
+
+
+def _decode_warmup_server_args(**overrides):
+    values = dict(
+        skip_server_warmup=False,
+        skip_tokenizer_init=False,
+        ep_join_mode=None,
+        language_only=False,
+        language_model_only=False,
+        enable_encoder_swa_bounded_replay=False,
+    )
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+@pytest.fixture
+def record_text_warmup(monkeypatch):
+    events = []
+
+    async def warmup_engine(engine, server_args):
+        events.append(("warmup", {}))
+
+    monkeypatch.setattr(init_llm_mod, "warmup_engine", warmup_engine)
+    return events
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_matches_launch_server_order(record_text_warmup):
+    events = record_text_warmup
+    await init_llm_mod._warmup_decode_engine(
+        _decode_warmup_engine(events), _decode_warmup_server_args()
+    )
+
+    assert [name for name, _ in events] == ["warmup", "freeze_gc", "generate"]
+    assert events[2][1]["input_ids"] == [0]
+    assert events[2][1]["sampling_params"]["max_new_tokens"] == 1
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_skip_server_warmup_still_freezes_gc(record_text_warmup):
+    events = record_text_warmup
+    await init_llm_mod._warmup_decode_engine(
+        _decode_warmup_engine(events),
+        _decode_warmup_server_args(skip_server_warmup=True),
+    )
+
+    assert [name for name, _ in events] == ["freeze_gc"]
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_skips_generation_on_scale_joiner(record_text_warmup):
+    events = record_text_warmup
+    await init_llm_mod._warmup_decode_engine(
+        _decode_warmup_engine(events, image=True),
+        _decode_warmup_server_args(ep_join_mode="scale"),
+    )
+
+    assert [name for name, _ in events] == ["freeze_gc"]
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_image_failure_aborts_startup(monkeypatch):
+    events = []
+
+    async def failing_image_warmup(engine):
+        raise RuntimeError("image warmup failed")
+
+    monkeypatch.setattr(init_llm_mod, "_image_warmup", failing_image_warmup)
+    with pytest.raises(RuntimeError, match="image warmup failed"):
+        await init_llm_mod._warmup_decode_engine(
+            _decode_warmup_engine(events, image=True), _decode_warmup_server_args()
+        )
+
+    assert events == []
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_final_generation_times_out(
+    monkeypatch, record_text_warmup
+):
+    events = record_text_warmup
+    engine = _decode_warmup_engine(events)
+
+    async def hanging_generate(**kwargs):
+        events.append(("generate", kwargs))
+        await asyncio.Event().wait()
+
+    engine.async_generate = hanging_generate
+    monkeypatch.setattr(init_llm_mod, "_warmup_timeout", lambda: 0.05)
+    with pytest.raises(asyncio.TimeoutError):
+        await init_llm_mod._warmup_decode_engine(engine, _decode_warmup_server_args())
+
+    assert [name for name, _ in events] == ["warmup", "freeze_gc", "generate"]
+
+
+@pytest.mark.parametrize(
+    ("image", "overrides", "expected"),
+    [
+        (True, {}, True),
+        (False, {}, False),
+        (True, {"skip_tokenizer_init": True}, False),
+        (True, {"language_only": True}, False),
+        (True, {"language_model_only": True}, False),
+        (True, {"enable_encoder_swa_bounded_replay": True}, False),
+    ],
+)
+def test_decode_warmup_chooses_image_request_like_launch_server(
+    monkeypatch, image, overrides, expected
+):
+    monkeypatch.setattr(init_llm_mod, "is_mps", lambda: False)
+    engine = _decode_warmup_engine([], image=image)
+
+    assert (
+        init_llm_mod._uses_image_warmup(engine, _decode_warmup_server_args(**overrides))
+        is expected
+    )
+
+
+def test_decode_warmup_image_check_tolerates_older_sglang_args(monkeypatch):
+    # SGLang 0.5.19 (the XPU image) has no enable_encoder_swa_bounded_replay.
+    monkeypatch.setattr(init_llm_mod, "is_mps", lambda: False)
+    server_args = SimpleNamespace(skip_tokenizer_init=False)
+    engine = _decode_warmup_engine([], image=True)
+
+    assert init_llm_mod._uses_image_warmup(engine, server_args) is True
 
 
 def _import_sglang_main_without_reconfiguring_logging(monkeypatch):

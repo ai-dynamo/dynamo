@@ -82,6 +82,11 @@ def test_regression_dep2_collision() -> None:
     assert a.label() != b.label()
 
 
+def test_label_encodes_cp_only_above_one() -> None:
+    assert PickedParallelConfig(moe_tp=4, cp=4).label() == "tp1-moetp4-cp4"
+    assert PickedParallelConfig(moe_tp=4, cp=1).label() == "tp1-moetp4"
+
+
 # (tp, pp, dp, moe_tp, moe_ep, expected_label)
 _FORMAT_PINS: list[tuple[int, int, int, int, int, str]] = [
     # All-default baseline.

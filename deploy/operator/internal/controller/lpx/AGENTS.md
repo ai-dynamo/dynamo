@@ -252,6 +252,9 @@ SPDX-License-Identifier: Apache-2.0
   with its UID. Find obsolete maps by label, verify ownership before deletion,
   and retain desired names. Delete obsolete maps only after readiness, not during
   PCS replacement, so existing pods keep their configuration.
+- A workload whose builds contain `lpuUnits` gets no runtime ConfigMap; its
+  runtimes read placement from the build. The builds of one workload all contain
+  `lpuUnits` or none do. Independent workloads in one graph may differ.
 
 # Tests
 

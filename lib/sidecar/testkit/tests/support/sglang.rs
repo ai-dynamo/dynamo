@@ -44,6 +44,7 @@ pub struct Fixture {
     server_info_entered: Arc<Mutex<Option<Instant>>>,
     health: watch::Sender<Option<bool>>,
     health_calls: watch::Receiver<usize>,
+    engine_state: watch::Sender<Option<pb::EngineStateSnapshot>>,
     http: Option<http::Peer>,
 }
 
@@ -77,6 +78,21 @@ impl Fixture {
         *self.model_info.lock().unwrap() = model_info;
         *self.server_info.lock().unwrap() = server_info.into();
     }
+
+    /// Publishes a `WatchEngineState` snapshot with these flags.
+    pub fn set_engine_state(&self, healthy: bool, is_pause: bool) {
+        self.engine_state.send_modify(|state| {
+            let state = state.as_mut().expect("WatchEngineState has ended");
+            state.revision += 1;
+            state.healthy = healthy;
+            state.is_pause = is_pause;
+        });
+    }
+
+    /// Ends every `WatchEngineState` stream.
+    pub fn end_engine_state(&self) {
+        self.engine_state.send_replace(None);
+    }
 }
 
 impl SidecarFixture for Fixture {
@@ -107,6 +123,12 @@ impl SidecarFixture for Fixture {
         let server_info_entered = Arc::new(Mutex::new(None));
         let (health, health_rx) = watch::channel(Some(true));
         let (health_tx, health_calls) = watch::channel(0);
+        let (engine_state, engine_state_rx) = watch::channel(Some(pb::EngineStateSnapshot {
+            instance_id: std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos() as u64,
+            revision: 1,
+            healthy: true,
+            ..Default::default()
+        }));
         let controlled = ControlledService {
             inner: service.clone(),
             control,
@@ -116,6 +138,7 @@ impl SidecarFixture for Fixture {
             server_info_entered: server_info_entered.clone(),
             health: health_rx,
             health_calls: health_tx,
+            engine_state: engine_state_rx,
         };
         let server = TestServer::start(move |listener, shutdown| async move {
             tonic::transport::Server::builder()
@@ -138,6 +161,7 @@ impl SidecarFixture for Fixture {
             server_info_entered,
             health,
             health_calls,
+            engine_state,
             http: None,
         }
     }
@@ -387,6 +411,7 @@ struct ControlledService {
     server_info_entered: Arc<Mutex<Option<Instant>>>,
     health: watch::Receiver<Option<bool>>,
     health_calls: watch::Sender<usize>,
+    engine_state: watch::Receiver<Option<pb::EngineStateSnapshot>>,
 }
 
 fn patch_metadata(raw: &mut String, patch: &Value) {
@@ -406,7 +431,7 @@ macro_rules! delegate_service {
             type ChatCompleteStream = <SglangMockerService as SglangService>::ChatCompleteStream;
             type CompleteStream = <SglangMockerService as SglangService>::CompleteStream;
             type WatchEngineStateStream =
-                <SglangMockerService as SglangService>::WatchEngineStateStream;
+                BoxStream<'static, Result<pb::EngineStateSnapshot, Status>>;
 
             async fn generate(
                 &self,
@@ -429,9 +454,19 @@ macro_rules! delegate_service {
 
             async fn watch_engine_state(
                 &self,
-                request: Request<pb::WatchEngineStateRequest>,
+                _request: Request<pb::WatchEngineStateRequest>,
             ) -> Result<Response<Self::WatchEngineStateStream>, Status> {
-                self.inner.watch_engine_state(request).await
+                let states = futures::stream::unfold(
+                    (self.engine_state.clone(), true),
+                    |(mut states, first)| async move {
+                        if !first {
+                            states.changed().await.ok()?;
+                        }
+                        let state = states.borrow_and_update().clone()?;
+                        Some((Ok(state), (states, false)))
+                    },
+                );
+                Ok(Response::new(Box::pin(states)))
             }
 
             async fn health_check(

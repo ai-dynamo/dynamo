@@ -75,7 +75,8 @@ ROUTER_NOT_RETUNABLE: dict[str, str] = {
     "host_cache_hit_weight": _STARTUP_OVERLAP_ACCOUNTING,
     "disk_cache_hit_weight": _STARTUP_OVERLAP_ACCOUNTING,
     "shared_cache_multiplier": (
-        "replay reports no shared cache hits, so every value would score the same"
+        "a router started with it at 0 builds no KV fetch inputs and a runtime "
+        "update cannot add them, so retune keeps it at its startup value"
     ),
 }
 
@@ -112,6 +113,9 @@ class RouterPredictionConfig(BaseModel):
     prefill_load_scale: StrictFiniteFloat | None = None
     temperature: StrictFiniteFloat | None = None
     conversation_affinity: ConversationAffinityConfig | None = None
+    # Router policy YAML, the file the live router takes as ``--router-policy-config``.
+    # A worker-selection policy it selects replaces the default cost function.
+    policy_config: str | None = None
 
     @field_validator(
         "overlap_score_credit",
@@ -131,6 +135,7 @@ class RouterPredictionConfig(BaseModel):
             conflicts = {
                 "conversation_affinity",
                 "overlap_score_credit",
+                "policy_config",
                 "prefill_load_scale",
                 "temperature",
             }.intersection(self.model_fields_set)

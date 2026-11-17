@@ -17,7 +17,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use dynamo_kv_router::identity::PoolId;
+use dynamo_router_protocol::identity::PoolId;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::transports::event_plane::{Codec, EventSubscriber};
 use futures::Stream;
@@ -510,10 +510,10 @@ mod tests {
     use std::cell::Cell;
     use std::sync::Arc;
 
-    use dynamo_kv_router::identity::{
+    use dynamo_kv_indexer::cuckoo::{CkfConfig, DcCkfState, ProducerIdentity};
+    use dynamo_router_protocol::identity::{
         CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, RoutingScopeId,
     };
-    use dynamo_kv_router::indexer::cuckoo::{CkfConfig, DcCkfState, ProducerIdentity};
     use dynamo_runtime::protocols::EndpointId;
 
     use super::*;

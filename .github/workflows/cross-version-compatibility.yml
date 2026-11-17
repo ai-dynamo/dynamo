@@ -38,7 +38,13 @@ on:
       source_ref:
         type: string
         default: ''
+      dd_env:
+        description: Datadog env tag for test sessions (DD_ENV)
+        type: string
+        default: 'ci'
     secrets:
+      DD_API_KEY:
+        required: false
       AZURE_ACR_HOSTNAME:
         required: true
       AZURE_ACR_USER:
@@ -149,6 +155,8 @@ jobs:
           operator_tag: ${{ inputs.operator_tag }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.worker_tag }}
           model_cache_pvc: model-cache
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: ${{ inputs.dd_env || 'ci' }}
           test_name: n2-compatibility
           test_file: tests/deploy/test_n2_compatibility.py
           extra_pytest_args: --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.frontend_tag }} -m k8s -n 0
