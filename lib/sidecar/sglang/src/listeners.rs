@@ -7,8 +7,8 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -18,7 +18,6 @@ use dynamo_backend_common::{
 use dynamo_sidecar_common::GrpcEndpoint;
 use futures::stream::{BoxStream, FuturesUnordered};
 use futures::{Stream, StreamExt};
-use parking_lot::Mutex;
 
 use crate::client::{self, AbortRpc, Pool};
 use crate::native_http::NativeHttp;
@@ -48,6 +47,14 @@ pub(crate) struct Listener {
 /// Each running dispatch's listener index and rid suffix, keyed by the
 /// address of its context allocation.
 type Dispatches = Arc<Mutex<HashMap<usize, (usize, u32)>>>;
+
+/// Each critical section is one map operation, so a panic elsewhere cannot
+/// leave the map half-updated, and a poisoned lock is still safe to use.
+fn lock(
+    dispatches: &Mutex<HashMap<usize, (usize, u32)>>,
+) -> MutexGuard<'_, HashMap<usize, (usize, u32)>> {
+    dispatches.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// A dispatch's rid: its public ID plus `suffix` in hex.
 fn dispatch_rid(id: &str, suffix: u32) -> String {
@@ -100,7 +107,7 @@ impl Dispatched {
 
 impl Drop for Dispatched {
     fn drop(&mut self) {
-        let mut dispatches = self.dispatches.lock();
+        let mut dispatches = lock(&self.dispatches);
         let key = context_key(&self.context);
         // A later dispatch of the same context owns the entry.
         if dispatches
@@ -178,9 +185,7 @@ impl NodeListeners {
     pub(crate) fn dispatch(&self, ctx: Arc<dyn AsyncEngineContext>, index: usize) -> Dispatched {
         let suffix = rand::random::<u32>();
         let rid = dispatch_rid(ctx.id(), suffix);
-        self.dispatches
-            .lock()
-            .insert(context_key(&ctx), (index, suffix));
+        lock(&self.dispatches).insert(context_key(&ctx), (index, suffix));
         Dispatched {
             dispatches: self.dispatches.clone(),
             context: ctx,
@@ -191,7 +196,7 @@ impl NodeListeners {
 
     /// The listener index and rid that `ctx` runs under, while it runs.
     fn running(&self, ctx: &Arc<dyn AsyncEngineContext>) -> Option<(usize, String)> {
-        let (index, suffix) = *self.dispatches.lock().get(&context_key(ctx))?;
+        let (index, suffix) = *lock(&self.dispatches).get(&context_key(ctx))?;
         Some((index, dispatch_rid(ctx.id(), suffix)))
     }
 
@@ -378,7 +383,7 @@ mod tests {
         assert_eq!(listeners.running(&failed), None);
         assert_eq!(listeners.running(&retry), Some((1, second.rid().into())));
         drop(second);
-        assert!(listeners.dispatches.lock().is_empty());
+        assert!(lock(&listeners.dispatches).is_empty());
 
         // A later dispatch of the same context owns its entry.
         let ctx = dynamo_backend_common::testing::mock_context();
@@ -387,7 +392,7 @@ mod tests {
         drop(earlier);
         assert_eq!(listeners.running(&ctx), Some((1, later.rid().into())));
         drop(later);
-        assert!(listeners.dispatches.lock().is_empty());
+        assert!(lock(&listeners.dispatches).is_empty());
     }
 
     #[tokio::test]
