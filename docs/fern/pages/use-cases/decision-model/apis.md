@@ -16,20 +16,9 @@ NVIDIA Dynamo exposes two non-streaming decision APIs over one scoring pipeline.
 | --- | --- | --- |
 | Route | `POST /v1/decisions` | `POST /v1/systemone` |
 | Client | Official OpenAI Python SDK | Official Jev/TypeSafe Python SDK |
-| Shared input | `input` | `state` |
-| Questions | Ordered array with optional `name` | Object keyed by question name |
-| Classification | `type: "choice"`, `choices` with typed string/boolean values | `type: "choice"`, string-valued `criteria` keys |
-| Binary judgment | `type: "predicate"`; answer has `probability` | `type: "noul"`; answer has `noul` |
-| Ordered score | `levels` containing labels; answer has a zero-based expected `score` | Ordered `criteria`; answer has expected `score` and an index-to-label `legend` |
-| Choice count | 2–255 before backend/tokenizer limits | 1–255 before backend/tokenizer limits |
-| Score level count | 2–10 | 1–10 |
-| Answers | Array in question order; preserves omitted, empty, and duplicate names | Object keyed by question name |
-| Distributions | Ordered arrays of value/probability entries | Probability maps keyed by choice or score index |
 | SDK `base_url` | API root, including `/v1` | Server origin, without `/v1` |
 
-The public contracts are the supported text-evaluation subset of [OpenAI Decisions](https://developers.openai.com/api/reference/resources/decisions/methods/create) and [Jev/TypeSafe System One](https://docs.typesafe.ai/sdk/python). Do not send SGLang-native `/v1/decisions` request fields to Dynamo. Neither route accepts `nvext`, including `{}` or `{"format":"oai"}`.
-
-Use the exact model alias returned by `GET /v1/models`. Supported inputs, candidate counts, and accounting depend on the model/executor profile. Dynamo currently admits at most 128 questions per request, subject to independent aggregate resource limits.
+Use the exact model alias returned by `GET /v1/models`. See the [Decision API Reference](../../reference/api/decision-apis.md) for supported fields, limits, and wire-format restrictions.
 
 ## Call OpenAI Decisions with curl
 
@@ -137,7 +126,7 @@ The equivalent illustrative SGLang response uses named answers and probability m
 }
 ```
 
-`x_label_mass` is a Dynamo extension reporting candidate vocabulary mass, not another conditional choice probability. It is not added to OpenAI answer objects. Treat `confidence` as an executor-derived statistic, not a calibrated probability of correctness.
+See the [answer-statistic definitions](../../reference/api/decision-apis.md#usage) before using `x_label_mass` or `confidence` in application logic.
 
 ## Use the Official OpenAI SDK
 
@@ -211,21 +200,6 @@ with TypeSafeClient(
 
 ## Interpret Usage and Failures
 
-Input usage counts rendered prompts across question executions, not only the shared input text. SGLang scores without decoding output tokens. Cache-read values come from backend measurements; an absent measurement must not be treated as zero. Questions in one request can reuse cached prefixes, but separate requests do not share them.
-
-> [!NOTE]
-> Dynamo currently always returns `usage.input_tokens_details.cache_write_tokens: 0` because cache-write usage is not measured. This value does not mean that caching is disabled or that no KV blocks were written. The current Decisions response schema requires an integer, so omission, `null`, and `"N/A"` are not supported. Use `cached_tokens` for measured cache reads; it is separate from the unmeasured write count.
-
-| Outcome | OpenAI Decisions | Jev System One |
-| --- | --- | --- |
-| Invalid or unsupported request shape | 400 | 422 |
-| Unknown model | 404 | 404 |
-| Registered model lacks decision capability | 400 | 400 |
-| Eligible worker unavailable | 503 | 503 |
-| Invalid backend scoring result or usage | 500 | 500 |
-| Admission capacity exhausted | Configured overload status, default 529 | Configured overload status, default 529 |
-| Request deadline exceeded | 504 | 504 |
-
-Capacity responses have code `rate_limit_exceeded` and `Retry-After: 1`; status alone does not identify overload. OpenAI errors use a nested `error` object; Jev uses top-level error fields. Responses expose `x-request-id` and `x-typesafe-request-id`. Preserve these IDs when reporting a failure. This guide disables SDK retries so rejections remain visible; choose any production retry policy explicitly.
+Use the [usage-accounting reference](../../reference/api/decision-apis.md#usage) to interpret token counts, including the unmeasured cache-write count. For a failed request, preserve its request ID and consult the [errors and headers reference](../../reference/api/decision-apis.md#errors-and-headers). This guide disables SDK retries so rejections remain visible; choose any production retry policy explicitly.
 
 For admission limits and cache isolation, see [Decision API Configuration](../../reference/components/frontend-configuration.mdx#decision-apis). For compatibility tests against an existing deployment, see the [official-client qualification suite](https://github.com/ai-dynamo/dynamo/blob/main/tests/serve/test_decisions_external.py). API/SDK conformance, native numerical parity, model-quality evaluation, and distributed lifecycle correctness are separate qualification gates.

@@ -1333,6 +1333,11 @@ navigation:
         path: pages/reference/api/image-edits.mdx
         slug: api/image-edits
 
+      - page: Decision APIs
+        icon: list-check
+        path: pages/reference/api/decision-apis.md
+        slug: api/decisions
+
       - section: Components
         icon: sliders
         slug: components
