@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import gc
 import logging
 import os
@@ -23,19 +24,40 @@ logger = logging.getLogger(__name__)
 
 
 class _ReleaseOnlyKvCache:
-    """Engine client whose sleep discards only the KV cache.
+    """Engine client that discards only the KV cache before a snapshot.
 
     Snapshot captures the weights on the GPU, so they need no host copy.
     """
 
     def __init__(self, engine_client: Any):
         self._engine_client = engine_client
+        # vLLM 0.33 (enterprise image) has no checkpoint_state, and its
+        # checkpoint_prepare expects a released KV cache; remove once it ships 0.34.
+        self._has_checkpoint_state = hasattr(engine_client, "checkpoint_state")
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._engine_client, name)
 
     async def sleep(self, *_args: object) -> None:
-        await self._engine_client.release_kv_cache_memory()
+        # From vLLM 0.34, checkpoint_prepare releases the KV cache itself and
+        # refuses an engine that is already asleep.
+        if not self._has_checkpoint_state:
+            await self._engine_client.release_kv_cache_memory()
+
+    async def checkpoint_prepare(self) -> None:
+        refusal = await self._engine_client.checkpoint_prepare()
+        if refusal is not None:
+            raise RuntimeError(f"vLLM refused to prepare for a checkpoint: {refusal}")
+        if not self._has_checkpoint_state:
+            return
+        state, error = await self._engine_client.checkpoint_state()
+        while state == "preparing":
+            await asyncio.sleep(0.05)
+            state, error = await self._engine_client.checkpoint_state()
+        if state != "prepared":
+            raise RuntimeError(
+                f"vLLM failed to prepare for a checkpoint ({state}): {error}"
+            )
 
 
 def apply_restore_served_model_name(config: Config) -> None:
@@ -73,25 +95,12 @@ async def prepare_snapshot_engine(
         embedding_worker=config.embedding_worker,
     )
     engine = setup_vllm_engine(config, stat_logger_factory)
-    # Decide before the first pause: reaching this at pause time would raise
-    # after sleep() had already released the engine's memory.
-    checkpoint_hooks = all(
-        hasattr(engine[0], hook)
-        for hook in ("checkpoint_prepare", "checkpoint_restore")
-    )
-    if not checkpoint_hooks:
-        logger.warning(
-            "This vLLM build has no AsyncLLM.checkpoint_prepare/checkpoint_restore; "
-            "snapshotting without communicator checkpointing. "
-            "Requires vLLM 0.27.0 or newer."
-        )
-    # GMS restores weights outside the checkpoint, so they must be released,
-    # and vLLM before 0.31.0 can release them only by sleeping.
+    # GMS restores weights outside the checkpoint, so they must be released by
+    # sleeping.
     engine_client = engine[0]
     if (
         getattr(config.engine_args, "load_format", None) != "gms"
         and os.environ.get("DYN_GMS_USE_V1") != "true"
-        and hasattr(engine_client, "release_kv_cache_memory")
     ):
         engine_client = _ReleaseOnlyKvCache(engine_client)
 
@@ -100,7 +109,7 @@ async def prepare_snapshot_engine(
         engine=(engine, stat_logger_factory),
         pause_controller=VllmEnginePauseController(
             engine_client,
-            prepare_for_process_checkpoint=checkpoint_hooks,
+            prepare_for_process_checkpoint=True,
         ),
         snapshot_config=snapshot_config,
         pause_args=(None,),

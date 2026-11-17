@@ -172,8 +172,11 @@ class KvConnectorLeader:
                 req.num_computed_tokens,
             )
 
-        # In vLLM 0.14.0+, resumed_from_preemption was changed to resumed_req_ids (a set)
-        resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
+        # vLLM 0.33 (enterprise image) still sends Model Runner V1's
+        # resumed_req_ids; remove once it ships 0.34.
+        resumed_req_ids = getattr(
+            scheduler_output.scheduled_cached_reqs, "resumed_req_ids", ()
+        )
 
         # If A == B, and A == C, then B == C
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -184,12 +187,8 @@ class KvConnectorLeader:
             cached_reqs.num_computed_tokens
         ), "Number of cached req_ids doesn't match the number of cached num_computed_tokens"
 
-        # In https://github.com/vllm-project/vllm/pull/26388/changes#diff-9eeca590fd99f15621897e559dba39b3ec4e7c2c65ec3c3229711689e008b5f4L732-L736,
-        # new_token_ids was changed to return an empty list unless pipeline
-        # parallelism is turned on. If needed, which for KVBM it is not needed,
-        # KVBM can consult the cached_reqs.all_token_ids to get the token ids
-        # for each of the requests. KVBM doesn't consult this field since
-        # it holds the token sequence in the _connector.
+        # new_token_ids is empty unless pipeline parallelism is on; KVBM keeps
+        # each request's token sequence in the connector instead.
         for i, req_id in enumerate(cached_reqs.req_ids):
             # new_token_ids may be empty when pipeline parallelism is disabled
 

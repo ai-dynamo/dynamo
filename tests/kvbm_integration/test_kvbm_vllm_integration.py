@@ -314,7 +314,6 @@ def test_new_request_interface():
 def test_cached_request_interface():
     _assert_interface(
         [
-            (CachedRequestData, "resumed_req_ids", {"is_instance_of": set[str]}),
             (CachedRequestData, "req_ids", {"is_instance_of": list[str]}),
             (CachedRequestData, "new_token_ids", {"is_instance_of": list[list[int]]}),
             (

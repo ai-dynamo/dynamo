@@ -11,6 +11,7 @@ from dynamo.common.snapshot.restore_context import (
     write_snapshot_restore_context,
 )
 from dynamo.vllm import snapshot
+from dynamo.vllm.handlers import VllmEnginePauseController
 from dynamo.vllm.publisher import StatLoggerFactory
 
 pytestmark = [
@@ -52,6 +53,54 @@ async def test_prepare_snapshot_preserves_engine_stat_loggers(monkeypatch):
     assert isinstance(stat_logger_factory, StatLoggerFactory)
     setup_vllm_engine.assert_called_once_with(config, stat_logger_factory)
     assert config.engine_args.enable_sleep_mode is True
+
+
+class _CheckpointLifecycleEngine:
+    """vLLM 0.34's lifecycle: prepare refuses a sleeping engine and drains."""
+
+    def __init__(self):
+        self.sleeping = False
+        self.state = "running"
+
+    async def pause_generation(self):
+        pass
+
+    async def release_kv_cache_memory(self):
+        self.sleeping = True
+
+    async def checkpoint_prepare(self):
+        if self.sleeping:
+            return "Preparing for a checkpoint requires an awake engine"
+        self.state = "preparing"
+        return None
+
+    async def checkpoint_state(self):
+        state = self.state
+        if state == "preparing":
+            self.state, self.sleeping = "prepared", True
+        return state, None
+
+    async def checkpoint_restore(self):
+        self.state, self.sleeping = "running", False
+
+    async def wake_up(self):
+        pass
+
+    async def resume_generation(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_snapshot_pause_prepares_checkpoint_on_awake_engine():
+    engine = _CheckpointLifecycleEngine()
+    controller = VllmEnginePauseController(
+        snapshot._ReleaseOnlyKvCache(engine), prepare_for_process_checkpoint=True
+    )
+
+    assert await controller.pause(None) is True
+    assert engine.state == "prepared"
+    assert await controller.resume() is True
+    assert engine.state == "running"
 
 
 @pytest.mark.parametrize(
