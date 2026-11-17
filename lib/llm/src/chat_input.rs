@@ -14,6 +14,10 @@ use crate::protocols::anthropic::types::{
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use crate::protocols::unified::UnifiedRequest;
 
+#[cfg(test)]
+#[path = "../tests/common/mistral_model.rs"]
+mod mistral_model;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ChatInputPolicy {
     #[default]
@@ -268,6 +272,23 @@ mod tests {
                 ChatInputPolicy::from_card(&card).unwrap(),
                 ChatInputPolicy::Mistral { .. }
             ));
+        }
+    }
+
+    #[test]
+    fn v13_chat_none_renders_like_unset_effort() {
+        for with_hf_config in [false, true] {
+            let dir = mistral_model::model_dir(with_hf_config, "v13", &[]);
+            let card = ModelDeploymentCard::load_from_disk(dir.path(), None).unwrap();
+            let policy = ChatInputPolicy::from_card(&card).unwrap();
+            let dynamo_renderer::PromptFormatter::OAI(formatter) =
+                crate::preprocessor::prompt::prompt_formatter_from_mdc(&card).unwrap();
+            let unset = chat(serde_json::json!({}));
+            let expected = formatter.render(&unset).unwrap();
+            let mut request = chat(serde_json::json!({"reasoning_effort":"none"}));
+            policy.normalize_chat(&mut request).unwrap();
+            assert_controls(&request, "low", true);
+            assert_eq!(formatter.render(&request).unwrap(), expected);
         }
     }
 

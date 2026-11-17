@@ -1160,7 +1160,7 @@ impl ModelWatcher {
 /// The configured unified family this card's tokenizer cannot serve. Only a family
 /// that checks the vocabulary loads the tokenizer here. Keep it for local pipelines,
 /// while also checking cards that use a factory or text-input pipeline.
-fn unsupported_unified_family(
+pub(super) fn unsupported_unified_family(
     card: &ModelDeploymentCard,
     tokenizer: &mut Option<crate::tokenizers::Tokenizer>,
     needs_rust_chat_validation: bool,

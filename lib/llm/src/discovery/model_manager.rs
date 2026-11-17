@@ -1727,6 +1727,12 @@ impl ModelManager {
         card.needs = Vec::new();
         let input_policy = crate::chat_input::ChatInputPolicy::from_card(&card)
             .map_err(|error| ModelManagerError::ModelUnavailable(format!("{model}: {error:#}")))?;
+        // The caller owns the already-built engine, including parser validation.
+        // Still keep HTTP aggregation consistent with the card's tokenizer.
+        let unsupported_family = super::watcher::unsupported_unified_family(
+            &card, &mut None, false,
+        )
+        .map_err(|error| ModelManagerError::ModelUnavailable(format!("{model}: {error:#}")))?;
         let _reservation = self.reservation_lock.lock();
         self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
@@ -1736,6 +1742,7 @@ impl ModelManager {
         let namespace = format!("__local_chat_{}", model);
         let mut ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
         ws.set_input_policy(input_policy);
+        ws.set_unsupported_unified_family(unsupported_family);
         ws.chat_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         self.publish_catalog_locked();
@@ -4693,6 +4700,62 @@ mod tests {
         Arc::new(crate::engines::StreamingEngineAdapter::new(
             crate::engines::make_echo_engine(),
         ))
+    }
+
+    #[test]
+    fn in_process_registration_preserves_token_gated_mistral_family() {
+        const MODE: &str = "DYNAMO_LOCAL_MISTRAL_FAMILY_MODE";
+        let Ok(mode) = std::env::var(MODE) else {
+            for mode in ["auto", "1", "2"] {
+                assert!(crate::test_utils::run_isolated(
+                    concat!(
+                        module_path!(),
+                        "::in_process_registration_preserves_token_gated_mistral_family"
+                    ),
+                    &[("DYN_PARSER_VERSION", mode), (MODE, mode)],
+                ));
+            }
+            return;
+        };
+        for (path, supports_unified) in [
+            ("tests/data/sample-models/TinyLlama_v1.1", false),
+            ("tests/data/sample-models/mock-mistral-tekken", true),
+        ] {
+            for input in [
+                crate::model_type::ModelInput::Tokens,
+                crate::model_type::ModelInput::Text,
+            ] {
+                for parser in ["mistral", "mistral_4"] {
+                    let manager = ModelManager::new();
+                    let mut card = ModelDeploymentCard::load_from_disk(path, None).unwrap();
+                    card.model_type = ModelType::Chat;
+                    card.model_input = input;
+                    card.runtime_config.tool_call_parser = Some(parser.into());
+                    card.runtime_config.reasoning_parser = Some(parser.into());
+                    manager
+                        .add_chat_completions_model_with_card(
+                            "mistral",
+                            "checksum",
+                            card,
+                            make_chat_engine(),
+                        )
+                        .unwrap();
+                    let (_, options) = manager
+                        .get_chat_completions_engine_with_parsing("mistral")
+                        .unwrap();
+                    assert_eq!(
+                        options.unsupported_unified_family.as_deref(),
+                        (!supports_unified).then_some("mistral_4"),
+                        "path={path}, input={input:?}, parser={parser}, mode={mode}"
+                    );
+                    assert_eq!(
+                        options.resolved_unified_family(),
+                        (supports_unified && mode != "1").then_some("mistral_4"),
+                        "path={path}, input={input:?}, parser={parser}, mode={mode}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
