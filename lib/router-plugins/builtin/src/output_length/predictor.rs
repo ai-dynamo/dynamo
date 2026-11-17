@@ -584,11 +584,16 @@ mod tests {
     fn trees_are_fitted_on_the_most_recent_replies_only() {
         let start = Instant::now();
         let mut predictor = Predictor::new();
+        let (old_reply, new_reply) = (50, 900);
         for turn in 0..TREES_MAX_ROWS + 10 {
-            learn(&mut predictor, None, 1_000 + turn, 50, start);
+            let out = if turn < 10 { old_reply } else { new_reply };
+            learn(&mut predictor, None, 1_000 + turn, out, start);
         }
         assert_eq!(predictor.tree_rows.len(), TREES_MAX_ROWS);
         assert_eq!(predictor.tree_rows_seen, TREES_MAX_ROWS + 10);
+        // The ten oldest replies are the ones the last ten replaced.
+        let kept = (new_reply as f64).ln_1p() as f32;
+        assert!(predictor.tree_rows.iter().all(|row| row[FEATURES] == kept));
     }
 
     #[test]
