@@ -10,11 +10,11 @@ subtitle: Admit, defer, or reject requests with a Rust request classifier
 
 Implement `RequestClassifier` to control when NVIDIA Dynamo admits a request to the KV router's scheduling queue. Use it to wait for capacity, assign a policy class, or reject a request that has exceeded its wait budget.
 
-The built-in [ThunderAgent plugin](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin) uses this API to hold requests from paused or busy sessions. Select it through router-policy YAML if it fits your workload. Write a custom classifier when you need a different admission rule.
+The built-in [ThunderAgent plugin](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin) uses this API to hold requests from paused or busy sessions, and the built-in [output-length prediction plugin](../../../../use-cases/agents/priority-scheduling.mdx#prioritize-short-replies-automatically) uses it to set each request's backend priority. Select one through router-policy YAML if it fits your workload. Write a custom classifier when you need a different admission rule.
 
 ## How It Works
 
-Dynamo calls `classify` before queueing a request. Return `Ok(request)` to admit it, wait asynchronously to defer it, or return an error to reject it. Before admitting the request, the classifier can set its policy class, queue deadline, scheduling cost, or preferred worker.
+Dynamo calls `classify` before queueing a request. Return `Ok(request)` to admit it, wait asynchronously to defer it, or return an error to reject it. Before admitting the request, the classifier can set its policy class, queue deadline, scheduling cost, preferred worker, or backend priority.
 
 ```mermaid
 flowchart TD
@@ -282,6 +282,7 @@ Every row also returns its `WorkerInfo` from `info()` without a declaration. To 
 | `set_scheduling_cost_tokens(tokens)` | Override the cost used by queue scheduling |
 | `set_worker_selection_target(worker)` | Set a soft worker/rank preference, subject to hard pins and eligibility |
 | `clear_worker_selection_target()` | Clear the soft preference |
+| `set_backend_priority(priority)` | Replace the soft `priority` forwarded to the backend engine, where a higher value is served first. Router queue order does not change |
 
 Use a class name from the [router policy configuration](configuration-and-tuning.md) with `set_policy_class`. A name that matches no configured class fails the request; it does not fall back to the default class. Dynamo refreshes cache estimates when the admitted request enters the queue and applies the classifier's explicit overrides.
 

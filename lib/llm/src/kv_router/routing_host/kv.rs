@@ -175,6 +175,7 @@ impl RoutingHost {
         };
         if let Some(lifecycle) = lifecycle.as_mut() {
             lifecycle.selected(selection.worker);
+            selection.backend_priority = lifecycle.backend_priority();
         }
         selection.request_lifecycle = lifecycle;
         Ok((selection, affinity))
@@ -538,6 +539,9 @@ impl RoutingHost {
         backend_input.kv_hint = selection.kv_hint;
         // Stamped after admission, so the request's time in the router queue counts too.
         backend_input.stamp_elapsed_since_arrival();
+        if let Some(priority) = selection.backend_priority {
+            backend_input.routing_mut().priority = Some(priority);
+        }
         let updated_request = context.map(|_| backend_input);
         guard.begin_dispatch(&phase_label, updated_request.content());
 

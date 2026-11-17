@@ -1554,6 +1554,8 @@ impl<
             due_at,
             scheduling_cost_tokens,
             worker_selection_target,
+            // The host reads it from the request lifecycle at dispatch.
+            backend_priority: _,
         } = classified_request.into_queue_inputs();
 
         if scheduling_cost_tokens == Some(0) {
