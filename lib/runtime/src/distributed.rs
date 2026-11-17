@@ -175,6 +175,7 @@ pub struct DistributedRuntime {
 
     // Worker validation gates; `None` unless DYN_PUBLISH_GATE is set
     worker_validation: Option<Arc<crate::validation::WorkerValidation>>,
+    validation_endpoint: Arc<crate::validation::ValidationEndpoint>,
 
     // This hierarchy's own metrics registry
     metrics_registry: MetricsRegistry,
@@ -253,6 +254,13 @@ impl DistributedRuntime {
 
         let config = crate::config::RuntimeConfig::from_settings()?;
         let worker_validation = Self::worker_validation_from_env(&config, policy)?;
+        let validation_endpoint = Arc::new(crate::validation::ValidationEndpoint::from_env()?);
+        anyhow::ensure!(
+            validation_endpoint.fixed_port().is_none()
+                || policy == system_status_server::SystemProbePolicy::Worker,
+            "the validation endpoint is not supported when Dynamo runs as a sidecar: \
+             the engine can restart under the same instance id"
+        );
         let nats_client = match nats_config {
             Some(nc) => Some(
                 nc.connect_with_cancellation(runtime.primary_token())
@@ -345,6 +353,7 @@ impl DistributedRuntime {
             response_plane,
             local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry::new(),
             worker_validation,
+            validation_endpoint,
             engine_routes: crate::engine_routes::EngineRouteRegistry::new(),
             metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry::new(),
             event_transport_kind,
@@ -551,6 +560,17 @@ impl DistributedRuntime {
     /// Worker validation gates, when `DYN_PUBLISH_GATE` is set.
     pub fn worker_validation(&self) -> Option<&Arc<crate::validation::WorkerValidation>> {
         self.worker_validation.as_ref()
+    }
+
+    /// The loopback endpoint that validation checks reach the worker through.
+    pub fn validation_endpoint(&self) -> &Arc<crate::validation::ValidationEndpoint> {
+        &self.validation_endpoint
+    }
+
+    /// True when the worker serves the validation endpoint, so its engine must
+    /// be registered for local calls.
+    pub fn serves_validation_endpoint(&self) -> bool {
+        self.worker_validation.is_some() || self.validation_endpoint.fixed_port().is_some()
     }
 
     /// Get the local endpoint registry for in-process endpoint calls

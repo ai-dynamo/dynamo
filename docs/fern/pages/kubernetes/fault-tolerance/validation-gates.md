@@ -61,7 +61,7 @@ Each request has a JSON body with the one thing a check runner can't be configur
 serves the worker's model through the same preprocessor, chat template, tool-call and reasoning
 parsers as the frontend, so a check sees what a client would get from this worker; its `/models` lists
 the model. It's `null` for workers without a chat or completions surface, such as prefill workers. The
-endpoint stops once the worker is released. Anything else a check needs, such as which gate it serves,
+endpoint stops once the worker is released, unless `DYN_VALIDATION_ENDPOINT_PORT` is set (see below). Anything else a check needs, such as which gate it serves,
 comes from the deployment spec: configure it on the check runner.
 
 ## Run checks
@@ -87,8 +87,29 @@ command; the runtime calls it the same way. Any server on loopback that follows 
 works.
 
 The same setup works under Kubernetes discovery. There, a validation sidecar with an ordinary
-`readinessProbe` is the recommended pattern, since Pod readiness already decides routing; support for
-it in the reference runner is coming in a follow-up.
+readiness probe is the recommended pattern; see below.
+
+## Kubernetes discovery: a sidecar with a readiness probe
+
+Under Kubernetes discovery a worker is routable only once its pod is Ready, so a validation sidecar
+with an ordinary `readinessProbe` keeps traffic off it with no gate in the worker:
+
+1. Set `DYN_VALIDATION_ENDPOINT_PORT` on the worker. It serves the same loopback OpenAI endpoint on
+   that port, from the moment its engine is registered for as long as the worker runs. Every response
+   carries the worker's instance id in the `x-dynamo-instance-id` header.
+2. Run the reference runner in the sidecar with `--base-url` pointing at that endpoint and
+   `--ready-checks` listing the checks to run, and probe its `GET /ready`.
+
+`GET /ready` answers 200 only once every listed check has passed against the worker answering now,
+and 503 with the reason otherwise. If the worker container restarts, its instance id changes, so the
+sidecar reports not ready and runs every check again: a restarted engine can't inherit an earlier
+pass. A check that fails holds that worker instance; restart the pod to retry. The runner has no
+liveness probe and never exits on a failed check, so it can't restart anything, but restarting the
+runner itself checks the running worker again, briefly making a serving pod not Ready.
+
+See [`agg_validation_readiness.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_validation_readiness.yaml).
+Use `DYN_PUBLISH_GATE` instead under etcd discovery, where readiness doesn't decide routing, and
+where sidecars aren't allowed.
 
 ## Roll out with gates
 

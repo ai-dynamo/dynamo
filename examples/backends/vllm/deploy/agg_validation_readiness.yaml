@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Aggregated vLLM worker checked by a validation sidecar with a readiness
+# probe, for Kubernetes discovery: the worker serves its loopback validation
+# endpoint on a fixed port, and the sidecar runs the "completion" and "smoke"
+# checks against it and is Ready only once both pass against the running
+# worker. The pod isn't Ready, so isn't routable, until then; with
+# max-unavailable 0 a failing check stalls the rollout while the old pods
+# serve. See docs: kubernetes/fault-tolerance/validation-gates.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-validation-readiness
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+  - name: worker
+    type: worker
+    replicas: 2
+    podTemplate:
+      metadata:
+        annotations:
+          nvidia.com/deployment-rolling-update-max-surge: "1"
+          nvidia.com/deployment-rolling-update-max-unavailable: "0"
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          command: [python3, -m, dynamo.vllm]
+          args: [--model, Qwen/Qwen3-0.6B]
+          env:
+          - name: DYN_VALIDATION_ENDPOINT_PORT
+            value: "8790"
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+        # Replace the image and checks with your own.
+        - name: validator
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          command: [python3, -m, dynamo.common.validation.runner, --port, "9100", --timeout, "600",
+                    --base-url, "http://127.0.0.1:8790/v1",
+                    --check, "completion=python3 -m dynamo.common.validation.completion",
+                    --check, "smoke=python3 /checks/smoke.py",
+                    --ready-checks, "completion,smoke"]
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 9100
+            periodSeconds: 5

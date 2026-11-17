@@ -62,6 +62,51 @@ enum GateState {
     Failed(String),
 }
 
+/// The loopback OpenAI endpoint that checks reach the worker through.
+#[derive(Debug, Default)]
+pub struct ValidationEndpoint {
+    fixed_port: Option<u16>,
+    claimed: AtomicBool,
+}
+
+impl ValidationEndpoint {
+    /// Read `DYN_VALIDATION_ENDPOINT_PORT`. Unset or blank means the endpoint
+    /// is served only for a publish gate, on a port chosen at startup.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let name =
+            crate::config::environment_names::runtime::validation::DYN_VALIDATION_ENDPOINT_PORT;
+        let fixed_port = match std::env::var(name) {
+            Ok(value) if !value.trim().is_empty() => Some(
+                value
+                    .trim()
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|port| *port != 0)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("{name} must be a port number, got {value:?}")
+                    })?,
+            ),
+            _ => None,
+        };
+        Ok(Self {
+            fixed_port,
+            claimed: AtomicBool::new(false),
+        })
+    }
+
+    /// The port to serve on for the worker's lifetime, if one is configured.
+    /// The endpoint is then served whether or not a publish gate is set.
+    pub fn fixed_port(&self) -> Option<u16> {
+        self.fixed_port
+    }
+
+    /// Claim the endpoint. Only the first caller gets `true`: a worker serves
+    /// one model to its checks.
+    pub fn claim(&self) -> bool {
+        !self.claimed.swap(true, Ordering::SeqCst)
+    }
+}
+
 /// Validation state for one worker process, owned by the `DistributedRuntime`.
 pub struct WorkerValidation {
     config: ValidationConfig,
@@ -70,7 +115,6 @@ pub struct WorkerValidation {
     publish_hook: parking_lot::Mutex<HookSlot>,
     released: watch::Sender<bool>,
     started: AtomicBool,
-    local_endpoint_claimed: AtomicBool,
 }
 
 impl std::fmt::Debug for WorkerValidation {
@@ -91,7 +135,6 @@ impl WorkerValidation {
             publish_hook: parking_lot::Mutex::new(HookSlot::Empty),
             released: watch::channel(false).0,
             started: AtomicBool::new(false),
-            local_endpoint_claimed: AtomicBool::new(false),
         })
     }
 
@@ -105,12 +148,6 @@ impl WorkerValidation {
         }
         *slot = HookSlot::Set(hook);
         true
-    }
-
-    /// Claim the loopback endpoint the gates check. Only the first caller gets
-    /// `true`: a worker serves one model to its gates.
-    pub fn claim_local_endpoint(&self) -> bool {
-        !self.local_endpoint_claimed.swap(true, Ordering::SeqCst)
     }
 
     /// True once every check has passed. A released worker is never held again.
@@ -385,5 +422,32 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!validation.is_released());
         assert!(!validation.set_publish_hook(Box::new(|| Box::pin(async { Ok(()) }))));
+    }
+
+    #[test]
+    fn the_endpoint_port_is_optional_and_never_zero() {
+        let name = "DYN_VALIDATION_ENDPOINT_PORT";
+        for (value, expected) in [
+            (None, Ok(None)),
+            (Some(" "), Ok(None)),
+            (Some("8790"), Ok(Some(8790))),
+        ] {
+            let port = temp_env::with_var(name, value, || {
+                ValidationEndpoint::from_env().map(|endpoint| endpoint.fixed_port())
+            });
+            assert_eq!(port.map_err(|e| e.to_string()), expected, "{value:?}");
+        }
+        for value in ["0", "70000", "http"] {
+            let error =
+                temp_env::with_var(name, Some(value), ValidationEndpoint::from_env).unwrap_err();
+            assert!(error.to_string().contains(name), "{value:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn only_the_first_claim_gets_the_endpoint() {
+        let endpoint = ValidationEndpoint::default();
+        assert!(endpoint.claim());
+        assert!(!endpoint.claim());
     }
 }

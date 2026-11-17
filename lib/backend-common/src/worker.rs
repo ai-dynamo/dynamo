@@ -1224,7 +1224,7 @@ impl Worker {
         // `LocalAsyncEngine` for this endpoint name. Register the modality's
         // JSON-shaped probe engine so both exercise the same `generate()` path
         // as real traffic.
-        if probe.is_some() || endpoint.drt().worker_validation().is_some() {
+        if probe.is_some() || endpoint.drt().serves_validation_endpoint() {
             builder = builder.register_local_engine(probe_engine).map_err(|e| {
                 err(
                     ErrorType::Backend(BackendError::Unknown),

@@ -1,16 +1,23 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Loopback OpenAI endpoint for worker validation gates.
+//! Loopback OpenAI endpoint for worker validation checks.
 //!
 //! A gated worker is unreachable by design: its card is held, so no frontend
-//! routes to it. Its gates still need to send it OpenAI requests that go
+//! routes to it. Its checks still need to send it OpenAI requests that go
 //! through the frontend's preprocessing, tool-call and reasoning parsers. This
 //! module serves the worker's model on `127.0.0.1` with the same pipeline the
-//! in-process token HTTP input builds, starts the gates once the worker's
-//! engine is registered, and stops serving once the worker is released.
+//! in-process token HTTP input builds, once the worker's engine is registered.
 //!
-//! Nothing here runs unless `DYN_PUBLISH_GATE` is set.
+//! With `DYN_PUBLISH_GATE`, the endpoint is on a port chosen at startup, the
+//! gates start once it serves, and it stops once the worker is released. With
+//! `DYN_VALIDATION_ENDPOINT_PORT`, it serves on that port for the worker's
+//! lifetime, for a sidecar that runs its own checks and reports through a
+//! readiness probe. Every response carries the worker's instance id in
+//! [`INSTANCE_ID_HEADER`], so such a sidecar can tell a restarted worker from
+//! the one it checked.
+//!
+//! Nothing here runs unless one of those variables is set.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -34,65 +41,71 @@ use crate::model_card::ModelDeploymentCard;
 use crate::model_type::ModelInput;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 
-/// Serve the first card a gated worker registers on the loopback endpoint and
-/// start its gates. A card the endpoint can't serve (prefill, encode,
-/// embeddings, text input, LoRA) starts the gates with no `base_url`.
+/// Response header carrying the worker's instance id, in hex.
+pub const INSTANCE_ID_HEADER: &str = "x-dynamo-instance-id";
+
+/// Serve the first card a worker registers on the loopback endpoint, if the
+/// worker has a publish gate or a fixed endpoint port, and start its gates. A
+/// card the endpoint can't serve (prefill, encode, embeddings, text input,
+/// LoRA) starts the gates with no `base_url`.
 pub async fn serve_if_gated(endpoint: &Endpoint, card: &ModelDeploymentCard) -> anyhow::Result<()> {
     let drt = endpoint.drt();
-    let Some(validation) = drt.worker_validation() else {
-        return Ok(());
-    };
-    if !validation.claim_local_endpoint() {
+    if !drt.serves_validation_endpoint() || !drt.validation_endpoint().claim() {
         return Ok(());
     }
+    let fixed_port = drt.validation_endpoint().fixed_port();
     let mut env = GateEnv::default();
     let cancel = drt.primary_token().child_token();
-    let servable = servable(card);
-    if servable {
-        let listener = tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
-            .await
-            .context("binding the validation endpoint")?;
+    let mut serving = None;
+    if servable(card) {
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from((
+            Ipv4Addr::LOCALHOST,
+            fixed_port.unwrap_or(0),
+        )))
+        .await
+        .context("binding the validation endpoint")?;
         let addr = listener.local_addr()?;
+        let instance_id = axum::http::HeaderValue::from_str(&format!("{:x}", drt.connection_id()))?;
         let http_service = HttpService::builder()
             .host(Ipv4Addr::LOCALHOST.to_string())
             .port(addr.port())
             .cancel_token(Some(cancel.clone()))
-            .build()?;
+            .build()?
+            .map_router(|router| {
+                router.layer(axum::middleware::map_response(
+                    move |mut response: axum::response::Response| {
+                        let instance_id = instance_id.clone();
+                        async move {
+                            response
+                                .headers_mut()
+                                .insert(INSTANCE_ID_HEADER, instance_id);
+                            response
+                        }
+                    },
+                ))
+            });
         let engine: ExecutionContext = Arc::new(RegistryEngine {
             registry: drt.local_endpoint_registry().clone(),
             endpoint_name: endpoint.name().to_string(),
         });
         super::http::serve_in_process_tokens(&http_service, card, engine).await?;
-        let serving = http_service
-            .spawn_with_listener(cancel.clone(), listener)
-            .await;
-        tokio::spawn(async move {
-            if let Ok(Err(error)) = serving.await {
-                tracing::error!(%error, "Validation endpoint stopped");
-            }
-        });
-        tracing::info!(%addr, model = %card.display_name, "Serving the validation endpoint");
         env.openai_base_url = Some(format!("http://{addr}/v1"));
+        serving = Some((http_service, listener));
     } else {
         tracing::warn!(
             model = %card.display_name,
             "Card has no token chat or completions surface; checks get no base_url"
         );
     }
-    // Only a servable card registers a local engine for the endpoint to
-    // reach; waiting for one otherwise would hold the worker forever.
-    let registration = servable.then(|| {
-        (
-            drt.local_endpoint_registry().clone(),
-            endpoint.name().to_string(),
-        )
-    });
-    tokio::spawn(start_gates_when_registered(
-        Arc::clone(validation),
-        registration,
+    tokio::spawn(serve_when_registered(
+        drt.worker_validation().cloned(),
+        drt.local_endpoint_registry().clone(),
+        endpoint.name().to_string(),
+        serving,
         env,
         drt.child_token(),
         cancel,
+        fixed_port.is_none(),
     ));
     Ok(())
 }
@@ -104,28 +117,49 @@ fn servable(card: &ModelDeploymentCard) -> bool {
         && card.lora.is_none()
 }
 
-/// Start the gates once the worker's engine is registered under
-/// `registration`'s endpoint name, so their first request does not race it,
-/// and stop the endpoint once the worker is released. A failed gate leaves it
-/// up for debugging the held worker.
-async fn start_gates_when_registered(
-    validation: Arc<WorkerValidation>,
-    registration: Option<(LocalEndpointRegistry, String)>,
+/// Once the worker's engine is registered, serve the endpoint and start the
+/// gates, so neither a check nor a sidecar's first request races it. Only a
+/// servable card registers a local engine, so without an endpoint to serve
+/// the gates start at once. With `stop_on_release`, stop the endpoint once
+/// the worker is released; a failed gate leaves it up for debugging the held
+/// worker.
+#[allow(clippy::too_many_arguments)]
+async fn serve_when_registered(
+    validation: Option<Arc<WorkerValidation>>,
+    registry: LocalEndpointRegistry,
+    endpoint_name: String,
+    serving: Option<(HttpService, tokio::net::TcpListener)>,
     env: GateEnv,
     gates_cancel: CancellationToken,
     endpoint_cancel: CancellationToken,
+    stop_on_release: bool,
 ) {
-    if let Some((registry, endpoint_name)) = registration {
+    if let Some((http_service, listener)) = serving {
         let mut registrations = registry.subscribe();
         tokio::select! {
             Ok(_) = registrations.wait_for(|_| registry.get(&endpoint_name).is_some()) => {}
             _ = endpoint_cancel.cancelled() => return,
         }
+        let addr = listener.local_addr().ok();
+        let serving = http_service
+            .spawn_with_listener(endpoint_cancel.clone(), listener)
+            .await;
+        tokio::spawn(async move {
+            if let Ok(Err(error)) = serving.await {
+                tracing::error!(%error, "Validation endpoint stopped");
+            }
+        });
+        tracing::info!(?addr, "Serving the validation endpoint");
     }
+    let Some(validation) = validation else {
+        return;
+    };
     validation.start(env, gates_cancel);
-    tokio::select! {
-        _ = validation.wait_released() => endpoint_cancel.cancel(),
-        _ = endpoint_cancel.cancelled() => {}
+    if stop_on_release {
+        tokio::select! {
+            _ = validation.wait_released() => endpoint_cancel.cancel(),
+            _ = endpoint_cancel.cancelled() => {}
+        }
     }
 }
 

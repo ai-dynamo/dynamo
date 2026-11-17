@@ -176,7 +176,7 @@ pub async fn run(
 
             let mut builder = endpoint.endpoint_builder().handler(ingress);
             // Validation gates reach the engine through the local registry.
-            if distributed_runtime.worker_validation().is_some() {
+            if distributed_runtime.serves_validation_endpoint() {
                 builder = builder
                     .register_local_engine(super::local_openai::JsonEngine::local(inner_engine))?;
             }
