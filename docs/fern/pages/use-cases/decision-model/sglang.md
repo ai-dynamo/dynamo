@@ -27,7 +27,7 @@ python -m dynamo.frontend \
   --enable-systemone-api
 ```
 
-The frontend flag defaults to false. It enables the internal scoring transport without requiring a public `/generate` route. Do not enable public Generate endpoints just to use the decision APIs.
+`--enable-systemone-api` defaults to `false` and enables both public decision APIs. It also enables internal scoring transport; no public `/generate` route is needed.
 
 ## Start the Worker
 
