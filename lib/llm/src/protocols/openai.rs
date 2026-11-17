@@ -469,12 +469,6 @@ pub struct ParsingOptions {
     #[serde(default)]
     pub default_thinking_mode: Option<String>,
 
-    /// The configured unified family this model's tokenizer cannot serve, resolved
-    /// once per model (see `unified_parser::unsupported_family`); its raw output then
-    /// keeps the legacy parsers, as the preprocessor's stream path does.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unsupported_unified_family: Option<String>,
-
     /// Final request policy for tool output. Some model parsers (currently
     /// Harmony) must still run during non-streaming aggregation to remove
     /// model-internal channel markup even when the request forbids tool calls.
@@ -541,7 +535,6 @@ impl ParsingOptions {
             reasoning_disabled: false,
             structured_response: false,
             default_thinking_mode: None,
-            unsupported_unified_family: None,
             tool_choice: None,
             suppress_tool_calls: false,
             guided_tool_constraint: GuidedToolConstraint::None,
@@ -552,26 +545,6 @@ impl ParsingOptions {
                 crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none(),
             tools: Vec::new(),
         }
-    }
-
-    /// A selected unified family, unless this model's tokenizer cannot serve it.
-    pub(crate) fn supported_unified_family(
-        &self,
-        selected: Option<&'static str>,
-    ) -> Option<&'static str> {
-        let unsupported = self
-            .unsupported_unified_family
-            .as_deref()
-            .and_then(|family| selected.filter(|selected| *selected == family));
-        chat_completions::unified_parser::supported_family(selected, unsupported)
-    }
-
-    /// The unified family resolved from parser configuration, version policy, and tokenizer support.
-    pub(crate) fn resolved_unified_family(&self) -> Option<&'static str> {
-        self.supported_unified_family(chat_completions::unified_parser::selected_batch_family(
-            self.tool_call_parser.as_deref(),
-            self.reasoning_parser.as_deref(),
-        ))
     }
 
     pub fn with_guided_tool_constraint(mut self, constraint: GuidedToolConstraint) -> Self {
@@ -598,23 +571,19 @@ impl ParsingOptions {
             let whole_response_decoder = matches!(
                 self.tool_call_parser.as_deref(),
                 Some("harmony" | "kimi_k3" | "kimi-k3")
-            ) || self
-                .supported_unified_family(
-                    chat_completions::unified_parser::selected_content_decoder_family(
-                        self.tool_call_parser.as_deref(),
-                        self.reasoning_parser.as_deref(),
-                    ),
+            )
+                || chat_completions::unified_parser::selected_content_decoder_family(
+                    self.tool_call_parser.as_deref(),
+                    self.reasoning_parser.as_deref(),
                 )
                 .is_some();
             // Removing an incompatible tool parser must not manufacture a reasoning-only V2 route.
             // TODO: Separate pair identity from legacy decoder activation: with suppressed calls,
             // hermes + qwen3 must retain literal tool-call text in batch as streaming does.
-            let reasoning_would_select_v2 = self
-                .supported_unified_family(
-                    chat_completions::unified_parser::selected_content_decoder_family(
-                        None,
-                        self.reasoning_parser.as_deref(),
-                    ),
+            let reasoning_would_select_v2 =
+                chat_completions::unified_parser::selected_content_decoder_family(
+                    None,
+                    self.reasoning_parser.as_deref(),
                 )
                 .is_some();
             if !whole_response_decoder && !reasoning_would_select_v2 {

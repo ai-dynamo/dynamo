@@ -261,7 +261,6 @@ pub struct WorkerSet {
     allocator_trim_wrapped: bool,
 
     input_policy: ChatInputPolicy,
-    unsupported_unified_family: Option<&'static str>,
 }
 
 impl WorkerSet {
@@ -297,7 +296,6 @@ impl WorkerSet {
             allocator_trim: None,
             allocator_trim_wrapped: false,
             input_policy: ChatInputPolicy::default(),
-            unsupported_unified_family: None,
         }
     }
 
@@ -461,10 +459,6 @@ impl WorkerSet {
         self.input_policy.clone()
     }
 
-    pub(crate) fn set_unsupported_unified_family(&mut self, family: Option<&'static str>) {
-        self.unsupported_unified_family = family;
-    }
-
     /// Build ParsingOptions from this WorkerSet's card configuration.
     pub fn parsing_options(&self) -> crate::protocols::openai::ParsingOptions {
         crate::protocols::openai::ParsingOptions {
@@ -475,7 +469,6 @@ impl WorkerSet {
                 .get(crate::preprocessor::DEFAULT_THINKING_MODE_RUNTIME_KEY)
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
-            unsupported_unified_family: self.unsupported_unified_family.map(str::to_string),
             structural_tag: self.card.runtime_config.structural_tag.clone(),
             exclude_tools_when_tool_choice_none: self
                 .card
@@ -644,7 +637,6 @@ impl WorkerSet {
             allocator_trim_wrapped: false,
             // An adapter renders through the base model's chat engine and tokenizer.
             input_policy: self.input_policy.clone(),
-            unsupported_unified_family: self.unsupported_unified_family,
         };
         if self.allocator_trim.is_some() {
             view.enable_allocator_trim_on_teardown();

@@ -1745,12 +1745,10 @@ impl ModelManager {
         card.needs = Vec::new();
         let input_policy = crate::chat_input::ChatInputPolicy::from_card(&card)
             .map_err(|error| ModelManagerError::ModelUnavailable(format!("{model}: {error:#}")))?;
-        // The caller owns the already-built engine, including parser validation.
-        // Still keep HTTP aggregation consistent with the card's tokenizer.
-        let unsupported_family =
-            super::watcher::unsupported_unified_family(&card, &mut tokenizer, false).map_err(
-                |error| ModelManagerError::ModelUnavailable(format!("{model}: {error:#}")),
-            )?;
+        // The caller owns the already-built engine. HTTP aggregation still selects the
+        // family from the card's parser names, so reject a tokenizer that cannot serve it.
+        super::watcher::check_unified_family_tokens(&card, &mut tokenizer)
+            .map_err(|error| ModelManagerError::ModelUnavailable(format!("{model}: {error:#}")))?;
         let _reservation = self.reservation_lock.lock();
         self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
@@ -1760,7 +1758,6 @@ impl ModelManager {
         let namespace = format!("__local_chat_{}", model);
         let mut ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
         ws.set_input_policy(input_policy);
-        ws.set_unsupported_unified_family(unsupported_family);
         ws.chat_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         self.publish_catalog_locked();
@@ -4720,15 +4717,17 @@ mod tests {
         ))
     }
 
+    // In-process registration rejects a tokenizer without `[ARGS]` for `mistral` and
+    // `mistral_4`, as discovery does, unless the v1 parsers serve every model.
     #[tokio::test]
-    async fn in_process_registration_preserves_token_gated_mistral_family() {
+    async fn in_process_registration_rejects_pre_v11_mistral_tokenizers() {
         const MODE: &str = "DYNAMO_LOCAL_MISTRAL_FAMILY_MODE";
         let Ok(mode) = std::env::var(MODE) else {
             for mode in ["auto", "1", "2"] {
                 assert!(crate::test_utils::run_isolated(
                     concat!(
                         module_path!(),
-                        "::in_process_registration_preserves_token_gated_mistral_family"
+                        "::in_process_registration_rejects_pre_v11_mistral_tokenizers"
                     ),
                     &[("DYN_PARSER_VERSION", mode), (MODE, mode)],
                 ));
@@ -4758,26 +4757,31 @@ mod tests {
                     let mut card = model.card().clone();
                     assert!(card.model_type.is_empty());
                     card.model_input = input;
-                    manager
-                        .add_chat_completions_model_with_card(
-                            "mistral",
-                            "checksum",
-                            card,
-                            make_chat_engine(),
-                        )
-                        .unwrap();
+                    let context =
+                        format!("path={path}, input={input:?}, parser={parser}, mode={mode}");
+                    let result = manager.add_chat_completions_model_with_card(
+                        "mistral",
+                        "checksum",
+                        card,
+                        make_chat_engine(),
+                    );
+                    if !supports_unified && mode != "1" {
+                        let error = result.expect_err(&context).to_string();
+                        assert!(error.contains("DYN_PARSER_VERSION=1"), "{context}: {error}");
+                        assert!(!manager.has_model_any("mistral"), "{context}");
+                        continue;
+                    }
+                    result.expect(&context);
                     let (_, options) = manager
                         .get_chat_completions_engine_with_parsing("mistral")
                         .unwrap();
                     assert_eq!(
-                        options.unsupported_unified_family.as_deref(),
-                        (!supports_unified).then_some("mistral_4"),
-                        "path={path}, input={input:?}, parser={parser}, mode={mode}"
-                    );
-                    assert_eq!(
-                        options.resolved_unified_family(),
-                        (supports_unified && mode != "1").then_some("mistral_4"),
-                        "path={path}, input={input:?}, parser={parser}, mode={mode}"
+                        crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
+                            options.tool_call_parser.as_deref(),
+                            options.reasoning_parser.as_deref(),
+                        ),
+                        (mode != "1").then_some("mistral_4"),
+                        "{context}"
                     );
                 }
             }

@@ -465,14 +465,13 @@ impl DeltaAggregator {
     ) -> Result<NvCreateChatCompletionResponse, DynamoError> {
         // V4.1 is default-on independently of this experiment. Its flag-off
         // backend-supplied arguments keep the established aggregation contract.
-        let require_explicit_tool_terminal = parsing_options
-            .supported_unified_family(super::unified_parser::selected_request_family(
-                parsing_options.tool_call_parser.as_deref(),
-                parsing_options.reasoning_parser.as_deref(),
-                parsing_options.tool_choice.as_ref(),
-                &parsing_options.guided_tool_constraint,
-            ))
-            .is_some()
+        let require_explicit_tool_terminal = super::unified_parser::selected_request_family(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+            parsing_options.tool_choice.as_ref(),
+            &parsing_options.guided_tool_constraint,
+        )
+        .is_some()
             && super::unified_parser::parsers_v2_selected();
         Self::apply_with_tool_terminal_policy(
             stream,
@@ -696,8 +695,10 @@ impl DeltaAggregator {
         // whole stream are dropped here (they're not a valid tool call in the
         // final schema), but chunks missing only `arguments` get defaulted to
         // "" — the old code dropped those entirely.
-        let is_mistral = parsing_options.resolved_unified_family()
-            == Some(super::unified_parser::MISTRAL_UNIFIED_FAMILY);
+        let is_mistral = super::unified_parser::selected_batch_family(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        ) == Some(super::unified_parser::MISTRAL_UNIFIED_FAMILY);
         for choice in aggregator.choices.values_mut() {
             if choice.tool_call_chunks.is_empty() {
                 continue;
@@ -740,7 +741,10 @@ impl DeltaAggregator {
 
         // One configured unified family owns raw batch output before legacy parsing.
         // Worker-parsed choices already carry tool calls and skip this safety net.
-        let selected_unified_family = parsing_options.resolved_unified_family();
+        let selected_unified_family = super::unified_parser::selected_batch_family(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        );
         if selected_unified_family.is_none() {
             let version = super::tool_parser_v2::selected_version().map_err(|error| {
                 DynamoError::builder()
@@ -2928,54 +2932,52 @@ mod tests {
     }
 
     /// A pre-v11 Mistral model writes a `[TOOL_CALLS]` JSON array that only the v1
-    /// parser reads. When the model's tokenizer rules out `mistral_4`, raw batch
-    /// output keeps that parser, as the preprocessor's stream path does.
+    /// parser reads, so such a model serves only with DYN_PARSER_VERSION=1. There raw
+    /// batch output keeps the v1 parser; `mistral_4` has no array form.
     #[tokio::test]
-    async fn pre_v11_mistral_batch_output_keeps_the_v1_parser() {
-        if crate::test_utils::run_isolated(
-            concat!(
-                module_path!(),
-                "::pre_v11_mistral_batch_output_keeps_the_v1_parser"
-            ),
-            &[],
-        ) {
+    async fn pre_v11_mistral_batch_output_needs_the_v1_parsers() {
+        const MODE: &str = "DYN_TEST_PRE_V11_BATCH_MODE";
+        let Ok(mode) = std::env::var(MODE) else {
+            for mode in ["auto", "1"] {
+                assert!(crate::test_utils::run_isolated(
+                    concat!(
+                        module_path!(),
+                        "::pre_v11_mistral_batch_output_needs_the_v1_parsers"
+                    ),
+                    &[("DYN_PARSER_VERSION", mode), (MODE, mode)],
+                ));
+            }
             return;
-        }
+        };
         let raw = r#"[TOOL_CALLS] [{"name": "get_weather", "arguments": {"city": "Paris"}}]"#;
-        let aggregate = |unsupported: Option<&str>| {
-            let mut options =
-                ParsingOptions::new(Some("mistral".to_string()), Some("mistral".to_string()));
-            options.unsupported_unified_family = unsupported.map(str::to_string);
-            let delta = create_test_delta(
-                0,
-                raw,
-                Some(dynamo_protocols::types::Role::Assistant),
-                Some(dynamo_protocols::types::FinishReason::Stop),
-                None,
-                None,
-            );
-            DeltaAggregator::apply_with_tool_terminal_policy(
-                stream::iter(vec![delta]),
-                options,
-                false,
-            )
-        };
-        let call_names = |response: NvCreateChatCompletionResponse| -> Vec<String> {
-            response.inner.choices[0]
-                .message
-                .tool_calls
-                .iter()
-                .flatten()
-                .map(|call| call.function.name.clone())
-                .collect()
-        };
-
-        let unsupported = super::super::unified_parser::MISTRAL_UNIFIED_FAMILY;
-        let kept = aggregate(Some(unsupported)).await.unwrap();
-        assert_eq!(call_names(kept), ["get_weather"]);
-        // The v11+ grammar has no array form, so `mistral_4` would drop the call.
-        let unified = aggregate(None).await.unwrap();
-        assert!(call_names(unified).is_empty());
+        let options = ParsingOptions::new(Some("mistral".to_string()), Some("mistral".to_string()));
+        let delta = create_test_delta(
+            0,
+            raw,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+        let response = DeltaAggregator::apply_with_tool_terminal_policy(
+            stream::iter(vec![delta]),
+            options,
+            false,
+        )
+        .await
+        .unwrap();
+        let call_names: Vec<String> = response.inner.choices[0]
+            .message
+            .tool_calls
+            .iter()
+            .flatten()
+            .map(|call| call.function.name.clone())
+            .collect();
+        if mode == "1" {
+            assert_eq!(call_names, ["get_weather"]);
+        } else {
+            assert!(call_names.is_empty(), "{call_names:?}");
+        }
     }
 
     /// A Mistral call whose closed body is not valid JSON streams to the client as a

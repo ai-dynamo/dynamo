@@ -2006,9 +2006,6 @@ pub struct OpenAIPreprocessor {
     /// KV cache block size published in the model deployment card.
     kv_cache_block_size: usize,
     tool_call_parser: Option<String>,
-    /// The configured Unified family this model's tokenizer cannot serve; see
-    /// [`crate::protocols::openai::chat_completions::unified_parser::unsupported_family`].
-    unsupported_unified_family: Option<&'static str>,
     // Resolved at model setup so requests do not construct parsers to inspect their grammar.
     parser_requires_special_tokens: bool,
     /// The model is served by the Beam unified family (`beam` tool-call and reasoning
@@ -2974,31 +2971,25 @@ impl OpenAIPreprocessor {
                 tool_call_parser.as_deref(),
                 mdc.runtime_config.reasoning_parser.as_deref(),
             )?;
-        }
-        let (unsupported_unified_family, unified_family) = if mdc.model_type.supports_chat() {
-            let unsupported_unified_family = unified_parser::unsupported_family(
+            unified_parser::check_family_tokens(
                 tool_call_parser.as_deref(),
                 mdc.runtime_config.reasoning_parser.as_deref(),
                 tokenizer.as_ref(),
-                validate_chat_parsers,
             )?;
-            let unified_family = unified_parser::supported_family(
-                unified_parser::selected_family(
-                    tool_call_parser.as_deref(),
-                    mdc.runtime_config.reasoning_parser.as_deref(),
-                ),
-                unsupported_unified_family,
-            );
-            (unsupported_unified_family, unified_family)
+        }
+        let unified_family = if mdc.model_type.supports_chat() {
+            unified_parser::selected_family(
+                tool_call_parser.as_deref(),
+                mdc.runtime_config.reasoning_parser.as_deref(),
+            )
         } else {
-            (None, None)
+            None
         };
         if validate_chat_parsers {
             tracing::info!(
                 model = %mdc.display_name,
                 parser_version = ?crate::protocols::openai::chat_completions::tool_parser_v2::selected_version()?,
                 unified_family = ?unified_family,
-                unsupported_unified_family = ?unsupported_unified_family,
                 tool_parser = ?tool_call_parser,
                 reasoning_parser = ?mdc.runtime_config.reasoning_parser,
                 "Selected model parser route"
@@ -3375,7 +3366,6 @@ impl OpenAIPreprocessor {
             structural_tag_reasoning_boundary,
             kv_cache_block_size,
             tool_call_parser,
-            unsupported_unified_family,
             parser_requires_special_tokens,
             beam_route,
             mistral_tool_call_grammar,
@@ -5846,16 +5836,11 @@ impl OpenAIPreprocessor {
         stream
     }
 
-    /// The Unified family that parses this model's output, after setup's tokenizer check.
+    /// The Unified family that parses this model's output.
     fn unified_family(&self) -> Option<&'static str> {
-        use crate::protocols::openai::chat_completions::unified_parser;
-
-        unified_parser::supported_family(
-            unified_parser::selected_family(
-                self.tool_call_parser.as_deref(),
-                self.runtime_config.reasoning_parser.as_deref(),
-            ),
-            self.unsupported_unified_family,
+        crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
         )
     }
 
@@ -5866,14 +5851,11 @@ impl OpenAIPreprocessor {
     ) -> anyhow::Result<ToolProcessingRoute> {
         use crate::protocols::openai::chat_completions::{tool_parser_v2, unified_parser};
 
-        let family = unified_parser::supported_family(
-            unified_parser::selected_request_family(
-                self.tool_call_parser.as_deref(),
-                self.runtime_config.reasoning_parser.as_deref(),
-                request.inner.tool_choice.as_ref(),
-                guided_tool_constraint,
-            ),
-            self.unsupported_unified_family,
+        let family = unified_parser::selected_request_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+            request.inner.tool_choice.as_ref(),
+            guided_tool_constraint,
         );
         // Options, capture, and aggregation reuse selection; only request routing
         // owns the operator-facing decision line.
@@ -11272,14 +11254,15 @@ mod tests {
     }
 
     // A tokenizer whose vocabulary has no `[ARGS]` predates the v11 Mistral call
-    // format, so `auto` keeps it on the v1 parser; an explicit `2` keeps Unified.
+    // format, so `mistral` fails chat setup unless DYN_PARSER_VERSION=1 selects the
+    // v1 parsers. Completions pipelines parse no tool calls and still build.
     #[test]
-    fn pre_v11_mistral_tokenizer_keeps_v1_under_auto() {
+    fn pre_v11_mistral_tokenizer_requires_v1_parsers() {
         const CHILD: &str = "DYNAMO_PRE_V11_MISTRAL_CHILD";
         if std::env::var_os(CHILD).is_none() {
             for version in [None, Some("1"), Some("2")] {
                 let mut command = crate::test_utils::isolated_command(
-                    "preprocessor::tests::pre_v11_mistral_tokenizer_keeps_v1_under_auto",
+                    "preprocessor::tests::pre_v11_mistral_tokenizer_requires_v1_parsers",
                 );
                 command.env(CHILD, "1");
                 if let Some(version) = version {
@@ -11291,7 +11274,7 @@ mod tests {
             }
             return;
         }
-        let explicit_v2 = std::env::var(env_llm::DYN_PARSER_VERSION).as_deref() == Ok("2");
+        let v1_selected = std::env::var(env_llm::DYN_PARSER_VERSION).as_deref() == Ok("1");
         let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
         let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
@@ -11299,12 +11282,12 @@ mod tests {
         card.runtime_config.tool_call_parser = Some("mistral".to_string());
         let tokenizer = card.tokenizer().unwrap();
         assert!(OpenAIPreprocessor::new_for_completions(card.clone(), tokenizer).is_ok());
-        if explicit_v2 {
+        if !v1_selected {
             let error = OpenAIPreprocessor::new(card)
                 .err()
-                .expect("legacy v2 must fail");
+                .expect("a pre-v11 tokenizer must fail chat setup");
             assert!(
-                error.to_string().contains("DYN_PARSER_VERSION=2"),
+                error.to_string().contains("DYN_PARSER_VERSION=1"),
                 "{error:#}"
             );
             return;
@@ -11386,9 +11369,7 @@ mod tests {
                             tokenizer.clone(),
                         );
                         let invalid = (parser == Some("mistral_4") && mode == "1")
-                            || (!has_unified_tokens
-                                && (parser == Some("mistral_4")
-                                    || (parser.is_some() && mode == "2")));
+                            || (!has_unified_tokens && parser.is_some() && mode != "1");
                         if invalid {
                             let error = result.err().expect("unsupported Rust parser must fail");
                             let expected = if mode == "1" {
@@ -11427,26 +11408,32 @@ mod tests {
                         .unwrap();
                     }
                     let manager = crate::discovery::ModelManager::new();
-                    manager
-                        .add_chat_completions_model_with_card_and_tokenizer(
-                            "mistral",
-                            card.mdcsum(),
-                            card.clone(),
-                            engine,
-                            Some(tokenizer),
-                        )
-                        .unwrap();
+                    let result = manager.add_chat_completions_model_with_card_and_tokenizer(
+                        "mistral",
+                        card.mdcsum(),
+                        card.clone(),
+                        engine,
+                        Some(tokenizer),
+                    );
+                    if !has_unified_tokens && parser.is_some() && mode != "1" {
+                        let error = result.expect_err("a pre-v11 tokenizer must fail registration");
+                        assert!(
+                            error.to_string().contains("DYN_PARSER_VERSION=1"),
+                            "{error:#}"
+                        );
+                        continue;
+                    }
+                    result.unwrap();
                     let (_, options) = manager
                         .get_chat_completions_engine_with_parsing("mistral")
                         .unwrap();
-                    assert_eq!(
-                        options.unsupported_unified_family.as_deref(),
-                        (!has_unified_tokens && parser.is_some()).then_some("mistral_4")
-                    );
                     if let Some(preprocessor) = preprocessor {
                         assert_eq!(
                             preprocessor.unified_family(),
-                            options.resolved_unified_family()
+                            crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
+                                options.tool_call_parser.as_deref(),
+                                options.reasoning_parser.as_deref(),
+                            )
                         );
                     }
                     let checksum = card.mdcsum().to_string();

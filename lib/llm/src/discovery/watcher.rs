@@ -490,13 +490,7 @@ impl ModelWatcher {
             WorkerSet::new(namespace.clone(), spec.mdc_checksum.clone(), card.clone());
         worker_set.set_input_policy(crate::chat_input::ChatInputPolicy::from_card(card)?);
         let mut tokenizer = None;
-        let needs_rust_chat_validation = should_validate_parser_version(card)
-            && !(card.model_input == ModelInput::Tokens && self.chat_engine_factory.is_some());
-        worker_set.set_unsupported_unified_family(unsupported_unified_family(
-            card,
-            &mut tokenizer,
-            needs_rust_chat_validation,
-        )?);
+        check_unified_family_tokens(card, &mut tokenizer)?;
         let allocator_trim = worker_set.initialize_allocator_trim_on_teardown();
         worker_set.set_lifecycle_cancellation(cancellation.clone());
         if card.model_type.supports_images() {
@@ -1157,35 +1151,31 @@ impl ModelWatcher {
     }
 }
 
-/// The configured unified family this card's tokenizer cannot serve. Only a family
-/// that checks the vocabulary loads the tokenizer here. Keep it for local pipelines,
-/// while also checking cards that use a factory or text-input pipeline.
-pub(super) fn unsupported_unified_family(
+/// Reject a chat card whose tokenizer lacks a token its configured unified family
+/// needs. Only such a family loads the tokenizer here, and the caller reuses it. Every
+/// serving chat pipeline is checked, including factory and text-input pipelines,
+/// because the HTTP layer selects the family from the card's parser names for all of
+/// them. Prefill-only sets parse no output.
+pub(super) fn check_unified_family_tokens(
     card: &ModelDeploymentCard,
     tokenizer: &mut Option<crate::tokenizers::Tokenizer>,
-    needs_rust_chat_validation: bool,
-) -> anyhow::Result<Option<&'static str>> {
+) -> anyhow::Result<()> {
     use crate::protocols::openai::chat_completions::unified_parser;
     let tool_call_parser = card.runtime_config.tool_call_parser.as_deref();
     let reasoning_parser = card.runtime_config.reasoning_parser.as_deref();
-    if !card.model_type.supports_chat()
+    if !should_validate_parser_version(card)
         || !unified_parser::needs_tokenizer_check(tool_call_parser, reasoning_parser)
     {
-        return Ok(None);
+        return Ok(());
     }
     if !card.has_tokenizer() {
-        return if card
+        if card
             .mistral_tokenizer_version()
             .is_some_and(|version| version < 11)
         {
-            unified_parser::unsupported_legacy_mistral_family(
-                tool_call_parser,
-                reasoning_parser,
-                needs_rust_chat_validation,
-            )
-        } else {
-            Ok(None)
-        };
+            unified_parser::check_legacy_mistral_family(tool_call_parser, reasoning_parser)?;
+        }
+        return Ok(());
     }
     let tokenizer = match tokenizer {
         Some(tokenizer) => tokenizer,
@@ -1194,12 +1184,7 @@ pub(super) fn unsupported_unified_family(
                 .context("tokenizer for the unified parser family check")?,
         ),
     };
-    unified_parser::unsupported_family(
-        tool_call_parser,
-        reasoning_parser,
-        tokenizer.as_ref(),
-        needs_rust_chat_validation,
-    )
+    unified_parser::check_family_tokens(tool_call_parser, reasoning_parser, tokenizer.as_ref())
 }
 
 #[async_trait]
@@ -1697,15 +1682,17 @@ mod tests {
     use dynamo_runtime::{Runtime, distributed::DistributedConfig};
     use futures::StreamExt;
 
+    // A pre-v11 card that no Rust tokenizer can load is rejected from its version, for
+    // factory and Rust chat pipelines alike, unless the v1 parsers serve every model.
     #[test]
-    fn mistral_family_check_without_native_tokenizer_respects_parser_ownership() {
+    fn mistral_family_check_without_native_tokenizer_rejects_pre_v11() {
         const MODE: &str = "DYNAMO_MISTRAL_FAMILY_CHECK_MODE";
         let Ok(mode) = std::env::var(MODE) else {
             for mode in ["auto", "1", "2"] {
                 assert!(crate::test_utils::run_isolated(
                     concat!(
                         module_path!(),
-                        "::mistral_family_check_without_native_tokenizer_respects_parser_ownership"
+                        "::mistral_family_check_without_native_tokenizer_rejects_pre_v11"
                     ),
                     &[("DYN_PARSER_VERSION", mode), (MODE, mode)],
                 ));
@@ -1726,26 +1713,17 @@ mod tests {
             card.model_input = ModelInput::Tokens;
             card.runtime_config.tool_call_parser = Some("mistral".into());
             card.runtime_config.reasoning_parser = Some("mistral".into());
-            for needs_rust_chat_validation in [false, true] {
-                let mut tokenizer = None;
-                let result =
-                    unsupported_unified_family(&card, &mut tokenizer, needs_rust_chat_validation);
-                assert!(
-                    tokenizer.is_none(),
-                    "version detection must not build a tokenizer"
-                );
-                if version < 11 && mode == "2" && needs_rust_chat_validation {
-                    let error = result.unwrap_err().to_string();
-                    assert!(error.contains("DYN_PARSER_VERSION=2"), "{error}");
-                } else {
-                    assert_eq!(
-                        result.unwrap(),
-                        (version < 11).then_some(
-                            crate::protocols::openai::chat_completions::unified_parser::MISTRAL_UNIFIED_FAMILY
-                        ),
-                        "version={version}, mode={mode}, Rust chat={needs_rust_chat_validation}"
-                    );
-                }
+            let mut tokenizer = None;
+            let result = check_unified_family_tokens(&card, &mut tokenizer);
+            assert!(
+                tokenizer.is_none(),
+                "version detection must not build a tokenizer"
+            );
+            if version < 11 && mode != "1" {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("DYN_PARSER_VERSION=1"), "{error}");
+            } else {
+                result.unwrap_or_else(|error| panic!("version={version}, mode={mode}: {error:#}"));
             }
         }
     }
@@ -1768,22 +1746,16 @@ mod tests {
             crate::common::checked_file::CheckedFile::from_disk(&path)?,
         ));
         let mut tokenizer = None;
-        assert_eq!(
-            unsupported_unified_family(&card, &mut tokenizer, true)?,
-            None
-        );
+        check_unified_family_tokens(&card, &mut tokenizer)?;
         let shared = tokenizer.as_ref().unwrap().clone();
         std::fs::remove_file(&path)?;
 
         for input in [ModelInput::Tokens, ModelInput::Text] {
             card.model_input = input;
-            assert_eq!(
-                unsupported_unified_family(&card, &mut tokenizer, true)?,
-                None
-            );
+            check_unified_family_tokens(&card, &mut tokenizer)?;
             assert!(Arc::ptr_eq(tokenizer.as_ref().unwrap(), &shared));
         }
-        assert!(unsupported_unified_family(&card, &mut None, true).is_err());
+        assert!(check_unified_family_tokens(&card, &mut None).is_err());
         Ok(())
     }
 
@@ -3783,7 +3755,7 @@ request_classifier:
         let Ok(scenario) = std::env::var(SCENARIO) else {
             for (scenario, version) in [
                 ("engine_native", "auto"),
-                ("legacy_mistral", "2"),
+                ("legacy_mistral", "auto"),
                 ("native_mistral", "auto"),
             ] {
                 assert!(crate::test_utils::run_isolated(
@@ -3817,6 +3789,13 @@ request_classifier:
             if is_native_mistral && !matches!(index, 2 | 3) {
                 continue;
             }
+            // A tokenizer without `[ARGS]` cannot serve `mistral` behind any chat
+            // pipeline, factory-owned included; only the prefill-only set is admitted.
+            let accepted = if is_legacy_mistral {
+                is_prefill
+            } else {
+                accepted
+            };
             let manager = Arc::new(ModelManager::new());
             let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let callback: ChatEngineFactoryCallback = {
@@ -3932,14 +3911,6 @@ request_classifier:
                     assert_eq!(request.system.unwrap().text, "reminder");
                     assert_eq!(request.messages.len(), 2);
                 }
-                if is_legacy_mistral {
-                    let options = worker_set.parsing_options();
-                    assert_eq!(
-                        options.unsupported_unified_family.as_deref(),
-                        Some("mistral_4")
-                    );
-                    assert!(options.resolved_unified_family().is_none());
-                }
                 if is_prefill {
                     assert!(worker_set.is_prefill_set());
                     assert!(!worker_set.has_chat_engine());
@@ -3961,7 +3932,7 @@ request_classifier:
                     .expect("Rust-owned selectors must be rejected")
                     .to_string();
                 let expected = if is_legacy_mistral {
-                    "DYN_PARSER_VERSION=2"
+                    "DYN_PARSER_VERSION=1"
                 } else {
                     "--dyn-tool-call-parser"
                 };
