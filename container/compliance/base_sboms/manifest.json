@@ -56,13 +56,13 @@
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:20509fabe50dda62c09c0786d1a6effa299d3dbdddcc49331b93e65144652a8c",
+      "baseline_digest": "sha256:be3a9aea234be64ffc2816ac561c597e0f0b1f44a61a7f4912780e4d77450086",
       "baseline_image": "vllm/vllm-openai-xpu",
-      "baseline_sbom": "vllm-openai-xpu@20509fab-amd64.cdx.json",
-      "baseline_tag": "v0.32.0",
-      "from_digest": "sha256:20509fabe50dda62c09c0786d1a6effa299d3dbdddcc49331b93e65144652a8c",
+      "baseline_sbom": "vllm-openai-xpu@be3a9aea-amd64.cdx.json",
+      "baseline_tag": "v0.33.0",
+      "from_digest": "sha256:be3a9aea234be64ffc2816ac561c597e0f0b1f44a61a7f4912780e4d77450086",
       "from_image": "vllm/vllm-openai-xpu",
-      "from_tag": "v0.32.0",
+      "from_tag": "v0.33.0",
       "platform": "linux/amd64"
     },
     {
@@ -110,23 +110,23 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a",
+      "baseline_digest": "sha256:aa9c10c5f547dc5924682c89c87fe2b7ce52503e259844f717b54ac8299347e0",
       "baseline_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "baseline_sbom": "release@93a3eaf1-amd64.cdx.json",
-      "baseline_tag": "1.4.0rc2",
-      "from_digest": "sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a",
+      "baseline_sbom": "release@aa9c10c5-amd64.cdx.json",
+      "baseline_tag": "1.4.0rc3",
+      "from_digest": "sha256:aa9c10c5f547dc5924682c89c87fe2b7ce52503e259844f717b54ac8299347e0",
       "from_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "from_tag": "1.4.0rc2",
+      "from_tag": "1.4.0rc3",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a",
+      "baseline_digest": "sha256:aa9c10c5f547dc5924682c89c87fe2b7ce52503e259844f717b54ac8299347e0",
       "baseline_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "baseline_sbom": "release@93a3eaf1-arm64.cdx.json",
-      "baseline_tag": "1.4.0rc2",
-      "from_digest": "sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a",
+      "baseline_sbom": "release@aa9c10c5-arm64.cdx.json",
+      "baseline_tag": "1.4.0rc3",
+      "from_digest": "sha256:aa9c10c5f547dc5924682c89c87fe2b7ce52503e259844f717b54ac8299347e0",
       "from_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "from_tag": "1.4.0rc2",
+      "from_tag": "1.4.0rc3",
       "platform": "linux/arm64"
     },
     {
@@ -148,6 +148,36 @@
       "from_image": "nvcr.io/nvidia/distroless/python",
       "from_tag": "3.13-v4.1.10",
       "platform": "linux/arm64"
+    },
+    {
+      "baseline_digest": "sha256:f5627c5ee6b094ae16e2bf38694b2c375b609aa8b5a3f4fab6af47ea461b20e9",
+      "baseline_image": "lmsysorg/sglang",
+      "baseline_sbom": "sglang@f5627c5e-amd64.cdx.json",
+      "baseline_tag": "v0.5.23-xpu",
+      "from_digest": "sha256:f5627c5ee6b094ae16e2bf38694b2c375b609aa8b5a3f4fab6af47ea461b20e9",
+      "from_image": "lmsysorg/sglang",
+      "from_tag": "v0.5.23-xpu",
+      "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:6622ab1d265c0c08cddd68899ebbf2c2363aac64fc3bc947ba0dcc4a78ac7ba8",
+      "baseline_image": "nvcr.io/nvidia/vllm-base-enterprise-nightly",
+      "baseline_sbom": "vllm-base-enterprise-nightly@6622ab1d-amd64.cdx.json",
+      "baseline_tag": "20261110-90f0ff8",
+      "from_digest": "sha256:6622ab1d265c0c08cddd68899ebbf2c2363aac64fc3bc947ba0dcc4a78ac7ba8",
+      "from_image": "nvcr.io/nvidia/vllm-base-enterprise-nightly",
+      "from_tag": "20261110-90f0ff8",
+      "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:6622ab1d265c0c08cddd68899ebbf2c2363aac64fc3bc947ba0dcc4a78ac7ba8",
+      "baseline_image": "nvcr.io/nvidia/vllm-base-enterprise-nightly",
+      "baseline_sbom": "vllm-base-enterprise-nightly@6622ab1d-arm64.cdx.json",
+      "baseline_tag": "20261110-90f0ff8",
+      "from_digest": "sha256:6622ab1d265c0c08cddd68899ebbf2c2363aac64fc3bc947ba0dcc4a78ac7ba8",
+      "from_image": "nvcr.io/nvidia/vllm-base-enterprise-nightly",
+      "from_tag": "20261110-90f0ff8",
+      "platform": "linux/arm64"
     }
   ],
   "entry_schema": {
@@ -162,6 +192,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-11-03T04:29:35+00:00",
+  "generated_at": "2026-11-12T15:21:51+00:00",
   "schema_version": 2
 }

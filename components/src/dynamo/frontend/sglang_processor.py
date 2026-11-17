@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from sglang.srt.parser.conversation import chat_template_exists
-from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
@@ -58,6 +57,16 @@ from .utils import (
     resolve_chat_template,
     worker_warmup,
 )
+
+try:
+    from sglang.srt.hf_transformers import get_tokenizer
+except ModuleNotFoundError as exc:
+    if exc.name != "sglang.srt.hf_transformers":
+        raise
+    # SGLang 0.5.11 to 0.5.23 (current CUDA and XPU pins).
+    # Remove once both pins are newer.
+    from sglang.srt.utils.hf_transformers import get_tokenizer
+
 
 logger = logging.getLogger(__name__)
 
@@ -377,6 +386,7 @@ def _init_worker(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    isolate_tool_call_markers: bool = False,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
@@ -400,6 +410,7 @@ def _init_worker(
         chat_template=chat_template,
         tool_call_parser_name=tool_call_parser_name,
         reasoning_parser_name=reasoning_parser_name,
+        isolate_tool_call_markers=isolate_tool_call_markers,
     )
 
 
@@ -1288,6 +1299,7 @@ class SglangEngineFactory:
             chat_template=chat_template,
             tool_call_parser_name=tool_call_parser_name,
             reasoning_parser_name=reasoning_parser_name,
+            isolate_tool_call_markers=self.config.isolate_tool_call_markers,
         )
         preprocess_pool = None
         preprocess_workers = self.config.preprocess_workers
@@ -1313,6 +1325,7 @@ class SglangEngineFactory:
                     structural_tag_mode,
                     structural_tag_scope,
                     structural_tag_schema,
+                    self.config.isolate_tool_call_markers,
                 ),
             )
             futures = [
