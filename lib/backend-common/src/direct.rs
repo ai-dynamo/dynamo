@@ -7,9 +7,9 @@
 //! registers the engine with discovery and serves the request plane through
 //! [`EngineAdapter`]. In direct mode the frontend runs that same engine
 //! implementation and adapter itself. It registers each engine in its own
-//! discovery under the engine's own instance id as a `TransportType::Grpc`
+//! discovery under the engine's own instance id as a `TransportType::Direct`
 //! worker, so model watching, routing and prefill activation run unchanged.
-//! [`DirectDispatch`] is registered as the runtime's gRPC dispatch, so routers
+//! [`DirectDispatch`] is registered as the runtime's direct dispatch, so routers
 //! hand each request for those workers to it, and it calls the engine's
 //! adapter in-process.
 //!
@@ -163,13 +163,15 @@ pub async fn serve_direct_engines(
     // Before any engine is published: routers check for this dispatch once,
     // when the first model card builds them.
     let dispatch = Arc::new(DirectDispatch::default());
-    drt.register_grpc_dispatch::<PreprocessedRequest, Annotated<LLMEngineOutput>>(dispatch.clone())
-        .map_err(|register_error| {
-            error(
-                ErrorType::InvalidArgument,
-                format!("register the direct dispatch: {register_error}"),
-            )
-        })?;
+    drt.register_direct_dispatch::<PreprocessedRequest, Annotated<LLMEngineOutput>>(
+        dispatch.clone(),
+    )
+    .map_err(|register_error| {
+        error(
+            ErrorType::InvalidArgument,
+            format!("register the direct dispatch: {register_error}"),
+        )
+    })?;
     let mut hosts: Vec<(DirectEngineHost, HostedEngine)> = Vec::with_capacity(specs.len());
     for spec in specs {
         let host = DirectEngineHost {
@@ -376,7 +378,7 @@ impl DirectEngineHost {
             component: component.clone(),
             endpoint: config.endpoint.clone(),
             instance_id: self.instance_id,
-            transport: TransportType::Grpc(self.spec.url.clone()),
+            transport: TransportType::Direct(self.spec.url.clone()),
             device_type: None,
             request_plane_codec: None,
         });
@@ -735,7 +737,7 @@ mod tests {
         assert!(
             frontend
                 .drt
-                .grpc_dispatch::<PreprocessedRequest, Annotated<LLMEngineOutput>>()
+                .direct_dispatch::<PreprocessedRequest, Annotated<LLMEngineOutput>>()
                 .is_some()
         );
 
