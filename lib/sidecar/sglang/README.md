@@ -33,6 +33,12 @@ server. See the [sidecar overview](../README.md) for installation.
 
 See [support notes](../SUPPORT_NOTES.md#sglang) for feature restrictions and operational limits.
 
+> [!WARNING]
+> SGLang's Rust server downloads `http://` and `https://` media URLs itself, from
+> any host, including `127.0.0.1` and its own HTTP API. It does not support
+> `--allowed-media-domains`, so limit the engine's network access instead, for
+> example with a Kubernetes NetworkPolicy.
+
 ## Run locally
 
 See [`launch/`](launch/) for all topologies. For example, aggregated serving on
@@ -70,7 +76,7 @@ kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 ```
 
 Multinode deployments use complete `leader` and `worker` role PodTemplates. See
-[`multinode_tp.yaml`](deploy/multinode_tp.yaml), [`multinode_dp.yaml`](deploy/multinode_dp.yaml),
+[`multinode_tp.yaml`](deploy/multinode_tp.yaml)
 and the [SGLang sidecar guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes).
 
 ### Kubernetes manifest notes
@@ -83,7 +89,7 @@ later. [sgl-project/sglang#45859](https://github.com/sgl-project/sglang/pull/458
 is optional; without it, an EAGLE engine gets no token budget and the sidecar
 treats `--allow-auto-truncate` and `--skip-tokenizer-init` as off.
 SGLang can alternatively load the sidecar in-process with
-`--sidecar dynamo.sglang.sidecar`.
+`--sidecar dynamo.sglang.sidecar`, which also works with `SGLANG_RUST_SERVER=1`.
 
 Aggregated serving uses loopback between the engine and sidecar. Disaggregated
 serving binds SGLang to the pod network so decode workers can reach prefill's
