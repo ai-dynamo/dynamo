@@ -45,7 +45,7 @@ def seed(identifier: str = "one") -> dict[str, Any]:
 
 def inputs(tmp_path: Path, seeds: list[dict[str, Any]]) -> tuple[Path, Path]:
     requests = tmp_path / "seeds.jsonl"
-    requests.write_text("".join(dumps(item) + "\n" for item in seeds))
+    requests.write_text("".join(dumps(item) + "\n" for item in seeds), encoding="utf-8")
     profile = tmp_path / "profile.json"
     profile.write_text(
         dumps(
@@ -363,6 +363,25 @@ def test_invalid_utf8_is_not_replacement_decoded(tmp_path: Path) -> None:
         "kind": "response_encoding",
         "message": "UnicodeDecodeError",
     }
+
+
+@pytest.mark.parametrize("surrogate", [b"\\ud800", b"\\udfff"])
+def test_lone_surrogate_is_archived_as_an_encoding_error(
+    tmp_path: Path, surrogate: bytes
+) -> None:
+    requests, profile = inputs(tmp_path, [seed()])
+    raw = b'{"text":"' + surrogate + b'"}'
+    with reference_server(body=raw) as (url, _):
+        manifest = capture_requests(requests, profile, url, tmp_path / "capture")
+    record = loads((tmp_path / "capture" / manifest["records"][0]["path"]).read_bytes())
+    assert manifest["complete"] is False and manifest["successful_count"] == 0
+    assert base64.b64decode(record["response_bytes_base64"]) == raw
+    assert record["response"] is None
+    assert record["error"] == {
+        "kind": "response_encoding",
+        "message": "UnicodeEncodeError",
+    }
+    assert loads((tmp_path / "capture/capture.json").read_bytes()) == manifest
 
 
 def test_partial_capture_manifest_keeps_exact_seed_order_and_is_incomplete(

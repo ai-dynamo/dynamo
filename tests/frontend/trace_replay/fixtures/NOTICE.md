@@ -9,7 +9,7 @@ specific pinned source file through `source.context.ref` and uses
 
 The captures used `deepseek-ai/DeepSeek-V4.1-Flash`, revision
 `2cba9e42aa026125f3ed06c6d98c1db82f7ca027`, on 2026-11-10. The independent
-vLLM OpenAI server was version `0.30.1rc1.dev493+gac9126e58`, installed in the
+stock vLLM OpenAI server was version `0.30.1rc1.dev493+gac9126e58`, installed in the
 public image
 `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2-post.1`,
 digest `sha256:a16bc24d474919b5305a9d53a306ae27e35f0c21fcf54430a2047be39cc963b4`.
@@ -62,14 +62,15 @@ content/reasoning channels are projected to nullable OpenAI channels. Tool
 arguments remain typed JSON values, including V4.1's explicit `unit: "km/h"`
 velocity arguments, and tool order is significant.
 
-The self-contained `prompt-audit.json.gz` receipt contains exactly the five
-selected request/prompt identities. Its `requests_sha256` explicitly identifies
-the full upstream capture request set of 9,392 requests, not a five-request
-document. The manifest records the selected receipt hash, full source audit
-hash, immutable source commit, and source manifest hash. Approved model,
-tokenizer, vendor encoder, request-byte, prompt-ID, and output-ID identities
-bind each reviewed response to its original evidence. All five original JSONL
-lines are copied verbatim; only public-safe manifest metadata is selected.
+The manifest's inline `provenance.prompt_audit` records the five prompt checks.
+Its `requests_sha256` identifies the full source capture request set of 9,392
+requests, not a five-request document. The full source capture and audit are
+not public; `source_selection` retains the source audit hash, immutable source
+commit, and source manifest hash. The `golden_review` approval ledger retains
+the model, tokenizer, vendor encoder, request-byte, prompt-ID, and output-ID
+identities that bind each reviewed response to its original evidence. All five
+original JSONL lines are copied verbatim; only public-safe manifest metadata
+is selected.
 
 Additional traces without independent response expectations remain
 **unjudged** at the output checkpoint until review. Captured peer responses

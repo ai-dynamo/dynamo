@@ -144,7 +144,9 @@ def _fetch(
 
 
 def _parse_response(payload: bytes) -> Any:
-    return loads(payload.decode("utf-8", errors="strict"))
+    value = loads(payload.decode("utf-8", errors="strict"))
+    dumps(value).encode("utf-8")
+    return value
 
 
 def _server_info(

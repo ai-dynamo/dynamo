@@ -121,10 +121,11 @@ def test_cold_download_then_readonly_warm_cache_reuses_all_verified_bytes(
             "a complete cache must not create locks or temporary files"
         )
 
-    monkeypatch.setattr(assets.os, "open", no_write)
-    repeated = assets.resolve_cached_assets(
-        remote.profile, remote.reference, tmp_path / "cache"
-    )
+    with monkeypatch.context() as patched:
+        patched.setattr(assets.os, "open", no_write)
+        repeated = assets.resolve_cached_assets(
+            remote.profile, remote.reference, tmp_path / "cache"
+        )
     assert repeated == bundle
     assert remote.seen == []
 

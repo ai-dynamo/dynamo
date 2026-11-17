@@ -70,9 +70,7 @@
         "kind": "full_upstream_capture",
         "count": 9392,
         "note": "requests_sha256 identifies the complete upstream capture request set, not a five-request document"
-      },
-      "path": "prompt-audit.json.gz",
-      "sha256": "c809c36c9e10810189cf1a0242b184959071358fdc56e875e4cd6d50146c071d"
+      }
     },
     "golden_review": {
       "ids": [

@@ -326,7 +326,7 @@ def test_capture_to_prepare_preserves_unicode_json_line_and_canonical_wire_ident
         **setup["seed"]["request"],
         "return_token_ids": True,
     }
-    setup["seeds"].write_text(dumps(setup["seed"]) + "\n")
+    setup["seeds"].write_text(dumps(setup["seed"]) + "\n", encoding="utf-8")
     native = prepare.ReferenceEncoder(
         setup["profile"], setup["reference"], setup["model"]
     )
@@ -570,8 +570,9 @@ def test_synthetic_completion_includes_thinking_close_and_fits_cap(
     ]
 
 
+@pytest.mark.parametrize("serialization", ["unchanged", "key_order", "number_spelling"])
 def test_reviewed_responses_require_explicit_ids_pins_and_exact_binding(
-    setup: dict[str, Any], tmp_path: Path
+    setup: dict[str, Any], tmp_path: Path, serialization: str
 ) -> None:
     captured = capture(setup, tmp_path / "capture")
     root = tmp_path / "reviewed"
@@ -618,7 +619,26 @@ def test_reviewed_responses_require_explicit_ids_pins_and_exact_binding(
         },
     }
     write_json(root / "manifest.json", manifest)
-    run(setup, tmp_path / "approved", captures=captured, reviewed_corpus=root)
+    if serialization == "key_order":
+        setup["seed"]["request"] = dict(
+            reversed(list(setup["seed"]["request"].items()))
+        )
+    elif serialization == "number_spelling":
+        setup["seed"]["request"]["temperature"] = loads("0.0")
+    captured = capture(setup, tmp_path / "recaptured")
+    record_bytes = (captured / "record.json").read_bytes()
+    seed_bytes = (captured / "requests.jsonl").read_bytes()
+    captured_hash = loads(record_bytes)["request_sha256"]
+    approved = tmp_path / "approved"
+    run(setup, approved, captures=captured, reviewed_corpus=root)
+    exported = load_corpus(approved).cases[0]
+    assert dumps(exported.request) == dumps(case["request"])
+    assert (
+        exported.reference["preparation"]["capture"]["request_sha256"] == captured_hash
+    )
+    run(setup, tmp_path / "approved-again", captures=captured, reviewed_corpus=approved)
+    assert (captured / "record.json").read_bytes() == record_bytes
+    assert (captured / "requests.jsonl").read_bytes() == seed_bytes
     assert (
         load_corpus(tmp_path / "approved")
         .cases[0]

@@ -31,6 +31,7 @@ from tests.frontend.trace_replay.contract import (
     judge_response,
     load_corpus,
     loads,
+    parse_case,
     pointer,
     read_request_seeds,
     same_json,
@@ -58,6 +59,10 @@ pytestmark = [
     pytest.mark.core,
     pytest.mark.parallel,
 ]
+
+
+def first_fixture_case() -> dict[str, Any]:
+    return loads((FIXTURES / "cases.jsonl").read_bytes().splitlines()[0])
 
 
 @pytest.mark.parametrize(
@@ -199,6 +204,90 @@ def test_json_pointer_escapes_and_missing_are_distinct_from_null() -> None:
     assert not same_json(pointer(value, "/missing"), None)
 
 
+@pytest.mark.parametrize("path", ["/sampling_options/~2", "/missing/~", "/missing/a~2"])
+def test_bad_pointer_escape_after_missing_component_fails_at_load(path: str) -> None:
+    case = first_fixture_case()
+    case["expect"]["preprocessed"]["fields_equal"][path] = 1
+    with pytest.raises(ReplayError, match="escape"):
+        parse_case(case)
+
+
+@pytest.mark.parametrize("calls", [False, 0, "", {}])
+def test_expected_tool_calls_requires_an_array(calls: Any) -> None:
+    case = first_fixture_case()
+    case["expect"]["response"]["message"]["tool_calls"] = calls
+    with pytest.raises(ReplayError, match="tool_calls.*array"):
+        parse_case(case)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        None,
+        "x",
+        {},
+        {"function": None},
+        {"function": []},
+        {"function": {}},
+        {"function": {"name": 1}},
+    ],
+)
+def test_expected_tool_call_requires_an_object_and_function_name(call: Any) -> None:
+    case = first_fixture_case()
+    case["expect"]["response"]["message"]["tool_calls"] = [call]
+    with pytest.raises(ReplayError, match="tool call|function name"):
+        parse_case(case)
+
+
+@pytest.mark.parametrize("arguments", ["{", '{"x":NaN}', '{"x":1,"x":2}'])
+def test_expected_tool_arguments_are_validated_at_load(arguments: str) -> None:
+    case = first_fixture_case()
+    case["expect"]["response"]["message"]["tool_calls"] = [
+        {"function": {"name": "f", "arguments": arguments}}
+    ]
+    with pytest.raises(ReplayError):
+        parse_case(case)
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize(
+    "arguments,wanted",
+    [
+        ('{"large":9007199254740993.0}', {"large": 9007199254740993}),
+        ({"flag": False}, {"flag": False}),
+        ([1, True, None], [1, True, None]),
+        (False, False),
+        (None, None),
+    ],
+)
+def test_valid_expected_tool_forms_preserve_typed_arguments(
+    nested: bool, arguments: Any, wanted: Any
+) -> None:
+    value = first_fixture_case()
+    message = value["expect"]["response"]["message"]
+    function = {"name": "f", "arguments": arguments}
+    message["tool_calls"] = [{"function": function} if nested else function]
+    case = parse_case(value)
+    actual = copy.deepcopy(value["expect"]["response"])
+    actual["message"]["tool_calls"] = [
+        {"type": "function", "function": {"name": "f", "arguments": wanted}}
+    ]
+    assert not judge_response(case, actual)
+
+
+@pytest.mark.parametrize("calls", [MISSING, None, []])
+def test_expected_optional_tool_calls_normalize_to_no_calls(calls: Any) -> None:
+    value = first_fixture_case()
+    message = value["expect"]["response"]["message"]
+    message.pop("tool_calls")
+    if calls is not MISSING:
+        message["tool_calls"] = calls
+    case = parse_case(value)
+    actual = copy.deepcopy(value["expect"]["response"])
+    actual["message"]["tool_calls"] = []
+    assert not judge_response(case, actual)
+
+
 def test_wrong_prompt_and_effective_parameter_fail() -> None:
     case = load_corpus(FIXTURES, 1).cases[0]
     actual = {
@@ -215,6 +304,21 @@ def test_wrong_prompt_and_effective_parameter_fail() -> None:
         "/token_ids",
         "/sampling_options/seed",
     }
+
+
+@pytest.mark.parametrize("change", ["missing_last", "extra_last"])
+def test_prompt_with_missing_or_extra_tokens_fails(change: str) -> None:
+    case = load_corpus(FIXTURES, 1).cases[0]
+    ids = list(case.expected_preprocessed["token_ids"])
+    actual = {
+        "token_ids": ids[:-1] if change == "missing_last" else [*ids, ids[-1]],
+        "sampling_options": {"temperature": 0, "seed": 0, "n": 1},
+        "stop_conditions": {"max_tokens": 4096, "stop_token_ids_hidden": [1]},
+        "eos_token_ids": [1],
+    }
+    assert [failure["path"] for failure in judge_preprocessed(case, actual)] == [
+        "/token_ids"
+    ]
 
 
 def test_gzip_corpus_limit_does_not_change_total_or_silently_cap_full_run(

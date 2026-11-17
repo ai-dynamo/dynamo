@@ -793,6 +793,8 @@ def prepare_corpus(
                 or golden.worker_events[-1].get("stop_reason") is not None
             ):
                 raise ReplayError("reviewed response binding mismatch: " + seed["id"])
+            # The copied legacy approval ledger binds serialization as well as values.
+            effective = _effective(golden.request)
             expected["response"] = golden.expected_response
         if transformations:
             preparation["reference_transformations"] = transformations

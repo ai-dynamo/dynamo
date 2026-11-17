@@ -155,10 +155,12 @@ def pointer(value: Any, path: str) -> Any:
         return value
     if not isinstance(path, str) or not path.startswith("/"):
         raise ReplayError(f"invalid JSON Pointer: {path!r}")
-    current = value
-    for encoded in path[1:].split("/"):
+    components = path[1:].split("/")
+    for encoded in components:
         if re.search(r"~(?![01])", encoded):
             raise ReplayError(f"invalid JSON Pointer escape: {path}")
+    current = value
+    for encoded in components:
         key = encoded.replace("~1", "/").replace("~0", "~")
         if isinstance(current, dict):
             current = current.get(key, MISSING)
@@ -305,6 +307,7 @@ def parse_case(value: Any) -> Case:
             )
         if not isinstance(response.get("usage"), dict):
             raise ReplayError("response expectation requires usage")
+        expected_message(response["message"])
     reference = value.get("reference", {})
     if not isinstance(reference, dict):
         raise ReplayError("reference must be an object")
@@ -545,9 +548,18 @@ def canonical_message(message: Any) -> dict[str, Any]:
 
 
 def expected_message(message: dict[str, Any]) -> dict[str, Any]:
+    tool_calls = message.get("tool_calls")
+    if tool_calls is None:
+        tool_calls = []
+    if not isinstance(tool_calls, list):
+        raise ReplayError("expected tool_calls must be an array")
     calls = []
-    for call in message.get("tool_calls") or []:
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            raise ReplayError("expected tool call must be an object")
         function = call.get("function", call)
+        if not isinstance(function, dict) or not isinstance(function.get("name"), str):
+            raise ReplayError("expected tool call requires a function name")
         arguments = function.get("arguments")
         if isinstance(arguments, str):
             arguments = loads(arguments)
