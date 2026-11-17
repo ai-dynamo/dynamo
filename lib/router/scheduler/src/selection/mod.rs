@@ -16,20 +16,18 @@ pub mod pending;
 pub mod types;
 
 pub use core::{
-    HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource, Selected,
-    SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation, SelectionOutcome,
-    SelectionPartition, SelectionRun, SelectionScheduler, SessionBinding,
+    HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource,
+    SelectionCore, SelectionHost, SelectionPartition, SelectionScheduler,
 };
 pub use error::SelectionError;
-pub use ingress::{KvEventIngress, LocalIndexIngress};
+pub use ingress::KvEventIngress;
 pub use input::{PromptRequest, PromptView};
 pub use membership::{CatalogObserver, CatalogReconciler, WorkerCatalogSource};
 pub use pending::SelectionCacheConfig;
 pub use types::{
     DEFAULT_MODEL_NAME, ModelLoadResponse, OutputBlockRequest, OverlapScoresRequest,
-    OverlapScoresResponse, PotentialLoadsRequest, ReadyResponse, ReservationRequest,
-    ReservationResponse, SelectAndReserveRequest, SelectRequest, SelectResponse,
-    SelectionInputTrigger, SelectionSessionContext, SelectionWorkerConfig, SelectionWorkerLoad,
-    SharedCacheOverlapScore, WorkerCatalogRecord, WorkerLifecycle, WorkerOverlapScore,
-    WorkerPatchRequest, WorkerRequest,
+    PotentialLoadsRequest, ReadyResponse, ReservationRequest, ReservationResponse,
+    SelectAndReserveRequest, SelectRequest, SelectResponse, SelectionInputTrigger,
+    SelectionSessionContext, SelectionWorkerConfig, SelectionWorkerLoad, WorkerCatalogRecord,
+    WorkerLifecycle, WorkerPatchRequest, WorkerRequest,
 };

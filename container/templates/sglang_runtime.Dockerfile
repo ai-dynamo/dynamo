@@ -7,11 +7,7 @@
 ########## Runtime Image #########
 ##################################
 
-{% if device == "xpu" %}
-FROM framework AS runtime
-{% else %}
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
-{% endif %}
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
@@ -37,8 +33,8 @@ ENV PATH=/usr/local/bin/etcd:$PATH
 # Install the TurboJPEG runtime used by frontend JPEG decoding and bring
 # base-image OS packages up to the current patch releases. --only-upgrade skips
 # anything not already installed while keeping both operations in one layer.
-# libjemalloc2 lets Dynamo processes opt into jemalloc via
-# LD_PRELOAD or DYN_FRONTEND_JEMALLOC; it is not preloaded by default.
+# libjemalloc2 lets CPython and C code opt into jemalloc via
+# LD_PRELOAD; it is not preloaded by default.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libturbojpeg \
@@ -62,8 +58,8 @@ RUN apt-get update && \
     ldconfig -p | grep -q 'libturbojpeg.so.0'
 {% else %}
 # Install the TurboJPEG runtime used by frontend JPEG decoding.
-# libjemalloc2 lets Dynamo processes opt into jemalloc via
-# LD_PRELOAD or DYN_FRONTEND_JEMALLOC; it is not preloaded by default.
+# libjemalloc2 lets CPython and C code opt into jemalloc via
+# LD_PRELOAD; it is not preloaded by default.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libturbojpeg \
@@ -106,6 +102,18 @@ COPY --chown=dynamo:0 --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linu
 
 COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+
+# Install RDMA libraries required for UCX to find RDMA devices
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libibverbs1 \
+        rdma-core \
+        ibverbs-utils \
+        libibumad3 \
+        libnuma1 \
+        librdmacm1 \
+        ibverbs-providers && \
+    rm -rf /var/lib/apt/lists/*
 
 ENV PATH=/usr/local/ucx/bin:$PATH
 
@@ -188,14 +196,26 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps $(grep -E '^nvtx==' /tmp/requirements.common.txt)
 
+{% if device == "xpu" %}
+# The upstream SGLang XPU base installs uv to /root/.local/bin, outside any Python
+# distribution, so requirements.sglang.txt cannot refresh it. Replace every uv on
+# PATH with the pinned release.
+{%- else %}
 # The upstream SGLang base copies a uv binary into /usr/local/bin, outside any
 # Python distribution, so requirements.sglang.txt cannot refresh it. Replace it
 # with the release carrying the current fix line where the base ships one.
+{%- endif %}
 # Nothing on the runtime path runs uv.
 RUN --mount=type=bind,from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }},source=/,target=/tmp/uv-image \
+{%- if device == "xpu" %}
+    for u in $(which -a uv uvx); do \
+        install -m 0755 "/tmp/uv-image/$(basename "$u")" "$u"; \
+    done && \
+{%- else %}
     if [ -e /usr/local/bin/uv ]; then \
         install -m 0755 /tmp/uv-image/uv /tmp/uv-image/uvx /usr/local/bin/; \
     fi && \
+{%- endif %}
     for u in $(which -a uv uvx); do \
         "$u" --version | grep -q '^uvx\{0,1\} {{ context.dynamo.uv_version | replace(".", "\\.") }} ' || { echo "unexpected uv at $u" >&2; exit 1; }; \
     done
@@ -219,7 +239,7 @@ RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compl
 # mooncake and PyNvVideoCodec are CUDA-only. The mooncake floor names the CUDA 13
 # distribution, and PyNvVideoCodec decodes on NVDEC through libnvcuvid, so both
 # are inert on the XPU image and neither is present in its base. The diffusers pin
-# is stripped too: the XPU framework stage installs its own diffusion extra, and
+# is stripped too: the published XPU base installs its own diffusion extra, and
 # this pin is tested on CUDA only. The patterns are
 # anchored to the line start so they cannot match inside another requirement, and
 # the checks fail the build if either package arrives by another route -- a filter
@@ -402,12 +422,12 @@ ENV SGLANG_FORCE_SHUTDOWN=1
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
 
+{# oneAPI and /opt/venv come through Docker ENV (SETVARS_COMPLETED=1), which every
+   process inherits -- do not move this into a bashrc, which only interactive
+   shells read. #}
 RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
 {%- if device == "xpu" %}
-    echo '. /opt/miniforge3/bin/activate sglang' >> /etc/bash.bashrc && \
-    echo 'source /opt/intel/oneapi/setvars.sh --force' >> /etc/bash.bashrc && \
-    mkdir -p /sgl-workspace && \
     ln -sf /workspace /sgl-workspace/dynamo
 {%- else %}
     ln -s /workspace /sgl-workspace/dynamo && \
@@ -463,14 +483,13 @@ ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
 {% if device == "xpu" %}
-CMD ["bash", "-c", "source /etc/bash.bashrc && exec bash"]
+CMD ["bash"]
 {% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 {% endif %}
 
 
-{% if device != "xpu" %}
 {# Compliance is skipped for dev/local-dev: those images are not shipped (release
    ships runtime/frontend/operator/planner/snapshot-agent), compliance-extract
    already skips them, and their pre_runtime carries no dynamo venv to scan. #}
@@ -484,13 +503,16 @@ CMD []
 #######################################
 
 FROM pre_runtime AS runtime
+{%- if device == "cuda" %}
 # NVDEC (PyNvVideoCodec, added in requirements.sglang.txt) needs the driver
 # "video" capability at runtime so libnvcuvid is exposed; without it
 # PyNvVideoCodec cannot import. Ensure the K8s pod/runtimeClass does not drop it.
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+{% endif %}
 {% if target not in ("dev", "local-dev") %}
 COPY --from=licenses /legal /legal
 {% endif %}
+{% if device != "xpu" %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 {% endif %}

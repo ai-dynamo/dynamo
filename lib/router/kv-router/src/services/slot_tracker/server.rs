@@ -19,7 +19,7 @@ use crate::services::common::replica_sync::PeerManager;
 use crate::services::common::replica_sync_http;
 use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
-use dynamo_scheduler::identity::default_routing_group;
+use dynamo_scheduler::default_routing_group;
 use dynamo_slot_tracker::SequenceError;
 
 use super::registry::{RegistryError, ServiceError, SlotTrackerRegistry};
