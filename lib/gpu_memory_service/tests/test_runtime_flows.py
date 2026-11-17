@@ -1254,3 +1254,437 @@ def test_content_commit_path_is_unchanged(gms_thread):
         assert len(reader.list_allocations()) == 1
     finally:
         reader.close()
+
+
+# ---- bulk import: lifetime, partial failure ----
+
+
+def _publish(socket_path, sizes, tag="weights"):
+    """Commit one layout with allocations of ``sizes``; return allocation ids by slot."""
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+    ids = [
+        writer.mappings[writer.create_mapping(size=s, tag=tag)].allocation_id
+        for s in sizes
+    ]
+    assert writer.commit()
+    writer.close()
+    return ids
+
+
+def _fake_vmm():
+    return _vmm_module._vmm_instance
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize("fail_at", ["export", "import", "map"])
+def test_bulk_import_unwinds_a_partial_failure(running_gms, monkeypatch, fail_at):
+    """A failure in the middle of import_allocations leaves nothing behind: no
+    reservations, no imported handles, no mappings, and no fd closed twice."""
+    _, socket_path = running_gms
+    ids = _publish(socket_path, (4096, 4096, 4096))
+    vmm = _fake_vmm()
+    reader = GMSClientMemoryManager(socket_path, device=0, tag="weights")
+    reader.connect(RequestedLockType.RO)
+    reservations_before = dict(vmm.reservations)
+    decoy = []
+    calls = {"n": 0}
+
+    def fail_second(real):
+        def wrapped(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                if fail_at == "import":
+                    # Contract: the fd is consumed even on failure. Another
+                    # thread may get the same fd number right away.
+                    os.close(args[0])
+                    decoy.extend(os.pipe())
+                raise RuntimeError(f"injected {fail_at} failure")
+            return real(*args, **kwargs)
+
+        return wrapped
+
+    if fail_at == "export":
+        monkeypatch.setattr(reader, "export_handle", fail_second(reader.export_handle))
+    elif fail_at == "import":
+        monkeypatch.setattr(
+            vmm,
+            "import_shareable_handle_close_fd",
+            fail_second(vmm.import_shareable_handle_close_fd),
+        )
+    else:
+        monkeypatch.setattr(vmm, "map", fail_second(vmm.map))
+    try:
+        with pytest.raises(RuntimeError, match="injected"):
+            reader.import_allocations(ids)
+        assert reader.mappings == {}
+        assert vmm.mapped == {}
+        assert vmm.imports == set()
+        assert vmm.reservations == reservations_before
+        for fd in decoy:
+            os.fstat(fd)  # still open: not closed a second time by the unwind
+        monkeypatch.undo()
+        reader.import_allocations(ids)
+        assert len(reader.mappings) == 3
+    finally:
+        for fd in decoy:
+            os.close(fd)
+        reader.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_bulk_remap_failure_leaves_the_manager_remappable(running_gms, monkeypatch):
+    _, socket_path = running_gms
+    ids = _publish(socket_path, (4096, 4096, 4096))
+    vmm = _fake_vmm()
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    try:
+        reader.connect(RequestedLockType.RO)
+        reader.import_allocations(ids)
+        reader.unmap_all_vas()
+        reader.abort()
+        reader.connect(RequestedLockType.RO)
+        real_map, calls = vmm.map, {"n": 0}
+
+        def flaky_map(*args):
+            calls["n"] += 1
+            if calls["n"] == 3:
+                raise RuntimeError("injected map failure")
+            return real_map(*args)
+
+        monkeypatch.setattr(vmm, "map", flaky_map)
+        with pytest.raises(RuntimeError, match="injected"):
+            reader.remap_all_vas()
+        assert vmm.mapped == {} and vmm.imports == set()
+        assert all(m.handle == 0 for m in reader.mappings.values())
+        monkeypatch.setattr(vmm, "map", real_map)
+        reader.remap_all_vas()
+        assert all(m.handle != 0 for m in reader.mappings.values())
+    finally:
+        reader.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_bulk_import_default_mode_sets_access_per_reservation(running_gms, monkeypatch):
+    """Without fixed VA every import is its own cuMemAddressReserve; access is set
+    per mapping (as the per-allocation path does) even when the driver happens to
+    hand out adjacent reservations."""
+    _, socket_path = running_gms
+    ids = _publish(socket_path, (4096, 4096, 4096))
+    vmm = _fake_vmm()
+    cursor = {"va": 0x7000000000}
+
+    def adjacent_reserve(size, granularity, addr=0):
+        va = cursor["va"]
+        cursor["va"] += size
+        vmm.reservations[va] = size
+        return va
+
+    monkeypatch.setattr(vmm, "address_reserve", adjacent_reserve)
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    try:
+        reader.connect(RequestedLockType.RO)
+        vmm.calls.clear()
+        reader.import_allocations(ids)
+        access = [c for c in vmm.calls if c[0] == "set_access"]
+        assert sorted(access) == [
+            ("set_access", va, 4096) for va in sorted(reader.mappings)
+        ]
+    finally:
+        reader.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_bulk_import_bounds_the_number_of_open_fds(running_gms, monkeypatch):
+    """Exports are imported in chunks so a large layout cannot hit RLIMIT_NOFILE."""
+    _, socket_path = running_gms
+    ids = _publish(socket_path, [4096] * 7)
+    vmm = _fake_vmm()
+    monkeypatch.setattr(GMSClientMemoryManager, "_BULK_CHUNK", 3, raising=False)
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    outstanding = {"now": 0, "max": 0}
+    real_export, real_import = (
+        reader.export_handle,
+        vmm.import_shareable_handle_close_fd,
+    )
+
+    def export(allocation_id):
+        outstanding["now"] += 1
+        outstanding["max"] = max(outstanding["max"], outstanding["now"])
+        return real_export(allocation_id)
+
+    def import_(fd, import_size=0):
+        outstanding["now"] -= 1
+        return real_import(fd, import_size=import_size)
+
+    monkeypatch.setattr(reader, "export_handle", export)
+    monkeypatch.setattr(vmm, "import_shareable_handle_close_fd", import_)
+    try:
+        reader.connect(RequestedLockType.RO)
+        reader.import_allocations(ids)
+        assert len(reader.mappings) == 7
+        assert outstanding["max"] == 3
+    finally:
+        reader.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_bulk_import_option_and_per_manager_import_stats(running_gms, monkeypatch):
+    """The constructor argument wins over DYN_GMS_BULK_IMPORT, which is only a
+    fallback, and import counters belong to the manager that imported."""
+    _, socket_path = running_gms
+    ids = _publish(socket_path, (4096, 4096))
+    monkeypatch.delenv("DYN_GMS_BULK_IMPORT", raising=False)
+    assert GMSClientMemoryManager(socket_path, device=0).bulk_import
+    monkeypatch.setenv("DYN_GMS_BULK_IMPORT", "0")
+    assert not GMSClientMemoryManager(socket_path, device=0).bulk_import
+    bulk = GMSClientMemoryManager(socket_path, device=0, bulk_import=True)
+    single = GMSClientMemoryManager(socket_path, device=0, bulk_import=False)
+    assert bulk.bulk_import and not single.bulk_import
+    try:
+        bulk.connect(RequestedLockType.RO)
+        single.connect(RequestedLockType.RO)
+        bulk.import_allocations(ids)
+        single.create_mapping(allocation_id=ids[0])
+        assert bulk.take_import_stats()["imports"] == 2
+        assert bulk.take_import_stats() == {}
+        assert single.take_import_stats()["imports"] == 1
+    finally:
+        bulk.close()
+        single.close()
+
+
+# ---- default read-only attach (materialize_module_from_gms) with bulk import ----
+
+
+def _publish_module_layout(socket_path):
+    """Publish four allocations: two parameters at different offsets of one, a
+    parameter and its alias on another, a buffer and a tensor attribute on a
+    third, and one allocation no tensor references. Returns allocation ids."""
+    import torch
+    from gpu_memory_service.client.torch.tensor import TensorMetadata
+
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+    ids = [
+        writer.mappings[writer.create_mapping(size=s, tag="weights")].allocation_id
+        for s in (2 * 4096, 4096, 4096, 4096)
+    ]
+
+    def put(key, allocation, offset, shape, tensor_type="parameter"):
+        stride = (shape[1], 1) if len(shape) == 2 else (1,)
+        meta = TensorMetadata(tuple(shape), torch.float32, stride, tensor_type)
+        assert writer.metadata_put(key, allocation, offset, meta.to_bytes())
+
+    put("a.weight", ids[0], 0, (4, 4))
+    put("a.bias", ids[0], 4096, (4,))
+    put("b.weight", ids[1], 0, (4, 4))
+    put("b.tied", ids[1], 0, (4, 4))
+    put("b.scale", ids[2], 0, (4,), "buffer")
+    put("b.extra", ids[2], 64, (4,), "tensor_attr")
+    assert writer.commit()
+    writer.close()
+    return ids
+
+
+def _meta_module():
+    import torch
+
+    model = torch.nn.Module()
+    with torch.device("meta"):
+        model.a = torch.nn.Linear(4, 4)
+        model.b = torch.nn.Linear(4, 4, bias=False)
+        model.b.tied = torch.nn.Parameter(torch.empty(4, 4))
+        model.b.register_buffer("scale", torch.empty(4))
+    return model
+
+
+def _attach(socket_path, monkeypatch, **manager_kwargs):
+    """Run the default RO attach with GPU tensors faked by the pointer they
+    alias. Returns (reader, model, per-tensor pointers, server RPC counts)."""
+    import torch
+    from gpu_memory_service.client.torch import tensor as gms_tensor
+    from gpu_memory_service.client.torch.module import materialize_module_from_gms
+
+    pointers = {}
+
+    def fake_tensor(ptr, shape, stride, dtype, device_index):
+        t = torch.zeros(shape, dtype=dtype)
+        pointers[id(t)] = ptr
+        return t
+
+    monkeypatch.setattr(gms_tensor, "_tensor_from_pointer", fake_tensor)
+    reader = GMSClientMemoryManager(
+        socket_path, device=0, tag="weights", **manager_kwargs
+    )
+    reader.connect(RequestedLockType.RO)
+    rpcs = {"get_handle_info": 0, "export_handle": 0}
+    for name in rpcs:
+        real = getattr(reader, name)
+
+        def counted(*args, _real=real, _name=name):
+            rpcs[_name] += 1
+            return _real(*args)
+
+        monkeypatch.setattr(reader, name, counted)
+    model = _meta_module()
+    by_name = {}
+    real_materialize = gms_tensor.GMSTensorSpec.materialize
+
+    def materialize(spec, manager, device_index):
+        t = real_materialize(spec, manager, device_index)
+        by_name[spec.name] = pointers[id(t)]
+        return t
+
+    monkeypatch.setattr(gms_tensor.GMSTensorSpec, "materialize", materialize)
+    try:
+        materialize_module_from_gms(reader, model, device_index=0)
+    finally:
+        monkeypatch.setattr(gms_tensor.GMSTensorSpec, "materialize", real_materialize)
+    return reader, model, by_name, rpcs
+
+
+def _attach_view(reader, by_name):
+    """Mappings and tensor placement independent of where the driver put VAs."""
+    base = {va: m.allocation_id for va, m in reader.mappings.items()}
+
+    def where(ptr):
+        for va, m in reader.mappings.items():
+            if va <= ptr < va + m.aligned_size:
+                return base[va], ptr - va
+        raise AssertionError(f"0x{ptr:x} is not in any mapping")
+
+    mappings = sorted(
+        (m.allocation_id, m.size, m.aligned_size, m.tag, m.layout_slot)
+        for m in reader.mappings.values()
+    )
+    return mappings, {name: where(ptr) for name, ptr in by_name.items()}
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_default_ro_attach_maps_the_same_with_bulk_import_on_and_off(
+    running_gms, monkeypatch
+):
+    """materialize_module_from_gms imports every referenced allocation in one
+    bulk call when the manager's bulk_import is on (no per-tensor handle-info
+    round trips) and gives the same mappings, tensor placement, aliases and
+    read-only access as one create_mapping per allocation."""
+    _, socket_path = running_gms
+    ids = _publish_module_layout(socket_path)
+    vmm = _fake_vmm()
+    views = {}
+    for bulk in (False, True):
+        vmm.calls.clear()
+        reader, model, by_name, rpcs = _attach(
+            socket_path, monkeypatch, bulk_import=bulk
+        )
+        try:
+            assert reader.bulk_import is bulk
+            # Unreferenced allocations stay unmapped on both paths.
+            assert {m.allocation_id for m in reader.mappings.values()} == set(ids[:3])
+            assert rpcs == {"get_handle_info": 0 if bulk else 3, "export_handle": 3}
+            assert set(vmm.access.values()) == {GrantedLockType.RO}
+            assert set(vmm.access) == set(reader.mappings)
+            assert by_name["b.tied"] == by_name["b.weight"]
+            assert not any(p.is_meta for p in model.parameters())
+            assert not any(b.is_meta for b in model.buffers())
+            views[bulk] = _attach_view(reader, by_name)
+        finally:
+            reader.close()
+    assert views[True] == views[False]
+    mappings, placement = views[True]
+    assert placement["a.bias"] == (ids[0], 4096)
+    assert placement["b.extra"] == (ids[2], 64)
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_default_ro_attach_follows_the_bulk_import_env_fallback(
+    running_gms, monkeypatch
+):
+    _, socket_path = running_gms
+    _publish_module_layout(socket_path)
+    monkeypatch.setenv("DYN_GMS_BULK_IMPORT", "0")
+    reader, _, _, rpcs = _attach(socket_path, monkeypatch)
+    reader.close()
+    assert rpcs["get_handle_info"] == 3  # per-allocation path
+    monkeypatch.delenv("DYN_GMS_BULK_IMPORT")
+    reader, _, _, rpcs = _attach(socket_path, monkeypatch)
+    reader.close()
+    assert rpcs["get_handle_info"] == 0  # bulk by default
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize("fail_at", ["export", "import", "map", "set_access"])
+def test_default_ro_attach_bulk_failure_is_all_or_nothing(
+    running_gms, monkeypatch, fail_at
+):
+    """A failure partway through the bulk attach leaves no reservation, handle
+    or mapping behind and the model untouched; the same manager can attach
+    again afterwards."""
+    import torch
+    from gpu_memory_service.client.torch import tensor as gms_tensor
+    from gpu_memory_service.client.torch.module import materialize_module_from_gms
+
+    _, socket_path = running_gms
+    _publish_module_layout(socket_path)
+    vmm = _fake_vmm()
+    reservations_before = dict(vmm.reservations)
+    reader = GMSClientMemoryManager(
+        socket_path, device=0, tag="weights", bulk_import=True
+    )
+    reader.connect(RequestedLockType.RO)
+    window = dict(vmm.reservations)
+    fail_on = 1 if fail_at == "set_access" else 2
+    calls = {"n": 0}
+
+    def failing(real):
+        def wrapped(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == fail_on:
+                if fail_at == "import":
+                    os.close(args[0])  # the fd is consumed even on failure
+                raise RuntimeError(f"injected {fail_at} failure")
+            return real(*args, **kwargs)
+
+        return wrapped
+
+    owner = reader if fail_at == "export" else vmm
+    name = {
+        "export": "export_handle",
+        "import": "import_shareable_handle_close_fd",
+    }.get(fail_at, fail_at)
+    real = getattr(owner, name)
+    monkeypatch.setattr(owner, name, failing(real))
+    materialized = []
+    real_materialize = gms_tensor.GMSTensorSpec.materialize
+
+    def materialize(*args):
+        materialized.append(args[0].name)
+        return real_materialize(*args)
+
+    monkeypatch.setattr(gms_tensor.GMSTensorSpec, "materialize", materialize)
+    monkeypatch.setattr(
+        gms_tensor,
+        "_tensor_from_pointer",
+        lambda ptr, shape, stride, dtype, device_index: torch.zeros(shape, dtype=dtype),
+    )
+    model = _meta_module()
+    try:
+        with pytest.raises(RuntimeError, match="injected"):
+            materialize_module_from_gms(reader, model, device_index=0)
+        assert materialized == []  # failed before any tensor was bound
+        assert reader.mappings == {}
+        assert vmm.mapped == {} and vmm.imports == set()
+        assert vmm.reservations == window
+        assert all(p.is_meta for p in model.parameters())
+        assert all(b.is_meta for b in model.buffers())
+
+        monkeypatch.setattr(owner, name, real)
+        materialize_module_from_gms(reader, model, device_index=0)
+        assert len(reader.mappings) == 3
+        assert set(vmm.access) == set(reader.mappings)
+        assert not any(p.is_meta for p in model.parameters())
+        assert not any(b.is_meta for b in model.buffers())
+    finally:
+        reader.close()
+    assert vmm.reservations == reservations_before

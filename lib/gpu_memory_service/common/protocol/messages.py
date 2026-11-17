@@ -14,10 +14,20 @@ class HandshakeRequest(msgspec.Struct, tag="handshake_request"):
     timeout_ms: Optional[int] = None
 
 
+# Optional requests a server understands beyond the base protocol. An older server
+# cannot decode a request type it does not know and drops the connection (and the
+# client's lock) instead of answering, so a client must check the capability from
+# the handshake before sending one of these.
+CAPABILITY_METADATA_GET_ALL = "metadata_get_all"
+SERVER_CAPABILITIES: tuple[str, ...] = (CAPABILITY_METADATA_GET_ALL,)
+
+
 class HandshakeResponse(msgspec.Struct, tag="handshake_response"):
     success: bool
     committed: bool
     granted_lock_type: Optional[GrantedLockType] = None
+    # Absent from (and ignored by) older peers, which decode it as empty.
+    capabilities: List[str] = []
 
 
 class CommitRequest(msgspec.Struct, tag="commit_request"):
@@ -165,6 +175,35 @@ class MetadataListResponse(msgspec.Struct, tag="metadata_list_response"):
     keys: List[str] = []
 
 
+class MetadataItem(msgspec.Struct):
+    key: str
+    allocation_id: str
+    offset_bytes: int
+    value: bytes
+
+
+class MetadataGetAllRequest(msgspec.Struct, tag="metadata_get_all_request"):
+    """Entries (key, allocation, offset, value) under ``prefix``, minus any key
+    under ``exclude_prefix``, in key order, one bounded page per round trip.
+
+    A reader otherwise issues one MetadataGetRequest per tensor (thousands for a
+    large model). Pages keep each reply well under the wire frame limit; the
+    first page starts at ``start_after=None``, later pages pass the previous
+    response's ``next_start_after``. Only sent to a server that advertises
+    ``CAPABILITY_METADATA_GET_ALL``.
+    """
+
+    prefix: str = ""
+    exclude_prefix: str = ""
+    start_after: Optional[str] = None
+
+
+class MetadataGetAllResponse(msgspec.Struct, tag="metadata_get_all_response"):
+    items: List[MetadataItem] = []
+    # Key to resume after, or None when this page completes the listing.
+    next_start_after: Optional[str] = None
+
+
 class GetStateHashRequest(msgspec.Struct, tag="get_memory_layout_hash_request"):
     pass
 
@@ -232,6 +271,8 @@ Message = Union[
     MetadataDeleteResponse,
     MetadataListRequest,
     MetadataListResponse,
+    MetadataGetAllRequest,
+    MetadataGetAllResponse,
     GetStateHashRequest,
     GetStateHashResponse,
     GetRuntimeStateRequest,

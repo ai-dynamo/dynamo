@@ -31,6 +31,9 @@ This module uses cuda-python bindings for CUDA driver API calls:
 from __future__ import annotations
 
 import logging
+import os
+import time
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -151,6 +154,12 @@ class LayoutCommit:
     granted_lock_type: GrantedLockType
 
 
+def _bulk_import_from_env() -> bool:
+    """Fallback for managers created without ``bulk_import``: on unless
+    ``DYN_GMS_BULK_IMPORT=0``."""
+    return os.environ.get("DYN_GMS_BULK_IMPORT", "1") != "0"
+
+
 class GMSClientMemoryManager:
     """Unified memory manager for GPU Memory Service.
 
@@ -164,7 +173,14 @@ class GMSClientMemoryManager:
         device: int = 0,
         tag: Optional[str] = None,
         scratch_size: int = 512 * 1024 * 1024,
+        bulk_import: Optional[bool] = None,
     ) -> None:
+        """``bulk_import``: import many allocations phase by phase (export a chunk
+        of fds, import them, map them, then set access) in ``remap_all_vas`` and
+        for callers of ``import_allocations``, instead of one allocation at a
+        time. Same mappings, far fewer cross-process waits. None falls back to
+        ``DYN_GMS_BULK_IMPORT`` (on unless ``0``).
+        """
         self.socket_path = socket_path
         self.device = device
         self.tag = tag
@@ -188,6 +204,12 @@ class GMSClientMemoryManager:
         self._unmapped = False
         self._aborted = False
         self._granted_lock_type: Optional[GrantedLockType] = None
+
+        self.bulk_import = (
+            _bulk_import_from_env() if bulk_import is None else bool(bulk_import)
+        )
+        # Import-path timing (seconds) and counts; see take_import_stats.
+        self._import_stats: Dict[str, float] = defaultdict(float)
 
         # VA-stable unmap/remap state
         self._va_preserved = False
@@ -401,6 +423,12 @@ class GMSClientMemoryManager:
     def metadata_list(self, prefix: str = "") -> List[str]:
         return self._client_rpc.metadata_list(prefix)
 
+    def metadata_get_all(
+        self, prefix: str = "", exclude_prefix: str = ""
+    ) -> List[tuple[str, str, int, bytes]]:
+        """All (key, allocation_id, offset_bytes, value) entries in one round trip."""
+        return self._client_rpc.metadata_get_all(prefix, exclude_prefix)
+
     def metadata_delete(self, key: str) -> bool:
         return self._client_rpc.metadata_delete(key)
 
@@ -426,11 +454,18 @@ class GMSClientMemoryManager:
         """
         assert self._granted_lock_type is not None
         aligned_size = align_to_granularity(size, self.granularity)
+        t0 = time.perf_counter()
         handle = self._vmm.import_shareable_handle_close_fd(
             fd, import_size=aligned_size
         )
+        t1 = time.perf_counter()
         self._vmm.map(va, aligned_size, handle)
+        t2 = time.perf_counter()
         self._vmm.set_access(va, aligned_size, self.device, self._granted_lock_type)
+        t3 = time.perf_counter()
+        self._import_stats["import_s"] += t1 - t0
+        self._import_stats["map_s"] += t2 - t1
+        self._import_stats["access_s"] += t3 - t2
         self._track_mapping(
             LocalMapping(
                 allocation_id=allocation_id,
@@ -476,6 +511,145 @@ class GMSClientMemoryManager:
 
     # ==================== Tier 2: Convenience ====================
 
+    def take_import_stats(self) -> Dict[str, float]:
+        """Import timing (seconds) and counts of this manager since the last
+        call, then reset them. ``imports`` counts imported allocations."""
+        stats = dict(self._import_stats)
+        self._import_stats.clear()
+        return stats
+
+    # Exported fds held open at once by a bulk import; bounds the fd count
+    # against RLIMIT_NOFILE (soft limit 1024 in many container runtimes).
+    _BULK_CHUNK = 256
+
+    def _bulk_map(self, entries: List[tuple]) -> List[int]:
+        """Map server allocations in phases: export a chunk of fds, import the
+        chunk, map it; then set access.
+
+        ``entries``: (va, aligned_size, allocation_id). Returns the handles in
+        order. Interleaving export/import/map per allocation is ~10x slower:
+        each process's driver calls wait on the other's (client import vs
+        server export) for every allocation.
+
+        Access is set once per mapping, as the per-allocation path does.
+        All or nothing: on failure every fd, handle and mapping made here
+        is released before the error propagates, so the caller's state is as
+        before the call.
+        """
+        assert self._granted_lock_type is not None
+        t0 = time.perf_counter()
+        fds: List[int] = []
+        handles: List[int] = []
+        mapped: List[tuple[int, int]] = []
+        times = [0.0, 0.0, 0.0]
+        try:
+            for lo in range(0, len(entries), self._BULK_CHUNK):
+                chunk = entries[lo : lo + self._BULK_CHUNK]
+                t = time.perf_counter()
+                fds = []
+                for _, _, allocation_id in chunk:
+                    fds.append(self.export_handle(allocation_id))
+                times[0] += time.perf_counter() - t
+                t = time.perf_counter()
+                for i, (_, aligned_size, _) in enumerate(chunk):
+                    # The fd is consumed (closed) by the import even when it fails.
+                    fd, fds[i] = fds[i], -1
+                    handles.append(
+                        self._vmm.import_shareable_handle_close_fd(
+                            fd, import_size=aligned_size
+                        )
+                    )
+                fds = []
+                times[1] += time.perf_counter() - t
+                t = time.perf_counter()
+                for va, aligned_size, _ in chunk:
+                    self._vmm.map(va, aligned_size, handles[len(mapped)])
+                    mapped.append((va, aligned_size))
+                times[2] += time.perf_counter() - t
+            t3 = time.perf_counter()
+            runs = [(va, aligned_size) for va, aligned_size, _ in sorted(entries)]
+            for va, size in runs:
+                self._vmm.set_access(va, size, self.device, self._granted_lock_type)
+        except BaseException:
+            for fd in fds:
+                if fd >= 0:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+            for va, size in reversed(mapped):
+                try:
+                    self._vmm.unmap(va, size)
+                except Exception:
+                    logger.exception("[GMS] unwinding bulk import: unmap 0x%x", va)
+            for handle in handles:
+                try:
+                    self._vmm.release(handle)
+                except Exception:
+                    logger.exception("[GMS] unwinding bulk import: release %d", handle)
+            raise
+        self._import_stats["imports"] += len(entries)
+        self._import_stats["export_s"] += times[0]
+        self._import_stats["import_s"] += times[1]
+        self._import_stats["map_s"] += times[2]
+        self._import_stats["access_s"] += time.perf_counter() - t3
+        self._import_stats["access_calls"] += len(runs)
+        self._import_stats["bulk_s"] += time.perf_counter() - t0
+        return handles
+
+    def import_allocations(self, allocation_ids) -> None:
+        """Import and map every listed allocation not mapped yet, in bulk.
+
+        Later ``create_mapping(allocation_id=...)`` calls return the cached VA.
+        Each allocation gets its own reservation, as with per-allocation import.
+        All or nothing: on failure no reservation or mapping is left behind.
+        """
+        assert self._granted_lock_type is not None
+        wanted = [
+            a for a in dict.fromkeys(allocation_ids) if a not in self._inverse_mapping
+        ]
+        if not wanted:
+            return
+        t0 = time.perf_counter()
+        infos = {str(i.allocation_id): i for i in self.list_handles()}
+        self._import_stats["handle_info_s"] += time.perf_counter() - t0
+        entries, meta = [], []
+        t0 = time.perf_counter()
+        try:
+            for allocation_id in wanted:
+                info = infos.get(allocation_id)
+                if info is None:
+                    raise RuntimeError(
+                        f"Allocation {allocation_id} is not in the layout"
+                    )
+                aligned_size = int(info.aligned_size)
+                slot = int(info.layout_slot)
+                va = self.reserve_va(aligned_size)
+                entries.append((va, aligned_size, allocation_id))
+                meta.append(
+                    (int(info.size), str(getattr(info, "tag", "default")), slot)
+                )
+            self._import_stats["reserve_s"] += time.perf_counter() - t0
+            handles = self._bulk_map(entries)
+        except BaseException:
+            for va, aligned_size, _ in entries:
+                self._vmm.address_free(va, aligned_size)
+            raise
+        for (va, aligned_size, allocation_id), (size, tag, slot), handle in zip(
+            entries, meta, handles
+        ):
+            self._track_mapping(
+                LocalMapping(
+                    allocation_id=allocation_id,
+                    va=va,
+                    size=size,
+                    aligned_size=aligned_size,
+                    handle=handle,
+                    tag=tag,
+                    layout_slot=slot,
+                )
+            )
+
     def create_mapping(
         self,
         allocation_id: Optional[str] = None,
@@ -502,15 +676,23 @@ class GMSClientMemoryManager:
                     )
                 return cached_va
 
+            t0 = time.perf_counter()
             info = self.get_handle_info(allocation_id)
             alloc_size = int(info.size)
             aligned_size = int(info.aligned_size)
             alloc_tag = str(getattr(info, "tag", "default"))
             layout_slot = int(info.layout_slot)
 
+            t1 = time.perf_counter()
             fd = self.export_handle(allocation_id)
+            t2 = time.perf_counter()
             va = self.reserve_va(aligned_size)
+            t3 = time.perf_counter()
             self.map_va(fd, va, alloc_size, allocation_id, alloc_tag, layout_slot)
+            self._import_stats["imports"] += 1
+            self._import_stats["handle_info_s"] += t1 - t0
+            self._import_stats["export_s"] += t2 - t1
+            self._import_stats["reserve_s"] += t3 - t2
             return va
 
         # Allocate path
@@ -612,6 +794,8 @@ class GMSClientMemoryManager:
         remapped_count = 0
         total_bytes = 0
         remapped_vas: list[int] = []
+        bulk = self.bulk_import
+        pending: list = []
         for rank, ((va, mapping), alloc_info) in enumerate(
             zip(local_mappings, committed_allocations)
         ):
@@ -628,6 +812,9 @@ class GMSClientMemoryManager:
                     f"Layout rank {rank} tag changed: {mapping.tag} vs {alloc_info.tag}"
                 )
 
+            if bulk:
+                pending.append((va, mapping, alloc_info))
+                continue
             fd = self.export_handle(alloc_info.allocation_id)
             handle = self._vmm.import_shareable_handle_close_fd(
                 fd, import_size=mapping.aligned_size
@@ -647,6 +834,22 @@ class GMSClientMemoryManager:
             self._inverse_mapping[alloc_info.allocation_id] = va
             remapped_count += 1
             total_bytes += mapping.aligned_size
+
+        if pending:
+            handles = self._bulk_map(
+                [(va, m.aligned_size, str(i.allocation_id)) for va, m, i in pending]
+            )
+            for (va, mapping, alloc_info), handle in zip(pending, handles):
+                remapped_vas.append(va)
+                if mapping.allocation_id != alloc_info.allocation_id:
+                    self._inverse_mapping.pop(mapping.allocation_id, None)
+                self._mappings[va] = mapping.with_server_identity(
+                    alloc_info.allocation_id,
+                    int(alloc_info.layout_slot),
+                ).with_handle(handle)
+                self._inverse_mapping[alloc_info.allocation_id] = va
+                remapped_count += 1
+                total_bytes += mapping.aligned_size
 
         if remapped_vas:
             self._vmm.synchronize()

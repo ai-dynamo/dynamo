@@ -30,7 +30,7 @@ class FakeVMM(VMMDevice):
         granularity: int = 4096,
     ):
         self._handles = itertools.count(1000)
-        self._vas = itertools.count(0x100000, 0x10000)
+        self._next_va = 0x100000
         self._devices = devices if devices is not None else [0]
         self._granularity = granularity
         self.calls: list[tuple] = []
@@ -80,29 +80,59 @@ class FakeVMM(VMMDevice):
         self.imports.add(handle)
         return handle
 
+    @staticmethod
+    def _overlaps(ranges, va, size):
+        return any(start < va + size and va < start + n for start, n in ranges)
+
     def address_reserve(self, size, granularity):
-        va = next(self._vas)
+        va = -(-self._next_va // granularity) * granularity
+        self._next_va = va + size + 0x10000
         self.reservations[va] = size
         return va
 
     def address_free(self, va, size):
         if self.reservations.pop(va) != size:
             raise AssertionError("reservation size mismatch")
+        if self._overlaps(((v, n) for v, (n, _) in self.mapped.items()), va, size):
+            raise AssertionError("freeing a reservation that is still mapped")
 
     def map(self, va, size, handle):
         if handle not in self.imports and handle not in self.server_handles:
             raise AssertionError("unknown handle")
+        # cuMemMap: the range must sit inside one reservation and be unmapped.
+        if not any(
+            start <= va and va + size <= start + n
+            for start, n in self.reservations.items()
+        ):
+            raise AssertionError(f"map 0x{va:x}+0x{size:x} outside any reservation")
+        if self._overlaps(((v, n) for v, (n, _) in self.mapped.items()), va, size):
+            raise AssertionError(f"map 0x{va:x}+0x{size:x} overlaps a live mapping")
         self.mapped[va] = size, handle
 
     def unmap(self, va, size):
-        if self.mapped.pop(va)[0] != size:
+        # Like cuMemUnmap: the range may cover several whole mappings.
+        cur, end = va, va + size
+        while cur < end:
+            if cur not in self.mapped:
+                raise AssertionError("mapping size mismatch")
+            n = self.mapped.pop(cur)[0]
+            self.access.pop(cur, None)
+            cur += n
+        if cur != end:
             raise AssertionError("mapping size mismatch")
-        self.access.pop(va, None)
 
     def set_access(self, va, size, device, access):
-        if self.mapped[va][0] != size:
+        # Like cuMemSetAccess: the range may span several contiguous mappings,
+        # but must be fully mapped.
+        cur, end = va, va + size
+        while cur < end:
+            if cur not in self.mapped:
+                raise AssertionError("access range not fully mapped")
+            self.access[cur] = access
+            cur += self.mapped[cur][0]
+        if cur != end:
             raise AssertionError("access size mismatch")
-        self.access[va] = access
+        self.calls.append(("set_access", va, size))
 
     def validate_pointer(self, va):
         pass

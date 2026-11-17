@@ -343,6 +343,46 @@ def test_finalize_gms_write_rebinds_nonparameter_tensors(running_gms):
         writer.close()
 
 
+def test_metadata_reads_batch_when_server_advertises_it(running_gms, monkeypatch):
+    """load_all batches through metadata_get_all, which the session gates on
+    the server's handshake capability (see test_protocol_compat for the
+    older-server fallback); results equal the per-key reads."""
+    from gpu_memory_service.client.torch.tensor import GMSTensorSpec
+
+    socket_path = running_gms
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+    model = _TinyModule().to(_DEVICE)
+    allocation_id, weight = _make_gms_tensor(
+        writer, cast(torch.Tensor, model.linear.weight), tag="weights"
+    )
+    model.linear.weight = torch.nn.Parameter(weight)
+    register_module_tensors(writer, model)
+    writer.metadata_put("__gms__.descriptor", allocation_id, 0, b"{}")
+    assert writer.commit()
+    del model, weight
+    writer.close()
+
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    reader.connect(RequestedLockType.RO)
+    batched = []
+    get_all = reader.metadata_get_all
+    try:
+        monkeypatch.setattr(reader, "metadata_get_all", None)
+        per_key = GMSTensorSpec.load_all(reader)
+        assert list(per_key) == ["linear.weight"]
+
+        monkeypatch.setattr(
+            reader,
+            "metadata_get_all",
+            lambda **kwargs: batched.append(kwargs) or get_all(**kwargs),
+        )
+        assert GMSTensorSpec.load_all(reader) == per_key
+        assert batched == [{"exclude_prefix": "__gms__."}]
+    finally:
+        reader.close()
+
+
 def test_live_gms_tensor_survives_unmap_and_remap(running_gms):
     socket_path = running_gms
     baseline = torch.arange(64, device=_DEVICE, dtype=torch.float32).reshape(8, 8)
