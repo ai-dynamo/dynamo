@@ -318,50 +318,424 @@ impl Drop for CudaMemPool {
 #[cfg(all(test, feature = "testing-cuda"))]
 mod tests {
     use super::*;
+    use cudarc::driver::{CudaEvent, CudaSlice, DevicePtr, PinnedHostSlice, result as cuda_result};
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+    use std::time::{Duration, Instant};
+
+    const WAIT: Duration = Duration::from_secs(5);
+    const BYTES: usize = 1024 * 1024;
+    const PROGRESS: Duration = Duration::from_secs(1);
+
+    fn fail_stop(error: impl std::fmt::Debug) -> ! {
+        eprintln!("GPU completion/ownership is unproven; stopping test process: {error:?}");
+        std::process::abort();
+    }
+
+    fn native<T, E: std::fmt::Debug>(result: std::result::Result<T, E>) -> T {
+        result.unwrap_or_else(|error| fail_stop(error))
+    }
+
+    fn join_finished<T>(finished: &Receiver<()>, worker: std::thread::JoinHandle<T>) -> T {
+        if let Err(error) = finished.recv_timeout(WAIT) {
+            fail_stop(error);
+        }
+        let deadline = Instant::now() + WAIT;
+        while !worker.is_finished() {
+            if Instant::now() >= deadline {
+                fail_stop("GPU worker did not finish native teardown");
+            }
+            std::thread::yield_now();
+        }
+        match worker.join() {
+            Ok(result) => result,
+            Err(_) => fail_stop("GPU worker panicked"),
+        }
+    }
+
+    struct StreamGate {
+        release: Option<SyncSender<()>>,
+        failed: Arc<AtomicBool>,
+    }
+
+    impl StreamGate {
+        fn new(stream: &Arc<CudaStream>) -> Self {
+            unsafe extern "C" fn wait(data: *mut std::ffi::c_void) {
+                // The callback owns this box and must never call CUDA or unwind.
+                let payload =
+                    unsafe { Box::from_raw(data.cast::<(Receiver<()>, Arc<AtomicBool>)>()) };
+                if payload.0.recv_timeout(WAIT).is_err() {
+                    payload.1.store(true, Ordering::Release);
+                }
+            }
+            native(stream.context().bind_to_thread());
+            let (release, receiver) = sync_channel(1);
+            let failed = Arc::new(AtomicBool::new(false));
+            let payload = Box::into_raw(Box::new((receiver, failed.clone())));
+            let result = unsafe {
+                cuda_result::stream::launch_host_function(stream.cu_stream(), wait, payload.cast())
+            };
+            if let Err(error) = result {
+                // An earlier asynchronous error does not prove the callback was not queued.
+                // Do not free its argument while ownership is uncertain.
+                fail_stop(error);
+            }
+            Self {
+                release: Some(release),
+                failed,
+            }
+        }
+
+        fn release(&mut self) {
+            if let Some(sender) = self.release.take() {
+                let _ = sender.try_send(());
+            }
+        }
+
+        fn assert_pending(&mut self, event: &CudaEvent) {
+            let pending = match event.try_is_complete() {
+                Ok(complete) => !complete,
+                Err(error) => {
+                    self.release();
+                    fail_stop(error);
+                }
+            };
+            if !pending {
+                self.release();
+            }
+            assert!(pending, "copy must actually be pending behind the gate");
+        }
+
+        fn assert_released(&self) {
+            assert!(
+                !self.failed.load(Ordering::Acquire),
+                "host-function gate timed out/disconnected"
+            );
+        }
+    }
+
+    impl Drop for StreamGate {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    struct PoolBuffers<'a> {
+        pool: &'a CudaMemPool,
+        streams: [Arc<CudaStream>; 2],
+        pointers: [Option<u64>; 2],
+    }
+
+    impl PoolBuffers<'_> {
+        fn release(&mut self) -> Result<()> {
+            for stream in &self.streams {
+                stream.synchronize()?;
+            }
+            for slot in &mut self.pointers {
+                if let Some(pointer) = *slot {
+                    self.pool.free_async(pointer, &self.streams[0])?;
+                    *slot = None;
+                }
+            }
+            self.streams[0].synchronize()?;
+            Ok(())
+        }
+    }
+
+    impl Drop for PoolBuffers<'_> {
+        fn drop(&mut self) {
+            if let Err(error) = self.release() {
+                fail_stop(error);
+            }
+        }
+    }
+
+    struct CopyOwners {
+        stream: Arc<CudaStream>,
+        fence: Option<CudaEvent>,
+        _device: CudaSlice<u8>,
+        _host: PinnedHostSlice<u8>,
+        entered: Option<SyncSender<()>>,
+        completed: Arc<AtomicBool>,
+    }
+
+    impl Drop for CopyOwners {
+        fn drop(&mut self) {
+            if let Some(entered) = self.entered.take() {
+                let _ = entered.try_send(());
+            }
+            // Installed before submission; a pre-fence failure still drains the real stream.
+            let result = match &self.fence {
+                Some(fence) => fence.synchronize(),
+                None => self.stream.synchronize(),
+            };
+            if let Err(error) = result {
+                // Do not let automatic field destruction free an unproven live source.
+                fail_stop(error);
+            }
+            self.completed.store(true, Ordering::Release);
+        }
+    }
 
     #[test]
     fn test_pool_creation_with_builder() {
-        // Skip if no CUDA device available
-        let context = match CudaContext::new(0) {
-            Ok(ctx) => ctx,
-            Err(e) => {
-                eprintln!("Skipping test - no CUDA device: {:?}", e);
-                return;
-            }
-        };
-
-        // Test builder with reserve size and release threshold
-        let result = CudaMemPool::builder(context.clone(), 1024 * 1024) // 1 MiB reserve
-            .release_threshold(64 * 1024 * 1024) // 64 MiB threshold
-            .build();
-
-        if result.is_err() {
-            eprintln!("Skipping test - pool creation failed: {:?}", result.err());
-            return;
-        }
-        let pool = result.unwrap();
+        let context = CudaContext::new(0).unwrap();
+        let pool = CudaMemPool::builder(context.clone(), BYTES)
+            .release_threshold(64 * 1024 * 1024)
+            .build()
+            .unwrap();
         drop(pool);
+        context.check_err().unwrap();
     }
 
     #[test]
     fn test_pool_creation_no_threshold() {
-        // Skip if no CUDA device available
-        let context = match CudaContext::new(0) {
-            Ok(ctx) => ctx,
-            Err(e) => {
-                eprintln!("Skipping test - no CUDA device: {:?}", e);
-                return;
-            }
-        };
-
-        // Test builder without release threshold
-        let result = CudaMemPool::builder(context, 0).build();
-
-        if result.is_err() {
-            eprintln!("Skipping test - pool creation failed: {:?}", result.err());
-            return;
-        }
-        let pool = result.unwrap();
+        let context = CudaContext::new(0).unwrap();
+        let pool = CudaMemPool::builder(context.clone(), 0).build().unwrap();
         drop(pool);
+        context.check_err().unwrap();
+    }
+
+    #[test]
+    fn test_pool_async_roundtrip_orders_free_and_reuse() {
+        let context = CudaContext::new(0).unwrap();
+        {
+            let upload = context.default_stream();
+            let download = context.new_stream().unwrap();
+            let pool = CudaMemPool::builder(context.clone(), 0).build().unwrap();
+            let mut input = unsafe { context.alloc_pinned::<u8>(BYTES) }.unwrap();
+            let mut output = unsafe { context.alloc_pinned::<u8>(BYTES) }.unwrap();
+            let mut buffers = PoolBuffers {
+                pool: &pool,
+                streams: [upload.clone(), download.clone()],
+                pointers: [None, None],
+            };
+            for seed in [19_u8, 173] {
+                let expected: Vec<_> = (0..BYTES).map(|i| (i as u8).wrapping_add(seed)).collect();
+                input.as_mut_slice().unwrap().copy_from_slice(&expected);
+                for slot in &mut buffers.pointers {
+                    *slot = Some(pool.alloc_async(BYTES, &upload).unwrap());
+                }
+                let [Some(source), Some(destination)] = buffers.pointers else {
+                    unreachable!()
+                };
+                unsafe {
+                    cuda_result::memcpy_htod_async(
+                        source,
+                        input.as_slice().unwrap(),
+                        upload.cu_stream(),
+                    )
+                    .unwrap();
+                }
+                let ready = upload.record_event(None).unwrap();
+                download.wait(&ready).unwrap();
+                unsafe {
+                    cuda_result::memcpy_dtod_async(
+                        destination,
+                        source,
+                        BYTES,
+                        download.cu_stream(),
+                    )
+                    .unwrap();
+                    cuda_result::memcpy_dtoh_async(
+                        output.as_mut_slice().unwrap(),
+                        destination,
+                        download.cu_stream(),
+                    )
+                    .unwrap();
+                }
+                let done = download.record_event(None).unwrap();
+                done.synchronize().unwrap();
+                assert_eq!(output.as_slice().unwrap(), expected.as_slice());
+                buffers.release().unwrap();
+            }
+            let raw_default = upload.cu_stream();
+            drop(buffers);
+            drop(upload);
+            unsafe { cuda_result::stream::synchronize(raw_default) }.unwrap();
+        }
+        context.check_err().unwrap();
+    }
+
+    #[test]
+    fn test_cudarc_managed_source_drop_waits_for_last_reader() {
+        let context = CudaContext::new(0).unwrap();
+        let async_allocation = context.has_async_alloc();
+        eprintln!("actual cudarc async allocation mode: {async_allocation}");
+        assert!(
+            async_allocation,
+            "unsupported prerequisite for pending-reader/async-free pressure witness; not a synchronous-Drop regression"
+        );
+        {
+            let upload = native(context.new_stream());
+            let consumer = native(context.new_stream());
+            let expected: Vec<_> = (0..BYTES).map(|i| (i as u8).wrapping_mul(37)).collect();
+            let source = native(upload.clone_htod(&expected));
+            let (source_address, record) = source.device_ptr(&upload);
+            drop(record);
+            let mut destination = native(consumer.alloc_zeros::<u8>(BYTES));
+            native(upload.synchronize());
+            native(consumer.synchronize());
+            let mut gate = StreamGate::new(&consumer);
+            native(consumer.memcpy_dtod(&source, &mut destination));
+            let done = native(consumer.record_event(None));
+            gate.assert_pending(&done);
+            let (queued, queuing) = sync_channel(1);
+            let (finished, finishing) = sync_channel(1);
+            let pressure_stream = upload.clone();
+            let owner_context = context.clone();
+            let worker = std::thread::spawn(move || {
+                drop(source);
+                native(owner_context.check_err());
+                let mut pressure = Vec::new();
+                let mut addresses = Vec::new();
+                for _ in 0..4 {
+                    let allocation = native(pressure_stream.alloc_zeros::<u8>(BYTES));
+                    let (address, record) = allocation.device_ptr(&pressure_stream);
+                    drop(record);
+                    addresses.push(address);
+                    pressure.push(allocation);
+                }
+                // The acknowledgement precedes the host fence, not the queued allocation/copy.
+                queued.send(addresses).unwrap();
+                native(pressure_stream.synchronize());
+                drop(pressure);
+                drop(pressure_stream);
+                native(owner_context.check_err());
+                drop(owner_context);
+                finished.send(()).unwrap();
+            });
+            let queued = queuing.recv_timeout(PROGRESS);
+            let pending = done.try_is_complete();
+            gate.release();
+            let pending = native(pending);
+            join_finished(&finishing, worker);
+            let addresses = queued.expect("no async-drop/reuse witness before release; qualification incomplete, not proof of a Drop bug");
+            assert!(
+                addresses.contains(&source_address),
+                "allocator did not reuse the source address; reuse sensitivity is unqualified"
+            );
+            assert!(!pending, "reader completed before the drop/reuse witness");
+            native(done.synchronize());
+            assert_eq!(native(consumer.clone_dtoh(&destination)), expected);
+            gate.assert_released();
+        }
+        {
+            let stream = native(context.new_stream());
+            let expected = vec![91_u8; BYTES];
+            let mut source = native(unsafe { context.alloc_pinned::<u8>(BYTES) });
+            native(source.as_mut_slice()).copy_from_slice(&expected);
+            let mut destination = native(stream.alloc_zeros::<u8>(BYTES));
+            native(stream.synchronize());
+            let mut gate = StreamGate::new(&stream);
+            native(stream.memcpy_htod(&source, &mut destination));
+            let done = native(stream.record_event(None));
+            gate.assert_pending(&done);
+            let (requested, requesting) = sync_channel(1);
+            let (finished, finishing) = sync_channel(1);
+            let owner_context = context.clone();
+            let worker = std::thread::spawn(move || {
+                requested.send(()).unwrap();
+                drop(source);
+                native(owner_context.check_err());
+                drop(owner_context);
+                finished.send(()).unwrap();
+            });
+            let requested = requesting.recv_timeout(PROGRESS);
+            if requested.is_err() {
+                gate.release();
+                join_finished(&finishing, worker);
+                panic!("pinned source drop was not requested in the bounded window");
+            }
+            // A returned Drop while this actual copy is blocked proves premature retirement.
+            match finishing.recv_timeout(PROGRESS) {
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                other => fail_stop(("pinned source Drop returned before its copy fence", other)),
+            }
+            let pending = done.try_is_complete();
+            gate.release();
+            let pending = native(pending);
+            join_finished(&finishing, worker);
+            assert!(!pending);
+            native(done.synchronize());
+            assert_eq!(native(stream.clone_dtoh(&destination)), expected);
+            gate.assert_released();
+        }
+        native(context.check_err());
+    }
+
+    #[test]
+    fn test_cudarc_explicit_fences_survive_cancelled_waiter() {
+        let context = CudaContext::new(0).unwrap();
+        unsafe { context.disable_event_tracking() };
+        for cancel_future in [false, true] {
+            let stream = native(context.new_stream());
+            let expected = vec![203_u8; BYTES];
+            let mut source = native(unsafe { context.alloc_pinned::<u8>(BYTES) });
+            native(source.as_mut_slice()).copy_from_slice(&expected);
+            let device_source = native(stream.alloc_zeros::<u8>(BYTES));
+            let mut destination = native(stream.alloc_zeros::<u8>(BYTES));
+            native(stream.synchronize());
+            let completed = Arc::new(AtomicBool::new(false));
+            let (entered, entering) = sync_channel(1);
+            let mut owners = CopyOwners {
+                stream: stream.clone(),
+                fence: None,
+                _device: device_source,
+                _host: source,
+                entered: Some(entered),
+                completed: completed.clone(),
+            };
+            // This guard is declared last, so unwind releases the gate before owners drain.
+            let mut gate = StreamGate::new(&stream);
+            native(stream.memcpy_htod(&owners._host, &mut owners._device));
+            native(stream.memcpy_dtod(&owners._device, &mut destination));
+            owners.fence = Some(native(stream.record_event(None)));
+            let observer = native(stream.record_event(None));
+            gate.assert_pending(&observer);
+            let (finished, finishing) = sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                if cancel_future {
+                    let mut future = Box::pin(async move {
+                        let _owners = owners;
+                        std::future::pending::<()>().await;
+                    });
+                    let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+                    assert!(future.as_mut().poll(&mut task).is_pending());
+                    drop(future);
+                } else {
+                    let fail_after_submission = || -> Result<()> {
+                        let _owners = owners;
+                        Err(anyhow!("intentional early return after submission"))
+                    };
+                    assert!(fail_after_submission().is_err());
+                }
+                finished.send(()).unwrap();
+            });
+            let entered = entering.recv_timeout(PROGRESS);
+            let pending = observer.try_is_complete();
+            // Sample before release; assert only after the worker has safely drained.
+            let completed_before_release = completed.load(Ordering::Acquire);
+            gate.release();
+            let pending = native(pending);
+            join_finished(&finishing, worker);
+            assert!(
+                entered.is_ok(),
+                "caller-owned cancellation/error destructor was not entered"
+            );
+            assert!(!pending);
+            assert!(
+                !completed_before_release,
+                "caller-owned destructor reported fence completion while copy was pending"
+            );
+            assert!(
+                completed.load(Ordering::Acquire),
+                "cancelled/error path did not complete its fence"
+            );
+            assert_eq!(native(stream.clone_dtoh(&destination)), expected);
+            gate.assert_released();
+        }
+        native(context.check_err());
     }
 }

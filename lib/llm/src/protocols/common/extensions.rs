@@ -136,6 +136,17 @@ pub struct AgentHints {
     pub latency_sensitivity: Option<f64>,
 }
 
+/// Opt-in TensorRT-LLM retained-prefix request. The engine validates and resolves
+/// the native reference; the frontend never interprets it as a memory address.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TrtllmRetainedPrefixOptions {
+    #[serde(default)]
+    pub retain_prefix: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_prefix: Option<serde_json::Value>,
+}
+
 /// Dynamo's LLM request extension envelope.
 #[derive(Serialize, Deserialize, Builder, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -175,6 +186,10 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub metadata_upload: Option<MetadataUpload>,
+
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trtllm_retained_prefix: Option<TrtllmRetainedPrefixOptions>,
 
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -240,6 +255,7 @@ impl NvExt {
             cache_salt: _,
             extra_fields,
             metadata_upload,
+            trtllm_retained_prefix,
             prefill_worker_id,
             decode_worker_id,
             dp_rank,
@@ -258,6 +274,7 @@ impl NvExt {
             || max_thinking_tokens.is_some()
             || extra_fields.is_some()
             || metadata_upload.is_some()
+            || trtllm_retained_prefix.is_some()
             || prefill_worker_id.is_some()
             || decode_worker_id.is_some()
             || dp_rank.is_some()

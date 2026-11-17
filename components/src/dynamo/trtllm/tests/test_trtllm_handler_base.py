@@ -38,6 +38,8 @@ from dynamo.trtllm.request_handlers.handler_base import (
     BYPASS_REMOTE_PREFILL_ANNOTATION,
     HandlerBase,
 )
+from dynamo.trtllm.utils import retained_prefix as retained_prefix_utils
+from dynamo.trtllm.utils.retained_prefix import parse_retained_prefix
 
 pytestmark = [
     pytest.mark.unit,
@@ -888,6 +890,191 @@ class TestDisaggRequestId:
             ep_disaggregated_params=None,
         )
         assert params.request_type == "context_and_generation"
+
+
+class TestRetainedPrefixAdmission:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("problem", ["disabled", "missing-native-api", "bad-flag"])
+    async def test_unsupported_optin_rejects_before_engine_submission(
+        self, monkeypatch, problem
+    ):
+        helper = TestGenerateLocally()
+        handler = helper._make_handler()
+        handler.disaggregation_mode = DisaggregationMode.PREFILL
+        handler.disagg_machine_id = 42
+        handler.engine.engine_args = (
+            {} if problem == "disabled" else {"native_retained_prefix": {}}
+        )
+        if problem == "missing-native-api":
+            monkeypatch.setattr(retained_prefix_utils, "parse_retained_prefix", None)
+        request = {
+            "token_ids": [1, 2],
+            "stop_conditions": {"max_tokens": 1},
+            "sampling_options": {},
+            "extra_args": {
+                "nvext": {
+                    "trtllm_retained_prefix": {
+                        "retain_prefix": "yes" if problem == "bad-flag" else True,
+                    }
+                }
+            },
+        }
+        with pytest.raises(InvalidArgument):
+            _ = [
+                chunk
+                async for chunk in handler.generate_locally(
+                    request, helper._make_context()
+                )
+            ]
+        handler.engine.llm.generate_async.assert_not_called()
+
+
+class TestRetainedPrefixBoundary:
+    @pytest.fixture(autouse=True)
+    def require_native_contract(self):
+        if parse_retained_prefix is None:
+            pytest.skip("requires TRT native retained-prefix contract")
+
+    def reference(self):
+        return {
+            "version": 1,
+            "peer_id": "decoder-a",
+            "engine_generation": "a" * 32,
+            "export_id": "b" * 64,
+            "prefix_tokens": 128,
+            "identity": "c" * 64,
+        }
+
+    def request(self, reference=None):
+        options = {"retain_prefix": True}
+        if reference is not None:
+            options["retained_prefix"] = reference
+        return {
+            "token_ids": list(range(130)),
+            "stop_conditions": {"max_tokens": 128},
+            "sampling_options": {"temperature": 0.0},
+            "extra_args": {
+                "nvext": {"cache_salt": "tenant-a", "trtllm_retained_prefix": options}
+            },
+        }
+
+    def handler(self, mode, enabled=True):
+        handler = TestGenerateLocally()._make_handler()
+        handler.disaggregation_mode = mode
+        handler.disagg_machine_id = 42
+        handler.engine.engine_args = {"native_retained_prefix": {}} if enabled else {}
+        return handler
+
+    def test_prefill_import_keeps_context_mode_and_copies_reference(self):
+        reference = self.reference()
+        request = self.request(reference)
+        params, _, _ = self.handler(
+            DisaggregationMode.PREFILL
+        )._setup_disaggregated_params_for_mode(request, None)
+        reference["peer_id"] = "changed-after-admission"
+        assert params.request_type == "context_only"
+        assert params.retain_prefix is True
+        assert params.retained_prefix.peer_id == "decoder-a"
+        assert request["sampling_options"] == {"temperature": 0.0}
+        assert request["extra_args"]["nvext"]["cache_salt"] == "tenant-a"
+
+    def test_no_hint_forward_handoff_omits_new_default_fields(self):
+        handler = self.handler(DisaggregationMode.PREFILL, enabled=False)
+        params, _, _ = handler._setup_disaggregated_params_for_mode({}, None)
+        output = SimpleNamespace(disaggregated_params=params)
+        packed = handler._encode_and_pack_disaggregated_params(output, params, {}, None)
+        assert packed["request_type"] == "context_only"
+        assert "retain_prefix" not in packed
+        assert "retained_prefix" not in packed
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("problem", ["disabled", "raw-address", "wrong-type"])
+    async def test_invalid_options_fail_before_engine_submission(self, problem):
+        handler = self.handler(
+            DisaggregationMode.PREFILL, enabled=problem != "disabled"
+        )
+        request = self.request(self.reference())
+        options = request["extra_args"]["nvext"]["trtllm_retained_prefix"]
+        if problem == "raw-address":
+            options["retained_prefix"]["address"] = 123
+        elif problem == "wrong-type":
+            options["retain_prefix"] = "true"
+        with pytest.raises(InvalidArgument):
+            _ = [
+                chunk
+                async for chunk in handler.generate_locally(
+                    request, TestGenerateLocally()._make_context()
+                )
+            ]
+        handler.engine.llm.generate_async.assert_not_called()
+
+    def test_forward_decode_does_not_reimport_prior_completed_donor(self):
+        request = self.request(self.reference())
+        request["prefill_result"] = {
+            "disaggregated_params": {
+                "request_type": "context_only",
+                "disagg_request_id": 71,
+                "opaque_state": None,
+                "retain_prefix": True,
+                "retained_prefix": self.reference(),
+                "worker_id": 88,
+                "_epd_metadata": {"_prefill_prompt_token_ids": [1, 2]},
+            }
+        }
+        before = deepcopy(request)
+        params, ep_params, metadata = self.handler(
+            DisaggregationMode.DECODE
+        )._setup_disaggregated_params_for_mode(request, None)
+        assert params.request_type == "generation_only"
+        assert params.retain_prefix is True
+        assert params.retained_prefix is None
+        assert ep_params is params
+        assert metadata == {"_prefill_prompt_token_ids": [1, 2]}
+        assert request == before
+
+    @pytest.mark.asyncio
+    async def test_authoritative_engine_export_reaches_response_metadata(self):
+        handler = self.handler(DisaggregationMode.DECODE)
+        request = self.request(self.reference())
+        request["prefill_result"] = {
+            "disaggregated_params": {
+                "request_type": "context_only",
+                "disagg_request_id": 71,
+                "retain_prefix": True,
+            }
+        }
+        helper = TestGenerateLocally()
+        result = helper._make_mock_generation_result()
+        authoritative = self.reference()
+        authoritative["export_id"] = "d" * 64
+
+        # The fixture yields this exact engine output through the real handler.
+        async def engine_results():
+            output = MagicMock()
+            output.token_ids = [42]
+            output.index = 0
+            output.finish_reason = "stop"
+            output.stop_reason = None
+            output.request_perf_metrics = None
+            output.prompt_logprobs = []
+            output.disaggregated_params = DisaggregatedParams(
+                retained_prefix=parse_retained_prefix(authoritative)
+            )
+            yield SimpleNamespace(outputs=[output], finished=True, cached_tokens=130)
+
+        result.__aiter__ = lambda _self: engine_results()
+        handler.engine.llm.generate_async.return_value = result
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, helper._make_context())
+        ]
+        assert chunks[-1]["engine_data"]["trtllm_retained_prefix"] == {
+            "retained_prefix": authoritative
+        }
+        args = handler.engine.llm.generate_async.call_args.kwargs
+        assert args["cache_salt"] == "tenant-a"
+        assert args["disaggregated_params"].request_type == "generation_only"
+        assert args["disaggregated_params"].retain_prefix is True
 
 
 class TestGenerateLocally:
