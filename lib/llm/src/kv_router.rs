@@ -71,13 +71,14 @@ pub mod plugins;
 pub mod prefill_router;
 pub mod publisher;
 mod request_lease;
+pub mod route_request;
 mod routing_host;
 pub(crate) use routing_host::hosted_picker;
 pub(crate) use routing_host::hosted_request;
 pub(crate) mod routing_load;
 pub mod sequence;
 pub mod shared_cache;
-pub(crate) mod stage_router;
+pub mod stage_router;
 
 pub use active_load::ActiveLoad;
 
@@ -85,9 +86,11 @@ pub use encoder_router::EncoderRouter;
 pub use indexer::Indexer;
 pub use prefill_router::PrefillRouter;
 pub(crate) use request_lease::RequestAttemptRelease;
+pub use route_request::RouteRequest;
 pub(crate) use routing_host::{EVERY_ROLE, check_hint_policies_route_on_kv_path};
 pub use routing_host::{
-    KvPushRouter, LlmDispatch, MultimodalCache, RoutingHost, RoutingHostBuilder,
+    KvPushRouter, LlmDispatch, MultimodalCache, RouteBooking, RoutePlan, RoutingHost,
+    RoutingHostBuilder,
 };
 pub use routing_load::{
     ManagedKvRouter, RouterLoadSource, RoutingLoadContext, SchedulerLoadSender,

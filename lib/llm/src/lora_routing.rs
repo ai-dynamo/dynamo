@@ -17,6 +17,7 @@ use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
+    protocols::common::preprocessor::RoutingHints,
     routing_policy::{
         CandidateSelection, ExecutionRequirements, ExecutionStage, HostedCandidatePolicy,
         KvAdmissionPolicy,
@@ -24,7 +25,11 @@ use crate::{
 };
 
 fn policy(request: &PreprocessedRequest) -> RequestPolicy {
-    let version = request.routing.as_ref().and_then(|routing| {
+    routing_policy(request.routing.as_ref())
+}
+
+fn routing_policy(routing: Option<&RoutingHints>) -> RequestPolicy {
+    let version = routing.and_then(|routing| {
         routing.lora_resolution_version.or_else(|| {
             (routing.base_model_name.is_some() || routing.lora_source_uri.is_some()).then_some(0)
         })
@@ -32,8 +37,11 @@ fn policy(request: &PreprocessedRequest) -> RequestPolicy {
     RequestPolicy::new(version)
 }
 
-pub(crate) fn execution_requirements(request: &PreprocessedRequest) -> ExecutionRequirements {
-    let policy = policy(request);
+/// The execution requirements a request's routing hints imply. They read only
+/// the hints, so a host that plans without the frontend's request, such as the
+/// Runtime EPP, gets the same answer.
+pub(crate) fn execution_requirements(routing: Option<&RoutingHints>) -> ExecutionRequirements {
+    let policy = routing_policy(routing);
     ExecutionRequirements {
         allows_replay: policy.allows_replay(),
         policy_required: policy.requires_candidate_policy(),
@@ -444,7 +452,7 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            execution_requirements(&request).accounting_attribution,
+            execution_requirements(request.routing.as_ref()).accounting_attribution,
             AccountingAttribution::UseRoutingName
         );
         request.routing = Some(RoutingHints {
@@ -457,7 +465,7 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            execution_requirements(&request).accounting_attribution,
+            execution_requirements(request.routing.as_ref()).accounting_attribution,
             AccountingAttribution::Exclude
         );
     }
@@ -495,7 +503,7 @@ mod tests {
                 _ => routing.lora_resolution_version = None,
             }
             request.routing = Some(routing);
-            let requirements = execution_requirements(&request);
+            let requirements = execution_requirements(request.routing.as_ref());
             assert!(!requirements.allows_replay);
             assert_eq!(
                 requirements.accounting_attribution,
@@ -537,7 +545,7 @@ mod tests {
             lora_name: Some("legacy-adapter".into()),
             ..Default::default()
         });
-        assert!(execution_requirements(&request).allows_replay);
+        assert!(execution_requirements(request.routing.as_ref()).allows_replay);
         assert!(check_candidate_policy(&request, true).is_ok());
     }
 

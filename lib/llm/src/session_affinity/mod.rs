@@ -15,7 +15,7 @@ use dynamo_session_affinity::host::{MAX_SESSION_AFFINITY_ENTRIES, SessionAffinit
 #[cfg(test)]
 pub(crate) use coordinator::to_table;
 pub use coordinator::{AffinityCoordinator, AffinityTarget, explicit_target};
-pub(crate) use coordinator::{affinity_id, from_table, invalid_argument};
+pub(crate) use coordinator::{affinity_id, explicit_routing_target, from_table, invalid_argument};
 pub(crate) use dynamo_session_affinity::host::{Hold, subagent_group_affinity_id};
 pub use dynamo_session_affinity::host::{MAX_SESSION_AFFINITY_TTL_SECS, SessionAffinityMode};
 

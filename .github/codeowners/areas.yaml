@@ -1173,7 +1173,7 @@ shared:
   owners:
   - router
   - epp
-- glob: lib/llm/src/kv_router/prefill_router/query.rs
+- glob: lib/llm/src/kv_router/prefill_router/schedule_tests.rs
   owners:
   - router
   - epp

@@ -143,22 +143,32 @@ errors, which return to the client.
 
 ## What selection reads from a request
 
-| Input | Source |
-|---|---|
-| Request id, cancellation | the `Context` around the request |
-| Policy class | context metadata key `policy-class` (header `x-dynamo-meta-policy-class`) |
-| Session-affinity id | the `Context`, set by the HTTP layer |
-| Agent session context | `PreprocessedRequest::agent_context` |
-| Tokens, multimodal block info | `PreprocessedRequest::block_mm_routing_info` |
-| Pins, DP ranks, priority, LoRA, cache namespace, constraints, allowed workers | `PreprocessedRequest::routing` (`RoutingHints`), from `nvext` and `x-dynamo-*` headers |
-| Scoring and accounting overrides | `PreprocessedRequest::router_config_override` |
-| Aggregated prompt-logprob cache credit | `output_options.prompt_logprobs`: when present, including zero, selection conservatively counts the full prompt without cache credit |
-| Excluded workers, parked classifier lifecycle | `PreprocessedRequest::migration_state` |
-| Staged KV that only this decode can release | `PreprocessedRequest::staged_kv_cleanup` |
-| Query-only selection (KV plane) | annotation `query_instance_id` in `PreprocessedRequest::annotations` |
+Selection reads a request through the `RouteRequest` trait (`route_request.rs`). Planning
+(`RoutingHost::plan_route`, `preview_kv_route`, `StageRouter::schedule` and `preview`) takes
+`&dyn RouteRequest`, so a host that never builds the frontend's `PreprocessedRequest` selects
+through the same path. Dispatch still takes a `PreprocessedRequest`. Every method has a default
+meaning "not supplied".
 
-The token-only Runtime EPP selection API has no output options and retains its existing cache
-behavior. Worker sampling options are unaffected by this conservative accounting rule.
+| Input | `RouteRequest` method | Frontend source (`SingleIn<PreprocessedRequest>`) |
+|---|---|---|
+| Request id, cancellation | `engine_context` | the `Context` around the request |
+| Tokens, multimodal block info | `routing_tokens` | `PreprocessedRequest::block_mm_routing_info` |
+| Pins, DP ranks, priority, LoRA, cache namespace, expected output length, constraints, allowed workers | `routing_hints` | `PreprocessedRequest::routing` (`RoutingHints`), from `nvext` and `x-dynamo-*` headers |
+| Scoring and accounting overrides | `router_config_override` | `PreprocessedRequest::router_config_override` |
+| Aggregated prompt-logprob cache credit | `requests_prompt_logprobs` | `output_options.prompt_logprobs`: when present, including zero, selection conservatively counts the full prompt without cache credit |
+| Policy class | `policy_class` | context metadata key `policy-class` (header `x-dynamo-meta-policy-class`) |
+| Agent session context | `agent_context` | `PreprocessedRequest::agent_context` |
+| Session-affinity id | `session_affinity_id` | the `Context`, set by the HTTP layer |
+| Excluded workers, parked classifier lifecycle | `migration_state` | `PreprocessedRequest::migration_state` |
+| Staged KV that only this decode can release | `staged_kv_cleanup` | `PreprocessedRequest::staged_kv_cleanup` |
+| Query-only selection | `is_query_only` | annotation `query_instance_id` in `PreprocessedRequest::annotations` |
+| Multimodal cache keys (device-aware mode), LoRA candidate and admission policies | `preprocessed` | the whole `PreprocessedRequest`; without it, device-aware routing weighs device types without cache hits, and the LoRA policies fail closed for a request whose routing hints require them and are skipped otherwise |
+
+Worker sampling options are unaffected by the conservative prompt-logprob accounting rule.
+
+The Runtime EPP supplies only some of these inputs. Which ones, and the gaps that leaves, are
+listed in its
+[routing parity table](../../../../deploy/inference-gateway/ext-proc/README.md#routing-parity-with-the-frontend).
 
 ## Admission modes
 
@@ -197,6 +207,12 @@ releasing it.
 
 `register_detached` is the other registration: the booking is tracked by request id and
 released by `KvRouter::free`, not by a handle. `KvRouter::add_request` uses it.
+
+A host that books but never sends ends the plan instead of dispatching it:
+`RoutePlan::into_booking` moves the cleanup into a `RouteBooking`, which releases it on
+`release()` or drop; `RoutePlan::detach_booking` detaches the local lease
+(`RequestAttemptLease::detach`), making it reachable by request id, so `KvRouter::free` or
+expiry releases it as for `register_detached`.
 
 Booking descriptors carry the attempt id, so late cleanup from an old attempt cannot release a
 newer booking that reused the same request id and worker.

@@ -85,7 +85,34 @@ pub(crate) struct ExecutionRequirements {
 }
 
 pub(crate) fn execution_requirements(request: &PreprocessedRequest) -> ExecutionRequirements {
-    crate::lora_routing::execution_requirements(request)
+    execution_requirements_for(request.routing.as_ref())
+}
+
+/// [`execution_requirements`] from the routing hints alone, which is all it reads.
+pub(crate) fn execution_requirements_for(
+    routing: Option<&crate::protocols::common::preprocessor::RoutingHints>,
+) -> ExecutionRequirements {
+    crate::lora_routing::execution_requirements(routing)
+}
+
+/// The frontend's request, for the LoRA policies that read all of it. A host
+/// that plans without one, such as the Runtime EPP, cannot apply them: a
+/// request whose routing hints require them fails closed, and any other
+/// request plans without them.
+pub(crate) fn policy_request(
+    request: &dyn crate::kv_router::RouteRequest,
+) -> Result<Option<&PreprocessedRequest>, Error> {
+    match request.preprocessed() {
+        Some(request) => Ok(Some(request)),
+        None if execution_requirements_for(request.routing_hints()).policy_required => {
+            Err(dynamo_runtime::error::DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+                .message("runtime LoRA routing requires the frontend's preprocessed request")
+                .build()
+                .into())
+        }
+        None => Ok(None),
+    }
 }
 
 pub(crate) fn check_candidate_policy(

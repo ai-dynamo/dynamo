@@ -800,7 +800,6 @@ requirements.txt                                                                
 /container/Dockerfile.global-discovery-service                                                          @ai-dynamo/dynamo-global-router-codeowners @ai-dynamo/dynamo-ops-codeowners
 /container/templates/sglang_runtime.Dockerfile                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
 /container/templates/trtllm_runtime.Dockerfile                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
-/lib/llm/src/kv_router/prefill_router/query.rs                                                          @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
 /lib/router/kv-router/src/scheduling/config.rs                                                          @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
 /lib/router/kv-router/src/services/selection/*                                                          @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
 /tests/router/test_router_e2e_with_vllm_xpu.py                                                          @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
@@ -857,6 +856,7 @@ requirements.txt                                                                
 /docs/fern/pages/blog/2026/agentic-harness-support.mdx                                                  @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
 /components/src/dynamo/planner/connectors/kubernetes.py                                                 @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
 /components/src/dynamo/profiler/utils/dgd_generation.py                                                 @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
+/lib/llm/src/kv_router/prefill_router/schedule_tests.rs                                                 @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-epp-codeowners
 /components/src/dynamo/common/backend/sample_diffusion_*                                                @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/common/multimodal/routing_utils.py                                               @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/trtllm/configs/diffusion_config.py                                               @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners

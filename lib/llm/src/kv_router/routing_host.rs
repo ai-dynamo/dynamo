@@ -25,27 +25,27 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 use dynamo_scheduler::host::{KvSchedulerError, WorkerConfigLike};
-use dynamo_worker_selection::host::{HostedSelectionRequest, HostedWorkerPicker};
+use dynamo_worker_selection::host::HostedWorkerPicker;
 use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
     kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, request_lease::RequestAttemptRelease,
-        to_worker_selection_session_context,
+        KvRouter, RouteRequest, metrics::RouterRequestMetrics,
+        request_lease::RequestAttemptRelease, to_worker_selection_session_context,
     },
     preprocessor::PreprocessedRequest,
     protocols::common::{
         FinishReason,
         extensions::SessionAffinityId,
         llm_backend::LLMEngineOutput,
-        preprocessor::owned_abort_error,
+        preprocessor::{RoutingHints, owned_abort_error},
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
     routing_policy::{HostedCandidatePolicy, check_candidate_policy},
     session_affinity::{
-        AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
-        explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
+        AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, explicit_routing_target,
+        from_table, invalid_argument, subagent_group_affinity_id,
     },
 };
 
@@ -306,7 +306,11 @@ pub struct RoutingHost {
 /// A route selected for one request but not sent yet, in any routing mode:
 /// the worker, what books it, and the affinity hold, until
 /// [`RoutingHost::dispatch_route`] sends it or [`RoutePlan::abort`] gives it up.
-pub(crate) struct RoutePlan {
+///
+/// A host that selects but never sends, such as the inference-gateway EPP,
+/// keeps the booking instead with [`Self::into_booking`] or
+/// [`Self::detach_booking`]. Dropping a plan releases what it holds.
+pub struct RoutePlan {
     /// The phase the worker was selected for; dispatch tracks under it rather
     /// than re-reading the request.
     phase: RequestPhase,
@@ -375,7 +379,7 @@ impl RoutePlan {
 
     /// The selected worker. A KV route is sent there exactly; a built-in route
     /// moves to another instance if this one is gone by the send.
-    pub(crate) fn target(&self) -> AffinityTarget {
+    pub fn target(&self) -> AffinityTarget {
         match &self.booking {
             PlanBooking::Kv { selection, .. } => route_target(selection.worker),
             PlanBooking::Hosted(booking) => booking.target(),
@@ -394,10 +398,7 @@ impl RoutePlan {
 
     /// Give the route up before dispatch: abort the classifier lifecycle with
     /// `error` as its cause, release the booking, and drop the affinity hold.
-    // No non-test caller yet: the frontend dispatches every plan it makes. The
-    // EPP, which can give a reservation up, is the intended first one.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn abort(self, error: Option<&Error>) {
+    pub async fn abort(self, error: Option<&Error>) {
         let Self {
             booking, affinity, ..
         } = self;
@@ -411,9 +412,70 @@ impl RoutePlan {
                 }
                 cleanup.finish().await;
             }
-            PlanBooking::Hosted(booking) => booking.abort(error).await,
+            // Built-in modes have no classifier lifecycle to tell; dropping
+            // the booking releases its reservations.
+            PlanBooking::Hosted(booking) => drop(booking),
         }
         drop(affinity);
+    }
+
+    /// Keep the booking without dispatching, for a host that releases it
+    /// itself. A KV booking stays with the returned [`RouteBooking`]. A
+    /// built-in route's occupancy reservation and candidate-policy attempt
+    /// lease are not keyed by request, so they are released now; a
+    /// round-robin cursor stays advanced.
+    pub fn into_booking(self) -> RouteBooking {
+        RouteBooking {
+            cleanup: self.into_kv_cleanup(),
+        }
+    }
+
+    /// Keep a KV booking under the plan's request id without dispatching. The
+    /// host frees it by that id with `KvRouter::free` (and reports prefill
+    /// done with `KvRouter::mark_prefill_completed`); otherwise the booking
+    /// expires with its lease. A built-in route releases what it holds now,
+    /// as with [`Self::into_booking`].
+    pub fn detach_booking(self) {
+        if let Some(cleanup) = self.into_kv_cleanup() {
+            cleanup.detach();
+        }
+    }
+
+    /// End the plan without dispatching and keep only its KV booking. Only a
+    /// dispatching host can follow a classifier lifecycle, so it is aborted;
+    /// the affinity hold is dropped without binding the session. A built-in
+    /// booking is dropped, releasing its reservations.
+    fn into_kv_cleanup(self) -> Option<KvRequestCleanup> {
+        match self.booking {
+            PlanBooking::Kv {
+                mut selection,
+                cleanup,
+            } => {
+                if let Some(mut lifecycle) = selection.request_lifecycle.take() {
+                    lifecycle.abort(None);
+                }
+                Some(cleanup)
+            }
+            PlanBooking::Hosted(_) => None,
+        }
+    }
+}
+
+/// The booking of a route its host keeps without dispatching, from
+/// [`RoutePlan::into_booking`]. [`Self::release`] frees it and waits for the
+/// scheduler to acknowledge; dropping it frees it without waiting.
+#[must_use = "dropping a route booking releases it"]
+pub struct RouteBooking {
+    /// `None` for a built-in route, whose reservations end with the plan.
+    cleanup: Option<KvRequestCleanup>,
+}
+
+impl RouteBooking {
+    /// Release the booking and wait for the scheduler to acknowledge it.
+    pub async fn release(self) {
+        if let Some(cleanup) = &self.cleanup {
+            cleanup.finish().await;
+        }
     }
 }
 
@@ -461,42 +523,20 @@ impl RoutingHost {
         }
     }
 
-    pub(crate) fn peek_next_worker(&self) -> Option<u64> {
-        match &self.policy {
-            RoutingPolicy::Hosted(picker) => match &self.hosted_occupancy {
-                Some(occupancy) => occupancy.peek(&self.inner, picker),
-                None => self
-                    .inner
-                    .with_selectable_worker_ids(|ids| {
-                        picker.select(
-                            ids,
-                            None,
-                            &HostedSelectionRequest::new(0).with_preview(true),
-                        )
-                    })
-                    .ok()
-                    .and_then(Result::ok),
-            },
-            RoutingPolicy::DeviceAwareWeighted => self.inner.peek_next_worker(),
-            RoutingPolicy::Direct => None,
-            RoutingPolicy::Kv(_) => None,
-        }
-    }
-
     /// The group key for a subagent: a request that carries a parent session id binds under the
     /// parent's group for decode, while prefill uses the parent's own binding to reuse its cache.
     /// An explicit per-request target stays on the request's own session so
     /// it cannot be rejected against, or rebind, the group.
     fn group_binding_id(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         explicit: Option<AffinityTarget>,
         phase: RequestPhase,
     ) -> Option<Arc<SessionAffinityId>> {
         if explicit.is_some() {
             return None;
         }
-        let agent = request.content().agent_context.as_ref()?;
+        let agent = request.agent_context()?;
         let parent_session_id = agent.parent_session_id.as_deref()?;
         let binding_id = if phase == RequestPhase::Prefill {
             let parent = parent_session_id.trim();
@@ -545,10 +585,10 @@ impl RoutingHost {
     /// or when dispatching: a worker disappearing later is a service failure.
     fn validate_explicit_worker(
         &self,
-        request: &PreprocessedRequest,
+        routing: Option<&RoutingHints>,
         phase: RequestPhase,
     ) -> Result<(), Error> {
-        let Some(routing) = request.routing.as_ref() else {
+        let Some(routing) = routing else {
             return Ok(());
         };
         let target = match phase {
@@ -635,7 +675,7 @@ impl RoutingHost {
 
     async fn select_with_session_affinity<T, Select, SelectionFuture>(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
         is_query_only: bool,
         budget: &CleanupBudget,
@@ -645,14 +685,14 @@ impl RoutingHost {
         Select: FnMut(Option<AffinityTarget>) -> SelectionFuture,
         SelectionFuture: Future<Output = Result<T, Error>>,
     {
-        let staged_kv = StagedKv::for_request(request.content());
+        let staged_kv = StagedKv::for_route(request);
         let Some(affinity) = self.affinity.as_ref() else {
             return Ok((select(None).await?, None));
         };
-        let Some(session_id) = affinity_id(request)? else {
+        let Some(session_id) = request.session_affinity_id()? else {
             return Ok((select(None).await?, None));
         };
-        let explicit = explicit_target(request.content(), phase)?;
+        let explicit = explicit_routing_target(request.routing_hints(), phase)?;
         let session_id = self
             .group_binding_id(request, explicit, phase)
             .unwrap_or(session_id);
@@ -661,7 +701,7 @@ impl RoutingHost {
             return Ok((select(target).await?, None));
         }
 
-        let request_context = request.context();
+        let request_context = request.engine_context();
         let reacquire = || {
             self.acquire_affinity_slot(
                 affinity,
@@ -718,9 +758,13 @@ impl RoutingHost {
     /// Select a worker for `request` in `phase` without sending to it. KV
     /// routing admits and books the worker in the scheduler. Built-in modes
     /// pick it and take their occupancy reservation and affinity hold.
-    pub(crate) async fn plan_route(
+    ///
+    /// Send the plan with [`Self::dispatch_route`], give it up with
+    /// [`RoutePlan::abort`], or, in a host that never sends, keep its booking
+    /// with [`RoutePlan::into_booking`] or [`RoutePlan::detach_booking`].
+    pub async fn plan_route(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
     ) -> Result<RoutePlan, Error> {
         match &self.policy {

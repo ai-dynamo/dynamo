@@ -904,10 +904,11 @@ where
 
     /// Select a DeviceAware worker while leaving request-lifecycle cleanup to
     /// the routing host. Request and device metadata is prepared before the
-    /// occupancy admission lock is acquired.
+    /// occupancy admission lock is acquired. Without a request, selection
+    /// weighs device types only, with no multimodal cache hits.
     pub fn select_device_aware_and_reserve(
         &self,
-        request: &T,
+        request: Option<&T>,
         pinned_worker: Option<u64>,
     ) -> anyhow::Result<DeviceAwareSelection> {
         anyhow::ensure!(
@@ -1331,7 +1332,7 @@ where
         // Apply a unified policy for all endpoints.
         let endpoint_id = self.client.endpoint.id();
 
-        let selection = self.device_aware_candidates(request.content(), instance_ids);
+        let selection = self.device_aware_candidates(Some(request.content()), instance_ids);
 
         // Only full cache hits bypass weighted accounting; partial hits still follow the
         // device-aware ratio because some image encoding remains for this request.
@@ -1360,7 +1361,11 @@ where
             .await
     }
 
-    fn device_aware_candidates(&self, request: &T, instance_ids: &[u64]) -> DeviceAwareCandidates {
+    fn device_aware_candidates(
+        &self,
+        request: Option<&T>,
+        instance_ids: &[u64],
+    ) -> DeviceAwareCandidates {
         let device_type_map = self
             .client
             .instances()
@@ -1381,7 +1386,8 @@ where
             .unwrap_or(8);
 
         let (request_cache_keys, cache_matched_candidates) =
-            if let (Some(indexer), Some(extractor)) = (
+            if let (Some(request), Some(indexer), Some(extractor)) = (
+                request,
                 self.multimodal_cache_indexer.as_ref(),
                 self.multimodal_cache_key_extractor.as_ref(),
             ) {
@@ -1562,7 +1568,7 @@ where
                 if instance_ids.is_empty() {
                     return Err(self.empty_free_pool_error(&routing_instances));
                 }
-                let selection = self.device_aware_candidates(request, instance_ids);
+                let selection = self.device_aware_candidates(Some(request), instance_ids);
                 let (decision, counter) = state
                     .select_and_admit_device_aware(&selection.candidates, selection.context)
                     .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
@@ -3262,11 +3268,19 @@ mod tests {
         .await
         .unwrap();
 
-        let selection = router.select_device_aware_and_reserve(&42, None).unwrap();
+        let selection = router
+            .select_device_aware_and_reserve(Some(&42), None)
+            .unwrap();
         assert_eq!(selection.worker_id(), cache_worker);
         assert!(
             selection.into_reservation().is_none(),
             "full cache hits bypass occupancy charging"
+        );
+
+        let selection = router.select_device_aware_and_reserve(None, None).unwrap();
+        assert!(
+            selection.into_reservation().is_some(),
+            "without a request there are no cache hits, so occupancy is charged"
         );
 
         rt.shutdown();
