@@ -31,8 +31,8 @@ from vllm_omni.inputs.data import OmniTokensPrompt
 
 from dynamo import prometheus_names
 from dynamo.llm import ModelType
-from dynamo.llm.exceptions import InvalidArgument
 from dynamo.runtime import DistributedRuntime
+from dynamo.vllm.errors import vllm_client_error_to_public_error
 from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
@@ -144,7 +144,7 @@ class OmniStageWorker:
                             stage_list, request_id, sampling_params_list_override
                         )
                     except VLLMValidationError as e:
-                        raise InvalidArgument(str(e)) from e
+                        raise vllm_client_error_to_public_error(e) from e
                     except RuntimeError as e:
                         yield {"error": str(e), "finished": True}
                         return
@@ -177,7 +177,7 @@ class OmniStageWorker:
                 self.stage_config, sampling_params_list_override
             )
         except VLLMValidationError as e:
-            raise InvalidArgument(str(e)) from e
+            raise vllm_client_error_to_public_error(e) from e
         last_result = None
 
         try:
