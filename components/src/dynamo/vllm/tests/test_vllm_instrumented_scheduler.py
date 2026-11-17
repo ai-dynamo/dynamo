@@ -4149,14 +4149,159 @@ def test_prefill_real_seed_explicit_value_overrides_layout(
     assert InstrumentedScheduler._bench_realseed_on(dense) is expected
 
 
-@pytest.mark.parametrize(("value", "expected"), [("auto", False), ("on", True)])
-def test_prefill_real_seed_auto_stays_off_under_attention_dp(
-    monkeypatch, value, expected
-):
+@pytest.mark.parametrize("value", ["auto", "on"])
+def test_prefill_real_seed_auto_follows_layout_under_attention_dp(monkeypatch, value):
+    """The ranks agree on every real-seed hit, so auto seeds hybrid layouts
+    under attention-DP too; attention-only layouts keep synthetic prefixes."""
     monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", value)
     hybrid = _realseed_layout_stub("FullAttentionSpec", "MambaSpec")
-    hybrid._bench_dp_size = 2
-    assert InstrumentedScheduler._bench_realseed_on(hybrid) is expected
+    dense = _realseed_layout_stub("FullAttentionSpec")
+    hybrid._bench_dp_size = dense._bench_dp_size = 2
+    assert InstrumentedScheduler._bench_realseed_on(hybrid) is True
+    assert InstrumentedScheduler._bench_realseed_on(dense) is (value == "on")
+
+
+def _realseed_dp_ranks(point, monkeypatch, hits_by_rank):
+    """Two attention-DP ranks of a real-seed point, joined by real
+    synchronizers. ``hits_by_rank[rank][n]`` is whether that rank's prefix
+    cache holds the seeded chain after its ``n+1``-th staging shot; a miss
+    admits nothing, like ``_bench_inject_prefill``."""
+    ranks = []
+    for synchronizer, hits in zip(_stage_pair(timeout=1), hits_by_rank, strict=True):
+        stub, calls = _realseed_prefill_stub(point, monkeypatch)
+        stub._bench_synchronizer = synchronizer
+
+        def inject(*, admit=True, _calls=calls, _hits=hits, **kwargs):
+            if "expected_kv_read_tokens" in kwargs:
+                stagings = sum("prompt_token_ids_list" not in c for c in _calls)
+                if not _hits[stagings - 1]:
+                    return 0
+            if admit:
+                _calls.append(kwargs)
+            return len(kwargs["prompt_lens"])
+
+        stub._bench_inject_prefill = inject
+        ranks.append((stub, calls))
+    return ranks
+
+
+def _realseed_dp_step(ranks):
+    """One scheduler pass on every rank, each on its own thread: the
+    real-seed round blocks until the whole group has reported."""
+    errors = []
+
+    def run(stub):
+        try:
+            InstrumentedScheduler._bench_step_prefill(stub)
+        except Exception as error:  # noqa: BLE001
+            errors.append(error)
+
+    threads = [threading.Thread(target=run, args=(stub,)) for stub, _ in ranks]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "scheduler pass did not complete"
+    if errors:
+        raise errors[0]
+
+
+def _measured(calls):
+    return [call for call in calls if "expected_kv_read_tokens" in call]
+
+
+@pytest.mark.parametrize("heals", [True, False])
+@pytest.mark.parametrize("missing_rank", [0, 1])
+def test_prefill_real_seed_asymmetric_hit_is_decided_by_every_attention_dp_rank(
+    monkeypatch, missing_rank, heals
+):
+    """One rank misses the seeded prefix while its peer hits. The rank that
+    hits must not admit its measured shot and wait at the measured barrier
+    while the other re-stages: every rank re-stages together, then measures
+    together once every rank hits, or skips together after a second miss."""
+    point = BenchmarkPoint(
+        point_type="prefill",
+        total_prefill_tokens=25,
+        total_kv_read_tokens=40,
+        batch_size=3,
+    )
+    hits_by_rank = [[True, True], [True, True]]
+    hits_by_rank[missing_rank] = [False, heals]
+    ranks = _realseed_dp_ranks(point, monkeypatch, hits_by_rank)
+    try:
+        _realseed_dp_step(ranks)  # staging
+        _realseed_dp_step(ranks)  # warm
+        _realseed_dp_step(ranks)  # the group sees one miss: everyone re-stages
+        for stub, calls in ranks:
+            chain = stub._bench_rsc[3]
+            assert _measured(calls) == []
+            assert stub._bench_sync_pending is False
+            assert calls[-1] == {
+                "prompt_lens": [16, 16, 8],
+                "max_tokens": 1,
+                "cache_salts": chain["salts"],
+            }
+            assert chain["depth"] == [0, 0, 0]
+            assert stub._bench_realseed_ready[0] == _stamped(point)
+            assert stub._bench_realseed_stage == "warm"
+        _realseed_dp_step(ranks)  # warm again
+        _realseed_dp_step(ranks)  # second verdict
+        for stub, calls in ranks:
+            assert stub._bench_realseed_ready is None
+            if heals:
+                assert len(_measured(calls)) == 1
+                assert stub._bench_sync_pending is True
+                assert stub._bench_current_point == _stamped(point)
+                assert stub._bench_skipped_points == []
+            else:
+                assert _measured(calls) == []
+                assert stub._bench_sync_pending is False
+                assert stub._bench_current_point is None
+                assert [s.reason for s in stub._bench_skipped_points] == [
+                    "real_seed_cache_validation_failed"
+                ]
+    finally:
+        for stub, _ in ranks:
+            stub._bench_synchronizer.close()
+
+
+def test_prefill_real_seed_attention_dp_rank_waits_for_a_late_warm_shot(
+    monkeypatch,
+):
+    """A rank whose warm shot drains later keeps its peer from admitting the
+    measured shot; the peer idles in step until both admit in one pass."""
+    point = BenchmarkPoint(
+        point_type="prefill",
+        total_prefill_tokens=25,
+        total_kv_read_tokens=40,
+        batch_size=3,
+    )
+    ranks = _realseed_dp_ranks(point, monkeypatch, [[True], [True]])
+    late, _ = ranks[1]
+    late._bench_point_deadline = 0.0
+    late._bench_stop_requested = False
+    late._kvwarm_borrowed_ids = set()
+    late.finish_requests = MagicMock()
+    late._bench_transition_to_timeout_done = lambda: False
+    try:
+        _realseed_dp_step(ranks)  # staging
+        _realseed_dp_step(ranks)  # warm
+        late._bench_active_req_ids.add("warm")
+        late.requests["warm"] = object()
+        _realseed_dp_step(ranks)  # rank 1's warm shot is still running
+        late.requests.clear()
+        _realseed_dp_step(ranks)  # rank 1 cleans up its warm shot
+        for stub, calls in ranks:
+            assert _measured(calls) == []
+            assert stub._bench_sync_pending is False
+        _realseed_dp_step(ranks)  # both are done: both admit
+        for stub, calls in ranks:
+            assert len(_measured(calls)) == 1
+            assert stub._bench_sync_pending is True
+        assert ranks[0][0]._bench_realseed_round_seq == late._bench_realseed_round_seq
+    finally:
+        for stub, _ in ranks:
+            stub._bench_synchronizer.close()
 
 
 def test_seed_regime_for_prefill_rows():
