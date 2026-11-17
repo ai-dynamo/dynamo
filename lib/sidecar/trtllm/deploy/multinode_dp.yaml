@@ -133,9 +133,12 @@ spec:
                 *-ldr-0.*) WORKER="${DYNAMO_LEADER_ADDRESS/-ldr-0./-wkr-0.}" ;;
                 *) WORKER="${DYNAMO_LEADER_ADDRESS/./-1.}" ;;
               esac
-              until ssh -o StrictHostKeyChecking=no "$WORKER" true; do echo "waiting for sshd on $WORKER"; sleep 3; done
+              # The worker's sshd listens on 2222. Pass the key explicitly: ssh looks for ~/.ssh in
+              # the passwd home, which can differ from $HOME.
+              SSH_ARGS="-p 2222 -i $HOME/.ssh/id_rsa -o StrictHostKeyChecking=no"
+              until ssh $SSH_ARGS "$WORKER" true; do echo "waiting for sshd on $WORKER"; sleep 3; done
               exec mpirun --bind-to none -n 4 -H "$DYNAMO_LEADER_ADDRESS:2,$WORKER:2" \
-                --mca pml ob1 ${HF_TOKEN:+-x HF_TOKEN} \
+                --mca pml ob1 --mca plm_rsh_args "$SSH_ARGS" ${HF_TOKEN:+-x HF_TOKEN} \
                 bash -c 'trtllm-llmapi-launch trtllm-serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
                   --grpc --grpc-protocol openengine --openengine-enable-load-metrics \
                   --host 0.0.0.0 --port 30001 --max_seq_len 2048 \
@@ -180,15 +183,24 @@ spec:
             - /bin/bash
             - -c
             args:
-            # The image ships no sshd, and apt does not create /run/sshd. Ranks run in
-            # sshd sessions, so export the container environment to them: Triton JIT
-            # needs the CUDA paths. Tokens stay out. The leader passes HF_TOKEN with mpirun -x.
+            # The release image ships no sshd. sshd runs as the container user (root in the
+            # release image, UID 1000 in the Dynamo runtime image) from a config, host key, and
+            # PID file under $HOME, on port 2222 because a non-root user cannot bind port 22.
+            # Ranks run in sshd sessions, so export the container environment to them: Triton
+            # JIT needs the CUDA paths. sshd reads ~/.ssh/environment from the passwd home,
+            # which is $HOME in both images. Tokens stay out. The leader passes HF_TOKEN with mpirun -x.
             - |
               set -euo pipefail
               command -v sshd >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server; }
               install -Dm600 /ssh-pk/private.key.pub "$HOME/.ssh/authorized_keys"
-              mkdir -p /run/sshd
+              ssh-keygen -q -t ed25519 -N '' -f "$HOME/.ssh/ssh_host_ed25519_key"
+              # Only an sshd started as root needs the privilege separation directory.
+              if [ "$(id -u)" = 0 ]; then mkdir -p /run/sshd; fi
+              # StrictModes no: the Dynamo runtime image's home is group 0 and may be group-writable.
+              printf '%s\n' 'Port 2222' "HostKey $HOME/.ssh/ssh_host_ed25519_key" "PidFile $HOME/.ssh/sshd.pid" \
+                "AuthorizedKeysFile $HOME/.ssh/authorized_keys" 'PasswordAuthentication no' \
+                'StrictModes no' 'PermitUserEnvironment yes' > "$HOME/.ssh/sshd_config"
               env | grep -vE '^(HF_TOKEN|HUGGING_FACE_HUB_TOKEN|HF_HUB_TOKEN)=' > "$HOME/.ssh/environment"
-              exec /usr/sbin/sshd -D -e -o PermitUserEnvironment=yes
+              exec /usr/sbin/sshd -D -e -f "$HOME/.ssh/sshd_config"
             volumeMounts: *engineMounts
           volumes: *engineVolumes
