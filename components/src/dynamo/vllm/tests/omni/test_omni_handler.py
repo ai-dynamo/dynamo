@@ -908,7 +908,7 @@ class TestAggregatedTextStreamsDeltas:
             c
             async for c in handler._generate_openai_mode(
                 {"messages": [{"role": "user", "content": "hi"}]},
-                MagicMock(),
+                _live_context(),
                 "req-1",
             )
         ]
