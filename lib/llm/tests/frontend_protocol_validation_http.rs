@@ -247,6 +247,117 @@ async fn chat_custom_unsupported_grammar_and_wrong_choice_do_not_reach_engine() 
     .await;
 }
 
+#[tokio::test]
+#[serial]
+async fn conflicting_tool_schemas_do_not_reach_engine() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(vec![script; 2]).await;
+        let first = json!({
+            "name":"lookup", "parameters":{"type":"object","properties":{"city":{"type":"string"}},
+            "required":["city"],"additionalProperties":false}
+        });
+        let second = json!({
+            "name":"lookup", "parameters":{"type":"object","properties":{"order_id":{"type":"integer"}},
+            "required":["order_id"],"additionalProperties":false}
+        });
+        for (path, mut body) in strict_tool_requests(first.clone()) {
+            let is_chat = path == "/v1/chat/completions";
+            let namespaced = body["tools"][0]["type"] == "namespace";
+            let tools = if namespaced { &mut body["tools"][0]["tools"] } else { &mut body["tools"] };
+            let mut added = second.clone();
+            if is_chat {
+                added = json!({"type":"function","function":added});
+            } else {
+                added["type"] = json!("function");
+            }
+            tools.as_array_mut().unwrap().push(added);
+            body["tool_choice"] = if is_chat {
+                json!({"type":"function","function":{"name":"lookup"}})
+            } else {
+                json!({"type":"function","name":"lookup"})
+            };
+            for streaming in [false, true] {
+                body["stream"] = json!(streaming);
+                for _ in 0..2 {
+                    assert_openai_error(
+                        post_json(&svc, path, body.clone()).await,
+                        ExpectedError::Validation,
+                        "Conflicting definitions for tool 'lookup' in tools[0] and tools[1]: \
+                         parameter schemas or strict settings differ",
+                    ).await;
+                    let tools = if namespaced { &mut body["tools"][0]["tools"] } else { &mut body["tools"] };
+                    tools.as_array_mut().unwrap().reverse();
+                }
+            }
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        for request_type in [RequestType::Unary, RequestType::Stream] {
+            assert_error_metrics(
+                &svc,
+                &Endpoint::Responses,
+                &request_type,
+                &[(ErrorType::Validation, 4), (ErrorType::Internal, 0)],
+            );
+        }
+        let mut first = first;
+        let mut second = second;
+        first["type"] = json!("function");
+        second["type"] = json!("function");
+        for streaming in [false, true] {
+            let response = post_json(&svc, "/v1/responses", json!({
+                "model":MODEL,"input":"look up the record","stream":streaming,
+                "tools":[
+                    {"type":"namespace","name":"cities","description":"Cities","tools":[first]},
+                    {"type":"namespace","name":"orders","description":"Orders","tools":[second]}
+                ],
+                "tool_choice":"auto"
+            })).await;
+            let status = response.status();
+            let body = bounded(response.text()).await.unwrap();
+            assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+            let requests = svc.engine.take_requests().await;
+            assert_eq!(requests.len(), 1);
+            let tools = requests[0].inner.tools.as_ref().unwrap();
+            assert_eq!(tools.len(), 2);
+            assert_ne!(tools[0].function.name, tools[1].function.name);
+        }
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    }).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn responses_backend_validation_diagnostics_remain_private() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let engine = Arc::new(ScriptedChatEngine::new((0..2).map(|_| {
+            Err(dynamo_error(
+                DynamoErrorType::InvalidArgument,
+                "PRIVATE_BACKEND_DIAGNOSTIC=/srv/worker/private",
+            ))
+        })));
+        let svc = HarnessService::start_with_engine(engine).await;
+        for stream in [false, true] {
+            let response = post_json(
+                &svc,
+                "/v1/responses",
+                json!({
+                    "model": MODEL, "input": "hello", "stream": stream
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+            let body: Value = bounded(response.json()).await.unwrap();
+            assert_eq!(body["message"], "Invalid request");
+            assert!(!body.to_string().contains("PRIVATE_BACKEND_DIAGNOSTIC"));
+        }
+        assert_eq!(svc.engine.take_requests().await.len(), 2);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 #[derive(Clone, Copy)]
 enum ExpectedError {
     Validation,
