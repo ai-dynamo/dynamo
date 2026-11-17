@@ -436,6 +436,21 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
     else echo "WARNING: no bundled nsys found under /opt/nvidia/nsight-compute"; fi
 {% endif %}
 
+{% if device == "cuda" and target == "runtime" %}
+# The upstream renderer bundles a software AAC decoder. Removing it also defers
+# Inkling serving, including text-only requests, in the published runtime.
+# Run after all installs and before compliance inventories the final environment.
+RUN python3 -m pip uninstall --yes --break-system-packages tml-renderers && python3 - <<'PYTHON'
+from importlib import metadata, util
+
+if (
+    list(metadata.distributions(name="tml-renderers"))
+    or util.find_spec("tml_renderers") is not None
+):
+    raise SystemExit("tml-renderers remains installed; Inkling is disabled in this runtime")
+PYTHON
+{% endif %}
+
 {%- if device != "xpu" %}
 # Precompile Python bytecode into the image while still root. CI runs tests as
 # the non-root `dynamo` user, which cannot write .pyc back to site-packages, and
