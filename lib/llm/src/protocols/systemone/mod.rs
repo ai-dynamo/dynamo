@@ -23,7 +23,10 @@ impl ScoringBackend {
     }
 
     pub(crate) fn output_tokens(self) -> usize {
-        usize::from(self == Self::Vllm)
+        match self {
+            Self::Sglang => 0,
+            Self::Vllm => 1,
+        }
     }
 }
 

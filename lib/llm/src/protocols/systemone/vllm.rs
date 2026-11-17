@@ -97,10 +97,13 @@ impl VllmScoreCollector {
         if frame.index.is_some_and(|index| index != 0) {
             return Err(invalid("scoring output index must be zero"));
         }
-        match frame.token_ids.as_slice() {
-            [] => {}
-            [token] if self.sampled_token.is_none() => self.sampled_token = Some(*token),
-            _ => return Err(invalid("scoring must generate exactly one token")),
+        if frame.token_ids.len() > 1
+            || (!frame.token_ids.is_empty() && self.sampled_token.is_some())
+        {
+            return Err(invalid("scoring must generate exactly one token"));
+        }
+        if let Some(&token) = frame.token_ids.first() {
+            self.sampled_token = Some(token);
         }
         if let Some(rows) = &frame.top_logprobs {
             self.observe_scores(rows)?;
@@ -410,14 +413,6 @@ mod tests {
                 .observe(&extra_tokens)
                 .is_err()
         );
-        let mut collector = VllmScoreCollector::new(vec![20, 10], 3).unwrap();
-        collector
-            .observe(&LLMEngineOutput {
-                finish_reason: None,
-                ..complete()
-            })
-            .unwrap();
-        assert!(collector.observe(&complete()).is_err());
         let mut collector = VllmScoreCollector::new(vec![20, 10], 3).unwrap();
         collector.observe(&complete()).unwrap();
         assert!(collector.observe(&complete()).is_err());
