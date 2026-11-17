@@ -169,10 +169,13 @@ impl WorkerPicker for SharedStickyMinLoadPicker {
             .map(|session| session.session_id());
         ACTIVE_REQUEST_COUNTS.with_borrow_mut(|load| {
             load.clear();
+            // Declaring ACTIVE_REQUESTS guarantees a count for every in-range row.
             for row in 0..input.len() {
-                load.push(input.active_requests(row).ok_or_else(|| {
-                    WorkerSelectionPolicyError::failed("active request counts unavailable")
-                })?);
+                load.push(
+                    input
+                        .active_requests(row)
+                        .expect("ACTIVE_REQUESTS supplies every candidate's count"),
+                );
             }
             self.0
                 .lock()
