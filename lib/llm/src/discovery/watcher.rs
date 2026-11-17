@@ -1156,7 +1156,7 @@ impl ModelWatcher {
 /// serving chat pipeline is checked, including factory and text-input pipelines,
 /// because the HTTP layer selects the family from the card's parser names for all of
 /// them. Prefill-only sets parse no output.
-pub(super) fn check_unified_family_tokens(
+fn check_unified_family_tokens(
     card: &ModelDeploymentCard,
     tokenizer: &mut Option<crate::tokenizers::Tokenizer>,
 ) -> anyhow::Result<()> {

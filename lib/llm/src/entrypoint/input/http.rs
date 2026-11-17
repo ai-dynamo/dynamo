@@ -17,7 +17,7 @@ use crate::{
     },
     kv_router::plugins::RouterPluginBuilder,
     local_model::runtime_config::TokenizerBackend,
-    model_type::{ModelInput, ModelType},
+    model_type::ModelType,
     namespace::NamespaceFilter,
     types::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -275,31 +275,22 @@ async fn run_with_router_plugins(
             .await?;
             http_service
         }
-        EngineConfig::InProcessText {
-            engine, mut model, ..
-        } => {
-            model.configure_in_process(ModelInput::Text);
+        EngineConfig::InProcessText { engine, model, .. } => {
             let http_service = http_service_builder.build()?;
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = http_service.model_manager();
             let checksum = model.card().mdcsum();
             manager.add_completions_model(model.display_name(), checksum, engine.clone())?;
-            manager.add_chat_completions_model_with_card(
-                model.display_name(),
-                checksum,
-                model.card().clone(),
-                engine,
-            )?;
+            manager.add_chat_completions_model(model.display_name(), checksum, engine)?;
 
             enable_in_process_model_endpoints(&http_service)?;
             http_service
         }
         EngineConfig::InProcessTokens {
             engine: inner_engine,
-            mut model,
+            model,
             ..
         } => {
-            model.configure_in_process(ModelInput::Tokens);
             let http_service = http_service_builder.build()?;
             let manager = http_service.model_manager();
             let checksum = model.card().mdcsum();
@@ -310,13 +301,7 @@ async fn run_with_router_plugins(
                 NvCreateChatCompletionStreamResponse,
             >(model.card(), inner_engine.clone(), tokenizer.clone())
             .await?;
-            manager.add_chat_completions_model_with_card_and_tokenizer(
-                model.display_name(),
-                checksum,
-                model.card().clone(),
-                chat_pipeline,
-                Some(tokenizer.clone()),
-            )?;
+            manager.add_chat_completions_model(model.display_name(), checksum, chat_pipeline)?;
 
             let cmpl_pipeline =
                 common::build_completions_pipeline(model.card(), inner_engine, tokenizer)?;

@@ -1716,38 +1716,18 @@ impl ModelManager {
     /// the parsing options the HTTP handlers read (tool-call / reasoning parser, structural
     /// tag, ...) reflect that card instead of the defaults. The card is still stamped as a
     /// synthetic aggregated in-process worker.
+    ///
+    /// In-process inputs register the default card; Mistral v11+ needs discovered workers.
     pub fn add_chat_completions_model_with_card(
-        &self,
-        model: &str,
-        card_checksum: &str,
-        card: ModelDeploymentCard,
-        engine: OpenAIChatCompletionsStreamingEngine,
-    ) -> Result<(), ModelManagerError> {
-        self.add_chat_completions_model_with_card_and_tokenizer(
-            model,
-            card_checksum,
-            card,
-            engine,
-            None,
-        )
-    }
-
-    pub(crate) fn add_chat_completions_model_with_card_and_tokenizer(
         &self,
         model: &str,
         card_checksum: &str,
         mut card: ModelDeploymentCard,
         engine: OpenAIChatCompletionsStreamingEngine,
-        mut tokenizer: Option<crate::tokenizers::Tokenizer>,
     ) -> Result<(), ModelManagerError> {
-        card.model_type.insert(ModelType::Chat);
         card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
         card.needs = Vec::new();
         let input_policy = crate::chat_input::ChatInputPolicy::from_card(&card)
-            .map_err(|error| ModelManagerError::ModelUnavailable(format!("{model}: {error:#}")))?;
-        // The caller owns the already-built engine. HTTP aggregation still selects the
-        // family from the card's parser names, so reject a tokenizer that cannot serve it.
-        super::watcher::check_unified_family_tokens(&card, &mut tokenizer)
             .map_err(|error| ModelManagerError::ModelUnavailable(format!("{model}: {error:#}")))?;
         let _reservation = self.reservation_lock.lock();
         self.ensure_name_not_alias(model)?;
@@ -4715,77 +4695,6 @@ mod tests {
         Arc::new(crate::engines::StreamingEngineAdapter::new(
             crate::engines::make_echo_engine(),
         ))
-    }
-
-    // In-process registration rejects a tokenizer without `[ARGS]` for `mistral` and
-    // `mistral_4`, as discovery does, unless the v1 parsers serve every model.
-    #[tokio::test]
-    async fn in_process_registration_rejects_pre_v11_mistral_tokenizers() {
-        const MODE: &str = "DYNAMO_LOCAL_MISTRAL_FAMILY_MODE";
-        let Ok(mode) = std::env::var(MODE) else {
-            for mode in ["auto", "1", "2"] {
-                assert!(crate::test_utils::run_isolated(
-                    concat!(
-                        module_path!(),
-                        "::in_process_registration_rejects_pre_v11_mistral_tokenizers"
-                    ),
-                    &[("DYN_PARSER_VERSION", mode), (MODE, mode)],
-                ));
-            }
-            return;
-        };
-        for (path, supports_unified) in [
-            ("tests/data/sample-models/TinyLlama_v1.1", false),
-            ("tests/data/sample-models/mock-mistral-tekken", true),
-        ] {
-            for input in [
-                crate::model_type::ModelInput::Tokens,
-                crate::model_type::ModelInput::Text,
-            ] {
-                for parser in ["mistral", "mistral_4"] {
-                    let manager = ModelManager::new();
-                    let model = crate::local_model::LocalModelBuilder::default()
-                        .model_path(path.into())
-                        .runtime_config(ModelRuntimeConfig {
-                            tool_call_parser: Some(parser.into()),
-                            reasoning_parser: Some(parser.into()),
-                            ..Default::default()
-                        })
-                        .build()
-                        .await
-                        .unwrap();
-                    let mut card = model.card().clone();
-                    assert!(card.model_type.is_empty());
-                    card.model_input = input;
-                    let context =
-                        format!("path={path}, input={input:?}, parser={parser}, mode={mode}");
-                    let result = manager.add_chat_completions_model_with_card(
-                        "mistral",
-                        "checksum",
-                        card,
-                        make_chat_engine(),
-                    );
-                    if !supports_unified && mode != "1" {
-                        let error = result.expect_err(&context).to_string();
-                        assert!(error.contains("DYN_PARSER_VERSION=1"), "{context}: {error}");
-                        assert!(!manager.has_model_any("mistral"), "{context}");
-                        continue;
-                    }
-                    result.expect(&context);
-                    let (_, options) = manager
-                        .get_chat_completions_engine_with_parsing("mistral")
-                        .unwrap();
-                    assert_eq!(
-                        crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
-                            options.tool_call_parser.as_deref(),
-                            options.reasoning_parser.as_deref(),
-                        ),
-                        (mode != "1").then_some("mistral_4"),
-                        "{context}"
-                    );
-                }
-            }
-        }
     }
 
     #[test]
