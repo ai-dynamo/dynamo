@@ -396,13 +396,30 @@ impl MediaRequestExt for NvCreateCompletionRequest {
 
 /// Build a [`PromptFormatter`] from a [`ModelDeploymentCard`].
 ///
-/// Model families whose HF repos ship no Jinja `chat_template` get a native
-/// Rust formatter; everything else loads the
+/// Mistral checkpoints with a `tekken.json` tokenizer, and model families whose
+/// HF repos ship no Jinja `chat_template`, get a native Rust formatter;
+/// everything else loads the
 /// HF `tokenizer_config.json` template (and any separate chat-template file)
 /// and builds via [`PromptFormatter::from_parts`].
 pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
-    // Mistral-native checkpoints ship no template; mistral-common's encoding
-    // is reproduced natively from the tekken tokenizer's version and settings.
+    // Mistral checkpoints with a tekken.json tokenizer get Mistral's own renderer.
+    // It builds each prompt exactly the way the mistral-common library does, which
+    // is also what stock vLLM uses for these checkpoints by default.
+    //
+    // The public mistralai/Mistral-Large-4-1T-A52B and
+    // mistralai/Mistral-Large-4-1T-A52B-NVFP4 also ship a Hugging Face
+    // chat_template.jinja and tokenizer.json. We don't use them, for two reasons:
+    // - The NVFP4 checkpoint has no config.json, so its card has no Hugging Face
+    //   tokenizer or template to use.
+    // - Their prompts can differ from mistral-common's. The template copies each
+    //   tool exactly as the client sent it, while mistral-common rewrites every
+    //   tool into one fixed shape, so a tool with `"strict": true`, no description,
+    //   or its keys in another order gives different tokens. And tokenizer.json
+    //   reads `[INST]` typed by a user as the real `[INST]` marker, while
+    //   mistral-common keeps it as plain text.
+    //
+    // A checkpoint that has config.json can still use its template: pass it as a
+    // custom chat template, and the card then skips tekken.json.
     if let Some(checked_file) = mdc.tokenizer.as_ref().and_then(TokenizerKind::tekken_file) {
         let metadata = TekkenMetadata::from_checked_file(checked_file)?;
         let version = metadata
