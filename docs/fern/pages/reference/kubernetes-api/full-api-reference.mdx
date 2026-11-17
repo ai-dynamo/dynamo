@@ -2906,9 +2906,9 @@ extraParameters are additional parameters that affect the checkpoint hash. Depre
 <Accordion id="v1beta1-dynamocomponentdeployment" title="DynamoComponentDeployment">
 DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.
 
-v1beta1 is the storage version. The API server transparently converts
-to and from the served v1alpha1 version through
-operator's conversion webhook; see api/v1alpha1/*_conversion.go.
+v1beta1 is the storage and only served version. The v1alpha1 version is
+unserved; its conversion webhook remains solely to serve objects stored
+by pre-migration operator versions, until the version is removed.
 
 
 **Kind:** `resource`
@@ -3173,9 +3173,9 @@ See [ExperimentalSpec](#experimentalspec).
 <Accordion id="v1beta1-dynamographdeployment" title="DynamoGraphDeployment">
 DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 
-v1beta1 is the storage version. The API server transparently converts
-to and from the served v1alpha1 version through
-operator's conversion webhook; see api/v1alpha1/*_conversion.go.
+v1beta1 is the storage and only served version. The v1alpha1 version is
+unserved; its conversion webhook remains solely to serve objects stored
+by pre-migration operator versions, until the version is removed.
 
 
 **Kind:** `resource`
@@ -3569,9 +3569,9 @@ The adapter acts as an intermediary between autoscalers and the DGD,
 ensuring that only the adapter controller modifies the DGD's component replicas.
 This prevents conflicts when multiple autoscaling mechanisms are in play.
 
-v1beta1 is the storage version; conversion to and from the served v1alpha1
-version is handled by the operator's conversion webhook
-(see api/v1alpha1/dynamographdeploymentscalingadapter_conversion.go).
+v1beta1 is the storage and only served version. The v1alpha1 version is
+unserved; its conversion webhook remains solely to serve objects stored
+by pre-migration operator versions, until the version is removed.
 
 
 **Kind:** `resource`

@@ -314,7 +314,7 @@ func (r *DynamoGraphDeploymentReconciler) controllerBuilder(mgr ctrl.Manager) (*
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
-		Owns(&nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{}, builder.WithPredicates(predicate.Funcs{
+		Owns(&nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the adapter
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },

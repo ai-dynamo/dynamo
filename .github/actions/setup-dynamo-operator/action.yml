@@ -642,26 +642,6 @@ runs:
         echo "::endgroup::"
 
         echo "::group::Admission webhook smoke tests"
-        smoke_v1alpha1() {
-          kubectl --kubeconfig="${VKUBECONFIG}" --request-timeout=15s \
-            create --namespace=default --dry-run=server \
-            -o json \
-            -f - <<'EOF'
-        apiVersion: nvidia.com/v1alpha1
-        kind: DynamoGraphDeployment
-        metadata:
-          name: ci-webhook-smoke-v1alpha1
-        spec:
-          services:
-            Smoke:
-              componentType: worker
-              replicas: 0
-              extraPodSpec:
-                mainContainer:
-                  image: registry.example/runtime:1.1.0
-        EOF
-        }
-
         smoke_v1beta1() {
           kubectl --kubeconfig="${VKUBECONFIG}" --request-timeout=15s \
             create --namespace=default --dry-run=server \
@@ -817,7 +797,6 @@ runs:
           fi
         }
 
-        verify_dynamo_admission v1alpha1 smoke_v1alpha1
         verify_dynamo_admission v1beta1 smoke_v1beta1
         verify_grove_webhook_configuration \
           mutatingwebhookconfiguration \

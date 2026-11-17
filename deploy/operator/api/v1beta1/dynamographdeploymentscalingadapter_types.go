@@ -92,9 +92,9 @@ type DynamoGraphDeploymentScalingAdapterStatus struct {
 // ensuring that only the adapter controller modifies the DGD's component replicas.
 // This prevents conflicts when multiple autoscaling mechanisms are in play.
 //
-// v1beta1 is the storage version; conversion to and from the served v1alpha1
-// version is handled by the operator's conversion webhook
-// (see api/v1alpha1/dynamographdeploymentscalingadapter_conversion.go).
+// v1beta1 is the storage and only served version. The v1alpha1 version is
+// unserved; its conversion webhook remains solely to serve objects stored
+// by pre-migration operator versions, until the version is removed.
 type DynamoGraphDeploymentScalingAdapter struct {
 	metav1.TypeMeta `json:",inline"`
 	// +optional

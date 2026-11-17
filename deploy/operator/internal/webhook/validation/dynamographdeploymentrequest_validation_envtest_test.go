@@ -22,7 +22,6 @@ import (
 	"strings"
 	"testing"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -107,11 +106,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			}),
 			gpuDiscovery:  true,
 			wantSchemaErr: `spec.runtimeVersionOverride: Invalid value: "1.2": spec.runtimeVersionOverride in body should match '^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'`,
-		},
-		{
-			name:         "valid v1alpha1 request converts through the production path",
-			request:      alphaDGDRForAdmission(nil),
-			gpuDiscovery: true,
 		},
 		{
 			name:       "v1beta2 create bypasses legacy v1beta1 validation",
@@ -201,14 +195,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			}),
 			gpuDiscovery:  true,
 			wantSchemaErr: `spec.sla.optimizationType: Unsupported value: "cost": supported values: "latency", "throughput"`,
-		},
-		{
-			name: "v1alpha1 backend enum is rejected by source schema before conversion",
-			request: alphaDGDRForAdmission(func(request *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) {
-				request.Spec.Backend = "unknown"
-			}),
-			gpuDiscovery:  true,
-			wantSchemaErr: `spec.backend: Unsupported value: "unknown": supported values: "auto", "vllm", "sglang", "trtllm"`,
 		},
 
 		// Structural create rules.
@@ -1254,18 +1240,6 @@ func TestDynamoGraphDeploymentRequestStatusRepresentationMatchesSpec(t *testing.
 		status       map[string]any
 	}{
 		{
-			name:         "v1alpha1 native spec rejects v1beta2 status",
-			createObject: alphaDGDRForAdmission(nil),
-			statusObject: alphaDGDRForAdmission(nil),
-			status:       map[string]any{"v1beta2": map[string]any{"observedGeneration": int64(1)}},
-		},
-		{
-			name:         "v1alpha1 v1beta2 spec rejects native status",
-			createObject: beta2DGDRForAdmission(setBeta2AdmissionHardware),
-			statusObject: alphaDGDRForAdmission(nil),
-			status:       map[string]any{"state": string(nvidiacomv1alpha1.DGDRStatePending)},
-		},
-		{
 			name:         "v1beta1 native spec rejects v1beta2 status",
 			createObject: betaDGDRForAdmission(nil),
 			statusObject: betaDGDRForAdmission(nil),
@@ -1324,14 +1298,14 @@ func TestDynamoGraphDeploymentRequestStatusRepresentationMatchesSpec(t *testing.
 	}
 }
 
-func TestDynamoGraphDeploymentRequestV1Beta2EmptyStatusSurvivesV1Alpha1(t *testing.T) {
+func TestDynamoGraphDeploymentRequestV1Beta2EmptyStatusSurvivesV1Beta1(t *testing.T) {
 	t.Log("Create a native v1beta2 request with empty status")
 	env := admissionEnv.ForTest(t)
 	admissionGate.set(features.Gates{GPUDiscovery: true})
 	setAdmissionH100Topology()
 	warnings := &warningRecorder{}
 	beta2Fixture := beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
-		request.Name = "empty-status-alpha-bridge"
+		request.Name = "empty-status-beta-bridge"
 		setBeta2AdmissionHardware(request)
 	})
 	beta2Client := newAdmissionResourceClient(t, env, beta2Fixture, "", warnings)
@@ -1341,20 +1315,20 @@ func TestDynamoGraphDeploymentRequestV1Beta2EmptyStatusSurvivesV1Alpha1(t *testi
 		t.Fatalf("create v1beta2 request: %v", err)
 	}
 
-	t.Log("Read and write the empty status through v1alpha1")
-	alphaClient := newAdmissionResourceClient(t, env, alphaDGDRForAdmission(nil), "", warnings)
-	alpha, err := alphaClient.Get(t.Context(), created.GetName(), metav1.GetOptions{})
+	t.Log("Read and write the empty status through v1beta1")
+	betaClient := newAdmissionResourceClient(t, env, betaDGDRForAdmission(nil), "", warnings)
+	beta, err := betaClient.Get(t.Context(), created.GetName(), metav1.GetOptions{})
 	if err != nil {
-		t.Fatalf("get request as v1alpha1: %v", err)
+		t.Fatalf("get request as v1beta1: %v", err)
 	}
-	assertEmptyDGDRStatus(t, alpha)
-	alpha, err = alphaClient.UpdateStatus(t.Context(), alpha, metav1.UpdateOptions{})
+	assertEmptyDGDRStatus(t, beta)
+	beta, err = betaClient.UpdateStatus(t.Context(), beta, metav1.UpdateOptions{})
 	if err != nil {
-		t.Fatalf("write empty v1alpha1 status: %v", err)
+		t.Fatalf("write empty v1beta1 status: %v", err)
 	}
 
 	t.Log("Read the request as v1beta2 and prove native status can still be written")
-	converted, err := beta2Client.Get(t.Context(), alpha.GetName(), metav1.GetOptions{})
+	converted, err := beta2Client.Get(t.Context(), beta.GetName(), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get request as v1beta2: %v", err)
 	}
@@ -1363,7 +1337,7 @@ func TestDynamoGraphDeploymentRequestV1Beta2EmptyStatusSurvivesV1Alpha1(t *testi
 		t.Fatalf("set native v1beta2 status: %v", err)
 	}
 	if _, err := beta2Client.UpdateStatus(t.Context(), converted, metav1.UpdateOptions{}); err != nil {
-		t.Fatalf("write native v1beta2 status after v1alpha1 round-trip: %v", err)
+		t.Fatalf("write native v1beta2 status after v1beta1 round-trip: %v", err)
 	}
 }
 
@@ -1391,28 +1365,6 @@ func betaDGDRForAdmission(
 			Image:                  "profiler:latest",
 			RuntimeVersionOverride: "1.1.0",
 			SearchStrategy:         nvidiacomv1beta1.SearchStrategyRapid,
-		},
-	}
-	if mutate != nil {
-		mutate(request)
-	}
-	return request
-}
-
-func alphaDGDRForAdmission(
-	mutate func(*nvidiacomv1alpha1.DynamoGraphDeploymentRequest),
-) *nvidiacomv1alpha1.DynamoGraphDeploymentRequest {
-	request := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
-		APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
-		Kind:       "DynamoGraphDeploymentRequest",
-		Name:       "test-dgdr", Namespace: "default",
-		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-			Model:                  "Qwen/Qwen3-0.6B",
-			Backend:                "vllm",
-			RuntimeVersionOverride: "1.1.0",
-			ProfilingConfig: &nvidiacomv1alpha1.ProfilingConfigSpec{
-				ProfilerImage: "profiler:latest",
-			},
 		},
 	}
 	if mutate != nil {

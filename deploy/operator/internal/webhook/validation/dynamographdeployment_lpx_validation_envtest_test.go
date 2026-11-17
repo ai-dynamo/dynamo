@@ -8,7 +8,6 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	k8sptr "k8s.io/utils/ptr"
 )
 
@@ -19,7 +18,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 	const sidecarRoleErr = "Forbidden: Dynamo sidecar mode in role pod templates is supported only on the LPX role that hosts the engine: the conductor role when the component declares one, otherwise the agent role"
 	const conductorTemplateErr = "spec.components[0].roles[1].podTemplate: Required value: LPX conductor requires an explicit podTemplate"
 	const lpxGateErr = "spec.components[0].type: Forbidden: LPX components require lpx.enabled=true"
-	const alphaLPXGateErr = "spec.services[lpx].componentType: Forbidden: LPX components require lpx.enabled=true"
 	const lpxOnDeleteErr = `metadata.annotations[nvidia.com/grove-update-strategy]: Invalid value: "OnDelete": must be "Coherent" or "RollingRecreate" when LPX components are configured`
 
 	// Keep LPX inputs and oracles together without a separate admission execution path.
@@ -76,13 +74,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		{
 			name: "LPX rejects the OnDelete update strategy",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
-			}),
-			wantWebhookErrs: []string{lpxOnDeleteErr},
-		},
-		{
-			name: "v1alpha1 LPX rejects the OnDelete update strategy after conversion",
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
 			}),
 			wantWebhookErrs: []string{lpxOnDeleteErr},
@@ -160,15 +151,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantWarnings: []string{`spec.components[0].minAvailable ("lpx") is deprecated; use spec.components[0].providerOverride.value.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
-			name: "v1alpha1 LPX preserves omitted replicas with minimum availability above one on CREATE",
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].Replicas = nil
-				dgd.Spec.Services["lpx"].MinAvailable = new(int32(2))
-			}),
-			wantReplicas: map[string]*int32{"lpx": nil},
-			wantWarnings: []string{`spec.components[0].minAvailable ("lpx") is deprecated; use spec.components[0].providerOverride.value.minAvailable and migrate all component minima together without changing their effective values`},
-		},
-		{
 			name: "LPX preserves omitted replicas with minimum availability above one on UPDATE",
 			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].Replicas = new(int32(3))
@@ -181,30 +163,11 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantReplicas: map[string]*int32{"lpx": nil},
 		},
 		{
-			name: "v1alpha1 LPX preserves omitted replicas with minimum availability above one on UPDATE",
-			oldDeployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].Replicas = new(int32(3))
-				dgd.Spec.Services["lpx"].MinAvailable = new(int32(2))
-			}),
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].Replicas = nil
-				dgd.Spec.Services["lpx"].MinAvailable = new(int32(2))
-			}),
-			wantReplicas: map[string]*int32{"lpx": nil},
-		},
-		{
 			name: "LPX rejects explicit replicas below minimum availability",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].MinAvailable = new(int32(2))
 			}),
 			wantCELErr: "spec.components[0]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
-		},
-		{
-			name: "v1alpha1 LPX rejects explicit replicas below minimum availability",
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].MinAvailable = new(int32(2))
-			}),
-			wantCELErr: "spec.services[lpx]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
 		},
 		{
 			name: "ordinary components reject omitted replicas with minimum availability above one",
@@ -214,15 +177,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				worker.MinAvailable = new(int32(2))
 			}),
 			wantCELErr: "spec.components[1]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
-		},
-		{
-			name: "v1alpha1 ordinary components reject omitted replicas with minimum availability above one",
-			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
-				worker.Replicas = nil
-				worker.MinAvailable = new(int32(2))
-			}),
-			wantCELErr: "spec.services[worker]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
 		},
 		{
 			name: "LPX admits nine hybrid replicas with lowered conductor volumes",
@@ -300,12 +254,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			deployment:      betaLPXDGDForAdmission(nil),
 			wantWebhookErrs: []string{lpxGateErr},
 		},
-		{
-			name:            "v1alpha1 LPX gate rejects CREATE when disabled",
-			lpxDisabled:     true,
-			deployment:      alphaLPXDGDForAdmission(nil),
-			wantWebhookErrs: []string{alphaLPXGateErr},
-		},
 		// Disabling LPX freezes each existing component, while unrelated updates remain available.
 		{
 			name:        "LPX gate admits ordinary component updates and reordering when disabled",
@@ -317,36 +265,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				worker := *betaWorkerComponent(betaDGDForAdmission(nil))
 				worker.Replicas = new(int32(2))
 				dgd.Spec.Components = append([]nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{worker}, dgd.Spec.Components...)
-			}),
-		},
-		{
-			name:          "v1alpha1 LPX gate rejects build updates when disabled",
-			lpxDisabled:   true,
-			oldDeployment: alphaLPXDGDForAdmission(nil),
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].LPX.BuildID = "test/replacement"
-			}),
-			wantWebhookErrs: []string{alphaLPXGateErr},
-		},
-		{
-			name:          "v1alpha1 LPX gate rejects ingress updates when disabled",
-			lpxDisabled:   true,
-			oldDeployment: alphaLPXDGDForAdmission(nil),
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "lpx.example.com"}
-			}),
-			wantWebhookErrs: []string{alphaLPXGateErr},
-		},
-		{
-			name:        "v1alpha1 LPX gate admits unrelated updates with unchanged ingress when disabled",
-			lpxDisabled: true,
-			oldDeployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "lpx.example.com"}
-			}),
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "lpx.example.com"}
-				dgd.Labels = map[string]string{"updated": "true"}
-				dgd.Spec.Labels = map[string]string{"updated": "true"}
 			}),
 		},
 		{
@@ -445,22 +363,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			},
 		},
 		{
-			name: "v1alpha1 LPX image and conductor template errors use beta paths",
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				component := dgd.Spec.Services["lpx"]
-				component.Roles[0], component.Roles[1] = component.Roles[1], component.Roles[0]
-				component.Roles[0].PodTemplate = nil
-				spec := &component.Roles[1].PodTemplate.Spec
-				spec.Containers = append(spec.Containers, corev1.Container{Name: "sidecar"})
-				spec.InitContainers = []corev1.Container{{Name: "init"}}
-			}),
-			wantWebhookErrs: []string{
-				"spec.components[0].roles[1].podTemplate.spec.containers[1].image: Required value: must specify a non-empty image",
-				"spec.components[0].roles[1].podTemplate.spec.initContainers[0].image: Required value: must specify a non-empty image",
-				"spec.components[0].roles[0].podTemplate: Required value: LPX conductor requires an explicit podTemplate",
-			},
-		},
-		{
 			name: "LPX rejects duplicate Pod roles",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]
@@ -488,13 +390,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				)
 			}),
 			wantWebhookErrs: []string{conductorRoleErr},
-		},
-		{
-			name: "v1alpha1 LPX allows an Agent init container named conductor with an explicit conductor template",
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				component := dgd.Spec.Services["lpx"]
-				component.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "conductor", Image: "setup"}}
-			}),
 		},
 		{
 			name: "LPX allows a conductor sidecar named conductor",
@@ -606,13 +501,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 			wantWebhookErrs: []string{`spec.components: Forbidden: requires the Grove pathway, but workload provider "component" is selected`},
 		},
-		{
-			name: "v1alpha1 SpecDecode draft replicas must be positive",
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				setAlphaLPXSpecDec(dgd, new(int32(0)))
-			}),
-			wantCELErr: "spec.services[draft]: Invalid value: replicas must be positive when componentType is lpx",
-		},
 		// Engine-local template and build validation.
 		{
 			name: "LPX rejects a component-level PodTemplate",
@@ -635,25 +523,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 			wantSchemaErr: "spec.components[0].lpx.buildId: Invalid value: \"\": spec.components[0].lpx.buildId in body should be at least 1 chars long",
 		},
-		{
-			name: "v1alpha1 LPX rejects root templates and whitespace build IDs together",
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				component := dgd.Spec.Services["lpx"]
-				component.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{Image: "runtime"}}
-				component.LPX.BuildID = " "
-			}),
-			wantWebhookErrs: []string{
-				"spec.components[0].podTemplate: Forbidden: LPX Pod templates belong to roles",
-				"spec.components[0].lpx.buildId: Required value: LPX component requires a buildId",
-			},
-		},
-		{
-			name: "v1alpha1 LPX rejects whitespace build IDs",
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].LPX.BuildID = " "
-			}),
-			wantWebhookErrs: []string{"spec.components[0].lpx.buildId: Required value: LPX component requires a buildId"},
-		},
 		// Conductor startup is explicit on both source API versions and on every update.
 		{
 			name: "LPX rejects a missing conductor template on CREATE",
@@ -663,52 +532,10 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantWebhookErrs: []string{conductorTemplateErr},
 		},
 		{
-			name: "v1alpha1 LPX rejects a missing conductor role on CREATE",
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				component := dgd.Spec.Services["lpx"]
-				component.Roles = component.Roles[:1]
-			}),
-			wantWebhookErrs: []string{conductorRoleErr},
-		},
-		{
-			name: "v1alpha1 LPX rejects a missing conductor template on CREATE",
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].Roles[1].PodTemplate = nil
-			}),
-			wantWebhookErrs: []string{conductorTemplateErr},
-		},
-		{
-			name: "v1alpha1 LPX conductor template error identifies the converted component and authored role indices",
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				setAlphaLPXSpecDec(dgd, new(int32(1)))
-				target := dgd.Spec.Services["target"]
-				target.Roles[0], target.Roles[1] = target.Roles[1], target.Roles[0]
-				target.Roles[0].PodTemplate = nil
-			}),
-			wantWebhookErrs: []string{"spec.components[1].roles[0].podTemplate: Required value: LPX conductor requires an explicit podTemplate"},
-		},
-		{
 			name:          "LPX rejects removing the conductor template on UPDATE",
 			oldDeployment: betaLPXDGDForAdmission(nil),
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].Roles[1].PodTemplate = nil
-			}),
-			wantWebhookErrs: []string{conductorTemplateErr},
-		},
-		{
-			name:          "v1alpha1 LPX rejects removing the conductor role on UPDATE",
-			oldDeployment: alphaLPXDGDForAdmission(nil),
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				component := dgd.Spec.Services["lpx"]
-				component.Roles = component.Roles[:1]
-			}),
-			wantWebhookErrs: []string{conductorRoleErr},
-		},
-		{
-			name:          "v1alpha1 LPX rejects removing the conductor template on UPDATE",
-			oldDeployment: alphaLPXDGDForAdmission(nil),
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].Roles[1].PodTemplate = nil
 			}),
 			wantWebhookErrs: []string{conductorTemplateErr},
 		},
@@ -725,33 +552,12 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantWebhookErrs: []string{conductorTemplateErr},
 		},
 		{
-			name:               "v1alpha1 LPX rejects retaining an absent conductor template on an unrelated UPDATE",
-			seedWithoutWebhook: true,
-			oldDeployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].Roles[1].PodTemplate = nil
-			}),
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].Roles[1].PodTemplate = nil
-				dgd.Spec.Services["lpx"].Replicas = new(int32(3))
-			}),
-			wantWebhookErrs: []string{conductorTemplateErr},
-		},
-		{
 			name: "LPX admits SpecDecode UPDATE with one conductor and Agent-only draft",
 			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaLPXSpecDec(dgd, new(int32(1)))
 			}),
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaLPXSpecDec(dgd, new(int32(2)))
-			}),
-		},
-		{
-			name: "v1alpha1 LPX admits SpecDecode UPDATE with one conductor and Agent-only draft",
-			oldDeployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				setAlphaLPXSpecDec(dgd, new(int32(1)))
-			}),
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				setAlphaLPXSpecDec(dgd, new(int32(2)))
 			}),
 		},
 		// Selected LPX workload shapes.
@@ -779,14 +585,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			name: "LPX rejects a whitespace-only build reference",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].LPX.BuildID = "  "
-			}),
-			wantWebhookErrs: []string{"spec.components[0].lpx.buildId: Required value: LPX component requires a buildId"},
-		},
-		{
-			name:          "v1alpha1 LPX rejects a whitespace-only build reference on UPDATE",
-			oldDeployment: alphaLPXDGDForAdmission(nil),
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].LPX.BuildID = "  "
 			}),
 			wantWebhookErrs: []string{"spec.components[0].lpx.buildId: Required value: LPX component requires a buildId"},
 		},
@@ -864,17 +662,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantWarnings: []string{`spec.components[0].minAvailable ("lpx") is deprecated; use spec.components[0].providerOverride.value.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
-			name: "v1alpha1 LPX rejects shared target scaling on UPDATE",
-			oldDeployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				setAlphaLPXSpecDec(dgd, nil)
-			}),
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				setAlphaLPXSpecDec(dgd, nil)
-				dgd.Spec.Services["target"].Replicas = new(int32(2))
-			}),
-			wantWebhookErrs: []string{"spec.components[1].replicas: Invalid value: 2: shared target replicas must be one"},
-		},
-		{
 			name: "LPX roles reject provider overrides",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].Roles[0].ProviderOverride = groveProviderOverride("", `{"topologyConstraint":{"pack":{"required":"rack"}}}`)
@@ -902,17 +689,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			},
 		},
 		{
-			name: "v1alpha1 LPX rejects provider overrides after conversion",
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.ProviderOverride = alphaGroveProviderOverride("", `{"spec":{"template":{"topologyConstraint":{"pack":{"required":"rack"}}}}}`)
-				dgd.Spec.Services["lpx"].ProviderOverride = alphaGroveProviderOverride("", `{"topologyConstraint":{"pack":{"required":"rack"}}}`)
-			}),
-			wantWebhookErrs: []string{
-				"spec.providerOverride: Forbidden: LPX does not support Grove topology overrides on the deployment",
-				"spec.components[0].providerOverride: Forbidden: LPX component does not support Grove topology overrides",
-			},
-		},
-		{
 			name: "LPX admits an ordinary component provider override",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				frontend := *betaDGDForAdmission(nil).GetComponentByName("frontend")
@@ -928,12 +704,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				component.Roles[0].PodTemplate.Spec.Volumes = []corev1.Volume{{Name: "model-storage",
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"}}}
 				setBetaLPXSpecDec(dgd, new(int32(2)))
-			}),
-		},
-		{
-			name: "selected v1alpha1 LPX derives SpecDecode from two models",
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				setAlphaLPXSpecDec(dgd, nil)
 			}),
 		},
 		{
@@ -989,31 +759,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			},
 		},
 		{
-			name: "v1alpha1 lpx requires an agent role",
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].Roles = nil
-			}),
-			wantWebhookErrs: []string{
-				`spec.components[0].roles: Required value: must contain the "agent" role`,
-				conductorRoleErr,
-			},
-		},
-		{
-			name: "v1alpha1 lpx requires lpx",
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].LPX = nil
-			}),
-			wantCELErr: "spec.services[lpx]: Invalid value: lpx is required when componentType is lpx",
-		},
-		{
-			name: "v1alpha1 non-lpx service rejects lpx",
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].ComponentType = consts.ComponentTypeWorker
-				dgd.Spec.Services["lpx"].Roles = nil
-			}),
-			wantCELErr: "spec.services[lpx]: Invalid value: lpx may only be set when componentType is lpx",
-		},
-		{
 			name: "LPX admits independent conductors across components",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				second := dgd.Spec.Components[0]
@@ -1030,14 +775,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				third := dgd.Spec.Components[0].DeepCopy()
 				third.ComponentName, third.Replicas = "third", new(int32(9))
 				dgd.Spec.Components = append(dgd.Spec.Components, *second, *third)
-			}),
-		},
-		{
-			name: "v1alpha1 LPX admits independent conductors",
-			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				second := dgd.Spec.Services["lpx"].DeepCopy()
-				second.Replicas = new(int32(3))
-				dgd.Spec.Services["second"] = second
 			}),
 		},
 		{
@@ -1103,7 +840,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		},
 	}
 
-	// Exercise restart admission and defaulting through both served API versions.
+	// Exercise restart admission and defaulting through the served API version.
 	const parallelRestartErr = "spec: Invalid value: spec.restart.strategy.type must be Parallel when the graph contains LPX components"
 	for _, restart := range []struct {
 		name       string
@@ -1125,46 +862,26 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		{name: "adding LPX rejects an unchanged Sequential restart", strategy: &nvidiacomv1beta1.RestartStrategy{Type: nvidiacomv1beta1.RestartStrategyTypeSequential}, addLPX: true, wantCELErr: parallelRestartErr},
 	} {
 		// Keep ordinary components beside LPX so the restriction covers mixed graphs.
-		alphaOld := alphaDGDForAdmission(nil)
 		betaOld := betaDGDForAdmission(nil)
 		if !restart.ordinary && !restart.addLPX {
-			alphaOld.Spec.Services["lpx"] = alphaLPXDGDForAdmission(nil).Spec.Services["lpx"]
 			betaOld.Spec.Components = append(betaOld.Spec.Components, betaLPXDGDForAdmission(nil).Spec.Components[0])
 		}
 
-		// Author equivalent restart requests without converting away source-version defaults.
-		alpha := alphaOld.DeepCopy()
 		beta := betaOld.DeepCopy()
-		alpha.Spec.Restart = &nvidiacomv1alpha1.Restart{ID: "restart-1"}
 		beta.Spec.Restart = &nvidiacomv1beta1.Restart{ID: "restart-1", Strategy: restart.strategy}
-		if restart.strategy != nil {
-			alpha.Spec.Restart.Strategy = &nvidiacomv1alpha1.RestartStrategy{Type: nvidiacomv1alpha1.RestartStrategyType(restart.strategy.Type)}
-		}
 		if restart.addLPX {
-			alphaOld.Spec.Restart = alpha.Spec.Restart.DeepCopy()
 			betaOld.Spec.Restart = beta.Spec.Restart.DeepCopy()
-			alpha.Spec.Services["lpx"] = alphaLPXDGDForAdmission(nil).Spec.Services["lpx"]
 			beta.Spec.Components = append(beta.Spec.Components, betaLPXDGDForAdmission(nil).Spec.Components[0])
 		}
 
-		// The shared harness submits each native object to its matching API endpoint.
-		for _, version := range []struct {
-			name       string
-			deployment runtime.Object
-			old        runtime.Object
-		}{
-			{name: "v1alpha1", deployment: alpha, old: alphaOld},
-			{name: "v1beta1", deployment: beta, old: betaOld},
-		} {
-			test := dgdAdmissionTestCase{
-				name: version.name + " " + restart.name, deployment: version.deployment,
-				oldDeployment: version.old, wantCELErr: restart.wantCELErr,
-			}
-			if restart.create {
-				test.oldDeployment = nil
-			}
-			tests = append(tests, test)
+		test := dgdAdmissionTestCase{
+			name: "v1beta1 " + restart.name, deployment: beta,
+			oldDeployment: betaOld, wantCELErr: restart.wantCELErr,
 		}
+		if restart.create {
+			test.oldDeployment = nil
+		}
+		tests = append(tests, test)
 	}
 	return tests
 }
@@ -1196,32 +913,6 @@ func betaLPXDGDForAdmission(
 	return dgd
 }
 
-func alphaLPXDGDForAdmission(
-	mutate func(*nvidiacomv1alpha1.DynamoGraphDeployment),
-) *nvidiacomv1alpha1.DynamoGraphDeployment {
-	dgd := alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-		dgd.Spec.Services = map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-			"lpx": {
-				ComponentType: string(nvidiacomv1beta1.ComponentTypeLPX),
-				Replicas:      new(int32(1)),
-				LPX:           &nvidiacomv1beta1.LPXConfig{BuildID: "test/build"},
-				Roles: []nvidiacomv1alpha1.ComponentRoleSpec{
-					{Name: nvidiacomv1alpha1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "lpu-runtime"}},
-					}}},
-					{Name: nvidiacomv1alpha1.ComponentRoleLPXConductor, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "conductor-runtime", Command: []string{"/bin/nova"}}},
-					}}},
-				},
-			},
-		}
-	})
-	if mutate != nil {
-		mutate(dgd)
-	}
-	return dgd
-}
-
 // setBetaLPXSpecDec splits the fixture into independently authored model components.
 func setBetaLPXSpecDec(dgd *nvidiacomv1beta1.DynamoGraphDeployment, draftReplicas *int32) {
 	draft := dgd.Spec.Components[0].DeepCopy()
@@ -1234,11 +925,3 @@ func setBetaLPXSpecDec(dgd *nvidiacomv1beta1.DynamoGraphDeployment, draftReplica
 }
 
 // setAlphaLPXSpecDec exercises the equivalent native alpha service representation.
-func setAlphaLPXSpecDec(dgd *nvidiacomv1alpha1.DynamoGraphDeployment, draftReplicas *int32) {
-	draft := dgd.Spec.Services["lpx"].DeepCopy()
-	target := dgd.Spec.Services["lpx"].DeepCopy()
-	draft.LPX.BuildID, target.LPX.BuildID = "test/draft", "test/target"
-	draft.Roles = draft.Roles[:1]
-	draft.Replicas = draftReplicas
-	dgd.Spec.Services = map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{"draft": draft, "target": target}
-}

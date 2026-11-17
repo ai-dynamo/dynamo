@@ -198,7 +198,7 @@ func updateDynamoGraphDeploymentRequestCounts(ctx context.Context, c client.Clie
 }
 
 func updateDynamoGraphDeploymentScalingAdapterCounts(ctx context.Context, c client.Client, excludedNamespaces ExcludedNamespaces, logger logr.Logger) {
-	dgdsaList := &v1alpha1.DynamoGraphDeploymentScalingAdapterList{}
+	dgdsaList := &v1beta1.DynamoGraphDeploymentScalingAdapterList{}
 	if err := c.List(ctx, dgdsaList); err != nil {
 		logger.Error(err, "failed to list DynamoGraphDeploymentScalingAdapters")
 		return
@@ -207,7 +207,7 @@ func updateDynamoGraphDeploymentScalingAdapterCounts(ctx context.Context, c clie
 		dgdsaList.Items,
 		excludedNamespaces,
 		consts.ResourceTypeDynamoGraphDeploymentScalingAdapter,
-		func(d *v1alpha1.DynamoGraphDeploymentScalingAdapter) *v1alpha1.DynamoGraphDeploymentScalingAdapter {
+		func(d *v1beta1.DynamoGraphDeploymentScalingAdapter) *v1beta1.DynamoGraphDeploymentScalingAdapter {
 			return d
 		},
 	)

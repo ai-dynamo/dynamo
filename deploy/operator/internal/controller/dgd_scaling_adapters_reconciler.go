@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"strings"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -63,7 +62,7 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 		component := &dgd.Spec.Components[i]
 		componentName := component.ComponentName
 		adapterName := generateAdapterName(dgd.Name, componentName)
-		adapter := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{
+		adapter := &nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{
 			Name:      adapterName,
 			Namespace: dgd.Namespace,
 		}
@@ -112,9 +111,9 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 			}
 			adapter.Labels[consts.KubeLabelDynamoGraphDeploymentName] = dgd.Name
 			adapter.Labels[consts.KubeLabelDynamoComponent] = componentName
-			adapter.Spec.DGDRef = nvidiacomv1alpha1.DynamoGraphDeploymentServiceRef{
-				Name:        dgd.Name,
-				ServiceName: componentName,
+			adapter.Spec.DGDRef = nvidiacomv1beta1.DynamoGraphDeploymentComponentRef{
+				Name:          dgd.Name,
+				ComponentName: componentName,
 			}
 
 			// Seed replicas only when creating the adapter; it owns subsequent changes.
@@ -163,7 +162,7 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 	}
 
 	// Delete adapters whose component target was removed.
-	adapterList := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapterList{}
+	adapterList := &nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapterList{}
 	if err := r.List(
 		ctx,
 		adapterList,
@@ -176,7 +175,7 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 
 	for i := range adapterList.Items {
 		adapter := &adapterList.Items[i]
-		componentName := adapter.Spec.DGDRef.ServiceName
+		componentName := adapter.Spec.DGDRef.ComponentName
 
 		// Labels alone do not establish ownership, even for a removed component.
 		if !metav1.IsControlledBy(adapter, dgd) || dgd.GetComponentByName(componentName) != nil {

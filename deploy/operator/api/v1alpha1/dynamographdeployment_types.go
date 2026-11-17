@@ -393,6 +393,7 @@ type ServiceReplicaStatus struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:unservedversion
 // +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoGraphDeployment is deprecated; use nvidia.com/v1beta1 DynamoGraphDeployment"
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=dgd
