@@ -95,12 +95,14 @@ fn chat_request() -> NvCreateChatCompletionRequest {
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
+        ..Default::default()
     }
 }
 
 fn backend_outputs(count: usize) -> Vec<BackendOutput> {
     (0..count)
         .map(|index| BackendOutput {
+            guided_output: None,
             token_ids: vec![index as u32],
             tokens: vec![Some("x".to_string())],
             text: Some("x".to_string()),

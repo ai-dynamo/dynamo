@@ -3389,94 +3389,54 @@ async fn tool_choice_matrix_non_force_required_prompt_injected_bare_json_contrac
     );
 }
 
-// This public adapter owns response_format and prompt-injection policy; the upstream
-// parser corpus cannot express those Dynamo request fields.
+// Decoded text cannot establish an engine reasoning boundary, including when
+// the caller believes thinking is off or a native JSON grammar was installed.
 #[tokio::test]
-async fn response_format_explicit_reasoning_without_prompt_prefill() {
-    if test_utils::run_isolated(
-        concat!(
-            module_path!(),
-            "::response_format_explicit_reasoning_without_prompt_prefill"
-        ),
-        &[(env_llm::DYN_PARSER_VERSION, "2")],
-    ) {
-        return;
-    }
-    for (family, opener, closer, response_open, response_close) in [
-        ("qwen3", "<think>", "</think>", "", ""),
-        ("deepseek_v4", "<think>", "</think>", "", ""),
-        ("deepseek_v41", "<think>", "</think>", "", ""),
-        ("glm47", "<think>", "</think>", "", ""),
-        ("kimi_k2", "<think>", "</think>", "", ""),
-        ("gemma4", "<|channel>thought\n", "<channel|>", "", ""),
-        (
-            "kimi_k3",
-            "<|open|>think<|sep|>",
-            "<|close|>think<|sep|>",
-            "<|open|>response<|sep|>",
-            "<|close|>response<|sep|>",
-        ),
-        (
-            "muse_glimmer",
-            "<|start|>assistant to=self<|message|>",
-            "<|eom|>",
-            "<|start|>assistant to=user<|message|>",
-            "<|eot|>",
-        ),
+async fn guided_output_text_reconstruction_requires_resolved_plan_for_every_format() {
+    for (reasoning, tool) in [
+        (Some("qwen3"), None),
+        (Some("step3"), None),
+        (Some("gpt_oss"), Some("harmony")),
+        (Some("beam"), Some("beam")),
     ] {
-        for (reasoning, tools) in [
-            (Some(family), None),
-            (None, Some(family)),
-            (Some(family), Some(family)),
-        ] {
-            let preprocessor = build_preprocessor(reasoning, tools);
-            for request in [
-                streaming_json_object_request(true),
-                streaming_json_schema_request(true),
+        let preprocessor = build_preprocessor(reasoning, tool);
+        for thinking in [false, true] {
+            let mut requests = vec![
+                streaming_json_schema_request(thinking),
+                streaming_json_object_request(thinking),
+            ];
+            for fields in [
+                serde_json::json!({"guided_json":{"type":"string"}}),
+                serde_json::json!({"guided_choice":["yes","no"]}),
+                serde_json::json!({"guided_regex":"yes|no"}),
+                serde_json::json!({"guided_grammar":"root ::= \"yes\""}),
             ] {
-                let json = r#"{"answer":42}"#;
-                let native =
-                    format!("{opener}private{closer}{response_open}{json}{response_close}");
-                let literal =
-                    serde_json::json!({"note": format!("{opener}literal{closer}")}).to_string();
-                for (raw, expected_reasoning, expected_content) in [
-                    (native.as_str(), "private", json),
-                    (literal.as_str(), "", literal.as_str()),
-                ] {
-                    // TODO: Extend this split matrix to literal native tool-call openers.
-                    for split in 0..=raw.len() + 1 {
-                        if split <= raw.len() && !raw.is_char_boundary(split) {
-                            continue;
-                        }
-                        let mut chunks = if split > raw.len() {
-                            raw.chars()
-                                .map(|c| mock_content_chunk(&c.to_string()))
-                                .collect::<Vec<_>>()
-                        } else {
-                            vec![
-                                mock_content_chunk(&raw[..split]),
-                                mock_content_chunk(&raw[split..]),
-                            ]
-                        };
-                        chunks.push(mock_final_chunk());
-                        let input = stream::iter(chunks.into_iter().map(Annotated::from_data));
-                        let output = drain_stream(
-                            preprocessor
-                                .postprocessor_parsing_stream(input, &request, false, false)
-                                .unwrap(),
-                        )
-                        .await;
-                        assert_eq!(
-                            output.reasoning, expected_reasoning,
-                            "{family} split {split}: {raw}"
-                        );
-                        assert_eq!(
-                            output.content, expected_content,
-                            "{family} split {split}: {raw}"
-                        );
-                        assert!(output.tool_calls.is_empty());
-                        assert_eq!(output.finish_reasons, vec![FinishReason::Stop]);
-                    }
+                let mut body =
+                    serde_json::to_value(streaming_json_schema_request(thinking)).unwrap();
+                body.as_object_mut().unwrap().remove("response_format");
+                body.as_object_mut()
+                    .unwrap()
+                    .extend(fields.as_object().unwrap().clone());
+                requests.push(serde_json::from_value(body).unwrap());
+            }
+            for request in requests {
+                for prefilled in [false, true] {
+                    let result = preprocessor.postprocessor_parsing_stream(
+                        stream::empty::<Annotated<NvCreateChatCompletionStreamResponse>>(),
+                        &request,
+                        prefilled,
+                        false,
+                    );
+                    let error = match result {
+                        Ok(_) => panic!("unresolved guided text was accepted"),
+                        Err(error) => error,
+                    };
+                    assert!(
+                        error.to_string().contains(
+                            "resolved output plan and token-derived boundary information"
+                        ),
+                        "{reasoning:?} {tool:?} {thinking} {prefilled}: {error}"
+                    );
                 }
             }
         }
@@ -3484,175 +3444,6 @@ async fn response_format_explicit_reasoning_without_prompt_prefill() {
 }
 
 // TODO: Cover literal native tool-call opener text in Muse structured responses.
-#[tokio::test]
-async fn response_format_muse_quoted_channel_stays_literal() {
-    if test_utils::run_isolated(
-        concat!(
-            module_path!(),
-            "::response_format_muse_quoted_channel_stays_literal"
-        ),
-        &[(env_llm::DYN_PARSER_VERSION, "2")],
-    ) {
-        return;
-    }
-    let preprocessor = build_preprocessor(Some("muse_glimmer"), None);
-    let request = streaming_json_object_request(true);
-    let raw = r#"{"note":"<|start|>assistant to=self<|message|>literal<|eom|>"}"#;
-    let input = stream::iter(
-        [mock_content_chunk(raw), mock_final_chunk()]
-            .into_iter()
-            .map(Annotated::from_data),
-    );
-    let output = drain_stream(
-        preprocessor
-            .postprocessor_parsing_stream(input, &request, false, false)
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(output.content, raw);
-    assert!(output.reasoning.is_empty());
-}
-
-/// `enable_thinking=true` still preserves genuine reasoning followed by a
-/// response_format JSON payload in their respective OpenAI fields.
-#[tokio::test]
-async fn response_format_qwen3_prompt_injected_reasoning_then_json_preserves_channels() {
-    let json = r#"{"country":"France","capital":"Paris"}"#;
-    let stream_text = format!("France is a country in Europe.</think>{json}");
-    let preprocessor = build_preprocessor(Some("qwen3"), None);
-    let request = streaming_json_schema_request(true);
-    let input_stream = stream::iter(
-        vec![mock_content_chunk(&stream_text), mock_final_chunk()]
-            .into_iter()
-            .map(Annotated::from_data),
-    );
-    let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, true, false)
-        .expect("postprocessor_parsing_stream should build");
-    let DrainOutput {
-        reasoning, content, ..
-    } = drain_stream(output_stream).await;
-
-    assert_eq!(reasoning.trim(), "France is a country in Europe.");
-    assert_eq!(content, json);
-}
-
-#[tokio::test]
-async fn response_format_qwen3_json_reasoning_then_close_preserves_channels_at_every_split() {
-    if test_utils::run_isolated(
-        concat!(
-            module_path!(),
-            "::response_format_qwen3_json_reasoning_then_close_preserves_channels_at_every_split"
-        ),
-        &[(env_llm::DYN_PARSER_VERSION, "2")],
-    ) {
-        return;
-    }
-    let raw = r#"{"plan":"check"}</think>{"answer":42}"#;
-    for split in 0..=raw.len() {
-        let preprocessor = build_preprocessor(Some("qwen3"), None);
-        let request = streaming_json_schema_request(true);
-        let input_stream = stream::iter(
-            vec![
-                mock_content_chunk(&raw[..split]),
-                mock_content_chunk(&raw[split..]),
-                mock_final_chunk(),
-            ]
-            .into_iter()
-            .map(Annotated::from_data),
-        );
-        let output_stream = preprocessor
-            .postprocessor_parsing_stream(input_stream, &request, true, false)
-            .expect("postprocessor_parsing_stream should build");
-        let DrainOutput {
-            reasoning, content, ..
-        } = drain_stream(output_stream).await;
-
-        assert_eq!(reasoning, r#"{"plan":"check"}"#, "split {split}");
-        assert_eq!(content, r#"{"answer":42}"#, "split {split}");
-    }
-}
-
-/// If SGLang emits response_format JSON immediately after a prompt-injected
-/// Qwen `<think>`, Dynamo must recover the structured answer as assistant
-/// content instead of classifying the JSON as reasoning.
-#[tokio::test]
-async fn response_format_qwen3_prompt_injected_bare_json_stays_content() {
-    let json = r#"{"country":"France","capital":"Paris"}"#;
-    let preprocessor = build_preprocessor(Some("qwen3"), None);
-    let request = streaming_json_schema_request(true);
-    let input_stream = stream::iter(
-        vec![mock_content_chunk(json), mock_final_chunk()]
-            .into_iter()
-            .map(Annotated::from_data),
-    );
-    let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, true, false)
-        .expect("postprocessor_parsing_stream should build");
-    let DrainOutput {
-        reasoning, content, ..
-    } = drain_stream(output_stream).await;
-
-    assert!(
-        reasoning.is_empty(),
-        "response_format JSON must not be reasoning_content, got: {reasoning:?}"
-    );
-    assert_eq!(content, json);
-}
-
-#[tokio::test]
-async fn response_format_qwen3_prompt_injected_truncated_json_stays_visible() {
-    let json_prefix = "{\"country\":";
-    let preprocessor = build_preprocessor(Some("qwen3"), None);
-    let request = streaming_json_schema_request(true);
-    let input_stream = stream::iter(
-        vec![mock_content_chunk(json_prefix), mock_final_chunk()]
-            .into_iter()
-            .map(Annotated::from_data),
-    );
-    let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, true, false)
-        .expect("postprocessor_parsing_stream should build");
-    let DrainOutput {
-        reasoning, content, ..
-    } = drain_stream(output_stream).await;
-
-    assert!(
-        reasoning.is_empty(),
-        "truncated structured JSON must stay visible"
-    );
-    assert_eq!(content, json_prefix);
-}
-
-#[tokio::test]
-async fn response_format_qwen3_prompt_injected_json_streams_before_terminal() {
-    let first_json_chunk = "{\"country\":";
-    let preprocessor = build_preprocessor(Some("qwen3"), None);
-    let request = streaming_json_schema_request(false);
-    let input_stream = stream::iter(
-        vec![
-            mock_content_chunk(first_json_chunk),
-            mock_content_chunk("\"France\"}"),
-            mock_final_chunk(),
-        ]
-        .into_iter()
-        .map(Annotated::from_data),
-    );
-    let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, true, false)
-        .expect("postprocessor_parsing_stream should build");
-    let first_output = output_stream.take(1).collect::<Vec<_>>().await;
-    let first_content: String = first_output
-        .iter()
-        .filter_map(|response| response.data.as_ref())
-        .flat_map(|response| response.inner.choices.iter())
-        .filter_map(|choice| choice.delta.content.as_ref())
-        .map(get_text)
-        .collect();
-
-    assert_eq!(first_content, first_json_chunk);
-}
-
 // TODO: Cover literal native tool-call opener text in streaming prose.
 #[tokio::test]
 async fn postprocessor_parsing_stream_keeps_quoted_think_markers_as_content() {
@@ -3699,54 +3490,6 @@ async fn postprocessor_parsing_stream_keeps_quoted_think_markers_as_content() {
             assert_eq!(content, literal, "{family} split {split}");
         }
     }
-}
-
-/// With thinking disabled, response_format JSON is ordinary assistant content.
-#[tokio::test]
-async fn response_format_qwen3_no_thinking_json_stays_content() {
-    let json = r#"{"country":"France","capital":"Paris"}"#;
-    let preprocessor = build_preprocessor(Some("qwen3"), None);
-    let request = streaming_json_schema_request(false);
-    let input_stream = stream::iter(
-        vec![mock_content_chunk(json), mock_final_chunk()]
-            .into_iter()
-            .map(Annotated::from_data),
-    );
-    let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, false, false)
-        .expect("postprocessor_parsing_stream should build");
-    let DrainOutput {
-        reasoning, content, ..
-    } = drain_stream(output_stream).await;
-
-    assert!(reasoning.is_empty());
-    assert_eq!(content, json);
-}
-
-/// Gemma4 structured output without visible reasoning markers should remain
-/// assistant content even when the reasoning parser is configured.
-#[tokio::test]
-async fn response_format_gemma4_bare_json_stays_content() {
-    let json = r#"{"country":"France","capital":"Paris"}"#;
-    let preprocessor = build_preprocessor(Some("gemma4"), None);
-    let request = streaming_json_schema_request(true);
-    let input_stream = stream::iter(
-        vec![mock_content_chunk(json), mock_final_chunk()]
-            .into_iter()
-            .map(Annotated::from_data),
-    );
-    let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, false, false)
-        .expect("postprocessor_parsing_stream should build");
-    let DrainOutput {
-        reasoning, content, ..
-    } = drain_stream(output_stream).await;
-
-    assert!(
-        reasoning.is_empty(),
-        "response_format JSON must not be reasoning_content, got: {reasoning:?}"
-    );
-    assert_eq!(content, json);
 }
 
 #[tokio::test]
@@ -3878,12 +3621,8 @@ async fn glm_thinking_off_preserves_generated_reasoning() {
                 ),
                 (r#"{"answer":"hello"}"#, false, "", r#"{"answer":"hello"}"#),
             ] {
-                let mut request = request.clone();
-                if expected_content.starts_with('{') {
-                    request.inner.response_format = Some(
-                        serde_json::from_value(serde_json::json!({"type": "json_object"})).unwrap(),
-                    );
-                }
+                // JSON-looking native text is still unconstrained output here.
+                // Final constraints are exercised through raw-ID output plans.
                 for split in 0..=raw.len() {
                     let input = stream::iter(
                         vec![
@@ -4205,112 +3944,6 @@ async fn gemma4_without_enable_thinking_parses_only_with_gemma4_tool_parser_pars
         return;
     }
     assert_gemma4_without_enable_thinking().await;
-}
-
-/// MiniMax append-think is a force-reasoning parser that is not yet proven to
-/// preserve native reasoning before guided JSON. Structured bare JSON should
-/// therefore use the legacy guided-output bypass and remain assistant content.
-#[tokio::test]
-async fn response_format_minimax_append_think_bare_json_stays_content() {
-    let json = r#"{"country":"France","capital":"Paris"}"#;
-    let preprocessor = build_preprocessor(Some("minimax_append_think"), Some("minimax_m2"));
-    let request = streaming_json_schema_request(true);
-    let input_stream = stream::iter(
-        vec![mock_content_chunk(json), mock_final_chunk()]
-            .into_iter()
-            .map(Annotated::from_data),
-    );
-    let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, false, false)
-        .expect("postprocessor_parsing_stream should build");
-    let DrainOutput {
-        reasoning, content, ..
-    } = drain_stream(output_stream).await;
-
-    assert!(
-        reasoning.is_empty(),
-        "response_format JSON must not be reasoning_content, got: {reasoning:?}"
-    );
-    assert_eq!(content, json);
-}
-
-/// GPT-OSS/Harmony guided structured output may be emitted as bare JSON from
-/// token 0. The reasoning parser should preserve that JSON as assistant
-/// content instead of dropping it while waiting for Harmony channel markers.
-#[tokio::test]
-async fn response_format_gpt_oss_bare_json_stays_content() {
-    let json = r#"{"country":"France","capital":"Paris"}"#;
-    let preprocessor = build_preprocessor(Some("gpt_oss"), None);
-    let request = streaming_json_schema_request(true);
-    let input_stream = stream::iter(
-        vec![mock_content_chunk(json), mock_final_chunk()]
-            .into_iter()
-            .map(Annotated::from_data),
-    );
-    let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, false, false)
-        .expect("postprocessor_parsing_stream should build");
-    let DrainOutput {
-        reasoning, content, ..
-    } = drain_stream(output_stream).await;
-
-    assert!(
-        reasoning.is_empty(),
-        "response_format JSON must not be reasoning_content, got: {reasoning:?}"
-    );
-    assert_eq!(content, json);
-}
-
-/// `json_object` response_format is also translated to guided JSON. It should
-/// follow the same GPT-OSS structured-output bypass as `json_schema`.
-#[tokio::test]
-async fn response_format_gpt_oss_json_object_bare_json_stays_content() {
-    let json = r#"{"country":"France","capital":"Paris"}"#;
-    let preprocessor = build_preprocessor(Some("gpt_oss"), None);
-    let request = streaming_json_object_request(true);
-    let input_stream = stream::iter(
-        vec![mock_content_chunk(json), mock_final_chunk()]
-            .into_iter()
-            .map(Annotated::from_data),
-    );
-    let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, false, false)
-        .expect("postprocessor_parsing_stream should build");
-    let DrainOutput {
-        reasoning, content, ..
-    } = drain_stream(output_stream).await;
-
-    assert!(
-        reasoning.is_empty(),
-        "response_format JSON must not be reasoning_content, got: {reasoning:?}"
-    );
-    assert_eq!(content, json);
-}
-
-/// If GPT-OSS emits native Harmony reasoning before the structured payload,
-/// shape detection must fall back to the parser path and preserve channels.
-#[tokio::test]
-async fn response_format_gpt_oss_reasoning_then_json_preserves_channels() {
-    let json = r#"{"country":"France","capital":"Paris"}"#;
-    let stream_text = format!(
-        "<|channel|>analysis<|message|>Need answer as JSON.<|end|><|start|>assistant<|channel|>final<|message|>{json}"
-    );
-    let preprocessor = build_preprocessor(Some("gpt_oss"), None);
-    let request = streaming_json_schema_request(true);
-    let input_stream = stream::iter(
-        vec![mock_content_chunk(&stream_text), mock_final_chunk()]
-            .into_iter()
-            .map(Annotated::from_data),
-    );
-    let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, false, false)
-        .expect("postprocessor_parsing_stream should build");
-    let DrainOutput {
-        reasoning, content, ..
-    } = drain_stream(output_stream).await;
-
-    assert_eq!(reasoning, "Need answer as JSON.");
-    assert_eq!(content, json);
 }
 
 /// DeepSeek V4 + required + `prompt_injected_reasoning=true` + bare JSON.

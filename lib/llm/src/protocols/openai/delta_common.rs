@@ -163,6 +163,13 @@ impl DeltaGeneratorState {
         }
     }
 
+    pub(crate) fn set_guided_reasoning_tokens(&mut self, count: u32) {
+        self.usage
+            .completion_tokens_details
+            .get_or_insert_with(Default::default)
+            .reasoning_tokens = Some(count);
+    }
+
     pub(crate) fn get_isl(&self) -> u32 {
         self.usage.prompt_tokens
     }

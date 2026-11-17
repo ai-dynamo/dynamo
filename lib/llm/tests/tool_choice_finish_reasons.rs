@@ -44,6 +44,7 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
 
 fn build_backend_output_with_finish(text: &str, finish: common::FinishReason) -> BackendOutput {
     BackendOutput {
+        guided_output: None,
         token_ids: vec![],
         tokens: vec![],
         text: Some(text.to_string()),

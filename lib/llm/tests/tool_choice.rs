@@ -132,6 +132,7 @@ async fn apply_jail_transformation_streaming(
 
 fn build_backend_output(text: &str) -> BackendOutput {
     BackendOutput {
+        guided_output: None,
         token_ids: vec![],
         tokens: vec![],
         text: Some(text.to_string()),
@@ -302,6 +303,7 @@ async fn test_streaming_named_tool_buffers_until_finish() {
     let mut raw_responses = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
         let backend_output = BackendOutput {
+            guided_output: None,
             token_ids: vec![],
             tokens: vec![],
             text: Some(chunk.to_string()),
@@ -374,6 +376,7 @@ async fn test_streaming_required_tool_parallel() {
     let mut raw_responses = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
         let backend_output = BackendOutput {
+            guided_output: None,
             token_ids: vec![],
             tokens: vec![],
             text: Some(chunk.to_string()),
@@ -452,6 +455,7 @@ fn test_no_tool_choice_outputs_normal_text() {
     let mut generator = request.response_generator("req-stream-4".to_string());
 
     let backend_output = BackendOutput {
+        guided_output: None,
         token_ids: vec![],
         tokens: vec![],
         text: Some("Hello world".to_string()),

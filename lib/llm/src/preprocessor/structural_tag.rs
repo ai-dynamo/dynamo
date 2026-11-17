@@ -369,6 +369,7 @@ impl OpenAIPreprocessor {
             request,
         )?;
         if applied {
+            request.native_json_requires_reasoning_gate = false;
             request
                 .sampling_options
                 .guided_decoding
@@ -481,6 +482,8 @@ impl OpenAIPreprocessor {
         };
         let applied = apply_structural_tag(parser_name, built_tag, preprocessed_request)?;
         if applied && structured_output_schema.is_some() {
+            preprocessed_request.native_json_requires_reasoning_gate =
+                reasoning_boundary == ResolvedReasoningBoundary::Backend;
             // Request preprocessing materializes `response_format` as guided JSON.
             // The composite structural tag now owns that schema.
             preprocessed_request

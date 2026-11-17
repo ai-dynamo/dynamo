@@ -1390,6 +1390,7 @@ mod tests {
     // Helper to create mock LLM engine output
     fn create_mock_output(token_id: u32) -> Annotated<BackendOutput> {
         Annotated::from_data(BackendOutput {
+            guided_output: None,
             token_ids: vec![token_id],
             tokens: vec![],
             text: Some(format!("token_{token_id}")),

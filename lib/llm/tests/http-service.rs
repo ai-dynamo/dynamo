@@ -3916,6 +3916,7 @@ mod zero_top_logprobs {
             .map(|(index, &(token, token_id, logprob))| {
                 generator
                     .choice_from_postprocessor(BackendOutput {
+                        guided_output: None,
                         token_ids: vec![token_id],
                         tokens: vec![Some(token.to_string())],
                         text: Some(token.to_string()),

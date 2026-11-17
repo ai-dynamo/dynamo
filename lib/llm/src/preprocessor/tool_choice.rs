@@ -382,7 +382,7 @@ impl OpenAIPreprocessor {
 
 /// Whether top-level `guided_*` fields install a grammar; mirrors
 /// `GuidedDecodingOptions::from_optional`.
-pub(super) fn has_explicit_guided_decoding(request: &NvCreateChatCompletionRequest) -> bool {
+pub(crate) fn has_explicit_guided_decoding(request: &NvCreateChatCompletionRequest) -> bool {
     request.common.guided_json.is_some()
         || request.common.guided_regex.is_some()
         || request
@@ -2197,6 +2197,7 @@ mod tests {
     fn beam_open_final_channel_keeps_only_the_answer_with_structural_tags_on() {
         let preprocessor = preprocessor("beam", StructuralTagMode::On);
         let open_answer = PromptReasoningPrefill {
+            guided_output_plan: None,
             legacy: false,
             unified: false,
             unified_starting_state: None,
@@ -2268,6 +2269,7 @@ mod tests {
     fn beam_open_final_channel_holds_only_the_answer_and_forces_no_call() {
         let preprocessor = preprocessor("beam", StructuralTagMode::Off);
         let open_answer = PromptReasoningPrefill {
+            guided_output_plan: None,
             legacy: false,
             unified: false,
             unified_starting_state: None,

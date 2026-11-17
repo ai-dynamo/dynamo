@@ -5868,6 +5868,7 @@ mod tests {
             finish_reason: Option<FinishReason>,
         ) -> BackendOutput {
             BackendOutput {
+                guided_output: None,
                 token_ids,
                 tokens: vec![],
                 text: Some(text.to_string()),

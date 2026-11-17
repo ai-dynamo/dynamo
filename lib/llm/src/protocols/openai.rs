@@ -451,6 +451,9 @@ impl GuidedToolConstraint {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ParsingOptions {
+    /// Shared with preprocessing so unary and trace aggregation do not parse an answer twice.
+    #[serde(skip)]
+    pub guided_answer_projected: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Request mode retained so stream and batch use the same native-family eligibility.
     #[serde(default)]
     pub tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
@@ -528,12 +531,19 @@ impl Default for ParsingOptions {
 }
 
 impl ParsingOptions {
+    pub(crate) fn projects_guided_answer(&self) -> bool {
+        self.guided_answer_projected
+            .as_ref()
+            .is_some_and(|state| state.load(std::sync::atomic::Ordering::Acquire))
+    }
+
     pub fn new(tool_call_parser: Option<String>, reasoning_parser: Option<String>) -> Self {
         Self {
             tool_call_parser,
             reasoning_parser,
             reasoning_disabled: false,
             structured_response: false,
+            guided_answer_projected: None,
             default_thinking_mode: None,
             tool_choice: None,
             suppress_tool_calls: false,

@@ -15,6 +15,8 @@
 //! Further post-processing can happen in the response stream. One example is the jailing mechanism for partial
 //! hidden stop condition matches, which can be handled in the response stream rather than the backend.
 
+use crate::protocols::common::guided_output::{GuidedOutputPlan, GuidedOutputState};
+
 use std::{
     collections::{HashMap, HashSet},
     pin::Pin,
@@ -92,6 +94,7 @@ struct DecoderState<S> {
     /// When `false`, `jailed_text` is left unset on every chunk rather than snapshotting the
     /// decoder's withheld state for a checkpoint nothing can ever consume.
     migration_possible: bool,
+    guided_output_plan: Option<GuidedOutputPlan>,
 }
 
 /// Decodes one vocabulary ID for per-token logprob metadata.
@@ -151,6 +154,7 @@ struct DecoderParams {
     // this Backend emits can ever be reseeded into a retry, so there is no point snapshotting
     // the decoder's withheld state onto every chunk via `jailed_text`.
     migration_possible: bool,
+    guided_output_plan: Option<GuidedOutputPlan>,
 }
 
 impl DecoderParams {
@@ -177,6 +181,10 @@ impl DecoderParams {
             n: request.sampling_options.n.unwrap_or(1) as u32,
             jail_seed: request.jail_seed.clone(),
             migration_possible: request.migration_state.is_some(),
+            guided_output_plan: request
+                .guided_output_plan
+                .clone()
+                .filter(GuidedOutputPlan::projects_answer),
         }
     }
 }
@@ -229,6 +237,7 @@ impl Backend {
             pending_flush: Vec::new(),
             stream_ended: false,
             migration_possible: params.migration_possible,
+            guided_output_plan: params.guided_output_plan.clone(),
         })
     }
 }
@@ -249,6 +258,11 @@ impl
     ) -> Result<ManyOut<Annotated<BackendOutput>>> {
         let decoder_params = DecoderParams::from_request(&request);
 
+        anyhow::ensure!(
+            request.sampling_options.guided_decoding.is_none()
+                || (decoder_params.jail_seed.is_none() && request.migration_state.is_none()),
+            "guided output cannot resume a migrated decoder checkpoint"
+        );
         let next_stream = next.generate(request).await?;
 
         let context = next_stream.context();
@@ -371,7 +385,9 @@ where
                 // instead of using the text fast path. Text-only output cannot
                 // honor these options; don't silently return trimmed or empty
                 // content. Empty stop trailers are valid after this choice emitted IDs.
-                if (self.no_stop_trim || self.retain_model_stop_token_text)
+                if (self.no_stop_trim
+                    || self.retain_model_stop_token_text
+                    || self.guided_output_plan.is_some())
                     && let Some(data) = &output.data
                     && data.token_ids.is_empty()
                     && (data.text.as_ref().is_some_and(|text| !text.is_empty())
@@ -387,9 +403,14 @@ where
                 {
                     self.stream.context().stop_generating();
                     self.finished = true;
+                    let message = if self.guided_output_plan.is_some() {
+                        "Guided final-answer output requires raw backend token IDs to preserve reasoning boundaries; the selected worker omitted them"
+                    } else {
+                        "no_stop_trim requires backend token IDs through the matched stop; the backend omitted them (also required when a parser retains the model's stop token text)"
+                    };
                     let error = DynamoError::builder()
                         .class(ErrorClass::BackendProtocol)
-                        .message("no_stop_trim requires backend token IDs through the matched stop; the backend omitted them (also required when a parser retains the model's stop token text)")
+                        .message(message)
                         .build();
                     return Poll::Ready(Some(Annotated::from_err(error)));
                 }
@@ -398,7 +419,9 @@ where
                 if let Some(data) = &mut output.data
                     && data.text.is_some()
                     && !self.validate_engine_decode
-                    && !(self.no_stop_trim || self.retain_model_stop_token_text)
+                    && !(self.no_stop_trim
+                        || self.retain_model_stop_token_text
+                        || self.guided_output_plan.is_some())
                 {
                     if data.log_probs.is_some() && data.tokens.is_none() {
                         data.tokens = Some(
@@ -585,7 +608,7 @@ where
                 // Local stop detection must not turn the worker's error into success.
                 if finish_reason.is_some()
                     && !matches!(data.finish_reason, Some(FinishReason::Error(_)))
-                    && !(self.retain_model_stop_token_text
+                    && !((self.retain_model_stop_token_text || self.guided_output_plan.is_some())
                         && matches!(
                             data.finish_reason,
                             Some(FinishReason::Length | FinishReason::Cancelled)
@@ -595,6 +618,15 @@ where
                     data.stop_reason = stop_reason.or(data.stop_reason.take());
                 }
                 data.text = text;
+                data.guided_output = decoder
+                    .guided_output
+                    .as_mut()
+                    .map(|state| Box::new(state.take_delta()));
+                if data.guided_output.is_some() && data.finish_reason.is_some() {
+                    // This terminal update already flushed the choice. In particular,
+                    // EOF must not replace Length/Error with a synthetic Stop.
+                    self.finished_choices.insert(choice_idx);
+                }
 
                 // A tokenizer-free engine can return tokens past a local
                 // stop in the same chunk. Keep its per-token fields aligned
@@ -642,7 +674,9 @@ where
                     }
                     let data = match decoder.finish() {
                         Ok(result)
-                            if result.released_text.is_some() || result.stop_trigger.is_some() =>
+                            if result.released_text.is_some()
+                                || result.stop_trigger.is_some()
+                                || decoder.guided_output.is_some() =>
                         {
                             let (reason, stop) = result
                                 .stop_trigger
@@ -652,6 +686,10 @@ where
                             LLMEngineOutput {
                                 index: Some(*idx),
                                 text: result.released_text,
+                                guided_output: decoder
+                                    .guided_output
+                                    .as_mut()
+                                    .map(|state| Box::new(state.take_delta())),
                                 finish_reason: Some(reason),
                                 stop_reason: stop,
                                 ..Default::default()
@@ -685,6 +723,7 @@ fn backend_output(output: Annotated<LLMEngineOutput>) -> Annotated<BackendOutput
     } = output;
     Annotated {
         data: data.map(|data| BackendOutput {
+            guided_output: data.guided_output,
             token_ids: data.token_ids,
             tokens: data.tokens.unwrap_or_default(),
             text: data.text,
@@ -744,6 +783,7 @@ impl
 /// on the same physical machine connected by an IPC.
 #[allow(dead_code)]
 pub struct Decoder {
+    guided_output: Option<GuidedOutputState>,
     tokenizer: Option<Tokenizer>,
     decode_stream: DecodeStream,
     skip_special_tokens: bool,
@@ -933,7 +973,23 @@ impl Decoder {
             }
         }
 
-        Ok(Self::from_state(
+        let guided_output = params
+            .guided_output_plan
+            .clone()
+            .filter(GuidedOutputPlan::projects_answer)
+            .map(|mut plan| -> Result<GuidedOutputState> {
+                if let GuidedOutputPlan::EngineGated(capability) = &mut plan {
+                    capability.end_text = tokenizer
+                        .decode(&capability.end_token_ids, params.skip_special_tokens)?
+                        .into();
+                    capability.start_text = tokenizer
+                        .decode(&capability.start_token_ids, params.skip_special_tokens)?
+                        .into();
+                }
+                Ok(GuidedOutputState::new(plan))
+            })
+            .transpose()?;
+        let mut decoder = Self::from_state(
             Some(tokenizer),
             decode_stream,
             params.skip_special_tokens,
@@ -944,7 +1000,9 @@ impl Decoder {
             params.tracker.clone(),
             jail,
             pending_token_ids,
-        ))
+        );
+        decoder.guided_output = guided_output;
+        Ok(decoder)
     }
 
     /// Builds decoder state after its incremental stream and migration state are ready.
@@ -1007,6 +1065,7 @@ impl Decoder {
 
         Self {
             tokenizer,
+            guided_output: None,
             decode_stream,
             skip_special_tokens,
             pending_token_ids,
@@ -1046,6 +1105,50 @@ impl Decoder {
         token_id: TokenIdType,
         needs_token_text: bool,
     ) -> Result<StepResult> {
+        let mut prefix = None;
+        if self
+            .guided_output
+            .as_ref()
+            .is_some_and(|state| state.flush_before_token(token_id))
+        {
+            let tail = self.decode_stream.finish()?;
+            self.pending_token_ids.clear();
+            if let Some(text) = tail {
+                self.guided_output.as_mut().unwrap().observe_text(&text);
+                let flushed = if self.generated_tokens <= self.min_tokens {
+                    self.guided_output.as_mut().unwrap().release(&text);
+                    StepResult::ok(Some(text))
+                } else {
+                    self.process_decoded_text(Some(text))?
+                };
+                if flushed.stop_trigger.is_some() {
+                    self.generated_tokens += 1;
+                    let state = self.guided_output.as_mut().unwrap();
+                    state.count_hidden_token();
+                    state.finish();
+                    return Ok(flushed);
+                }
+                prefix = flushed.released_text;
+            }
+        }
+        let mut result = self.step_with_token_text_inner(token_id, needs_token_text)?;
+        if let Some(mut prefix) = prefix {
+            prefix.push_str(result.released_text.as_deref().unwrap_or_default());
+            result.released_text = Some(prefix);
+        }
+        if result.stop_trigger.is_some()
+            && let Some(state) = &mut self.guided_output
+        {
+            state.finish();
+        }
+        Ok(result)
+    }
+
+    fn step_with_token_text_inner(
+        &mut self,
+        token_id: TokenIdType,
+        needs_token_text: bool,
+    ) -> Result<StepResult> {
         let below_min_tokens = self.generated_tokens < self.min_tokens;
         // increment the generated tokens
         self.generated_tokens += 1;
@@ -1061,6 +1164,9 @@ impl Decoder {
             && !self.no_stop_trim
             && !retains_model_stop_text
         {
+            if let Some(state) = &mut self.guided_output {
+                state.count_hidden_token();
+            }
             let mut result = self.finish()?;
             result.stop_trigger.get_or_insert_with(|| {
                 if self.user_stop_ids.contains(&token_id) {
@@ -1101,8 +1207,14 @@ impl Decoder {
             None
         };
 
+        if let Some(state) = &mut self.guided_output {
+            state.observe_token(token_id, decoded_text.as_deref().unwrap_or_default())?;
+        }
         // stop conditions to not apply until the minimum number of tokens have been generated
         if below_min_tokens {
+            if let Some(state) = &mut self.guided_output {
+                state.release(decoded_text.as_deref().unwrap_or_default());
+            }
             return Ok(StepResult {
                 token: selected_token,
                 ..StepResult::ok(decoded_text)
@@ -1113,6 +1225,9 @@ impl Decoder {
             let tail = self.decode_stream.finish()?;
             self.pending_token_ids.clear();
             if let Some(tail) = tail {
+                if let Some(state) = &mut self.guided_output {
+                    state.observe_text(&tail);
+                }
                 decoded_text.get_or_insert_default().push_str(&tail);
             }
         }
@@ -1142,6 +1257,9 @@ impl Decoder {
         // complete now, so it goes out ahead of this token's own text -- otherwise it would
         // be silently dropped and, if it were released later, would come out of order.
         if let Some(flushed) = self.flush_jailed() {
+            if let Some(state) = &mut self.guided_output {
+                state.release(&flushed);
+            }
             decoded
                 .released_text
                 .get_or_insert_default()
@@ -1152,6 +1270,14 @@ impl Decoder {
     }
 
     fn process_decoded_text(&mut self, decoded_text: Option<String>) -> Result<StepResult> {
+        let result = self.process_decoded_text_inner(decoded_text)?;
+        if let Some(state) = &mut self.guided_output {
+            state.release(result.released_text.as_deref().unwrap_or_default());
+        }
+        Ok(result)
+    }
+
+    fn process_decoded_text_inner(&mut self, decoded_text: Option<String>) -> Result<StepResult> {
         // check stop sequences - the jail will always hold at least the largest stop sequence
         // if jail_max_bytes is 0, then there are no stop sequences
         if self.jail_max_bytes > 0
@@ -1221,7 +1347,13 @@ impl Decoder {
     fn finish(&mut self) -> Result<StepResult> {
         let tail = self.decode_stream.finish()?;
         self.pending_token_ids.clear();
+        if let Some(state) = &mut self.guided_output {
+            state.observe_text(tail.as_deref().unwrap_or_default());
+        }
         let mut result = if self.generated_tokens <= self.min_tokens {
+            if let Some(state) = &mut self.guided_output {
+                state.release(tail.as_deref().unwrap_or_default());
+            }
             StepResult::ok(tail)
         } else {
             self.process_decoded_text(tail)?
@@ -1229,10 +1361,16 @@ impl Decoder {
         if result.stop_trigger.is_none()
             && let Some(jailed) = self.flush_jailed()
         {
+            if let Some(state) = &mut self.guided_output {
+                state.release(&jailed);
+            }
             result
                 .released_text
                 .get_or_insert_default()
                 .push_str(&jailed);
+        }
+        if let Some(state) = &mut self.guided_output {
+            state.finish();
         }
         Ok(result)
     }
@@ -1494,6 +1632,266 @@ mod tests {
     }
 
     impl traits::Tokenizer for CandidateDecoder {}
+
+    fn guided_test_request(
+        skip_special: bool,
+        special_boundary: bool,
+        stop: Option<&str>,
+    ) -> (Tokenizer, PreprocessedRequest) {
+        use crate::protocols::common::guided_output::{
+            GuidedOutputCapability, GuidedReasoningMode,
+        };
+
+        let hf: tokenizers::Tokenizer = serde_json::from_value(serde_json::json!({
+            "version":"1.0", "truncation":null, "padding":null,
+            "added_tokens":[
+                {"id":3,"content":"</think>","special":special_boundary,"single_word":false,"lstrip":false,"rstrip":false,"normalized":false},
+                {"id":4,"content":"<think>","special":special_boundary,"single_word":false,"lstrip":false,"rstrip":false,"normalized":false}
+            ],
+            "normalizer":null,"pre_tokenizer":null,"post_processor":null,
+            "decoder":{"type":"Sequence","decoders":[{"type":"ByteFallback"},{"type":"Fuse"}]},
+            "model":{"type":"BPE","vocab":{"<0xC3>":0,"<0xA9>":1,"plan":2,"</think>":3,"<think>":4,"<tool_call>yes</tool_call>":5},"merges":[],"byte_fallback":true}
+        })).unwrap();
+        let tokenizer: Arc<dyn traits::Tokenizer> =
+            Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf));
+        let mut request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions {
+                stop: stop.map(|text| vec![text.into()]),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions {
+                skip_special_tokens: Some(skip_special),
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+        request.guided_output_plan = Some(GuidedOutputPlan::EngineGated(GuidedOutputCapability {
+            version: 1,
+            engine: "test".into(),
+            mode: GuidedReasoningMode::ExplicitGate,
+            request_controls: true,
+            reasoner: Some("step3".into()),
+            start_token_ids: vec![4],
+            end_token_ids: vec![3],
+            start_text: "<think>".into(),
+            end_text: "</think>".into(),
+        }));
+        (Tokenizer::from(tokenizer), request)
+    }
+
+    fn guided_test_decoder(
+        skip_special: bool,
+        special_boundary: bool,
+        stop: Option<&str>,
+    ) -> Decoder {
+        let (tokenizer, request) = guided_test_request(skip_special, special_boundary, stop);
+        Decoder::new_with_checkpoint(tokenizer, &DecoderParams::from_request(&request)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn guided_output_interleaved_choices_preserve_fields_usage_and_errors() {
+        use crate::protocols::openai::{
+            DeltaGeneratorExt, ParsingOptions,
+            chat_completions::{DeltaAggregator, NvCreateChatCompletionRequest},
+        };
+        use std::sync::atomic::AtomicBool;
+
+        for error in [false, true] {
+            let (tokenizer, mut request) = guided_test_request(false, true, None);
+            request.sampling_options.n = Some(2);
+            let mut outputs = vec![
+                LLMEngineOutput {
+                    index: Some(0),
+                    token_ids: vec![4, 0],
+                    ..Default::default()
+                },
+                LLMEngineOutput {
+                    index: Some(1),
+                    token_ids: vec![2],
+                    ..Default::default()
+                },
+                LLMEngineOutput {
+                    index: Some(0),
+                    token_ids: vec![1, 3, 5],
+                    finish_reason: Some(FinishReason::Length),
+                    ..Default::default()
+                },
+            ];
+            if error {
+                outputs.push(LLMEngineOutput {
+                    index: Some(1),
+                    finish_reason: Some(FinishReason::Error("engine failed".into())),
+                    ..Default::default()
+                });
+            }
+            for output in &mut outputs {
+                output.log_probs = Some(vec![-0.1; output.token_ids.len()]);
+                output.top_logprobs = Some(vec![vec![]; output.token_ids.len()]);
+            }
+            let engine = Arc::new(SyntheticSglangStopEngine {
+                outputs: Some(outputs),
+            });
+            let backend = Backend::from_tokenizer(tokenizer);
+            let mut stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+                .await
+                .unwrap();
+            let api_request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model":"test", "messages":[{"role":"user","content":"test"}],"logprobs":true,
+                    "stream":true,"stream_options":{"include_usage":true}
+                }))
+                .unwrap();
+            let mut generator = api_request.response_generator("guided".into());
+            let mut chunks = Vec::new();
+            let mut failed = false;
+            while let Some(output) = stream.next().await {
+                let data = output.data.unwrap();
+                match generator.choice_from_postprocessor(data) {
+                    Ok(chunk) => {
+                        assert!(!failed, "no synthetic successful chunk may follow an error");
+                        chunks.push(Annotated::from_data(chunk));
+                    }
+                    Err(error) => {
+                        assert!(error.to_string().contains("engine failed"));
+                        failed = true;
+                    }
+                }
+            }
+            assert_eq!(failed, error);
+            assert_eq!(generator.get_usage().completion_tokens, 6);
+            assert_eq!(
+                generator
+                    .get_usage()
+                    .completion_tokens_details
+                    .unwrap()
+                    .reasoning_tokens,
+                Some(5)
+            );
+            if !error {
+                chunks.push(Annotated::from_data(generator.create_usage_chunk()));
+                assert_eq!(
+                    chunks
+                        .iter()
+                        .filter(|chunk| chunk.data.as_ref().unwrap().inner.choices.is_empty())
+                        .count(),
+                    1
+                );
+                let mut options = ParsingOptions::new(Some("hermes".into()), Some("step3".into()));
+                options.guided_answer_projected = Some(Arc::new(AtomicBool::new(true)));
+                let response = DeltaAggregator::apply(futures::stream::iter(chunks), options)
+                    .await
+                    .unwrap();
+                assert_eq!(response.inner.choices.len(), 2);
+                let first = &response.inner.choices[0];
+                assert_eq!(
+                    first.message.content,
+                    Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                        "<tool_call>yes</tool_call>".into()
+                    ))
+                );
+                assert_eq!(first.message.reasoning_content.as_deref(), Some("é"));
+                assert!(first.message.tool_calls.is_none());
+                assert_eq!(
+                    first.finish_reason,
+                    Some(dynamo_protocols::types::FinishReason::Length)
+                );
+                assert_eq!(
+                    response.inner.choices[1]
+                        .message
+                        .reasoning_content
+                        .as_deref(),
+                    Some("plan")
+                );
+                assert_eq!(
+                    response
+                        .inner
+                        .usage
+                        .unwrap()
+                        .completion_tokens_details
+                        .unwrap()
+                        .reasoning_tokens,
+                    Some(5)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn guided_output_keeps_byte_fallback_and_literal_answer_markers_in_their_channels() {
+        for skip_special in [false, true] {
+            for special_boundary in [false, true] {
+                for chunk_size in [1, 5] {
+                    for (ids, expected_reasoning, expected_count) in
+                        [(vec![4, 0, 1, 3, 5], "é", 4), (vec![4, 0, 3, 5], "�", 3)]
+                    {
+                        let mut decoder = guided_test_decoder(skip_special, special_boundary, None);
+                        let mut reasoning = String::new();
+                        let mut content = String::new();
+                        let mut count = 0;
+                        for chunk in ids.chunks(chunk_size) {
+                            decoder.process_token_ids(chunk).unwrap();
+                            let delta = decoder.guided_output.as_mut().unwrap().take_delta();
+                            reasoning.push_str(&delta.reasoning);
+                            content.push_str(&delta.content);
+                            count += delta.reasoning_tokens;
+                        }
+                        decoder.finish().unwrap();
+                        let delta = decoder.guided_output.as_mut().unwrap().take_delta();
+                        reasoning.push_str(&delta.reasoning);
+                        content.push_str(&delta.content);
+                        count += delta.reasoning_tokens;
+                        assert_eq!(
+                            reasoning, expected_reasoning,
+                            "skip={skip_special} special={special_boundary} chunks={chunk_size}"
+                        );
+                        assert_eq!(content, "<tool_call>yes</tool_call>");
+                        assert_eq!(count, expected_count);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn guided_output_preserves_user_stops_on_or_across_the_reasoning_boundary() {
+        for (stop, expected_reasoning) in [("</think>", "plan"), ("n</think><tool_call>", "pla")] {
+            let mut decoder = guided_test_decoder(false, true, Some(stop));
+            let result = decoder.process_token_ids(&[4, 2, 3, 5]).unwrap();
+            assert!(result.stop_trigger.is_some());
+            let delta = decoder.guided_output.as_mut().unwrap().take_delta();
+            assert_eq!(delta.reasoning, expected_reasoning, "{stop}");
+            assert_eq!(delta.content, "");
+        }
+    }
+
+    #[test]
+    fn guided_output_byte_flush_respects_min_tokens() {
+        for min_tokens in [2, 4] {
+            let mut decoder = guided_test_decoder(false, true, Some("�"));
+            decoder.min_tokens = min_tokens;
+            let result = decoder.process_token_ids(&[4, 0, 3, 5]).unwrap();
+            assert!(result.stop_trigger.is_none());
+            decoder.finish().unwrap();
+            let delta = decoder.guided_output.as_mut().unwrap().take_delta();
+            assert_eq!(delta.reasoning, "�");
+            assert_eq!(delta.content, "<tool_call>yes</tool_call>");
+            assert_eq!(delta.reasoning_tokens, 3);
+        }
+    }
+
+    #[test]
+    fn guided_output_flushes_truncated_reasoning_without_making_an_answer() {
+        let mut decoder = guided_test_decoder(true, true, None);
+        decoder.process_token_ids(&[4, 0]).unwrap();
+        decoder.finish().unwrap();
+        let delta = decoder.guided_output.as_mut().unwrap().take_delta();
+        assert_eq!(delta.reasoning, "�");
+        assert_eq!(delta.content, "");
+        assert_eq!(delta.reasoning_tokens, 2);
+    }
 
     #[tokio::test]
     async fn backend_finalizes_byte_fallback_at_each_terminal_boundary() {

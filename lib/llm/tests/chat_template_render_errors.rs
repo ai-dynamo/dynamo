@@ -68,6 +68,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>
         let ctx = context.context();
 
         let output = BackendOutput {
+            guided_output: None,
             token_ids: vec![],
             tokens: vec![],
             text: Some("ok".to_string()),

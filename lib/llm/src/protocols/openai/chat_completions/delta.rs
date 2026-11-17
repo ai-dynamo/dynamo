@@ -54,6 +54,7 @@ pub struct DeltaGenerator {
     emitted_role_choices: HashSet<u32>,
     suppress_top_logprobs: bool,
     tool_call_eos_enabled: bool,
+    guided_reasoning_tokens: u32,
     /// Whether the unary response should include prompt logprobs at its root.
     should_return_prompt_logprobs: bool,
     /// Prompt logprobs may arrive before the terminal backend delta.
@@ -73,6 +74,7 @@ impl DeltaGenerator {
             emitted_role_choices: HashSet::new(),
             suppress_top_logprobs: false,
             tool_call_eos_enabled: false,
+            guided_reasoning_tokens: 0,
             should_return_prompt_logprobs: false,
             prompt_logprobs: None,
         }
@@ -281,6 +283,13 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             return Err(error);
         }
         self.state.update_usage_from_backend_output(&delta);
+        if let Some(guided) = &delta.guided_output {
+            self.guided_reasoning_tokens = self
+                .guided_reasoning_tokens
+                .saturating_add(guided.reasoning_tokens);
+            self.state
+                .set_guided_reasoning_tokens(self.guided_reasoning_tokens);
+        }
 
         let logprobs = self.create_logprobs(
             delta.tokens,
@@ -312,6 +321,13 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         // Create the streaming response.
         let index = delta.index.unwrap_or(0);
         let mut stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
+        if let Some(guided) = delta.guided_output {
+            let choice = &mut stream_response.inner.choices[0].delta;
+            choice.content = (!guided.content.is_empty()).then_some(
+                dynamo_protocols::types::ChatCompletionMessageContent::Text(guided.content),
+            );
+            choice.reasoning_content = (!guided.reasoning.is_empty()).then_some(guided.reasoning);
+        }
         if self.tool_call_eos_enabled && delta.finish_reason == Some(common::FinishReason::EoS) {
             stream_response.model_eos.push(index);
         }
@@ -521,6 +537,7 @@ mod tests {
 
     fn final_backend_output() -> BackendOutput {
         BackendOutput {
+            guided_output: None,
             token_ids: vec![1],
             tokens: vec![Some("hello".to_string())],
             text: Some("hello".to_string()),
@@ -846,6 +863,7 @@ mod tests {
     fn make_backend_output_with_engine_data() -> crate::protocols::common::llm_backend::BackendOutput
     {
         crate::protocols::common::llm_backend::BackendOutput {
+            guided_output: None,
             token_ids: vec![42],
             tokens: vec![Some("hello".to_string())],
             text: Some("hello".to_string()),
@@ -1297,6 +1315,7 @@ mod tests {
         let mut generator = request.response_generator("req-engine-4".to_string());
 
         let backend_output = crate::protocols::common::llm_backend::BackendOutput {
+            guided_output: None,
             token_ids: vec![42],
             tokens: vec![Some("hello".to_string())],
             text: Some("hello".to_string()),

@@ -57,6 +57,7 @@ pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Erro
 
 pub mod extensions;
 mod guided_grammar;
+pub mod guided_output;
 pub mod input_trigger;
 pub mod llm_backend;
 pub mod metadata_upload;

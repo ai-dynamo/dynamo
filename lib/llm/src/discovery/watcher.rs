@@ -66,7 +66,10 @@ use crate::{
 use super::readiness::normalize_legacy_prefill_topology;
 use super::{
     ModelManager,
-    controller::{ControllerHost, DesiredInstance, GroupKey, GroupSpec, ModelDiscoveryController},
+    controller::{
+        CONFLICTED_GUIDED_OUTPUT_CONTRACT, ControllerHost, DesiredInstance, GroupKey, GroupSpec,
+        ModelDiscoveryController,
+    },
 };
 use crate::namespace::{NamespaceFilter, NamespacePrefixMode};
 use tokio_util::sync::CancellationToken;
@@ -463,6 +466,7 @@ impl ModelWatcher {
                  exact video routing disabled for this group"
             );
         }
+        prepare_guided_output_cohort(card, spec.guided_output_contract.as_deref());
         // Use per-worker-set router config if the worker provided one in its MDC,
         // otherwise fall back to the frontend-level global config. Policy selections
         // are process-local, so preserve them when the MDC supplies the base config.
@@ -1181,6 +1185,7 @@ impl ControllerHost for ModelWatcher {
         let mdc_checksum = card.mdcsum().to_string();
         let projection_fingerprint = lora_projection_fingerprint(&card)?;
         let video_contract = qwen_video_contract_digest(&card);
+        let guided_output_contract = guided_output_contract_digest(&card);
         Ok(Some(DesiredInstance {
             key: mcid.to_path(),
             mcid,
@@ -1190,6 +1195,7 @@ impl ControllerHost for ModelWatcher {
             mdc_checksum,
             projection_fingerprint,
             video_contract,
+            guided_output_contract,
         }))
     }
 
@@ -1606,6 +1612,33 @@ pub(super) fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<S
     Some(blake3::hash(contracts.to_string().as_bytes()).to_string())
 }
 
+pub(super) fn guided_output_contract_digest(card: &ModelDeploymentCard) -> Option<String> {
+    let mut value = card
+        .runtime_config
+        .runtime_data
+        .get(crate::protocols::common::guided_output::GUIDED_OUTPUT_REASONING_RUNTIME_KEY)?
+        .clone();
+    canonicalize_json_object_keys(&mut value);
+    Some(blake3::hash(value.to_string().as_bytes()).to_string())
+}
+
+fn prepare_guided_output_cohort(card: &mut ModelDeploymentCard, contract: Option<&str>) {
+    use crate::protocols::common::guided_output::{
+        GUIDED_OUTPUT_COHORT_CONFLICT_RUNTIME_KEY, GUIDED_OUTPUT_REASONING_RUNTIME_KEY,
+    };
+    let runtime = &mut card.runtime_config.runtime_data;
+    runtime.remove(GUIDED_OUTPUT_COHORT_CONFLICT_RUNTIME_KEY);
+    if contract == Some(CONFLICTED_GUIDED_OUTPUT_CONTRACT) {
+        runtime.insert(
+            GUIDED_OUTPUT_COHORT_CONFLICT_RUNTIME_KEY.into(),
+            serde_json::Value::Bool(true),
+        );
+    }
+    if contract.is_none() || contract == Some(CONFLICTED_GUIDED_OUTPUT_CONTRACT) {
+        runtime.remove(GUIDED_OUTPUT_REASONING_RUNTIME_KEY);
+    }
+}
+
 fn worker_set_chat_preprocessor(
     card: &ModelDeploymentCard,
     tokenizer: crate::tokenizers::Tokenizer,
@@ -1635,6 +1668,119 @@ mod tests {
     use dynamo_runtime::pipeline::Error;
     use dynamo_runtime::{Runtime, distributed::DistributedConfig};
     use futures::StreamExt;
+
+    #[test]
+    fn guided_output_mixed_cohort_cannot_use_the_representative_reasoning_policy() {
+        use crate::protocols::{
+            common::{
+                OutputOptions, SamplingOptions, StopConditions,
+                guided_output::{GUIDED_OUTPUT_REASONING_RUNTIME_KEY, GuidedOutputPlan},
+                llm_backend::PreprocessedRequest,
+            },
+            openai::GuidedToolConstraint,
+        };
+
+        let common = || {
+            PreprocessedRequest::builder()
+                .model("test".into())
+                .token_ids(vec![])
+                .stop_conditions(StopConditions::default())
+                .sampling_options(SamplingOptions::default())
+                .output_options(OutputOptions::default())
+                .build()
+                .unwrap()
+        };
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        for representative_capability in [
+            serde_json::json!({"version":1,"engine":"vllm","mode":"immediate"}),
+            serde_json::json!({"version":1,"engine":"vllm","mode":"explicit_gate","request_controls":true,"reasoner":"deepseek_r1","end_token_ids":[5],"end_text":"</think>"}),
+        ] {
+            let mut card = ModelDeploymentCard::load_from_disk(&path, None).unwrap();
+            card.runtime_config.reasoning_parser = None;
+            card.runtime_config.tool_call_parser = None;
+            card.runtime_config.runtime_data.insert(
+                GUIDED_OUTPUT_REASONING_RUNTIME_KEY.into(),
+                representative_capability,
+            );
+            prepare_guided_output_cohort(&mut card, Some(CONFLICTED_GUIDED_OUTPUT_CONTRACT));
+            let processor = OpenAIPreprocessor::new(card).unwrap();
+            for thinking in [None, Some(false), Some(true)] {
+                let mut request: NvCreateChatCompletionRequest =
+                    serde_json::from_value(serde_json::json!({
+                        "model":"test","messages":[{"role":"user","content":"Answer yes."}],
+                        "guided_choice":["yes"]
+                    }))
+                    .unwrap();
+                request.chat_template_args = thinking.map(|value| {
+                    HashMap::from([("enable_thinking".into(), serde_json::json!(value))])
+                });
+                let error = processor
+                    .resolve_guided_output_plan(
+                        &request,
+                        &mut common(),
+                        &false.into(),
+                        &GuidedToolConstraint::None,
+                    )
+                    .unwrap_err();
+                assert!(error.to_string().contains("capabilities disagree"));
+
+                request.common.guided_choice = None;
+                assert_eq!(
+                    processor
+                        .resolve_guided_output_plan(
+                            &request,
+                            &mut common(),
+                            &false.into(),
+                            &GuidedToolConstraint::None,
+                        )
+                        .unwrap(),
+                    None,
+                    "ordinary chat must not be disabled"
+                );
+            }
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model":"test","messages":[{"role":"user","content":"Answer JSON."}],
+                    "response_format":{"type":"json_object"}
+                }))
+                .unwrap();
+            assert_eq!(
+                processor
+                    .resolve_guided_output_plan(
+                        &request,
+                        &mut common(),
+                        &false.into(),
+                        &GuidedToolConstraint::StructuralTag,
+                    )
+                    .unwrap(),
+                Some(GuidedOutputPlan::NativeJson),
+                "grammar-owned JSON keeps its parser"
+            );
+        }
+
+        let mut legacy = ModelDeploymentCard::load_from_disk(path, None).unwrap();
+        legacy.runtime_config.reasoning_parser = None;
+        legacy.runtime_config.tool_call_parser = None;
+        prepare_guided_output_cohort(&mut legacy, None);
+        let processor = OpenAIPreprocessor::new(legacy).unwrap();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model":"test","messages":[{"role":"user","content":"Answer yes."}],
+            "guided_choice":["yes"]
+        }))
+        .unwrap();
+        assert_eq!(
+            processor
+                .resolve_guided_output_plan(
+                    &request,
+                    &mut common(),
+                    &false.into(),
+                    &GuidedToolConstraint::None,
+                )
+                .unwrap(),
+            Some(GuidedOutputPlan::Direct)
+        );
+    }
 
     #[test]
     fn direct_routing_gets_a_threshold_handle_that_ignores_thresholds() {
@@ -2525,6 +2671,7 @@ request_classifier:
                 fingerprint: desired.mdc_checksum.clone(),
                 generation: instance as u64 + 1,
                 video_contract: desired.video_contract.clone(),
+                guided_output_contract: desired.guided_output_contract.clone(),
                 representative: desired,
             };
             let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![worker_id]);
@@ -2671,6 +2818,7 @@ request_classifier:
             mdc_checksum: card.mdcsum().to_string(),
             projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
             video_contract: qwen_video_contract_digest(&card),
+            guided_output_contract: guided_output_contract_digest(&card),
             card,
             group_key: key.clone(),
         };
@@ -2681,6 +2829,7 @@ request_classifier:
             generation: 1,
             representative: desired.clone(),
             video_contract: desired.video_contract.clone(),
+            guided_output_contract: desired.guided_output_contract.clone(),
         };
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
         let prepared = watcher
@@ -2766,6 +2915,7 @@ request_classifier:
                 mdc_checksum: card.mdcsum().to_string(),
                 projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
                 video_contract: qwen_video_contract_digest(&card),
+                guided_output_contract: guided_output_contract_digest(&card),
                 card,
                 group_key: key.clone(),
             };
@@ -2776,6 +2926,7 @@ request_classifier:
                 generation: 1,
                 representative: desired.clone(),
                 video_contract: desired.video_contract.clone(),
+                guided_output_contract: desired.guided_output_contract.clone(),
             };
             let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
             let prepared = watcher
@@ -2991,6 +3142,7 @@ request_classifier:
             mdc_checksum: card.mdcsum().to_string(),
             projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
             video_contract: qwen_video_contract_digest(&card),
+            guided_output_contract: guided_output_contract_digest(&card),
             card,
             group_key: key.clone(),
         };
@@ -3001,6 +3153,7 @@ request_classifier:
             generation: 1,
             representative: desired,
             video_contract: None,
+            guided_output_contract: None,
         };
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
 
@@ -3678,6 +3831,7 @@ request_classifier:
                 fingerprint: desired.mdc_checksum.clone(),
                 generation: index + 1,
                 video_contract: desired.video_contract.clone(),
+                guided_output_contract: desired.guided_output_contract.clone(),
                 representative: desired.clone(),
             };
             let (_tx, rx) = tokio::sync::watch::channel(vec![worker_id]);

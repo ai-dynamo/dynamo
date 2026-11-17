@@ -64,6 +64,21 @@ fn apply_request_tool_call_parsing_options(
     mut parsing_options: ParsingOptions,
     request: &NvCreateChatCompletionRequest,
 ) -> Result<ParsingOptions, DynamoError> {
+    let mut normalized;
+    let request = if request.common.guided_json.is_some() {
+        normalized = request.clone();
+        crate::preprocessor::guided_output::normalize_guided_json(&mut normalized).map_err(
+            |error| {
+                DynamoError::builder()
+                    .class(dynamo_runtime::error::ErrorClass::InvalidRequest)
+                    .diagnostic(error.to_string())
+                    .build()
+            },
+        )?;
+        &normalized
+    } else {
+        request
+    };
     let unified_family =
         crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
             parsing_options.tool_call_parser.as_deref(),
@@ -78,6 +93,13 @@ fn apply_request_tool_call_parsing_options(
     );
     parsing_options.structured_response =
         OpenAIPreprocessor::has_structured_response_format(request);
+    if crate::preprocessor::tool_choice::has_explicit_guided_decoding(request)
+        || parsing_options.structured_response
+    {
+        parsing_options.guided_answer_projected = Some(std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(false),
+        ));
+    }
     parsing_options.tool_choice = request.inner.tool_choice.clone();
     let tool_call_parsing_enabled = OpenAIPreprocessor::tool_call_parsing_enabled(request);
     let tool_choice = request
