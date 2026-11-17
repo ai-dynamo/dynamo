@@ -284,12 +284,13 @@ where
         }
         if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL) {
             tracing::warn!(
+                waiting,
                 attempt = attempts,
                 elapsed = ?started.elapsed(),
                 remaining = ?deadline.saturating_duration_since(now),
                 retry_interval = ?retry_interval,
                 %reason,
-                "{waiting}; retrying"
+                "SGLang not ready; retrying"
             );
             last_logged_at = Some(now);
         }

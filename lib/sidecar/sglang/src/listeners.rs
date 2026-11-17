@@ -7,8 +7,8 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -18,6 +18,7 @@ use dynamo_backend_common::{
 use dynamo_sidecar_common::GrpcEndpoint;
 use futures::stream::{BoxStream, FuturesUnordered};
 use futures::{Stream, StreamExt};
+use parking_lot::Mutex;
 
 use crate::client::{self, AbortRpc, Pool};
 use crate::native_http::NativeHttp;
@@ -44,9 +45,14 @@ pub(crate) struct Listener {
     pub bootstrap_port: Option<u16>,
 }
 
-/// Each running dispatch's listener index and rid, keyed by the address of
-/// its context allocation.
-type Dispatches = Arc<Mutex<HashMap<usize, (usize, String)>>>;
+/// Each running dispatch's listener index and rid suffix, keyed by the
+/// address of its context allocation.
+type Dispatches = Arc<Mutex<HashMap<usize, (usize, u32)>>>;
+
+/// A dispatch's rid: its public ID plus `suffix` in hex.
+fn dispatch_rid(id: &str, suffix: u32) -> String {
+    format!("{id}-{suffix:08x}")
+}
 
 fn context_key(ctx: &Arc<dyn AsyncEngineContext>) -> usize {
     Arc::as_ptr(ctx).addr()
@@ -72,6 +78,7 @@ pub(crate) struct Dispatched {
     // reused before the entry is removed.
     context: Arc<dyn AsyncEngineContext>,
     rid: String,
+    suffix: u32,
 }
 
 impl Dispatched {
@@ -93,12 +100,12 @@ impl Dispatched {
 
 impl Drop for Dispatched {
     fn drop(&mut self) {
-        let mut dispatches = self.dispatches.lock().unwrap_or_else(|e| e.into_inner());
+        let mut dispatches = self.dispatches.lock();
         let key = context_key(&self.context);
         // A later dispatch of the same context owns the entry.
         if dispatches
             .get(&key)
-            .is_some_and(|(_, rid)| *rid == self.rid)
+            .is_some_and(|&(_, suffix)| suffix == self.suffix)
         {
             dispatches.remove(&key);
         }
@@ -119,15 +126,23 @@ impl<T> Stream for Attached<T> {
 }
 
 impl NodeListeners {
-    pub(crate) fn new(start_rank: u32, global_dp_size: u32, listeners: Vec<Listener>) -> Self {
-        assert!(!listeners.is_empty(), "a node has at least one listener");
-        Self {
+    pub(crate) fn new(
+        start_rank: u32,
+        global_dp_size: u32,
+        listeners: Vec<Listener>,
+    ) -> Result<Self, DynamoError> {
+        if listeners.is_empty() {
+            return Err(client::protocol_error(
+                "SGLang reported no listeners on this node",
+            ));
+        }
+        Ok(Self {
             start_rank,
             global_dp_size,
             listeners,
             next: AtomicUsize::new(0),
             dispatches: Dispatches::default(),
-        }
+        })
     }
 
     fn ranks(&self) -> std::ops::Range<u32> {
@@ -161,25 +176,23 @@ impl NodeListeners {
     /// aborts every generation that shares a rid. The record lasts until the
     /// returned guard drops.
     pub(crate) fn dispatch(&self, ctx: Arc<dyn AsyncEngineContext>, index: usize) -> Dispatched {
-        let rid = format!("{}-{:08x}", ctx.id(), rand::random::<u32>());
+        let suffix = rand::random::<u32>();
+        let rid = dispatch_rid(ctx.id(), suffix);
         self.dispatches
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(context_key(&ctx), (index, rid.clone()));
+            .insert(context_key(&ctx), (index, suffix));
         Dispatched {
             dispatches: self.dispatches.clone(),
             context: ctx,
             rid,
+            suffix,
         }
     }
 
     /// The listener index and rid that `ctx` runs under, while it runs.
     fn running(&self, ctx: &Arc<dyn AsyncEngineContext>) -> Option<(usize, String)> {
-        self.dispatches
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&context_key(ctx))
-            .cloned()
+        let (index, suffix) = *self.dispatches.lock().get(&context_key(ctx))?;
+        Some((index, dispatch_rid(ctx.id(), suffix)))
     }
 
     /// Abort the request of `ctx` by its own rid, on the listener that runs
@@ -217,7 +230,7 @@ impl NodeListeners {
             watches
                 .next()
                 .await
-                .expect("a node has at least one listener")
+                .unwrap_or_else(|| "the node has no listeners".to_string())
         }
     }
 }
@@ -250,7 +263,7 @@ mod tests {
                 }
             })
             .collect();
-        NodeListeners::new(start, global, listeners)
+        NodeListeners::new(start, global, listeners).unwrap()
     }
 
     fn request() -> PreprocessedRequest {
@@ -319,7 +332,9 @@ mod tests {
             "serves DP ranks [2, 4)",
         );
         // Requests that name no rank alternate over the node's listeners, and
-        // a prefill carries the rank it lands on.
+        // a prefill carries the rank it lands on. A fresh node starts the turn
+        // at its first listener.
+        let listeners = node(2, 2, 4);
         for (mode, rank, prefill_rank) in [
             (Aggregated, 2, None),
             (Prefill, 3, Some(3)),
@@ -363,7 +378,7 @@ mod tests {
         assert_eq!(listeners.running(&failed), None);
         assert_eq!(listeners.running(&retry), Some((1, second.rid().into())));
         drop(second);
-        assert!(listeners.dispatches.lock().unwrap().is_empty());
+        assert!(listeners.dispatches.lock().is_empty());
 
         // A later dispatch of the same context owns its entry.
         let ctx = dynamo_backend_common::testing::mock_context();
@@ -372,7 +387,7 @@ mod tests {
         drop(earlier);
         assert_eq!(listeners.running(&ctx), Some((1, later.rid().into())));
         drop(later);
-        assert!(listeners.dispatches.lock().unwrap().is_empty());
+        assert!(listeners.dispatches.lock().is_empty());
     }
 
     #[tokio::test]

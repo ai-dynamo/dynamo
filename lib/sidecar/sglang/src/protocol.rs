@@ -321,9 +321,11 @@ pub(crate) fn disaggregated_params_to_json(rendezvous: &Rendezvous) -> Value {
 /// the prefill handoff. A prefill request without either gets this worker's
 /// bootstrap address and a fresh room, congruent to its rank modulo the DP
 /// size (SGLang's `follow_bootstrap_room`); aggregated requests carry none.
-/// Prefill names its rank only when the router named it; decode names the
-/// router's prefill rank, or the handoff's. For a single-rank prefill that is
-/// rank 0, which SGLang resolves anyway.
+/// Prefill names its rank only when the router named a prefill rank
+/// (`prefill_dp_rank`); a prefill pinned only by `dp_rank` still runs on that
+/// rank, and SGLang derives it from the room. Decode names the router's
+/// prefill rank, or the handoff's. For a single-rank prefill that is rank 0,
+/// which SGLang resolves anyway.
 pub(crate) fn resolve_disaggregated_params(
     request: &PreprocessedRequest,
     mode: DisaggregationMode,

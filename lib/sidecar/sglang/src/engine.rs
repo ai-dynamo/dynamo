@@ -387,7 +387,7 @@ impl LLMEngine for SglangSidecarEngine {
             })
             .collect::<Vec<_>>();
         let connection_count: usize = listeners.iter().map(|listener| listener.pool.len()).sum();
-        let listeners = NodeListeners::new(node.start_rank, node.global_dp_size, listeners);
+        let listeners = NodeListeners::new(node.start_rank, node.global_dp_size, listeners)?;
         let serving = listeners.watch_serving(self.transport.connect_attempt_timeout);
 
         let kv_event_source_count = kv_event_sources.len();
@@ -508,7 +508,6 @@ impl LLMEngine for SglangSidecarEngine {
             let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
             let mut shutdown_cancellation = Box::pin(async move { cancel.cancelled().await });
 
-            tracing::debug!(request_id = %ctx.id(), "sending request to SGLang gRPC");
             let opened = tokio::select! {
                 biased;
                 _ = &mut request_cancellation => None,

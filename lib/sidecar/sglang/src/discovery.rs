@@ -461,4 +461,23 @@ mod tests {
         .unwrap();
         assert_eq!(info.native_offloading_capacity, Some(20_000));
     }
+
+    #[test]
+    fn replica_dp_keeps_the_launch_wide_max_num_seqs() {
+        let info = info(|server| {
+            server.port = 30_000;
+            let deployment = server.deployment_info.as_mut().unwrap();
+            deployment.dp_size = 4;
+            deployment.dp_rank = Some(0);
+            deployment.max_running_requests = Some(256);
+            deployment.node_listeners = vec![pb::NodeRustListener {
+                port_offset: 0,
+                dp_rank: 0,
+                http_port: 30_000,
+                grpc_port: Some(30_010),
+            }];
+        })
+        .unwrap();
+        assert_eq!(info.max_num_seqs, Some(256));
+    }
 }
