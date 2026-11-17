@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use dynamo_sglang_sidecar::proto::generate_stream_item::Item;
-use dynamo_sglang_sidecar::proto::sglang_service_server::SglangService;
 use futures::StreamExt;
 use serde_json::json;
+use sglang_api_types::api::v1::generate_stream_item::Item;
+use sglang_api_types::api::v1::sglang_service_server::SglangService;
 
 fn engine_args() -> MockerConfig {
     MockerConfig::from_value(serde_json::json!({
@@ -308,10 +308,10 @@ async fn streaming_survives_a_producer_that_outruns_a_stalled_consumer() {
 #[tokio::test]
 async fn missing_abort_is_idempotent() {
     let service = SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
-    for _ in 0..2 {
+    for rid in ["missing-or-finished", "missing-or-finished", "  "] {
         let response = service
             .abort(Request::new(pb::AbortRequest {
-                rid: "missing-or-finished".to_string(),
+                rid: rid.to_string(),
                 abort_all: false,
             }))
             .await
@@ -320,7 +320,7 @@ async fn missing_abort_is_idempotent() {
         // Like SGLang, an unknown or finished rid matches nothing.
         assert!(!response.success);
     }
-    for (rid, abort_all) in [("", false), ("  ", false), ("rid", true)] {
+    for (rid, abort_all) in [("", false), ("rid", true)] {
         assert_eq!(
             service
                 .abort(Request::new(pb::AbortRequest {

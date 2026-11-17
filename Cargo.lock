@@ -3462,6 +3462,7 @@ dependencies = [
  "dynamo-sglang-sidecar",
  "futures",
  "serde_json",
+ "sglang-api-types",
  "tokio",
  "tokio-stream",
  "tonic 0.14.6",

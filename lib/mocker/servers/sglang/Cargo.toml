@@ -18,7 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-mocker = { workspace = true, features = ["zmq-events"] }
-dynamo-sglang-sidecar = { path = "../../../sidecar/sglang" }
+sglang-api-types = { workspace = true }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
@@ -32,6 +32,7 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+dynamo-sglang-sidecar = { path = "../../../sidecar/sglang" }
 dynamo-llm = { workspace = true }
 dynamo-kv-events = { workspace = true }
 dynamo-kv-hashing = { workspace = true }
