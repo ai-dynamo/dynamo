@@ -2975,7 +2975,7 @@
 [0.000, "o", "\u001b[K  \u001b[0;32m✅ Job 'slime-grpo-d5tcx' succeeded · 2m33s after the RayJob started\u001b[0m\r\n"]
 [0.047, "o", "\u001b[?25h"]
 [1.005, "o", "\r\n"]
-[0.910, "o", "\u001b[0;37m# Logprob gap \u001b[0;91m\u001b[1m≈ 0.01\u001b[0m\u001b[0;37m at every step: the engines generated with the weights Slime had just synced.\u001b[0m\r\n"]
+[0.910, "o", "\u001b[0;37m# Logprob gap \u001b[0;91m\u001b[1m≈ 0.01\u001b[0m\u001b[0;37m at every step: a sanity check that no engine was left on older weights.\u001b[0m\r\n"]
 [0.904, "o", "\u001b[0;37m# The reward moves with the 8 prompts in each step. Ten steps test the pipeline, not learning.\u001b[0m\r\n"]
 [1.009, "o", "\r\n\r\n"]
 [0.000, "o", "\u001b[0;30m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m\r\n  \u001b[1m✅ Step 6: Verify What Dynamo Did\u001b[0m\r\n"]

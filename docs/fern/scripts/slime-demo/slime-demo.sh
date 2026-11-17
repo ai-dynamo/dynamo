@@ -786,7 +786,7 @@ beat5_rl_loop() {
     cursor_show
     pause "$PAUSE_MED"
     echo ""
-    narrate "Logprob gap ${NUM}${BOLD}≈ 0.01${NC}${NAR} at every step: the engines generated with the weights Slime had just synced." \
+    narrate "Logprob gap ${NUM}${BOLD}≈ 0.01${NC}${NAR} at every step: a sanity check that no engine was left on older weights." \
             "The reward moves with the 8 prompts in each step. Ten steps test the pipeline, not learning."
     pause "$PAUSE_MED"
 }
