@@ -57,7 +57,7 @@ class GlmOutputParser:
         for parts in arguments:
             try:
                 json.loads("".join(parts))
-            except json.JSONDecodeError:
+            except ValueError:
                 return True
         return False
 

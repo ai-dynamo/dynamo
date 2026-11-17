@@ -7639,6 +7639,40 @@ class TestGlmNativeOutput:
             frame.get("llm_metrics", {}).get("chunk_tokens", 0) for frame in frames
         ) == len(token_ids)
 
+    @pytest.mark.skipif(
+        sys.get_int_max_str_digits() == 0,
+        reason="Python integer conversion limit disabled",
+    )
+    def test_oversized_integer_does_not_fail_finalization(self):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "f",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"value": {"type": "object"}},
+                        },
+                    },
+                }
+            ]
+        )
+        output = GlmOutputParser(
+            reasoning_parser=None,
+            tool_parser=FunctionCallParser(tools, "glm47"),
+            tools=tools,
+            stream=True,
+        )
+        value = '{"n":' + "1" * (sys.get_int_max_str_digits() + 1) + "}"
+        deltas = output.parse(
+            f"<tool_call>f<arg_key>value</arg_key><arg_value>{value}</arg_value></tool_call>",
+            None,
+        )
+        emitted = self._assembled(deltas)
+        assert emitted[0]["arguments"] == '{"value": ' + value + "}"
+        assert self._assembled(deltas + output.parse("", "stop")) == emitted
+
     def test_recursive_schema_does_not_fail_recovery(self):
         tools = convert_tools(
             [
