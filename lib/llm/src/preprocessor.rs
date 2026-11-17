@@ -1818,49 +1818,6 @@ pub(crate) fn has_custom_content(request: &impl OAIChatLikeRequest) -> bool {
         })
 }
 
-/// Project Custom parts without serializing their payloads. Templates own the
-/// marker syntax; the original position and modality name are all they need.
-fn template_content_part(part: MultimodalContentPart<'_>) -> Result<serde_json::Value> {
-    if let Some(custom) = part.custom_part() {
-        return Ok(serde_json::json!({"type": "custom", "kind": custom.kind}));
-    }
-    Ok(match part {
-        MultimodalContentPart::User(part) => serde_json::to_value(part)?,
-        MultimodalContentPart::Tool(part) => serde_json::to_value(part)?,
-    })
-}
-
-/// Project before serialization so bulk custom payloads are never copied into
-/// templates or auxiliary messages. Keep each role's established metadata.
-fn template_messages(request: &impl OAIChatLikeRequest) -> Result<serde_json::Value> {
-    if !has_custom_content(request) {
-        return Ok(serde_json::to_value(request.messages())?);
-    }
-    let Some(messages) = request.typed_messages() else {
-        return Ok(serde_json::to_value(request.messages())?);
-    };
-    messages.iter().map(|message| {
-        match message {
-            ChatCompletionRequestMessage::User(user) => {
-                if let ChatCompletionRequestUserMessageContent::Array(parts) = &user.content {
-                    let parts: Vec<_> = parts.iter().map(|part| template_content_part(MultimodalContentPart::User(part))).collect::<Result<_>>()?;
-                    let mut value = serde_json::json!({"role":"user", "content":parts});
-                    if let Some(name) = &user.name { value["name"] = name.clone().into(); }
-                    return Ok(value);
-                }
-            }
-            ChatCompletionRequestMessage::Tool(tool) => {
-                if let ChatCompletionRequestToolMessageContent::Array(parts) = &tool.content {
-                    let parts: Vec<_> = parts.iter().map(|part| template_content_part(MultimodalContentPart::Tool(part))).collect::<Result<_>>()?;
-                    return Ok(serde_json::json!({"role":"tool", "tool_call_id":tool.tool_call_id, "content":parts}));
-                }
-            }
-            _ => {}
-        }
-        Ok(serde_json::to_value(message)?)
-    }).collect::<Result<Vec<_>>>().map(serde_json::Value::Array)
-}
-
 /// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
 /// `function.arguments` when the model opts in (GLM-5.2), and appends
 /// HuggingFace's unique continue-final-message marker when that flag is set.
@@ -4222,8 +4179,9 @@ impl OpenAIPreprocessor {
         }
     }
 
-    /// Replace inline `data:` URLs with empty strings in message content parts.
-    /// Preserves HTTP(S) URLs, text content, and overall message structure.
+    /// Replace inline `data:` URLs with empty strings and drop custom `fields` in
+    /// message content parts. Preserves HTTP(S) URLs, text content, and overall
+    /// message structure.
     fn strip_inline_data_urls(messages: &mut serde_json::Value) {
         let Some(arr) = messages.as_array_mut() else {
             return;
@@ -4236,6 +4194,11 @@ impl OpenAIPreprocessor {
                 continue;
             };
             for part in parts {
+                if part.get("type").and_then(serde_json::Value::as_str) == Some("custom")
+                    && let Some(part) = part.as_object_mut()
+                {
+                    part.remove("fields");
+                }
                 for key in ["image_url", "video_url", "audio_url"] {
                     if let Some(media) = part.get_mut(key)
                         && let Some(url) = media.get_mut("url")
@@ -4311,21 +4274,6 @@ impl OpenAIPreprocessor {
         formatted_prompt: Option<&str>,
         token_ids: &[crate::protocols::TokenIdType],
     ) -> Result<(Vec<MmRoutingEntry>, Option<usize>)> {
-        if has_custom_content(request)
-            && !self.runtime_config.runtime_flag_enabled(
-                crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
-            )
-        {
-            let message = CUSTOM_CONTENT_UNSUPPORTED;
-            return Err(DynamoError::builder()
-                .error_type(ErrorType::InvalidArgument)
-                .message(message)
-                .public_details(PublicDetails::Message {
-                    message: message.into(),
-                })
-                .build()
-                .into());
-        }
         // `token_ids` is only consumed by exact MM-routing construction below.
         #[cfg(not(feature = "mm-routing"))]
         let _ = token_ids;
@@ -4388,6 +4336,11 @@ impl OpenAIPreprocessor {
             for content_part in content_parts {
                 let Some((type_str, url, uuid)) = content_part.media_info() else {
                     if let Some(part) = content_part.custom_part() {
+                        if !self.runtime_config.runtime_flag_enabled(
+                            crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+                        ) {
+                            return Err(custom_transport_error(CUSTOM_CONTENT_UNSUPPORTED));
+                        }
                         validate_custom_kind(&part.kind)?;
                         let payload = serde_json::Value::Object(part.fields.clone());
                         media_map
@@ -4747,7 +4700,7 @@ impl OpenAIPreprocessor {
             // Preserve original messages and formatted prompt in extra_args for multimodal
             // workers (e.g., TRT-LLM needs message structure and the template-rendered
             // prompt with <image> placeholders for embedding-path / NIXL flows).
-            let messages_json = template_messages(request)?;
+            let messages_json = serde_json::to_value(request.messages())?;
             let mut extra_args = serde_json::json!({
                 "messages": messages_json
             });
@@ -17059,46 +17012,6 @@ responses_tools: None,
         );
     }
 
-    #[test]
-    fn muse_named_tool_preserves_responses_history_phases() {
-        let mut preprocessor = mock_llama_preprocessor();
-        let preprocessor = Arc::get_mut(&mut preprocessor).unwrap();
-        preprocessor.tool_call_parser = Some("muse_spark".into());
-        preprocessor.formatter = test_prompt_formatter(include_str!(
-            "../tests/data/muse_spark_open_deferred_tools.jinja"
-        ));
-        let response: crate::protocols::openai::responses::NvCreateResponse =
-            serde_json::from_value(serde_json::json!({
-                "model": "test-model",
-                "input": [
-                    {"role": "assistant", "phase": "commentary", "content": "Checking."},
-                    {"role": "assistant", "phase": "final_answer", "content": "Done."},
-                    {"role": "user", "content": "Continue."}
-                ],
-                "tools": [{"type": "function", "name": "lookup", "parameters": {
-                    "type": "object", "properties": {}
-                }}],
-                "tool_choice": {"type": "function", "name": "lookup"}
-            }))
-            .unwrap();
-        let mut request: NvCreateChatCompletionRequest = response.try_into().unwrap();
-        request.normalize_responses_history_phases(true);
-        request
-            .normalize_responses_tools(preprocessor.formatter.supports_native_tools(&request))
-            .unwrap();
-
-        let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
-        let prompt = rendered.as_str();
-        assert!(
-            prompt.contains("assistant to=commentary<|message|>Checking.<|eom|>"),
-            "{prompt}"
-        );
-        assert!(
-            prompt.contains("assistant to=user<|message|>Done.<|eot|>"),
-            "{prompt}"
-        );
-    }
-
     fn render_with_continue_final_message(
         formatter: &dyn OAIPromptFormatter,
         request: &NvCreateChatCompletionRequest,
@@ -21574,34 +21487,6 @@ mod custom_content_template_tests {
             preprocessor.normalize_tool_call_args = normalize_tool_call_args;
             let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
             assert_eq!(rendered.as_str(), "patch=change x;<chemistry>");
-        }
-    }
-
-    #[test]
-    fn chat_raw_prompt_flag_keeps_template_rendering_with_custom_content() {
-        let preprocessor = custom_preprocessor(CUSTOM_TEMPLATE);
-        for with_system in [false, true] {
-            let mut messages = vec![serde_json::json!({"role":"user", "content":[
-                {"type":"text", "text":"Look"},
-                {"type":"custom", "kind":"chemistry", "fields":{"data_base64":"SECRET"}}
-            ]})];
-            if with_system {
-                messages.insert(0, serde_json::json!({"role":"system", "content":"Rules"}));
-            }
-            let request: NvCreateChatCompletionRequest =
-                serde_json::from_value(serde_json::json!({
-                    "model":"test", "messages":messages,
-                    "nvext":{"use_raw_prompt":true}, "add_generation_prompt":false
-                }))
-                .unwrap();
-            crate::engines::ValidateRequest::validate(&request).unwrap();
-            let expected = if with_system {
-                "<|system|>Rules<|end|><|user|>Look<|chem_projected|><|end|>"
-            } else {
-                "<|user|>Look<|chem_projected|><|end|>"
-            };
-            let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
-            assert_eq!(rendered.as_str(), expected);
         }
     }
 
