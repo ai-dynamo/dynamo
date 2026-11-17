@@ -519,6 +519,12 @@ pub struct ParsingOptions {
     /// round-tripped, so it is skipped rather than wired into the wire format.
     #[serde(skip)]
     pub tools: Vec<ToolDefinition>,
+
+    /// The chat engine is a Python chat processor that already split reasoning
+    /// and tool calls from the generated text. Non-streaming aggregation keeps
+    /// its content and structured calls instead of parsing the text again.
+    #[serde(default)]
+    pub output_parsed_by_chat_processor: bool,
 }
 
 impl Default for ParsingOptions {
@@ -544,6 +550,7 @@ impl ParsingOptions {
             exclude_tools_when_tool_choice_none:
                 crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none(),
             tools: Vec::new(),
+            output_parsed_by_chat_processor: false,
         }
     }
 

@@ -258,6 +258,10 @@ pub struct WorkerSet {
     /// Drops after engine fields and after every active request context releases it.
     allocator_trim: Option<Arc<AllocatorTrimOnDrop>>,
     allocator_trim_wrapped: bool,
+
+    /// `chat_engine` came from a Python chat-engine factory, which parses its
+    /// own output.
+    pub(crate) chat_engine_parses_output: bool,
 }
 
 impl WorkerSet {
@@ -292,6 +296,7 @@ impl WorkerSet {
             lifecycle_cancellation: None,
             allocator_trim: None,
             allocator_trim_wrapped: false,
+            chat_engine_parses_output: false,
         }
     }
 
@@ -462,6 +467,7 @@ impl WorkerSet {
                 .card
                 .runtime_config
                 .exclude_tools_when_tool_choice_none,
+            output_parsed_by_chat_processor: self.chat_engine_parses_output,
             ..crate::protocols::openai::ParsingOptions::new(
                 self.card.runtime_config.tool_call_parser.clone(),
                 self.card.runtime_config.reasoning_parser.clone(),
@@ -623,6 +629,7 @@ impl WorkerSet {
                 .map(CancellationToken::child_token),
             allocator_trim: None,
             allocator_trim_wrapped: false,
+            chat_engine_parses_output: self.chat_engine_parses_output,
         };
         if self.allocator_trim.is_some() {
             view.enable_allocator_trim_on_teardown();
