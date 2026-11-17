@@ -735,7 +735,7 @@ impl SelectionService {
 
     /// Subscribe to a worker that publishes its own requests' prefill-completed and free
     /// events as [`ScopedReplicaEvent`](dynamo_scheduler::replication::ScopedReplicaEvent)s
-    /// on the replica topic, with its worker id as `router_id`. They apply to this
+    /// on the replica topic, with `origin: Worker`. They apply to this
     /// service's booking, local or replicated, and are not republished. Requires replica
     /// sync. Returns whether membership changed.
     #[cfg(feature = "replica-sync-zmq")]

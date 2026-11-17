@@ -138,7 +138,7 @@ impl ActiveSequenceEventPublisher {
         Ok(event_sender)
     }
 
-    /// Emit a worker-origin completion mark. `router_id` carries the worker's source DRT identity.
+    /// Emit a worker-origin prefill completion mark.
     pub fn mark_prefill_completed(
         &self,
         request_id: String,
@@ -151,6 +151,7 @@ impl ActiveSequenceEventPublisher {
             worker,
             data: dynamo_slot_tracker::host::ActiveSequenceEventData::MarkPrefillCompleted,
             router_id: worker.worker_id,
+            origin: dynamo_slot_tracker::host::ActiveSequenceEventOrigin::Worker,
             lora_name: None,
         })
     }
@@ -613,6 +614,7 @@ mod tests {
             worker: WorkerWithDpRank::new(1, 0),
             data: ActiveSequenceEventData::Free,
             router_id: 7,
+            origin: Default::default(),
             lora_name: None,
         }
     }
@@ -628,6 +630,7 @@ mod tests {
                 prefill_load_hint: None,
             },
             router_id: 7,
+            origin: Default::default(),
             lora_name: None,
         }
     }
@@ -638,6 +641,7 @@ mod tests {
             worker: WorkerWithDpRank::new(1, 0),
             data: ActiveSequenceEventData::MarkPrefillCompleted,
             router_id: 7,
+            origin: Default::default(),
             lora_name: None,
         }
     }
@@ -971,6 +975,7 @@ mod tests {
                     worker: WorkerWithDpRank::new(42, 0),
                     data: ActiveSequenceEventData::MarkPrefillCompleted,
                     router_id: 1,
+                    origin: Default::default(),
                     lora_name: None,
                 })?;
                 peer.mark_prefill_completed("peer-mark".to_string(), 42, 0)?;

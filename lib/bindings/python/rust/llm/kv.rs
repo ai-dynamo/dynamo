@@ -73,6 +73,66 @@ use super::entrypoint::AisPerfConfig;
 
 mod demand_driven;
 
+#[cfg(feature = "select-service")]
+#[pyclass(frozen)]
+pub(crate) struct ActiveSequenceEventPublisher {
+    inner: parking_lot::Mutex<Option<selection::ActiveSequenceEventPublisher>>,
+    endpoint: String,
+}
+
+#[cfg(feature = "select-service")]
+#[pymethods]
+impl ActiveSequenceEventPublisher {
+    #[new]
+    #[pyo3(signature = (*, model_name, routing_group, worker_id, block_size, dp_rank=0, bind_endpoint="tcp://*:*"))]
+    fn new(
+        model_name: String,
+        routing_group: String,
+        worker_id: WorkerId,
+        block_size: u32,
+        dp_rank: DpRank,
+        bind_endpoint: &str,
+    ) -> PyResult<Self> {
+        let publisher = selection::ActiveSequenceEventPublisher::new(
+            bind_endpoint,
+            model_name,
+            routing_group,
+            dynamo_router_protocol::worker::WorkerWithDpRank::new(worker_id, dp_rank),
+            block_size,
+        )
+        .map_err(to_pyerr)?;
+        Ok(Self {
+            endpoint: publisher.endpoint().to_string(),
+            inner: parking_lot::Mutex::new(Some(publisher)),
+        })
+    }
+
+    #[getter]
+    fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    fn mark_prefill_completed(&self, request_id: &str) -> PyResult<()> {
+        if let Some(publisher) = self.inner.lock().as_mut() {
+            publisher
+                .mark_prefill_completed(request_id)
+                .map_err(to_pyerr)?;
+        }
+        Ok(())
+    }
+
+    fn free(&self, request_id: &str) -> PyResult<()> {
+        if let Some(publisher) = self.inner.lock().as_mut() {
+            publisher.free(request_id).map_err(to_pyerr)?;
+        }
+        Ok(())
+    }
+
+    fn close(&self) {
+        self.inner.lock().take();
+    }
+}
+
 const MAX_RESPONSE_BUFFER_SIZE: usize = tokio::sync::Semaphore::MAX_PERMITS;
 
 #[pyclass(frozen)]

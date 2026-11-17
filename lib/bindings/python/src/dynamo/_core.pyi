@@ -914,6 +914,35 @@ class SelectionService:
         """Endpoints of the subscribed worker publishers, sorted."""
         ...
 
+class ActiveSequenceEventPublisher:
+    """Nonblocking ZMQ publisher for worker-origin active-sequence events."""
+
+    def __init__(
+        self,
+        *,
+        model_name: str,
+        routing_group: str,
+        worker_id: int,
+        block_size: int,
+        dp_rank: int = 0,
+        bind_endpoint: str = "tcp://*:*",
+    ) -> None:
+        ...
+
+    @property
+    def endpoint(self) -> str:
+        """Bound endpoint, including the port selected by ZMQ."""
+        ...
+
+    def mark_prefill_completed(self, request_id: str) -> None:
+        ...
+
+    def free(self, request_id: str) -> None:
+        ...
+
+    def close(self) -> None:
+        ...
+
 class ModelDeploymentCard:
     """
     A model deployment card is a collection of model information

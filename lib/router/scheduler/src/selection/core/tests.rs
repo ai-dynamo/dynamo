@@ -2720,6 +2720,7 @@ async fn early_peer_accounting_follows_host_policy_without_granting_eligibility(
                         prefill_load_hint: None,
                     },
                     router_id: 99,
+                    origin: Default::default(),
                     lora_name: None,
                 })
                 .await
@@ -2786,6 +2787,7 @@ async fn mirrored_replica_bookings_are_indexed_until_freed() {
         worker: WorkerWithDpRank::new(1, 0),
         data,
         router_id: 99,
+        origin: Default::default(),
         lora_name: None,
     };
     let add = |request_id: &str| {
@@ -3639,7 +3641,7 @@ async fn worker_free_releases_the_local_booking_without_republishing() {
         outbound: Some(outbound_tx),
         inbound_tx: inbound_tx.clone(),
         inbound_rx,
-        process_id: 7,
+        process_id: 1,
         ingress_observer: None,
     }));
     let core = core_with(
@@ -3670,8 +3672,8 @@ async fn worker_free_releases_the_local_booking_without_republishing() {
             request_id: "r1".to_string(),
             worker: WorkerWithDpRank::new(1, 0),
             data: ActiveSequenceEventData::Free,
-            // The worker's own id.
             router_id: 1,
+            origin: dynamo_slot_tracker::host::ActiveSequenceEventOrigin::Worker,
             lora_name: None,
         })
         .await

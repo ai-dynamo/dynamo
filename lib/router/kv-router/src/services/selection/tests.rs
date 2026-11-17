@@ -1965,26 +1965,6 @@ async fn mesh_service(port: u16) -> SelectionService {
     .unwrap()
 }
 
-/// An event worker 1 publishes about its own request.
-fn worker_event_frames(request_id: &str, data: &str) -> Vec<Vec<u8>> {
-    let event = serde_json::json!({
-        "model_name": "model",
-        "routing_group": "default",
-        "block_size": 4,
-        "event": {
-            "request_id": request_id,
-            "worker": {"worker_id": 1, "dp_rank": 0},
-            "data": data,
-            "router_id": 1,
-            "lora_name": null,
-        },
-    });
-    vec![
-        crate::services::common::replica_sync::REPLICA_TOPIC.to_vec(),
-        rmp_serde::to_vec_named(&event).unwrap(),
-    ]
-}
-
 fn service_load(service: &SelectionService) -> (usize, usize, usize) {
     let loads = service.loads(Some("model"), Some("default"));
     let load = &loads[0].loads[0];
@@ -2004,21 +1984,27 @@ async fn worker_events_reach_every_selector_after_the_booking_one_leaves() {
         .register_replica_peer(format!("tcp://127.0.0.1:{port_a}"))
         .await
         .unwrap();
-    let worker_endpoint = format!("tcp://127.0.0.1:{}", reserve_tcp_port());
-    let mut worker =
-        crate::services::common::zmq::create_bound_pub_socket(&worker_endpoint).unwrap();
+    let worker_id = 1;
+    let mut worker = ActiveSequenceEventPublisher::new(
+        "tcp://127.0.0.1:*",
+        "model".to_string(),
+        "default".to_string(),
+        WorkerWithDpRank::new(worker_id, 0),
+        4,
+    )
+    .unwrap();
     for service in [&service_a, &service_b] {
-        let worker: WorkerRequest = serde_json::from_value(serde_json::json!({
-            "worker_id": 1,
+        let worker_record: WorkerRequest = serde_json::from_value(serde_json::json!({
+            "worker_id": worker_id,
             "model_name": "model",
             "endpoint": "http://worker-1:8000",
             "block_size": 4
         }))
         .unwrap();
-        service.upsert_worker(worker).await.unwrap();
+        service.upsert_worker(worker_record).await.unwrap();
         assert!(
             service
-                .register_worker_publisher(worker_endpoint.clone())
+                .register_worker_publisher(worker.endpoint().to_string())
                 .await
                 .unwrap()
         );
@@ -2041,10 +2027,7 @@ async fn worker_events_reach_every_selector_after_the_booking_one_leaves() {
     wait_for_service_load(&service_b, 1, 1, 4).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while service_load(&service_a) != (0, 0, 0) || service_load(&service_b) != (0, 0, 0) {
-            worker
-                .send_multipart(worker_event_frames("warmup", "Free"))
-                .await
-                .unwrap();
+            worker.free("warmup").unwrap();
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
@@ -2059,15 +2042,9 @@ async fn worker_events_reach_every_selector_after_the_booking_one_leaves() {
     service_a.shutdown().await;
     drop(service_a);
 
-    worker
-        .send_multipart(worker_event_frames("target", "MarkPrefillCompleted"))
-        .await
-        .unwrap();
+    worker.mark_prefill_completed("target").unwrap();
     wait_for_service_load(&service_b, 1, 1, 0).await;
-    worker
-        .send_multipart(worker_event_frames("target", "Free"))
-        .await
-        .unwrap();
+    worker.free("target").unwrap();
     wait_for_service_load(&service_b, 0, 0, 0).await;
     service_b.shutdown().await;
 }

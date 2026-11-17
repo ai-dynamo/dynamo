@@ -7,6 +7,6 @@
 pub(crate) use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 
 pub(crate) use crate::wire::{
-    ActiveSequenceEvent, ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION,
-    MAX_REPLICA_BATCH_EVENTS, PrefillLoadHint,
+    ActiveSequenceEvent, ActiveSequenceEventData, ActiveSequenceEventOrigin,
+    MAX_REPLICA_BATCH_DURATION, MAX_REPLICA_BATCH_EVENTS, PrefillLoadHint,
 };

@@ -18,7 +18,8 @@ pub use crate::prompt_registry::WorkerLoadProjection;
 pub use crate::single::ActiveSequences;
 pub use crate::topology::WorkerDpRange;
 pub use crate::wire::{
-    ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, SchedulerGroup, SchedulerLoad,
+    ActiveSequenceEvent, ActiveSequenceEventData, ActiveSequenceEventOrigin, PrefillLoadHint,
+    SchedulerGroup, SchedulerLoad,
 };
 
 // What the frontend host (lib/llm) names beyond the lists above.

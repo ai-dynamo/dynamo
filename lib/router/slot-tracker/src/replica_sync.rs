@@ -17,8 +17,8 @@ use super::prompt_registry::WorkerLoadSnapshot;
 use super::single::PrefillCompletion;
 use crate::booking::SchedulerBookingDescriptor;
 use crate::prelude::{
-    ActiveSequenceEvent, ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION,
-    MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
+    ActiveSequenceEvent, ActiveSequenceEventData, ActiveSequenceEventOrigin,
+    MAX_REPLICA_BATCH_DURATION, MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
 };
 
 /// How long an early worker mark waits for its replicated booking.
@@ -80,12 +80,18 @@ impl EarlyWorkerMarks {
     }
 
     /// Take the mark a booking of `request_id` on `worker` must honor.
-    fn take(&mut self, request_id: &str, worker: WorkerWithDpRank) -> Option<EarlyWorkerMark> {
+    fn take(
+        &mut self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+        now: Instant,
+    ) -> Option<EarlyWorkerMark> {
         if self.marks.is_empty() {
             return None;
         }
-        let (marked_worker, mark, _) = self.marks.remove(request_id)?;
-        (marked_worker == worker).then_some(mark)
+        let (marked_worker, mark, recorded_at) = self.marks.remove(request_id)?;
+        (marked_worker == worker && now.duration_since(recorded_at) < EARLY_WORKER_MARK_TTL)
+            .then_some(mark)
     }
 }
 
@@ -233,16 +239,16 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             data,
             router_id,
             lora_name,
+            origin,
         } = event;
 
-        if router_id == self.router_id {
+        if origin == ActiveSequenceEventOrigin::Router && router_id == self.router_id {
             return;
         }
         if !self.replica_sync && !matches!(data, ActiveSequenceEventData::MarkPrefillCompleted) {
             return;
         }
-        // Workers stamp their own id as `router_id`.
-        let remember_early_mark = self.replica_sync && router_id == event_worker.worker_id;
+        let remember_early_mark = self.replica_sync && origin == ActiveSequenceEventOrigin::Worker;
 
         // ActiveSequenceEvent does not carry prompt-load decay timestamps yet.
         // Peer routers still approximate decay anchoring with local receive time.
@@ -255,10 +261,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 expected_output_tokens,
                 prefill_load_hint,
             } => {
-                let early_mark = self
-                    .early_worker_marks
-                    .lock()
-                    .take(&request_id, event_worker);
+                let early_mark =
+                    self.early_worker_marks
+                        .lock()
+                        .take(&request_id, event_worker, decay_now);
                 if early_mark == Some(EarlyWorkerMark::Freed) {
                     return;
                 }
@@ -320,6 +326,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                         data: ActiveSequenceEventData::MarkPrefillCompleted,
                         router_id,
                         lora_name: None,
+                        origin,
                     });
                 if let Some(observer) = self.replica_request_lease_observer() {
                     observer.admitted(booking);

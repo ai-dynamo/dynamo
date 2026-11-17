@@ -1917,6 +1917,7 @@ mod tests {
                 worker: WorkerWithDpRank::new(0, 0),
                 data: ActiveSequenceEventData::MarkPrefillCompleted,
                 router_id: 1,
+                origin: Default::default(),
                 lora_name: None,
             })
             .unwrap();
@@ -2002,6 +2003,7 @@ mod tests {
                 worker: WorkerWithDpRank::new(0, 0),
                 data: ActiveSequenceEventData::Free,
                 router_id: 1,
+                origin: Default::default(),
                 lora_name: None,
             })
             .unwrap();
@@ -2086,6 +2088,7 @@ mod tests {
                 worker: WorkerWithDpRank::new(0, 0),
                 data: ActiveSequenceEventData::Free,
                 router_id: 1,
+                origin: Default::default(),
                 lora_name: None,
             })
             .unwrap();

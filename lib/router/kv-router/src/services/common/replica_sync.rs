@@ -517,6 +517,7 @@ mod tests {
                 worker: WorkerWithDpRank::new(1, 0),
                 data: ActiveSequenceEventData::Free,
                 router_id: 42,
+                origin: Default::default(),
                 lora_name: None,
             },
         }
