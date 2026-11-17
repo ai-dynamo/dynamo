@@ -211,7 +211,10 @@ with TypeSafeClient(
 
 ## Interpret Usage and Failures
 
-Input usage counts rendered prompts across question executions, not only the shared input text. SGLang scores without decoding output tokens. The OpenAI `cache_write_tokens=0` value is a Dynamo accounting convention, not a measured physical KV-write counter or a claim about OpenAI's policy. Cache-read values come from backend measurements; an absent measurement must not be treated as zero. Request-local prefix sharing does not enable trusted cross-request KV reuse.
+Input usage counts rendered prompts across question executions, not only the shared input text. SGLang scores without decoding output tokens. Cache-read values come from backend measurements; an absent measurement must not be treated as zero. Questions in one request can reuse cached prefixes, but separate requests do not share them.
+
+> [!NOTE]
+> Dynamo currently always returns `usage.input_tokens_details.cache_write_tokens: 0` because cache-write usage is not measured. This value does not mean that caching is disabled or that no KV blocks were written. The current Decisions response schema requires an integer, so omission, `null`, and `"N/A"` are not supported. Use `cached_tokens` for measured cache reads; it is separate from the unmeasured write count.
 
 | Outcome | OpenAI Decisions | Jev System One |
 | --- | --- | --- |
