@@ -17,6 +17,7 @@ use crate::{
     kv_router::{EncoderRouter, KvRouter, PrefillRouter, RoutingHost, RoutingLoadContext},
     migration::Migration,
     model_card::ModelDeploymentCard,
+    model_type::ModelInput,
     namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
@@ -350,9 +351,10 @@ pub async fn prepare_engine(
         }
         EngineConfig::InProcessTokens {
             engine: inner_engine,
-            model,
+            mut model,
             ..
         } => {
+            model.configure_in_process(ModelInput::Tokens);
             let pipeline = build_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,

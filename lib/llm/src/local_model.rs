@@ -553,6 +553,11 @@ impl LocalModel {
         &self.card
     }
 
+    pub(crate) fn configure_in_process(&mut self, input: ModelInput) {
+        self.card.model_type = ModelType::Chat | ModelType::Completions;
+        self.card.model_input = input;
+    }
+
     pub fn path(&self) -> &Path {
         &self.full_path
     }

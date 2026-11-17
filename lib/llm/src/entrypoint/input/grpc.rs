@@ -11,6 +11,7 @@ use crate::{
     grpc::service::kserve,
     http::service::metrics::Metrics,
     local_model::runtime_config::TokenizerBackend,
+    model_type::ModelInput,
     namespace::NamespaceFilter,
     types::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -78,7 +79,10 @@ pub async fn run(
             .await?;
             grpc_service
         }
-        EngineConfig::InProcessText { engine, model, .. } => {
+        EngineConfig::InProcessText {
+            engine, mut model, ..
+        } => {
+            model.configure_in_process(ModelInput::Text);
             let grpc_service = grpc_service_builder.build()?;
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = grpc_service.model_manager();
@@ -94,9 +98,10 @@ pub async fn run(
         }
         EngineConfig::InProcessTokens {
             engine: inner_engine,
-            model,
+            mut model,
             ..
         } => {
+            model.configure_in_process(ModelInput::Tokens);
             let grpc_service = grpc_service_builder.build()?;
             let manager = grpc_service.model_manager();
             let checksum = model.card().mdcsum();
@@ -107,11 +112,12 @@ pub async fn run(
                 NvCreateChatCompletionStreamResponse,
             >(model.card(), inner_engine.clone(), tokenizer.clone())
             .await?;
-            manager.add_chat_completions_model_with_card(
+            manager.add_chat_completions_model_with_card_and_tokenizer(
                 model.service_name(),
                 checksum,
                 model.card().clone(),
                 chat_pipeline,
+                Some(tokenizer.clone()),
             )?;
 
             let cmpl_pipeline =
@@ -211,7 +217,7 @@ mod tests {
     #[tokio::test]
     async fn metrics_bind_failure_shuts_down_dynamic_and_in_process_runtimes() {
         for dynamic in [true, false] {
-            let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let occupied = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
             let model = Box::new(
                 LocalModelBuilder::default()
                     .model_name(Some("bind-failure".to_string()))

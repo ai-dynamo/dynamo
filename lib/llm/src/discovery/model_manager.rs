@@ -1720,19 +1720,37 @@ impl ModelManager {
         &self,
         model: &str,
         card_checksum: &str,
-        mut card: ModelDeploymentCard,
+        card: ModelDeploymentCard,
         engine: OpenAIChatCompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        self.add_chat_completions_model_with_card_and_tokenizer(
+            model,
+            card_checksum,
+            card,
+            engine,
+            None,
+        )
+    }
+
+    pub(crate) fn add_chat_completions_model_with_card_and_tokenizer(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        mut card: ModelDeploymentCard,
+        engine: OpenAIChatCompletionsStreamingEngine,
+        mut tokenizer: Option<crate::tokenizers::Tokenizer>,
+    ) -> Result<(), ModelManagerError> {
+        card.model_type.insert(ModelType::Chat);
         card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
         card.needs = Vec::new();
         let input_policy = crate::chat_input::ChatInputPolicy::from_card(&card)
             .map_err(|error| ModelManagerError::ModelUnavailable(format!("{model}: {error:#}")))?;
         // The caller owns the already-built engine, including parser validation.
         // Still keep HTTP aggregation consistent with the card's tokenizer.
-        let unsupported_family = super::watcher::unsupported_unified_family(
-            &card, &mut None, false,
-        )
-        .map_err(|error| ModelManagerError::ModelUnavailable(format!("{model}: {error:#}")))?;
+        let unsupported_family =
+            super::watcher::unsupported_unified_family(&card, &mut tokenizer, false).map_err(
+                |error| ModelManagerError::ModelUnavailable(format!("{model}: {error:#}")),
+            )?;
         let _reservation = self.reservation_lock.lock();
         self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
@@ -4702,8 +4720,8 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn in_process_registration_preserves_token_gated_mistral_family() {
+    #[tokio::test]
+    async fn in_process_registration_preserves_token_gated_mistral_family() {
         const MODE: &str = "DYNAMO_LOCAL_MISTRAL_FAMILY_MODE";
         let Ok(mode) = std::env::var(MODE) else {
             for mode in ["auto", "1", "2"] {
@@ -4727,11 +4745,19 @@ mod tests {
             ] {
                 for parser in ["mistral", "mistral_4"] {
                     let manager = ModelManager::new();
-                    let mut card = ModelDeploymentCard::load_from_disk(path, None).unwrap();
-                    card.model_type = ModelType::Chat;
+                    let model = crate::local_model::LocalModelBuilder::default()
+                        .model_path(path.into())
+                        .runtime_config(ModelRuntimeConfig {
+                            tool_call_parser: Some(parser.into()),
+                            reasoning_parser: Some(parser.into()),
+                            ..Default::default()
+                        })
+                        .build()
+                        .await
+                        .unwrap();
+                    let mut card = model.card().clone();
+                    assert!(card.model_type.is_empty());
                     card.model_input = input;
-                    card.runtime_config.tool_call_parser = Some(parser.into());
-                    card.runtime_config.reasoning_parser = Some(parser.into());
                     manager
                         .add_chat_completions_model_with_card(
                             "mistral",

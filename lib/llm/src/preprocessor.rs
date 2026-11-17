@@ -11322,6 +11322,142 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn in_process_mistral_parser_eligibility_matches_registration() {
+        use crate::local_model::LocalModelBuilder;
+        use crate::model_type::{ModelInput, ModelType};
+
+        const MODE: &str = "DYN_TEST_IN_PROCESS_MISTRAL_MODE";
+        let Ok(mode) = std::env::var(MODE) else {
+            for mode in ["auto", "1", "2"] {
+                assert!(crate::test_utils::run_isolated(
+                    concat!(
+                        module_path!(),
+                        "::in_process_mistral_parser_eligibility_matches_registration"
+                    ),
+                    &[("DYN_PARSER_VERSION", mode), (MODE, mode)],
+                ));
+            }
+            return;
+        };
+        for (fixture, has_unified_tokens) in [
+            ("mock-llama-3.1-8b-instruct", false),
+            ("mock-mistral-tekken", true),
+        ] {
+            for input in [ModelInput::Tokens, ModelInput::Text] {
+                for parser in [None, Some("mistral"), Some("mistral_4")] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("tests/data/sample-models")
+                        .join(fixture);
+                    for entry in std::fs::read_dir(source).unwrap() {
+                        let entry = entry.unwrap();
+                        if matches!(
+                            entry
+                                .path()
+                                .extension()
+                                .and_then(|extension| extension.to_str()),
+                            Some("json" | "jinja")
+                        ) {
+                            std::fs::copy(entry.path(), dir.path().join(entry.file_name()))
+                                .unwrap();
+                        }
+                    }
+                    let config = crate::local_model::runtime_config::ModelRuntimeConfig {
+                        tool_call_parser: parser.map(str::to_string),
+                        reasoning_parser: parser.map(str::to_string),
+                        ..Default::default()
+                    };
+                    let mut model = LocalModelBuilder::default()
+                        .model_path(dir.path().to_path_buf())
+                        .runtime_config(config)
+                        .build()
+                        .await
+                        .unwrap();
+                    assert!(model.card().model_type.is_empty());
+                    model.configure_in_process(input);
+                    let card = model.card();
+                    let tokenizer = card.tokenizer().unwrap();
+                    let preprocessor = if input == ModelInput::Tokens {
+                        let PromptFormatter::OAI(formatter) =
+                            prompt::prompt_formatter_from_mdc(card).unwrap();
+                        let result = OpenAIPreprocessor::new_with_parts(
+                            card.clone(),
+                            formatter,
+                            tokenizer.clone(),
+                        );
+                        let invalid = (parser == Some("mistral_4") && mode == "1")
+                            || (!has_unified_tokens
+                                && (parser == Some("mistral_4")
+                                    || (parser.is_some() && mode == "2")));
+                        if invalid {
+                            let error = result.err().expect("unsupported Rust parser must fail");
+                            let expected = if mode == "1" {
+                                "no compatible v1 parser"
+                            } else {
+                                "[ARGS]"
+                            };
+                            assert!(error.to_string().contains(expected), "{error:#}");
+                            continue;
+                        }
+                        let preprocessor = result.unwrap();
+                        assert_eq!(
+                            preprocessor.unified_family(),
+                            (has_unified_tokens && parser.is_some() && mode != "1")
+                                .then_some("mistral_4"),
+                            "fixture={fixture}, input={input:?}, parser={parser:?}, mode={mode}"
+                        );
+                        Some(preprocessor)
+                    } else {
+                        None
+                    };
+                    assert_eq!(card.model_type, ModelType::Chat | ModelType::Completions);
+                    assert_eq!(card.model_input, input);
+                    let engine = Arc::new(crate::engines::StreamingEngineAdapter::new(
+                        crate::engines::make_echo_engine(),
+                    ));
+                    if !has_unified_tokens {
+                        std::fs::remove_file(
+                            card.tokenizer
+                                .as_ref()
+                                .unwrap()
+                                .checked_file()
+                                .path()
+                                .unwrap(),
+                        )
+                        .unwrap();
+                    }
+                    let manager = crate::discovery::ModelManager::new();
+                    manager
+                        .add_chat_completions_model_with_card_and_tokenizer(
+                            "mistral",
+                            card.mdcsum(),
+                            card.clone(),
+                            engine,
+                            Some(tokenizer),
+                        )
+                        .unwrap();
+                    let (_, options) = manager
+                        .get_chat_completions_engine_with_parsing("mistral")
+                        .unwrap();
+                    assert_eq!(
+                        options.unsupported_unified_family.as_deref(),
+                        (!has_unified_tokens && parser.is_some()).then_some("mistral_4")
+                    );
+                    if let Some(preprocessor) = preprocessor {
+                        assert_eq!(
+                            preprocessor.unified_family(),
+                            options.resolved_unified_family()
+                        );
+                    }
+                    let checksum = card.mdcsum().to_string();
+                    model.configure_in_process(input);
+                    assert_eq!(model.card().mdcsum(), checksum);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn gemma_prompt_channel_preserves_optional_label_ownership() {
         use crate::protocols::openai::chat_completions::unified_parser;
         if unified_parser::selected_family(Some("gemma4"), Some("gemma4")).is_none() {
