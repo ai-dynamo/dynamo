@@ -64,8 +64,9 @@ use crate::preprocessor::{
 };
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, NvExt as CommonNvExt,
-    SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, agent_context_from_headers,
-    apply_frontend_nvext_policy, has_non_cache_salt_routing_headers, session_affinity_from_headers,
+    SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, UPSTREAM_ELAPSED_CONTEXT_KEY,
+    agent_context_from_headers, apply_frontend_nvext_policy, has_non_cache_salt_routing_headers,
+    session_affinity_from_headers, upstream_elapsed_from_headers,
 };
 use crate::protocols::common::input_trigger::{
     classify_chat_request, classify_completion_request, classify_response_request,
@@ -1244,6 +1245,18 @@ where
     Ok(request)
 }
 
+/// Record how long a gateway held the request before forwarding it, from its routing header.
+/// Like the other routing headers it is honored only while NvExt is enabled.
+pub(super) fn attach_upstream_elapsed<T: Send + Sync + 'static>(
+    request: &mut Context<T>,
+    headers: &HeaderMap,
+    nvext_enabled: bool,
+) {
+    if nvext_enabled && let Some(upstream_elapsed) = upstream_elapsed_from_headers(headers) {
+        request.insert(UPSTREAM_ELAPSED_CONTEXT_KEY, upstream_elapsed);
+    }
+}
+
 /// [`context_from_headers`] for handlers that build the [`PreprocessedRequest`] themselves.
 ///
 /// The OpenAI routes get `agent_context` copied onto the request by the preprocessor
@@ -1282,6 +1295,9 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
             SESSION_AFFINITY_CONTEXT_KEY,
             session_affinity.as_ref().clone(),
         );
+    }
+    if let Ok(upstream_elapsed) = source.get::<std::time::Duration>(UPSTREAM_ELAPSED_CONTEXT_KEY) {
+        target.insert(UPSTREAM_ELAPSED_CONTEXT_KEY, *upstream_elapsed);
     }
 }
 
@@ -1345,10 +1361,11 @@ async fn handler_completions(
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request =
+    let mut request =
         context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
             Some(classify_completion_request(request))
         })?;
+    attach_upstream_elapsed(&mut request, &headers, state.nvext_enabled());
     let context = request.context();
 
     // create the connection handles
@@ -2720,6 +2737,7 @@ async fn handler_chat_completions(
                 return Err(error);
             }
         };
+    attach_upstream_elapsed(&mut request, &headers, state.nvext_enabled());
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -4835,6 +4853,7 @@ async fn handler_responses(
         context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
             Some(classify_response_request(request))
         })?;
+    attach_upstream_elapsed(&mut request, &headers, state.nvext_enabled());
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -7589,6 +7608,35 @@ mod tests {
                 .input_trigger,
             Some(InputTrigger::Other)
         );
+    }
+
+    #[test]
+    fn test_upstream_elapsed_follows_the_nvext_switch_and_survives_a_context_copy() {
+        use std::time::Duration;
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dynamo-elapsed-since-arrival-ms", "1500".parse().unwrap());
+
+        let mut disabled = context_from_headers((), "request-1".to_string(), &headers).unwrap();
+        attach_upstream_elapsed(&mut disabled, &headers, false);
+        assert!(
+            disabled
+                .get::<Duration>(UPSTREAM_ELAPSED_CONTEXT_KEY)
+                .is_err()
+        );
+
+        let mut source = context_from_headers((), "request-2".to_string(), &headers).unwrap();
+        attach_upstream_elapsed(&mut source, &headers, true);
+        let mut target = Context::new(());
+        copy_context_metadata(&source, &mut target);
+        for context in [&source, &target] {
+            assert_eq!(
+                *context
+                    .get::<Duration>(UPSTREAM_ELAPSED_CONTEXT_KEY)
+                    .unwrap(),
+                Duration::from_millis(1500)
+            );
+        }
     }
 
     #[test]
