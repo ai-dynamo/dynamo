@@ -552,24 +552,27 @@ pub(crate) fn validated_effective_tools(
     };
 
     validate_tools(&Some(tools.as_ref()))?;
-    // Dynamic system tools can update a definition across turns. Check only the
-    // request-level declarations, whose schemas must not depend on list order.
+    // Check only top-level declarations; dynamic system tools retain their
+    // existing behavior.
     if let Some(request_tools) = request.tools.as_deref().filter(|tools| tools.len() > 1) {
-        let mut definitions: HashMap<&str, (usize, &FunctionObject)> = HashMap::new();
+        let mut definitions: HashMap<&str, usize> = HashMap::new();
         for (index, tool) in request_tools.iter().enumerate() {
-            let function = &tool.function;
-            if let Some((first_index, first)) = definitions.get(function.name.as_str()) {
-                if first.parameters != function.parameters || first.strict != function.strict {
-                    anyhow::bail!(
-                        "Conflicting definitions for tool '{}' in tools[{}] and tools[{}]: \
-                         parameter schemas or strict settings differ",
-                        function.name,
-                        first_index,
-                        index,
-                    );
-                }
-            } else {
-                definitions.insert(&function.name, (index, function));
+            let first_index = *definitions
+                .entry(tool.function.name.as_str())
+                .or_insert(index);
+            if first_index == index {
+                continue;
+            }
+            let first = &request_tools[first_index].function;
+            if first.parameters != tool.function.parameters || first.strict != tool.function.strict
+            {
+                anyhow::bail!(
+                    "Conflicting definitions for tool '{}' in tools[{}] and tools[{}]: \
+                     parameter schemas or strict settings differ",
+                    tool.function.name,
+                    first_index,
+                    index,
+                );
             }
         }
     }
@@ -1063,10 +1066,10 @@ mod tests {
                 }))
                 .unwrap();
                 let error = validated_effective_tools(&request).unwrap_err().to_string();
-                assert!(error.contains("lookup"), "{error}");
-                assert!(
-                    error.contains("tools[0]") && error.contains("tools[1]"),
-                    "{error}"
+                assert_eq!(
+                    error,
+                    "Conflicting definitions for tool 'lookup' in tools[0] and tools[1]: \
+                     parameter schemas or strict settings differ"
                 );
             }
         }
@@ -1095,7 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn top_level_tool_check_does_not_reject_dynamic_system_updates() {
+    fn top_level_tool_check_preserves_dynamic_system_declarations() {
         let request: CreateChatCompletionRequest = serde_json::from_value(json!({
             "model":"test",
             "tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],
