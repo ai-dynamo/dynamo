@@ -454,11 +454,6 @@ impl
             }
             return next.generate(context.map(|_| request)).await;
         }
-        crate::routing_policy::check_stage(
-            &request,
-            crate::routing_policy::ExecutionStage::Encoder,
-        )?;
-
         let binding = self.binding.load_full();
         if !required
             && let Some(modalities) = binding
@@ -472,6 +467,10 @@ impl
         {
             return next.generate(context.map(|_| request)).await;
         }
+        crate::routing_policy::check_stage(
+            &request,
+            crate::routing_policy::ExecutionStage::Encoder,
+        )?;
         let mut encode_request = request.clone();
         if let Some(routing) = &mut encode_request.routing {
             routing.backend_instance_id = None;
@@ -543,7 +542,10 @@ impl
         let response_context = response.context();
         let stream = async_stream::stream! {
             let mut cleanup = cleanup;
-            while let Some(item) = response.next().await {
+            while cleanup.request.is_some() {
+                let Some(item) = response.next().await else {
+                    return;
+                };
                 if item.data.as_ref().is_some_and(|output| {
                     !output.token_ids.is_empty()
                         || matches!(output.finish_reason, Some(FinishReason::EoS | FinishReason::Length | FinishReason::Stop))
@@ -556,6 +558,9 @@ impl
                 }) {
                     cleanup.release().await;
                 }
+                yield item;
+            }
+            while let Some(item) = response.next().await {
                 yield item;
             }
         };

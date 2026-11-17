@@ -173,9 +173,10 @@ async fn optional_encoder_skips_unsupported_media_as_a_whole() {
         .insert(ENCODER_SUPPORTED_MODALITIES.into(), json!(["image_url"]));
     let fixture = Fixture::with_card(card).await;
     let router = &fixture.router;
-    for required in [false, true] {
+    for (required, has_runtime_lora) in [(false, false), (true, false), (false, true), (true, true)]
+    {
         router.set_required(required);
-        for kind in ["video_url", "audio_url"] {
+        for kind in ["image_url", "video_url", "audio_url"] {
             let mut input = media_request(kind);
             // Mixed inputs must stay inline as a whole, never partially encoded.
             input.multi_modal_data.as_mut().unwrap().insert(
@@ -186,23 +187,56 @@ async fn optional_encoder_skips_unsupported_media_as_a_whole() {
                     .remove("image_url")
                     .unwrap(),
             );
+            if has_runtime_lora {
+                input.routing = Some(crate::protocols::common::preprocessor::RoutingHints {
+                    lora_name: Some(crate::lora::runtime::adapter_key(
+                        "model",
+                        "custom:///opaque",
+                    )),
+                    base_model_name: Some("model".into()),
+                    lora_source_uri: Some(crate::lora::runtime::RuntimeLoraSourceUri::new(
+                        "custom:///opaque".into(),
+                    )),
+                    lora_resolution_version: Some(
+                        crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION,
+                    ),
+                    ..Default::default()
+                });
+            }
+            let expected = serde_json::to_value(&input).unwrap();
+            let before = fixture.encode_calls.load(Ordering::SeqCst);
+            let should_encode = required || kind == "image_url";
             let downstream = Arc::new(CaptureEngine::default());
             let response = router
                 .generate(SingleIn::new(input), downstream.clone())
                 .await;
+            if has_runtime_lora && should_encode {
+                let error = response.unwrap_err();
+                assert!(dynamo_runtime::error::match_error_chain(
+                    error.as_ref(),
+                    &[dynamo_runtime::error::ErrorType::InvalidArgument],
+                    &[],
+                ));
+                assert!(
+                    error
+                        .to_string()
+                        .contains("runtime_lora_encoder_unsupported")
+                );
+                assert_eq!(fixture.encode_calls.load(Ordering::SeqCst), before);
+                assert!(downstream.request.lock().unwrap().is_none());
+                continue;
+            }
             drop(response.unwrap());
+            let captured = downstream.request.lock().unwrap().take().unwrap();
             assert_eq!(
-                downstream
-                    .request
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .unwrap()
-                    .encoder_result
-                    .is_some(),
-                required,
+                captured.encoder_result.is_some(),
+                should_encode,
                 "optional hints must not reject required traffic accepted by the producer",
             );
+            if !should_encode {
+                assert_eq!(serde_json::to_value(captured).unwrap(), expected);
+                assert_eq!(fixture.encode_calls.load(Ordering::SeqCst), before);
+            }
         }
     }
 

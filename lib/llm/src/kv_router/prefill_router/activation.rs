@@ -688,6 +688,27 @@ impl PrefillRouter {
         (**self.activation.load()).clone()
     }
 
+    /// Resolve again after waits: a retired binding cannot admit new Prefill work.
+    pub(super) fn binding_for_request(
+        &self,
+        request: &crate::protocols::common::llm_backend::PreprocessedRequest,
+    ) -> Result<Option<Arc<PrefillBinding>>> {
+        match self.activation_snapshot() {
+            PrefillActivation::Active(binding) => Ok(Some(binding)),
+            PrefillActivation::Pending { .. } => Err(super::prefill_activation_pending_error(
+                &self.model_name,
+                &self.namespace,
+            )),
+            PrefillActivation::Untargeted {
+                encoder_result_requires_prefill,
+                ..
+            } => {
+                self.validate_passthrough(request, encoder_result_requires_prefill)?;
+                Ok(None)
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn set_test_binding(&self, binding: Option<Arc<PrefillBinding>>) {
         let activation = match binding {

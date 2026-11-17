@@ -27,7 +27,8 @@ operators in front of it, not `RoutingHost`s. `PrefillRouter` holds a separate `
 the prefill worker set (built in `prefill_router/activation.rs`) and sends the prefill hop
 through it. It also keeps a handle to the decode `RoutingHost`, which it uses only to preview
 decode for conditional disaggregation. `EncoderRouter` sends the encode hop through its own
-round-robin `PushRouter`.
+round-robin `PushRouter`. `prefill_router/mod.rs` coordinates conditional admission and parked
+classifier state; `prefill_router/dispatch.rs` handles the Prefill hop and Decode continuation.
 
 A `RoutingHost` serves one worker set. What it holds (composition, not call order):
 
