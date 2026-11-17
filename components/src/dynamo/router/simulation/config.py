@@ -113,6 +113,9 @@ class RouterPredictionConfig(BaseModel):
     prefill_load_scale: StrictFiniteFloat | None = None
     temperature: StrictFiniteFloat | None = None
     conversation_affinity: ConversationAffinityConfig | None = None
+    # Router policy YAML, the file the live router takes as ``--router-policy-config``.
+    # A worker-selection policy it selects replaces the default cost function.
+    policy_config: str | None = None
 
     @field_validator(
         "overlap_score_credit",
@@ -132,6 +135,7 @@ class RouterPredictionConfig(BaseModel):
             conflicts = {
                 "conversation_affinity",
                 "overlap_score_credit",
+                "policy_config",
                 "prefill_load_scale",
                 "temperature",
             }.intersection(self.model_fields_set)

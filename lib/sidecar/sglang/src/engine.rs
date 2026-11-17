@@ -568,6 +568,7 @@ impl LLMEngine for SglangSidecarEngine {
                 topic: source.topic.clone(),
                 dp_rank: source.dp_rank,
                 image_token_id: None,
+                idempotent_stores: true,
             })
             .collect())
     }

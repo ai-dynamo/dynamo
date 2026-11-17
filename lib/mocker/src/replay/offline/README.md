@@ -20,6 +20,14 @@ composition:
 See the [`aisimulate-core` crate](https://crates.io/crates/aisimulate-core) for the
 virtual-time runtime and its liveness contract.
 
+## Worker-selection policies
+
+Each worker pool runs the worker-selection policy the router config selects for its role,
+resolved from `ReplayScope::router_plugins` (the policies Dynamo ships when unset). The policy
+is built by its registered factory, so the replay seed does not reach it and a policy that
+reads the clock reads wall time. Conversation affinity pins a session's worker under every
+policy. `request_classifier` plugins are not supported.
+
 ## Reproducibility
 
 `arrival_seed` in the Python replay API controls request arrival generation only.

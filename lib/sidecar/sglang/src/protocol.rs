@@ -226,6 +226,11 @@ fn media_data(request: &PreprocessedRequest) -> Result<[Option<pb::MediaInput>; 
 /// network and inline sources are forwarded.
 fn media_source(item: &MultimodalData) -> Result<String, DynamoError> {
     let source = match item {
+        MultimodalData::Json(_) => {
+            return Err(client::invalid_request(
+                "Custom JSON content requires a dynamo.vllm worker; the SGLang sidecar does not support it",
+            ));
+        }
         MultimodalData::Url(url) => url.as_str(),
         MultimodalData::RawUrl(source) => source,
         MultimodalData::Decoded(_) => {
