@@ -36,11 +36,13 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Generator
 
 import pytest
 import requests
+from PIL import Image, ImageOps
 
 from tests.mm_router.utils import (
     COMMON_PROCESS_KWARGS,
@@ -278,18 +280,48 @@ def _make_image_handler(image_map: dict[str, bytes]) -> type:
     return _ImageHandler
 
 
+def _make_exif_rotated_png_pair() -> tuple[bytes, bytes]:
+    """Return (upright PNG, stored PNG tagged EXIF Orientation 6).
+
+    Non-square with one marked corner, so a missed rotation changes both the
+    decoded shape and the pixels."""
+    stored = Image.new("RGB", (256, 128), (20, 120, 200))
+    stored.paste((240, 200, 30), (0, 0, 64, 32))
+    exif = Image.Exif()
+    exif[0x0112] = 6  # Orientation: rotate 90 degrees clockwise to display
+    upright = stored.transpose(Image.Transpose.ROTATE_270)
+
+    def encode(image: Image.Image, **save_kwargs: Any) -> bytes:
+        buffer = BytesIO()
+        image.save(buffer, format="PNG", **save_kwargs)
+        return buffer.getvalue()
+
+    upright_bytes = encode(upright)
+    tagged_bytes = encode(stored, exif=exif.tobytes())
+    # Pillow reads the tag the way vLLM's loader does (ImageOps.exif_transpose).
+    loaded = ImageOps.exif_transpose(Image.open(BytesIO(tagged_bytes)))
+    assert loaded.size == upright.size and loaded.tobytes() == upright.tobytes()
+    return upright_bytes, tagged_bytes
+
+
 @pytest.fixture(scope="module")
 def http_image_server_with_alias() -> Generator[dict[str, str], None, None]:
     """Serve PNGs over HTTP. Two distinct paths (`/image_A.png` and
     `/image_A_alias.png`) return *byte-identical* content; the
     content-hash assertion below relies on this. Distinct paths defeat
-    URL-string hashing — only content hashing collides them."""
+    URL-string hashing — only content hashing collides them.
+
+    `/exif_upright.png` and `/exif_tagged.png` hold the same picture, the
+    second stored unrotated with an EXIF orientation tag."""
     with reserved_ports(count=1, start_port=18600) as ports:
         port = ports[0]
         primary_bytes = make_png_bytes((180, 30, 90))
+        exif_upright_bytes, exif_tagged_bytes = _make_exif_rotated_png_pair()
         image_map: dict[str, bytes] = {
             "/image_A.png": primary_bytes,
             "/image_A_alias.png": primary_bytes,  # byte-identical, different URL
+            "/exif_upright.png": exif_upright_bytes,
+            "/exif_tagged.png": exif_tagged_bytes,
         }
         server = HTTPServer(("127.0.0.1", port), _make_image_handler(image_map))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -298,6 +330,8 @@ def http_image_server_with_alias() -> Generator[dict[str, str], None, None]:
             yield {
                 "primary": f"http://127.0.0.1:{port}/image_A.png",
                 "alias": f"http://127.0.0.1:{port}/image_A_alias.png",
+                "exif_upright": f"http://127.0.0.1:{port}/exif_upright.png",
+                "exif_tagged": f"http://127.0.0.1:{port}/exif_tagged.png",
             }
         finally:
             server.shutdown()
@@ -376,6 +410,52 @@ def test_frontend_decode_content_hash_collides_across_urls(
     assert cached_2 is not None and cached_2 > prompt_tokens_2 // 2, (
         f"expected high vLLM cached_tokens on warm alias request "
         f"(content hash should match the worker's KV cache key), got "
+        f"cached={cached_2}, prompt_tokens={prompt_tokens_2}"
+    )
+
+
+@pytest.mark.post_merge
+@pytest.mark.timeout(300)
+def test_frontend_decode_applies_exif_orientation(
+    start_frontend_decode_services,
+    predownload_models,
+    http_image_server_with_alias,
+):
+    """vLLM's own loader applies EXIF orientation, so the vLLM worker's card
+    turns it on for frontend decoding. An EXIF-tagged image must then decode
+    to the same pixels as the upright image, share its content hash, and reuse
+    its KV cache. Without the rotation the shape and pixels differ, and the
+    tagged request sees only text-prefix overlap."""
+    frontend_port, router_proc = start_frontend_decode_services
+
+    overlap_1, total_1, _ = _send(
+        frontend_port,
+        router_proc,
+        _build_payload([http_image_server_with_alias["exif_upright"]]),
+        "fed_exif_upright",
+    )
+    overlap_2, total_2, data_2 = _send(
+        frontend_port,
+        router_proc,
+        _build_payload([http_image_server_with_alias["exif_tagged"]]),
+        "fed_exif_tagged",
+    )
+
+    assert (
+        total_1 > 1 and total_2 > 1
+    ), f"expected non-trivial total blocks for MM request, got {total_1}, {total_2}"
+    assert overlap_2 > overlap_1 + 1, (
+        f"an EXIF-tagged image should decode to the same pixels as the upright "
+        f"image. Got upright={overlap_1}/{total_1}, tagged={overlap_2}/{total_2}. "
+        f"If overlap_2 ≈ overlap_1, the frontend did not apply EXIF orientation."
+    )
+
+    cached_2 = (data_2.get("usage", {}).get("prompt_tokens_details") or {}).get(
+        "cached_tokens"
+    )
+    prompt_tokens_2 = data_2.get("usage", {}).get("prompt_tokens", 0)
+    assert cached_2 is not None and cached_2 > prompt_tokens_2 // 2, (
+        f"expected high vLLM cached_tokens on the EXIF-tagged request, got "
         f"cached={cached_2}, prompt_tokens={prompt_tokens_2}"
     )
 

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from dynamo.llm import MediaDecoder
+from dynamo.vllm.multimodal_utils.media_config import create_frontend_media_config
 
 pytestmark = [
     pytest.mark.unit,
@@ -51,3 +52,16 @@ def test_vllm_runtime_includes_working_frontend_video_decoder(tmp_path: Path):
 
     assert result.returncode == 0, result.stderr
     assert output.stat().st_size > 0
+
+
+def test_frontend_media_config_applies_exif_orientation():
+    # SGLang and TRT-LLM build a bare MediaDecoder and rely on this default:
+    # their own encoded-image loaders do not apply EXIF.
+    assert MediaDecoder().apply_exif_orientation is False
+
+    # vLLM's loader applies EXIF, so the frontend must rotate to match it.
+    media_decoder, media_fetcher = create_frontend_media_config(True)
+    assert media_decoder is not None and media_fetcher is not None
+    assert media_decoder.apply_exif_orientation is True
+
+    assert create_frontend_media_config(False) == (None, None)
