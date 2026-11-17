@@ -4,7 +4,7 @@
 //! The router-local request vocabulary: what a host hands the scheduler kernel
 //! (`RouterRequest`, `RoutingConstraints`, the worker-config view `WorkerConfigLike`) and
 //! what comes back (`RouterResponse`, `PotentialLoad`, `WorkerSelectionResult`), plus the
-//! event sink hosts implement. Kernel-owned per SPLIT_V2 section 4 rows 40-41.
+//! event sink hosts implement. Owned by the kernel.
 
 use crate::kv_hints::{KvTransferSourceChoice, WorkerKvTransferKeys, WorkerKvTransferKeysExt};
 use dynamo_kv_events::event::RouterEvent;
@@ -243,7 +243,7 @@ pub enum RouterResponse {
         overlap_blocks: u32,
     },
     QueueRejected {
-        rejection: dynamo_admission::queue::QueueRejection,
+        rejection: dynamo_admission::QueueRejection,
     },
     PrefillMarked {
         success: bool,
@@ -322,8 +322,6 @@ pub struct SelectionLogFields {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use serde_json;
 
     #[test]
     fn test_router_request_mark_free_backwards_compatible_deserialization() {

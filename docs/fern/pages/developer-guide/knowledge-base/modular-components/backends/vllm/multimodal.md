@@ -15,6 +15,12 @@ This page describes multimodal inference with the Dynamo vLLM backend.
 > serve but also extends it to all multimodal content (URL, embeddings, and
 > base64 data).
 
+> [!NOTE]
+> Embedding workers are the exception. A vLLM `--embedding-worker` accepts
+> image, video, and audio in chat-style `messages` without
+> `--enable-multimodal`, and cannot be combined with it. See
+> [Embedding](../../../../../reference/backends/vllm-configuration.mdx#embedding).
+
 ## Support Matrix
 
 | Modality | Aggregated | P/D | Separate encode worker |
@@ -165,6 +171,8 @@ For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cas
 ## Image/Video Serving
 
 Dynamo supports multimodal image and video requests for Vision Language Models (VLMs). `Qwen/Qwen3-VL-2B-Instruct` is a good example because the same model can handle both `image_url` and `video_url` requests through the standard OpenAI chat endpoint.
+
+The vLLM worker pastes a transparent image on a white background, as vLLM does. A separate encode worker and the Python chat processor do the same.
 
 ### Aggregated Serving
 

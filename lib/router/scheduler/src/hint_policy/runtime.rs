@@ -4,7 +4,7 @@
 //! The hint stage: runs a booking's hint policies and composes their actions into one KV hint.
 //!
 //! The stage never reads an action's payload. It numbers the actions, caps the hint at
-//! [`MAX_KV_HINT_ACTIONS`](crate::kv_hints::MAX_KV_HINT_ACTIONS), and treats a committed copy as
+//! [`MAX_KV_HINT_ACTIONS`](dynamo_kv_hints::MAX_KV_HINT_ACTIONS), and treats a committed copy as
 //! delivered when the policy that sends committed copies returns at least one action.
 
 use std::sync::Arc;

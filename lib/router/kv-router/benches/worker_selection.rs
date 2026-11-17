@@ -22,11 +22,11 @@ use dynamo_kv_indexer::host::{
 };
 use dynamo_router_protocol::columns::WorkerInputs;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::OverlapSignals;
 use dynamo_scheduler::ScheduleMode;
 use dynamo_scheduler::SchedulingRequest;
-use dynamo_scheduler::overlap::OverlapSignals;
-use dynamo_scheduler::protocols::{RoutingConstraints, WorkerConfigLike};
-use dynamo_scheduler::selector::{DefaultWorkerSelector, WorkerSelectionInput, WorkerSelector};
+use dynamo_scheduler::{DefaultWorkerSelector, WorkerSelectionInput, WorkerSelector};
+use dynamo_scheduler::{RoutingConstraints, WorkerConfigLike};
 use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::experimental::resident_blocks::{RESIDENT_BLOCKS, ResidentBlocks};
 use dynamo_worker_selection::{
