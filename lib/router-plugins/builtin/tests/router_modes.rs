@@ -84,8 +84,6 @@ fn routing_modes_select_eligible_workers_on_the_kv_path() {
     }
 }
 
-/// Sticky min-load reads only active request counts, so it declares no `LOAD` rows and picks
-/// from counts alone.
 #[test]
 fn sticky_min_load_picks_from_active_request_counts() {
     let mut registry = default_registry();
