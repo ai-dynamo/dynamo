@@ -29,8 +29,8 @@ pub(super) type PrefillOutput = Option<Box<serde_json::Value>>;
 pub(super) struct PrefillTask(JoinHandle<Result<PrefillOutput, PrefillError>>);
 
 /// Prefill's output as a stream item tagged with [`PREFILL_OUTPUT_ANNOTATION`].
-/// Sent even without `engine_data`: an older prefill worker returns none, and the
-/// format still needs to know that prefill completed.
+/// Sent even without `engine_data`: a prefill worker that forwards no native
+/// response returns none, and the format still needs to know that prefill completed.
 fn output_item(output: PrefillOutput) -> Annotated<LLMEngineOutput> {
     Annotated {
         event: Some(PREFILL_OUTPUT_ANNOTATION.to_string()),
@@ -128,7 +128,7 @@ impl PrefillTask {
                     return Ok(response);
                 }
                 let context = response.context();
-                let stream = stream::once(async { output_item(prefill) }).chain(response);
+                let stream = stream::iter([output_item(prefill)]).chain(response);
                 return Ok(ResponseStream::new(Box::pin(stream), context));
             }
             result = &mut decode => match result {
@@ -545,15 +545,23 @@ mod tests {
 
     #[tokio::test]
     async fn emitted_prefill_output_precedes_ready_decode_tokens() {
-        for prefill_first in [false, true] {
+        // `None` is a prefill worker that forwards no native response.
+        for (output, prefill_first) in [
+            (
+                Some(Box::new(serde_json::json!({"sglang_response": {}}))),
+                false,
+            ),
+            (
+                Some(Box::new(serde_json::json!({"sglang_response": {}}))),
+                true,
+            ),
+            (None, false),
+            (None, true),
+        ] {
             let (tx, task) = pending_prefill();
             let mut tx = Some(tx);
-            let output = serde_json::json!({"sglang_response": {}});
             if prefill_first {
-                tx.take()
-                    .unwrap()
-                    .send(Ok(Some(Box::new(output.clone()))))
-                    .unwrap();
+                tx.take().unwrap().send(Ok(output.clone())).unwrap();
                 tokio::task::yield_now().await;
             }
             let decode: ManyOut<Annotated<LLMEngineOutput>> = ResponseStream::new(
@@ -574,14 +582,11 @@ mod tests {
                 .unwrap();
             if !prefill_first {
                 assert!(response.next().now_or_never().is_none());
-                tx.take()
-                    .unwrap()
-                    .send(Ok(Some(Box::new(output.clone()))))
-                    .unwrap();
+                tx.take().unwrap().send(Ok(output.clone())).unwrap();
             }
             let item = response.next().await.unwrap();
             assert_eq!(item.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
-            assert_eq!(item.data.unwrap().engine_data, Some(Box::new(output)));
+            assert_eq!(item.data.unwrap().engine_data, output);
             assert!(
                 response
                     .next()
@@ -612,113 +617,51 @@ mod tests {
 
     #[tokio::test]
     async fn prefill_output_before_last_does_not_hold_decode_tokens() {
-        let (tx, task) = pending_prefill();
-        let token = Annotated::from_data(LLMEngineOutput {
-            token_ids: vec![7],
-            ..Default::default()
-        });
-        let decode: ManyOut<Annotated<LLMEngineOutput>> = ResponseStream::new(
-            Box::pin(stream::iter([
-                token,
-                Annotated::from_data(LLMEngineOutput::length()),
-            ])),
-            Arc::new(Controller::default()),
-        );
-        let context = Arc::new(Controller::default());
-        let mut response = task
-            .forward_decode(
-                async { Ok(decode) },
-                context,
-                PrefillNeed::BeforeLast,
-                Arc::new(Controller::default()),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.next().await.unwrap().data.unwrap().token_ids, [7]);
-        let terminal = response.next();
-        tokio::pin!(terminal);
-        assert!((&mut terminal).now_or_never().is_none());
-        let output = serde_json::json!({"sglang_response": {}});
-        tx.send(Ok(Some(Box::new(output.clone())))).unwrap();
-        let item = terminal.await.unwrap();
-        assert_eq!(item.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
-        assert_eq!(item.data.unwrap().engine_data, Some(Box::new(output)));
-        assert!(
-            response
-                .next()
-                .await
-                .unwrap()
-                .data
-                .unwrap()
-                .finish_reason
-                .is_some()
-        );
-        assert!(response.next().await.is_none());
-    }
-
-    /// An older prefill worker returns no `engine_data`; the format still needs
-    /// the item to know prefill completed. Without a need, nothing is sent.
-    #[tokio::test]
-    async fn prefill_without_output_is_still_emitted() {
-        for (need, prefill_first) in [
-            (PrefillNeed::BeforeFirst, false),
-            (PrefillNeed::BeforeFirst, true),
-            (PrefillNeed::BeforeLast, false),
-            (PrefillNeed::BeforeLast, true),
-            (PrefillNeed::None, false),
-            (PrefillNeed::None, true),
+        for output in [
+            Some(Box::new(serde_json::json!({"sglang_response": {}}))),
+            None,
         ] {
             let (tx, task) = pending_prefill();
-            let mut tx = Some(tx);
-            if prefill_first {
-                tx.take().unwrap().send(Ok(None)).unwrap();
-                tokio::task::yield_now().await;
-            }
+            let token = Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![7],
+                ..Default::default()
+            });
             let decode: ManyOut<Annotated<LLMEngineOutput>> = ResponseStream::new(
-                Box::pin(stream::iter([Annotated::from_data(
-                    LLMEngineOutput::length(),
-                )])),
+                Box::pin(stream::iter([
+                    token,
+                    Annotated::from_data(LLMEngineOutput::length()),
+                ])),
                 Arc::new(Controller::default()),
             );
+            let context = Arc::new(Controller::default());
             let mut response = task
                 .forward_decode(
                     async { Ok(decode) },
-                    Arc::new(Controller::default()),
-                    need,
+                    context,
+                    PrefillNeed::BeforeLast,
                     Arc::new(Controller::default()),
                 )
                 .await
                 .unwrap();
-            if let Some(tx) = tx {
-                tx.send(Ok(None)).unwrap();
-            }
-            let mut items = Vec::new();
-            while let Some(item) = response.next().await {
-                items.push(item);
-            }
-            let case = format!("{need:?}, prefill_first={prefill_first}");
-            if need == PrefillNeed::None {
-                assert_eq!(items.len(), 1, "{case}");
-            } else {
-                assert_eq!(items.len(), 2, "{case}");
-                assert_eq!(
-                    items[0].event.as_deref(),
-                    Some(PREFILL_OUTPUT_ANNOTATION),
-                    "{case}"
-                );
-                assert_eq!(items[0].data.as_ref().unwrap().engine_data, None, "{case}");
-            }
+            assert_eq!(response.next().await.unwrap().data.unwrap().token_ids, [7]);
+            let terminal = response.next();
+            tokio::pin!(terminal);
+            assert!((&mut terminal).now_or_never().is_none());
+            tx.send(Ok(output.clone())).unwrap();
+            let item = terminal.await.unwrap();
+            assert_eq!(item.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
+            assert_eq!(item.data.unwrap().engine_data, output);
             assert!(
-                items
-                    .last()
+                response
+                    .next()
+                    .await
                     .unwrap()
                     .data
-                    .as_ref()
                     .unwrap()
                     .finish_reason
-                    .is_some(),
-                "{case}"
+                    .is_some()
             );
+            assert!(response.next().await.is_none());
         }
     }
 
