@@ -35,6 +35,7 @@ use dynamo_runtime::error::{DynamoError, ErrorType};
 use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
+use tracing::Instrument;
 use dynamo_scheduler::host::{RouterConfigOverride, RoutingConstraints};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
@@ -1682,6 +1683,9 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::InvalidRequest(format!("Invalid UTF-8: {e}")))?;
 
+        // Create phase spans while the root is current so the logging layer
+        // inherits its distributed trace context. Instrument each future to
+        // enter the phase only while it is polled.
         let TokenizeResult {
             tokens,
             cache_namespace,
@@ -1690,13 +1694,41 @@ impl EndpointPicker for Router {
             routing_constraints,
             tokens_safe_to_inject,
             timings: tokenize_timings,
-        } = self.tokenize(body_str, &req.headers).await.map_err(|e| {
-            if e.is::<TokenizationCancelled>() {
-                PickError::TokenizerUnavailable
-            } else {
-                PickError::InvalidRequest(e.to_string())
-            }
-        })?;
+        } = {
+            let span = match req.parent_span.as_ref() {
+                Some(root) => root.in_scope(|| {
+                    tracing::info_span!(
+                        target: "request_span",
+                        "epp-tokenize",
+                        input_tokens = tracing::field::Empty,
+                        cache_namespace = tracing::field::Empty,
+                    )
+                }),
+                None => tracing::info_span!(
+                    target: "request_span",
+                    "epp-tokenize",
+                    input_tokens = tracing::field::Empty,
+                    cache_namespace = tracing::field::Empty,
+                ),
+            };
+            let result = self
+                .tokenize(body_str, &req.headers)
+                .instrument(span.clone())
+                .await
+                .map_err(|e| {
+                    if e.is::<TokenizationCancelled>() {
+                        PickError::TokenizerUnavailable
+                    } else {
+                        PickError::InvalidRequest(e.to_string())
+                    }
+                })?;
+            span.record("input_tokens", result.tokens.len() as u64);
+            span.record(
+                "cache_namespace",
+                result.cache_namespace.as_deref().unwrap_or(""),
+            );
+            result
+        };
         let policy_class = requested_policy_class(&req.headers)?;
         let reservation_id = Uuid::new_v4().to_string();
         let select_started = Instant::now();
@@ -1705,34 +1737,90 @@ impl EndpointPicker for Router {
         //
         // If the prefill router is not activated (no prefill workers discovered yet, or the inner
         // router has been deactivated), fall back to aggregated routing.
-        let prefill_booking = self
-            .route_prefill(
-                &format!("epp-prefill/{reservation_id}"),
-                &tokens,
-                cache_namespace.clone(),
-                priority_jump,
-                strict_priority,
-                policy_class.clone(),
-                allowed_worker_ids.clone(),
-                routing_constraints.clone(),
-            )
-            .await;
+        let prefill_booking = {
+            let span = match req.parent_span.as_ref() {
+                Some(root) => root.in_scope(|| {
+                    tracing::info_span!(
+                        target: "request_span",
+                        "epp-prefill-pick",
+                        prefill_worker_id = tracing::field::Empty,
+                        prefill_dp_rank = tracing::field::Empty,
+                        reserved = tracing::field::Empty,
+                    )
+                }),
+                None => tracing::info_span!(
+                    target: "request_span",
+                    "epp-prefill-pick",
+                    prefill_worker_id = tracing::field::Empty,
+                    prefill_dp_rank = tracing::field::Empty,
+                    reserved = tracing::field::Empty,
+                ),
+            };
+            let booking = self
+                .route_prefill(
+                    &format!("epp-prefill/{reservation_id}"),
+                    &tokens,
+                    cache_namespace.clone(),
+                    priority_jump,
+                    strict_priority,
+                    policy_class.clone(),
+                    allowed_worker_ids.clone(),
+                    routing_constraints.clone(),
+                )
+                .instrument(span.clone())
+                .await;
+            span.record(
+                "prefill_worker_id",
+                booking.as_ref().map(|b| b.worker_id()).unwrap_or(0),
+            );
+            span.record(
+                "prefill_dp_rank",
+                booking.as_ref().ok().and_then(|b| b.dp_rank()).unwrap_or(0),
+            );
+            span.record("reserved", booking.is_ok());
+            booking
+        };
 
         let is_disaggregated = prefill_disaggregated(&prefill_booking)?;
 
-        let (decode_worker, _overlap) = self
-            .route_decode(
-                &tokens,
-                is_disaggregated,
-                cache_namespace.clone(),
-                priority_jump,
-                strict_priority,
-                policy_class,
-                allowed_worker_ids,
-                routing_constraints,
-            )
-            .await
-            .map_err(decode_pick_error)?;
+        let (decode_worker, _overlap) = {
+            let span = match req.parent_span.as_ref() {
+                Some(root) => root.in_scope(|| {
+                    tracing::info_span!(
+                        target: "request_span",
+                        "epp-decode-pick",
+                        decode_worker_id = tracing::field::Empty,
+                        dp_rank = tracing::field::Empty,
+                        overlap_blocks = tracing::field::Empty,
+                    )
+                }),
+                None => tracing::info_span!(
+                    target: "request_span",
+                    "epp-decode-pick",
+                    decode_worker_id = tracing::field::Empty,
+                    dp_rank = tracing::field::Empty,
+                    overlap_blocks = tracing::field::Empty,
+                ),
+            };
+            let (worker, overlap_blocks) = self
+                .route_decode(
+                    &tokens,
+                    is_disaggregated,
+                    cache_namespace.clone(),
+                    priority_jump,
+                    strict_priority,
+                    policy_class,
+                    allowed_worker_ids,
+                    routing_constraints,
+                )
+                .instrument(span.clone())
+                .await
+                .map_err(decode_pick_error)?;
+            span.record("decode_worker_id", worker.worker_id);
+            span.record("dp_rank", worker.dp_rank);
+            span.record("overlap_blocks", overlap_blocks);
+            (worker, overlap_blocks)
+        };
         let select = select_started.elapsed();
         metrics::observe_stage(Stage::Select, select);
 
