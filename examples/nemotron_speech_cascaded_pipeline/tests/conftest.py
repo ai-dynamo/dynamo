@@ -16,7 +16,5 @@
 import os
 import sys
 
-# Put the example root on sys.path so `import nemotron_speech` resolves to the local
-# package. The package is deliberately NOT named `riva`, so it does not shadow
-# the nvidia-riva-client package (imported as top-level `riva`).
+# Import the standalone smoke client from the example root.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

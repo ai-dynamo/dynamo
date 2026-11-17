@@ -8,7 +8,7 @@ Do not edit it unless the user explicitly asks you to.
 
 # Sidecars
 
-Rust sidecars connect Dynamo to vLLM, SGLang, and TensorRT-LLM engines over
+Rust sidecars connect Dynamo to vLLM, SGLang, TensorRT-LLM, and Speech NIM engines over
 their native gRPC APIs. The engine runs in its own process; the sidecar
 registers it with Dynamo and serves its requests.
 
@@ -17,7 +17,7 @@ registers it with Dynamo and serves its requests.
 > experimental. Manifests, flags, and behavior may change without notice.
 
 Engine-specific guides: [vLLM](vllm/README.md), [SGLang](sglang/README.md),
-[TensorRT-LLM](trtllm/README.md).
+[TensorRT-LLM](trtllm/README.md), [Speech NIM](speech-nim/README.md).
 
 See [support notes](SUPPORT_NOTES.md) for feature restrictions and operational limits.
 
@@ -25,7 +25,7 @@ See [support notes](SUPPORT_NOTES.md) for feature restrictions and operational l
 
 ### pip
 
-The sidecars ship in the `ai-dynamo` wheel:
+The vLLM, SGLang, and TensorRT-LLM sidecars ship in the `ai-dynamo` wheel:
 
 ```bash
 pip install ai-dynamo
@@ -34,7 +34,7 @@ python -m dynamo.vllm.sidecar --help    # also dynamo.sglang.sidecar, dynamo.trt
 
 ### Docker
 
-The CPU-only `dynamo-sidecar` image contains all three sidecars and is
+The CPU-only `dynamo-sidecar` image contains the sidecars and is
 published to NGC:
 
 ```bash

@@ -1,0 +1,143 @@
+// SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: MIT
+
+syntax = "proto3";
+
+package nvidia.riva.tts;
+
+option cc_enable_arenas = true;
+option go_package = "nvidia.com/riva_speech";
+
+import "riva/proto/riva_audio.proto";
+import "riva/proto/riva_common.proto";
+
+service RivaSpeechSynthesis {
+  // Used to request text-to-speech from the service. Submit a request
+  // containing the desired text and configuration, and receive audio bytes in
+  // the requested format.
+  rpc Synthesize(SynthesizeSpeechRequest) returns (SynthesizeSpeechResponse) {}
+
+  // Used to request text-to-speech returned via stream as it becomes available.
+  // Submit a stream of SynthesizeSpeechRequest messages with desired text and
+  // configuration, and receive a stream of bytes in the requested format.
+  rpc SynthesizeOnline(stream SynthesizeSpeechRequest)
+      returns (stream SynthesizeSpeechResponse) {}
+
+  // Enables clients to request the configuration of the current Synthesize
+  // service, or a specific model within the service.
+  rpc GetRivaSynthesisConfig(RivaSynthesisConfigRequest)
+      returns (RivaSynthesisConfigResponse) {}
+}
+
+message RivaSynthesisConfigRequest {
+  // If model is specified only return config for model, otherwise return all
+  // configs.
+  string model_name = 1;
+}
+
+message RivaSynthesisConfigResponse {
+  message Config {
+    string model_name = 1;
+    map<string, string> parameters = 2;
+  }
+
+  repeated Config model_config = 1;
+}
+
+// Required for Zero Shot model
+message ZeroShotData {
+  // Audio prompt for Zero Shot model. Duration should be between 3 to 10
+  // seconds.
+  bytes audio_prompt = 1;
+  // Sample rate for input audio prompt. Current defaults to 22050, can be user
+  // provided.
+  int32 sample_rate_hz = 2;
+  // Encoding of audio prompt. Supported encodings are LINEAR_PCM and OGGOPUS.
+  AudioEncoding encoding = 3;
+  // The number of times user wants to pass audio through decoder. This ranges
+  // between 1-40. Defaults to 20.
+  int32 quality = 4;
+  // Transcript corresponding to audio_prompt.
+  string transcript = 5;
+}
+
+message SynthesizeSpeechRequest {
+  // Text to be converted to audio
+  string text = 1;
+  string language_code = 2;
+  // audio encoding params
+  AudioEncoding encoding = 3;
+
+  //  The sample rate in hertz (Hz) of the audio output requested through
+  //  `SynthesizeSpeechRequest` messages. Models produce an output at a fixed
+  //  rate. The sample rate enables you to resample the generated audio output
+  //  if required. You use the sample rate to up-sample or down-sample the audio
+  //  for various scenarios. For example, the sample rate can be set to 8kHz
+  //  (kilohertz) if the output audio is desired for a low bandwidth
+  //  application. The sample rate values below 8kHz will not produce any
+  //  meaningful output. Also, up-sampling too much will increase the size of
+  //  the output without improving the output audio quality.
+
+  int32 sample_rate_hz = 4;
+  // voice params
+  string voice_name = 5;
+
+  // Zero Shot model params
+  ZeroShotData zero_shot_data = 6;
+
+  // A string containing comma-separated key-value pairs of
+  // grapheme and corresponding phoneme separated by double spaces.
+  string custom_dictionary = 7;
+
+  // Free-form key/value parameters for the synthesizer. Lets the server
+  // accept additional or model-specific options without proto changes.
+  // Currently recognized keys include "exaggeration_factor".
+  map<string, string> custom_configuration = 8;
+
+  // If `true`, the response metadata includes a list of words and the start
+  // and end time offsets (timestamps) for those words, when the model supports
+  // alignment (currently Magpie TTS). Has no effect for models that do not
+  // produce word alignment.
+  bool enable_word_time_offsets = 9;
+
+  // The ID to be associated with the request. If provided, this will be
+  // returned in the corresponding response.
+  RequestId id = 100;
+}
+
+// Word-specific timing information for a synthesized word.
+message WordTiming {
+  // The word this timing corresponds to.
+  string word = 1;
+
+  // Time offset relative to the beginning of the synthesized audio in
+  // milliseconds, corresponding to the start of the spoken word.
+  int32 start_time = 2;
+
+  // Time offset relative to the beginning of the synthesized audio in
+  // milliseconds, corresponding to the end of the spoken word.
+  int32 end_time = 3;
+}
+
+message SynthesizeSpeechResponseMetadata {
+  // Currently experimental API addition that returns the input text
+  // after preprocessing has been completed as well as the predicted
+  // duration for each token.
+  // Note: this message is subject to future breaking changes, and potential
+  // removal.
+  string text = 1;
+  string processed_text = 2;
+  repeated float predicted_durations = 8;
+
+  // List of word-level timing information. Only populated when the request set
+  // `enable_word_time_offsets=true` and the model produces word alignment.
+  repeated WordTiming words = 9;
+}
+
+message SynthesizeSpeechResponse {
+  bytes audio = 1;
+  SynthesizeSpeechResponseMetadata meta = 2;
+
+  // The ID associated with the request
+  RequestId id = 100;
+}
