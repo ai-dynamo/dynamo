@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import os
+import resource
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
 
@@ -43,6 +44,17 @@ from gpu_memory_service.common.utils import align_to_granularity, is_bulk_import
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, get_vmm_device_type
 
 logger = logging.getLogger(__name__)
+
+
+def _fd_headroom() -> Optional[int]:
+    """File descriptors this process may still open; None if unknown or unlimited."""
+    soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft == resource.RLIM_INFINITY:
+        return None
+    try:
+        return soft - len(os.listdir("/proc/self/fd"))
+    except OSError:
+        return None
 
 
 class StaleMemoryLayoutError(Exception):
@@ -159,9 +171,12 @@ class GMSClientMemoryManager:
     Constructor does NOT connect — call connect() explicitly after construction.
     """
 
-    # Exported fds a bulk import holds open at once. It needs that much room
-    # under RLIMIT_NOFILE on top of the fds the process already has open.
+    # Exported fds a bulk import holds open at once, at most. A chunk shrinks
+    # when the process is close to RLIMIT_NOFILE, down to one fd at a time,
+    # which is what a per-allocation import holds.
     _BULK_CHUNK = 256
+    # Descriptors a chunk leaves free for the rest of the process.
+    _BULK_FD_MARGIN = 32
 
     def __init__(
         self,
@@ -512,8 +527,10 @@ class GMSClientMemoryManager:
         handles: List[int] = []
         mapped: List[tuple[int, int]] = []
         try:
-            for lo in range(0, len(entries), self._BULK_CHUNK):
-                chunk = entries[lo : lo + self._BULK_CHUNK]
+            lo = 0
+            while lo < len(entries):
+                chunk = entries[lo : lo + self._bulk_chunk_size()]
+                lo += len(chunk)
                 fds = []
                 for _, _, allocation_id in chunk:
                     fds.append(self.export_handle(allocation_id))
@@ -552,6 +569,12 @@ class GMSClientMemoryManager:
                     logger.exception("[GMS] unwinding bulk import: release %d", handle)
             raise
         return handles
+
+    def _bulk_chunk_size(self) -> int:
+        headroom = _fd_headroom()
+        if headroom is None:
+            return self._BULK_CHUNK
+        return max(1, min(self._BULK_CHUNK, headroom - self._BULK_FD_MARGIN))
 
     def import_allocations(self, allocation_ids: Iterable[str]) -> None:
         """Import and map, in bulk, every listed allocation not tracked yet.

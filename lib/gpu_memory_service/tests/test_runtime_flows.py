@@ -39,6 +39,7 @@ import gpu_memory_service.server.gms as server_gms
 import gpu_memory_service.server.rpc as server_rpc
 import msgspec
 from _fake_vmm import FakeVMM
+from gpu_memory_service.client import memory_manager
 from gpu_memory_service.client.memory_manager import (
     GMSClientMemoryManager,
     StaleMemoryLayoutError,
@@ -1339,11 +1340,19 @@ def test_bulk_import_follows_the_environment_unless_passed(
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
-def test_bulk_import_holds_at_most_one_chunk_of_exported_fds(running_gms, monkeypatch):
+@pytest.mark.parametrize("limited_by", ["chunk size", "fd headroom"])
+def test_bulk_import_holds_at_most_one_chunk_of_exported_fds(
+    running_gms, monkeypatch, limited_by
+):
     _, socket_path = running_gms
     ids = _publish(socket_path, [4096] * 7)
     vmm = _fake_vmm()
-    monkeypatch.setattr(GMSClientMemoryManager, "_BULK_CHUNK", 3)
+    if limited_by == "chunk size":
+        monkeypatch.setattr(GMSClientMemoryManager, "_BULK_CHUNK", 3)
+    else:
+        # Close to RLIMIT_NOFILE, a chunk takes only what the process can open.
+        headroom = GMSClientMemoryManager._BULK_FD_MARGIN + 3
+        monkeypatch.setattr(memory_manager, "_fd_headroom", lambda: headroom)
     reader = GMSClientMemoryManager(socket_path, device=0, bulk_import=True)
     held = max_held = 0
     real_export = reader.export_handle

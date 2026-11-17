@@ -542,7 +542,7 @@ class GMSClientMemoryManager:
 
 #### Bulk import
 
-By default, the read-only attach (`materialize_module_from_gms`) and `remap_all_vas()` map allocations in bulk: they export a chunk of up to 256 allocations, import the chunk, map it, and set access once every chunk is mapped. This makes the same driver calls as importing one allocation at a time, without alternating between client and server for each allocation. A bulk import holds up to 256 exported file descriptors at once, and a failed one leaves nothing mapped.
+By default, the read-only attach (`materialize_module_from_gms`) and `remap_all_vas()` map allocations in bulk: they export a chunk of up to 256 allocations, import the chunk, map it, and set access once every chunk is mapped. This makes the same driver calls as importing one allocation at a time, without alternating between client and server for each allocation. A bulk import holds up to 256 exported file descriptors at once, fewer when the process is close to its `RLIMIT_NOFILE`, and a failed one leaves nothing mapped.
 
 To import one allocation at a time instead, pass `bulk_import=False` to the constructor or set `DYN_GMS_BULK_IMPORT` to `0`, `false`, `no` or `off` in the engine's environment. The constructor argument takes precedence.
 
