@@ -722,8 +722,7 @@ impl DeltaAggregator {
 
         // One configured unified family owns raw batch output before legacy parsing.
         // Worker-parsed choices already carry tool calls and skip this safety net.
-        // A Python chat processor has already decided what is a call (for SGLang,
-        // from delimiter token ids); its remaining text is content, and parsing it
+        // A Python chat processor already split calls from content; parsing its text
         // again would turn echoed delimiter markup into calls the model never made.
         let reparse_text = !parsing_options.output_parsed_by_chat_processor;
         let selected_unified_family = if reparse_text {
