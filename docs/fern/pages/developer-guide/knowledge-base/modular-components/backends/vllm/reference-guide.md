@@ -90,7 +90,7 @@ Dynamo supports [vLLM prompt embeddings](https://docs.vllm.ai/en/stable/features
 ### Custom JSON Content
 
 **Experimental, unreleased.** Aggregated Python vLLM token workers started with
-`--enable-multimodal` accept explicit custom parts in user and tool messages:
+`--enable-multimodal` accept explicit custom parts in user and tool messages.
 
 Custom content requires the Rust frontend preprocessing path
 (`--dyn-chat-processor dynamo`, the default). The Python frontend processor
@@ -147,19 +147,6 @@ role metadata, and ordering; payloads travel only in `multi_modal_data`.
 For an already rendered prompt, `nvext.token_data` supplies token IDs directly.
 Clients using it remain responsible for the complete model-specific token
 sequence.
-Engine token IDs/logprobs remain available through `nvext.engine_data`
-independently of parser-rewritten choice text.
-
-Custom fields remain opaque JSON, including any base64 strings, shape/dtype
-metadata, or plugin-defined reference objects. The model plugin owns their
-validation and decoding. Dynamo does not define an inline tensor format or
-resolve arbitrary tensor references from this HTTP envelope.
-
-Existing image/audio/video transfers keep their maintained SHM/NIXL paths.
-Processed vLLM `mm_kwargs` and embedding transfer descriptors are internal
-handoffs, not public HTTP inputs for arbitrary custom tensors. Their serialization,
-staging, copying, and buffer ownership remain unchanged; no zero-copy GPU claim
-is made for custom JSON.
 
 The frontend sends custom content only to workers that advertise
 `custom_json_v1` and returns 400 when none does. Custom P/D, encoder
