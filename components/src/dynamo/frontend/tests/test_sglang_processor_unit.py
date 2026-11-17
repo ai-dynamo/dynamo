@@ -7507,15 +7507,37 @@ class TestGlmNativeOutput:
         )
 
     @pytest.mark.parametrize("field", ["chat_template_kwargs", "chat_template_args"])
-    def test_force_nonempty_content_reaches_native_parser(self, field):
+    @pytest.mark.parametrize("legacy_detector", [False, True])
+    def test_force_nonempty_content_reaches_native_parser(
+        self, field, legacy_detector, monkeypatch
+    ):
+        if legacy_detector:
+            detector = sglang_prepost_module.ReasoningParser.DetectorMap["glm45"]
+
+            class LegacyGlm45Detector(detector):
+                # SGLang 0.5.11's constructor does not accept parser options.
+                def __init__(self, stream_reasoning=True, force_reasoning=False):
+                    super().__init__(
+                        stream_reasoning=stream_reasoning,
+                        force_reasoning=force_reasoning,
+                    )
+
+            monkeypatch.setitem(
+                sglang_prepost_module.ReasoningParser.DetectorMap,
+                "glm45",
+                LegacyGlm45Detector,
+            )
+        request = {field: {"force_nonempty_content": True}}
         _, reasoning = create_parsers(
-            {field: {"force_nonempty_content": True}},
+            request,
             tool_call_parser_name=None,
             reasoning_parser_name="glm45",
             force_reasoning=True,
         )
-        # With no closing marker, native GLM moves the answer out of reasoning.
-        assert reasoning.parse_non_stream("Hello") == ("", "Hello")
+        # Older detectors keep their existing reasoning-only behavior.
+        expected = ("Hello", "") if legacy_detector else ("", "Hello")
+        assert reasoning.parse_non_stream("Hello") == expected
+        assert request[field] == {"force_nonempty_content": True}
 
     @pytest.mark.parametrize("call_count", [2, 3])
     @pytest.mark.parametrize("batch_size", [1, 20, 10000])

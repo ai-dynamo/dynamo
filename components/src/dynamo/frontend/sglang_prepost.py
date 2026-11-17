@@ -363,11 +363,22 @@ def create_parsers(
         reasoning_parser_name = _normalize_sglang_parser_name(reasoning_parser_name)
         native_request_kwargs = {}
         if reasoning_parser_name == "glm45":
+            template_kwargs = dict(
+                request.get("chat_template_kwargs")
+                or request.get("chat_template_args")
+                or {}
+            )
+            # The XPU SGLang 0.5.11 detector lacks this parser option.
+            if template_kwargs.get("force_nonempty_content") is True and not (
+                _callable_accepts_kwarg(
+                    ReasoningParser.DetectorMap["glm45"], "force_nonempty_content"
+                )
+            ):
+                template_kwargs.pop("force_nonempty_content")
             native_request_kwargs["request"] = ChatCompletionRequest(
                 model="",
                 messages=[],
-                chat_template_kwargs=request.get("chat_template_kwargs")
-                or request.get("chat_template_args"),
+                chat_template_kwargs=template_kwargs,
             )
         reasoning_parser = ReasoningParser(
             model_type=reasoning_parser_name,
