@@ -459,6 +459,7 @@ impl DcCkfRankReplacement {
                 self.canonical_candidates.clear();
                 Ok(())
             }
+            KvCacheEventData::Recurrent(_) => Ok(()),
         }
     }
 }
@@ -598,6 +599,7 @@ impl DcCkfState {
                     retain_first_error(&mut first_error, error);
                 }
             }
+            KvCacheEventData::Recurrent(_) => {}
         }
         self.telemetry.unknown_removals = self
             .telemetry

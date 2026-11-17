@@ -58,6 +58,7 @@ fn host_loop_is_rejected_before_live_tasks_start() {
 enum CapturedEffect {
     KvStored,
     KvRemoved,
+    KvRecurrent,
     Fpm,
     Ack,
 }
@@ -76,6 +77,7 @@ impl KvCacheEventSink for CapturedEffects {
             KvCacheEventData::Stored(_) => CapturedEffect::KvStored,
             KvCacheEventData::Removed(_) => CapturedEffect::KvRemoved,
             KvCacheEventData::Cleared => CapturedEffect::KvRemoved,
+            KvCacheEventData::Recurrent(_) => CapturedEffect::KvRecurrent,
         });
         self.kv.lock().unwrap().push(event);
         Ok(())

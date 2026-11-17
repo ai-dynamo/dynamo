@@ -516,6 +516,7 @@ pub mod indexer {
     pub use dynamo_kv_indexer::METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED;
     pub use dynamo_kv_indexer::METRIC_CKF_MUTATION_UNKNOWN_REMOVE;
     pub use dynamo_kv_indexer::METRIC_EVENT_CLEARED;
+    pub use dynamo_kv_indexer::METRIC_EVENT_RECURRENT;
     pub use dynamo_kv_indexer::METRIC_EVENT_REMOVED;
     pub use dynamo_kv_indexer::METRIC_EVENT_STORED;
     pub use dynamo_kv_indexer::METRIC_STATUS_ALLOCATION_FAILED;

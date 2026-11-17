@@ -353,6 +353,7 @@ impl ZmqEventNormalizer {
                 self.engine_mm.clear(worker);
                 convert(raw)
             }
+            RawKvEvent::RecurrentState { .. } => convert(raw),
             RawKvEvent::Ignored => None,
         }
     }
@@ -512,6 +513,7 @@ impl ZmqEventNormalizer {
                 self.cache_namespaces
                     .retain(|(known_worker, _), _| *known_worker != worker);
             }
+            RawKvEvent::RecurrentState { .. } => {}
             RawKvEvent::Ignored => {}
         }
         Ok(())

@@ -419,6 +419,7 @@ impl PoolCapacityTracker {
                 }
             }
             KvCacheEventData::Cleared => self.clear(member)?,
+            KvCacheEventData::Recurrent(_) => {}
         }
         self.event_count = self
             .event_count

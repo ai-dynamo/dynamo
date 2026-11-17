@@ -145,6 +145,7 @@ pub(crate) fn derive_kvcr_layer(
                 KvCacheEventData::Stored(store) => Some((store.clone(), event.dp_rank)),
                 KvCacheEventData::Removed(_) => None,
                 KvCacheEventData::Cleared => anyhow::bail!("host-tier clears are not modelled"),
+                KvCacheEventData::Recurrent(_) => None,
             },
             _ => None,
         };

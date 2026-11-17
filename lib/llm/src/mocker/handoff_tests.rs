@@ -747,7 +747,9 @@ fn drain_stored_hashes(
                 .into_iter()
                 .map(|block| block.block_hash)
                 .collect(),
-            KvCacheEventData::Removed(_) | KvCacheEventData::Cleared => Vec::new(),
+            KvCacheEventData::Removed(_)
+            | KvCacheEventData::Cleared
+            | KvCacheEventData::Recurrent(_) => Vec::new(),
         })
         .collect()
 }

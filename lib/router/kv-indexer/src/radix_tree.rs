@@ -305,6 +305,7 @@ impl RadixTree {
                 self.drop_rank(worker);
                 Ok(())
             }
+            KvCacheEventData::Recurrent(_) => Ok(()),
         };
         if let Some(tracker) = &mut self.resident_blocks {
             tracker.update(worker, self.lookup.get(&worker).map(WorkerLookup::len));
@@ -991,6 +992,7 @@ mod tests {
                 KvCacheEventData::Cleared => {
                     self.held.remove(&worker);
                 }
+                KvCacheEventData::Recurrent(_) => {}
             }
             let _ = self.tree.apply_event(event);
         }
