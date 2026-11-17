@@ -10004,6 +10004,7 @@ POWER_KEYS = {
     "window_s",
     "window_iterations",
     "kv_drift_tokens",
+    "step_wall_times_s",
 }
 
 
@@ -10015,6 +10016,7 @@ def _unavailable(reason):
         "window_s": None,
         "window_iterations": None,
         "kv_drift_tokens": None,
+        "step_wall_times_s": None,
     }
 
 
@@ -10025,6 +10027,7 @@ def test_power_block_measures_the_counter_delta_in_wms():
         window_s=1.25,
         window_iterations=40,
         kv_drift_tokens=320,
+        step_wall_times_s=[0.03, 0.031],
         min_window_s=1.0,
     )
 
@@ -10039,6 +10042,7 @@ def test_power_block_measures_the_counter_delta_in_wms():
         "window_s": 1.25,
         "window_iterations": 40,
         "kv_drift_tokens": 320,
+        "step_wall_times_s": [0.03, 0.031],
     }
 
 
@@ -10061,6 +10065,7 @@ def test_power_block_reports_unavailable_without_zero_fill(
         window_s=window_s,
         window_iterations=iterations,
         kv_drift_tokens=0,
+        step_wall_times_s=[0.03],
         min_window_s=1.0,
     )
 
@@ -10161,7 +10166,7 @@ def _run_power_window(stub, clock, *, iteration_s, max_passes=100):
             for request in stub.requests.values():
                 request.num_computed_tokens += 1
             clock.now += iteration_s
-            stub._bench_power_window["completed"] += 1
+            stub._bench_power_step_completed(iteration_s)
     raise AssertionError("power window did not finish")
 
 
@@ -10211,6 +10216,8 @@ def test_decode_power_window_repeats_until_the_minimum_and_records_drift(
         "window_s": pytest.approx(1.2),
         "window_iterations": 4,
         "kv_drift_tokens": 8,
+        # One wall_time per completed repeat, in order.
+        "step_wall_times_s": [0.3, 0.3, 0.3, 0.3],
     }
 
 
@@ -10391,6 +10398,7 @@ def test_power_block_rides_in_the_local_and_group_fpm_copies():
         "window_s": 1.1,
         "window_iterations": 9,
         "kv_drift_tokens": 0,
+        "step_wall_times_s": [0.1] * 9,
     }
     stub._bench_power_result = measured
 
@@ -10465,6 +10473,7 @@ def test_schema_3_output_keeps_window_time_out_of_measured_iterations(tmp_path):
             "window_s": 1.5,
             "window_iterations": 75,
             "kv_drift_tokens": 0,
+            "step_wall_times_s": [0.02] * 75,
         },
     }
     output_path = tmp_path / "benchmark.json"
@@ -10611,7 +10620,7 @@ def test_prefill_power_window_prepares_the_next_repeat_while_one_runs(monkeypatc
         rounds = window["rounds"]
         clock.now += 0.4
         stub.requests.clear()
-        window["completed"] += 1
+        stub._bench_power_step_completed(0.4)
         stub._bench_power_window_step()
         if stub._bench_power_window is None:
             break

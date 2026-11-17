@@ -160,6 +160,8 @@ EPHEMERAL_PORT_RANGE_PATH = "/proc/sys/net/ipv4/ip_local_port_range"
 
 # Rank artifact schema. Version 3, written only with the power window on, adds
 # the ``power`` block to every FPM; without the window the artifact stays 2.
+# The block's per-step ``step_wall_times_s`` is the evidence for the
+# collector's latency-stability power gate.
 BENCHMARK_RESULT_SCHEMA_VERSION = 3
 # Hard cap on the iterations of one point's power window.
 FPM_POWER_MAX_WINDOW_ITERATIONS = 2000
@@ -607,6 +609,7 @@ def _bench_power_unavailable(reason: str) -> dict:
         "window_s": None,
         "window_iterations": None,
         "kv_drift_tokens": None,
+        "step_wall_times_s": None,
     }
 
 
@@ -617,6 +620,7 @@ def _bench_power_block(
     window_s: float,
     window_iterations: int,
     kv_drift_tokens: int,
+    step_wall_times_s: Sequence[float],
     min_window_s: float,
 ) -> dict:
     """Power block of one finished window from the edge counter readings.
@@ -625,7 +629,10 @@ def _bench_power_block(
     the window energy with no unit conversion. A window shorter than the
     minimum (iteration cap reached first), a counter that went backwards
     (wrap or driver reload) or did not advance is reported unavailable,
-    never as a short or zero measurement.
+    never as a short or zero measurement. ``step_wall_times_s`` holds the
+    ``wall_time`` of every forward step completed inside the window, in
+    order (one per decode repeat); the collector judges the window's
+    stability from it.
     """
     if window_iterations < 1 or not math.isfinite(window_s) or window_s < min_window_s:
         return _bench_power_unavailable("window_below_minimum")
@@ -643,6 +650,7 @@ def _bench_power_block(
         "window_s": float(window_s),
         "window_iterations": int(window_iterations),
         "kv_drift_tokens": int(kv_drift_tokens),
+        "step_wall_times_s": [float(value) for value in step_wall_times_s],
     }
 
 
@@ -2725,9 +2733,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 forward_index = self._bench_forward_index
                 self._bench_forward_index += 1
                 self._bench_observe_warmup(scheduled)
-                window = self._bench_power_window
-                if window is not None:
-                    window["completed"] += 1
+                self._bench_power_step_completed(wall_time)
                 if is_benchmark_point:
                     # Older vLLM versions may not expose this optional output
                     # field. Absence is unknown, never evidence of eager mode.
@@ -7826,6 +7832,16 @@ class InstrumentedScheduler(AsyncScheduler):
             window["point"].benchmark_id, seq, want, ok
         )
 
+    def _bench_power_step_completed(self, wall_time: float) -> None:
+        """Count one finished forward step of an open window and keep its
+        ``wall_time``. Window steps are not benchmark samples, so this is the
+        output-to-output interval; the first one also covers the window's
+        opening barrier and NVML start read."""
+        window = self._bench_power_window
+        if window is not None:
+            window["completed"] += 1
+            window["step_wall_times_s"].append(wall_time)
+
     def _bench_power_kv_tokens(self) -> int:
         return sum(
             self.requests[req_id].num_computed_tokens
@@ -7949,6 +7965,7 @@ class InstrumentedScheduler(AsyncScheduler):
             "rounds": 0,
             "dispatched": 0,
             "completed": 0,
+            "step_wall_times_s": [],
             "stopping": False,
             "failure": None,
             "next": None,
@@ -8005,6 +8022,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 window_s=window_s,
                 window_iterations=window["dispatched"],
                 kv_drift_tokens=drift,
+                step_wall_times_s=window["step_wall_times_s"],
                 min_window_s=self._bench_power_window_s(),
             )
         )
