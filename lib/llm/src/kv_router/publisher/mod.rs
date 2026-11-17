@@ -59,7 +59,8 @@ pub use attachment_owner::{KvStateAttachmentDescriptor, KvStateAttachmentOwner};
 
 pub use crate::discovery::kv_state_agent::KvStateIngressProtocol;
 #[cfg(test)]
-use dedup::{EventDedupFilter, EventDedupPolicy};
+use dedup::EventDedupFilter;
+use dedup::EventDedupPolicy;
 #[cfg(test)]
 use event_processor::run_event_processor_loop;
 use event_processor::start_event_processor;
@@ -434,13 +435,17 @@ impl KvEventPublisher {
                 ),
             "KV replay recovery requires the local indexer"
         );
-        let idempotent_stores = matches!(
+        let worker_dedup_policy = if matches!(
             source_config,
             Some(KvEventSourceConfig::Zmq {
                 idempotent_stores: true,
                 ..
             })
-        );
+        ) {
+            EventDedupPolicy::SetLike
+        } else {
+            EventDedupPolicy::RefCounted
+        };
         let mut source = None;
         if let Some(config) = source_config {
             source = Some(KvEventSource::start(
@@ -566,7 +571,7 @@ impl KvEventPublisher {
                 rx,
                 local_indexer_clone,
                 batching_timeout_ms,
-                idempotent_stores,
+                worker_dedup_policy,
             )
             .await;
 

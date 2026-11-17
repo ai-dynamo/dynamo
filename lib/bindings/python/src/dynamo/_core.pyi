@@ -1299,8 +1299,7 @@ class KvEventPublisher:
                 format (after sgl-project/sglang#43043), including for caller hashes,
                 so every event token at or above 1,000,000 is excluded from the index.
                 Otherwise only values that do not fit in 32 bits are.
-            idempotent_stores: The ZMQ source emits one remove per block however many
-                times it stored it, so repeated stores do not stack. Set for SGLang.
+            idempotent_stores: Do not refcount repeated stores. Set for SGLang.
         """
 
     def publish_stored(

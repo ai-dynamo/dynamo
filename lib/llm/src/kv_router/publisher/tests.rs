@@ -947,7 +947,16 @@ mod tests_startup_helpers {
         let cleanup_discovery = discovery.clone();
         let processor = tokio::spawn(async move {
             let (publisher, _) = MockComponent::new();
-            start_event_processor(publisher, 1, processor_token, rx, None, None, false).await;
+            start_event_processor(
+                publisher,
+                1,
+                processor_token,
+                rx,
+                None,
+                None,
+                EventDedupPolicy::RefCounted,
+            )
+            .await;
             cleanup_discovery.unregister(source_instance).await.unwrap();
         });
         let listener_handle = tokio::spawn(async {});
@@ -1020,7 +1029,7 @@ mod tests_startup_helpers {
             rx,
             None,
             Some(10_000),
-            false,
+            EventDedupPolicy::RefCounted,
         ));
 
         tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
@@ -1080,7 +1089,7 @@ mod tests_startup_helpers {
             rx,
             Some(local_indexer.clone()), // arc::clone just increments atomic counters
             Some(10_000),
-            false,
+            EventDedupPolicy::RefCounted,
         ));
 
         // Wait for processing
@@ -1166,7 +1175,7 @@ mod tests_startup_helpers {
             rx,
             Some(local_indexer.clone()),
             Some(10_000),
-            false,
+            EventDedupPolicy::RefCounted,
         ));
 
         // Then remove same event
@@ -1259,7 +1268,7 @@ mod tests_startup_helpers {
             rx,
             Some(local_indexer.clone()),
             Some(10_000),
-            false,
+            EventDedupPolicy::RefCounted,
         ));
 
         tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
@@ -1330,7 +1339,7 @@ mod tests_startup_helpers {
             rx,
             Some(local_indexer),
             Some(10_000),
-            false,
+            EventDedupPolicy::RefCounted,
         ));
 
         tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
@@ -1892,7 +1901,7 @@ mod tests_startup_helpers {
             worker_rx,
             Some(local_indexer_1.clone()),
             Some(10), // 10ms batching timeout
-            false,
+            EventDedupPolicy::RefCounted,
         ));
 
         // === SETUP: Router Components ===
@@ -2582,7 +2591,7 @@ mod event_processor_tests {
                 Some(indexer.clone()),
                 Some(60_000),
                 DEFAULT_MAX_BATCH_BLOCKS,
-                false,
+                EventDedupPolicy::RefCounted,
             ));
             let (done, ack) = tokio::sync::oneshot::channel();
             // A missing parent reaches the index and is rejected there, as on the live path.
@@ -2625,7 +2634,7 @@ mod event_processor_tests {
             None,
             None,
             DEFAULT_MAX_BATCH_BLOCKS,
-            false,
+            EventDedupPolicy::RefCounted,
         ));
 
         tx.send(
@@ -2660,7 +2669,7 @@ mod event_processor_tests {
             None,
             None,
             DEFAULT_MAX_BATCH_BLOCKS,
-            true,
+            EventDedupPolicy::SetLike,
         ));
 
         // SGLang announces a block more than once and removes it once: a host block after an
@@ -2701,7 +2710,7 @@ mod event_processor_tests {
             None,
             None,
             DEFAULT_MAX_BATCH_BLOCKS,
-            false,
+            EventDedupPolicy::RefCounted,
         ));
 
         tx.send(
@@ -2739,7 +2748,7 @@ mod event_processor_tests {
             None,
             None,
             DEFAULT_MAX_BATCH_BLOCKS,
-            false,
+            EventDedupPolicy::RefCounted,
         ));
 
         let host_removed = removed_event(5, 51, 1);
@@ -2823,7 +2832,7 @@ mod event_processor_tests {
             None,
             None,
             DEFAULT_MAX_BATCH_BLOCKS,
-            false,
+            EventDedupPolicy::RefCounted,
         ));
 
         tx.send(local_gpu_event(removed_event(0, 30, 0)).into())
@@ -2853,7 +2862,7 @@ mod event_processor_tests {
             None,
             Some(1_000),
             DEFAULT_MAX_BATCH_BLOCKS,
-            false,
+            EventDedupPolicy::RefCounted,
         ));
 
         tx.send(local_gpu_event(removed_event(0, 40, 0)).into())
@@ -2883,7 +2892,7 @@ mod event_processor_tests {
             None,
             Some(1_000),
             DEFAULT_MAX_BATCH_BLOCKS,
-            false,
+            EventDedupPolicy::RefCounted,
         ));
 
         let events = (0..=DEFAULT_MAX_BATCH_BLOCKS * 2)
@@ -2956,7 +2965,7 @@ mod event_processor_tests {
             None,
             Some(1_000),
             DEFAULT_MAX_BATCH_BLOCKS,
-            false,
+            EventDedupPolicy::RefCounted,
         ));
 
         let block_count = DEFAULT_MAX_BATCH_BLOCKS + 1;
@@ -3025,7 +3034,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
-                false,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3123,7 +3132,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
-                false,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3223,7 +3232,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
-                false,
+                EventDedupPolicy::RefCounted,
             )
             .await
             // SLEEP HERE?! so that events are not batched!
@@ -3293,7 +3302,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
-                false,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3441,7 +3450,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
-                false,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3515,7 +3524,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
-                false,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3587,7 +3596,7 @@ mod event_processor_tests {
                 None,
                 Some(100),
                 DEFAULT_MAX_BATCH_BLOCKS,
-                false,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3639,7 +3648,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
-                false,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3701,7 +3710,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
-                false,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3800,7 +3809,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
-                false,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3893,7 +3902,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
-                false,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3967,7 +3976,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
-                false,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -4097,7 +4106,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
-                false,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });

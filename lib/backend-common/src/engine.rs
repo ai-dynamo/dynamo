@@ -523,8 +523,7 @@ pub enum KvEventSource {
         image_token_id: Option<u32>,
         /// Opt-in idle heartbeat deadline; absent preserves legacy publishers.
         heartbeat_timeout: Option<std::time::Duration>,
-        /// The engine emits one remove per block however many times it stored
-        /// it (SGLang), so its publisher does not count repeated stores.
+        /// Skip store refcounting; see `KvEventSourceConfig::Zmq` in `dynamo-llm`.
         idempotent_stores: bool,
     },
     Push {

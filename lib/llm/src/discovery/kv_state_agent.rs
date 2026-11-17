@@ -70,8 +70,7 @@ impl KvStateIngressProtocol {
         matches!(self, Self::SglangHiCacheV1)
     }
 
-    /// SGLang emits one remove per block however many times it stored it, so
-    /// the publisher must not count its stores.
+    /// See `idempotent_stores` on `KvEventSourceConfig::Zmq`.
     pub fn has_idempotent_stores(self) -> bool {
         matches!(self, Self::SglangHiCacheV1)
     }

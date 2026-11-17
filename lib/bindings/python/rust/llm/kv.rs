@@ -1399,9 +1399,7 @@ impl KvEventPublisher {
     ///         format (after sgl-project/sglang#43043), including for caller hashes,
     ///         so every event token at or above 1,000,000 is excluded from the
     ///         index. Otherwise only values that do not fit in 32 bits are.
-    ///     idempotent_stores: The ZMQ source emits one remove per block however
-    ///         many times it stored it, so repeated stores do not stack. Set for
-    ///         SGLang; vLLM emits a remove per store.
+    ///     idempotent_stores: Do not refcount repeated stores. Set for SGLang.
     #[new]
     #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None, video_token_id=None, engine_owned_mm_identity=false, idempotent_stores=false))]
     #[allow(clippy::too_many_arguments)]

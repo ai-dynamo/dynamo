@@ -270,11 +270,6 @@ struct Coordinator<P> {
     source_failed: bool,
 }
 
-/// The dedup filter a slot on `protocol` publishes through.
-fn dedup_filter_for(protocol: KvStateIngressProtocol) -> EventDedupFilter {
-    EventDedupFilter::new().with_idempotent_worker_stores(protocol.has_idempotent_stores())
-}
-
 impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
     async fn run(mut self, cancel: CancellationToken) {
         loop {
@@ -630,11 +625,16 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         &mut self,
         placement_events: Vec<PlacementEvent>,
     ) -> Result<()> {
-        let attachment_worker = self
+        let attachment = self
             .attachment
             .as_ref()
-            .context("KV state agent has no framework attachment")?
-            .worker;
+            .context("KV state agent has no framework attachment")?;
+        let attachment_worker = attachment.worker;
+        let worker_dedup_policy = if attachment.ingress_protocol.has_idempotent_stores() {
+            EventDedupPolicy::SetLike
+        } else {
+            EventDedupPolicy::RefCounted
+        };
         let mut coalescer = PlacementEventCoalescer::new(DEFAULT_MAX_BATCH_BLOCKS);
         let mut coalesced = Vec::with_capacity(placement_events.len());
         for placement_event in placement_events {
@@ -660,7 +660,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         for placement_event in coalesced {
             let domain = placement_event.placement.residency_domain;
             let dedup_policy = match domain {
-                ResidencyDomain::Worker => EventDedupPolicy::RefCounted,
+                ResidencyDomain::Worker => worker_dedup_policy,
                 // This state agent creates CacheOwner events only from KVCR ownership.
                 ResidencyDomain::CacheOwner => EventDedupPolicy::SetLike,
             };
@@ -1015,7 +1015,7 @@ impl KvStateAgent {
                 next_outbound_id: 1,
                 next_attachment_generation: 1,
                 source_cursor: SourceCursorState::default(),
-                dedup: dedup_filter_for(config.ingress_protocol),
+                dedup: EventDedupFilter::new(),
                 worker_domain_failed: false,
                 cache_owner_domain_failed: false,
                 source_failed: false,
@@ -2858,7 +2858,7 @@ mod tests {
             next_outbound_id: 1,
             next_attachment_generation: 1,
             source_cursor: SourceCursorState::default(),
-            dedup: dedup_filter_for(protocol),
+            dedup: EventDedupFilter::new(),
             worker_domain_failed: false,
             cache_owner_domain_failed: false,
             source_failed: false,
@@ -2899,7 +2899,6 @@ mod tests {
 
     #[tokio::test]
     async fn sglang_slot_publishes_the_only_remove_of_a_repeated_store() {
-        // SGLang emits one remove per block however many times it stored it.
         let protocol = KvStateIngressProtocol::SglangHiCacheV1;
         assert!(repeated_store_publishes_its_remove(protocol).await);
     }
