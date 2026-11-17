@@ -42,10 +42,6 @@ Start with a specific bottleneck and a baseline metric. Measure cache reuse, wor
 Dynamo does not decide whether a trajectory is on-policy, accepted, or fresh enough for training. The framework must gate requests around synchronous updates or enforce its own bounded-staleness policy.
 </Info>
 
-## Decision Model
-
-For experimental classification, predicate evaluation, and scoring, see the separate [Decision Model use case](../decision-model/apis.md). RL frameworks can consume these inference results as evaluation signals; they still own reward design, calibration, and trajectory acceptance.
-
 ## Framework Integrations
 
 | Framework | Status | Start here |
