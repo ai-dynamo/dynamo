@@ -40,6 +40,12 @@ pub trait WorkerConfigLike {
         None
     }
 
+    /// Host-pinned capacity, in blocks, of the cache owner (KVCR instance) attached
+    /// to each data-parallel rank of this worker, if advertised.
+    fn cache_owner_capacity_blocks(&self) -> Option<u64> {
+        None
+    }
+
     /// Tokens retained by the backend's native KV offloading tier, if available.
     fn native_offloading_capacity_tokens(&self) -> Option<u64> {
         None

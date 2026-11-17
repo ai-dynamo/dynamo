@@ -2682,6 +2682,80 @@ mod tests {
         );
     }
 
+    /// A hybrid engine with an explicit `prefix_match_unit` cannot export engine KV events, so it
+    /// replays, aggregated and disaggregated, behind a KV router that does not read them.
+    #[test]
+    fn hybrid_prefix_match_unit_replays_behind_a_router_without_kv_events() {
+        let hybrid = |worker_type: WorkerType| {
+            MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "worker_type": worker_type,
+                    "block_size": 64,
+                    "num_gpu_blocks": 64,
+                    "kv_cache_bytes_per_token": 16,
+                    "state_cache": {"bytes_per_request": 1500},
+                    "prefix_match_unit": 64,
+                    "max_num_seqs": 4,
+                    "max_num_batched_tokens": 256,
+                },
+            }))
+            .unwrap()
+        };
+        let router = || {
+            Some(KvRouterConfig {
+                use_kv_events: false,
+                ..KvRouterConfig::default()
+            })
+        };
+        let requests = || {
+            (1..=2)
+                .map(|uuid| DirectRequest {
+                    tokens: (0..128).collect(),
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(uuid)),
+                    arrival_timestamp_ms: Some(0.0),
+                    ..DirectRequest::default()
+                })
+                .collect()
+        };
+        let aggregated = crate::replay::offline::simulate_trace_with_scaling_policy(
+            hybrid(WorkerType::Aggregated),
+            router(),
+            None,
+            requests(),
+            2,
+            1.0,
+            ReplayRouterMode::KvRouter,
+            true,
+            None,
+            SlaThresholds::default(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(aggregated.per_request.len(), 2);
+        let disaggregated = crate::replay::offline::simulate_trace_disagg_with_scaling_policy(
+            OfflineDisaggReplayConfig {
+                prefill_args: hybrid(WorkerType::Prefill),
+                decode_args: hybrid(WorkerType::Decode),
+                num_prefill_workers: 1,
+                num_decode_workers: 1,
+            },
+            router(),
+            None,
+            requests(),
+            1.0,
+            ReplayRouterMode::KvRouter,
+            true,
+            None,
+            SlaThresholds::default(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(disaggregated.per_request.len(), 2);
+    }
+
     #[test]
     fn kv_event_lag_reaches_offline_kv_router_replay() {
         let args = MockerConfig::from_value(serde_json::json!({

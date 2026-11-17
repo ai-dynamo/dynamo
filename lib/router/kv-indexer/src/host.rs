@@ -17,7 +17,7 @@ pub use crate::branch_sharded::BranchShardedIndexer;
 pub use crate::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use crate::config::ApproximateCachePolicyKind;
 pub use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
-pub use crate::kv_indexer::KvIndexer;
+pub use crate::kv_indexer::{KvIndexer, apply_prune_removes, apply_routing_decision};
 pub use crate::local::LocalKvIndexer;
 pub use crate::lower_tier::LowerTierMatchDetails;
 pub use crate::lower_tier_indexers::{
@@ -38,7 +38,7 @@ pub use crate::observation::{
 };
 pub use crate::overlap::OverlapScores;
 pub use crate::positional::PositionalIndexer;
-pub use crate::pruning::PruneConfig;
+pub use crate::pruning::{BlockEntry, PruneConfig, PruneManager};
 pub use crate::radix_tree::RadixTree;
 pub use crate::recording::ApproximateRequestLease;
 pub use crate::registry::IndexRegistry;
