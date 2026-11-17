@@ -170,6 +170,13 @@ def _load_processor_module(
         remove_module(name)
     _install_sglang_stubs(install_module, tokenizer_module)
     _install_module(install_module, "dynamo._internal", ModelDeploymentCard=object)
+    _install_module(
+        install_module,
+        "dynamo.frontend.sglang_prompt_renderer",
+        DeepSeekPromptRenderer=type("DeepSeekPromptRenderer", (), {}),
+        PromptRenderer=object,
+        build_prompt_renderer=lambda *_args, **_kwargs: None,
+    )
     # Importing common.utils initializes native bindings absent from this fixture.
     _install_module(
         install_module,

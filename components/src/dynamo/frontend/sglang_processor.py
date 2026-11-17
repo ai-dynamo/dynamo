@@ -27,8 +27,9 @@ from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 
 from .responses_history import responses_tools_request
-from .sglang_deepseek import create_recipe_output_parser, resolve_deepseek_spec
+from .sglang_deepseek import create_recipe_output_parser
 from .sglang_prepost import (
+    JsonArrayParser,
     ReasoningParser,
     SglangStreamingPostProcessor,
     ToolCallParserType,
@@ -42,7 +43,11 @@ from .sglang_prepost import (
     preprocess_chat_request,
     resolve_skip_special_tokens,
 )
-from .sglang_prompt_renderer import PromptRenderer, build_prompt_renderer
+from .sglang_prompt_renderer import (
+    DeepSeekPromptRenderer,
+    PromptRenderer,
+    build_prompt_renderer,
+)
 from .structural_tag_policy import runtime_structural_tag_options
 from .thinking import runtime_default_thinking_mode
 from .usage import response_usage, update_usage_metadata
@@ -388,6 +393,7 @@ def _init_worker(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    isolate_tool_call_markers: bool = False,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
@@ -411,6 +417,7 @@ def _init_worker(
         chat_template=chat_template,
         tool_call_parser_name=tool_call_parser_name,
         reasoning_parser_name=reasoning_parser_name,
+        isolate_tool_call_markers=isolate_tool_call_markers,
     )
 
 
@@ -611,7 +618,6 @@ class SglangProcessor:
         structural_tag_scope: str = "auto",
         structural_tag_schema: str = "auto",
         prompt_renderer: PromptRenderer | None = None,
-        deepseek_spec: str | None = None,
     ):
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
@@ -640,7 +646,11 @@ class SglangProcessor:
         self.structural_tag_scope = structural_tag_scope
         self.structural_tag_schema = structural_tag_schema
         self.prompt_renderer = prompt_renderer
-        self.deepseek_spec = deepseek_spec
+        self.deepseek_spec = (
+            prompt_renderer.recipe_spec
+            if isinstance(prompt_renderer, DeepSeekPromptRenderer)
+            else None
+        )
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
@@ -707,7 +717,9 @@ class SglangProcessor:
         main process; they are not picklable.
         """
         recipe_parser = None
-        if self.deepseek_spec is not None:
+        if self.deepseek_spec is not None and not isinstance(
+            tool_call_parser, JsonArrayParser
+        ):
             recipe_request = _with_thinking_template_kwargs(
                 request, self.default_thinking_mode
             )
@@ -720,12 +732,9 @@ class SglangProcessor:
                 spec=self.deepseek_spec,
                 reasoning_parser_name=self.reasoning_parser_name,
                 tool_call_parser_name=self.tool_call_parser_name,
-                parse_tool_calls=bool(self.tool_call_parser_name)
-                and tool_call_parser is not None,
+                parse_tool_calls=tool_call_parser is not None,
                 json_content=_guided_json_is_content(dynamo_preproc),
             )
-            if recipe_parser is not None and not self.tool_call_parser_name:
-                tool_call_parser = None
         return SglangStreamingPostProcessor(
             tokenizer=self.tokenizer,
             tool_call_parser=tool_call_parser,
@@ -941,6 +950,7 @@ class SglangProcessor:
                 stop_reason: Any | None,
                 stop_terminated: bool,
                 engine_data: Any | None,
+                aborted: bool = False,
             ) -> dict[str, Any]:
                 nonlocal pending_token_ids
                 nonlocal pending_log_probs
@@ -957,6 +967,7 @@ class SglangProcessor:
                     "finish_reason": finish_reason,
                     "stop_reason": stop_reason,
                     "stop_terminated": stop_terminated,
+                    "aborted": aborted,
                 }
                 if pending_log_probs is not None:
                     mapped_response["log_probs"] = pending_log_probs
@@ -1116,6 +1127,10 @@ class SglangProcessor:
                     )
                     break
                 finish_reason = _map_finish_reason(raw_finish_reason)
+                aborted = isinstance(raw_finish_reason, str) and (
+                    raw_finish_reason == "cancelled"
+                    or raw_finish_reason.startswith("abort")
+                )
                 backend_finished = raw_finish_reason is not None
                 prompt_logprobs.update(engine_response)
                 if usage := engine_response.get("completion_usage"):
@@ -1140,7 +1155,7 @@ class SglangProcessor:
                         entries[:logprobs_count] for entries in top_logprobs
                     ]
 
-                if new_ids and pending_token_ids:
+                if new_ids and pending_token_ids and not aborted:
                     pending_logprob_shape = (
                         pending_log_probs is not None,
                         pending_top_logprobs is not None,
@@ -1195,6 +1210,7 @@ class SglangProcessor:
                         stop_reason=stop_reason,
                         stop_terminated=stop_terminated,
                         engine_data=engine_data,
+                        aborted=aborted,
                     )
                     if (
                         post.locally_finished
@@ -1205,7 +1221,7 @@ class SglangProcessor:
                         pending_terminal = envelope
                         continue
                     yield envelope
-                    if post.locally_finished:
+                    if post.locally_finished or aborted:
                         break
             else:
                 if pending_terminal is not None:
@@ -1322,6 +1338,7 @@ class SglangEngineFactory:
             chat_template=chat_template,
             tool_call_parser_name=tool_call_parser_name,
             reasoning_parser_name=reasoning_parser_name,
+            isolate_tool_call_markers=self.config.isolate_tool_call_markers,
         )
         preprocess_pool = None
         preprocess_workers = self.config.preprocess_workers
@@ -1347,6 +1364,7 @@ class SglangEngineFactory:
                     structural_tag_mode,
                     structural_tag_scope,
                     structural_tag_schema,
+                    self.config.isolate_tool_call_markers,
                 ),
             )
             futures = [
@@ -1387,9 +1405,6 @@ class SglangEngineFactory:
             structural_tag_scope=structural_tag_scope,
             structural_tag_schema=structural_tag_schema,
             prompt_renderer=prompt_renderer,
-            deepseek_spec=(
-                resolve_deepseek_spec(local_dir) if chat_template is None else None
-            ),
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none
