@@ -29,7 +29,7 @@ NVIDIA Dynamo exposes two non-streaming decision APIs over one scoring pipeline.
 
 The public contracts are the supported text-evaluation subset of [OpenAI Decisions](https://developers.openai.com/api/reference/resources/decisions/methods/create) and [Jev/TypeSafe System One](https://docs.typesafe.ai/sdk/python). Do not send SGLang-native `/v1/decisions` request fields to Dynamo. Neither route accepts `nvext`, including `{}` or `{"format":"oai"}`.
 
-Use the exact alias returned by `GET /v1/models`, not the hosted provider's model name. Selecting a wire contract does not select an OpenAI- or Jev-hosted checkpoint. Supported inputs, candidate counts, and accounting depend on the model/executor profile. Dynamo currently admits at most 128 questions per request, subject to independent aggregate resource limits; this is not the hosted providers' request limit.
+Use the exact model alias returned by `GET /v1/models`. Supported inputs, candidate counts, and accounting depend on the model/executor profile. Dynamo currently admits at most 128 questions per request, subject to independent aggregate resource limits.
 
 ## Call OpenAI Decisions with curl
 
@@ -135,7 +135,7 @@ The equivalent illustrative SGLang response uses named answers and probability m
 }
 ```
 
-`x_label_mass` is a Dynamo extension reporting candidate vocabulary mass, not another conditional choice probability. It is not added to OpenAI answer objects. Treat `confidence` as an executor-derived statistic, not a calibrated probability of correctness or a guarantee of hosted-model equivalence.
+`x_label_mass` is a Dynamo extension reporting candidate vocabulary mass, not another conditional choice probability. It is not added to OpenAI answer objects. Treat `confidence` as an executor-derived statistic, not a calibrated probability of correctness.
 
 ## Use the Official OpenAI SDK
 
@@ -175,11 +175,11 @@ with OpenAI(base_url="http://localhost:8000/v1", api_key=os.environ.get("DYNAMO_
     print(result.usage, result._request_id)
 ```
 
-Answers are a union of types. Check `answer.type` before accessing type-specific fields. The profiles documented in these guides return scored answers, not hosted-provider safety refusals; clients must not treat a refusal answer from another executor as a normal classification.
+Answers are a union of types. Check `answer.type` before accessing type-specific fields. These examples return scored answers; do not interpret a refusal answer as a classification.
 
 ## Use the Official Jev/TypeSafe SDK
 
-Use the TypeSafe SDK (`typesafe-sdk`) to call Jev's System One API, in the same client environment. Set the System One model explicitly so the SDK does not negotiate a hosted model catalog. The TypeSafe SDK base URL is the server origin **without `/v1`**; the client supplies its own `/v1/systemone` path.
+Use the TypeSafe SDK (`typesafe-sdk`) to call Jev's System One API, in the same client environment. Set the System One model explicitly to the registered alias. The TypeSafe SDK base URL is the server origin **without `/v1`**; the client supplies its own `/v1/systemone` path.
 
 ```python
 import os
