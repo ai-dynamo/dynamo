@@ -230,6 +230,28 @@ def test_removed_layerwise_gpu_layers_rejected(monkeypatch, source, layers):
         config.validate()
 
 
+@pytest.mark.parametrize("source", ["cli", "environment"])
+def test_custom_jinja_template_rejected(monkeypatch, tmp_path, source):
+    template = tmp_path / "template.jinja"
+    template.write_text("{{ messages[0].content }}")
+    monkeypatch.delenv("DYN_CUSTOM_JINJA_TEMPLATE", raising=False)
+    argv = []
+    if source == "environment":
+        monkeypatch.setenv("DYN_CUSTOM_JINJA_TEMPLATE", str(template))
+    else:
+        argv = ["--custom-jinja-template", str(template)]
+    parser = argparse.ArgumentParser()
+    DynamoRuntimeArgGroup().add_arguments(parser)
+    args = parser.parse_args(argv)
+    config = _make_omni_config(custom_jinja_template=args.custom_jinja_template)
+
+    with pytest.raises(
+        ValueError,
+        match="--custom-jinja-template.*DYN_CUSTOM_JINJA_TEMPLATE.*ignored",
+    ):
+        config.validate()
+
+
 def test_diffusion_bool_option_preserves_explicit_false():
     parser = argparse.ArgumentParser()
     OmniArgGroup().add_arguments(parser)
