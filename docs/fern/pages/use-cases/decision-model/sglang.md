@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Decision Models with SGLang
+sidebar-title: SGLang
 subtitle: Run a dedicated text-scoring worker for both Dynamo decision APIs
 ---
 

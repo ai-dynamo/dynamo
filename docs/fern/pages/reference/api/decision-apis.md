@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Decision API Reference
+sidebar-title: Decision APIs
 subtitle: Text evaluation contracts, accounting, and errors for Decisions and System One
 ---
 

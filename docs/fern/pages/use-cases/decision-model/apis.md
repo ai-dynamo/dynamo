@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Decision APIs
+sidebar-title: APIs
 subtitle: Classify and score text with the OpenAI Decisions and Jev System One contracts
 ---
 
