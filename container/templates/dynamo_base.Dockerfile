@@ -31,8 +31,6 @@ RUN for attempt in 1 2 3; do \
 # of the v0.61.0 that the release's modules pin. go get raises it in server,
 # etcdctl and etcdutl, whose binaries build.sh compiles, and in the root module,
 # which replaces them with their local copies and which build.sh loads first.
-# In v3.5.35 no other module moves. The check after the build reads each
-# binary's module list.
 RUN x_net=v0.62.0 && \
     for attempt in 1 2 3; do \
         git clone --depth 1 --branch "${ETCD_VERSION}" https://github.com/etcd-io/etcd.git /src/etcd && break; \
