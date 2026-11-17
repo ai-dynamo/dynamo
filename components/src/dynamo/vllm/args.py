@@ -62,7 +62,6 @@ GC_WORKER_EXTENSION = "dynamo.vllm.gc_policy.FpmGcWorkerExtension"
 
 class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     component: str
-    systemone_serial: bool = False
     custom_jinja_template: Optional[str] = None
     discovery_backend: str
     request_plane: str
@@ -168,15 +167,6 @@ def _parse_cli_args(argv: list[str] | None) -> tuple[Config, argparse.Namespace]
     # Build argument parser
     dynamo_runtime_argspec.add_arguments(parser)
     dynamo_vllm_argspec.add_arguments(parser)
-    parser.add_argument(
-        "--systemone-serial",
-        action="store_true",
-        help=(
-            "Opt in to decision scoring on a qualified serialized worker. "
-            "Requires --max-num-seqs=1 and --logprobs-mode=raw_logprobs; "
-            "does not change engine scheduling settings."
-        ),
-    )
 
     # trick to add vllm engine flags to a specific group without breaking the Dynamo groups.
     vg = parser.add_argument_group(

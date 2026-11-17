@@ -4,9 +4,7 @@
 """Advertise the qualified vLLM 0.33 causal decision execution profile."""
 
 import logging
-from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
-from inspect import signature
 from typing import TYPE_CHECKING
 
 from packaging.version import InvalidVersion, Version
@@ -39,22 +37,6 @@ def _released_runtime() -> bool:
         installed = version("vllm")
         return isinstance(installed, str) and Version(installed).public == "0.33.0"
     except (PackageNotFoundError, InvalidVersion):
-        return False
-
-
-def _scoring_api_available() -> bool:
-    # The backend is optional in CPU installations. Inspect only its wire schema.
-    try:
-        params = signature(
-            import_module("vllm.sampling_params").SamplingParams
-        ).parameters
-        output = signature(import_module("vllm.outputs").RequestOutput).parameters
-        return "logprob_token_ids" in params and {
-            "num_cached_tokens",
-            "num_cache_creation_tokens",
-        }.issubset(output)
-    except (ImportError, OSError, RuntimeError, AttributeError, TypeError, ValueError):
-        logger.warning("vLLM decisions disabled: scoring schema unavailable")
         return False
 
 
@@ -125,16 +107,26 @@ def publish_vllm_decision_capability(
         or model_input != ModelInput.Tokens
         or worker_type != WorkerType.Aggregated
         or any(needs or ())
-        or not _released_runtime()
     ):
-        return False
+        raise ValueError(
+            "--systemone-serial requires an aggregated token-input worker with "
+            "native generate support and no downstream workers"
+        )
+    if not _released_runtime():
+        raise ValueError("--systemone-serial requires qualified vLLM 0.33.0")
     try:
         if not _qualified_configuration(config, vllm_config):
-            return False
-    except AttributeError:
-        logger.warning("vLLM decisions disabled: runtime metadata unavailable")
-        return False
-    if not verify_cache_sources() or not _scoring_api_available():
-        return False
+            raise ValueError(
+                "--systemone-serial requires a qualified causal model and runtime: "
+                "raw_logprobs, max_num_seqs=1, data_parallel_size=1, standard "
+                "scheduler, and no LoRA, speculation, or KV/encoder transfers"
+            )
+    except AttributeError as exc:
+        raise ValueError(
+            "--systemone-serial cannot qualify missing runtime metadata"
+        ) from exc
+    if not verify_cache_sources():
+        raise ValueError("--systemone-serial requires qualified vLLM cache sources")
     runtime_config.set_engine_specific(VLLM_CAUSAL_DECISION_CAPABILITY, "true")
+    logger.info("Published vLLM causal decision capability (serialized raw scoring)")
     return True
