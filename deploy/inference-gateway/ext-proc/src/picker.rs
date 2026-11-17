@@ -197,7 +197,7 @@ pub struct ResponseUsage {
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
-    /// `usage.prompt_tokens_details.cached_tokens`
+    /// `usage.prompt_tokens_details.cached_tokens`, or `input_tokens_details` for Responses
     pub cached_tokens: Option<u64>,
 }
 
