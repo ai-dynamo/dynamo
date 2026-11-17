@@ -40,18 +40,8 @@ NAMESPACE="${NAMESPACE:-default}"
 NUM_MODELS="${NUM_MODELS:-16}"
 NODE_NAME="${NODE_NAME:-}"
 
-# With NODE_NAME set, add a nodeSelector to each component's pod spec (the lines
-# that are exactly "        spec:"); otherwise pass the manifest through unchanged.
-add_node_selector() {
-  if [ -z "${NODE_NAME}" ]; then
-    cat
-  else
-    awk -v node="${NODE_NAME}" '{ print } $0 == "        spec:" {
-      print "          nodeSelector:"
-      print "            kubernetes.io/hostname: " node
-    }'
-  fi
-}
+# add_node_selector: with NODE_NAME set, pin each component to that node.
+source "$(dirname "$0")/../common/lib.sh"
 MODEL_REVISION="1cfa9a7208912126459214e8b04321603b3df60c"
 MODEL_PATH="${1:-${HF_CACHE_DIR}/hub/models--Qwen--Qwen3-4B/snapshots/${MODEL_REVISION}}"
 

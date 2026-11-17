@@ -47,6 +47,7 @@ load generator runs in a pod on another node.
 | [`common/setup-aiperf.sh`](common/setup-aiperf.sh) | Creates a venv with AIPerf 0.11.0 |
 | [`common/run-sweep.sh`](common/run-sweep.sh) | Runs the concurrency sweep against `NUM_MODELS` DGD frontends at once |
 | [`common/aiperf-client-pod.yaml`](common/aiperf-client-pod.yaml) | In-cluster load-generator pod that runs `run-sweep.sh` with `ENDPOINT_MODE=dns` |
+| [`common/lib.sh`](common/lib.sh) | Shell helpers sourced by the generators (`add_node_selector`, which pins every component to `NODE_NAME` when it is set) |
 | [`baseline/gen-dgds.sh`](baseline/gen-dgds.sh), [`baseline/dgds-8x.yaml`](baseline/dgds-8x.yaml) | Generator and rendered manifests for the 8-DGD baseline |
 | [`kai-hami/install-kai-hami.sh`](kai-hami/install-kai-hami.sh) | Installs KAI-Scheduler v0.17.0 with the hamicore plugin, the HAMi resource isolator 1.1.0-chart, and opens the default queue quotas |
 | [`kai-hami/gen-dgds.sh`](kai-hami/gen-dgds.sh), [`kai-hami/dgds-16x.yaml`](kai-hami/dgds-16x.yaml) | Generator and rendered manifests for the 16-DGD KAI + HAMi run |
