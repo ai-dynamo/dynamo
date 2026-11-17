@@ -1017,6 +1017,7 @@ class TestGenerateLocally:
 
         assert chunks[-1].get("engine_data", {}).get("kv_cache_hit") == expected
 
+    @pytest.mark.multimodal
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "mode",
@@ -1062,24 +1063,31 @@ class TestGenerateLocally:
         assert usage["prompt_tokens_details"]["cached_tokens"] == 96
         assert usage["total_tokens"] == 105
 
+    @pytest.mark.core
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "engine_prompt_ids",
-        [[0, 2], [11, 12, 13, 14, 15], None],
-        ids=["encoder-decoder", "text", "no-engine-prompt"],
+        ("request_ids", "engine_prompt_ids"),
+        [
+            ([42], [2, 0]),
+            ([11, 12, 13, 14, 15], [2, 0]),
+            ([11, 12, 13, 14, 15], [11, 12, 13, 14, 15]),
+            ([11, 12, 13, 14, 15], None),
+        ],
+        ids=["encoder-decoder-short", "encoder-decoder", "text", "no-engine-prompt"],
     )
-    async def test_usage_keeps_request_length_for_shorter_engine_prompt(
-        self, engine_prompt_ids
+    async def test_usage_keeps_request_length_for_text_prompt(
+        self, request_ids, engine_prompt_ids
     ):
         # An encoder-decoder engine prompt is only the decoder start tokens.
         handler = self._make_handler()
+        cached_tokens = len(request_ids) - 1
         handler.engine.llm.generate_async = MagicMock(
             return_value=self._make_mock_generation_result_sequence(
-                [[]], cached_tokens=4, prompt_token_ids=engine_prompt_ids
+                [[]], cached_tokens=cached_tokens, prompt_token_ids=engine_prompt_ids
             )
         )
         request = {
-            "token_ids": [11, 12, 13, 14, 15],
+            "token_ids": list(request_ids),
             "stop_conditions": {"max_tokens": 10},
             "sampling_options": {},
         }
@@ -1088,9 +1096,9 @@ class TestGenerateLocally:
             async for chunk in handler.generate_locally(request, self._make_context())
         ]
         usage = chunks[-1]["completion_usage"]
-        assert usage["prompt_tokens"] == 5
-        assert usage["prompt_tokens_details"]["cached_tokens"] == 4
-        assert usage["total_tokens"] == 6
+        assert usage["prompt_tokens"] == len(request_ids)
+        assert usage["prompt_tokens_details"]["cached_tokens"] == cached_tokens
+        assert usage["total_tokens"] == len(request_ids) + 1
 
     @pytest.mark.asyncio
     async def test_health_check_gets_priority_1(self):

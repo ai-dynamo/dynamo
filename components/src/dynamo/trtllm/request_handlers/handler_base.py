@@ -1477,11 +1477,12 @@ class HandlerBase(BaseGenerativeHandler):
                                     "prompt_logprobs"
                                 ] = prompt_logprobs_payload
 
-                            # Multimodal prompts expand; encoder-decoder prompts shrink.
-                            num_input_tokens = max(
-                                len(request.get("token_ids", [])),
-                                len(res.prompt_token_ids or []),
-                            )
+                            num_input_tokens = len(request.get("token_ids", []))
+                            if isinstance(processed_input, dict):
+                                # Multimodal placeholders expand in the engine.
+                                num_input_tokens = max(
+                                    num_input_tokens, len(res.prompt_token_ids or [])
+                                )
                             total_completion_tokens = sum(
                                 len(o.token_ids) for o in res.outputs
                             )
@@ -1741,8 +1742,6 @@ def _kv_cache_hit_engine_data(res, num_input_tokens: int) -> dict:
 
 def _prompt_tokens_details(res, num_input_tokens: int, generation_only: bool) -> dict:
     engine_reported = int(res.cached_tokens or 0)
-    # Clamp to prompt size: image token_ids are unexpanded placeholders, so the
-    # engine count (measured over the expanded prompt) can exceed it.
     details: dict = {"cached_tokens": min(num_input_tokens, engine_reported)}
     if not generation_only:
         # On context paths the engine value is the KV manager's prepopulated
