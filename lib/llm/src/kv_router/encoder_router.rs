@@ -17,7 +17,7 @@ use dynamo_runtime::{
     engine::AsyncEngine,
     pipeline::{
         Context, ManyOut, Operator, PushRouter, RouterMode, ServerStreamingEngine, SingleIn,
-        async_trait, network::egress::dispatch_observer::propagate_dispatch_observer,
+        async_trait,
     },
     protocols::{EndpointId, annotated::Annotated, maybe_error::MaybeError},
 };
@@ -398,12 +398,11 @@ impl
             crate::routing_policy::ExecutionStage::Encoder,
         )?;
 
-        let mut encode_context = Context::with_id_and_metadata(
+        let encode_context = Context::with_id_and_metadata(
             request.clone(),
             context.id().to_string(),
             context.metadata().clone(),
         );
-        propagate_dispatch_observer(&context, &mut encode_context)?;
         let encode_result = async {
             let binding = self
                 .binding

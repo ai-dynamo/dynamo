@@ -444,10 +444,10 @@ def _parse_migration_max_seq_len_exceeded_metric(
 def expected_ongoing_migrations(
     migration_limit: int, migration_max_seq_len: int | None
 ) -> int:
-    """Replacement dispatches expected after one mid-stream worker fault.
+    """Accepted replacements expected after one mid-stream worker fault.
 
-    The frontend counts a migration only when it sends the request to a
-    replacement worker, so a disabled limit or an exceeded seq-len cap (the
+    The frontend counts a migration only when a replacement worker accepts
+    the request, so a disabled limit or an exceeded seq-len cap (the
     cases use a cap of 1) gives 0.
     """
     return 1 if migration_limit > 0 and migration_max_seq_len != 1 else 0
@@ -708,7 +708,7 @@ def run_migration_test(
 
     # Step 6: Verify that migration behaved as expected via the frontend's
     # Prometheus metrics (a stable structured surface) instead of asserting on
-    # log strings. `ongoing_request` counts only replacement dispatches after a
+    # log strings. `ongoing_request` counts only accepted replacements after a
     # stream error; `max_seq_len_exceeded` counts hits on the migration seq-len cap.
     exact_metric_counts = expected_ongoing_request_count is not None
     if expected_ongoing_request_count is None:

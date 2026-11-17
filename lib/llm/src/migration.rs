@@ -34,10 +34,7 @@ use dynamo_runtime::metrics::prometheus_names::frontend_service;
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator, PipelineOperator,
     ResponseStream, ServerStreamingEngine, SingleIn, async_trait, attach_first_response_guard,
-    network::egress::{
-        dispatch_observer::attach_dispatch_observer,
-        route_span::{RouteTraceContext, attach_route_trace_context, error_type_name},
-    },
+    network::egress::route_span::{RouteTraceContext, attach_route_trace_context, error_type_name},
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 
@@ -794,13 +791,6 @@ where
             {
                 release.release().await;
             }
-            if let Some(cause) = migration {
-                let metrics = self.metrics.clone();
-                let model_name = self.model_name.clone();
-                attach_dispatch_observer(&mut request, move || {
-                    metrics.inc_migration(&model_name, cause.migration_type);
-                });
-            }
             let response_stream = self.next_generate.generate(request).await;
             match response_stream {
                 Ok(next_stream) => {
@@ -816,6 +806,12 @@ where
                     } else {
                         frontend_service::migration_outcome::SUCCESS
                     };
+                    if let Some(cause) = migration
+                        && outcome == frontend_service::migration_outcome::SUCCESS
+                    {
+                        self.metrics
+                            .inc_migration(&self.model_name, cause.migration_type);
+                    }
                     self.record_migration_outcome(migration_event.as_ref(), outcome);
                     self.active_route_trace = Some(route_trace);
                     self.next_stream = Some(next_stream);
@@ -1517,9 +1513,6 @@ mod tests {
             &self,
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<BackendOutput>>> {
-            dynamo_runtime::pipeline::network::egress::dispatch_observer::notify_dispatch(
-                &request,
-            )?;
             let call_num = self.call_count.fetch_add(1, Ordering::SeqCst);
             if matches!(self.behavior, MockBehavior::FailThenSuccessWithAffinity) {
                 let actual = request
@@ -2647,8 +2640,8 @@ mod tests {
             assert!(error.to_string().contains("no responders"));
         }
 
-        // 3 replacement dispatches; the 4th failure has no budget left.
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 3);
+        // Every replacement is rejected, so none counts as a migration.
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
         assert_eq!(
             migration_duration_count(
@@ -2717,9 +2710,9 @@ mod tests {
         let err = error_response.err().expect("expected error response");
         assert_eq!(err.error_type(), ErrorType::Disconnected);
 
-        // One replacement after the mid-stream failure, two after failed dispatches.
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 2);
-        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
+        // Every replacement is rejected after the original stream fails.
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
         assert_eq!(
             migration_duration_count(
                 &metrics,
@@ -2962,7 +2955,7 @@ mod tests {
             .downcast_ref::<DynamoError>()
             .expect("error should be a DynamoError");
         assert_eq!(dynamo_error.error_type(), ErrorType::Cancelled);
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 1);
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(
             migration_duration_count(
                 &metrics,
@@ -3078,14 +3071,8 @@ mod tests {
         }
         // [success, failure, cancelled]: exactly one terminal outcome.
         assert_eq!(duration_counts(&metrics), [0, 0, 1]);
-        assert_eq!(
-            metrics.get_migration_new_request_count(TEST_MODEL),
-            u64::from(!mid_stream)
-        );
-        assert_eq!(
-            metrics.get_migration_ongoing_request_count(TEST_MODEL),
-            u64::from(mid_stream)
-        );
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
     }
 
     #[tokio::test]
@@ -3872,9 +3859,6 @@ mod tests {
                 &self,
                 request: SingleIn<PreprocessedRequest>,
             ) -> Result<ManyOut<Annotated<BackendOutput>>> {
-                dynamo_runtime::pipeline::network::egress::dispatch_observer::notify_dispatch(
-                    &request,
-                )?;
                 let call_num = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
                 let route_trace = get_route_trace_context(&request)
                     .expect("migration wrapper must attach route trace context");

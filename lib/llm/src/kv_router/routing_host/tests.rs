@@ -4148,7 +4148,6 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Reje
         &self,
         request: SingleIn<AddressedRequest<PreprocessedRequest>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        dynamo_runtime::pipeline::network::egress::dispatch_observer::notify_dispatch(&request)?;
         let (addressed, context) = request.transfer(());
         let (request, _, instance) = addressed.into_parts();
         let worker_id = instance.expect("selected worker instance").id();
