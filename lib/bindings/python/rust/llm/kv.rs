@@ -2561,15 +2561,9 @@ impl KvRouter {
         let mut request: llm_rs::protocols::common::preprocessor::PreprocessedRequest =
             depythonize(request.bind(py)).map_err(to_pyerr)?;
 
-        // Create tracker if not already set, to capture worker routing info
-        let tracker = match request.tracker {
-            Some(ref t) => t.clone(),
-            None => {
-                let t = Arc::new(RequestTracker::new());
-                request.tracker = Some(t.clone());
-                t
-            }
-        };
+        // The tracker captures worker routing info, and carries on from the age an upstream
+        // router stamped on the request.
+        let tracker = request.ensure_tracker().clone();
         let request = crate::create_request_context(request, &context);
         let dispatch_span = context
             .as_ref()
