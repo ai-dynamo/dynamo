@@ -1411,6 +1411,12 @@ class HandlerBase(BaseGenerativeHandler):
                         yield {"finish_reason": "error", "token_ids": []}
                         break
 
+                    num_input_tokens = len(request.get("token_ids", []))
+                    if isinstance(processed_input, dict):
+                        # Multimodal placeholders expand in the engine.
+                        num_input_tokens = max(
+                            num_input_tokens, len(res.prompt_token_ids or [])
+                        )
                     for output in res.outputs:
                         output_idx = getattr(output, "index", 0) or 0
                         tokens_so_far = output_tokens_per_choice.get(output_idx, 0)
@@ -1477,16 +1483,6 @@ class HandlerBase(BaseGenerativeHandler):
                                     "prompt_logprobs"
                                 ] = prompt_logprobs_payload
 
-                            num_input_tokens = len(request.get("token_ids", []))
-                            if isinstance(processed_input, dict):
-                                # Multimodal placeholders expand in the engine.
-                                num_input_tokens = max(
-                                    num_input_tokens, len(res.prompt_token_ids or [])
-                                )
-                            total_completion_tokens = sum(
-                                len(o.token_ids) for o in res.outputs
-                            )
-
                             if prefill_prompt_tokens_details:
                                 # A decode with a prefill result: its prefill
                                 # attempt already reported cache reuse.
@@ -1522,14 +1518,26 @@ class HandlerBase(BaseGenerativeHandler):
                                             "kv_cache_hit"
                                         ] = kv_cache_hit
 
-                            out["completion_usage"] = {
-                                "prompt_tokens": int(num_input_tokens),
-                                "completion_tokens": int(total_completion_tokens),
-                                "total_tokens": int(
-                                    num_input_tokens + total_completion_tokens
-                                ),
-                                "prompt_tokens_details": prompt_tokens_details,
-                            }
+                            out["completion_usage"] = _completion_usage(
+                                res, num_input_tokens, prompt_tokens_details
+                            )
+                        elif output_idx not in output_tokens_per_choice:
+                            # Until a chunk carries usage, the frontend shows its
+                            # own prompt count, which misses expanded image tokens.
+                            # It counts output tokens itself, so usage on the first
+                            # chunk is enough. A generation-only reuse count needs
+                            # the final metrics, so it waits for the last chunk.
+                            prompt_tokens_details = prefill_prompt_tokens_details
+                            if not prompt_tokens_details and (
+                                getattr(disaggregated_params, "request_type", None)
+                                != "generation_only"
+                            ):
+                                prompt_tokens_details = _prompt_tokens_details(
+                                    res, num_input_tokens, False
+                                )
+                            out["completion_usage"] = _completion_usage(
+                                res, num_input_tokens, prompt_tokens_details
+                            )
 
                         # Yield the chunk to the client and update the token
                         # count for this output choice.
@@ -1730,6 +1738,17 @@ class HandlerBase(BaseGenerativeHandler):
         # 1. it catches unsupported fields / attributes.
         # 2. it executes the class's `__post_init__`, which may contain helpful validation logic.
         return dataclasses.replace(sampling_params, **overrides)
+
+
+def _completion_usage(res, num_input_tokens: int, prompt_tokens_details) -> dict:
+    """Build a chunk's usage; completion tokens count every choice so far."""
+    completion_tokens = sum(len(o.token_ids) for o in res.outputs)
+    return {
+        "prompt_tokens": int(num_input_tokens),
+        "completion_tokens": int(completion_tokens),
+        "total_tokens": int(num_input_tokens + completion_tokens),
+        "prompt_tokens_details": prompt_tokens_details,
+    }
 
 
 def _kv_cache_hit_engine_data(res, num_input_tokens: int) -> dict:

@@ -916,6 +916,7 @@ class TestGenerateLocally:
         last_index = len(prompt_logprobs_per_chunk) - 1
         for index, prompt_logprobs in enumerate(prompt_logprobs_per_chunk):
             output = MagicMock()
+            output.index = 0
             output.token_ids = list(range(42, 43 + index))
             output.finish_reason = "stop" if index == last_index else None
             output.stop_reason = None
@@ -1099,6 +1100,103 @@ class TestGenerateLocally:
         assert usage["prompt_tokens"] == len(request_ids)
         assert usage["prompt_tokens_details"]["cached_tokens"] == cached_tokens
         assert usage["total_tokens"] == len(request_ids) + 1
+
+    @pytest.mark.multimodal
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("mode", "prefill_details", "first_details"),
+        [
+            (DisaggregationMode.AGGREGATED, None, {"cached_tokens": 96}),
+            (DisaggregationMode.DECODE, None, None),
+            (DisaggregationMode.DECODE, {"cached_tokens": 64}, {"cached_tokens": 64}),
+        ],
+        ids=["aggregated", "generation-only", "decode-with-prefill-details"],
+    )
+    async def test_streamed_usage_counts_expanded_prompt_from_first_chunk(
+        self, mode, prefill_details, first_details
+    ):
+        # The frontend shows its own unexpanded prompt count until a chunk
+        # carries usage, so the first chunk must carry the expanded count.
+        handler = self._make_handler()
+        handler.disaggregation_mode = mode
+        expanded_ids = list(range(104))
+        handler._prepare_input_for_generation = mock.AsyncMock(
+            return_value={"prompt_token_ids": expanded_ids, "multi_modal_data": None}
+        )
+        params = (
+            SimpleNamespace(request_type="generation_only", disagg_request_id=None)
+            if mode == DisaggregationMode.DECODE
+            else None
+        )
+        handler._setup_disaggregated_params_for_mode = MagicMock(
+            return_value=(params, None, {})
+        )
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result_sequence(
+                [[], [], []], cached_tokens=96, prompt_token_ids=expanded_ids
+            )
+        )
+        request = {
+            "token_ids": [1, 91, 2],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        if prefill_details is not None:
+            request["prefill_result"] = {"prompt_tokens_details": prefill_details}
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert len(chunks) == 3
+        assert chunks[0]["completion_usage"] == {
+            "prompt_tokens": 104,
+            "completion_tokens": 1,
+            "total_tokens": 105,
+            "prompt_tokens_details": first_details,
+        }
+        assert "completion_usage" not in chunks[1]
+        assert chunks[-1]["completion_usage"] == {
+            "prompt_tokens": 104,
+            "completion_tokens": 3,
+            "total_tokens": 107,
+            "prompt_tokens_details": prefill_details or {"cached_tokens": 96},
+        }
+
+    @pytest.mark.core
+    @pytest.mark.asyncio
+    async def test_streamed_usage_sends_text_prompt_count_on_first_chunk(self):
+        handler = self._make_handler()
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result_sequence(
+                [[], [], []], cached_tokens=4, prompt_token_ids=[11, 12, 13, 14, 15]
+            )
+        )
+        request = {
+            "token_ids": [11, 12, 13, 14, 15],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert ["completion_usage" in chunk for chunk in chunks] == [True, False, True]
+        assert chunks[0]["completion_usage"] == {
+            "prompt_tokens": 5,
+            "completion_tokens": 1,
+            "total_tokens": 6,
+            "prompt_tokens_details": {"cached_tokens": 4},
+        }
+        # Cache-hit reports for the router stay on the final chunk only.
+        assert "engine_data" not in chunks[0]
+        assert chunks[-1]["engine_data"]["kv_cache_hit"] == {
+            "prompt_tokens": 5,
+            "reused_tokens": 4,
+        }
+        assert chunks[-1]["completion_usage"]["prompt_tokens"] == 5
+        assert chunks[-1]["completion_usage"]["total_tokens"] == 8
 
     @pytest.mark.asyncio
     async def test_health_check_gets_priority_1(self):
