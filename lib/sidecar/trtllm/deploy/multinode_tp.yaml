@@ -170,12 +170,8 @@ spec:
             - /bin/bash
             - -c
             args:
-            # The release image ships no sshd. sshd runs as the container user (root in the
-            # release image, UID 1000 in the Dynamo runtime image) from a config, host key, and
-            # PID file under $HOME, on port 2222 because a non-root user cannot bind port 22.
-            # Ranks run in sshd sessions, so export the container environment to them: Triton
-            # JIT needs the CUDA paths. sshd reads ~/.ssh/environment from the passwd home,
-            # which is $HOME in both images. Tokens stay out. The leader passes HF_TOKEN with mpirun -x.
+            # sshd runs as the container user on port 2222, since non-root cannot bind 22. Ranks
+            # need the container env for Triton JIT's CUDA paths; HF_TOKEN goes via mpirun -x instead.
             - |
               set -euo pipefail
               command -v sshd >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server; }
