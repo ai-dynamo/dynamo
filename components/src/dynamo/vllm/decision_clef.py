@@ -102,6 +102,7 @@ class ClefDecisionExecutor:
         self._admission = asyncio.Semaphore(max_concurrency)
         self._preflight = asyncio.Semaphore(max_concurrency)
         self._unsettled = False
+        self._drains = set()
 
     def _question(self, raw, ordinal):
         if (
@@ -115,8 +116,8 @@ class ClefDecisionExecutor:
         if kind not in kinds:
             raise InvalidArgument("unsupported native decision question kind")
         candidates = raw.get("candidates")
-        if not isinstance(candidates, list) or not 2 <= len(candidates) <= 26:
-            raise InvalidArgument("native decisions require 2 to 26 candidates")
+        if not isinstance(candidates, list) or not 1 <= len(candidates) <= 26:
+            raise InvalidArgument("native decisions require 1 to 26 candidates")
         options, seen = [], set()
         typed = any(
             isinstance(item, dict) and type(item.get("value")) is bool
@@ -303,6 +304,8 @@ class ClefDecisionExecutor:
         }
 
     async def _execute(self, wire, context):
+        if self._unsettled:
+            raise HttpError(503, "native decision cleanup did not settle")
         async with self._admission:
             if self._unsettled:
                 raise HttpError(503, "native decision cleanup did not settle")
@@ -360,16 +363,21 @@ class ClefDecisionExecutor:
         except TimeoutError as cause:
             errors = [cause]
         if errors:
-            self._unsettled = True
-            if self.handler.shutdown_event is not None:
-                self.handler.shutdown_event.set()
+            self._stop_admission()
             if completed:
                 raise HttpError(
                     503, "native decision cleanup did not settle"
                 ) from errors[0]
             logger.warning(
-                "Native decision cleanup failed; retaining the request error"
+                "Native decision cleanup failed for %s; retaining the request error",
+                request_id,
+                exc_info=errors[0],
             )
+
+    def _stop_admission(self):
+        self._unsettled = True
+        if self.handler.shutdown_event is not None:
+            self.handler.shutdown_event.set()
 
     async def execute(self, wire, context):
         if context.is_stopped() or context.is_killed():
@@ -398,7 +406,19 @@ class ClefDecisionExecutor:
             for owned in (task, signal):
                 if not owned.done():
                     owned.cancel()
-            await asyncio.gather(task, signal, return_exceptions=True)
+            drain = asyncio.gather(task, signal, return_exceptions=True)
+            # Retain and observe cleanup even if the caller cancels this drain.
+            self._drains.add(drain)
+            drain.add_done_callback(self._drains.discard)
+            try:
+                await asyncio.wait((drain,), timeout=5)
+            finally:
+                if not drain.done():
+                    self._stop_admission()
+                    logger.warning(
+                        "Native decision cancellation drain did not settle for %s",
+                        context.id(),
+                    )
 
     async def health(self, context):
         wire = {
@@ -452,6 +472,7 @@ async def initialize_clef(handler, runtime, config):
         and 1 <= scheduler.max_num_seqs <= 4
         and scheduler.async_scheduling is False
         and scheduler.enable_chunked_prefill is False
+        and scheduler.long_prefill_token_threshold == 0
         and runtime.cache_config.enable_prefix_caching is False
         and scheduler.scheduler_cls in (None, "vllm.v1.core.sched.scheduler.Scheduler")
         and all(

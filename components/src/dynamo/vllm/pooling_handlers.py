@@ -212,15 +212,14 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
                 raise HttpError(503, "native decisions are unavailable on this worker")
             yield await self.decision_clef.execute(request, context)
             return
+        if self.decision_clef is not None:
+            raise InvalidArgument(
+                "Clef pooling and classification require a decision schema; use the decision APIs"
+            )
         if "encoding_format" in request:
             async for response in self._generate_pooling(request, context):
                 yield response
             return
-
-        if self.decision_clef is not None:
-            raise InvalidArgument(
-                "Clef classification requires a decision schema; use the decision APIs"
-            )
 
         model_name = request.get("model") or self.config.served_model_name or ""
         input_field = request.get("input")

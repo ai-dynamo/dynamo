@@ -14,10 +14,12 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.llm.exceptions import HttpError, InvalidArgument
 from dynamo.vllm import decision_clef as clef
+from dynamo.vllm.pooling_handlers import ClassifyWorkerHandler
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -254,6 +256,27 @@ def test_reference_state_truncation_is_preserved(executor, wire):
     assert len(executor.prepare(wire).prompt_ids) == 2048
 
 
+@pytest.mark.parametrize("kind", ["Choice", "Score"])
+def test_single_candidate_questions_preserve_native_schema(executor, wire, kind):
+    question = wire["decision_head"]["questions"][0]
+    question["kind"] = kind
+    question["candidates"] = [{"value": "0"}]
+    wire["decision_head"]["questions"] = [question]
+    prepared = executor.prepare(wire)
+    assert prepared.schema["option_counts"] == [1]
+    assert prepared.orders == ((0,),)
+    output = SimpleNamespace(
+        error=None,
+        finished=True,
+        prompt_token_ids=list(prepared.prompt_ids),
+        num_cached_tokens=0,
+        outputs=SimpleNamespace(data=SimpleNamespace(ndim=1, tolist=lambda: [1.0])),
+    )
+    assert executor.decode(prepared, output)["outcomes"] == [
+        {"ordinal": 0, "probabilities": [1.0]}
+    ]
+
+
 @pytest.mark.parametrize(
     "values", [[0.1], [float("nan")] * 6, [0.2] * 6, [-0.2, 1.2] * 3]
 )
@@ -348,6 +371,7 @@ def startup(executor, monkeypatch):
             async_scheduling=False,
             scheduler_cls=None,
             enable_chunked_prefill=False,
+            long_prefill_token_threshold=0,
         ),
         cache_config=SimpleNamespace(enable_prefix_caching=False),
         parallel_config=SimpleNamespace(data_parallel_size=1),
@@ -426,6 +450,7 @@ async def test_other_architectures_do_not_import_optional_native_runtime(
         "canary",
         "prefix_cache",
         "chunked_prefill",
+        "long_prefill",
         "capacity",
     ],
 )
@@ -447,6 +472,8 @@ async def test_recognized_clef_fails_startup_when_not_qualified(
         runtime.cache_config.enable_prefix_caching = True
     elif change == "chunked_prefill":
         runtime.scheduler_config.enable_chunked_prefill = True
+    elif change == "long_prefill":
+        runtime.scheduler_config.long_prefill_token_threshold = 1
     elif change == "capacity":
         runtime.scheduler_config.max_num_seqs = 5
     else:
@@ -517,8 +544,6 @@ async def test_native_errors_retain_overload_and_shutdown_meaning(
 async def test_classify_handler_dispatch_requires_internal_metadata(
     executor, wire, trusted
 ):
-    from dynamo.vllm.pooling_handlers import ClassifyWorkerHandler
-
     handler = ClassifyWorkerHandler.__new__(ClassifyWorkerHandler)
     handler.decision_clef = executor
     context = Context()
@@ -558,7 +583,7 @@ def test_installed_strategy_preserves_question_types_and_option_order(executor, 
 
 @pytest.mark.asyncio
 async def test_invalid_output_closes_iterator_and_preserves_primary_error(
-    executor, wire
+    executor, wire, caplog
 ):
     closed = asyncio.Event()
 
@@ -575,6 +600,9 @@ async def test_invalid_output_closes_iterator_and_preserves_primary_error(
     assert closed.is_set()
     executor.handler.engine_client.abort.assert_awaited_once()
     assert executor.handler.shutdown_event.is_set()
+    warning = caplog.records[-1]
+    assert "native-request-head-0" in warning.getMessage()
+    assert isinstance(warning.exc_info[1], RuntimeError)
     calls = executor.handler.engine_client.encode.call_count
     with pytest.raises(HttpError, match="cleanup did not settle"):
         await executor.execute(wire, Context())
@@ -634,3 +662,85 @@ async def test_cleanup_timeout_stops_further_admission(executor, wire, monkeypat
     with pytest.raises(HttpError, match="cleanup did not settle"):
         await executor.execute(wire, Context())
     executor.handler.engine_client.encode.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("clef_worker", [False, True])
+async def test_raw_pooling_cannot_bypass_clef_executor(executor, clef_worker):
+    handler = ClassifyWorkerHandler.__new__(ClassifyWorkerHandler)
+    handler.decision_clef = executor if clef_worker else None
+    reached = Mock()
+
+    async def pooling(request, context):
+        reached()
+        yield {"data": []}
+
+    handler._generate_pooling = pooling
+    stream = handler.generate({"input": "state", "encoding_format": "float"}, Context())
+    if clef_worker:
+        with pytest.raises(InvalidArgument, match="decision schema"):
+            [row async for row in stream]
+        reached.assert_not_called()
+    else:
+        assert [row async for row in stream] == [{"data": []}]
+        reached.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_unsettled_executor_rejects_before_waiting_for_admission(executor, wire):
+    executor._admission = asyncio.Semaphore(1)
+    await executor._admission.acquire()
+    executor._unsettled = True
+    try:
+        with pytest.raises(HttpError, match="cleanup did not settle"):
+            await asyncio.wait_for(executor.execute(wire, Context()), timeout=0.1)
+    finally:
+        executor._admission.release()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_cancel", [False, True])
+async def test_cancellation_bounds_drain_when_engine_abort_stalls(
+    executor, wire, monkeypatch, second_cancel
+):
+    entered, release = asyncio.Event(), asyncio.Event()
+    drain_waiting = asyncio.Event()
+    original_wait = asyncio.wait
+
+    async def bounded(tasks, **kwargs):
+        if "timeout" in kwargs:
+            kwargs["timeout"] = 0.01
+            drain_waiting.set()
+        return await original_wait(tasks, **kwargs)
+
+    async def stalled(**kwargs):
+        entered.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            await release.wait()
+            raise
+        yield
+
+    monkeypatch.setattr(clef.asyncio, "wait", bounded)
+    executor.handler.engine_client.encode.side_effect = stalled
+    context = Context()
+    task = asyncio.create_task(executor.execute(wire, context))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        context.cancelled.set()
+        if second_cancel:
+            await asyncio.wait_for(drain_waiting.wait(), timeout=1)
+            task.cancel()
+        done, _ = await original_wait((task,), timeout=0.2)
+        assert task in done, "cancellation waited indefinitely for engine abort"
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert executor._unsettled
+        assert executor.handler.shutdown_event.is_set()
+        with pytest.raises(HttpError, match="cleanup did not settle"):
+            await executor.execute(wire, Context())
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.gather(*executor._drains, return_exceptions=True)
