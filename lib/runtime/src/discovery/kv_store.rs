@@ -1853,6 +1853,32 @@ mod tests {
 
         client.unregister(model).await.unwrap();
         assert_eq!(identity_record_count(&client).await, 0);
+
+        // A record with no card: only a check that reads the index sees model 'c'.
+        let (key, identity) = KVStoreDiscovery::model_identity_record(
+            &named_model_spec("c", "/models/c").into_instance(client.instance_id() + 1),
+        )
+        .unwrap()
+        .unwrap();
+        client
+            .store
+            .get_bucket(MODEL_IDENTITIES_BUCKET)
+            .await
+            .unwrap()
+            .unwrap()
+            .insert(&key, serde_json::to_vec(&identity).unwrap().into(), 0)
+            .await
+            .unwrap();
+        let error = client
+            .register(named_model_spec("d", "/models/d"))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("a different model 'c' is already registered there"),
+            "unexpected error: {error:#}"
+        );
     }
 
     /// Registers `concurrent_spec` through `concurrent` while `inner` is inside
@@ -1910,6 +1936,7 @@ mod tests {
     async fn register_rolls_back_after_a_concurrent_conflicting_registration() {
         let tempdir = tempfile::tempdir().unwrap();
         let store_cancel = CancellationToken::new();
+        let _stop_stores = store_cancel.clone().drop_guard();
         let worker = || {
             KVStoreDiscovery::new(
                 kv::Manager::file(store_cancel.clone(), tempdir.path()),
@@ -1959,6 +1986,7 @@ mod tests {
         for order in [[0, 1, 2], [2, 1, 0]] {
             let tempdir = tempfile::tempdir().unwrap();
             let store_cancel = CancellationToken::new();
+            let _stop_stores = store_cancel.clone().drop_guard();
             for (position, index) in order.into_iter().enumerate() {
                 let client = KVStoreDiscovery::new(
                     kv::Manager::file(store_cancel.clone(), tempdir.path()),
