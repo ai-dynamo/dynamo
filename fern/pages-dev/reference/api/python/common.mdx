@@ -877,7 +877,7 @@ from dynamo.common.multimodal import ImageLoader
 ImageLoader(cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None, max_bytes: int | None = None, session_scoped_cache: bool | None = None, max_pixels: int | None = None, to_rgb: Callable[[Image.Image], Image.Image] = _pillow_rgb)
 ```
 
-[`components/src/dynamo/common/multimodal/image_loader.py#L142`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L142)
+[`components/src/dynamo/common/multimodal/image_loader.py#L155`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L155)
 
 **Public methods**
 
@@ -928,7 +928,7 @@ RGB image and be safe to call from a worker thread. Frontend-decoded
 arrays that are already RGB skip it.
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L145)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L158)
 
 <h4 id="api-dynamo-common-multimodal-image-loader-imageloader-load-image">load_image</h4>
 
@@ -942,7 +942,7 @@ A request-specific budget uses a cancellable private fetch on cache miss;
 it cannot join an in-flight decode with a different budget. Completed
 cache entries remain shareable and are checked against the caller's limit.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L434)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L460)
 
 <h4 id="api-dynamo-common-multimodal-image-loader-imageloader-load-image-batch">load_image_batch</h4>
 
@@ -985,7 +985,7 @@ DYN_MM_IMAGE_CACHE_SESSION_SCOPED is enabled.
 - `ValueError` — If enable_frontend_decoding=True but nixl_connector is None
 - `ValueError` — If a UUID-only slot is received without opting in
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L564)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L590)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-llmengine" title="LLMEngine (class)">
