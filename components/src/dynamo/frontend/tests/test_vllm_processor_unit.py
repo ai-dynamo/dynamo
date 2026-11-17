@@ -2177,14 +2177,14 @@ class TestRoutedEnginePath:
         assert caught.value is rejection
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("http_status", [499, 529])
     @pytest.mark.parametrize("rejected_after_frames", [None, 1])
     async def test_routed_engine_error_is_raised_not_enveloped(
-        self, vllm_processor_module, rejected_after_frames
+        self, vllm_processor_module, rejected_after_frames, http_status
     ):
-        # A worker pool at capacity rejects with CapacityExhausted (HTTP 529),
-        # either before the stream starts (None) or after some token frames.
+        # Keep cancellation (499) and capacity (529) errors before or during a stream.
         with pytest.raises(RoutedEngineError) as raised:
-            _raise_routed_http_error(529, "worker pool at capacity")
+            _raise_routed_http_error(http_status, "worker rejected request")
         rejection = raised.value
 
         class _RejectingRoutedEngine(_FakeRoutedEngine):
