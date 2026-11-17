@@ -2554,18 +2554,17 @@ async def test_disagg_decode_drops_prompt_ids_once_dispatched():
 
     handler._get_input_param = get_input_param
     handler._resolve_lora = lambda request: None
-    handler.engine = SimpleNamespace(
-        async_generate=AsyncMock(
-            return_value=_stream(
-                [
-                    {
-                        "output_ids": [68],
-                        "meta_info": {"id": "r", "finish_reason": {"type": "stop"}},
-                    }
-                ]
-            )
-        )
-    )
+
+    state_at_first_output = []
+
+    async def output():
+        state_at_first_output.append(("token_ids" in request, input_params[-1]))
+        yield {
+            "output_ids": [68],
+            "meta_info": {"id": "r", "finish_reason": {"type": "stop"}},
+        }
+
+    handler.engine = SimpleNamespace(async_generate=AsyncMock(return_value=output()))
     context = SimpleNamespace(
         id=lambda: "request-id",
         trace_id="trace-id",
@@ -2587,8 +2586,7 @@ async def test_disagg_decode_drops_prompt_ids_once_dispatched():
 
     assert [chunk["token_ids"] for chunk in chunks] == [[68]]
     assert handler.engine.async_generate.await_args.kwargs["input_ids"] is prompt
-    assert "token_ids" not in request
-    assert input_params == [{}]
+    assert state_at_first_output == [(False, {})]
 
 
 @pytest.mark.asyncio
