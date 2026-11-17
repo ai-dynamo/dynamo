@@ -37,6 +37,8 @@ use crate::types::{
 
 const SYSTEMONE_MAX_QUESTIONS: usize = 128;
 const SYSTEMONE_MAX_CANDIDATES: usize = 255;
+// Causal vLLM scoring currently uses the single-letter A-Z label profile.
+const VLLM_SYSTEMONE_MAX_CANDIDATES: usize = 26;
 
 /// Emit a one-time deprecation warning when serving-readiness falls back to
 /// the legacy path because a namespace still contains a legacy card (a
@@ -107,10 +109,6 @@ pub(crate) struct SystemOneExecutionSelection {
 }
 
 impl SystemOneExecutionSelection {
-    pub(crate) fn backend(&self) -> crate::protocols::systemone::ScoringBackend {
-        self.backend
-    }
-
     pub(crate) fn validate_dispatch(
         &self,
         pinned_worker: Option<u64>,
@@ -137,13 +135,12 @@ impl SystemOneExecutionSelection {
     }
 
     pub(crate) fn decision_capabilities(&self) -> dynamo_decisions::Capabilities {
-        // The serialized SGLang capability pins the zero-decode requested-ID
-        // contract, including vocabulary logprobs and meta_info.cached_tokens.
+        // Both qualified profiles provide vocabulary logprobs and measured cache reads.
         // Tokenizer-specific candidate limits are checked during preflight.
         dynamo_decisions::Capabilities {
             max_questions: SYSTEMONE_MAX_QUESTIONS,
-            max_candidates: if self.backend() == crate::protocols::systemone::ScoringBackend::Vllm {
-                26
+            max_candidates: if self.backend == crate::protocols::systemone::ScoringBackend::Vllm {
+                VLLM_SYSTEMONE_MAX_CANDIDATES
             } else {
                 SYSTEMONE_MAX_CANDIDATES
             },
@@ -1527,7 +1524,7 @@ mod tests {
         model.add_worker_set("ns".into(), workers);
         let selected = model.get_systemone_execution_selection().unwrap();
         assert_eq!(
-            selected.backend(),
+            selected.backend,
             crate::protocols::systemone::ScoringBackend::Sglang
         );
     }

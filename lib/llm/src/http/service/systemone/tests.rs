@@ -429,51 +429,47 @@ async fn finish_branch_parses_terminal_scores_and_tracker_placement() {
 
 #[tokio::test]
 async fn finish_branch_stops_when_parent_is_cancelled() {
-    let tracker = Arc::new(RequestTracker::new());
-    tracker.record_worker(41, Some(0), "decode");
-    let stream = ResponseStream::new(
-        Box::pin(stream::pending::<Annotated<LLMEngineOutput>>()),
-        Context::new(()).context(),
-    );
-    let parent = Context::new(());
-    let parent_context = parent.context();
-    parent_context.kill();
-    let result = finish_branch(
-        started_branch(prepared_noul_branch(0), tracker, stream),
-        0,
-        1,
-        parent_context,
-    )
-    .await;
-    let Err(error) = result else {
-        panic!("cancelled parent should stop branch completion")
-    };
-    assert_eq!(error.status.as_u16(), 499);
+    for backend in [ScoringBackend::Sglang, ScoringBackend::Vllm] {
+        let tracker = Arc::new(RequestTracker::new());
+        tracker.record_worker(41, Some(0), "decode");
+        let stream = ResponseStream::new(
+            Box::pin(stream::pending::<Annotated<LLMEngineOutput>>()),
+            Context::new(()).context(),
+        );
+        let parent = Context::new(());
+        let parent_context = parent.context();
+        parent_context.kill();
+        let mut started = started_branch(prepared_noul_branch(0), tracker, stream);
+        started.backend = backend;
+        let result = finish_branch(started, 0, 1, parent_context).await;
+        let Err(error) = result else {
+            panic!("cancelled parent should stop branch completion")
+        };
+        assert_eq!(error.status.as_u16(), 499);
+    }
 }
 
 #[tokio::test]
 async fn cancelled_stream_completion_is_not_a_malformed_response() {
-    let parent = Context::new(()).context();
-    let stream_parent = parent.clone();
-    let stream = stream::poll_fn(move |_| {
-        stream_parent.kill();
-        std::task::Poll::Ready(None::<Annotated<LLMEngineOutput>>)
-    });
-    let result = finish_branch(
-        started_branch(
+    for backend in [ScoringBackend::Sglang, ScoringBackend::Vllm] {
+        let parent = Context::new(()).context();
+        let stream_parent = parent.clone();
+        let stream = stream::poll_fn(move |_| {
+            stream_parent.kill();
+            std::task::Poll::Ready(None::<Annotated<LLMEngineOutput>>)
+        });
+        let mut started = started_branch(
             prepared_noul_branch(0),
             Arc::new(RequestTracker::new()),
             ResponseStream::new(Box::pin(stream), Context::new(()).context()),
-        ),
-        0,
-        1,
-        parent,
-    )
-    .await;
-    let Err(error) = result else {
-        panic!("cancelled stream must not produce an answer")
-    };
-    assert_eq!(error.status.as_u16(), 499);
+        );
+        started.backend = backend;
+        let result = finish_branch(started, 0, 1, parent).await;
+        let Err(error) = result else {
+            panic!("cancelled stream must not produce an answer")
+        };
+        assert_eq!(error.status.as_u16(), 499);
+    }
 }
 
 #[derive(Clone, Copy)]

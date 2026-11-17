@@ -463,7 +463,7 @@ fn prepare_branches(
                 .map_err(|message| (StatusCode::UNPROCESSABLE_ENTITY, message))?;
         remaining_tokenization_work -= prompt_ids.len() * (rendered.labels.len() + 2);
         remaining_encoding_bytes -= encoding_bytes;
-        let native = match selection.backend() {
+        let native = match selection.backend {
             ScoringBackend::Sglang => {
                 build_native_score_request(&prompt_ids, &label_ids, "validation")
             }
@@ -530,7 +530,8 @@ async fn dispatch(
     results.push(first_result);
 
     let fanout_started = Instant::now();
-    let siblings_limit = if selection.backend() == ScoringBackend::Vllm {
+    // Unlike SGLang's zero-token reads, vLLM's one-token reads are qualified serially.
+    let siblings_limit = if selection.backend == ScoringBackend::Vllm {
         1
     } else {
         MAX_CONCURRENT_SIBLINGS
@@ -655,7 +656,7 @@ async fn run_branch(
         request: mut preprocessed,
         exchange,
     } = bind_native(
-        selection.backend(),
+        selection.backend,
         &selection.canonical_model,
         selection.card.kv_cache_block_size,
         &native,
@@ -665,7 +666,7 @@ async fn run_branch(
     preprocessed
         .routing
         .get_or_insert_default()
-        .expected_output_tokens = Some(selection.backend().output_tokens() as u32);
+        .expected_output_tokens = Some(selection.backend.output_tokens() as u32);
     let tracker = Arc::new(RequestTracker::new());
     tracker.record_isl(prepared.prompt_ids.len(), None);
     if let Some(placement) = pinned {
@@ -692,7 +693,7 @@ async fn run_branch(
     }
     let result = finish_branch(
         StartedBranch {
-            backend: selection.backend(),
+            backend: selection.backend,
             prepared,
             tracker,
             stream,
@@ -775,42 +776,57 @@ async fn finish_branch(
     data_parallel_size: u32,
     parent_context: Arc<dyn AsyncEngineContext>,
 ) -> Result<BranchResult, DispatchError> {
-    let result = read_branch(
-        started,
-        data_parallel_start_rank,
-        data_parallel_size,
-        parent_context.clone(),
-    )
-    .await;
+    let result = match started.backend {
+        ScoringBackend::Sglang => {
+            read_sglang_branch(
+                started,
+                data_parallel_start_rank,
+                data_parallel_size,
+                parent_context.clone(),
+            )
+            .await
+        }
+        ScoringBackend::Vllm => {
+            let StartedBranch {
+                prepared,
+                tracker,
+                stream,
+                exchange,
+                ..
+            } = started;
+            drop(exchange);
+            read_vllm_branch(
+                prepared,
+                tracker,
+                stream,
+                data_parallel_start_rank,
+                data_parallel_size,
+                parent_context.clone(),
+            )
+            .await
+        }
+    };
     if parent_context.is_killed() {
         return Err(DispatchError::cancelled());
     }
     result
 }
 
-async fn read_branch(
+async fn read_sglang_branch(
     started: StartedBranch,
     data_parallel_start_rank: u32,
     data_parallel_size: u32,
     parent_context: Arc<dyn AsyncEngineContext>,
 ) -> Result<BranchResult, DispatchError> {
     let StartedBranch {
-        backend,
         prepared,
         tracker,
         mut stream,
         mut exchange,
+        ..
     } = started;
     let mut terminal = None;
     let mut frames = Vec::new();
-    let mut vllm = if backend == ScoringBackend::Vllm {
-        Some(
-            VllmScoreCollector::new(prepared.label_ids.clone(), prepared.prompt_ids.len())
-                .map_err(|cause| DispatchError::malformed(cause.to_string()))?,
-        )
-    } else {
-        None
-    };
     loop {
         let delta = run_until_killed(parent_context.as_ref(), stream.next())
             .await
@@ -818,32 +834,97 @@ async fn read_branch(
         let Some(delta) = delta else { break };
         let prefill = delta.event.as_deref() == Some(PREFILL_OUTPUT_ANNOTATION);
         if let Some(output) = delta.into_data().map_err(stream_error)? {
-            if let Some(collector) = vllm.as_mut() {
-                if matches!(
-                    output.finish_reason.as_ref(),
-                    Some(FinishReason::Cancelled | FinishReason::Error(_))
-                ) {
-                    return Err(DispatchError::unavailable("native scoring worker aborted"));
-                }
-                collector
-                    .observe(&output)
-                    .map_err(|cause| DispatchError::malformed(cause.to_string()))?;
-            } else {
-                exchange
-                    .chunk(output, prefill, &mut |frame| frames.push(frame.clone()))
-                    .map_err(stream_error)?;
-            }
+            exchange
+                .chunk(output, prefill, &mut |frame| frames.push(frame.clone()))
+                .map_err(stream_error)?;
         }
         for frame in frames.drain(..) {
             accept_frame(frame, &mut terminal)?;
         }
     }
-    if vllm.is_none()
-        && let Some(frame) = exchange.finish().map_err(stream_error)?
-    {
+    if let Some(frame) = exchange.finish().map_err(stream_error)? {
         accept_frame(frame, &mut terminal)?;
     }
-    let placement = tracker
+    let placement = branch_placement(&tracker, data_parallel_start_rank, data_parallel_size)?;
+    let terminal = terminal
+        .ok_or_else(|| DispatchError::malformed("missing terminal SGLang scoring frame"))?;
+    let scores = parse_candidate_scores(&terminal, &prepared.label_ids)
+        .map_err(|cause| DispatchError::malformed(cause.to_string()))?;
+    let answer = QuestionOutcome::Answer(
+        reduce_vocab_logprobs(&scores, prepared.temperature)
+            .map_err(|cause| DispatchError::malformed(cause.to_string()))?,
+    );
+    Ok(BranchResult {
+        index: prepared.index,
+        answer,
+        input_tokens: prepared.prompt_ids.len(),
+        output_tokens: 0,
+        cached_tokens: measured_cached_tokens(&terminal, prepared.prompt_ids.len())?,
+        placement,
+    })
+}
+
+async fn read_vllm_branch(
+    prepared: PreparedBranch,
+    tracker: Arc<RequestTracker>,
+    mut stream: ManyOut<Annotated<LLMEngineOutput>>,
+    data_parallel_start_rank: u32,
+    data_parallel_size: u32,
+    parent_context: Arc<dyn AsyncEngineContext>,
+) -> Result<BranchResult, DispatchError> {
+    let mut collector = VllmScoreCollector::new(prepared.label_ids, prepared.prompt_ids.len())
+        .map_err(|cause| DispatchError::malformed(cause.to_string()))?;
+    loop {
+        let delta = run_until_killed(parent_context.as_ref(), stream.next())
+            .await
+            .ok_or_else(DispatchError::cancelled)?;
+        let Some(delta) = delta else { break };
+        if let Some(output) = delta.into_data().map_err(stream_error)? {
+            match &output.finish_reason {
+                Some(FinishReason::Cancelled) => {
+                    return Err(DispatchError::unavailable(
+                        "native scoring worker cancelled",
+                    ));
+                }
+                Some(FinishReason::Error(detail)) => {
+                    return Err(DispatchError {
+                        status: StatusCode::INTERNAL_SERVER_ERROR,
+                        public_message: "scoring worker failed",
+                        detail: detail.clone(),
+                        retry_after: false,
+                        is_capacity_exhausted: false,
+                    });
+                }
+                _ => {}
+            }
+            collector
+                .observe(&output)
+                .map_err(|cause| DispatchError::malformed(cause.to_string()))?;
+        }
+    }
+    let result = collector
+        .finish()
+        .map_err(|cause| DispatchError::malformed(cause.to_string()))?;
+    let answer = QuestionOutcome::Answer(
+        reduce_vocab_logprobs(&result.scores, prepared.temperature)
+            .map_err(|cause| DispatchError::malformed(cause.to_string()))?,
+    );
+    Ok(BranchResult {
+        index: prepared.index,
+        answer,
+        input_tokens: prepared.prompt_ids.len(),
+        output_tokens: 1,
+        cached_tokens: Some(result.cached_tokens),
+        placement: branch_placement(&tracker, data_parallel_start_rank, data_parallel_size)?,
+    })
+}
+
+fn branch_placement(
+    tracker: &RequestTracker,
+    data_parallel_start_rank: u32,
+    data_parallel_size: u32,
+) -> Result<Placement, DispatchError> {
+    tracker
         .get_worker_info()
         .and_then(|worker| {
             worker
@@ -861,34 +942,7 @@ async fn read_branch(
         .flatten()
         .ok_or_else(|| {
             DispatchError::unavailable("Dynamo did not report an unambiguous scoring worker rank")
-        })?;
-    let (scores, cached_tokens) = if let Some(collector) = vllm {
-        let result = collector
-            .finish()
-            .map_err(|cause| DispatchError::malformed(cause.to_string()))?;
-        (result.scores, Some(result.cached_tokens))
-    } else {
-        let terminal = terminal
-            .ok_or_else(|| DispatchError::malformed("missing terminal SGLang scoring frame"))?;
-        (
-            parse_candidate_scores(&terminal, &prepared.label_ids)
-                .map_err(|cause| DispatchError::malformed(cause.to_string()))?,
-            measured_cached_tokens(&terminal, prepared.prompt_ids.len())?,
-        )
-    };
-    let answer = QuestionOutcome::Answer(
-        reduce_vocab_logprobs(&scores, prepared.temperature)
-            .map_err(|cause| DispatchError::malformed(cause.to_string()))?,
-    );
-    let input_tokens = prepared.prompt_ids.len();
-    Ok(BranchResult {
-        index: prepared.index,
-        answer,
-        input_tokens,
-        output_tokens: backend.output_tokens(),
-        cached_tokens,
-        placement,
-    })
+        })
 }
 
 fn measured_cached_tokens(

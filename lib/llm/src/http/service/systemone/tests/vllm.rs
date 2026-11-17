@@ -146,17 +146,20 @@ async fn malformed_causal_results_do_not_become_successful_answers() {
 }
 
 #[tokio::test]
-async fn worker_aborted_causal_scoring_is_unavailable_for_both_contracts() {
+async fn causal_worker_cancellation_and_failure_have_distinct_statuses() {
     for dialect in [
         dynamo_decisions::Dialect::OpenAi,
         dynamo_decisions::Dialect::Jev,
     ] {
-        for outcome in [Outcome::Cancelled, Outcome::Error] {
+        for (outcome, expected_status) in [
+            (Outcome::Cancelled, StatusCode::SERVICE_UNAVAILABLE),
+            (Outcome::Error, StatusCode::INTERNAL_SERVER_ERROR),
+        ] {
             let (response, engine) =
                 tokio::time::timeout(Duration::from_secs(2), run_causal(dialect, outcome))
                     .await
                     .expect("worker abort must not wait for stream closure");
-            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.status(), expected_status);
             let body = response_body(response).await;
             let error = if dialect == dynamo_decisions::Dialect::OpenAi {
                 &body["error"]
@@ -172,4 +175,32 @@ async fn worker_aborted_causal_scoring_is_unavailable_for_both_contracts() {
             assert!(observations[0].stream_context.is_killed());
         }
     }
+}
+
+#[tokio::test]
+async fn causal_worker_failure_retains_private_detail_for_server_logging() {
+    let prepared = prepared_noul_branch(0);
+    let output = terminal(
+        &prepared.label_ids,
+        prepared.prompt_ids.len(),
+        Outcome::Error,
+    );
+    let stream = ResponseStream::new(
+        Box::pin(stream::iter([Annotated::from_data(output)])),
+        Context::new(()).context(),
+    );
+    let result = super::super::read_vllm_branch(
+        prepared,
+        Arc::new(RequestTracker::new()),
+        stream,
+        0,
+        1,
+        Context::new(()).context(),
+    )
+    .await;
+    let Err(error) = result else {
+        panic!("worker failure must not produce an answer")
+    };
+    assert_eq!(error.detail, "private worker detail");
+    assert_eq!(error.public_message, "scoring worker failed");
 }

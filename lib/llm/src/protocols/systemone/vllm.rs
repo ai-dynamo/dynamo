@@ -49,7 +49,6 @@ pub fn causal_scoring_request(
 #[derive(Debug, PartialEq)]
 pub struct VllmScoreResult {
     pub scores: Vec<f64>,
-    pub input_tokens: usize,
     pub cached_tokens: usize,
 }
 
@@ -98,13 +97,10 @@ impl VllmScoreCollector {
         if frame.index.is_some_and(|index| index != 0) {
             return Err(invalid("scoring output index must be zero"));
         }
-        if frame.token_ids.len() > 1
-            || (!frame.token_ids.is_empty() && self.sampled_token.is_some())
-        {
-            return Err(invalid("scoring must generate exactly one token"));
-        }
-        if let Some(&token) = frame.token_ids.first() {
-            self.sampled_token = Some(token);
+        match frame.token_ids.as_slice() {
+            [] => {}
+            [token] if self.sampled_token.is_none() => self.sampled_token = Some(*token),
+            _ => return Err(invalid("scoring must generate exactly one token")),
         }
         if let Some(rows) = &frame.top_logprobs {
             self.observe_scores(rows)?;
@@ -217,7 +213,6 @@ impl VllmScoreCollector {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(VllmScoreResult {
             scores: ordered,
-            input_tokens: self.prompt_tokens,
             cached_tokens: self
                 .cached_tokens
                 .ok_or_else(|| invalid("missing measured cache reads"))?,
@@ -301,7 +296,6 @@ mod tests {
         collector.observe(&complete()).unwrap();
         let result = collector.finish().unwrap();
         assert_eq!(result.scores, [-3.0, -2.0]);
-        assert_eq!(result.input_tokens, 3);
         assert_eq!(result.cached_tokens, 2);
     }
 
@@ -344,7 +338,7 @@ mod tests {
         let mut collector = VllmScoreCollector::new(vec![20, 10], 3).unwrap();
         collector.observe(&scores).unwrap();
         collector.observe(&terminal).unwrap();
-        assert_eq!(collector.finish().unwrap().input_tokens, 3);
+        assert_eq!(collector.finish().unwrap().scores, [-2.0, -3.0]);
     }
 
     #[test]
@@ -416,6 +410,14 @@ mod tests {
                 .observe(&extra_tokens)
                 .is_err()
         );
+        let mut collector = VllmScoreCollector::new(vec![20, 10], 3).unwrap();
+        collector
+            .observe(&LLMEngineOutput {
+                finish_reason: None,
+                ..complete()
+            })
+            .unwrap();
+        assert!(collector.observe(&complete()).is_err());
         let mut collector = VllmScoreCollector::new(vec![20, 10], 3).unwrap();
         collector.observe(&complete()).unwrap();
         assert!(collector.observe(&complete()).is_err());
