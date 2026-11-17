@@ -353,12 +353,12 @@ async def test_worker_publisher_updates_reservation_load(monkeypatch, unused_tcp
             {"model_name": "model", "token_ids": [5, 6, 7, 8], "selection_id": "target"}
         )
         assert load() == (1, 1, 4)
-        publisher.mark_prefill_completed("target")
+        await asyncio.to_thread(publisher.mark_prefill_completed, "target")
         await wait_load((1, 1, 0))
-        publisher.free("target")
+        await asyncio.to_thread(publisher.free, "target")
         await wait_load((0, 0, 0))
     finally:
-        publisher.close()
+        await asyncio.to_thread(publisher.close)
         await service.shutdown_async()
 
 

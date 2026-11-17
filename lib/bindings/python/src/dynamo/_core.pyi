@@ -919,7 +919,11 @@ class SelectionService:
         ...
 
 class ActiveSequenceEventPublisher:
-    """Nonblocking ZMQ publisher for worker-origin active-sequence events."""
+    """Nonblocking ZMQ publisher for worker-origin active-sequence events.
+
+    Publishing releases the GIL. A publish or close call raises RuntimeError if
+    another publish is already in progress.
+    """
 
     def __init__(
         self,

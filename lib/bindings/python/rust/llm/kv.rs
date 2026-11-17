@@ -3,8 +3,12 @@
 
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::plugins::RouterPluginRegistry;
+#[cfg(feature = "select-service")]
+use pyo3::sync::GILProtected;
 use pythonize::{depythonize, pythonize};
 use serde::Deserialize;
+#[cfg(feature = "select-service")]
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::Arc;
@@ -76,7 +80,8 @@ mod demand_driven;
 #[cfg(feature = "select-service")]
 #[pyclass(frozen)]
 pub(crate) struct ActiveSequenceEventPublisher {
-    inner: parking_lot::Mutex<Option<selection::ActiveSequenceEventPublisher>>,
+    // The GIL protects the borrow state while the socket is used without it.
+    inner: GILProtected<RefCell<Option<selection::ActiveSequenceEventPublisher>>>,
     endpoint: String,
 }
 
@@ -103,7 +108,7 @@ impl ActiveSequenceEventPublisher {
         .map_err(to_pyerr)?;
         Ok(Self {
             endpoint: publisher.endpoint().to_string(),
-            inner: parking_lot::Mutex::new(Some(publisher)),
+            inner: GILProtected::new(RefCell::new(Some(publisher))),
         })
     }
 
@@ -112,24 +117,41 @@ impl ActiveSequenceEventPublisher {
         &self.endpoint
     }
 
-    fn mark_prefill_completed(&self, request_id: &str) -> PyResult<()> {
-        if let Some(publisher) = self.inner.lock().as_mut() {
-            publisher
-                .mark_prefill_completed(request_id)
+    fn mark_prefill_completed(&self, py: Python<'_>, request_id: &str) -> PyResult<()> {
+        let mut inner = self
+            .inner
+            .get(py)
+            .try_borrow_mut()
+            .map_err(|_| PyRuntimeError::new_err("publisher is already in use"))?;
+        if let Some(publisher) = inner.as_mut() {
+            py.allow_threads(|| publisher.mark_prefill_completed(request_id))
                 .map_err(to_pyerr)?;
         }
         Ok(())
     }
 
-    fn free(&self, request_id: &str) -> PyResult<()> {
-        if let Some(publisher) = self.inner.lock().as_mut() {
-            publisher.free(request_id).map_err(to_pyerr)?;
+    fn free(&self, py: Python<'_>, request_id: &str) -> PyResult<()> {
+        let mut inner = self
+            .inner
+            .get(py)
+            .try_borrow_mut()
+            .map_err(|_| PyRuntimeError::new_err("publisher is already in use"))?;
+        if let Some(publisher) = inner.as_mut() {
+            py.allow_threads(|| publisher.free(request_id))
+                .map_err(to_pyerr)?;
         }
         Ok(())
     }
 
-    fn close(&self) {
-        self.inner.lock().take();
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        let publisher = self
+            .inner
+            .get(py)
+            .try_borrow_mut()
+            .map_err(|_| PyRuntimeError::new_err("publisher is already in use"))?
+            .take();
+        py.allow_threads(move || drop(publisher));
+        Ok(())
     }
 }
 
