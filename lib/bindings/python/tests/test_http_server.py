@@ -680,12 +680,7 @@ async def test_image_pixel_limit_public_response(
         ) as response:
             assert response.status == (200 if stream else status)
             raw = await response.text()
-    body = (
-        json.loads(raw.split("data:", 1)[1].split("\n\n", 1)[0])
-        if stream
-        else json.loads(raw)
-    )
-    error = body["error"] if stream else body
+    error = _sse_error(raw) if stream else json.loads(raw)
     assert error["code"] == status
     if public:
         assert error == {
