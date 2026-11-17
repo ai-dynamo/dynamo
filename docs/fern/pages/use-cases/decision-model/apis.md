@@ -172,7 +172,7 @@ with OpenAI(base_url="http://localhost:8000/v1", api_key=os.environ.get("DYNAMO_
     print(result.usage, result._request_id)
 ```
 
-Answers are a union of types. Check `answer.type` before accessing type-specific fields. The causal profile documented here returns scored answers, not hosted-provider safety refusals; clients must not treat a refusal answer from another executor as a normal classification.
+Answers are a union of types. Check `answer.type` before accessing type-specific fields. The profiles documented in these guides return scored answers, not hosted-provider safety refusals; clients must not treat a refusal answer from another executor as a normal classification.
 
 ## Use the Official Jev/TypeSafe SDK
 
