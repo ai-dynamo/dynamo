@@ -645,6 +645,18 @@ def test_reviewed_responses_require_explicit_ids_pins_and_exact_binding(
         .expected_response["message"]["content"]
         == "independent golden"
     )
+    original_cap = setup["seed"]["request"]["max_tokens"]
+    setup["seed"]["request"]["max_tokens"] = 7
+    changed_capture = capture(setup, tmp_path / "changed-request")
+    setup["seed"]["request"]["max_tokens"] = original_cap
+    with pytest.raises(ReplayError, match="binding mismatch"):
+        run(
+            setup,
+            tmp_path / "changed-request-out",
+            captures=changed_capture,
+            reviewed_corpus=root,
+        )
+    assert not (tmp_path / "changed-request-out" / "manifest.json").exists()
     for mutation in (
         "request",
         "prompt",
