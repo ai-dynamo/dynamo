@@ -335,10 +335,13 @@ pub fn _raise_routed_http_error(code: u16, message: String, routed_engine: bool)
 /// status. Accepts `.code` (matches [`HttpError`] in `http.rs`) or `.status`
 /// (matches `dynamo.common.http.HttpStatusError`) plus `.message`.
 ///
-/// SECURITY: `.message` is diagnostic-only. HTTP-like exceptions can wrap remote
-/// fetch failures whose text includes URLs or internal connection details. The
-/// semantic status is preserved, but client renderers use the class catalog
-/// unless the producer raised an explicitly public Dynamo exception.
+/// SECURITY: `.message` is diagnostic-only unless its exact value is listed in
+/// `PUBLIC_HTTP_MESSAGES`. HTTP-like exceptions can wrap remote fetch failures
+/// whose text includes URLs or internal connection details. The semantic status
+/// is preserved, but client renderers use the class catalog unless the message
+/// is allowlisted or the producer raised an explicitly public Dynamo exception.
+/// The allowlist is an exact match: a longer message that begins with an
+/// allowed sentence stays private.
 pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, String)> {
     let value = err.value(py);
     let code = value
@@ -386,17 +389,26 @@ pub(crate) fn http_like_error_to_dynamo(py: Python<'_>, err: &PyErr) -> Option<D
     Some(build_http_like_error(code, message))
 }
 
+/// Exact `.message` values safe to show clients. Fetch errors repeat URLs, so
+/// anything else stays diagnostic and the renderer uses the class catalog.
+/// Python producers must use the same text: the Python test
+/// `test_video_public_message_matches_binding_allowlist` fails if they diverge.
+const PUBLIC_HTTP_MESSAGES: &[&str] = &["Unsupported video media"];
+
 fn build_http_like_error(code: u16, message: String) -> DynamoError {
     let legacy_message = serde_json::json!({
-        "message": message,
+        "message": &message,
         "code": code,
     })
     .to_string();
 
-    DynamoError::builder()
+    let mut builder = DynamoError::builder()
         .class(error_class_for_http_status(code))
-        .diagnostic(legacy_message)
-        .build()
+        .diagnostic(legacy_message);
+    if PUBLIC_HTTP_MESSAGES.contains(&message.as_str()) {
+        builder = builder.public_message(message);
+    }
+    builder.build()
 }
 
 #[cfg(test)]
@@ -562,5 +574,19 @@ mod tests {
             assert_eq!(legacy_http.code, code);
             assert_eq!(legacy_http.message, "private backend detail");
         }
+    }
+
+    #[test]
+    fn allowlisted_http_message_is_public_and_a_prefix_is_not() {
+        let error = build_http_like_error(415, "Unsupported video media".to_string());
+        assert_eq!(error.class(), ErrorClass::UnsupportedMedia);
+        assert_eq!(error.public_message(), Some("Unsupported video media"));
+
+        let prefixed = build_http_like_error(
+            415,
+            "Unsupported video media https://example.com/secret".to_string(),
+        );
+        assert_eq!(prefixed.class(), ErrorClass::UnsupportedMedia);
+        assert_eq!(prefixed.public_message(), None);
     }
 }
