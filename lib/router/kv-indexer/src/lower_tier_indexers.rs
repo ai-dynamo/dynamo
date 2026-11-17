@@ -464,40 +464,28 @@ mod tests {
     };
 
     #[test]
-    fn tiered_wire_caps_preserve_explicit_zero_for_both_native_representations() {
+    fn tiered_wire_caps_preserve_explicit_zero() {
         let first = WorkerWithDpRank::new(7, 0);
         let zero = WorkerWithDpRank::new(7, 1);
-        for caps in [
-            HybridResumeCaps::from_iter([(first, 3), (zero, 0)]),
-            HybridResumeCaps::UniformConfirmed {
-                workers: [first, zero].into_iter().collect(),
-                cap: 0,
-            },
-        ] {
-            let mut native = TieredMatchDetails::default();
-            native.device.overlap_scores.scores.insert(first, 3);
-            native.device.hybrid_resume_caps = caps;
-            let wire = WireTieredMatchDetails::from(&native);
-            assert_eq!(wire.hybrid_resume_caps.len(), 2);
-            assert!(wire.hybrid_resume_caps.contains(&(zero, 0)));
-            let value = serde_json::to_value(&wire).unwrap();
-            assert!(value["hybrid_resume_caps"].is_array());
-            let decoded = serde_json::from_value::<WireTieredMatchDetails>(value).unwrap();
-            let restored = TieredMatchDetails::from(decoded);
-            assert_eq!(
-                restored.device.hybrid_resume_caps,
-                native.device.hybrid_resume_caps
-            );
-            assert_eq!(restored.device.hybrid_resume_caps.get(&zero), Some(&0));
-            assert!(matches!(
-                restored.device.hybrid_resume_caps,
-                HybridResumeCaps::Explicit(_)
-            ));
-            assert_eq!(
-                restored.device.overlap_scores.scores,
-                native.device.overlap_scores.scores
-            );
-        }
+        let mut native = TieredMatchDetails::default();
+        native.device.overlap_scores.scores.insert(first, 3);
+        native.device.hybrid_resume_caps = HybridResumeCaps::from_iter([(first, 3), (zero, 0)]);
+        let wire = WireTieredMatchDetails::from(&native);
+        assert_eq!(wire.hybrid_resume_caps.len(), 2);
+        assert!(wire.hybrid_resume_caps.contains(&(zero, 0)));
+        let value = serde_json::to_value(&wire).unwrap();
+        assert!(value["hybrid_resume_caps"].is_array());
+        let decoded = serde_json::from_value::<WireTieredMatchDetails>(value).unwrap();
+        let restored = TieredMatchDetails::from(decoded);
+        assert_eq!(
+            restored.device.hybrid_resume_caps,
+            native.device.hybrid_resume_caps
+        );
+        assert_eq!(restored.device.hybrid_resume_caps.get(&zero), Some(&0));
+        assert_eq!(
+            restored.device.overlap_scores.scores,
+            native.device.overlap_scores.scores
+        );
     }
 
     #[test]

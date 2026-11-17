@@ -244,9 +244,13 @@ impl<'a> LookupPipeline<'a> {
         let residency = self.group_residency().filter(|_| self.lower_tier.is_some());
         let mut details = if let Some(residency) = residency {
             if (!with_side || self.side.is_none())
-                && let Some(details) = self
-                    .primary
-                    .find_forward_device(sequence, retain, max_blocks, residency)
+                && let Some(details) = self.primary.find_forward_device(
+                    sequence,
+                    retain,
+                    max_blocks,
+                    residency,
+                    retain || !with_side,
+                )
             {
                 return Ok(details);
             }
@@ -308,6 +312,7 @@ impl<'a> LookupPipeline<'a> {
                     options.retain_kv_transfer_chain,
                     options.max_reusable_blocks,
                     residency,
+                    options.retain_kv_transfer_chain || !with_side,
                 )
             {
                 return Ok(TieredMatchDetails {
@@ -428,12 +433,16 @@ impl<'a> PrimaryLookup<'a> {
         retain: bool,
         max_blocks: Option<usize>,
         residency: &KvCacheGroupResidency,
+        caps: bool,
     ) -> Option<MatchDetails> {
         let Self::Concurrent(primary) = self else {
             return None;
         };
         let mut evaluator = ForwardDeviceEvaluator::new(residency, max_blocks);
         evaluator.reserve_blocks(sequence.as_slice().len());
+        if !caps {
+            evaluator.omit_caps();
+        }
         let mut details = primary.backend().find_match_details_impl_with_observer(
             sequence.as_slice(),
             false,
@@ -707,8 +716,6 @@ mod tests {
 
     #[tokio::test]
     async fn forward_presence_matches_general_evaluator_and_observes_cleared_state() {
-        use crate::HybridResumeCaps;
-
         for missing in [false, true] {
             let indexer = make_test_concurrent_indexer();
             let sequence: Vec<_> = [11, 12, 13].into_iter().map(LocalBlockHash).collect();
@@ -784,10 +791,6 @@ mod tests {
                 expected.kv_transfer_candidates
             );
             if !missing {
-                assert!(matches!(
-                    actual.hybrid_resume_caps,
-                    HybridResumeCaps::UniformConfirmed { .. }
-                ));
                 lower_tier.group_residency().clear_worker(workers[0]);
                 let mut observer = ForwardDeviceEvaluator::new(lower_tier.group_residency(), None);
                 let mut after_clear = primary.backend().find_match_details_impl_with_observer(
@@ -799,19 +802,12 @@ mod tests {
                 observer.finish(&mut after_clear);
                 assert!(!after_clear.overlap_scores.scores.contains_key(&workers[0]));
                 assert_eq!(after_clear.hybrid_resume_caps.get(&workers[0]), Some(&0));
-            } else {
-                assert!(matches!(
-                    actual.hybrid_resume_caps,
-                    HybridResumeCaps::SparseConfirmed(_)
-                ));
             }
         }
     }
 
     #[tokio::test]
     async fn bounded_forward_presence_matches_general_caps_and_keeps_dense_coverage() {
-        use crate::HybridResumeCaps;
-
         for with_dense_worker in [false, true] {
             let indexer = make_test_concurrent_indexer();
             let sequence: Vec<_> = [11, 12, 13].into_iter().map(LocalBlockHash).collect();
@@ -894,11 +890,6 @@ mod tests {
                             .get(&WorkerWithDpRank::new(3, 0)),
                         Some(&3)
                     );
-                } else if limit != Some(0) {
-                    assert!(matches!(
-                        actual.hybrid_resume_caps,
-                        HybridResumeCaps::UniformConfirmed { .. }
-                    ));
                 }
             }
         }

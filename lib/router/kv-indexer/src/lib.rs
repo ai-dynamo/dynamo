@@ -217,7 +217,7 @@ pub use thread_pool::{
 pub use traits::{AnchorCapableSyncIndexer, KvIndexerInterface, ShardSizeSnapshot, SyncIndexer};
 pub use types::{
     AnchorRef, AnchorTask, ContainsWorkerBlockRequest, DumpRequest, FlushRequest,
-    GetWorkersRequest, HybridResumeCaps, HybridResumeCapsIter, KvRouterError, MatchDetails,
-    MatchDetailsRequest, MatchRequest, RoutingDecisionHashes, WireLowerTierMatchDetails,
-    WireOverlapScores, WireTieredMatchDetails, WorkerLookupStats, WorkerTask,
+    GetWorkersRequest, HybridResumeCaps, KvRouterError, MatchDetails, MatchDetailsRequest,
+    MatchRequest, RoutingDecisionHashes, WireLowerTierMatchDetails, WireOverlapScores,
+    WireTieredMatchDetails, WorkerLookupStats, WorkerTask,
 };

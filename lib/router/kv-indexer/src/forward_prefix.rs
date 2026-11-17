@@ -90,6 +90,7 @@ pub(crate) struct ForwardDeviceEvaluator<'a> {
     chain: Vec<(usize, ExternalSequenceBlockHash)>,
     needs_checkpoints: bool,
     emitted: bool,
+    emit_caps: bool,
 }
 
 impl<'a> ForwardDeviceEvaluator<'a> {
@@ -101,7 +102,14 @@ impl<'a> ForwardDeviceEvaluator<'a> {
             chain: Vec::new(),
             needs_checkpoints: true,
             emitted: false,
+            emit_caps: true,
         }
+    }
+
+    /// Leave `hybrid_resume_caps` empty. Only a caller that retains transfer
+    /// hints or answers a remote query reads them.
+    pub(crate) fn omit_caps(&mut self) {
+        self.emit_caps = false;
     }
 
     /// Size the chain for a query of `blocks` blocks before the walk takes
@@ -260,11 +268,9 @@ impl<'a> ForwardDeviceEvaluator<'a> {
         // anywhere, or no attention coverage within the limit.
         let mut uncredited = Vec::new();
         // Workers whose coverage ended before the final depth are already
-        // scored; the known ones join the confirmed scope below.
-        let mut earlier = Vec::new();
+        // scored; the known ones are resolved within their own bound.
         for (&worker, &blocks) in &details.overlap_scores.scores {
             if let Some((count, bit)) = self.device_summary(worker) {
-                earlier.push(worker);
                 let bound = blocks.min(limit);
                 if count == 0 || bound == 0 {
                     uncredited.push(worker);
@@ -369,31 +375,12 @@ impl<'a> ForwardDeviceEvaluator<'a> {
 
         self.resolve(&mut pending);
 
-        // The most common cap becomes the default so few overrides are stored.
         let top_cap = top.map_or(0, |index| self.chain[index].0 as u32);
-        let cap_of = |entry: &Pending| {
-            entry
-                .resolved
-                .map_or(0, |index| self.chain[index as usize].0 as u32)
-        };
-        let mut default_cap = top_cap;
-        let mut votes = settled_at_top;
-        let mut vote = |cap: u32, count: usize| {
-            if cap == default_cap {
-                votes += count;
-            } else if votes >= count {
-                votes -= count;
-            } else {
-                default_cap = cap;
-                votes = count - votes;
-            }
-        };
-        vote(0, uncredited.len());
-        for entry in &pending {
-            vote(cap_of(entry), 1);
+        let emit_caps = self.emit_caps;
+        let mut caps = super::HybridResumeCaps::default();
+        if emit_caps {
+            caps.reserve(survivors.len() + pending.len() + uncredited.len());
         }
-
-        let mut overrides = Vec::new();
         if settled_at_top > 0
             && let Some(index) = top
         {
@@ -405,8 +392,8 @@ impl<'a> ForwardDeviceEvaluator<'a> {
                 }
                 scores.insert(worker, top_cap);
                 last_hashes.insert(worker, hash);
-                if top_cap != default_cap {
-                    overrides.push((worker, top_cap));
+                if emit_caps {
+                    caps.insert(worker, top_cap);
                 }
             }
         }
@@ -417,8 +404,8 @@ impl<'a> ForwardDeviceEvaluator<'a> {
                     let cap = position as u32;
                     scores.insert(entry.worker, cap);
                     last_hashes.insert(entry.worker, hash);
-                    if cap != default_cap {
-                        overrides.push((entry.worker, cap));
+                    if emit_caps {
+                        caps.insert(entry.worker, cap);
                     }
                 }
                 None => uncredited.push(entry.worker),
@@ -427,14 +414,12 @@ impl<'a> ForwardDeviceEvaluator<'a> {
         for worker in uncredited {
             scores.remove(&worker);
             last_hashes.remove(&worker);
-            if default_cap != 0 {
-                overrides.push((worker, 0));
+            if emit_caps {
+                caps.insert(worker, 0);
             }
         }
-        active.extend(earlier);
         self.view = None;
-        details.hybrid_resume_caps =
-            super::HybridResumeCaps::sparse_confirmed(active, default_cap, overrides);
+        details.hybrid_resume_caps = caps;
     }
 
     pub(crate) fn finish(&mut self, details: &mut MatchDetails) {
