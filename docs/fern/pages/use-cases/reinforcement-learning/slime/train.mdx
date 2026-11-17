@@ -229,7 +229,7 @@ SUCC cli.py:67 -- Job 'slime-grpo-d5tcx' succeeded
 2. Slime starts its own SGLang router. The router only tracks the engines; rollouts go to the Dynamo frontend.
 3. Slime syncs its weights to both engines once before the first rollout, so the engines start from the trainer's exact weights.
 4. `rollout 0` reports the 64 samples generated through Dynamo. `rollout/raw_reward` is the fraction of correct answers.
-5. `step 0` reports the training step. `train/train_rollout_logprob_abs_diff` compares the token log-probabilities that the engines returned with the ones that Megatron-LM computes. A value near 0.01 at every step shows that the engines generated with the weights that Slime synced before that rollout. An engine left on older weights would make the value grow.
+5. `step 0` reports the training step. `train/train_rollout_logprob_abs_diff` compares the token log-probabilities that the engines returned with the ones that Megatron-LM computes. Use it as a sanity check for the weight syncs: it stays near 0.01 when the engines generate with the weights that Slime synced before the rollout, and an engine left on older weights would make it grow. The value is an average over the whole rollout, so it doesn't prove that every sample came from the latest weights. This tutorial doesn't check each sample's policy version.
 6. The sync, rollout, and step lines repeat for steps 1 through 9. A last sync follows step 9, and the job succeeds.
 
 With 8 prompts per step, the reward moves between about 0.4 and 0.8 from step to step. Ten steps at this learning rate test the pipeline; they don't show learning.
