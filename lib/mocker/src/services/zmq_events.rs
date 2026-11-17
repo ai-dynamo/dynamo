@@ -362,7 +362,7 @@ fn convert_to_zmq_events(
         KvCacheEventData::Cleared => vec![],
         KvCacheEventData::Recurrent(payload) => {
             vec![ZmqRawKvEvent::RecurrentState {
-                payload: payload.clone(),
+                payload: (**payload).clone(),
             }]
         }
     }

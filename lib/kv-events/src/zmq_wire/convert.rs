@@ -178,7 +178,7 @@ pub fn convert_event(
         },
         RawKvEvent::RecurrentState { payload } => KvCacheEvent {
             event_id,
-            data: KvCacheEventData::Recurrent(payload),
+            data: KvCacheEventData::Recurrent(Box::new(payload)),
             dp_rank,
         },
         RawKvEvent::Ignored => unreachable!("ignored events return before conversion"),

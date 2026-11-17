@@ -285,11 +285,11 @@ mod tests {
     }
 
     fn recurrent(sequence: u64) -> PlacementEvent {
-        event(KvCacheEventData::Recurrent(RecurrentStateEvent {
+        event(KvCacheEventData::Recurrent(Box::new(RecurrentStateEvent {
             epoch: "worker-epoch".to_string(),
             sequence,
             data: serde_json::json!({"stored": {"prefix_len": sequence}}),
-        }))
+        })))
     }
 
     #[test]
@@ -339,8 +339,8 @@ mod tests {
         assert_eq!(output.len(), 3);
         assert!(matches!(output[0].event.data, KvCacheEventData::Stored(_)));
         assert!(matches!(
-            output[1].event.data,
-            KvCacheEventData::Recurrent(RecurrentStateEvent { sequence: 7, .. })
+            &output[1].event.data,
+            KvCacheEventData::Recurrent(state) if state.sequence == 7
         ));
         assert!(matches!(output[2].event.data, KvCacheEventData::Stored(_)));
     }

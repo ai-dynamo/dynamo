@@ -67,7 +67,7 @@ pub enum KvCacheEventData {
     /// persistence formats use serde's positional enum representation, so the
     /// discriminants of `Stored`, `Removed`, and `Cleared` are compatibility
     /// surface.
-    Recurrent(RecurrentStateEvent),
+    Recurrent(Box<RecurrentStateEvent>),
 }
 
 /// Represents the data associated with a stored cache event.
