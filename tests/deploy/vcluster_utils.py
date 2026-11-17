@@ -9,7 +9,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
-VCLUSTER_CONNECTION_RETRY_LIMIT = 3
+VCLUSTER_CONNECTION_RETRY_LIMIT = 12
 VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS = 5
 
 _Result = TypeVar("_Result")

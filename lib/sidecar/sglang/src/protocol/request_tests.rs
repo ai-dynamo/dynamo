@@ -424,7 +424,6 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
     for field in [
         "token_ids",
         "prompt_embeds",
-        "multimodal",
         "mm_processor_kwargs",
         "multi_modal_uuids",
         "encoder_result",
@@ -438,10 +437,6 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
             "prompt_embeds" => {
                 request.prompt_embeds = Some("encoded".to_string());
                 "prompt_embeds"
-            }
-            "multimodal" => {
-                request.multi_modal_data = Some(Default::default());
-                "multimodal"
             }
             "mm_processor_kwargs" => {
                 request.mm_processor_kwargs = Some(json!({}));
@@ -464,6 +459,81 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
             build(&request, DisaggregationMode::Aggregated).unwrap_err(),
             message,
         );
+    }
+}
+
+fn url(source: &str) -> MultimodalData {
+    MultimodalData::Url(url::Url::parse(source).unwrap())
+}
+
+/// One request's media sources, in api.v1's flat list form.
+fn many(sources: &[&str]) -> Option<pb::MediaInput> {
+    let items = sources.iter().map(|source| pb::OptionalMediaItem {
+        item: Some(pb::MediaItem {
+            value: Some(pb::media_item::Value::Source(source.to_string())),
+        }),
+    });
+    Some(pb::MediaInput {
+        value: Some(pb::media_input::Value::Many(pb::MediaItems {
+            items: items.collect(),
+        })),
+    })
+}
+
+#[test]
+fn media_maps_to_sglang_fields_in_request_order() {
+    let mut request = request();
+    request.multi_modal_data = Some(HashMap::from([
+        (
+            "image_url".to_string(),
+            vec![
+                url("https://example.com/a.png"),
+                MultimodalData::RawUrl("data:image/png;base64,AAAA".to_string()),
+            ],
+        ),
+        (
+            "video_url".to_string(),
+            vec![url("http://example.com/v.mp4")],
+        ),
+        (
+            "audio_url".to_string(),
+            vec![url("https://example.com/a.wav")],
+        ),
+    ]));
+    let mapped = build(&request, DisaggregationMode::Aggregated).unwrap();
+    assert_eq!(
+        mapped.image_data,
+        many(&["https://example.com/a.png", "data:image/png;base64,AAAA"])
+    );
+    assert_eq!(mapped.video_data, many(&["http://example.com/v.mp4"]));
+    assert_eq!(mapped.audio_data, many(&["https://example.com/a.wav"]));
+}
+
+#[test]
+fn unsupported_media_is_refused() {
+    let scheme = "media only as http://, https://, or data: URLs";
+    for (key, item, message) in [
+        (
+            "image_url",
+            MultimodalData::UuidOnly("id".into()),
+            "UUID-only media",
+        ),
+        ("image_url", url("file:///etc/hosts"), scheme),
+        (
+            "video_url",
+            MultimodalData::RawUrl("/tmp/v.mp4".into()),
+            scheme,
+        ),
+        (
+            "vision_chunk",
+            url("https://example.com/a.png"),
+            "image, video, and audio",
+        ),
+    ] {
+        let mut request = request();
+        request.multi_modal_data = Some(HashMap::from([(key.to_string(), vec![item])]));
+        let error = build(&request, DisaggregationMode::Aggregated).unwrap_err();
+        assert_invalid(error, message);
     }
 }
 

@@ -1335,6 +1335,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unsupported_video_public_message_reaches_the_sse_body() {
+        let error = DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic(r#"{"message":"Unsupported video media","code":415}"#)
+            .public_message("Unsupported video media")
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["message"], "Unsupported video media");
+        assert_eq!(body["error"]["code"], 415);
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+    }
+
+    #[test]
+    fn unsupported_media_without_public_message_uses_catalog_text_in_sse() {
+        let error = DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic("private fetch https://example.com/?sig=secret")
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["message"], "Unsupported media type");
+        assert_eq!(body["error"]["code"], 415);
+        assert!(
+            !body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("secret")
+        );
+    }
+
     #[tokio::test]
     async fn signaled_error_before_terminal_event_keeps_disconnect_handle_armed() {
         let error_signal = StreamErrorSignal::default();

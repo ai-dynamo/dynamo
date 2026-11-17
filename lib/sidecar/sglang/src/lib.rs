@@ -14,9 +14,9 @@
 //! sidecar serves every listener of its node as one worker that owns their DP
 //! ranks, and sends each request to the listener of its rank.
 //!
-//! The crate never depends on `sglang` or any engine crate. It uses
-//! `dynamo-backend-common`, `dynamo-llm`, `dynamo-runtime`, `tonic`/`prost`,
-//! `clap`, and tokio.
+//! The crate never depends on the SGLang engine. It uses `sglang-api-types`,
+//! `dynamo-backend-common`, `dynamo-llm`, `dynamo-runtime`, `tonic`, `clap`,
+//! and tokio.
 
 use std::sync::Arc;
 
@@ -33,8 +33,8 @@ mod listeners;
 mod native_http;
 mod node;
 
-/// Generated SGLang gRPC types, temporarily exposed for the Mocker server
-/// until SGLang publishes its upstream protocol package.
+/// SGLang's `sglang.api.v1` types from the `sglang-api-types` crate, re-exported
+/// for the Mocker server.
 #[doc(hidden)]
 pub mod proto;
 mod protocol;

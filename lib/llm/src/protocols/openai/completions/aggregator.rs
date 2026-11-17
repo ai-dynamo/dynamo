@@ -239,6 +239,7 @@ mod tests {
             token_logprobs: vec![Some(lp)],
             top_logprobs: vec![
                 serde_json::to_value(dynamo_protocols::types::TopLogprobs {
+                    token_id: None,
                     token: text.to_string(),
                     logprob: lp,
                     bytes: None,

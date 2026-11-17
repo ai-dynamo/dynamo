@@ -90,4 +90,4 @@ For request-level tracing, enable `DYN_REQUEST_TRACE=1` on the frontend. Explici
 
 - Run the ThunderAgent Scheduler
 - [ThunderAgent Scheduler Design](../../use-cases/agents/thunderagent-program-scheduler.md)
-- [Priority Scheduling](../../use-cases/agents/priority-scheduling.md)
+- [Priority Scheduling](../../use-cases/agents/priority-scheduling.mdx)

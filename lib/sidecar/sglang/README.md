@@ -30,7 +30,7 @@ server. See the [sidecar overview](../README.md) for installation.
 | Kubernetes multinode tensor parallelism (TP) | Yes |
 | Attention DP (`--attn-dp-size N`) | Yes, one sidecar per node |
 | Replica DP (`--dp-size N`) | Aggregated and decode; SGLang's Rust server rejects it for prefill |
-| Image, video, and audio input | No |
+| Image, video, and audio input | Yes, as URLs |
 
 SGLang's Rust server runs one listener per DP rank: listener `k` on a node
 binds `--port + k` and `--grpc-port + k`, so keep the two ports at least the

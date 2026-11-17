@@ -4,6 +4,8 @@
 //! The SGLang fixture for `sglang.api.v1`, the gRPC contract of SGLang's Rust
 //! server.
 
+use tonic_v14 as tonic;
+
 use std::collections::{HashMap, VecDeque};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -424,6 +426,7 @@ pub fn error_item(code: u32, message: &str) -> pb::GenerateStreamItem {
             error: Some(pb::ErrorBody {
                 message: message.to_string(),
                 code,
+                ..Default::default()
             }),
             index: None,
         })),

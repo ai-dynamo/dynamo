@@ -4462,7 +4462,7 @@ async fn test_reject_media_disabled_preserves_anthropic_model_lookup_precedence(
         .json(&serde_json::json!({
             "model": "unregistered", "max_tokens": 16,
             "messages": [{"role": "user", "content": [{
-                "type": "image", "source": {"type": "url", "url": "https://example.com/a.png", "media_type": "image/png", "data": ""}
+                "type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}
             }]}]
         }))
         .send()

@@ -133,10 +133,10 @@ cargo test --locked -p dynamo-vllm-sidecar --lib \
   convert::request_tests::canonical_priority_preserves_native_ordering -- --exact
 ```
 
-The vLLM dependency enables common's `tonic-v14` feature. To cover that version
-when running common alone, add `--features tonic-v14`. Building requires the
-repository's normal Rust prerequisites; running these suites needs no GPU,
-model download or inference-engine installation.
+The vLLM and SGLang dependencies enable common's `tonic-v14` feature. To cover
+that version when running common alone, add `--features tonic-v14`. Building
+requires the repository's normal Rust prerequisites; running these suites needs
+no GPU, model download or inference-engine installation.
 
 CI runs them through the ordinary `cargo test --locked --all-targets` step and
 nightly Rust coverage. There are no per-test lane markers or custom unit runner.
