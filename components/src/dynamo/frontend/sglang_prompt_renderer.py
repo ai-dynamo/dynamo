@@ -15,11 +15,11 @@ from sglang.srt.parser.jinja_template_utils import (
 
 from .sglang_deepseek import (
     RecipeRequestError,
-    RenderedDeepSeekPrompt,
     recipe_renderer,
     render_recipe_prompt,
     resolve_deepseek_spec,
 )
+from .sglang_prompt_types import RenderedPrompt
 from .utils import PreprocessError, extract_mm_urls
 
 
@@ -31,7 +31,7 @@ class PromptRenderer(Protocol):
         messages: list[dict[str, Any]],
         template_tools: list[dict[str, Any]] | None,
         resolved_responses_template: str | None,
-    ) -> list[int] | RenderedDeepSeekPrompt:
+    ) -> RenderedPrompt:
         ...
 
 
@@ -46,7 +46,7 @@ class JinjaPromptRenderer:
         messages: list[dict[str, Any]],
         template_tools: list[dict[str, Any]] | None,
         resolved_responses_template: str | None,
-    ) -> list[int]:
+    ) -> RenderedPrompt:
         # Build template kwargs -- single call for rendering + tokenization
         template_kwargs: dict[str, Any] = {
             "add_generation_prompt": True,
@@ -79,7 +79,7 @@ class JinjaPromptRenderer:
         except (TemplateError, TypeError) as exc:
             # Jinja filters such as tojson can raise TypeError for invalid inputs.
             raise PreprocessError(str(exc)) from exc
-        return _normalize_prompt_token_ids(rendered)
+        return RenderedPrompt(_normalize_prompt_token_ids(rendered))
 
 
 _KIMI_K3_THINKING_EFFORTS = frozenset({"low", "high", "max"})
@@ -219,7 +219,7 @@ class KimiK3PromptRenderer:
         messages: list[dict[str, Any]],
         template_tools: list[dict[str, Any]] | None,
         resolved_responses_template: str | None,
-    ) -> list[int]:
+    ) -> RenderedPrompt:
         chat_template_kwargs = (
             request.get("chat_template_kwargs")
             or request.get("chat_template_args")
@@ -253,7 +253,7 @@ class KimiK3PromptRenderer:
             )
         except (TemplateError, TypeError) as exc:
             raise PreprocessError(str(exc)) from exc
-        return _normalize_prompt_token_ids(rendered)
+        return RenderedPrompt(_normalize_prompt_token_ids(rendered))
 
 
 class DeepSeekPromptRenderer:
@@ -278,7 +278,7 @@ class DeepSeekPromptRenderer:
         messages: list[dict[str, Any]],
         template_tools: list[dict[str, Any]] | None,
         resolved_responses_template: str | None,
-    ) -> list[int] | RenderedDeepSeekPrompt:
+    ) -> RenderedPrompt:
         if self._spec is None and not _should_use_deepseek_v4_encoding(
             request,
             tokenizer=self._tokenizer,
@@ -338,7 +338,7 @@ class _NativePromptRenderer:
         messages: list[dict[str, Any]],
         template_tools: list[dict[str, Any]] | None,
         resolved_responses_template: str | None,
-    ) -> list[int] | RenderedDeepSeekPrompt:
+    ) -> RenderedPrompt:
         return self.select(request).render(
             request,
             messages=messages,
@@ -444,7 +444,7 @@ def _render_deepseek_prompt(
     tokenizer,
     template_tools: list[dict[str, Any]] | None,
     spec: str = "dsv4",
-) -> RenderedDeepSeekPrompt:
+) -> RenderedPrompt:
     """Use SGLang's recipe adapter or its legacy V4 checkpoint encoder."""
     if recipe_renderer is not None:
         try:
@@ -526,7 +526,7 @@ def _render_deepseek_prompt(
         thinking_mode=thinking_mode,
         reasoning_effort=reasoning_effort,
     )
-    return RenderedDeepSeekPrompt(_normalize_prompt_token_ids(tokenizer.encode(prompt)))
+    return RenderedPrompt(_normalize_prompt_token_ids(tokenizer.encode(prompt)))
 
 
 def _normalize_prompt_token_ids(prompt_token_ids: Any) -> list[int]:

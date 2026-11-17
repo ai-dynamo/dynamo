@@ -5,10 +5,11 @@
 
 import json
 from collections import Counter
-from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+from .sglang_prompt_types import RenderedPrompt
 
 try:
     import sglang.srt.parser.deepseek_recipe_renderer as recipe_renderer
@@ -37,13 +38,6 @@ class RecipeRequestError(ValueError):
     """A client request rejected by the recipe encoder."""
 
 
-@dataclass
-class RenderedDeepSeekPrompt:
-    token_ids: list[int]
-    # None keeps the request's image order and string objects.
-    image_urls: list[str] | None = None
-
-
 @lru_cache(maxsize=8)
 def _encoder(tokenizer: Any, spec: str):
     return recipe_renderer.DeepSeekRecipe.from_hf_tokenizer(spec, tokenizer)
@@ -57,7 +51,7 @@ def render_recipe_prompt(
     tools: list[dict[str, Any]] | None,
     spec: str,
     image_urls: list[str],
-) -> RenderedDeepSeekPrompt:
+) -> RenderedPrompt:
     """Encode a prompt on SGLang builds that provide the recipe adapter."""
     kwargs = (
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
@@ -102,6 +96,6 @@ def render_recipe_prompt(
             raise ValueError("DeepSeek recipe images differ from request media")
     except ValueError as exc:
         raise RecipeRequestError(str(exc)) from exc
-    return RenderedDeepSeekPrompt(
+    return RenderedPrompt(
         tokens, rendered_images if rendered_images != image_urls else None
     )

@@ -79,6 +79,7 @@ from dynamo.frontend.sglang_prompt_renderer import (
     _normalize_prompt_token_ids,
     build_prompt_renderer,
 )
+from dynamo.frontend.sglang_prompt_types import RenderedPrompt
 from dynamo.frontend.utils import (
     PreprocessError,
     nvext_extra_field_requested,
@@ -3818,7 +3819,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
 
         def render_recipe(request, *, spec, **kwargs):
             assert spec == "dsv41"
-            return sglang_prepost_module.RenderedDeepSeekPrompt([1, 2, 3])
+            return RenderedPrompt([1, 2, 3])
 
         monkeypatch.setattr(
             sglang_processor_module,
@@ -3968,7 +3969,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
 
         def render(request, **kwargs):
             captured.update(kwargs)
-            return sglang_prepost_module.RenderedDeepSeekPrompt([1, 2, 3])
+            return RenderedPrompt([1, 2, 3])
 
         class CheckpointTokenizer:
             def __init__(self):

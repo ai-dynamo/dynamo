@@ -30,7 +30,6 @@ from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
 from .responses_history import responses_history_recipients, responses_tools_request
-from .sglang_deepseek import RenderedDeepSeekPrompt
 from .sglang_prompt_renderer import (
     KimiK3PromptRenderer,
     PromptRenderer,
@@ -882,12 +881,8 @@ def preprocess_chat_request(
         template_tools=template_tools,
         resolved_responses_template=resolved_responses_template,
     )
-    if isinstance(rendered, RenderedDeepSeekPrompt):
-        prompt_token_ids = rendered.token_ids
-        rendered_image_urls = rendered.image_urls
-    else:
-        prompt_token_ids = rendered
-        rendered_image_urls = None
+    prompt_token_ids = rendered.token_ids
+    rendered_image_urls = rendered.image_urls
 
     response_format_guided_decoding = build_response_format_guided_decoding(request)
     tool_call_guided_decoding = build_tool_call_guided_decoding(
