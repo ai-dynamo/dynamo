@@ -417,13 +417,14 @@ impl EmbeddedSelection {
         &self,
         operation: SelectionOperation<'_>,
         allow_cache_credit: bool,
+        accounting_name: Option<&str>,
     ) -> SelectionRun {
         // Keep the selection state out of the frontend's nested request future.
-        let run = Box::pin(
-            self.service
-                .core()
-                .run_selection_with_cache_credit(operation, allow_cache_credit),
-        )
+        let run = Box::pin(self.service.core().run_selection_with_accounting_name(
+            operation,
+            accounting_name,
+            allow_cache_credit,
+        ))
         .await;
         self.observe_queue(match &run.result {
             Ok(SelectionOutcome::QueueRejected { rejection }) => Some(rejection),

@@ -51,8 +51,7 @@ pub use crate::shared_cache::SharedKvCache;
 pub use crate::tracking_hash::{TrackingHashAlgorithm, TrackingHashScope};
 pub use crate::tracking_hash::{TrackingHashConfig, TrackingHashContext};
 pub use crate::types::{
-    AccountingAttribution, KvSchedulerError, ScheduleMode, ScheduleRequest, SchedulingContext,
-    SchedulingRequest,
+    KvSchedulerError, ScheduleMode, ScheduleRequest, SchedulingContext, SchedulingRequest,
 };
 pub use crate::types::{RejectThresholdsProvider, WorkerSelectionPolicyFactory};
 pub use dynamo_admission::RequestLifecycle;

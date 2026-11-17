@@ -290,7 +290,6 @@ fn lease_operation<'a>(
     track_active_blocks: bool,
 ) -> SelectionOperation<'a> {
     SelectionOperation {
-        accounting_attribution: Default::default(),
         key: default_key(),
         prompt,
         router_config_override: None,
@@ -1314,9 +1313,7 @@ async fn explicit_reservation_preserves_legacy_adapter_attribution() {
 }
 
 #[tokio::test]
-async fn accounting_attribution_preserves_routing_identity_and_reservation_replay() {
-    use crate::AccountingAttribution;
-
+async fn resolved_accounting_preserves_routing_identity_and_reservation_replay() {
     struct AdapterFilter;
     impl LoraWorkerFilter for AdapterFilter {
         fn filter_worker_ids_for_lora(&self, name: &str, available: &[WorkerId]) -> Vec<WorkerId> {
@@ -1325,9 +1322,10 @@ async fn accounting_attribution_preserves_routing_identity_and_reservation_repla
         }
     }
 
-    for attribution in [
-        AccountingAttribution::UseRoutingName,
-        AccountingAttribution::Exclude,
+    for (accounting_name, use_default) in [
+        (Some("dynamo-lora-legacy-alias"), false),
+        (None, false),
+        (Some("dynamo-lora-legacy-alias"), true),
     ] {
         for replay in [false, true] {
             let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
@@ -1355,7 +1353,6 @@ async fn accounting_attribution_preserves_routing_identity_and_reservation_repla
             prompt.lora_name = Some("dynamo-lora-legacy-alias".into());
             let expected_hashes = prompt.view().block_hashes_for_indexer(4, false).unwrap();
             let mut operation = lease_operation(prompt.view(), "accounting", true);
-            operation.accounting_attribution = attribution;
             operation.return_routing_hashes = true;
             operation.admission = if replay {
                 SelectionAdmission::Query {
@@ -1367,21 +1364,24 @@ async fn accounting_attribution_preserves_routing_identity_and_reservation_repla
                 }
             };
             operation.replay_id = replay.then(|| "accounting".into());
-            let SelectionOutcome::Selected(selected) =
-                core.run_selection(operation).await.result.unwrap()
-            else {
+            let run = if use_default {
+                core.run_selection(operation).await
+            } else {
+                core.run_selection_with_accounting_name(operation, accounting_name, true)
+                    .await
+            };
+            let SelectionOutcome::Selected(selected) = run.result.unwrap() else {
                 panic!("selection must succeed");
             };
             assert_eq!(selected.response.best_worker.worker_id, 2);
             assert_eq!(selected.routing_hashes, Some(expected_hashes));
             if replay {
                 assert!(outbound_rx.try_recv().is_err());
-                core.create_reservation(replay_reservation("accounting"))
-                    .await
-                    .unwrap();
+                let mut replay = replay_reservation("accounting");
+                replay.prompt.lora_name = Some("ignored-replay-name".into());
+                core.create_reservation(replay).await.unwrap();
             }
-            let expected_name = (attribution == AccountingAttribution::UseRoutingName)
-                .then(|| "dynamo-lora-legacy-alias".to_string());
+            let expected_name = accounting_name.map(str::to_string);
             let added = tokio::time::timeout(Duration::from_secs(5), outbound_rx.recv())
                 .await
                 .unwrap()

@@ -84,7 +84,6 @@ impl SelectionCore {
         };
         let (selected, endpoint) = self
             .select_or_reject(SelectionOperation {
-                accounting_attribution: Default::default(),
                 key: RoutingPartitionId::new(req.model_name, req.routing_group),
                 prompt: req.prompt.view(),
                 router_config_override: req.router_config_override,
@@ -128,7 +127,6 @@ impl SelectionCore {
         let session = session_binding(session_context.as_ref(), is_steerable, true);
         let (selected, endpoint) = self
             .select_or_reject(SelectionOperation {
-                accounting_attribution: Default::default(),
                 key: RoutingPartitionId::new(req.model_name, req.routing_group),
                 prompt: req.prompt.view(),
                 router_config_override: req.router_config_override,
@@ -247,13 +245,28 @@ impl SelectionCore {
     /// and (for `Book`) install the reservation. Every host's selection goes
     /// through here.
     pub async fn run_selection(&self, operation: SelectionOperation<'_>) -> SelectionRun {
-        self.run_selection_with_cache_credit(operation, true).await
+        let accounting_name = operation.prompt.lora_name;
+        self.run_selection_with_accounting_name(operation, accounting_name, true)
+            .await
     }
 
     /// Run selection with the embedding host's request-wide cache-credit policy.
     pub async fn run_selection_with_cache_credit(
         &self,
         operation: SelectionOperation<'_>,
+        allow_cache_credit: bool,
+    ) -> SelectionRun {
+        let accounting_name = operation.prompt.lora_name;
+        self.run_selection_with_accounting_name(operation, accounting_name, allow_cache_credit)
+            .await
+    }
+
+    /// Supply the demand label separately from the prompt's hashing and host-filter identity.
+    /// `None` excludes per-adapter demand; availability hooks and low-level selectors see this label.
+    pub async fn run_selection_with_accounting_name(
+        &self,
+        operation: SelectionOperation<'_>,
+        accounting_name: Option<&str>,
         allow_cache_credit: bool,
     ) -> SelectionRun {
         let mut lookup = None;
@@ -264,7 +277,7 @@ impl SelectionCore {
                 _ = self.cancel_token.cancelled() => {
                     Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown))
                 }
-                result = self.run_selection_inner(operation, &mut lookup, allow_cache_credit) => result,
+                result = self.run_selection_inner(operation, &mut lookup, allow_cache_credit, accounting_name) => result,
             },
         };
         SelectionRun { result, lookup }
@@ -275,11 +288,11 @@ impl SelectionCore {
         operation: SelectionOperation<'_>,
         lookup: &mut Option<LookupTimings>,
         allow_cache_credit: bool,
+        accounting_name: Option<&str>,
     ) -> Result<SelectionOutcome, SelectionError> {
         let SelectionOperation {
             key,
             prompt,
-            accounting_attribution,
             router_config_override,
             expected_output_tokens,
             priority_jump,
@@ -412,7 +425,7 @@ impl SelectionCore {
             (
                 id,
                 sequence_hashes.clone(),
-                prompt.lora_name.map(str::to_string),
+                accounting_name.map(str::to_string),
                 track_prefill_tokens,
                 match &session {
                     SessionBinding::Query { session_id } => Some(session_id.clone()),
@@ -451,8 +464,7 @@ impl SelectionCore {
             kv_transfer_candidates,
             retain_kv_transfer_chain,
             router_config_override,
-            lora_name: prompt.lora_name.map(str::to_string),
-            accounting_attribution,
+            lora_name: accounting_name.map(str::to_string),
             priority_jump,
             strict_priority,
             policy_class,
@@ -575,7 +587,6 @@ impl SelectionCore {
                     expected_output_tokens,
                     track_prefill_tokens,
                     lora_name,
-                    accounting_attribution,
                     routing_hashes,
                     session_id,
                     session_context,

@@ -32,15 +32,18 @@ fn policy(request: &PreprocessedRequest) -> RequestPolicy {
     RequestPolicy::new(version)
 }
 
-pub(crate) fn execution_requirements(request: &PreprocessedRequest) -> ExecutionRequirements {
+pub(crate) fn execution_requirements(request: &PreprocessedRequest) -> ExecutionRequirements<'_> {
     let policy = policy(request);
     ExecutionRequirements {
         allows_replay: policy.allows_replay(),
         policy_required: policy.requires_candidate_policy(),
-        accounting_attribution: if policy.tracks_legacy_load() {
-            dynamo_scheduler::host::AccountingAttribution::UseRoutingName
+        accounting_lora_name: if policy.tracks_legacy_load() {
+            request
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.lora_name.as_deref())
         } else {
-            dynamo_scheduler::host::AccountingAttribution::Exclude
+            None
         },
     }
 }
@@ -430,7 +433,6 @@ mod tests {
     #[test]
     fn accounting_uses_typed_runtime_metadata_not_adapter_name() {
         use crate::protocols::common::preprocessor::RoutingHints;
-        use dynamo_scheduler::host::AccountingAttribution;
 
         let mut request = PreprocessedRequest::builder()
             .model("base".to_string())
@@ -440,13 +442,14 @@ mod tests {
             .output_options(Default::default())
             .build()
             .unwrap();
+        assert_eq!(execution_requirements(&request).accounting_lora_name, None);
         request.routing = Some(RoutingHints {
             lora_name: Some("dyn-lora-legacy-alias".into()),
             ..Default::default()
         });
         assert_eq!(
-            execution_requirements(&request).accounting_attribution,
-            AccountingAttribution::UseRoutingName
+            execution_requirements(&request).accounting_lora_name,
+            Some("dyn-lora-legacy-alias")
         );
         request.routing = Some(RoutingHints {
             lora_name: Some("runtime-key".into()),
@@ -457,16 +460,12 @@ mod tests {
             lora_resolution_version: Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION),
             ..Default::default()
         });
-        assert_eq!(
-            execution_requirements(&request).accounting_attribution,
-            AccountingAttribution::Exclude
-        );
+        assert_eq!(execution_requirements(&request).accounting_lora_name, None);
     }
 
     #[test]
     fn partial_runtime_metadata_is_rejected_and_never_replayed() {
         use crate::protocols::common::preprocessor::RoutingHints;
-        use dynamo_scheduler::host::AccountingAttribution;
 
         let mut request = PreprocessedRequest::builder()
             .model("base".to_string())
@@ -498,10 +497,7 @@ mod tests {
             request.routing = Some(routing);
             let requirements = execution_requirements(&request);
             assert!(!requirements.allows_replay);
-            assert_eq!(
-                requirements.accounting_attribution,
-                AccountingAttribution::Exclude
-            );
+            assert_eq!(requirements.accounting_lora_name, None);
             let error = check_candidate_policy(&request, true).unwrap_err();
             assert_eq!(
                 error
@@ -695,9 +691,10 @@ mod tests {
     fn kv_admission_intersects_live_and_allowed_workers_on_each_refresh() {
         use dynamo_router_protocol::worker::WorkerWithDpRank;
         use dynamo_scheduler::host::ScheduleMode;
+        let tracker = LoraStateTracker::new();
         let policy = LoraKvPolicy::kv(Arc::new(LoraFilter::new(
             LoraRoutingTable::new(),
-            LoraStateTracker::new(),
+            tracker.clone(),
         )));
         let (_tx, workers) = tokio::sync::watch::channel(Default::default());
         let mut request = SchedulingRequest {
@@ -707,7 +704,6 @@ mod tests {
             token_seq: None,
             isl_tokens: 0,
             lora_name: Some("adapter".into()),
-            accounting_attribution: Default::default(),
             expected_output_tokens: None,
             affinity_target: None,
             pinned_worker: Some(WorkerWithDpRank::new(2, 0)),
@@ -747,6 +743,67 @@ mod tests {
                 .refresh_admission(&request, Some(Arc::new(HashSet::new())), &workers)
                 .unwrap()
                 .is_empty()
+        );
+
+        tracker.replace_endpoint_projection(HashMap::from([(
+            WorkerWithDpRank::new(2, 0),
+            crate::lora::state_tracker::LoraWorkerProjection {
+                capacity: 4,
+                loras: vec![],
+                is_registration_required: true,
+            },
+        )]));
+        let mut runtime = PreprocessedRequest::builder()
+            .model("base".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+        let key = crate::lora::runtime::adapter_key("base", "custom:///cold");
+        runtime.routing = Some(crate::protocols::common::preprocessor::RoutingHints {
+            lora_name: Some(key.clone()),
+            base_model_name: Some("base".into()),
+            lora_source_uri: Some(crate::lora::runtime::RuntimeLoraSourceUri::new(
+                "custom:///cold".into(),
+            )),
+            lora_resolution_version: Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION),
+            ..Default::default()
+        });
+        request.lora_name = execution_requirements(&runtime)
+            .accounting_lora_name
+            .map(str::to_string);
+        let eligible = policy
+            .refresh_admission(&request, available.clone(), &workers)
+            .unwrap();
+        assert!(
+            eligible.contains(&2),
+            "cold runtime home needs no registration"
+        );
+        let eligible_ids = eligible.iter().copied().collect();
+        assert!(
+            request
+                .eligibility()
+                .with_available_workers(Some(&eligible_ids))
+                .validate_worker_rank(
+                    &HashMap::from([(2, ModelRuntimeConfig::default())]),
+                    WorkerWithDpRank::new(2, 0)
+                )
+                .is_ok()
+        );
+        runtime.routing.as_mut().unwrap().lora_resolution_version = None;
+        runtime.routing.as_mut().unwrap().lora_source_uri = None;
+        runtime.routing.as_mut().unwrap().base_model_name = None;
+        request.lora_name = execution_requirements(&runtime)
+            .accounting_lora_name
+            .map(str::to_string);
+        assert_eq!(request.lora_name.as_deref(), Some(key.as_str()));
+        assert!(
+            !policy
+                .refresh_admission(&request, available, &workers)
+                .unwrap()
+                .contains(&2)
         );
     }
 }

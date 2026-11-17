@@ -78,13 +78,13 @@ pub(crate) enum ExecutionStage {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct ExecutionRequirements {
+pub(crate) struct ExecutionRequirements<'a> {
     pub allows_replay: bool,
     pub policy_required: bool,
-    pub accounting_attribution: dynamo_scheduler::host::AccountingAttribution,
+    pub accounting_lora_name: Option<&'a str>,
 }
 
-pub(crate) fn execution_requirements(request: &PreprocessedRequest) -> ExecutionRequirements {
+pub(crate) fn execution_requirements(request: &PreprocessedRequest) -> ExecutionRequirements<'_> {
     crate::lora_routing::execution_requirements(request)
 }
 
