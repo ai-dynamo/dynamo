@@ -2095,15 +2095,27 @@ fn declared_mamba_group_zero_removal_is_tagged_before_first_store() {
 }
 
 #[test]
-fn recurrent_gate_covers_framework_storage_events() {
+fn default_mode_filters_recurrent_groups_on_every_medium() {
     let worker = WorkerWithDpRank::new(7, 0);
-    let mut normalizer = ZmqEventNormalizer::new(4);
-    for payload in [
-        serde_json::json!({"type":"BlockStored", "block_hashes":[11], "token_ids":[], "block_size":4, "medium":"STORAGE", "group_idx":0, "kv_cache_spec_kind":"mamba"}),
-        serde_json::json!({"type":"BlockRemoved", "block_hashes":[11], "medium":"STORAGE", "group_idx":0}),
-    ] {
-        let raw: RawKvEvent = from_slice(&rmp_serde::to_vec_named(&payload).unwrap()).unwrap();
-        assert!(normalizer.preprocess(raw, worker).is_none());
+    for medium in ["GPU", "STORAGE"] {
+        let mut normalizer = ZmqEventNormalizer::new(4);
+        for (payload, reason) in [
+            (
+                serde_json::json!({"type":"BlockStored", "block_hashes":[11], "token_ids":[], "block_size":4, "medium":medium, "group_idx":0, "kv_cache_spec_kind":"mamba"}),
+                ZmqEventFilterReason::NonMainAttentionKind,
+            ),
+            (
+                serde_json::json!({"type":"BlockRemoved", "block_hashes":[11], "medium":medium, "group_idx":0}),
+                ZmqEventFilterReason::NonMainAttentionGroup,
+            ),
+        ] {
+            let raw: RawKvEvent = from_slice(&rmp_serde::to_vec_named(&payload).unwrap()).unwrap();
+            assert_eq!(
+                normalizer.preprocess_with_reason(raw, worker).unwrap_err(),
+                reason,
+                "{medium}"
+            );
+        }
     }
 }
 
