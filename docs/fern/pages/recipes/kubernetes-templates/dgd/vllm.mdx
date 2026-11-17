@@ -34,9 +34,6 @@ Apply the whole file — both documents are part of the example.
 <Accordion title="agg_router_kv_approx.yaml · KV routing with approximate cache tracking (no NATS/KV events)">
 <Code src="../../../../../../examples/backends/vllm/deploy/agg_router_kv_approx.yaml" title="agg_router_kv_approx.yaml" language="yaml" maxLines={0} />
 </Accordion>
-<Accordion title="agg_kvbm.yaml · Aggregated with KV Block Manager offloading">
-<Code src="../../../../../../examples/backends/vllm/deploy/agg_kvbm.yaml" title="agg_kvbm.yaml" language="yaml" maxLines={0} />
-</Accordion>
 <Accordion title="agg_gms.yaml · Aggregated with GPU Memory Service sidecar">
 <Code src="../../../../../../examples/backends/vllm/deploy/agg_gms.yaml" title="agg_gms.yaml" language="yaml" maxLines={0} />
 </Accordion>
@@ -62,15 +59,6 @@ Apply the whole file — both documents are part of the example.
 </Accordion>
 <Accordion title="disagg_planner.yaml · Disaggregated with Dynamo Planner autoscaling">
 <Code src="../../../../../../examples/backends/vllm/deploy/disagg_planner.yaml" title="disagg_planner.yaml" language="yaml" maxLines={0} />
-</Accordion>
-<Accordion title="disagg_kvbm.yaml · Disaggregated with KV Block Manager offloading">
-<Code src="../../../../../../examples/backends/vllm/deploy/disagg_kvbm.yaml" title="disagg_kvbm.yaml" language="yaml" maxLines={0} />
-</Accordion>
-<Accordion title="disagg_kvbm_tp2.yaml · Disaggregated KVBM, tensor-parallel 2">
-<Code src="../../../../../../examples/backends/vllm/deploy/disagg_kvbm_tp2.yaml" title="disagg_kvbm_tp2.yaml" language="yaml" maxLines={0} />
-</Accordion>
-<Accordion title="disagg_kvbm_2p2d.yaml · Disaggregated KVBM, 2 prefill + 2 decode workers">
-<Code src="../../../../../../examples/backends/vllm/deploy/disagg_kvbm_2p2d.yaml" title="disagg_kvbm_2p2d.yaml" language="yaml" maxLines={0} />
 </Accordion>
 <Accordion title="disagg_tracing.yaml · Disaggregated with OpenTelemetry tracing">
 <Code src="../../../../../../examples/backends/vllm/deploy/disagg_tracing.yaml" title="disagg_tracing.yaml" language="yaml" maxLines={0} />

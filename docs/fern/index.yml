@@ -1151,9 +1151,6 @@ navigation:
               - page: Overview
                 path: pages/recipes/examples/kv-cache-offloading-overview.mdx
                 slug: kv-cache-offloading
-              - page: KV Block Manager
-                path: pages/recipes/examples/kvbm.mdx
-                slug: kvbm
               - page: LMCache
                 path: pages/recipes/examples/lmcache.mdx
                 slug: lmcache
