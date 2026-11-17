@@ -4,14 +4,18 @@
 import asyncio
 import base64
 import io
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from PIL import Image
 
+from dynamo._core import _raise_routed_http_error
+from dynamo.common.constants import IMAGE_FETCH_ERROR_MESSAGES
 from dynamo.common.http import HttpStatusError
 from dynamo.common.multimodal import ImageLoader
+from dynamo.llm.exceptions import RoutedEngineError
 from dynamo.vllm.omni import image_edit
 
 pytestmark = [
@@ -144,12 +148,16 @@ async def test_cancelled_edit_cancels_fetch_and_does_not_start_next(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_remote_error_preserves_status_but_not_url():
+@pytest.mark.parametrize("status,approved", [(403, True), (404, True), (404, False)])
+async def test_remote_error_preserves_status_but_not_url(status, approved):
     """Origin status survives sanitization while URL credentials stay private."""
+    message = IMAGE_FETCH_ERROR_MESSAGES[status]
+    if not approved:
+        message += " private signed URL"
     loader = SimpleNamespace(
         load_image=AsyncMock(
             side_effect=HttpStatusError(
-                404, "private signed URL", "https://example.com/?secret=token"
+                status, message, "https://example.com/?secret=token"
             )
         )
     )
@@ -157,6 +165,19 @@ async def test_remote_error_preserves_status_but_not_url():
         await image_edit.load_image_edit_references(
             ["reference"], image_loader=loader, model_class_name="Flux2KleinPipeline"
         )
-    assert caught.value.status == 404
-    assert caught.value.message == "input_reference could not be loaded"
+    assert caught.value.status == status
+    expected = (
+        IMAGE_FETCH_ERROR_MESSAGES[status]
+        if approved
+        else "input_reference could not be loaded"
+    )
+    assert caught.value.message == expected
+    assert caught.value.url == "image edit"
     assert "secret" not in str(caught.value)
+    with pytest.raises(RoutedEngineError) as bridged:
+        _raise_routed_http_error(status, caught.value.message)
+    semantic = json.loads(bridged.value._dynamo_error)
+    if approved:
+        assert semantic["public"]["message"] == expected
+    else:
+        assert "public" not in semantic

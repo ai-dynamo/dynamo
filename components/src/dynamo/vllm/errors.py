@@ -13,7 +13,7 @@ from vllm.exceptions import (
 )
 from vllm.v1.engine.exceptions import EngineGenerateError
 
-from dynamo.common.multimodal.image_loader import UUID_ONLY_VARIANT_KEY
+from dynamo.common.constants import UUID_ONLY_VARIANT_KEY
 from dynamo.llm.exceptions import HttpError, InvalidArgument
 
 _IMAGE_CACHE_MISS = re.compile(

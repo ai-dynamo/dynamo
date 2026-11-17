@@ -19,6 +19,7 @@ use super::common::EncodedMediaData;
 use super::decoders::{Decoder, MediaDecoder};
 use super::rdma::{DataType, RdmaMediaDataDescriptor, drain_nixl_notifications, get_nixl_agent};
 use super::require_image_url;
+use super::{IMAGE_FETCH_FORBIDDEN_MESSAGE, IMAGE_FETCH_NOT_FOUND_MESSAGE};
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::collections::hash_map::DefaultHasher;
@@ -29,8 +30,6 @@ const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 3;
 
 const IMAGE_FETCH_FAILED: &str = "Failed to fetch the image_url media";
-const IMAGE_FORBIDDEN: &str = "Image download returned HTTP 403. Refresh the URL or access permissions, or resend the image data before retrying.";
-const IMAGE_NOT_FOUND: &str = "Image download returned HTTP 404. Verify the image URL or resend the image data before retrying.";
 const IMAGE_DECODE_FAILED: &str =
     "Failed to decode the image_url data: it is not a valid or supported image";
 #[cfg(feature = "media-ffmpeg")]
@@ -187,8 +186,12 @@ fn image_fetch_error(error: anyhow::Error) -> anyhow::Error {
         .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
         .find_map(reqwest::Error::status);
     let (class, public) = match status {
-        Some(reqwest::StatusCode::FORBIDDEN) => (ErrorType::PermissionDenied, IMAGE_FORBIDDEN),
-        Some(reqwest::StatusCode::NOT_FOUND) => (ErrorType::NotFound, IMAGE_NOT_FOUND),
+        Some(reqwest::StatusCode::FORBIDDEN) => {
+            (ErrorType::PermissionDenied, IMAGE_FETCH_FORBIDDEN_MESSAGE)
+        }
+        Some(reqwest::StatusCode::NOT_FOUND) => {
+            (ErrorType::NotFound, IMAGE_FETCH_NOT_FOUND_MESSAGE)
+        }
         _ => return media_input_error(IMAGE_FETCH_FAILED, error),
     };
     DynamoError::builder()

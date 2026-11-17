@@ -34,6 +34,12 @@ from dynamo.frontend.utils import PromptLogprobsAccumulator
 from dynamo.llm import HttpAsyncEngine, HttpError, HttpService
 from dynamo.runtime import DistributedRuntime
 
+try:
+    from dynamo.common.multimodal.image_loader import ImageLoader
+except ImportError:
+    # CPU text-only test images do not install all multimodal dependencies.
+    ImageLoader = None
+
 # Real VP9 clip. The probe names vp9, so this is a video, not a 415.
 _VALID_CLIP = Path(__file__).resolve().parents[4] / "lib/llm/tests/data/media/2p_10.mp4"
 
@@ -61,7 +67,6 @@ class _OpenIfCodec:
 
 async def _decode_request_media(content: list) -> None:
     """Load media through the real loaders before the mock completion."""
-    from dynamo.common.multimodal.image_loader import ImageLoader
     from dynamo.common.multimodal.media_source import decode_data_uri
     from dynamo.common.multimodal.video_loader import VideoLoader
 
@@ -527,6 +532,9 @@ def test_video_public_message_matches_binding_allowlist():
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    ImageLoader is None, reason="multimodal image dependencies are not installed"
+)
 @pytest.mark.parametrize(
     "http_server,origin_status,after_commit",
     [({"wait_for_first_item": True}, 403, False), ({}, 404, True)],
@@ -649,9 +657,9 @@ async def test_streaming_chat_completion_http_error_with_peek_disabled(http_serv
     # The frame carries the sanitized stream error, not the backend's own
     # message: HTTP 200 is already committed, so there is no status left to
     # carry the 400, and the stream formatter does not forward backend text.
-    assert '"error"' in body, (
-        f"the pre-yield failure must arrive as an SSE error frame; got: {body}"
-    )
+    assert (
+        '"error"' in body
+    ), f"the pre-yield failure must arrive as an SSE error frame; got: {body}"
     assert "mock response" not in body, (
         f"the generator raised before its first yield, so the stream must "
         f"carry no content; got: {body}"

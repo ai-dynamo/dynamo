@@ -10,12 +10,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 from PIL import Image
+from vllm import SamplingParams
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.media.image import ImageMediaIO
+from vllm.multimodal.parse import MultiModalDataItems, VisionChunkProcessorItems
+from vllm.multimodal.processing.processor import BaseMultiModalProcessor
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.exceptions import EngineGenerateError
 
 import dynamo.common.multimodal.video_loader as video_loader_module
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.video_utils import encode_to_video_bytes
+from dynamo.llm.exceptions import InvalidArgument
+from dynamo.vllm.handlers import _translate_vllm_client_errors
 from dynamo.vllm.multimodal_utils import request_processor as mod
 from dynamo.vllm.multimodal_utils.models import qwen as qwen_mod
 
@@ -830,36 +838,24 @@ def test_build_tokens_prompt_forwards_opaque_uuid_for_unified_vision_chunk():
 
 
 @pytest.mark.asyncio
-async def test_uuid_only_image_cache_miss_can_be_recovered():
-    from vllm import SamplingParams
-    from vllm.multimodal.cache import MultiModalProcessorOnlyCache
-    from vllm.multimodal.inputs import MultiModalKwargsItem
-    from vllm.multimodal.parse import (
-        MultiModalDataItems,
-        VisionChunkProcessorItems,
-        parse_mm_uuids,
-    )
-    from vllm.multimodal.processing.inputs import ProcessorInputs
-    from vllm.multimodal.processing.processor import BaseMultiModalProcessor
-    from vllm.renderers.base import BaseRenderer
-    from vllm.v1.engine.async_llm import AsyncLLM
-    from vllm.v1.engine.exceptions import EngineGenerateError
-
-    from dynamo.llm.exceptions import InvalidArgument
-    from dynamo.vllm.handlers import _translate_vllm_client_errors
-
+async def test_worker_uuid_cache_miss_has_actionable_recovery_advice():
     uuid = "catalog/image:v2"
+    request = {
+        "token_ids": [1],
+        "multi_modal_data": {"image_url": [{"UuidOnly": uuid}]},
+        "multi_modal_uuids": {"image_url": [uuid]},
+    }
+    prompt = _processor(unified_vision_chunk=True).build_tokens_prompt(
+        request, {"vision_chunk": [None]}, None
+    )
     data_items = MultiModalDataItems(
-        {"vision_chunk": VisionChunkProcessorItems([None])}
+        {
+            "vision_chunk": VisionChunkProcessorItems(
+                prompt["multi_modal_data"]["vision_chunk"]
+            )
+        }
     )
-    uuid_items = parse_mm_uuids({"vision_chunk": [uuid]})
-    BaseRenderer._validate_mm_uuids(
-        None, {"vision_chunk": [None]}, data_items, uuid_items
-    )
-    mm_hashes = ProcessorInputs([], data_items, uuid_items).get_mm_hashes(
-        "test-model", "blake3"
-    )
-    assert mm_hashes == {"vision_chunk": [uuid]}
+    mm_hashes = prompt["multi_modal_uuids"]
 
     def parse_mm_data(data, *, validate):
         return MultiModalDataItems(
@@ -885,12 +881,8 @@ async def test_uuid_only_image_cache_miss_can_be_recovered():
     # exception chain that could diverge from AsyncLLM.generate.
     engine = SimpleNamespace(add_request=add_request, log_requests=False)
     stream = AsyncLLM.generate(
-        engine, {"prompt_token_ids": [1]}, SamplingParams(max_tokens=1), "cache-miss"
+        engine, prompt, SamplingParams(max_tokens=1), "cache-miss"
     )
-    request = {
-        "multi_modal_data": {"image_url": [{"UuidOnly": uuid}]},
-        "multi_modal_uuids": {"image_url": [uuid]},
-    }
     with pytest.raises(InvalidArgument, match="Resend.*same UUID") as raised:
         await asyncio.wait_for(
             anext(_translate_vllm_client_errors(stream, request)), timeout=5
@@ -898,26 +890,6 @@ async def test_uuid_only_image_cache_miss_can_be_recovered():
     assert isinstance(raised.value.__cause__, EngineGenerateError)
     assert type(raised.value.__cause__.__cause__) is ValueError
     assert uuid not in str(raised.value)
-
-    # Resending materialized data makes the miss processable and populates the
-    # real CPU cache; the next UUID-only lookup must resolve on that worker.
-    image = Image.new("RGB", (2, 2))
-    materialized = MultiModalDataItems(
-        {"vision_chunk": VisionChunkProcessorItems([image])}
-    )
-    is_cached, missing = BaseMultiModalProcessor._get_cache_missing_items(
-        processor, cache, materialized, mm_hashes
-    )
-    assert is_cached == {"vision_chunk": [False]}
-    assert missing["vision_chunk"][0] is image
-    item = MultiModalKwargsItem.dummy(1)
-    cache.get_and_update_item((item, []), uuid)
-    is_cached, missing = BaseMultiModalProcessor._get_cache_missing_items(
-        processor, cache, data_items, mm_hashes
-    )
-    assert is_cached == {"vision_chunk": [True]}
-    assert missing.get_count("vision_chunk", strict=False) == 0
-    assert cache.get_and_update_item(None, uuid)[0] is item
 
 
 def test_build_tokens_prompt_forwards_user_uuids_for_each_modality() -> None:

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from PIL import Image
 
+from dynamo.common.constants import IMAGE_FETCH_ERROR_MESSAGES
 from dynamo.common.http import HttpStatusError
 from dynamo.common.http.url_validator import MediaSizeError
 
@@ -172,9 +173,12 @@ async def load_image_edit_references(
                     if error.status == 413
                     else "could not be loaded"
                 )
-                raise HttpStatusError(
-                    error.status, f"{field} {detail}", "image edit"
-                ) from error
+                message = (
+                    error.message
+                    if IMAGE_FETCH_ERROR_MESSAGES.get(error.status) == error.message
+                    else f"{field} {detail}"
+                )
+                raise HttpStatusError(error.status, message, "image edit") from error
             except ValueError as error:
                 # Preserve the legacy single-reference error and keep payloads
                 # and signed URLs out of multi-reference errors as well.
