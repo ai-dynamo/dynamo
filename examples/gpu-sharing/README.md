@@ -139,8 +139,9 @@ Also confirm the per-worker caps:
 The three experiments deploy one DGD and one frontend per model. To put the same
 GPU-fraction workers behind a single frontend instead, so that clients use one endpoint
 and select a model by name, see
-[Serve Many Models Behind One Frontend](docs/deploy-one-frontend-many-models.md). It uses
-Dynamo platform and runtime 1.6.2, and was also tested with 1.5.0.
+[Serve Many Models Behind One Frontend](docs/deploy-one-frontend-many-models.md). It needs a
+newer Dynamo platform and runtime than the other experiments; see its
+[What Was Tested](docs/deploy-one-frontend-many-models.md#what-was-tested) section for the versions.
 
 ## Known Issues
 

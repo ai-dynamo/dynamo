@@ -30,8 +30,9 @@
 # Usage: ./gen-dgd.sh [model-snapshot-path] > dgd-2-models.yaml
 #
 # Environment:
-#   NUM_MODELS              number of workers, one model each        (default: 2,
-#                           which fills one A100 40GB with the other defaults)
+#   NUM_MODELS              number of workers, one model each        (default: 2;
+#                           with the other defaults two workers take all the
+#                           SMs of one GPU and 2 x 19968 MiB of its memory)
 #   DGD_NAME                name of the DGD                          (default: qwen3-4b-shared)
 #   MODEL_NAME_PREFIX       served names are <prefix>-01..NN         (default: qwen3-4b)
 #   GPU_COMPUTE             fraction of a GPU's SMs per worker       (default: 0.5)

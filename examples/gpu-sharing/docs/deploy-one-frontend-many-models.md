@@ -14,12 +14,11 @@ The other experiments in [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sh
 | DGDs for N models | N | 1 |
 | Frontends and endpoints | N | 1 |
 | How a client picks a model | By endpoint | By the `model` field of the request |
-| Worker pods | One per model, a GPU fraction each | The same |
 
 All commands run from `examples/gpu-sharing` in a checkout of the [Dynamo repository](https://github.com/ai-dynamo/dynamo). The files this guide uses are in [`examples/gpu-sharing/one-frontend-many-models/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/gpu-sharing/one-frontend-many-models).
 
 > [!NOTE]
-> This guide is experimental. It deploys two models on one GPU, which is the configuration that was tested; see [What Was Tested](#what-was-tested).
+> This guide is experimental. It deploys two models on one GPU, which is the configuration that was tested; see [What Was Tested](#what-was-tested). The way the frontend finds the workers of its DGD was observed on Dynamo 1.5.0 and 1.6.2, not taken from a documented contract, and may change in a later release; see [How the Frontend Finds Its Workers](#how-the-frontend-finds-its-workers).
 
 ## Requirements
 
@@ -32,8 +31,11 @@ This guide differs from the other experiments in one requirement:
 
 | Requirement | This guide | Why |
 |---|---|---|
-| Dynamo platform (operator) | 1.6.2 (also tested with 1.5.0) | The other guides pin 1.4.2 |
-| Runtime image | `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.2` (also tested with 1.5.0) | The other guides pin `vllm-runtime:1.3.0` |
+| Dynamo platform (operator) | 1.6.2 | The other guides pin 1.4.2 |
+| Runtime image | `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.2` | The other guides pin `vllm-runtime:1.3.0` |
+
+> [!WARNING]
+> The shared scripts default to the older versions: `common/install-dynamo-platform.sh` installs platform 1.4.2 and `common/download-model.sh` pulls `vllm-runtime:1.3.0` unless told otherwise. The commands below set `PLATFORM_VERSION` and `RUNTIME_IMAGE` explicitly; if you drop those variables you silently get the old versions. [What Was Tested](#what-was-tested) lists the versions this guide was run with.
 
 Pick the GPU node and export its name; every later step uses it:
 
@@ -45,7 +47,6 @@ export GPU_NODE=<node-name>
 ## Step 1: Install the Dynamo Platform
 
 ```bash
-cd examples/gpu-sharing
 PLATFORM_VERSION=1.6.2 common/install-dynamo-platform.sh
 ```
 
@@ -63,14 +64,21 @@ This downloads `Qwen/Qwen3-4B` at the pinned revision into the `hostPath` cache 
 
 [`one-frontend-many-models/gen-dgd.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/one-frontend-many-models/gen-dgd.sh) renders a single DGD with one frontend and `NUM_MODELS` workers. Each worker serves the weights under its own name, `qwen3-4b-01`, `qwen3-4b-02`, and so on, set with `--served-model-name`.
 
-Each worker takes `GPU_COMPUTE` of a GPU's streaming multiprocessors (SMs) and `GPU_MEMORY_MI` of its memory. With the defaults that is half of an A100 40GB, and the generator renders two workers, which fill one GPU:
+Each worker takes `GPU_COMPUTE` of a GPU's streaming multiprocessors (SMs) and `GPU_MEMORY_MI` of its memory. The defaults are half the SMs and a 19,968 MiB memory cap per worker, so the two workers the generator renders use all the SMs of one GPU. That is the whole memory of an A100 40GB, and about half of the A100 80GB this guide was tested on:
+
+| Card | Two workers at the defaults | Note |
+|---|---|---|
+| A100 80GB (tested) | All SMs, about half the memory | To give each worker more KV cache, raise `GPU_MEMORY_MI`, for example to `39936`. Not measured |
+| A100 40GB | All SMs, all the memory | Same caps as the [KAI + GPU fractions experiment](deploy-kai-gpu-fractions.md), which ran 16 of these workers two per GPU on 8x A100 40GB. This generator was not run on a 40GB card |
 
 ```bash
 NODE_NAME="$GPU_NODE" one-frontend-many-models/gen-dgd.sh | kubectl apply -f -
-kubectl get dgd -n default      # wait until qwen3-4b-shared is Ready
+kubectl wait --for=condition=Ready pod -n default -l experiment.nvidia.com/dgd=qwen3-4b-shared --timeout=600s
 ```
 
-To use more GPUs, set `NUM_MODELS` to two per A100 40GB.
+The frontend and both workers were Ready about two minutes after apply in the tested run; the first start also loads the weights from the hostPath cache. `kubectl get dgd -n default` shows the DGD itself.
+
+To use more GPUs, raise `NUM_MODELS` by two per GPU. KAI places each worker pod on a GPU with room, as it does for the one-DGD-per-model layout, which the [KAI + GPU fractions experiment](deploy-kai-gpu-fractions.md) ran across 8 GPUs. This generator, however, was only run on one GPU; a layout that spans several GPUs is expected to work but was not tested.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -125,7 +133,14 @@ sent 7 requests, 7 returned 200; unknown model returned 404
 RESULT: PASS
 ```
 
-`RESULT: PASS` means the frontend lists every deployed model, every request returned 200, and each worker finished exactly the requests sent to its model. If `missing` is not `none`, the frontend does not list a model that has a running worker, and requests for that model return 404.
+`RESULT: PASS` means the frontend lists every deployed model, every request returned 200, and each worker finished exactly the requests sent to its model. The per-worker counts come from each worker's vLLM metrics endpoint on port 9090, which the script reads from inside the frontend pod. The script exits 0 on `PASS` and 1 otherwise.
+
+If it does not pass:
+
+- **`no running frontend or workers found`** (exit 1 before any check): the pods are not Running yet, or the DGD name or `NAMESPACE` is wrong. Check `kubectl get pods -n default -l experiment.nvidia.com/dgd=qwen3-4b-shared`.
+- **`missing` is not `none`**: a worker is Running but the frontend does not list its model, and requests for it return 404. The worker has not finished registering, or it is registered in a different Dynamo namespace (see [How the Frontend Finds Its Workers](#how-the-frontend-finds-its-workers)). Look at the worker's log for the model name it registered and at the frontend's log for the namespace it watches.
+- **Fewer than all requests returned 200**: the frontend accepted the request but a worker failed it. Look at that worker's log; the usual causes are the engine still loading, or a request larger than its KV cache.
+- **A worker line says `FAIL`**: the worker finished a different number of requests than were sent to its model, so a request went to the wrong worker or a counter could not be read. Re-run once, since a request that was still finishing when the counters were read also shows up here. If it repeats, compare the `--served-model-name` in each worker's args with the model names the frontend lists.
 
 ## Step 5: Call a Model
 
@@ -133,33 +148,37 @@ The frontend Service is a ClusterIP. Forward it and select a model by name:
 
 ```bash
 kubectl port-forward -n default svc/qwen3-4b-shared-frontend 8000:8000 &
-curl -s localhost:8000/v1/models | python3 -c 'import json,sys; print([m["id"] for m in json.load(sys.stdin)["data"]])'
+PF_PID=$!
+curl -s localhost:8000/v1/models | jq -r '.data[].id'
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-4b-02","messages":[{"role":"user","content":"Say hello."}],"max_tokens":32}'
 ```
 
+The first call prints one model name per line, `qwen3-4b-01` and `qwen3-4b-02`. The second returns a JSON chat completion whose `model` field is `qwen3-4b-02` and whose `choices[0].message.content` is the reply. A request that names a model the frontend does not list returns 404. Stop the port-forward with `kill $PF_PID` when you are done.
+
 ## How the Frontend Finds Its Workers
 
-The operator sets `DYN_NAMESPACE_PREFIX` on the frontend to `<k8s-namespace>-<dgd-name>`, here `default-qwen3-4b-shared`. It registers the workers of the DGD in the Dynamo namespace `default-qwen3-4b-shared-<8 hex>`, the DGD's worker generation, which is why the generated workers set no `DYN_NAMESPACE`. The frontend discovers that namespace and lists the models of its workers. See `DYN_NAMESPACE_PREFIX` in the [Kubernetes API reference](../../../docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md).
+Two kinds of namespace are involved. The Kubernetes namespace is where the DGD's pods run, `default` in this guide. A Dynamo namespace is a name in Dynamo's service discovery under which workers register and frontends look for them; it is not a Kubernetes object. This section is about the Dynamo namespace.
 
-What was observed around that:
+Normally a worker sets its Dynamo namespace itself through the `DYN_NAMESPACE` environment variable. The generated workers set none. Instead, the operator does it: it sets `DYN_NAMESPACE_PREFIX` on the frontend to `<k8s-namespace>-<dgd-name>`, here `default-qwen3-4b-shared`, and registers the workers of the DGD under `default-qwen3-4b-shared-<8 hex>`. The suffix identifies the DGD's current worker generation, the set of worker pods created by the current version of the DGD spec, so a rolled-out change gets a fresh suffix. The frontend watches for namespaces with its prefix and lists the models of every worker it finds there. See `DYN_NAMESPACE_PREFIX` in the [Kubernetes API reference](../../../docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md).
 
-- **A frontend lists only the models of its own DGD.** With two DGDs that each have a frontend, each frontend lists its own models and returns 404 for the other's (checked on 1.5.0).
+This is observed behaviour of the operator and runtime on 1.5.0 and 1.6.2, not a documented contract, and it may change. Two consequences were checked:
+
+- **A frontend lists only the models of its own DGD.** With two DGDs that each have a frontend, each frontend lists its own models and returns 404 for the other's. To put a model behind this frontend, add it as a worker in the same DGD (checked on 1.5.0 and 1.6.2).
 - **A DGD can declare more than one frontend component.** Each frontend gets its own Service and serves all the models of the DGD; the frontends do not divide the models between them (checked on 1.5.0 and 1.6.2).
 
 ## What Was Tested
 
 The steps on this page were run as written, with the files in this directory, on one A100 80GB with driver 615.71.09 and the fork builds of KAI-Scheduler and kai-gpu-fractioning. With Dynamo platform and runtime 1.6.2, the two workers and the frontend were Running after about two minutes, the frontend listed both models, and `verify-routing.sh` passed: 7 of 7 requests returned 200 and were counted by the worker of the model they named. The same deployment passed with Dynamo 1.5.0.
 
-The generator was also run with more workers on that GPU, using smaller shares per worker: four Qwen3-4B models, and a larger number of Qwen3-0.6B models. The frontend listed every model and routed every request correctly in those runs too. Layouts that span several GPUs were not tested.
+The generator was also run with more workers on that GPU, using smaller shares per worker: four Qwen3-4B models, and a larger number of Qwen3-0.6B models. The frontend listed every model and routed every request correctly in those runs too.
 
-## Known Issues
-
-- **A frontend serves only the models of its own DGD.** To put a model behind this frontend, add it as a worker in the same DGD. A model deployed in a separate DGD is not served by it; from Dynamo 1.6.0 this is by design.
+Not tested: an A100 40GB, and any layout that spans several GPUs. The other pages that mention versions for this layout point here.
 
 ## Clean Up
 
 ```bash
+kill "$PF_PID" 2>/dev/null   # the port-forward from Step 5, if it is still running
 kubectl delete dgd qwen3-4b-shared -n default
 kubectl delete job download-qwen3-4b -n default --ignore-not-found
 ```
