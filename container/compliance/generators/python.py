@@ -5,11 +5,13 @@
 Walks each search path's site-packages, reads `*.dist-info/METADATA` via
 `importlib.metadata`, and normalizes the license string to an SPDX expression.
 
-Resolution preference per package (PEP 639 ordering):
-  1. `License-Expression: <SPDX>` header (PEP 639, modern wheels)
-  2. `License: <free-form>` header (legacy, normalized via _FREE_FORM_MAP)
+Resolution preference per package:
+  1. Audited exact-version entry in license_overrides.yaml
+  2. `License-Expression: <SPDX>` header (PEP 639, modern wheels)
   3. `Classifier: License :: ...` headers (normalized via _CLASSIFIER_MAP)
-  4. UNKNOWN — surfaces in the policy gate; fix via license_overrides.yaml
+  4. `License: <free-form>` header (legacy, normalized via _FREE_FORM_MAP)
+  5. Version-agnostic fallback in license_overrides.yaml
+  6. UNKNOWN — surfaces in the policy gate
 
 Why importlib.metadata vs pip-licenses:
   - Zero extra installs in the runtime image (pip-licenses + transitively
@@ -292,25 +294,36 @@ def _resolve_site_packages(search_paths: list[Path]) -> list[Path]:
 
 
 def _read_license_text(dist_info_dir: Path) -> str | None:
-    """Return the upstream LICENSE text for a wheel, if present.
+    """Return upstream license and notice texts for a wheel, if present.
 
     Modern wheels put it under <dist-info>/licenses/LICENSE (PEP 639). Older
     wheels use <dist-info>/LICENSE or LICENSE.txt at the top of the dir.
     """
-    candidates = [
-        dist_info_dir / "licenses" / "LICENSE",
-        dist_info_dir / "licenses" / "LICENSE.txt",
-        dist_info_dir / "LICENSE",
-        dist_info_dir / "LICENSE.txt",
-        dist_info_dir / "LICENSE.md",
-    ]
+    if not dist_info_dir.is_dir():
+        return None
+    # PEP 639 can distribute multiple nested license/notice files. Keep all
+    # of them, including THIRDPARTYNOTICES, rather than only the first LICENSE.
+    license_dir = dist_info_dir / "licenses"
+    candidates = sorted(license_dir.rglob("*")) if license_dir.is_dir() else []
+    candidates.extend(
+        path
+        for path in sorted(dist_info_dir.iterdir())
+        if path.name.upper().startswith(
+            ("LICENSE", "LICENCE", "COPYING", "NOTICE", "THIRDPARTY", "THIRD_PARTY")
+        )
+    )
+    texts: list[tuple[str, str]] = []
     for path in candidates:
         if path.is_file():
             try:
-                return path.read_text(encoding="utf-8", errors="replace")
+                text = path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-    return None
+            if text.strip():
+                texts.append((str(path.relative_to(dist_info_dir)), text))
+    if len(texts) == 1:
+        return texts[0][1]
+    return "\n\n".join(f"--- {name} ---\n{text}" for name, text in texts) or None
 
 
 def _extract_metadata_field(
@@ -357,21 +370,27 @@ def _resolve_spdx(
     """Resolve an SPDX ID for one Python package.
 
     Order (refined after real-image testing):
-      1. License-Expression (PEP 639 — modern, single-line by spec)
-      2. Classifiers (PyPI's structured tags — well-defined values, more
+      1. Exact-version license_overrides.yaml entry — audited correction
+         limited to the reviewed package version.
+      2. License-Expression (PEP 639 — modern, single-line by spec)
+      3. Classifiers (PyPI's structured tags — well-defined values, more
          reliable than the free-form License field for legacy packages
          where License often contains body text)
-      3. License free-form — only when it's plausibly a license NAME, not
+      4. License free-form — only when it's plausibly a license NAME, not
          body. Rejected if multi-line (>3 lines) or any single line >80
          chars; matplotlib's License field, for instance, is the entire
          PSF-style license body and would false-match patterns deep inside.
-      4. license_overrides.yaml — hand-curated overrides for packages
+      5. Version-agnostic license_overrides.yaml fallback for packages
          whose upstream metadata is empty or wrong (e.g. NVIDIA's older
          CUDA wheels: nvidia-cufft, nvidia-curand, etc.).
-      5. UNKNOWN
+      6. UNKNOWN
     """
+    audited = license_overrides.lookup_exact(ECOSYSTEM, name, version)
+    if audited:
+        return audited
+
     if license_expr:
-        return license_expr  # PEP 639 — authoritative
+        return license_expr  # PEP 639 — authoritative absent an exact audit
 
     for cls in classifiers:
         if cls.startswith("License :: "):

@@ -40,6 +40,7 @@ jobs:
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
       triton: ${{ steps.changes.outputs.triton }}
+      tokenspeed: ${{ steps.changes.outputs.tokenspeed }}
       frontend: ${{ steps.changes.outputs.frontend }}
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
       sample: ${{ steps.changes.outputs.sample }}
@@ -152,6 +153,8 @@ jobs:
       - trtllm-multi-gpu-test
       - trtllm-copy-to-acr
       - triton-build
+      - tokenspeed-build
+      - tokenspeed-test
       - triton-test
       - vllm-efa-build
       - sglang-efa-build
@@ -605,6 +608,29 @@ jobs:
         USER_GID=1000
     secrets: inherit
 
+  tokenspeed-build:
+    name: tokenspeed-runtime
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.tokenspeed == 'true'
+    uses: $/.github/workflows/shared-build-image.yml
+    with:
+      framework: tokenspeed
+      target: runtime
+      cuda_version: '["13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      inline_compliance: true
+      artifact_retention_days: '7'
+      build_timeout_minutes: 90
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+    permissions:
+      contents: read
+      actions: read
+    secrets: inherit
+
   triton-build:
     name: triton-runtime
     needs: [changed-files]
@@ -973,6 +999,31 @@ jobs:
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
+  tokenspeed-test:
+    name: tokenspeed-runtime
+    needs: [changed-files, tokenspeed-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.tokenspeed == 'true'
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: tokenspeed
+      framework: tokenspeed
+      pytest_paths: tests/serve/test_tokenspeed.py::test_tokenspeed_single_request
+      test_type: Test
+      minio_service: false
+      amd_runner: prod-tester-amd-gpu-v2
+      amd_runner_labels: '["gpu-1","amd64","v2","us-east-1"]'
+      target_tag_plain: ${{ needs.tokenspeed-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_cpu_only_tests: false
+      run_gpu_parallel_tests: false
+      gpu_test_markers: pre_merge and tokenspeed and gpu_1
+      gpu_test_timeout_minutes: 15
+      job_timeout_minutes: 45
+      dd_flaky_retry_enabled: 'false'
+      dd_early_flake_detection_enabled: 'false'
+    secrets: inherit
+
   triton-test:
     name: triton-runtime
     needs: [changed-files, triton-build]
@@ -1089,6 +1140,7 @@ jobs:
       needs.changed-files.outputs.sglang == 'true' ||
       needs.changed-files.outputs.trtllm == 'true' ||
       needs.changed-files.outputs.triton == 'true' ||
+      needs.changed-files.outputs.tokenspeed == 'true' ||
       needs.changed-files.outputs.benchmarks == 'true'
     uses: $/.github/workflows/dynamo-pipeline.yml
     with:

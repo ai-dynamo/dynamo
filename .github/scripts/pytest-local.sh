@@ -13,7 +13,8 @@
 #             PLATFORM_ARCH, PARALLEL_MODE (auto | none | 0 | <workers>),
 #             JOB_CHECK_RUN_ID
 #   Optional: ENABLE_COVERAGE=true, GPU_TESTS=true, VERIFY_GPU=false (skips the
-#             MinIO and GPU checks), MAX_VRAM_GIB, PYTEST_DD_FLAKY_RETRY_ENABLED
+#             MinIO and GPU checks), MINIO_SERVICE_ENABLED=false (skips only
+#             MinIO), MAX_VRAM_GIB, PYTEST_DD_FLAKY_RETRY_ENABLED
 #
 # The distroless planner test image ships only the tools listed in
 # container/Dockerfile.test, so stay on bash builtins and those tools.
@@ -34,17 +35,19 @@ export DYNAMO_TEST_WORKFLOW="${GITHUB_WORKFLOW}"
 export HF_XET_HIGH_PERFORMANCE=1
 
 if [[ "${GPU_TESTS:-}" == "true" && "${VERIFY_GPU:-}" != "false" && "${PYTEST_MARKS}" != *"triton_qa"* ]]; then
-  # Only GPU tests require MinIO (LoRA tests). Wait for the job service.
-  echo "⏳ Waiting for MinIO to be ready..."
-  for attempt in {1..30}; do
-    curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1 && break
-    if (( attempt == 30 )); then
-      echo "❌ MinIO failed to start within 30s"
-      exit 1
-    fi
-    sleep 1
-  done
-  echo "✅ MinIO is ready (attempt ${attempt})"
+  # LoRA suites use MinIO; a suite without that service must still verify its GPU.
+  if [[ "${MINIO_SERVICE_ENABLED:-true}" == "true" ]]; then
+    echo "⏳ Waiting for MinIO to be ready..."
+    for attempt in {1..30}; do
+      curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1 && break
+      if (( attempt == 30 )); then
+        echo "❌ MinIO failed to start within 30s"
+        exit 1
+      fi
+      sleep 1
+    done
+    echo "✅ MinIO is ready (attempt ${attempt})"
+  fi
 
   # Verify GPU visibility before spending time on collection.
   python - <<'PY'

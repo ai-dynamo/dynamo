@@ -52,6 +52,9 @@ outputs:
   triton:
     description: 'Whether triton files changed'
     value: ${{ steps.filter.outputs.triton_any_modified }}
+  tokenspeed:
+    description: 'Whether TokenSpeed files changed'
+    value: ${{ steps.filter.outputs.tokenspeed_any_modified }}
   sample:
     description: 'Whether sample-backend files changed'
     value: ${{ steps.filter.outputs.sample_any_modified }}

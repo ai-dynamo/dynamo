@@ -12,7 +12,7 @@ Default checks:
 - System resources (OS, CPU, memory, GPU)
 - Container/host context (execution context, /dev/shm sizing, selected env)
 - Development tools (Cargo/Rust, Maturin, Python)
-- LLM frameworks (vllm, sglang, tensorrt_llm)
+- LLM frameworks (vllm, sglang, tensorrt_llm, tokenspeed)
 - Dynamo runtime and framework components
 - Installation status and component availability
 
@@ -145,7 +145,7 @@ Options:
     --runtime-check-only          Skip compile-time dependency checks (Rust, Cargo, Maturin) for runtime containers
                                   and validate ai-dynamo packages (ai-dynamo-runtime and ai-dynamo)
     --no-gpu-check                Skip GPU detection and information collection (useful for environments without GPU access)
-    --no-framework-check          Skip LLM framework package checks (vllm, sglang, tensorrt_llm)
+    --no-framework-check          Skip LLM framework package checks (vllm, sglang, tensorrt_llm, tokenspeed)
 """
 
 import csv
@@ -477,7 +477,7 @@ class SystemInfo(NodeInfo):
             gpu_info = GPUInfo(thorough_check=self.thorough_check)
             self.add_child(gpu_info)
 
-        # Add Framework info (vllm, sglang, tensorrt_llm)
+        # Add Framework info (vllm, sglang, tensorrt_llm, tokenspeed)
         self.add_child(FrameworkInfo(no_framework_check=self.no_framework_check))
 
         # In terse mode, only add other components if they have errors
@@ -3051,7 +3051,7 @@ class FrameworkInfo(NodeInfo):
         if no_framework_check:
             # Why: In some environments (CI, minimal runtime containers) we may want to
             # validate the Dynamo install without requiring a framework/engine package
-            # (vllm/sglang/tensorrt_llm) to be present.
+            # (vllm/sglang/tensorrt_llm/tokenspeed) to be present.
             self.desc = "skipped (--no-framework-check)"
             return
 
@@ -3060,6 +3060,7 @@ class FrameworkInfo(NodeInfo):
             ("vllm", "vLLM"),
             ("sglang", "Sglang"),
             ("tensorrt_llm", "tensorRT LLM"),
+            ("tokenspeed", "TokenSpeed"),
         ]
 
         frameworks_found = 0
@@ -3103,6 +3104,7 @@ class FrameworkInfo(NodeInfo):
                 "vllm": "vllm",
                 "sglang": "sglang",
                 "tensorrt_llm": "trtllm-build",
+                "tokenspeed": "ts",
             }
             if module_name in exec_names:
                 exec_path_raw = shutil.which(exec_names[module_name])
@@ -4032,7 +4034,7 @@ def main():
         "--no-framework-check",
         dest="no_framework_check",
         action="store_true",
-        help="Skip LLM framework package checks (vllm, sglang, tensorrt_llm)",
+        help="Skip LLM framework package checks (vllm, sglang, tensorrt_llm, tokenspeed)",
     )
     args = parser.parse_args()
 

@@ -385,6 +385,7 @@ markers = [
     "vllm: marks tests as requiring vllm",
     "trtllm: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
+    "tokenspeed: marks tests as requiring tokenspeed",
     "triton: marks tests as requiring triton",
     "triton_qa: marks the Triton QA test suite",
     "lmcache: marks tests as requiring lmcache",
