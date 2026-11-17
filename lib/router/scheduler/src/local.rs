@@ -36,7 +36,7 @@ use dynamo_admission::RouterQueuePolicy;
 use dynamo_admission::{ClassifyRequest, RequestClassifier};
 use dynamo_admission::{RequestClassifierRuntime, RequestLifecycle};
 use dynamo_kv_hashing::LocalBlockHash;
-use dynamo_kv_indexer::{LowerTierIndexers, ResidentBlockCountsHandle};
+use dynamo_kv_indexer::ResidentBlockCountsHandle;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_slot_tracker::WorkerDpRange;
 use dynamo_slot_tracker::{
@@ -541,14 +541,6 @@ where
     /// Returns `false` when counts are already installed.
     pub fn set_resident_block_counts(&self, counts: ResidentBlockCountsHandle) -> bool {
         self.queue.set_resident_block_counts(counts)
-    }
-
-    /// Lend the partition's lower-tier indexes to every selection, for a policy that declared
-    /// [`WorkerInputs::CACHE`] and may read cache-owner block counts.
-    ///
-    /// Returns `false` when they are already installed.
-    pub fn set_lower_tier(&self, lower_tier: LowerTierIndexers) -> bool {
-        self.queue.set_lower_tier(lower_tier)
     }
 
     #[expect(clippy::too_many_arguments)]

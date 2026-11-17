@@ -84,7 +84,9 @@ impl WorkerCapacity {
 
     /// Host-pinned capacity, in KV blocks, of the cache owner (KVCR instance) attached to
     /// this rank, when the worker advertises it. Experimental: plugins read it through the
-    /// worker-selection stage's `experimental::cache_owner_blocks` module.
+    /// worker-selection stage's `experimental::resident_blocks` module, so it is left out of
+    /// this type's documented surface.
+    #[doc(hidden)]
     pub fn cache_owner_capacity_blocks(self) -> Option<u64> {
         self.cache_owner_capacity_blocks.map(NonZeroU64::get)
     }

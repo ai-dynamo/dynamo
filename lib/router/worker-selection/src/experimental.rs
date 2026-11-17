@@ -6,5 +6,4 @@
 //! Items in this module have no compatibility guarantee. They may change or be removed in any
 //! release. Each extension lives in its own submodule.
 
-pub mod cache_owner_blocks;
 pub mod resident_blocks;

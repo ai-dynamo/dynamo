@@ -284,17 +284,6 @@ impl Indexer {
         matches!(self, Self::Single { .. } | Self::Concurrent { .. })
     }
 
-    /// The local lower-tier indexes; `None` for a remote primary and for routing without
-    /// KV state.
-    pub fn lower_tier(&self) -> Option<&LowerTierIndexers> {
-        match self {
-            Self::Single { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
-                Some(lower_tier)
-            }
-            Self::Remote { .. } | Self::None => None,
-        }
-    }
-
     pub fn supports_kv_transfer_chain_retention(&self) -> bool {
         matches!(
             self,
@@ -875,11 +864,20 @@ impl Indexer {
     }
 
     /// Live per-rank block counts from the local primary, which starts keeping them on the first
-    /// call; `None` without a local primary.
+    /// call; `None` without a local primary. The counts also carry the local lower tiers, for
+    /// cache-owner block counts.
     pub fn track_resident_blocks(&self) -> Option<ResidentBlockCountsHandle> {
         match self {
-            Self::Single { primary, .. } => Some(primary.track_resident_blocks()),
-            Self::Concurrent { primary, .. } => Some(primary.track_resident_blocks()),
+            Self::Single {
+                primary,
+                lower_tier,
+                ..
+            } => Some(primary.track_resident_blocks().with_lower_tier(lower_tier)),
+            Self::Concurrent {
+                primary,
+                lower_tier,
+                ..
+            } => Some(primary.track_resident_blocks().with_lower_tier(lower_tier)),
             Self::Remote { .. } | Self::None => None,
         }
     }

@@ -18,10 +18,9 @@ use dynamo_kv_indexer::ResidencyOwnerKeyExt;
 use dynamo_kv_indexer::testing::store_event;
 use dynamo_session_affinity::SessionAffinityMode;
 use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
-use dynamo_worker_selection::experimental::cache_owner_blocks::{
-    CacheOwnerBlocksByRow, CacheOwnerCapacity,
+use dynamo_worker_selection::experimental::resident_blocks::{
+    CacheOwnerCapacity, RESIDENT_BLOCKS, ResidentBlocksByRow,
 };
-use dynamo_worker_selection::experimental::resident_blocks::ResidentBlocksByRow;
 use dynamo_worker_selection::{
     WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
 };
@@ -941,7 +940,7 @@ struct SelectionObservation {
 
 impl dynamo_worker_selection::WorkerPicker for CapturingPicker {
     fn required_worker_inputs(&self) -> dynamo_worker_selection::WorkerInputs {
-        dynamo_worker_selection::WorkerInputs::CACHE
+        dynamo_worker_selection::WorkerInputs::CACHE | RESIDENT_BLOCKS
     }
 
     fn pick(

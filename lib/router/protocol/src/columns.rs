@@ -17,19 +17,17 @@ pub struct WorkerInputs(u8);
 impl WorkerInputs {
     /// Request no optional worker inputs.
     pub const NONE: Self = Self(0);
-    /// Request worker KV-cache overlaps and shared-cache lookup results. Experimental: it also
-    /// gates the block count of each worker's attached cache owner (KVCR instance), which
-    /// plugins read through the worker-selection stage's `experimental::cache_owner_blocks`
-    /// module.
+    /// Request worker KV-cache overlaps and shared-cache lookup results.
     pub const CACHE: Self = Self(1 << 0);
     /// Request active-load inputs.
     pub const LOAD: Self = Self(1 << 1);
     /// Request preferred-taint routing metadata.
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
-    /// Request per-rank counts of the blocks the router's indexer holds. Experimental: plugins
-    /// read it through the worker-selection stage's `experimental::resident_blocks` module, and
-    /// the host rejects a policy that declares it without [`Self::CACHE`], because the counts
-    /// come from the indexer that `CACHE` starts.
+    /// Request per-rank counts of the blocks the router's indexer holds, and the block count of
+    /// each rank's attached cache owner (KVCR instance). Experimental: plugins read them through
+    /// the worker-selection stage's `experimental::resident_blocks` module, and the host rejects
+    /// a policy that declares it without [`Self::CACHE`], because the counts come from the
+    /// indexer that `CACHE` starts.
     pub const RESIDENT_BLOCKS: Self = Self(1 << 3);
     /// Request each row's active request count, read through the worker-selection stage's
     /// `WorkerInputView::active_requests`. Picker only: filters and scorers that declare it
