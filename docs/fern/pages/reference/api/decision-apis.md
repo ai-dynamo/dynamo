@@ -23,7 +23,7 @@ NVIDIA Dynamo exposes two non-streaming text-evaluation contracts. For runnable 
 | Ordered score | `levels` containing labels; answer has a zero-based expected `score` | Ordered `criteria`; answer has expected `score` and an index-to-label `legend` |
 | Choice count | 2–255 before backend/tokenizer limits | 1–255 before backend/tokenizer limits |
 | Score level count | 2–10 | 1–10 |
-| Answers | Array in question order; preserves omitted, empty, and duplicate names | Object keyed by question name |
+| Answers | Array in question order; preserves omitted, empty, and duplicate names; can include `type: "refusal"` | Object keyed by question name; a refusal produces an error instead |
 | Distributions | Ordered arrays of value/probability entries | Probability maps keyed by choice or score index |
 | SDK `base_url` | API root, including `/v1` | Server origin, without `/v1` |
 
@@ -45,12 +45,15 @@ Input usage counts rendered prompts across question executions, not only the sha
 | Outcome | OpenAI Decisions | Jev System One |
 | --- | --- | --- |
 | Invalid or unsupported request shape | 400 | 422 |
+| Executor refused a question | 200 with a `type: "refusal"` answer | 422, code `decision_refused` |
 | Unknown model | 404 | 404 |
 | Registered model lacks decision capability | 400 | 400 |
 | Eligible worker unavailable | 503 | 503 |
 | Invalid backend scoring result or usage | 500 | 500 |
 | Admission capacity exhausted | Configured overload status, default 529 | Configured overload status, default 529 |
 | Request deadline exceeded | 504 | 504 |
+
+An OpenAI refusal is an answer variant, not an HTTP error. If an executor refuses any Jev question, Dynamo returns `decision_refused` for the request rather than a partial answer object.
 
 Capacity responses have code `rate_limit_exceeded` and `Retry-After: 1`; status alone does not identify overload. OpenAI errors use a nested `error` object; Jev uses top-level error fields. Responses expose `x-request-id` and `x-typesafe-request-id`.
 
