@@ -206,7 +206,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             let greedy = nvext.greed_sampling.unwrap_or(false);
             if greedy {
                 top_p = None;
-                temperature = None;
+                temperature = Some(0.0);
             }
         }
 
