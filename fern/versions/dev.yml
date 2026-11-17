@@ -724,6 +724,18 @@ navigation:
                 path: ../pages-dev/use-cases/reinforcement-learning/implementation-guide.md
               - page: RL Integration Reference
                 path: ../pages-dev/use-cases/reinforcement-learning/integration-reference.md
+      # ==================== Decision Model ====================
+      - section: Decision Model
+        slug: decision-model
+        collapsed: true
+        icon: list-check
+        contents:
+          - page: APIs
+            slug: apis
+            path: ../pages-dev/use-cases/decision-model/apis.md
+          - page: SGLang
+            slug: sglang
+            path: ../pages-dev/use-cases/decision-model/sglang.md
       # ==================== Agents ====================
       - section: Agents
         collapsed: true
@@ -1271,6 +1283,10 @@ navigation:
         icon: image
         path: ../pages-dev/reference/api/image-edits.mdx
         slug: api/image-edits
+      - page: Decision APIs
+        icon: list-check
+        path: ../pages-dev/reference/api/decision-apis.md
+        slug: api/decisions
       - section: Components
         icon: sliders
         slug: components
