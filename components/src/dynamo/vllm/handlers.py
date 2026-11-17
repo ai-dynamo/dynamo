@@ -18,7 +18,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager, closing, nullcontext
+from contextlib import aclosing, asynccontextmanager, closing, nullcontext
 from typing import (
     Any,
     AsyncIterator,
@@ -815,6 +815,14 @@ def build_sampling_params(
     # and vLLM validates before the process_inputs clone reruns it.
     sampling_params.__post_init__()
     return sampling_params
+
+
+def _get_kv_transfer_params(request: dict[str, Any]) -> dict[str, Any] | None:
+    prefill_result = request.get("prefill_result")
+    if not isinstance(prefill_result, dict):
+        return None
+    disaggregated_params = prefill_result.get("disaggregated_params") or {}
+    return disaggregated_params.get("kv_transfer_params")
 
 
 def _update_kv_transfer_params(
@@ -3640,16 +3648,73 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # Token-in-token-out mode: internal protocol format
                 generator = self._generate_token_mode(request, context, request_id)
 
-            async for chunk in _translate_vllm_client_errors(generator):
-                if first_token:
-                    decode_timer.stop_interval()
-                    first_token = False
-                if not self.use_vllm_tokenizer and not first_token_output_seen:
-                    token_ids = chunk.get("token_ids") or []
-                    if token_ids:
-                        first_token_output_seen = True
-                        context.notify_first_token()
-                yield chunk
+            async with (
+                aclosing(generator),
+                aclosing(_translate_vllm_client_errors(generator)) as responses,
+            ):
+                extra_args = request.get("extra_args")
+                native_tito = isinstance(extra_args, dict) and "vllm_tito" in extra_args
+                if native_tito or _get_kv_transfer_params(request):
+                    # Admit staged KV even after cancellation so vLLM's
+                    # connector can release the prefill worker's blocks.
+                    # Native TITO owns its KV metadata; preserve its admission.
+                    chunk = await anext(responses, None)
+                else:
+                    chunk = await self._first_output_or_cancel(
+                        responses, context, request_id
+                    )
+                while chunk is not None:
+                    if first_token:
+                        decode_timer.stop_interval()
+                        first_token = False
+                    if not self.use_vllm_tokenizer and not first_token_output_seen:
+                        token_ids = chunk.get("token_ids") or []
+                        if token_ids:
+                            first_token_output_seen = True
+                            context.notify_first_token()
+                    yield chunk
+                    chunk = await anext(responses, None)
+
+    async def _first_output_or_cancel(
+        self,
+        generator: AsyncIterator[ResponseT],
+        context: Context,
+        request_id: str,
+    ) -> ResponseT | None:
+        """Cancel non-native admission without staged KV, including preprocessing.
+
+        Aborting an external ID before vLLM registers it is a no-op. Stop and
+        drain the first iteration before aborting, so it cannot submit work
+        after the abort. Later iterations use the existing abort monitor and
+        incur no additional task or wait per output.
+        """
+        if context.is_stopped() or context.is_killed():
+            return None
+
+        cancelled = context.async_killed_or_stopped()
+        first_output = asyncio.create_task(anext(generator, None))
+        cancel_admission = True
+        try:
+            done, _ = await asyncio.wait(
+                (cancelled, first_output), return_when=asyncio.FIRST_COMPLETED
+            )
+            if cancelled in done:
+                return None
+            cancel_admission = False
+            return first_output.result()
+        except asyncio.CancelledError:
+            cancel_admission = True
+            raise
+        finally:
+            cancelled.cancel()
+            if cancel_admission:
+                first_output.cancel()
+                try:
+                    await asyncio.gather(first_output, return_exceptions=True)
+                finally:
+                    # Cancellation may interrupt add_request after registration
+                    # but before vLLM.generate owns its output collector.
+                    await asyncio.shield(self.engine_client.abort(request_id))
 
     async def _assemble_custom_encoder_prompt(
         self,
@@ -3788,17 +3853,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
-        # Firstly extract disaggregated params from prefill result if available
         prefill_result = request.get("prefill_result")
-        if prefill_result and isinstance(prefill_result, dict):
-            # `disaggregated_params` may be explicitly None (prefill error path,
-            # or _build_disaggregated_params returning None when empty), so use
-            # `or {}` rather than a .get default — the default only applies when
-            # the key is absent, not when it is present-but-None.
-            disaggregated_params = prefill_result.get("disaggregated_params") or {}
-            kv_params = disaggregated_params.get("kv_transfer_params")
-        else:
-            kv_params = None
+        kv_params = _get_kv_transfer_params(request)
 
         mode = cast(DisaggregationMode, self.config.disaggregation_mode)
         if mode == DisaggregationMode.DECODE and BYPASS_REMOTE_PREFILL_ANNOTATION in (
@@ -3886,6 +3942,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             mm_processor_kwargs = prepared_input.mm_processor_kwargs
             pre_rendered = prepared_input.pre_rendered_prompt
             custom_data = prepared_input.custom_data
+
+        # Media preparation can run synchronously without yielding to the
+        # cancellation watcher. Recheck the Rust context before admission.
+        if (
+            not kv_params
+            and engine_generate_input is None
+            and (context.is_stopped() or context.is_killed())
+        ):
+            return
 
         # Build prompt from request. `prompt` is either a pre-rendered
         # MultiModalInput dict (fast path) or a TokensPrompt/EmbedsPrompt from
