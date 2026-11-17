@@ -840,6 +840,38 @@ global:
     enabled: true   # Enables multinode orchestration via PodCliqueSets
 ```
 
+
+To select a custom KAI scheduler name, set the operator integration value:
+
+```yaml
+global:
+  kai-scheduler:
+    enabled: true
+    schedulerName: runai-scheduler
+  grove:
+    enabled: true
+```
+
+The default is `kai-scheduler`. An empty value also uses that default. For a directly
+managed `OperatorConfiguration`, set `orchestrators.kaiScheduler.schedulerName` instead.
+Names must be valid Kubernetes scheduler names (DNS subdomains); names such as
+`Runai_Scheduler` are rejected during operator startup.
+
+The operator injects the validated `kai.scheduler/queue` label when a component omits
+`schedulerName` or explicitly selects the configured KAI scheduler. An explicit
+component scheduler with a different name is preserved without KAI queue injection.
+The queue is selected from the DGD's `nvidia.com/kai-scheduler-queue` annotation,
+falling back to `dynamo`.
+
+This value configures Dynamo's workload templates only. It does not rename or
+reconfigure KAI or Grove. Before using a custom name, verify that the installed
+Grove version maps that name to its KAI backend and that the scheduler consumes
+Grove's PodGroups and queue metadata. The bundled Grove profile is named
+`kai-scheduler`; changing this value alone does not establish Run:ai compatibility.
+Existing workloads keep their current templates when this value is omitted.
+Changing the configured name is an explicit scheduling change and can roll workloads;
+coordinate it with the scheduler and Grove configuration.
+
 Volcano:
 
 ```yaml
