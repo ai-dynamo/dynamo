@@ -25,7 +25,7 @@ pub enum FieldClass {
     Delta,
     /// Prompt-side values supplied by prefill in disaggregated serving. An
     /// engine may send them once, so a later empty or absent value keeps the
-    /// earlier one.
+    /// earlier one. In P/D, decode's value is dropped when prefill has none.
     Prompt,
     /// Final Base64 rows: prefill's bytes replace decode's stale prompt rows.
     SequenceFinal,
@@ -194,7 +194,8 @@ impl RuleSet {
     }
 
     /// P/D: prompt values are swapped in; prefill's sequence prefix overwrites
-    /// decode's in place, and decode's value is dropped without one.
+    /// decode's in place. Without a prefill value, decode's prompt or sequence
+    /// value is dropped: decode never computed it.
     fn join_prefill(&self, prefill: &mut Value, decode: &mut Value, codec: &impl ClientCodec) {
         // Prefill generates the first token. If it is also the last, decode
         // never runs a model step and has no sequence value of its own.
@@ -210,6 +211,14 @@ impl RuleSet {
                 Some("stop" | "length")
             );
         self.swap(FieldClass::Prompt, prefill, decode);
+        // Not in `swap`: `render` swaps again to restore prefill's values.
+        for field in self.of(FieldClass::Prompt) {
+            if object(prefill, &field.parent).is_none_or(|o| !o.contains_key(&field.key))
+                && let Some(target) = object(decode, &field.parent)
+            {
+                target.remove(&field.key);
+            }
+        }
         for field in self.of(FieldClass::SequenceFinal) {
             let Some(target) = object(decode, &field.parent) else {
                 continue;

@@ -29,15 +29,16 @@ pub(super) type PrefillOutput = Option<Box<serde_json::Value>>;
 pub(super) struct PrefillTask(JoinHandle<Result<PrefillOutput, PrefillError>>);
 
 /// Prefill's output as a stream item tagged with [`PREFILL_OUTPUT_ANNOTATION`].
-fn output_item(output: PrefillOutput) -> Option<Annotated<LLMEngineOutput>> {
-    let engine_data = Some(output?);
-    Some(Annotated {
+/// Sent even without `engine_data`: an older prefill worker returns none, and the
+/// format still needs to know that prefill completed.
+fn output_item(output: PrefillOutput) -> Annotated<LLMEngineOutput> {
+    Annotated {
         event: Some(PREFILL_OUTPUT_ANNOTATION.to_string()),
         ..Annotated::from_data(LLMEngineOutput {
-            engine_data,
+            engine_data: output,
             ..Default::default()
         })
-    })
+    }
 }
 
 impl PrefillTask {
@@ -127,7 +128,7 @@ impl PrefillTask {
                     return Ok(response);
                 }
                 let context = response.context();
-                let stream = stream::iter(output_item(prefill)).chain(response);
+                let stream = stream::once(async { output_item(prefill) }).chain(response);
                 return Ok(ResponseStream::new(Box::pin(stream), context));
             }
             result = &mut decode => match result {
@@ -165,11 +166,7 @@ impl PrefillTask {
                     }
                 };
                 match prefill_result {
-                    Ok(output) => {
-                        if let Some(item) = output_item(output) {
-                            yield item;
-                        }
-                    }
+                    Ok(output) => yield output_item(output),
                     Err(error) => {
                         request_context.stop_generating();
                         stream_context.stop_generating();
@@ -195,8 +192,8 @@ impl PrefillTask {
                     biased;
                     result = &mut completion => {
                         match result {
-                            Ok(prefill) => if emit && let Some(item) = output_item(prefill) {
-                                yield item;
+                            Ok(prefill) => if emit {
+                                yield output_item(prefill);
                             },
                             Err(error) => {
                                 request_context.stop_generating();
@@ -229,8 +226,8 @@ impl PrefillTask {
                         // Metadata must precede the terminal; bare EOF must still surface prefill errors.
                         if terminal && (emit || output.is_none()) {
                             match completion.as_mut().await {
-                                Ok(prefill) => if emit && let Some(item) = output_item(prefill) {
-                                    yield item;
+                                Ok(prefill) => if emit {
+                                    yield output_item(prefill);
                                 },
                                 Err(error) => {
                                     request_context.stop_generating();
@@ -659,6 +656,72 @@ mod tests {
         assert!(response.next().await.is_none());
     }
 
+    /// An older prefill worker returns no `engine_data`; the format still needs
+    /// the item to know prefill completed. Without a need, nothing is sent.
+    #[tokio::test]
+    async fn prefill_without_output_is_still_emitted() {
+        for (need, prefill_first) in [
+            (PrefillNeed::BeforeFirst, false),
+            (PrefillNeed::BeforeFirst, true),
+            (PrefillNeed::BeforeLast, false),
+            (PrefillNeed::BeforeLast, true),
+            (PrefillNeed::None, false),
+            (PrefillNeed::None, true),
+        ] {
+            let (tx, task) = pending_prefill();
+            let mut tx = Some(tx);
+            if prefill_first {
+                tx.take().unwrap().send(Ok(None)).unwrap();
+                tokio::task::yield_now().await;
+            }
+            let decode: ManyOut<Annotated<LLMEngineOutput>> = ResponseStream::new(
+                Box::pin(stream::iter([Annotated::from_data(
+                    LLMEngineOutput::length(),
+                )])),
+                Arc::new(Controller::default()),
+            );
+            let mut response = task
+                .forward_decode(
+                    async { Ok(decode) },
+                    Arc::new(Controller::default()),
+                    need,
+                    Arc::new(Controller::default()),
+                )
+                .await
+                .unwrap();
+            if let Some(tx) = tx {
+                tx.send(Ok(None)).unwrap();
+            }
+            let mut items = Vec::new();
+            while let Some(item) = response.next().await {
+                items.push(item);
+            }
+            let case = format!("{need:?}, prefill_first={prefill_first}");
+            if need == PrefillNeed::None {
+                assert_eq!(items.len(), 1, "{case}");
+            } else {
+                assert_eq!(items.len(), 2, "{case}");
+                assert_eq!(
+                    items[0].event.as_deref(),
+                    Some(PREFILL_OUTPUT_ANNOTATION),
+                    "{case}"
+                );
+                assert_eq!(items[0].data.as_ref().unwrap().engine_data, None, "{case}");
+            }
+            assert!(
+                items
+                    .last()
+                    .unwrap()
+                    .data
+                    .as_ref()
+                    .unwrap()
+                    .finish_reason
+                    .is_some(),
+                "{case}"
+            );
+        }
+    }
+
     /// Preserve prefill metadata and failures without polling an ended decode stream again.
     #[tokio::test]
     async fn before_first_does_not_repoll_ended_decode() {
@@ -701,13 +764,11 @@ mod tests {
                 assert_eq!(outputs.len(), 1);
                 assert!(outputs[0].err().is_some());
                 assert!(context.is_stopped());
-            } else if let Some(expected) = expected {
+            } else {
                 assert_eq!(outputs.len(), 1);
                 let output = outputs.into_iter().next().unwrap();
                 assert_eq!(output.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
-                assert_eq!(output.data.unwrap().engine_data, Some(expected));
-            } else {
-                assert!(outputs.is_empty());
+                assert_eq!(output.data.unwrap().engine_data, expected);
             }
         }
     }
