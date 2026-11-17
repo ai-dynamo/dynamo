@@ -185,6 +185,16 @@ const testCases = [
     desc: 'any docs/tests descendant triggers recipe check without core'
   },
   {
+    file: 'docs/fern/pages/recipes/_catalog/recipes/kimi-k3.yaml',
+    expect: { core: false, docs: true, examples: true },
+    desc: 'recipe catalog entry triggers the catalog validator in recipe check'
+  },
+  {
+    file: 'docs/fern/pages/recipes/feature-benchmarks/_catalog/schema.json',
+    expect: { core: false, docs: true, examples: true },
+    desc: 'benchmark catalog triggers the catalog validator in recipe check'
+  },
+  {
     file: 'deploy/operator/config/crd/bases/nvidia.com_dynamomodels.yaml',
     expect: { core: false, docs: false, examples: true, operator: true },
     desc: 'every operator CRD base triggers generated recipe OpenAPI checks'
@@ -540,6 +550,16 @@ const testCases = [
     file: 'deploy/helm/charts/platform/components/operator/templates/deployment.yaml',
     expect: { snapshot: true, deploy: true, operator: true },
     desc: 'Operator Helm changes trigger snapshot integration'
+  },
+  {
+    file: 'lib/router/kv-router/README.md',
+    expect: { rust: false, core: false, frontend: false, ignore: true },
+    desc: 'router crate docs do not run the Rust jobs'
+  },
+  {
+    file: 'lib/router/kv-router/tests/data/router-settings.yaml',
+    expect: { rust: true, core: true, frontend: true },
+    desc: 'router test data compiled in with include_str! runs the Rust jobs'
   },
 ];
 

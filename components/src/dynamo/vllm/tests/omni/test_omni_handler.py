@@ -17,6 +17,7 @@ from dynamo.vllm.omni.image_edit import ImageEditLimits
 
 try:
     from PIL import Image
+    from vllm.exceptions import VLLMNotFoundError, VLLMValidationError
     from vllm.sampling_params import RequestOutputKind, SamplingParams
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
@@ -32,6 +33,7 @@ try:
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
     from dynamo.common.utils.output_modalities import RequestType
+    from dynamo.llm.exceptions import HttpError as LlmHttpError
     from dynamo.llm.exceptions import InvalidArgument
     from dynamo.vllm.lora_state import LoRAState
     from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
@@ -54,6 +56,13 @@ pytestmark = [
     pytest.mark.multimodal,
     pytest.mark.pre_merge,
 ]
+
+
+def _live_context() -> MagicMock:
+    """A request context whose client never disconnects."""
+    context = MagicMock()
+    context.async_killed_or_stopped = asyncio.Event().wait
+    return context
 
 
 def _make_handler(stage_types=("diffusion",)):
@@ -345,16 +354,35 @@ class TestHealthCanaries:
             ):
                 pytest.fail("A completed chunk must not hide a later failure")
 
-    @pytest.mark.parametrize("error_type", [RuntimeError, ValueError])
+    @pytest.mark.parametrize(
+        "error,expected_type,code",
+        [
+            (RuntimeError("Stage-0 has no live replica"), RuntimeError, None),
+            (ValueError("Stage-0 has no live replica"), ValueError, None),
+            # A vLLM request error is not a ValueError, so the endpoint must
+            # translate it or the bindings answer 500.
+            (
+                VLLMValidationError("prompt is longer than the maximum model length"),
+                InvalidArgument,
+                None,
+            ),
+            (VLLMNotFoundError("adapter not found"), LlmHttpError, 404),
+        ],
+        ids=["runtime_error", "value_error", "validation_400", "not_found_404"],
+    )
     @pytest.mark.asyncio
-    async def test_normal_generation_propagates_engine_failure(self, error_type):
+    async def test_normal_generation_propagates_engine_failure(
+        self, error, expected_type, code
+    ):
+        """A live request must still raise an engine failure after preloading,
+        and a vLLM request error keeps its client status."""
         handler = _make_handler()
         handler.config.output_modalities = ["image"]
-        context = MagicMock()
+        context = _live_context()
         context.id.return_value = "image-request"
 
         async def fail_generation(**kwargs):
-            raise error_type("Stage-0 has no live replica")
+            raise error
             yield  # pragma: no cover
 
         @asynccontextmanager
@@ -363,9 +391,14 @@ class TestHealthCanaries:
 
         handler.engine_client.generate = fail_generation
         handler._abort_monitor = no_abort_monitor
-        with pytest.raises(error_type, match="Stage-0 has no live replica"):
+        with pytest.raises(expected_type) as exc_info:
             async for _ in handler.generate({"prompt": "A teapot"}, context):
                 pytest.fail("An engine failure must not count as successful activity")
+        raised = exc_info.value
+        assert raised is error or raised.__cause__ is error
+        assert str(error) in str(raised)
+        if code is not None:
+            assert raised.code == code
 
 
 def test_handler_passes_png_compression_to_formatter():
@@ -682,7 +715,7 @@ class TestAggregatedAudioFollowsOutputKind:
         return [
             c
             async for c in handler._generate_openai_mode(
-                {"input": "hi"}, MagicMock(), "req-1"
+                {"input": "hi"}, _live_context(), "req-1"
             )
         ]
 
@@ -1308,7 +1341,7 @@ class TestLoraEnablement:
             "dynamo.vllm.omni.omni_handler.get_lora_manager",
             return_value=MagicMock(),
         ):
-            with pytest.raises(ValueError, match="unknown model or LoRA adapter"):
+            with pytest.raises(InvalidArgument, match="unknown model or LoRA adapter"):
                 handler._resolve_lora_request("ghost-adapter")
 
     def test_resolve_lora_request_unknown_adapter_is_none_when_manager_missing(self):
@@ -1329,6 +1362,69 @@ class TestLoraEnablement:
             return_value=MagicMock(),
         ):
             assert handler._resolve_lora_request("test-model-alias") is None
+
+    @pytest.mark.asyncio
+    async def test_unknown_adapter_chat_rejected_before_generation(self):
+        handler = _make_handler()
+        handler.config.engine_args.enable_lora = True
+        handler._abort_monitor = MagicMock(return_value=nullcontext())
+        handler.engine_client.generate = MagicMock(
+            side_effect=AssertionError("engine must not run for a rejected request")
+        )
+        request = {
+            "model": "ghost-adapter",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+        with patch(
+            "dynamo.vllm.omni.omni_handler.get_lora_manager",
+            return_value=MagicMock(),
+        ):
+            with pytest.raises(InvalidArgument, match="unknown model or LoRA adapter"):
+                async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                    pass
+
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_admission_recheck_failure_propagates_as_invalid_argument(self):
+        """An adapter unloaded between input build and lock admission must
+        surface as a public InvalidArgument (HTTP 400), not an in-band error
+        chunk inside a 200 stream."""
+        handler = _make_handler()
+        handler.config.engine_args.enable_lora = True
+        handler._abort_monitor = MagicMock(return_value=nullcontext())
+        handler.engine_client.generate = MagicMock(
+            side_effect=AssertionError("engine must not run for a rejected request")
+        )
+        handler._lora_state.loaded_loras["adapterA"] = LoRAInfo(
+            id=123, path="/cache/adapterA"
+        )
+
+        original_build = handler.build_engine_inputs
+
+        async def _build_then_unload(*args, **kwargs):
+            inputs = await original_build(*args, **kwargs)
+            # A concurrent unload_lora lands between input build and
+            # admission-lock acquisition.
+            handler._lora_state.loaded_loras.pop("adapterA")
+            return inputs
+
+        handler.build_engine_inputs = _build_then_unload
+
+        request = {
+            "model": "adapterA",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        with patch(
+            "dynamo.vllm.omni.omni_handler.get_lora_manager",
+            return_value=MagicMock(),
+        ):
+            with pytest.raises(InvalidArgument, match="unknown model or LoRA adapter"):
+                async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                    pass
+
+        handler.engine_client.generate.assert_not_called()
 
 
 class TestLoraCapacity:
@@ -1998,23 +2094,21 @@ class TestImageReferenceInputs:
             Image.new("RGB", (64, 64), color="red").save(buffer, format="JPEG")
             truncated = buffer.getvalue()[:-20]
         reference = "https://8.8.8.8/reference.jpg"
-        expected_error = OSError
         if source == "data":
             reference = "data:image/jpeg;base64," + base64.b64encode(truncated).decode()
-            expected_error = HttpStatusError
 
         with patch(
             "dynamo.common.multimodal.image_loader.fetch_bytes",
             new=AsyncMock(return_value=truncated),
         ) as fetch:
-            with pytest.raises(expected_error) as exc_info:
+            with pytest.raises(HttpStatusError) as exc_info:
                 async for _ in handler._generate_openai_mode(
                     {"prompt": "a teapot", "input_reference": reference}, None, "req-1"
                 ):
                     pass
 
+        assert exc_info.value.status == 400
         if source == "data":
-            assert exc_info.value.status == 400
             fetch.assert_not_awaited()
         else:
             fetch.assert_awaited_once()
@@ -2104,10 +2198,11 @@ class TestChatAudioValidation:
     async def test_client_validation_raises_invalid_argument(
         self, modality, payload, reason
     ):
+        """Invalid chat and audio inputs must fail before engine generation."""
         handler = _make_handler()
         handler.config.output_modalities = [modality]
         handler.audio = _make_audio_handler()
-        context = MagicMock()
+        context = _live_context()
         context.id.return_value = "invalid-request"
 
         with pytest.raises(InvalidArgument, match=reason):
@@ -2128,11 +2223,12 @@ class TestVideoEndpointValidation:
     async def test_i2v_invalid_reference_is_a_client_error(
         self, monkeypatch, reference
     ):
+        """Blocked URLs and malformed image data must raise a client error."""
         monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
         handler = _make_handler()
         handler.config.output_modalities = ["video"]
         handler._image_loader = ImageLoader()
-        context = MagicMock()
+        context = _live_context()
         context.id.return_value = "req-1"
 
         with pytest.raises(InvalidArgument, match="Failed to load input_reference"):
@@ -2149,10 +2245,11 @@ class TestVideoEndpointValidation:
 
     @pytest.mark.asyncio
     async def test_i2v_unsupported_reference_preserves_status(self):
+        """An unsupported reference image must keep its HTTP 415 status."""
         handler = _make_handler()
         handler.config.output_modalities = ["video"]
         handler._image_loader = ImageLoader()
-        context = MagicMock()
+        context = _live_context()
         context.id.return_value = "req-1"
 
         with pytest.raises(HttpStatusError) as exc_info:
@@ -2170,11 +2267,12 @@ class TestVideoEndpointValidation:
 
     @pytest.mark.asyncio
     async def test_i2v_pixel_limit_is_a_bounded_client_error(self):
+        """An oversized image must fail without exposing loader details."""
         handler = _make_handler()
         handler.config.output_modalities = ["video"]
         error = Image.DecompressionBombError("unbounded loader details")
         handler._image_loader = SimpleNamespace(load_image=AsyncMock(side_effect=error))
-        context = MagicMock()
+        context = _live_context()
         context.id.return_value = "req-1"
 
         with pytest.raises(InvalidArgument) as exc_info:
@@ -2201,10 +2299,11 @@ class TestVideoEndpointValidation:
         ids=["origin-unavailable", "unexpected-failure"],
     )
     async def test_i2v_loader_server_errors_are_preserved(self, error):
+        """Origin and unexpected loader failures must reach the caller intact."""
         handler = _make_handler()
         handler.config.output_modalities = ["video"]
         handler._image_loader = SimpleNamespace(load_image=AsyncMock(side_effect=error))
-        context = MagicMock()
+        context = _live_context()
         context.id.return_value = "req-1"
 
         with pytest.raises(type(error)) as exc_info:
@@ -2327,6 +2426,7 @@ class TestRefAudioRejection:
 
     @pytest.mark.asyncio
     async def test_a_blocked_ref_audio_url_fails_the_request(self, monkeypatch):
+        """A blocked audio reference must fail before engine generation."""
         monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
         monkeypatch.setattr(dynamo_http, "_default", AiohttpClient())
         handler = _make_handler()
@@ -2337,7 +2437,7 @@ class TestRefAudioRejection:
             side_effect=AssertionError("engine must not run for a rejected request")
         )
 
-        context = MagicMock()
+        context = _live_context()
         context.id.return_value = "req-1"
         with pytest.raises(InvalidArgument, match="blocked range"):
             async for _ in handler.generate(
@@ -2404,3 +2504,89 @@ async def test_failed_second_image_never_generates_from_first(image_request_hand
             ):
                 pass
     handler.engine_client.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_context_stop_cancels_stalled_reference_download(
+    image_request_handler, monkeypatch
+):
+    """A client disconnect must end a stalled reference download promptly,
+    start no later download, and never reach generation."""
+    handler = image_request_handler
+    handler.engine_client.engine.od_config.model_class_name = "Flux2KleinPipeline"
+    started, released = asyncio.Event(), asyncio.Event()
+
+    async def stalled_fetch(*args, **kwargs):
+        """Hold the download open and record when cancellation releases it."""
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            released.set()
+
+    fetch = AsyncMock(side_effect=stalled_fetch)
+    monkeypatch.setattr("dynamo.common.multimodal.image_loader.fetch_bytes", fetch)
+    killed = asyncio.get_running_loop().create_future()
+    context = SimpleNamespace(async_killed_or_stopped=lambda: killed)
+    metadata = SimpleNamespace(
+        supports_multimodal_inputs=True, max_multimodal_image_inputs=4
+    )
+
+    async def run():
+        """Consume the edit request so its download can be cancelled."""
+        async for _ in handler._generate_openai_mode(
+            {
+                "prompt": "edit",
+                "input_reference": ["https://8.8.8.8/slow", "https://8.8.8.8/next"],
+            },
+            context,
+            "stalled-ref",
+        ):
+            pass
+
+    with patch(
+        "dynamo.vllm.omni.image_edit.get_diffusion_model_metadata",
+        return_value=metadata,
+    ):
+        task = asyncio.create_task(run())
+        await asyncio.wait_for(started.wait(), 1)
+        killed.set_result(None)
+        # Far below the loader's 30 s download timeout.
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 1)
+
+    assert released.is_set()
+    fetch.assert_awaited_once()
+    assert not handler._image_edit_loader._inflight
+    handler.engine_client.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_live_context_does_not_cancel_successful_edit(image_request_handler):
+    """Watching the context must not disturb a healthy multi-image edit."""
+    handler = image_request_handler
+    handler.engine_client.engine.od_config.model_class_name = "Flux2KleinPipeline"
+    images = [Image.new("RGB", (2, 2), color) for color in ["red", "blue"]]
+    handler._image_edit_loader.load_image = AsyncMock(side_effect=images)
+    killed = asyncio.get_running_loop().create_future()
+    context = SimpleNamespace(async_killed_or_stopped=lambda: killed)
+    metadata = SimpleNamespace(
+        supports_multimodal_inputs=True, max_multimodal_image_inputs=4
+    )
+    with patch(
+        "dynamo.vllm.omni.image_edit.get_diffusion_model_metadata",
+        return_value=metadata,
+    ):
+        async for _ in handler._generate_openai_mode(
+            {
+                "prompt": "edit",
+                "input_reference": ["https://example.com/a", "https://example.com/b"],
+            },
+            context,
+            "live-ref",
+        ):
+            pass
+    prompt = handler.engine_client.generate.call_args.kwargs["prompt"]
+    assert prompt["multi_modal_data"]["image"] == images
+    # The context watcher is torn down once preloading finishes.
+    assert killed.cancelled()

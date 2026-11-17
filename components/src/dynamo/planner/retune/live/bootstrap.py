@@ -47,7 +47,7 @@ from dynamo.planner.config.planner_config import (
 from dynamo.planner.core.types import RetuneInputs
 from dynamo.planner.errors import ComponentError
 from dynamo.planner.monitoring.dgd_services import get_component_from_type_or_name
-from dynamo.planner.retune.domains import expand_router_domain
+from dynamo.planner.retune.domains import expand_router_domain, retune_history_seconds
 from dynamo.planner.retune.live import frontend_config, window_cut
 from dynamo.planner.retune.live.actuator import (
     AiohttpRouterPolicyClient,
@@ -75,6 +75,7 @@ from dynamo.planner.retune.live.supervisor import (
     SupervisorSettings,
     worker_types_for,
 )
+from dynamo.planner.simulation.config import retune_sweep_base
 
 logger = logging.getLogger(__name__)
 
@@ -294,11 +295,14 @@ def dgdr_canary(
         if not replicas or not point:
             return False
         sla_ttft_ms, sla_itl_ms = retune.scoring_sla(config.ttft_ms, config.itl_ms)
+        # A scaling Planner's Requests carry the planner section too.
+        scaling = config.scaling_enabled()
         shard = Shard(
             id=CANARY_SHARD_ID,
             kind="point",
             choices={key: (value,) for key, value in point.items()},
             points=(dict(point),),
+            planners=({},) if scaling else (),
         )
         body = build_request(
             dgd=supervisor.dgd,
@@ -313,6 +317,10 @@ def dgdr_canary(
             spec_replicas=replicas,
             backend=str(config.backend),
             attempt=0,
+            planner_base=(
+                retune_sweep_base(config.model_dump(mode="json")) if scaling else None
+            ),
+            planner_warmup={},
         )
         try:
             supervisor.kube.create_request(body, dry_run=True, timeout_s=timeout_s)
@@ -426,7 +434,13 @@ async def build_supervisor(
     evaluation = evaluate(dgd_obj)
     if reconciler is None:
         reconciler = Reconciler(
-            kube, evaluation.dgd, dgdr, retune, dgdr.mount_path, metrics
+            kube,
+            evaluation.dgd,
+            dgdr,
+            retune,
+            dgdr.mount_path,
+            metrics,
+            history_s=retune_history_seconds(config),
         )
     worker_types = worker_types_for(config.mode)
     settings = SupervisorSettings.from_config(

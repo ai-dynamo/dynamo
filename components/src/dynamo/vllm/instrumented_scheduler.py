@@ -58,7 +58,7 @@ How metrics are measured
   parameter passed to ``update_from_output`` (the EngineCore always
   passes the correct output for the batch being processed, even in
   async mode where multiple batches are in flight).
-* **queued_requests**: computed from ``self.waiting`` at emit time.
+* **queued_requests**: computed from vLLM's waiting queues at emit time.
 * **wall_time**: approximates the GPU forward pass time for each batch.
   In steady state, measured as the interval between consecutive
   ``update_from_output()`` calls (accurate because CPU scheduling
@@ -67,9 +67,21 @@ How metrics are measured
   ``schedule()``-to-``update_from_output()`` timestamp recorded via a
   FIFO queue.  ``wall_time`` is ``0.0`` only for heartbeats.
 
+Heartbeats are sent when no frame has gone out for ``HEARTBEAT_INTERVAL``,
+including while a long forward pass is running.  They have ``wall_time=0``
+and empty ``scheduled_requests``, and carry the latest waiting-queue snapshot.
+Extra snapshots run on the scheduler thread at most once per heartbeat
+interval, plus when an empty snapshot first gains waiting work. Completed
+passes reuse their existing scan. Empty heartbeats are
+suppressed while scheduler-visible requests, scheduled batches, or pending
+connector work remain.
+This does not establish EngineCore idleness or invalidate an idle frame
+already cached by Planner.
+
 Serialization and ZMQ send are handled by a background thread
 (same approach as vLLM's ZmqEventPublisher) so the scheduler
-hot path only pays for accumulation + queue.put().
+hot path pays for accumulation, bounded snapshots, a constant-time activity
+handoff, and queue.put().
 
 Inject via:
     --scheduler-cls "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
@@ -94,7 +106,7 @@ import time
 import uuid
 from array import array
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from datetime import datetime, timezone
@@ -2112,7 +2124,9 @@ class _BenchmarkSynchronizer:
 class _FpmPublisherThread:
     """Background thread that serializes and sends ForwardPassMetrics over ZMQ.
 
-    Also emits periodic heartbeats when idle.
+    Also emits a heartbeat when nothing has been sent for HEARTBEAT_INTERVAL.
+    Heartbeats carry the latest queue snapshot. Empty heartbeats are suppressed
+    while the scheduler reports activity or uncertain completion.
     """
 
     SHUTDOWN_TIMEOUT: float = 1.0
@@ -2126,6 +2140,7 @@ class _FpmPublisherThread:
         max_queue_size: int = 10_000,
         start_paused: bool = False,
     ) -> None:
+        """Bind the metrics socket and start publishing, optionally paused."""
         self._queue: queue.Queue[ForwardPassMetrics | None] = queue.Queue(
             maxsize=max_queue_size
         )
@@ -2135,6 +2150,8 @@ class _FpmPublisherThread:
         self._publishing = threading.Event()
         if not start_paused:
             self._publishing.set()
+        self._heartbeat_lock = threading.Lock()
+        self._heartbeat_state = (QueuedRequestMetrics(), False)
 
         self._ctx = zmq.Context.instance()
         self._pub = self._ctx.socket(zmq.PUB)
@@ -2156,8 +2173,19 @@ class _FpmPublisherThread:
         except queue.Full:
             pass
 
+    def set_activity(self, active: bool) -> None:
+        """Hand off scheduler activity without scanning its mutable queues."""
+        with self._heartbeat_lock:
+            self._heartbeat_state = (self._heartbeat_state[0], active)
+
+    def set_heartbeat_state(self, queued: QueuedRequestMetrics, active: bool) -> None:
+        """Replace the immutable queue snapshot and activity state together."""
+        with self._heartbeat_lock:
+            self._heartbeat_state = (queued, active)
+
     def resume(self) -> None:
         """Enable live publishing after startup self-benchmarking finishes."""
+        self.set_heartbeat_state(QueuedRequestMetrics(), False)
         self._publishing.set()
 
     def shutdown(self) -> None:
@@ -2174,7 +2202,7 @@ class _FpmPublisherThread:
             pass
 
     def _run(self) -> None:
-        topic = b""
+        """Send completed passes and heartbeats that do not report false idle."""
         last_publish = time.monotonic()
 
         while self._running or not self._queue.empty():
@@ -2185,25 +2213,40 @@ class _FpmPublisherThread:
                 if metrics is None:
                     break
             except queue.Empty:
-                if time.monotonic() - last_publish >= self.HEARTBEAT_INTERVAL:
+                if time.monotonic() - last_publish < self.HEARTBEAT_INTERVAL:
+                    continue
+                # Keep the activity handoff and heartbeat send ordered. The
+                # socket is nonblocking; mutable queues stay on the scheduler.
+                with self._heartbeat_lock:
+                    queued, active = self._heartbeat_state
                     metrics = ForwardPassMetrics(
                         worker_id=self._worker_id,
                         dp_rank=self._dp_rank,
+                        queued_requests=queued,
                     )
-                else:
-                    continue
+                    if active and metrics.is_idle():
+                        continue
+                    if self._send(metrics):
+                        last_publish = time.monotonic()
+                continue
 
-            try:
-                seq = next(self._seq)
-                metrics = msgspec.structs.replace(metrics, counter_id=seq)
-                payload = encode(metrics)
-                seq_bytes = seq.to_bytes(8, "big")
-                self._pub.send_multipart((topic, seq_bytes, payload), flags=zmq.NOBLOCK)
+            if self._send(metrics):
                 last_publish = time.monotonic()
-            except zmq.Again:
-                pass
-            except Exception:
-                logger.warning("FPM publisher send failed", exc_info=True)
+
+    def _send(self, metrics: ForwardPassMetrics) -> bool:
+        """Serialize and send one frame, returning whether it reached ZMQ."""
+        try:
+            seq = next(self._seq)
+            metrics = msgspec.structs.replace(metrics, counter_id=seq)
+            payload = encode(metrics)
+            seq_bytes = seq.to_bytes(8, "big")
+            self._pub.send_multipart((b"", seq_bytes, payload), flags=zmq.NOBLOCK)
+            return True
+        except zmq.Again:
+            return False
+        except Exception:
+            logger.warning("FPM publisher send failed", exc_info=True)
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -2217,6 +2260,8 @@ _BASE_SCHEDULE_TAKES_THROTTLE = (
 
 
 class InstrumentedScheduler(AsyncScheduler):
+    running: list[Request]
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -2226,6 +2271,7 @@ class InstrumentedScheduler(AsyncScheduler):
         hash_block_size: int | None = None,
         **kwargs,
     ) -> None:
+        """Initialize scheduling, live heartbeat tracking, and startup benchmarking."""
         super().__init__(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
@@ -2242,6 +2288,9 @@ class InstrumentedScheduler(AsyncScheduler):
         self._fpm_worker_id = os.environ.get(ENV_FPM_WORKER_ID, "")
         self._fpm_dp_rank = dp_rank
 
+        self._inflight_outputs: dict[int, SchedulerOutput] = {}
+        self._heartbeat_queued = QueuedRequestMetrics()
+        self._heartbeat_snapshot_time = float("-inf")
         self._schedule_times: deque[float] = deque()
         self._last_update_time: float = 0.0
         self._prompt_len_per_req: dict[str, int] = {}
@@ -2376,6 +2425,8 @@ class InstrumentedScheduler(AsyncScheduler):
     def _schedule_and_record_time(
         self, throttle_prefills: bool = False
     ) -> SchedulerOutput:
+        """Dispatch a step and track it until its matching output is processed."""
+        self._mark_heartbeat_busy()
         # vLLM added `throttle_prefills` to Scheduler.schedule() after some of
         # the runtime images were built; pass it only when the base accepts it
         # so one overlay works across both.
@@ -2396,7 +2447,74 @@ class InstrumentedScheduler(AsyncScheduler):
                     self._bench_abort(error)
                     raise
             self._schedule_times.append(time.monotonic())
+        if not self._bench_active and output.total_num_scheduled_tokens > 0:
+            # Retain the output so a missing completion cannot reuse its id.
+            self._inflight_outputs[id(output)] = output
+        self._refresh_heartbeat_state()
         return output
+
+    def add_request(self, request: Request) -> None:
+        """Mark arrivals busy before vLLM changes its scheduling queues."""
+        self._mark_heartbeat_busy()
+        super().add_request(request)
+        self._refresh_heartbeat_state(allow_snapshot=False)
+
+    def finish_requests(
+        self,
+        request_ids: str | Iterable[str] | None,
+        finished_status: RequestStatus,
+    ) -> list[Request]:
+        """Finish requests without forgetting batches still awaiting output."""
+        self._mark_heartbeat_busy()
+        aborted = super().finish_requests(request_ids, finished_status)
+        self._refresh_heartbeat_state()
+        return aborted
+
+    def _mark_heartbeat_busy(self) -> None:
+        """Suppress idle heartbeats while a scheduler mutation is in progress."""
+        if not self._bench_active:
+            self._publisher.set_activity(True)
+
+    def _refresh_heartbeat_state(
+        self, queued: QueuedRequestMetrics | None = None, *, allow_snapshot: bool = True
+    ) -> None:
+        """Reuse completed-pass snapshots and bound additional queue scans."""
+        if self._bench_active:
+            return
+        if hasattr(self, "kv_holding_waiting"):
+            other_waiting = self.kv_holding_waiting
+        else:
+            other_waiting = self.skipped_waiting
+        waiting = bool(self.waiting) or bool(other_waiting)
+        # Newer vLLM versions park asynchronous KV loads in a third queue.
+        if hasattr(self, "async_kv_waiting"):
+            waiting = waiting or bool(self.async_kv_waiting)
+        now = time.monotonic()
+        if queued is not None:
+            self._heartbeat_snapshot_time = now
+        elif not waiting:
+            queued = QueuedRequestMetrics()
+        elif allow_snapshot and (
+            now - self._heartbeat_snapshot_time >= self._publisher.HEARTBEAT_INTERVAL
+            or (
+                self._heartbeat_queued.num_prefill_requests == 0
+                and self._heartbeat_queued.num_decode_requests == 0
+            )
+        ):
+            # The first waiting work needs a nonempty snapshot before a long
+            # pass. Further steps reuse it until the interval or queue drain.
+            queued = self._compute_queued()
+            self._heartbeat_snapshot_time = now
+        else:
+            queued = self._heartbeat_queued
+        self._heartbeat_queued = queued
+        active = (
+            waiting
+            or bool(self.running)
+            or bool(self._inflight_outputs)
+            or super().has_requests()
+        )
+        self._publisher.set_heartbeat_state(queued, active)
 
     def shutdown(self) -> None:
         if self._bench_active and self._bench_active_req_ids:
@@ -2434,10 +2552,14 @@ class InstrumentedScheduler(AsyncScheduler):
         scheduler_output: SchedulerOutput,
         model_runner_output: "ModelRunnerOutput",
     ):
+        """Process a step's output and update its metrics and heartbeat queue."""
         model_output_arrival = (
             time.monotonic() if scheduler_output.total_num_scheduled_tokens > 0 else 0.0
         )
+        self._mark_heartbeat_busy()
         result = super().update_from_output(scheduler_output, model_runner_output)
+        if not self._bench_active:
+            self._inflight_outputs.pop(id(scheduler_output), None)
 
         if scheduler_output.total_num_scheduled_tokens > 0:
             t_sched = self._schedule_times.popleft() if self._schedule_times else 0.0
@@ -2476,9 +2598,11 @@ class InstrumentedScheduler(AsyncScheduler):
                 )
             self._last_update_time = model_output_arrival
 
+            queued = self._compute_queued()
+            self._refresh_heartbeat_state(queued)
             metrics = self._extract_metrics(
                 scheduler_output,
-                self._compute_queued(),
+                queued,
                 wall_time,
                 scheduled=scheduled,
             )
@@ -2503,6 +2627,7 @@ class InstrumentedScheduler(AsyncScheduler):
             self._publish_or_record_metrics(metrics, benchmark_sample)
         else:
             self._last_update_time = 0.0
+            self._refresh_heartbeat_state()
 
         self._cleanup_finished(scheduler_output)
         return result
@@ -2662,7 +2787,10 @@ class InstrumentedScheduler(AsyncScheduler):
         else:
             other_waiting = self.skipped_waiting
 
-        for request in chain(self.waiting, other_waiting):
+        waiting_queues: tuple[Iterable[Request], ...] = (self.waiting, other_waiting)
+        if hasattr(self, "async_kv_waiting"):
+            waiting_queues += (self.async_kv_waiting,)
+        for request in chain.from_iterable(waiting_queues):
             if request.status in (
                 RequestStatus.PREEMPTED,
                 RequestStatus.WAITING_FOR_REMOTE_KVS,
@@ -3965,7 +4093,16 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _bench_realseed_on(self) -> bool:
         """Real-KV seeding for prefill points (``DYN_BENCH_PREFILL_REAL_SEED``,
-        default off).
+        default auto).
+
+        Auto: on when the KV-cache layout has a recurrent-state (Mamba/GDN/KDA)
+        group and there is a single attention-DP rank, off otherwise.
+        Synthetic prefix blocks carry no recurrent state, so a hybrid layout in
+        Mamba "align" mode never reports a hit on them: every past-KV prefill
+        point would be skipped and the run rejected. Auto stays off under
+        attention-DP because real-seed retries are not coordinated across
+        ranks: a rank that misses re-stages while a rank that hits waits at
+        the measured barrier.
 
         Off: a point that reads past KV gets synthetic prefix blocks that are
         registered in the prefix cache but never computed (see
@@ -3984,11 +4121,20 @@ class InstrumentedScheduler(AsyncScheduler):
         skips the point on a miss, so an evicted prefix can never be measured
         silently as a fake one.
         """
-        return os.environ.get("DYN_BENCH_PREFILL_REAL_SEED", "off").lower() in (
-            "on",
-            "1",
-            "true",
-        )
+        value = os.environ.get("DYN_BENCH_PREFILL_REAL_SEED", "auto").lower()
+        if value in ("on", "1", "true"):
+            return True
+        if value == "auto":
+            if getattr(self, "_bench_dp_size", 1) > 1:
+                return False
+            config = getattr(
+                getattr(self, "kv_cache_manager", None), "kv_cache_config", None
+            )
+            return any(
+                self._kvwarm_is_state_spec(getattr(group, "kv_cache_spec", None))
+                for group in getattr(config, "kv_cache_groups", None) or []
+            )
+        return False
 
     def _bench_realseed_chain(self, batch_size: int) -> dict:
         """Per-batch seeding registry: one fixed cache salt per request slot

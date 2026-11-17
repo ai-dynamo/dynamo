@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Annotated, Any, Literal, TypeAlias
 
 from aisimulate.config.common import Choices, IntegerRange, NumericRange
@@ -380,6 +381,103 @@ _PLANNER_FIXED_SLA = ("ttft_ms", "itl_ms")
 _PLANNER_LIVE_NAME_HINTS = {
     live: public for public, live in PLANNER_RETUNE_KNOBS.items() if live != public
 }
+
+
+# ``PlannerConfig`` fields a live retune sweep (``retune.executor: dgdr``)
+# sends as the base of each candidate's inner planner, in the
+# ``planner.retune_sweep`` section of a DGDR Request: the fields that decide
+# scaling. Connections, credentials, file paths, ports, reports, the
+# Kubernetes wiring and the performance-model sources stay in the live
+# Planner; the Run's replay brings its own performance model.
+PLANNER_RETUNE_SWEEP_BASE_FIELDS = frozenset(
+    {
+        "mode",
+        "optimization_target",
+        "ttft_ms",
+        "itl_ms",
+        "enable_throughput_scaling",
+        "enable_load_scaling",
+        "throughput_adjustment_interval_seconds",
+        "load_adjustment_interval_seconds",
+        "max_throughput_scaling_replicas",
+        "max_gpu_budget",
+        "min_gpu_budget",
+        "min_endpoint",
+        "prefill_min_endpoint",
+        "decode_min_endpoint",
+        "load_predictor",
+        "load_predictor_log1p",
+        "prophet_window_size",
+        "kalman_q_level",
+        "kalman_q_trend",
+        "kalman_r",
+        "kalman_min_points",
+        "max_num_fpm_samples",
+        "fpm_sample_bucket_size",
+        "load_scaling_down_sensitivity",
+        "load_min_observations",
+        "prefill_scale_up_queue_tokens",
+        "prefill_scale_down_queue_tokens",
+        "decode_scale_up_kv_rate",
+        "decode_scale_down_kv_rate",
+        "speculative_nextn",
+        "throughput_metrics_source",
+        "scheduling",
+    }
+)
+# ``scheduling`` keys a retune sweep base keeps: the tick cadence. Plugins,
+# the registration gateway and the live tick deadline stay in the Planner.
+PLANNER_RETUNE_SWEEP_SCHEDULING_FIELDS = frozenset({"scale_interval_seconds"})
+
+
+def retune_sweep_base(planner: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``planner.retune_sweep.base`` of a live Planner config dump."""
+
+    base = {
+        key: value
+        for key, value in planner.items()
+        if key in PLANNER_RETUNE_SWEEP_BASE_FIELDS and key != "scheduling"
+    }
+    scheduling = planner.get("scheduling")
+    if isinstance(scheduling, Mapping):
+        base["scheduling"] = {
+            key: value
+            for key, value in scheduling.items()
+            if key in PLANNER_RETUNE_SWEEP_SCHEDULING_FIELDS
+        }
+    return base
+
+
+# What a retune candidate's inner planner overrides in the running planner's
+# configuration. It is never retuned and always actuates, even under an
+# advisory outer planner: a candidate is scored on the replicas it would
+# drive. It writes no reports and opens no listener, warms from the sweep's
+# history instead of the outer planner's warmup trace, and runs no batch
+# scheduling, which replay never runs and which would need the Redis settings
+# an actuating planner requires.
+INNER_PLANNER_OVERRIDES: dict[str, Any] = {
+    "retune": None,
+    "advisory": False,
+    "report_interval_hours": None,
+    "live_dashboard_port": 0,
+    "metric_reporting_prometheus_port": 0,
+    "load_predictor_warmup_trace": None,
+    "batch_scheduling": {"enabled": False},
+}
+
+
+def inner_planner_config(
+    base: Mapping[str, Any], point: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """A retune candidate's inner planner: ``base`` with ``point`` applied and
+    ``INNER_PLANNER_OVERRIDES`` over both. Every retune executor (the replay
+    sweep, the DGDR executor and the AISimulate adapter) builds it here."""
+
+    return {
+        **deepcopy(dict(base)),
+        **deepcopy(dict(point or {})),
+        **deepcopy(INNER_PLANNER_OVERRIDES),
+    }
 
 
 class PlannerRetuneConfig(PlannerRecommendationConfig):

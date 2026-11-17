@@ -1043,6 +1043,10 @@ DGDR_TIMEOUT_MARGIN_SECONDS = 600.0
 # DGDR v1beta2 ``spec.recommendation.maxCandidates`` maximum: one Request (a
 # grid shard) carries at most this many router points.
 DGDR_MAX_SHARD_POINTS = 100
+# History buckets per throughput interval one DGDR Request carries as its
+# inner planners' load-predictor warmup (Scenario 2), and each Candidate
+# again as its replayable config: it bounds the objects' size.
+DGDR_MAX_WARMUP_BUCKETS = 1024
 # Router knobs a DGDR v1beta2 Request can search, by public name
 # (``contracts.DGDR_ROUTER_KNOBS``); the Request's router section has no
 # place for the retune extension knobs.
@@ -1086,19 +1090,31 @@ def dgdr_rounds(points: int, parallelism: int) -> int:
 
 
 def dgdr_need_seconds(
-    points: int, dgdr: DgdrExecutorConfig, *, needs_cut: bool
+    points: int,
+    dgdr: DgdrExecutorConfig,
+    *,
+    needs_cut: bool,
+    needs_history: bool = False,
 ) -> float:
-    """Wall-clock seconds one DGDR shard of ``points`` router points needs.
+    """Wall-clock seconds one DGDR shard of ``points`` candidate points needs.
 
-    ``cut_budget`` (when the window file must still be cut) + Run Job
-    start-up + ``dgdr_rounds(points, run.parallelism)`` rounds of
+    ``cut_budget`` (when the window file must still be cut) + another
+    ``cut_budget`` (when the history must still be read and the predictor
+    pre-sweep run, Scenario 2) + Run Job start-up +
+    ``dgdr_rounds(points, run.parallelism)`` rounds of
     ``candidate_timeout``. ``parallelism`` is the configured value; Job
     resources may lower it, so this is optimistic.
     """
 
     rounds = dgdr_rounds(points, dgdr.run.parallelism)
     cut = dgdr.cut_budget_seconds if needs_cut else 0.0
-    return cut + dgdr.job_startup_seconds + rounds * dgdr.run.candidate_timeout_seconds
+    history = dgdr.cut_budget_seconds if needs_history else 0.0
+    return (
+        cut
+        + history
+        + dgdr.job_startup_seconds
+        + rounds * dgdr.run.candidate_timeout_seconds
+    )
 
 
 def balanced_shard_parts(
@@ -2493,7 +2509,7 @@ class PlannerConfig(BaseModel):
                 "default domain, so pin knobs with a scalar to shrink the grid"
             )
         if retune.executor == "dgdr":
-            self._validate_live_retune_budget(retune, router_domain)
+            self._validate_live_retune_budget(retune, router_domain, planner_domain)
 
     def _validate_live_retune(self, retune: RetuneConfig) -> None:
         """Configuration premises P1, P2, P3 and P5 of live retune.
@@ -2540,15 +2556,12 @@ class PlannerConfig(BaseModel):
                 f"{DGDR_TIMEOUT_MARGIN_SECONDS:g} = {limit:g} with executor "
                 f"'dgdr' (P1), got {retune.timeout_seconds:g}"
             )
-        if self.scaling_enabled():
+        if retune.router is None:
             raise ValueError(
-                "retune.executor 'dgdr' supports retune-only mode (P2): set "
-                "enable_load_scaling and enable_throughput_scaling both to false"
-            )
-        if retune.planner is not None:
-            raise ValueError(
-                "retune.executor 'dgdr' retunes the router only (P2); remove "
-                "retune.planner"
+                "retune.executor 'dgdr' requires retune.router (P2): every DGDR "
+                "Request sets the three router knobs; to retune the Planner "
+                "alone, pin overlap_score_credit, prefill_load_scale and "
+                "temperature to the frontend's startup values with scalars"
             )
         self._validate_live_retune_router(retune)
         _validate_dgdr_engine(dgdr.engine, self.mode, self.backend)
@@ -2618,41 +2631,75 @@ class PlannerConfig(BaseModel):
                 f"executor 'dgdr' (P3), got {written}"
             )
 
-    @staticmethod
     def _validate_live_retune_budget(
-        retune: RetuneConfig, router_domain: Mapping[str, Sequence[float]]
+        self,
+        retune: RetuneConfig,
+        router_domain: Mapping[str, Sequence[float]],
+        planner_domain: Any,
     ) -> None:
         """P13: the largest grid shard can finish within the sweep deadline.
 
         The baseline can fall in any grid shard, and a window whose baseline
         shard cannot finish fails with ``launch_too_late``, so the largest
         shard must fit. The domain is the widest one: a zero startup credit
-        only narrows it at runtime.
+        only narrows it at runtime, and folding inactive fields to the
+        baseline's values only merges planner points. With scaling, the
+        planner points are one more shard dimension, the history read and
+        the predictor pre-sweep take another ``cut_budget_seconds``, and the
+        warmup a Request carries is bounded by ``DGDR_MAX_WARMUP_BUCKETS``
+        buckets per throughput interval.
         """
 
         dgdr = retune.dgdr
         if dgdr is None or retune.timeout_seconds is None:
             # _validate_live_retune rejects both first.
             raise ValueError("retune.executor 'dgdr' requires dgdr and timeout_seconds")
+        scaling = self.scaling_enabled()
+        if scaling:
+            # Imported on use: the module imports this one at module scope.
+            from dynamo.planner.retune.domains import (
+                required_history_seconds,
+                throughput_intervals,
+            )
+
+            intervals = throughput_intervals(self, planner_domain.points)
+            history_s = retune.history_seconds
+            if history_s is None:
+                history_s = required_history_seconds(self, planner_domain)
+            if intervals and history_s / min(intervals) > DGDR_MAX_WARMUP_BUCKETS:
+                raise ValueError(
+                    f"retune history of {history_s:g}s at the shortest throughput "
+                    f"interval {min(intervals)}s is "
+                    f"{math.ceil(history_s / min(intervals))} warmup buckets, more "
+                    f"than the {DGDR_MAX_WARMUP_BUCKETS} a DGDR Request carries "
+                    "(P13); lower retune.history_seconds or the predictor window"
+                )
         sizes = [len(values) for values in router_domain.values()]
+        if scaling:
+            sizes.append(len(planner_domain.points))
         parts = balanced_shard_parts(
             sizes, dgdr.run.max_shards, parallelism=dgdr.run.parallelism
         )
         points = largest_shard_points(sizes, parts)
         if points > DGDR_MAX_SHARD_POINTS:
             raise ValueError(
-                f"the retune router grid of {math.prod(sizes)} points cannot be "
+                f"the retune grid of {math.prod(sizes)} points cannot be "
                 f"split into at most retune.dgdr.run.max_shards="
                 f"{dgdr.run.max_shards} Cartesian shards of at most "
                 f"{DGDR_MAX_SHARD_POINTS} points (P13); the largest would have "
                 f"{points}. Raise max_shards or pin router knobs with a scalar"
             )
-        need = dgdr_need_seconds(points, dgdr, needs_cut=True)
+        need = dgdr_need_seconds(points, dgdr, needs_cut=True, needs_history=scaling)
         if need > retune.timeout_seconds:
             rounds = dgdr_rounds(points, dgdr.run.parallelism)
+            history = (
+                f"cut_budget_seconds {dgdr.cut_budget_seconds:g} for the history + "
+                if scaling
+                else ""
+            )
             raise ValueError(
                 f"the largest retune grid shard ({points} points) needs "
-                f"{need:g}s: cut_budget_seconds {dgdr.cut_budget_seconds:g} + "
+                f"{need:g}s: {history}cut_budget_seconds {dgdr.cut_budget_seconds:g} + "
                 f"job_startup_seconds {dgdr.job_startup_seconds:g} + {rounds} "
                 f"rounds x candidate_timeout_seconds "
                 f"{dgdr.run.candidate_timeout_seconds:g}, more than "

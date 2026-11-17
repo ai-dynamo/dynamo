@@ -884,3 +884,16 @@ def required_history_seconds(config: PlannerConfig, domain: PlannerDomain) -> fl
             )
             min_points.append(fields.get("kalman_min_points", config.kalman_min_points))
     return float(max(intervals) * max(*window_sizes, *min_points))
+
+
+def retune_history_seconds(config: PlannerConfig) -> float:
+    """History each sweep reads before its window: ``retune.history_seconds``,
+    else ``required_history_seconds`` (0 without throughput scaling, or with
+    fixed replicas, whose sweeps run no inner planner)."""
+
+    retune = config.retune
+    if retune is None or not config.scaling_enabled():
+        return 0.0
+    if retune.history_seconds is not None:
+        return float(retune.history_seconds)
+    return required_history_seconds(config, expand_planner_domain(config))
