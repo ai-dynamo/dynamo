@@ -18,7 +18,7 @@ use dynamo_bench::kv_router_common::sweep::compute_sweep_durations;
 use dynamo_kv_indexer::host::{
     ConcurrentRadixTreeCompressed, KvIndexerMetrics, PositionalIndexer, ThreadPoolIndexer,
 };
-use mooncake_lower_tier::LowerTierRun;
+use mooncake_lower_tier::{HostFill, LowerTierRun};
 use mooncake_open_loop::{
     OpenLoopConfig, OpenLoopResult, RunProvenance, parse_cpu_list, prepare_mooncake_corpus,
     prepare_open_loop_trial, run_open_loop, validate_cpu_partition,
@@ -89,6 +89,15 @@ struct LowerTierArgs {
     /// KV cache bytes per token, which sets the mocker's device-to-host copy time.
     #[clap(long, default_value = "131072")]
     kv_cache_bytes_per_token: usize,
+
+    /// When a block reaches the CPU tier: `write-through` as it is computed, parent first, or
+    /// `write-back` when the device evicts it, a chain's tail first.
+    #[clap(long, value_enum, default_value = "write-through")]
+    host_fill: HostFill,
+
+    /// Most blocks in one store of a write-back fill, as one evicted radix node holds.
+    #[clap(long, default_value = "64")]
+    write_back_event_blocks: usize,
 }
 
 impl LowerTierArgs {
@@ -226,6 +235,14 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
     }
     if args.lower_tier.kvcr_blocks.is_some() && args.lower_tier.num_host_blocks.is_none() {
         anyhow::bail!("--kvcr-blocks needs --num-host-blocks");
+    }
+    if args.lower_tier.host_fill == HostFill::WriteBack {
+        let Some(num_host_blocks) = args.lower_tier.num_host_blocks else {
+            anyhow::bail!("--host-fill write-back needs --num-host-blocks");
+        };
+        if !(1..=num_host_blocks).contains(&args.lower_tier.write_back_event_blocks) {
+            anyhow::bail!("--write-back-event-blocks must be from 1 to --num-host-blocks");
+        }
     }
     if args.common.mooncake_trace_path.is_none() {
         return Ok(());
@@ -473,6 +490,34 @@ fn print_open_loop_result(result: &OpenLoopResult) {
                 .bytes_per_membership
                 .map_or("?".to_string(), |bytes| format!("{bytes:.1}")),
         );
+        for (name, tier) in [("CPU tier", &lower.cpu_tier), ("KVCR tier", &lower.kvcr)] {
+            println!(
+                "{name} stores: {} events, {} blocks | before their parent: {} events, {} blocks | of 1 / 2-15 / 16-255 / 256+ blocks: {:?}",
+                tier.stored_events,
+                tier.stored_blocks,
+                tier.before_parent_events,
+                tier.before_parent_blocks,
+                tier.stored_events_by_blocks,
+            );
+        }
+        let runs = &lower.runs;
+        println!(
+            "Lower-tier runs: {} runs | {} blocks stored, {} held | {} owner segments | longest {} | of 1 / 2-15 / 16-255 / 256+ blocks: {:?}",
+            runs.runs,
+            runs.stored_blocks,
+            runs.held_blocks,
+            runs.segments,
+            runs.longest_run,
+            runs.runs_by_length,
+        );
+        println!(
+            "Lower-tier run starts: root / absent parent / branch / after a run's end: {:?} ({} joinable) | {} blocks unheld, {} trailing | {} spare slots",
+            runs.runs_by_start,
+            runs.joinable_runs,
+            runs.stored_blocks - runs.held_blocks,
+            runs.unheld_trailing_blocks,
+            runs.spare_slots,
+        );
     }
     if !result.backend_timing_report.is_empty() {
         println!("{}", result.backend_timing_report);
@@ -534,6 +579,12 @@ fn run_provenance(args: &Args, config: &MooncakeIndexerConfig) -> anyhow::Result
             .lower_tier
             .num_host_blocks
             .map(|_| args.lower_tier.kv_cache_bytes_per_token),
+        host_fill: args
+            .lower_tier
+            .num_host_blocks
+            .map(|_| args.lower_tier.host_fill),
+        write_back_event_blocks: (args.lower_tier.host_fill == HostFill::WriteBack)
+            .then_some(args.lower_tier.write_back_event_blocks),
     })
 }
 
@@ -554,8 +605,10 @@ async fn prepare_benchmark(
     };
 
     let traces = args.common.load_mooncake_trace(path)?;
+    // A write-back CPU tier is derived from the device stream of an engine without host offload.
+    let write_through = args.lower_tier.host_fill == HostFill::WriteThrough;
     let artifacts = match args.lower_tier.num_host_blocks {
-        Some(num_host_blocks) => {
+        Some(num_host_blocks) if write_through => {
             let engine = host_offload_mock_engine_args(
                 args.common.num_gpu_blocks,
                 args.common.block_size as usize,
@@ -569,7 +622,7 @@ async fn prepare_benchmark(
             )
             .await?
         }
-        None => {
+        _ => {
             generate_replay_artifacts(
                 &traces,
                 args.common.num_gpu_blocks,
@@ -581,6 +634,12 @@ async fn prepare_benchmark(
     };
     drop(traces);
     let mut merged = merge_worker_traces(artifacts, args.common.block_size)?;
+    if let Some(num_host_blocks) = args.lower_tier.num_host_blocks
+        && !write_through
+    {
+        merged = merged
+            .with_write_back_layer(num_host_blocks, args.lower_tier.write_back_event_blocks)?;
+    }
     if args.lower_tier.num_host_blocks.is_some() && args.lower_tier.kvcr_blocks() > 0 {
         merged = merged.with_kvcr_layer(args.lower_tier.kvcr_blocks())?;
     }

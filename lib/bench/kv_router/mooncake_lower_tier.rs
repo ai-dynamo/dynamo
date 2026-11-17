@@ -5,26 +5,28 @@
 //!
 //! A vLLM worker with KVCR publishes two host-tier streams, and the router indexes both in its
 //! `LowerTierIndexers`:
-//! - vLLM's CPU offload tier, owned by the worker: the mocker's `native_host_offload` writes each
-//!   computed prompt block through to host and evicts LRU.
+//! - The CPU offload tier, owned by the worker. Filled by write-through, it is vLLM's: the
+//!   mocker's `native_host_offload` writes each computed prompt block through to host and evicts
+//!   LRU. Filled by write-back ([`derive_write_back_layer`]), a block reaches it when the device
+//!   evicts it, so a chain arrives tail first.
 //! - KVCR's DRAM tier, owned by the worker's KVCR cache owner: [`derive_kvcr_layer`] copies every
 //!   completed CPU-tier store into it, with its own capacity and LRU.
 //!
 //! Each query is the router's lookup (`LookupPipeline::find_matches_by_tier`): the CRTC device
 //! match first, which seeds every worker's lower-tier walk.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use dynamo_kv_events::event::{
-    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
 };
 use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_kv_indexer::host::{
     ConcurrentRadixTreeCompressed, KvIndexerInterface, KvIndexerMetrics, LowerTierIndexers,
     LowerTierQueryOptions, MatchDetails, ResidencyProjection, ResidencyRoutingSnapshot,
-    RouterHintSourceMetadata,
+    RouterHintSourceMetadata, RunCensus,
 };
 use dynamo_router_protocol::identity::{
     CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
@@ -78,16 +80,27 @@ pub(crate) fn routing_snapshot(
     ))
 }
 
-/// One worker's KVCR DRAM tier: an LRU set of block hashes. `order` holds (tick, hash) per touch;
+/// When a block reaches the CPU offload tier.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum HostFill {
+    /// When it is computed, parent first: vLLM's CPU offload.
+    #[default]
+    WriteThrough,
+    /// When the device evicts it, tail first: SGLang HiCache's `write_back`.
+    WriteBack,
+}
+
+/// One worker's host tier: an LRU set of block hashes. `order` holds (tick, hash) per touch;
 /// entries whose tick is no longer current are skipped on eviction.
-struct KvcrCache {
+struct HostLru {
     capacity: usize,
     tick: u64,
     resident: HashMap<u64, u64>,
     order: VecDeque<(u64, u64)>,
 }
 
-impl KvcrCache {
+impl HostLru {
     fn new(capacity: usize) -> Self {
         Self {
             capacity,
@@ -132,7 +145,7 @@ pub(crate) fn derive_kvcr_layer(
     timeline: Vec<WorkerTrace>,
     capacity: usize,
 ) -> anyhow::Result<Vec<WorkerTrace>> {
-    let mut cache = KvcrCache::new(capacity);
+    let mut cache = HostLru::new(capacity);
     let mut event_id = 0u64;
     let mut out = Vec::with_capacity(timeline.len());
     for entry in timeline {
@@ -200,6 +213,137 @@ pub(crate) fn derive_kvcr_layer(
                 blocks: blocks[start..end].to_vec(),
             }));
             start = end;
+        }
+    }
+    Ok(out)
+}
+
+/// A device block as its `Stored` event described it.
+struct DeviceBlock {
+    parent: Option<ExternalSequenceBlockHash>,
+    position: Option<u32>,
+    block: KvCacheStoredBlockData,
+}
+
+/// Builds one worker's CPU tier as a write-back cache, from a timeline with no host tier: a block
+/// is written to host when the device evicts it. Each device `Removed` is followed by the host's
+/// events for the evicted blocks it does not hold. A stretch of a chain goes out tail first, in
+/// `Stored` events of at most `event_blocks` blocks, each in chain order, as SGLang's HiCache
+/// publishes one store per evicted radix node, leaves first. The host evicts LRU, a chain's tail
+/// first, and publishes the `Removed` ahead of the store that needed the room.
+pub(crate) fn derive_write_back_layer(
+    timeline: Vec<WorkerTrace>,
+    capacity: usize,
+    event_blocks: usize,
+) -> anyhow::Result<Vec<WorkerTrace>> {
+    anyhow::ensure!(
+        (1..=capacity).contains(&event_blocks),
+        "a write-back event holds 1 to {capacity} blocks, the host tier's capacity"
+    );
+    let mut host = HostLru::new(capacity);
+    let mut device: HashMap<u64, DeviceBlock> = HashMap::new();
+    let mut event_id = 0u64;
+    let mut out = Vec::with_capacity(timeline.len());
+    for entry in timeline {
+        let evicted = match &entry.entry {
+            WorkerTraceEntry::Event {
+                event,
+                storage_tier,
+                ..
+            } if storage_tier.is_gpu() => match &event.data {
+                KvCacheEventData::Stored(store) => {
+                    let mut parent = store.parent_hash;
+                    for (index, block) in store.blocks.iter().enumerate() {
+                        let position = store.start_position.map(|start| start + index as u32);
+                        device.insert(
+                            block.block_hash.0,
+                            DeviceBlock {
+                                parent,
+                                position,
+                                block: block.clone(),
+                            },
+                        );
+                        parent = Some(block.block_hash);
+                    }
+                    None
+                }
+                KvCacheEventData::Removed(remove) => {
+                    Some((remove.block_hashes.clone(), event.dp_rank))
+                }
+                KvCacheEventData::Cleared => None,
+            },
+            WorkerTraceEntry::Event { .. } => {
+                anyhow::bail!("a write-back fill needs a timeline without host-tier events")
+            }
+            WorkerTraceEntry::Request(_) => None,
+        };
+        let timestamp_us = entry.timestamp_us;
+        out.push(entry);
+        let Some((evicted, dp_rank)) = evicted else {
+            continue;
+        };
+        let mut push = |data| {
+            out.push(WorkerTrace {
+                timestamp_us,
+                entry: WorkerTraceEntry::Event {
+                    event: KvCacheEvent {
+                        event_id,
+                        data,
+                        dp_rank,
+                    },
+                    storage_tier: StorageTier::HostPinned,
+                    cache_owner: false,
+                },
+            });
+            event_id += 1;
+        };
+
+        // A block the host still holds is not written again; the eviction makes it recent.
+        let mut writes = Vec::new();
+        for hash in &evicted {
+            if host.resident.contains_key(&hash.0) {
+                host.touch(hash.0);
+            } else if device.contains_key(&hash.0) {
+                writes.push(hash.0);
+            }
+        }
+        let written: HashSet<u64> = writes.iter().copied().collect();
+        let parent_of = |hash: u64| device[&hash].parent.map(|parent| parent.0);
+        let parents: HashSet<u64> = writes.iter().filter_map(|&hash| parent_of(hash)).collect();
+        let mut taken = HashSet::new();
+        // From each block with no evicted child, up its chain: one stretch, tail first.
+        for &leaf in writes.iter().filter(|hash| !parents.contains(hash)) {
+            let mut stretch = Vec::new();
+            let mut next = Some(leaf);
+            while let Some(hash) = next
+                && written.contains(&hash)
+                && taken.insert(hash)
+            {
+                stretch.push(hash);
+                next = parent_of(hash);
+            }
+            for event in stretch.chunks(event_blocks) {
+                // Tail to head, so the tail is the first of them to be evicted.
+                for &hash in event {
+                    host.touch(hash);
+                }
+                let removed = host.evict_overflow();
+                if !removed.is_empty() {
+                    push(KvCacheEventData::Removed(KvCacheRemoveData {
+                        block_hashes: removed,
+                    }));
+                }
+                let head = &device[&event[event.len() - 1]];
+                push(KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: head.parent,
+                    start_position: head.position,
+                    blocks: event
+                        .iter()
+                        .rev()
+                        .map(|hash| device[hash].block.clone())
+                        .collect(),
+                }));
+            }
         }
     }
     Ok(out)
@@ -309,11 +453,12 @@ fn heap_allocated() -> anyhow::Result<Option<(Allocator, u64)>> {
 pub(crate) struct Footprint {
     pub(crate) cpu_tier_memberships: usize,
     pub(crate) kvcr_memberships: usize,
+    pub(crate) runs: RunCensus,
     pub(crate) heap: Option<(Allocator, u64)>,
 }
 
-/// Counts the lower tier's (block, owner) memberships by domain from its dump, then measures its
-/// heap as the drop in allocated bytes when it is dropped.
+/// Counts the lower tier's (block, owner) memberships by domain from its dump, sizes its run
+/// storage, then measures its heap as the drop in allocated bytes when it is dropped.
 pub(crate) async fn footprint<T>(run: LowerTierRun<T>) -> anyhow::Result<Footprint> {
     let tier = run.indexers.get_or_create(StorageTier::HostPinned);
     let (mut cpu_tier_memberships, mut kvcr_memberships) = (0, 0);
@@ -325,6 +470,7 @@ pub(crate) async fn footprint<T>(run: LowerTierRun<T>) -> anyhow::Result<Footpri
             }
         }
     }
+    let runs = tier.backend().run_census();
     drop(tier);
     let loaded = heap_allocated()?;
     drop(run);
@@ -332,8 +478,217 @@ pub(crate) async fn footprint<T>(run: LowerTierRun<T>) -> anyhow::Result<Footpri
     Ok(Footprint {
         cpu_tier_memberships,
         kvcr_memberships,
+        runs,
         heap: loaded
             .zip(dropped)
             .map(|((allocator, loaded), (_, dropped))| (allocator, loaded.saturating_sub(dropped))),
     })
+}
+
+// These run in `tests/mooncake_trace.rs`, which includes this file. The benchmark binary builds
+// in test mode without the harness, which drops the tests and leaves what they use unused.
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+mod tests {
+    use dynamo_bench::kv_router_common::replay::{
+        WorkerReplayArtifacts, generate_replay_artifacts, process_mooncake_trace,
+    };
+    use dynamo_kv_indexer::host::ThreadPoolIndexer;
+    use dynamo_mocker::replay::ReplayTimedKvEvent;
+
+    use super::super::mooncake_open_loop::{
+        OpenLoopConfig, prepare_mooncake_corpus, prepare_open_loop_trial, run_open_loop,
+    };
+    use super::super::mooncake_shared::{merge_worker_traces, prepare_scaled_benchmark};
+    use super::*;
+
+    const BLOCK_SIZE: u32 = 128;
+
+    fn stored(parent: Option<u64>, start: u32, hashes: &[u64]) -> KvCacheEventData {
+        KvCacheEventData::Stored(KvCacheStoreData {
+            parent_hash: parent.map(ExternalSequenceBlockHash),
+            start_position: Some(start),
+            blocks: hashes
+                .iter()
+                .map(|&hash| KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(hash),
+                    tokens_hash: LocalBlockHash(hash + 100),
+                    mm_extra_info: None,
+                })
+                .collect(),
+        })
+    }
+
+    fn removed(hashes: &[u64]) -> KvCacheEventData {
+        KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: hashes
+                .iter()
+                .copied()
+                .map(ExternalSequenceBlockHash)
+                .collect(),
+        })
+    }
+
+    #[test]
+    fn write_back_layer_stores_evicted_chains_tail_first() -> anyhow::Result<()> {
+        // The device holds the chain 1..=5 and evicts it leaf first in two batches (99 was never
+        // stored), computes 3..=5 again and evicts them again.
+        let device = [
+            stored(None, 0, &[1, 2, 3, 4, 5]),
+            removed(&[5, 4, 3]),
+            removed(&[2, 1, 99]),
+            stored(Some(2), 2, &[3, 4, 5]),
+            removed(&[5, 4, 3]),
+        ];
+        let host_events = |capacity: usize, event_blocks: usize| -> anyhow::Result<_> {
+            let kv_events = device
+                .iter()
+                .enumerate()
+                .map(|(index, data)| ReplayTimedKvEvent {
+                    event: KvCacheEvent {
+                        event_id: index as u64,
+                        data: data.clone(),
+                        dp_rank: 0,
+                    },
+                    storage_tier: StorageTier::Device,
+                    timestamp_us: 10 * index as u64,
+                })
+                .collect();
+            let artifacts = vec![WorkerReplayArtifacts {
+                requests: Vec::new(),
+                output_signals: Vec::new(),
+                kv_events,
+            }];
+            let merged = merge_worker_traces(artifacts, BLOCK_SIZE)?
+                .with_write_back_layer(capacity, event_blocks)?;
+            let prepared = prepare_scaled_benchmark(merged, 1_000);
+            let events: Vec<KvCacheEventData> = prepared
+                .worker_traces
+                .iter()
+                .next()
+                .unwrap()
+                .iter()
+                .filter_map(|entry| match &entry.entry {
+                    WorkerTraceEntry::Event {
+                        event,
+                        storage_tier: StorageTier::HostPinned,
+                        cache_owner: false,
+                    } => Some(event.data.clone()),
+                    _ => None,
+                })
+                .collect();
+            Ok((events, prepared.totals.cpu_tier))
+        };
+
+        // A host tier of 4 blocks, 2 blocks per store. Each eviction is written tail first; the
+        // host drops its oldest block (5, then 2) to admit a store; 3 and 4, still on host at
+        // the last eviction, are not written again.
+        let (events, cpu_tier) = host_events(4, 2)?;
+        assert_eq!(
+            events,
+            vec![
+                stored(Some(3), 3, &[4, 5]),
+                stored(Some(2), 2, &[3]),
+                removed(&[5]),
+                stored(None, 0, &[1, 2]),
+                removed(&[2]),
+                stored(Some(4), 4, &[5]),
+            ]
+        );
+        assert_eq!(
+            (
+                cpu_tier.stored_events,
+                cpu_tier.stored_blocks,
+                cpu_tier.live_memberships
+            ),
+            (4, 6, 4)
+        );
+        // [4, 5] and [3] arrived before their parents; [1, 2] is a root and 5's parent was held.
+        assert_eq!(
+            (cpu_tier.before_parent_events, cpu_tier.before_parent_blocks),
+            (2, 3)
+        );
+        assert_eq!(cpu_tier.stored_events_by_blocks, [2, 2, 0, 0]);
+
+        // One block per store: every block of an eviction is its own event, tail first.
+        let (events, cpu_tier) = host_events(8, 1)?;
+        assert_eq!(
+            events,
+            vec![
+                stored(Some(4), 4, &[5]),
+                stored(Some(3), 3, &[4]),
+                stored(Some(2), 2, &[3]),
+                stored(Some(1), 1, &[2]),
+                stored(None, 0, &[1]),
+            ],
+            "the host still holds 3..=5 at the last eviction"
+        );
+        assert_eq!(cpu_tier.before_parent_events, 4);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_loop_routes_a_write_back_fill() -> anyhow::Result<()> {
+        let fixture = format!(
+            "{}/testdata/mooncake_trace_1000.jsonl",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        // The fixture records one hash per 512-token trace block. The device evicts into a
+        // host tier of the same size, 8 blocks per store, and KVCR copies it.
+        let traces = process_mooncake_trace(&fixture, 512, 1, 1, 2, 42)?;
+        let artifacts = generate_replay_artifacts(&traces, 1024, BLOCK_SIZE, None).await?;
+        let merged = merge_worker_traces(artifacts, BLOCK_SIZE)?
+            .with_write_back_layer(1024, 8)?
+            .with_kvcr_layer(1024)?;
+        let prepared = prepare_scaled_benchmark(merged, 1_000);
+        let trial = prepare_open_loop_trial(prepare_mooncake_corpus(prepared, 1)?, 2)?;
+        let indexer = Arc::new(ThreadPoolIndexer::new(
+            ConcurrentRadixTreeCompressed::new(),
+            2,
+            BLOCK_SIZE,
+        ));
+        let result = run_open_loop(
+            "concurrent-radix-tree-compressed",
+            indexer,
+            Some(LowerTierRun::crtc(2, BLOCK_SIZE, None, true)),
+            trial,
+            OpenLoopConfig {
+                query_lanes: 2,
+                issuer_threads: 3,
+                spin_us: 50,
+                issue_lag_diagnostic_threshold_us: 250,
+                pre_run_quiescence_ms: 0,
+                issuer_cpus: Vec::new(),
+                query_issuer_cpu: None,
+                backend_cpus: Vec::new(),
+            },
+        )
+        .await?;
+
+        assert!(
+            result.failure_reasons.is_empty(),
+            "{:?}",
+            result.failure_reasons
+        );
+        let lower = result
+            .lower_tier
+            .expect("a lower-tier run reports its lower tier");
+        assert!(
+            lower.cpu_tier.before_parent_events > 0 && lower.kvcr.removed_events > 0,
+            "a write-back fill stores blocks before their parents, and KVCR evicts"
+        );
+        assert_eq!(
+            lower.cpu_tier_indexed_memberships,
+            lower.cpu_tier.live_memberships
+        );
+        assert_eq!(lower.kvcr_indexed_memberships, lower.kvcr.live_memberships);
+        // Stores of 8 blocks that arrive before their parents still build long runs: each
+        // goes in front of the run that starts after it.
+        assert!(
+            lower.runs.stored_blocks > 16 * lower.runs.runs,
+            "{:?}",
+            lower.runs
+        );
+        Ok(())
+    }
 }

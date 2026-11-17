@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_kv_events::event::RouterEvent;
+use dynamo_kv_indexer::host::order_lower_tier_dump;
 use dynamo_router_protocol::worker::{DpRank, WorkerId};
 use std::future::Future;
 
@@ -91,7 +92,7 @@ impl RecoveryTarget for IndexerRecoveryTarget {
             RecoveryResetReason::Lifecycle,
         )
         .await?;
-        for event in events {
+        for event in order_lower_tier_dump(events) {
             self.admit_event(publisher_id, event).await?;
         }
         Ok(())
