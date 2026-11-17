@@ -489,7 +489,7 @@ func TestBugDGD_ChangedCompilationCacheDoesNotRestoreStaleVolumeMounts(t *testin
 
 func TestBugDGD_ChangedCompilationCacheSubPathDoesNotRestoreStaleVolumeMount(t *testing.T) {
 	in := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "cache-subpath-changed", Namespace: "ns"},
+		Name: "cache-subpath-changed", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
