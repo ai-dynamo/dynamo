@@ -272,6 +272,16 @@ class ImageLoader:
                 ImageLoader._open_image_sync, image_data, max_pixels, to_rgb
             )
 
+    def _cached_image(self, key: str, max_pixels: int | None) -> Image.Image | None:
+        """Return a cached image under the caller's pixel limit, marking it recently used."""
+        image = self._image_cache.get(key)
+        if image is None:
+            return None
+        self._image_cache.move_to_end(key)
+        if max_pixels is not None and image.width * image.height > max_pixels:
+            raise HttpStatusError(413, "Image exceeds the decoded pixel limit", "image")
+        return image
+
     def _cache_put(self, key: str, image: Image.Image) -> None:
         """Insert into cache if not already present. Sync — no awaits."""
         # A capacity of zero or less means caching is off. Falling through would
@@ -469,19 +479,14 @@ class ImageLoader:
             if key is None:
                 return await self._fetch_and_process(None, normalized_url, max_pixels)
 
-            if key in self._image_cache:
+            cached = self._cached_image(key, max_pixels)
+            if cached is not None:
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
                         "Image found in cache for URL: %s",
                         describe_media_source(image_url),
                     )
-                self._image_cache.move_to_end(key)
-                image = self._image_cache[key]
-                if max_pixels is not None and image.width * image.height > max_pixels:
-                    raise HttpStatusError(
-                        413, "Image exceeds the decoded pixel limit", "image"
-                    )
-                return image
+                return cached
 
             if private_fetch:
                 image = await self._fetch_and_process(key, normalized_url, max_pixels)
@@ -499,6 +504,17 @@ class ImageLoader:
             return await asyncio.shield(self._inflight[key])
 
         if parsed_url.scheme == "data":
+            # Inline images repeat across the turns of a conversation, so key
+            # them by content and skip base64 and image decoding on a hit.
+            key = scope_image_cache_key(
+                f"data:sha256:{hashlib.sha256(normalized_url.encode()).hexdigest()}",
+                cache_scope,
+                session_scoped_cache=self._session_scoped_cache,
+            )
+            if key is not None:
+                cached = self._cached_image(key, max_pixels)
+                if cached is not None:
+                    return cached
             try:
                 with _nvtx.annotate("mm:img:base64_decode", color="lime"):
                     if not parsed_url.path.startswith("image/"):
@@ -508,7 +524,7 @@ class ImageLoader:
                         normalized_url, max_bytes=self._max_bytes()
                     )
                     image_data = BytesIO(image_bytes)
-                return await self._open_image(image_data, max_pixels, self._to_rgb)
+                image = await self._open_image(image_data, max_pixels, self._to_rgb)
             except Image.UnidentifiedImageError as e:
                 logger.error(
                     "Unsupported image format decoding: '%s'",
@@ -537,6 +553,9 @@ class ImageLoader:
                     describe_media_source(image_url),
                 )
                 raise
+            if key is not None:
+                self._cache_put(key, image)
+            return image
 
         # It's not file:, http:, https:, or data:
         raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
