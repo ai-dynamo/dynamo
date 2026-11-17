@@ -33,7 +33,7 @@ Use the exact model alias returned by `GET /v1/models`. Supported inputs, candid
 
 ## Usage
 
-Input usage counts rendered prompts across question executions, not only the shared input text. SGLang scores without decoding output tokens. OpenAI `total_tokens` is the sum of `input_tokens` and `output_tokens`. Cache-read values come from backend measurements; an absent measurement must not be treated as zero. Questions in one request can reuse cached prefixes, but separate requests do not share them.
+Input usage counts rendered prompts across question executions, not only the shared input text. SGLang scores without decoding output tokens. OpenAI `total_tokens` is the sum of `input_tokens` and `output_tokens`. Cache-read values come from backend counters or a profile verified to perform no cache reads; Dynamo returns 500 rather than reporting an unmeasured read count as zero. Questions in one request can reuse cached prefixes, but separate requests do not share them.
 
 > [!NOTE]
 > Dynamo currently always returns `usage.input_tokens_details.cache_write_tokens: 0` because cache-write usage is not measured. This value does not mean that caching is disabled or that no KV blocks were written. The current Decisions response schema requires an integer, so omission, `null`, and `"N/A"` are not supported. Use `cached_tokens` for measured cache reads; it is separate from the unmeasured write count.
