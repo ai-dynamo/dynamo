@@ -126,7 +126,7 @@ The equivalent illustrative SGLang response uses named answers and probability m
 }
 ```
 
-See the [answer-statistic definitions](../../reference/api/decision-apis.md#usage) before using `x_label_mass` or `confidence` in application logic.
+See the [answer-statistic definitions](../../reference/api/decision-apis.md#answer-statistics) before using `x_label_mass` or `confidence` in application logic.
 
 ## Use the Official OpenAI SDK
 

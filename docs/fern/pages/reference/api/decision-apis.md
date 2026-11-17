@@ -38,6 +38,8 @@ Input usage counts rendered prompts across question executions, not only the sha
 > [!NOTE]
 > Dynamo currently always returns `usage.input_tokens_details.cache_write_tokens: 0` because cache-write usage is not measured. This value does not mean that caching is disabled or that no KV blocks were written. The current Decisions response schema requires an integer, so omission, `null`, and `"N/A"` are not supported. Use `cached_tokens` for measured cache reads; it is separate from the unmeasured write count.
 
+## Answer Statistics
+
 `x_label_mass` is a Dynamo extension on Jev answers reporting candidate vocabulary mass, not another conditional choice probability. It is not added to OpenAI answer objects. `confidence` is an executor-derived statistic, not a calibrated probability of correctness.
 
 ## Errors and Headers
