@@ -214,6 +214,7 @@ def _load_processor_module(
         "dynamo.llm.exceptions",
         HttpError=type("HttpError", (Exception,), {}),
         InvalidArgument=type("InvalidArgument", (Exception,), {}),
+        RoutedEngineError=type("RoutedEngineError", (Exception,), {}),
         Unknown=type("Unknown", (Exception,), {}),
         WorkerUnavailable=type("WorkerUnavailable", (Exception,), {}),
     )
