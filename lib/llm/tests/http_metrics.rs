@@ -931,6 +931,130 @@ async fn test_responses_non_streaming_observes_metrics_before_backend_error_pref
     .await;
 }
 
+/// Family names declared by `# TYPE` lines, in order, duplicates kept.
+fn declared_families(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("# TYPE "))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .map(str::to_string)
+        .collect()
+}
+
+/// A frontend wired to a DistributedRuntime exports over OTLP whatever the
+/// DRT's `metric_families_combined()` returns. Everything the frontend's
+/// `/metrics` serves must be in that set -- in particular its own
+/// `dynamo_frontend_*` metrics, which live in the HTTP service's registry
+/// rather than in one the DRT created. And `/metrics`, which already merged
+/// the two, must still declare each family exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_frontend_metrics_reach_the_otlp_export_path() {
+    use dynamo_runtime::metrics::MetricsHierarchy;
+    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+
+    temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
+        let drt = DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let drt_metrics = drt.get_metrics_registry().clone();
+        // A metric the DRT tree owns, so the scrape has both halves to merge.
+        drt_metrics
+            .add_metric(Box::new(
+                prometheus::IntCounter::new(
+                    "dynamo_component_otlp_parity_probe_total",
+                    "Probe registered on the DRT tree",
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+
+        let (listener, port) = bind_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .enable_chat_endpoints(true)
+            .drt_metrics(Some(drt_metrics.clone()))
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        let manager = state.manager();
+        let token = CancellationToken::new();
+        let cancel_token = token.clone();
+        let task =
+            tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+
+        let card = ModelDeploymentCard::with_name_only("otlpmodel");
+        manager
+            .add_chat_completions_model("otlpmodel", card.mdcsum(), Arc::new(MockModelEngine {}))
+            .unwrap();
+        wait_for_metrics_ready(port).await;
+
+        // Serve one request so the per-model frontend families have samples;
+        // a labelled family with no children is not gathered at all.
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("http://localhost:{port}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "otlpmodel",
+                "stream": true,
+                "max_tokens": 8,
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success(), "{response:?}");
+        let _ = response.bytes().await.unwrap();
+
+        let scrape = client
+            .get(format!("http://localhost:{port}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let declared = declared_families(&scrape);
+        let scraped: std::collections::BTreeSet<String> = declared.iter().cloned().collect();
+        assert_eq!(
+            declared.len(),
+            scraped.len(),
+            "/metrics declares a family more than once:\n{scrape}"
+        );
+        for name in [
+            "dynamo_frontend_requests_total",
+            "dynamo_frontend_request_duration_seconds",
+            "dynamo_component_otlp_parity_probe_total",
+        ] {
+            assert!(scraped.contains(name), "{name} missing from /metrics");
+        }
+
+        // What the OTLP exporter sends: `otlp_export::run` exports exactly
+        // `metric_families_combined()` of the DRT registry.
+        let exported: std::collections::BTreeSet<String> = drt_metrics
+            .metric_families_combined()
+            .unwrap()
+            .families
+            .iter()
+            .map(|family| family.name().to_string())
+            .collect();
+        let missing: Vec<_> = scraped.difference(&exported).collect();
+        let extra: Vec<_> = exported.difference(&scraped).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "/metrics and the OTLP export path disagree.\n\
+             on /metrics but not exported: {missing:?}\n\
+             exported but not on /metrics: {extra:?}"
+        );
+
+        cancel_token.cancel();
+        task.await.unwrap().unwrap();
+        drt.shutdown();
+    })
+    .await;
+}
+
 // Integration tests that require distributed runtime with etcd
 #[cfg(feature = "integration")]
 mod integration_tests {
