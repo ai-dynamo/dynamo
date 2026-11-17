@@ -514,7 +514,6 @@ mod tests {
                 emitted.extend(exchange.finish().unwrap());
                 assert_eq!(emitted.len(), if stream { 2 } else { 1 }, "{name}");
                 for response in emitted {
-                    // A missing key, not an empty array, when prefill has no value.
                     assert_eq!(
                         response.pointer("/meta_info/input_token_logprobs"),
                         expected.as_ref(),
