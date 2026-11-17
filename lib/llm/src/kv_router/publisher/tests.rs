@@ -947,7 +947,7 @@ mod tests_startup_helpers {
         let cleanup_discovery = discovery.clone();
         let processor = tokio::spawn(async move {
             let (publisher, _) = MockComponent::new();
-            start_event_processor(publisher, 1, processor_token, rx, None, None).await;
+            start_event_processor(publisher, 1, processor_token, rx, None, None, false).await;
             cleanup_discovery.unregister(source_instance).await.unwrap();
         });
         let listener_handle = tokio::spawn(async {});
@@ -1020,6 +1020,7 @@ mod tests_startup_helpers {
             rx,
             None,
             Some(10_000),
+            false,
         ));
 
         tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
@@ -1079,6 +1080,7 @@ mod tests_startup_helpers {
             rx,
             Some(local_indexer.clone()), // arc::clone just increments atomic counters
             Some(10_000),
+            false,
         ));
 
         // Wait for processing
@@ -1164,6 +1166,7 @@ mod tests_startup_helpers {
             rx,
             Some(local_indexer.clone()),
             Some(10_000),
+            false,
         ));
 
         // Then remove same event
@@ -1256,6 +1259,7 @@ mod tests_startup_helpers {
             rx,
             Some(local_indexer.clone()),
             Some(10_000),
+            false,
         ));
 
         tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
@@ -1326,6 +1330,7 @@ mod tests_startup_helpers {
             rx,
             Some(local_indexer),
             Some(10_000),
+            false,
         ));
 
         tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
@@ -1887,6 +1892,7 @@ mod tests_startup_helpers {
             worker_rx,
             Some(local_indexer_1.clone()),
             Some(10), // 10ms batching timeout
+            false,
         ));
 
         // === SETUP: Router Components ===
@@ -2576,6 +2582,7 @@ mod event_processor_tests {
                 Some(indexer.clone()),
                 Some(60_000),
                 DEFAULT_MAX_BATCH_BLOCKS,
+                false,
             ));
             let (done, ack) = tokio::sync::oneshot::channel();
             // A missing parent reaches the index and is rejected there, as on the live path.
@@ -2618,6 +2625,7 @@ mod event_processor_tests {
             None,
             None,
             DEFAULT_MAX_BATCH_BLOCKS,
+            false,
         ));
 
         tx.send(
@@ -2641,6 +2649,47 @@ mod event_processor_tests {
     }
 
     #[tokio::test]
+    async fn test_idempotent_stores_publish_each_blocks_only_remove() {
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
+        let publisher = MockPublisher::new();
+        let handle = tokio::spawn(run_event_processor_loop(
+            publisher.clone(),
+            1,
+            CancellationToken::new(),
+            rx,
+            None,
+            None,
+            DEFAULT_MAX_BATCH_BLOCKS,
+            true,
+        ));
+
+        // SGLang announces a block more than once and removes it once: a host block after an
+        // auxiliary backup, a device block when a storage backend re-announces a split parent.
+        tx.send(local_host_event(stored_event(0, None, 10, 0)).into())
+            .unwrap();
+        tx.send(local_host_event(stored_event(1, None, 10, 0)).into())
+            .unwrap();
+        tx.send(local_host_event(removed_event(2, 10, 0)).into())
+            .unwrap();
+        tx.send(local_gpu_event(stored_event(3, None, 20, 0)).into())
+            .unwrap();
+        tx.send(local_gpu_event(stored_event(4, None, 20, 0)).into())
+            .unwrap();
+        tx.send(local_gpu_event(removed_event(5, 20, 0)).into())
+            .unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        let remove_tiers: Vec<StorageTier> = publisher
+            .get_events()
+            .into_iter()
+            .filter(|event| matches!(event.event.data, KvCacheEventData::Removed(_)))
+            .map(|event| event.storage_tier)
+            .collect();
+        assert_eq!(remove_tiers, [StorageTier::HostPinned, StorageTier::Device]);
+    }
+
+    #[tokio::test]
     async fn test_native_list_merges_removals_and_preserves_type_order() {
         let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
@@ -2652,6 +2701,7 @@ mod event_processor_tests {
             None,
             None,
             DEFAULT_MAX_BATCH_BLOCKS,
+            false,
         ));
 
         tx.send(
@@ -2689,6 +2739,7 @@ mod event_processor_tests {
             None,
             None,
             DEFAULT_MAX_BATCH_BLOCKS,
+            false,
         ));
 
         let host_removed = removed_event(5, 51, 1);
@@ -2772,6 +2823,7 @@ mod event_processor_tests {
             None,
             None,
             DEFAULT_MAX_BATCH_BLOCKS,
+            false,
         ));
 
         tx.send(local_gpu_event(removed_event(0, 30, 0)).into())
@@ -2801,6 +2853,7 @@ mod event_processor_tests {
             None,
             Some(1_000),
             DEFAULT_MAX_BATCH_BLOCKS,
+            false,
         ));
 
         tx.send(local_gpu_event(removed_event(0, 40, 0)).into())
@@ -2830,6 +2883,7 @@ mod event_processor_tests {
             None,
             Some(1_000),
             DEFAULT_MAX_BATCH_BLOCKS,
+            false,
         ));
 
         let events = (0..=DEFAULT_MAX_BATCH_BLOCKS * 2)
@@ -2902,6 +2956,7 @@ mod event_processor_tests {
             None,
             Some(1_000),
             DEFAULT_MAX_BATCH_BLOCKS,
+            false,
         ));
 
         let block_count = DEFAULT_MAX_BATCH_BLOCKS + 1;
@@ -2970,6 +3025,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                false,
             )
             .await
         });
@@ -3067,6 +3123,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                false,
             )
             .await
         });
@@ -3166,6 +3223,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                false,
             )
             .await
             // SLEEP HERE?! so that events are not batched!
@@ -3235,6 +3293,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                false,
             )
             .await
         });
@@ -3382,6 +3441,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                false,
             )
             .await
         });
@@ -3455,6 +3515,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                false,
             )
             .await
         });
@@ -3526,6 +3587,7 @@ mod event_processor_tests {
                 None,
                 Some(100),
                 DEFAULT_MAX_BATCH_BLOCKS,
+                false,
             )
             .await
         });
@@ -3577,6 +3639,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                false,
             )
             .await
         });
@@ -3638,6 +3701,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                false,
             )
             .await
         });
@@ -3736,6 +3800,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                false,
             )
             .await
         });
@@ -3828,6 +3893,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                false,
             )
             .await
         });
@@ -3901,6 +3967,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                false,
             )
             .await
         });
@@ -4030,6 +4097,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                false,
             )
             .await
         });

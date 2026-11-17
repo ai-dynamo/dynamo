@@ -69,6 +69,12 @@ impl KvStateIngressProtocol {
     pub fn has_process_local_inventory(self) -> bool {
         matches!(self, Self::SglangHiCacheV1)
     }
+
+    /// SGLang emits one remove per block however many times it stored it, so
+    /// the publisher must not count its stores.
+    pub fn has_idempotent_stores(self) -> bool {
+        matches!(self, Self::SglangHiCacheV1)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

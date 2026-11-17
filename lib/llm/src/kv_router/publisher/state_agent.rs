@@ -1010,7 +1010,8 @@ impl KvStateAgent {
                 next_outbound_id: 1,
                 next_attachment_generation: 1,
                 source_cursor: SourceCursorState::default(),
-                dedup: EventDedupFilter::new(),
+                dedup: EventDedupFilter::new()
+                    .with_idempotent_worker_stores(config.ingress_protocol.has_idempotent_stores()),
                 worker_domain_failed: false,
                 cache_owner_domain_failed: false,
                 source_failed: false,

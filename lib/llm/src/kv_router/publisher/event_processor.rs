@@ -25,9 +25,10 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
     local_indexer: Option<Arc<LocalKvIndexer>>,
     timeout_ms: Option<u64>,
     max_batch_blocks: usize,
+    idempotent_stores: bool,
 ) {
     let mut batching_state = BatchingState::new(max_batch_blocks);
-    let mut dedup = EventDedupFilter::new();
+    let mut dedup = EventDedupFilter::new().with_idempotent_worker_stores(idempotent_stores);
     let mut last_raw_input_id: Option<u64> = None;
 
     loop {
@@ -226,6 +227,7 @@ pub(super) async fn start_event_processor<P: RouterEventBatchSink + 'static>(
     rx: mpsc::UnboundedReceiver<super::PublisherInput>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     batching_timeout_ms: Option<u64>,
+    idempotent_stores: bool,
 ) {
     run_event_processor_loop(
         publisher,
@@ -235,6 +237,7 @@ pub(super) async fn start_event_processor<P: RouterEventBatchSink + 'static>(
         local_indexer,
         batching_timeout_ms,
         DEFAULT_MAX_BATCH_BLOCKS,
+        idempotent_stores,
     )
     .await
 }

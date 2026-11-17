@@ -46,6 +46,15 @@ pending across native lists until the deadline or another flush condition.
 through. Removes only pass through when the refcount for a block reaches zero;
 unknown removes pass through defensively.
 
+Worker-domain events are not counted on any tier when the ZMQ source sets
+`idempotent_stores`, as Dynamo's SGLang worker, the SGLang sidecar and
+`sglang_hicache_v1` state-agent slots do. SGLang emits one remove per block
+however many times it stored it: it announces a host block again when a later
+auxiliary backup covers the same node, and some storage backends re-announce a
+parent node after a split. A counted block would outlive its only remove. vLLM
+emits a remove per store and keeps the refcount. Do not set it for an engine
+that can hold two copies of a block under one published hash in one tier.
+
 `sinks.rs` applies the emitted router event to the optional local indexer before
 publishing it externally. Both side effects receive the same `RouterEvent`.
 

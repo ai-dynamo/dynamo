@@ -136,6 +136,7 @@ pub(crate) async fn relay(
                     expected_rank: Some(rank),
                     liveness: heartbeat_timeout.map(|timeout| (rank, timeout)),
                     engine_owned_mm_identity: false,
+                    idempotent_stores: false,
                     recovery: None,
                 }),
                 leader_config.enable_local_indexer,

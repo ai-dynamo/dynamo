@@ -106,6 +106,11 @@ pub enum KvEventSourceConfig {
         /// above `MM_PAD_SHIFT_VALUE` is excluded from the index. Otherwise only
         /// values that do not fit in `u32` are excluded.
         engine_owned_mm_identity: bool,
+        /// The source emits one remove per block however many times it stored
+        /// it (SGLang), so the publisher does not count repeated Worker-domain
+        /// stores on any tier. Otherwise stores are refcounted, because vLLM
+        /// emits a remove per store.
+        idempotent_stores: bool,
         /// Opt-in replay recovery that gates readiness on verified continuity.
         /// Cannot be combined with `liveness`.
         recovery: Option<ZmqRecoveryConfig>,
@@ -170,6 +175,7 @@ impl KvEventSource {
                 expected_rank,
                 liveness,
                 engine_owned_mm_identity,
+                idempotent_stores: _,
                 recovery,
             } => {
                 anyhow::ensure!(
@@ -428,6 +434,13 @@ impl KvEventPublisher {
                 ),
             "KV replay recovery requires the local indexer"
         );
+        let idempotent_stores = matches!(
+            source_config,
+            Some(KvEventSourceConfig::Zmq {
+                idempotent_stores: true,
+                ..
+            })
+        );
         let mut source = None;
         if let Some(config) = source_config {
             source = Some(KvEventSource::start(
@@ -553,6 +566,7 @@ impl KvEventPublisher {
                 rx,
                 local_indexer_clone,
                 batching_timeout_ms,
+                idempotent_stores,
             )
             .await;
 

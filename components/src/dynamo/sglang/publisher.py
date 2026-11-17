@@ -457,6 +457,9 @@ class DynamoSglangPublisher:
                     dp_rank=dp_rank,
                     kv_state_endpoint=self.dynamo_args.kv_state_endpoint,
                     engine_owned_mm_identity=engine_owned_mm_identity,
+                    # SGLang emits one remove per block however many times it
+                    # stored it, so counting stores would swallow the remove.
+                    idempotent_stores=True,
                 )
                 self.kv_publishers.append(publisher)
 

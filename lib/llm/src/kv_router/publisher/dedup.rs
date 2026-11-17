@@ -28,13 +28,35 @@ pub(super) struct EventDedupFilter {
     /// Per-(dp_rank, storage_tier, residency_domain) refcounts.
     per_rank_tier:
         HashMap<(u32, StorageTier, ResidencyDomain), HashMap<ExternalSequenceBlockHash, usize>>,
+    /// See [`Self::with_idempotent_worker_stores`].
+    idempotent_worker_stores: bool,
 }
 
 impl EventDedupFilter {
     pub(super) fn new() -> Self {
         Self {
             per_rank_tier: HashMap::new(),
+            idempotent_worker_stores: false,
         }
+    }
+
+    /// Treat Worker-domain events on every tier as `SetLike` whatever policy
+    /// the caller passes.
+    ///
+    /// SGLang emits one remove per block however many times it stored it: it
+    /// announces a host block again when a later auxiliary backup covers the
+    /// same node, and some storage backends re-announce a parent after a split.
+    /// Counting those stores leaves the count above zero after the block's only
+    /// remove, so the router keeps crediting the worker with a block it no
+    /// longer has.
+    pub(super) fn with_idempotent_worker_stores(mut self, enabled: bool) -> Self {
+        self.idempotent_worker_stores = enabled;
+        self
+    }
+
+    fn is_set_like(&self, residency_domain: ResidencyDomain, policy: EventDedupPolicy) -> bool {
+        policy == EventDedupPolicy::SetLike
+            || (self.idempotent_worker_stores && residency_domain == ResidencyDomain::Worker)
     }
 
     /// Track a store event. Increments refcount for each block hash on the
@@ -48,7 +70,7 @@ impl EventDedupFilter {
         policy: EventDedupPolicy,
         data: &KvCacheStoreData,
     ) {
-        if policy == EventDedupPolicy::SetLike {
+        if self.is_set_like(residency_domain, policy) {
             return;
         }
         let refcounts = self
@@ -71,7 +93,7 @@ impl EventDedupFilter {
         policy: EventDedupPolicy,
         mut data: KvCacheRemoveData,
     ) -> Option<KvCacheRemoveData> {
-        if policy == EventDedupPolicy::SetLike {
+        if self.is_set_like(residency_domain, policy) {
             return (!data.block_hashes.is_empty()).then_some(data);
         }
         let refcounts = self
