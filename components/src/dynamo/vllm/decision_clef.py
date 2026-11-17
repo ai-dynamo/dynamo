@@ -362,6 +362,9 @@ class ClefDecisionExecutor:
             errors = [result for result in results if isinstance(result, BaseException)]
         except TimeoutError as cause:
             errors = [cause]
+        except asyncio.CancelledError:
+            self._stop_admission()
+            raise
         if errors:
             self._stop_admission()
             if completed:

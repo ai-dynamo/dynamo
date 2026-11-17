@@ -665,6 +665,46 @@ async def test_cleanup_timeout_stops_further_admission(executor, wire, monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_cancellation_during_cleanup_closes_admission(executor, wire):
+    cleanup_entered = asyncio.Event()
+    cleanup_cancelled = asyncio.Event()
+
+    async def failed(**kwargs):
+        raise HttpError(502, "native pooling failed")
+        yield
+
+    async def abort(*args):
+        cleanup_entered.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cleanup_cancelled.set()
+            raise
+
+    executor.handler.engine_client.encode.side_effect = failed
+    executor.handler.engine_client.abort.side_effect = abort
+    context = Context()
+    task = asyncio.create_task(executor.execute(wire, context))
+    try:
+        await asyncio.wait_for(cleanup_entered.wait(), timeout=1)
+        assert not executor._unsettled
+        context.cancelled.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+        assert cleanup_cancelled.is_set()
+        assert executor._unsettled
+        assert executor.handler.shutdown_event.is_set()
+        with pytest.raises(HttpError, match="cleanup did not settle"):
+            await executor.execute(wire, Context())
+        assert executor.handler.engine_client.encode.call_count == 1
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.gather(*executor._drains, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("clef_worker", [False, True])
 async def test_raw_pooling_cannot_bypass_clef_executor(executor, clef_worker):
     handler = ClassifyWorkerHandler.__new__(ClassifyWorkerHandler)

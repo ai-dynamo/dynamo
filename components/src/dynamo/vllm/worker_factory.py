@@ -1708,7 +1708,7 @@ SetupMetricsCollectionFn = Callable[..., None]
 
 @dataclass
 class _WorkerLifecycle:
-    """Owns the engine and handler of a prefill, decode, or aggregated worker.
+    """Owns a worker's engine and handler until serving exits.
 
     On exit it shuts the vLLM EngineCore down explicitly. EngineCore is a
     non-daemon child, so leaving it to interpreter exit can block the main
@@ -1717,7 +1717,7 @@ class _WorkerLifecycle:
 
     engine_client: Optional[AsyncLLM] = None
     vllm_config: Optional[VllmConfig] = None
-    handler: Optional[BaseWorkerHandler] = None
+    handler: BaseWorkerHandler | ClassifyWorkerHandler | None = None
     shutdown_event: asyncio.Event | None = None
 
     def __enter__(self) -> "_WorkerLifecycle":
@@ -2382,16 +2382,21 @@ class WorkerFactory:
             _component_gauges,
         ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
 
-        handler = ClassifyWorkerHandler(
-            runtime=runtime,
-            engine=engine_client,
-            config=config,
-            model_config=getattr(vllm_config, "model_config", None),
+        with _WorkerLifecycle(
+            engine_client=engine_client,
+            vllm_config=vllm_config,
             shutdown_event=shutdown_event,
-        )
+        ) as lifecycle:
+            handler = ClassifyWorkerHandler(
+                runtime=runtime,
+                engine=engine_client,
+                config=config,
+                model_config=getattr(vllm_config, "model_config", None),
+                shutdown_event=shutdown_event,
+            )
+            lifecycle.handler = handler
 
-        logger.info("Starting to serve the classify worker endpoint...")
-        try:
+            logger.info("Starting to serve the classify worker endpoint...")
             handler.decision_clef = await initialize_clef(handler, vllm_config, config)
             health_payload = (
                 ClefHealthCheckPayload(config.served_model_name or config.model)
@@ -2422,11 +2427,6 @@ class WorkerFactory:
                     ),
                 ),
             )
-        except Exception as e:
-            logger.error(f"Failed to serve classify worker endpoint: {e}")
-            raise
-        finally:
-            handler.cleanup()
 
     def _maybe_create_failover_metrics(self, config: Config, generate_endpoint):
         """Create + register per-engine failover metrics (shadow mode only).
