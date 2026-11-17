@@ -664,8 +664,11 @@ pub(crate) fn convert_tools(tools: &[ChatCompletionTool]) -> Vec<ToolDefinition>
 pub(crate) fn effective_tools(
     request: &CreateChatCompletionRequest,
 ) -> Result<Cow<'_, [ChatCompletionTool]>, DynamoError> {
-    validate::validated_effective_tools(request)
-        .map_err(|error| invalid_argument(error.to_string(), None))
+    validate::validated_effective_tools(request).map_err(|error| {
+        // This validator reports client request errors, not backend diagnostics.
+        let message = error.to_string();
+        invalid_argument(message.clone(), Some(&message))
+    })
 }
 
 pub(crate) fn effective_tool_definitions(

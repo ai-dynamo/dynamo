@@ -283,11 +283,8 @@ async fn conflicting_tool_schemas_do_not_reach_engine() {
                     assert_openai_error(
                         post_json(&svc, path, body.clone()).await,
                         ExpectedError::Validation,
-                        if is_chat {
-                            "Conflicting definitions for tool 'lookup' in tools[0] and tools[1]"
-                        } else {
-                            "Invalid request"
-                        },
+                        "Conflicting definitions for tool 'lookup' in tools[0] and tools[1]: \
+                         parameter schemas or strict settings differ",
                     ).await;
                     let tools = if namespaced { &mut body["tools"][0]["tools"] } else { &mut body["tools"] };
                     tools.as_array_mut().unwrap().reverse();
@@ -295,6 +292,14 @@ async fn conflicting_tool_schemas_do_not_reach_engine() {
             }
         }
         assert!(svc.engine.take_requests().await.is_empty());
+        for request_type in [RequestType::Unary, RequestType::Stream] {
+            assert_error_metrics(
+                &svc,
+                &Endpoint::Responses,
+                &request_type,
+                &[(ErrorType::Validation, 4), (ErrorType::Internal, 0)],
+            );
+        }
         let mut first = first;
         let mut second = second;
         first["type"] = json!("function");
@@ -320,6 +325,37 @@ async fn conflicting_tool_schemas_do_not_reach_engine() {
         assert_eq!(svc.engine.remaining_scripts().await, 0);
         svc.shutdown().await;
     }).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn responses_backend_validation_diagnostics_remain_private() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let engine = Arc::new(ScriptedChatEngine::new((0..2).map(|_| {
+            Err(dynamo_error(
+                DynamoErrorType::InvalidArgument,
+                "PRIVATE_BACKEND_DIAGNOSTIC=/srv/worker/private",
+            ))
+        })));
+        let svc = HarnessService::start_with_engine(engine).await;
+        for stream in [false, true] {
+            let response = post_json(
+                &svc,
+                "/v1/responses",
+                json!({
+                    "model": MODEL, "input": "hello", "stream": stream
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+            let body: Value = bounded(response.json()).await.unwrap();
+            assert_eq!(body["message"], "Invalid request");
+            assert!(!body.to_string().contains("PRIVATE_BACKEND_DIAGNOSTIC"));
+        }
+        assert_eq!(svc.engine.take_requests().await.len(), 2);
+        svc.shutdown().await;
+    })
+    .await;
 }
 
 #[derive(Clone, Copy)]
