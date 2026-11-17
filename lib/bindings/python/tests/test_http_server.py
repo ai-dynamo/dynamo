@@ -27,6 +27,7 @@ from typing import AsyncGenerator, Dict
 import aiohttp
 import numpy as np
 import pytest
+import pytest_asyncio
 
 from dynamo._core import Context, _raise_routed_http_error
 from dynamo.frontend.utils import PromptLogprobsAccumulator
@@ -155,6 +156,9 @@ class MockHttpEngine:
         if MSG_SETS_RESPONSE_HEADER.lower() in user_message.lower():
             context.set_response_header("x-mock-engine", "set")
 
+        if user_message.startswith("public-http-test:"):
+            status, message = json.loads(user_message.split(":", 1)[1])
+            raise _StatusLikeError(status, message)
         if MSG_CONTAINS_ERROR.lower() in user_message.lower():
             raise HttpError(code=400, message=MSG_CONTAINS_ERROR)
         elif MSG_CONTAINS_STATUS_ERROR.lower() in user_message.lower():
@@ -215,6 +219,24 @@ def test_batch_endpoint_cannot_be_changed_at_runtime():
 
 @pytest.fixture(scope="function", autouse=False)
 async def http_server(request, unused_tcp_port: int, runtime: DistributedRuntime):
+    async for server in _serve_mock_http(request, unused_tcp_port, runtime):
+        yield server
+
+
+@pytest_asyncio.fixture
+async def pixel_limit_http_server(request, unused_tcp_port, tmp_path, monkeypatch):
+    monkeypatch.setenv("DYN_FILE_KV", str(tmp_path))
+    runtime = DistributedRuntime(
+        asyncio.get_running_loop(), "file", "tcp", event_plane="zmq"
+    )
+    try:
+        async for server in _serve_mock_http(request, unused_tcp_port, runtime):
+            yield server
+    finally:
+        runtime.shutdown()
+
+
+async def _serve_mock_http(request, unused_tcp_port: int, runtime: DistributedRuntime):
     """Fixture to start a mock HTTP server using HttpService, contributed by Baseten.
 
     Parametrize indirectly with a bool to set ``wait_for_first_item`` on the
@@ -617,3 +639,61 @@ async def test_chat_engine_response_header(
 def test_set_response_header_without_an_http_response():
     # A context with no HTTP response behind it reports that nothing was set.
     assert Context().set_response_header("x-mock-engine", "set") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("status", "message", "public"),
+    [
+        (413, "Image exceeds the decoded pixel limit", True),
+        (
+            413,
+            "Image exceeds the decoded pixel limit https://example.com/?secret=private",
+            False,
+        ),
+        (413, "private https://example.com/?secret=private", False),
+        (400, "Image exceeds the decoded pixel limit", False),
+    ],
+)
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_image_pixel_limit_public_response(
+    pixel_limit_http_server, stream, status, message, public
+):
+    base_url, model_name = pixel_limit_http_server
+    data = {
+        "model": model_name,
+        "stream": stream,
+        "messages": [
+            {
+                "role": "user",
+                "content": "public-http-test:" + json.dumps([status, message]),
+            }
+        ],
+    }
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10)
+    ) as session:
+        async with session.post(
+            f"{base_url}/v1/chat/completions", json=data
+        ) as response:
+            assert response.status == (200 if stream else status)
+            raw = await response.text()
+    body = (
+        json.loads(raw.split("data:", 1)[1].split("\n\n", 1)[0])
+        if stream
+        else json.loads(raw)
+    )
+    error = body["error"] if stream else body
+    assert error["code"] == status
+    if public:
+        assert error == {
+            "message": "Image exceeds the decoded pixel limit",
+            "type": "invalid_request_error" if stream else "Payload Too Large",
+            "code": 413,
+        }
+    else:
+        assert error["message"] != "Image exceeds the decoded pixel limit"
+        assert "private" not in raw
+        assert "secret" not in raw
