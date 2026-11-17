@@ -1035,7 +1035,7 @@ async fn test_frontend_metrics_reach_the_otlp_export_path() {
             .drt_metrics(Some(drt_metrics.clone()))
             .build()
             .unwrap();
-        let own_registry = service.metrics_registry().clone();
+        let own_registry = service.prometheus_registry().clone();
         let state = service.state_clone();
         let card = ModelDeploymentCard::with_name_only("otlpmodel");
         state
@@ -1094,7 +1094,10 @@ async fn test_frontend_metrics_reach_the_otlp_export_path() {
         );
 
         // --- Second service on the same DRT, no requests yet: none of the
-        // first service's request series may be served or exported.
+        // first service's request series may be served or exported. (Nor are
+        // the process-wide request-plane/tokio/transport/frontend-perf statics:
+        // they are registered once per process, into the first service's
+        // registry only -- see `HttpService::_drt_metrics_attachment`.)
         let (listener, port) = bind_random_port().await;
         let service = HttpService::builder()
             .port(port)

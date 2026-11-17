@@ -981,12 +981,21 @@ pub struct HttpService {
     admin: Option<AdminListener>,
     frontend_load_target: Option<FrontendLoadTarget>,
     /// The registry the HTTP service's own metrics are registered into.
-    metrics_registry: metrics::Registry,
-    /// Keeps `metrics_registry` attached to the DRT's metrics tree (so the
+    prometheus_registry: metrics::Registry,
+    /// Keeps `prometheus_registry` attached to the DRT's metrics tree (so the
     /// DRT's OTLP export and `/metrics` include it) for as long as any clone
-    /// of this service is alive. One service per DRT: a service built later on
-    /// the same DRT while this one is alive would gather both registries, and
-    /// a series both report keeps this one's value.
+    /// of this service is alive. In the dynamic-model path that is until the
+    /// runtime shuts down: the model watcher and `_endpoint_enabler_task` in
+    /// `entrypoint/input/http.rs` hold clones.
+    ///
+    /// One service per DRT is the supported shape:
+    /// - A service built later on the same DRT while this one is alive gathers
+    ///   both registries, and a series both report keeps this one's value.
+    /// - The request-plane, tokio, transport and frontend perf/tokenizer
+    ///   metrics are process-wide statics registered once per process
+    ///   (`ensure_*_registered_prometheus`), so only the first service's
+    ///   registry has them; a service rebuilt on the same DRT after the first
+    ///   is dropped does not serve or export them.
     _drt_metrics_attachment: Option<Arc<dynamo_runtime::metrics::AttachedPrometheusRegistry>>,
 }
 
@@ -1166,8 +1175,8 @@ impl HttpService {
 
     /// The registry this service's own metrics (`dynamo_frontend_*` and the
     /// rest) are registered into.
-    pub fn metrics_registry(&self) -> &metrics::Registry {
-        &self.metrics_registry
+    pub fn prometheus_registry(&self) -> &metrics::Registry {
+        &self.prometheus_registry
     }
 
     pub fn state_clone(&self) -> Arc<State> {
@@ -1967,7 +1976,7 @@ impl HttpServiceConfigBuilder {
                 runtime,
                 namespace: crate::frontend_load::frontend_load_namespace(config.namespace),
             }),
-            metrics_registry: registry,
+            prometheus_registry: registry,
             _drt_metrics_attachment: drt_metrics_attachment,
         })
     }

@@ -1394,6 +1394,14 @@ pub struct AttachedPrometheusRegistry {
     child: Arc<std::sync::RwLock<prometheus::Registry>>,
 }
 
+impl std::fmt::Debug for AttachedPrometheusRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttachedPrometheusRegistry")
+            .field("attached", &(self.parent.strong_count() > 0))
+            .finish_non_exhaustive()
+    }
+}
+
 impl Drop for AttachedPrometheusRegistry {
     fn drop(&mut self) {
         if let Some(parent) = self.parent.upgrade() {

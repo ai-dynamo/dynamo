@@ -3118,8 +3118,10 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
 /// family declared once. `registry` must then be attached to that tree with
 /// [`MetricsRegistry::add_prometheus_registry`](dynamo_runtime::metrics::MetricsRegistry::add_prometheus_registry)
 /// for its families to appear; `HttpService::build` does this once the service
-/// is fully built. Without `drt_metrics`, `/metrics` serves `registry` alone.
-pub fn router(
+/// is fully built. Without `drt_metrics` (standalone KVBM), `/metrics` serves
+/// `registry` alone. Crate-private so that a DRT-backed router cannot be wired
+/// without that attachment from outside.
+pub(crate) fn router(
     registry: Registry,
     path: Option<String>,
     drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,
