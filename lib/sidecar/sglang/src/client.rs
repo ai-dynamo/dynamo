@@ -224,7 +224,7 @@ fn validate_endpoint(endpoint: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
+const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Connect and discover the engine before the worker registers, which fixes
 /// its role and identity.
@@ -246,6 +246,57 @@ pub(crate) async fn bootstrap_discover(
     discovery::engine_info(discovery)
 }
 
+/// What one try of a startup wait found.
+pub(crate) enum Retry<T> {
+    /// Stop with this result.
+    Stop(Result<T, DynamoError>),
+    /// Try again after the retry interval, for this reason.
+    Again(String),
+}
+
+/// Run `attempt` every `retry_interval` until it stops. Retries are logged at
+/// most every `RETRY_LOG_INTERVAL`, so a slow startup is neither silent nor
+/// noisy. When the next try would start at or after `deadline`, the last
+/// reason to retry goes to `timed_out` instead.
+pub(crate) async fn retry_until<T, F>(
+    retry_interval: Duration,
+    deadline: Instant,
+    waiting: &str,
+    mut attempt: impl FnMut() -> F,
+    timed_out: impl FnOnce(String) -> DynamoError,
+) -> Result<T, DynamoError>
+where
+    F: Future<Output = Retry<T>>,
+{
+    let started = Instant::now();
+    let mut attempts = 0_u64;
+    let mut last_logged_at: Option<Instant> = None;
+    loop {
+        attempts += 1;
+        let reason = match attempt().await {
+            Retry::Stop(result) => return result,
+            Retry::Again(reason) => reason,
+        };
+        let now = Instant::now();
+        let retry_at = now + retry_interval;
+        if retry_at >= deadline {
+            return Err(timed_out(reason));
+        }
+        if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL) {
+            tracing::warn!(
+                attempt = attempts,
+                elapsed = ?started.elapsed(),
+                remaining = ?deadline.saturating_duration_since(now),
+                retry_interval = ?retry_interval,
+                %reason,
+                "{waiting}; retrying"
+            );
+            last_logged_at = Some(now);
+        }
+        tokio::time::sleep_until(retry_at).await;
+    }
+}
+
 /// Retry `attempt` while it fails UNAVAILABLE, every `retry_interval` until
 /// `deadline`; any other result returns at once. GetServerInfo answers
 /// UNAVAILABLE until every DP rank's listener is bound
@@ -258,38 +309,32 @@ async fn retry_unavailable<T, F>(
 where
     F: Future<Output = Result<T, DynamoError>>,
 {
-    let started = Instant::now();
-    let mut attempts = 0_u64;
-    let mut last_logged_at: Option<Instant> = None;
-    loop {
-        attempts += 1;
-        // status_to_dynamo maps UNAVAILABLE, and only that, to CannotConnect.
-        let error = match attempt().await {
-            Err(error) if error.error_type() == ErrorType::Backend(BackendError::CannotConnect) => {
-                error
+    retry_until(
+        retry_interval,
+        deadline,
+        "SGLang discovery unavailable",
+        || {
+            let result = attempt();
+            async move {
+                match result.await {
+                    // status_to_dynamo maps UNAVAILABLE, and only that, to CannotConnect.
+                    Err(error)
+                        if error.error_type()
+                            == ErrorType::Backend(BackendError::CannotConnect) =>
+                    {
+                        Retry::Again(error.to_string())
+                    }
+                    result => Retry::Stop(result),
+                }
             }
-            result => return result,
-        };
-        let now = Instant::now();
-        let retry_at = now + retry_interval;
-        if retry_at >= deadline {
-            return Err(cannot_connect(format!(
-                "SGLang discovery did not succeed within the startup deadline: {error}"
-            )));
-        }
-        if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL) {
-            tracing::warn!(
-                attempt = attempts,
-                elapsed = ?started.elapsed(),
-                remaining = ?deadline.saturating_duration_since(now),
-                retry_interval = ?retry_interval,
-                reason = %error,
-                "SGLang discovery unavailable; retrying"
-            );
-            last_logged_at = Some(now);
-        }
-        tokio::time::sleep_until(retry_at).await;
-    }
+        },
+        |reason| {
+            cannot_connect(format!(
+                "SGLang discovery did not succeed within the startup deadline: {reason}"
+            ))
+        },
+    )
+    .await
 }
 
 /// `bootstrap`: true for synchronous constructors before logging setup;

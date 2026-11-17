@@ -26,9 +26,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{
-    self, AbortRpc, Client, GRPC_SERVICE, Pool, RETRY_LOG_INTERVAL, WORKER_GROUP_KEY,
-};
+use crate::client::{self, AbortRpc, Client, GRPC_SERVICE, Pool, Retry, WORKER_GROUP_KEY};
 use crate::discovery::{self, EngineInfo, sglang_eagle_enabled};
 use crate::listeners::{Listener, NodeListeners};
 use crate::native_http::{self, NativeHttp};
@@ -237,7 +235,7 @@ impl SglangSidecarEngine {
         async {
             let pool = Pool::connect(endpoint, &self.transport, deadline).await?;
             let mut control = pool.control_client();
-            self.await_ready(&mut control, deadline, dp_rank, endpoint)
+            self.await_ready(&control, deadline, dp_rank, endpoint)
                 .await?;
             let info = discovery::engine_info(client::discover(&mut control, deadline).await?)?;
             if info.disaggregation_mode != self.disaggregation_mode {
@@ -267,54 +265,33 @@ impl SglangSidecarEngine {
 
     async fn await_ready(
         &self,
-        client: &mut Client,
+        client: &Client,
         deadline: Instant,
         dp_rank: u32,
         endpoint: &GrpcEndpoint,
     ) -> Result<(), DynamoError> {
-        let started = Instant::now();
-        let mut attempt = 0_u64;
-        let mut last_logged_at: Option<Instant> = None;
-        loop {
-            attempt += 1;
-            let retry_message = match client::health_check(client, deadline).await {
-                Ok(healthy) => {
-                    if healthy {
-                        return Ok(());
+        client::retry_until(
+            self.transport.retry_interval,
+            deadline,
+            &format!("SGLang listener for DP rank {dp_rank} at {endpoint} is not healthy yet"),
+            || {
+                let mut client = client.clone();
+                async move {
+                    match client::health_check(&mut client, deadline).await {
+                        Ok(true) => Retry::Stop(Ok(())),
+                        Ok(false) => Retry::Again("SGLang reported unhealthy".to_string()),
+                        Err(error) => Retry::Again(format!("HealthCheck RPC failed: {error}")),
                     }
-                    "SGLang reported unhealthy".to_string()
                 }
-                Err(error) => format!("HealthCheck RPC failed: {error}"),
-            };
-            if Instant::now() >= deadline {
-                return Err(client::engine_shutdown(format!(
-                    "SGLang did not become healthy within {:?}: {retry_message}",
+            },
+            |reason| {
+                client::engine_shutdown(format!(
+                    "SGLang did not become healthy within {:?}: {reason}",
                     self.transport.startup_deadline
-                )));
-            }
-            let now = Instant::now();
-            if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL) {
-                // WARN, not silent: this loop previously logged nothing at all on a
-                // failed attempt, so a SGLang engine that's slow (or never becomes)
-                // healthy produced zero visible output anywhere for up to
-                // startup_deadline (default 300s) -- indistinguishable from a hang.
-                // Rate-limited like GrpcChannelPool::connect_until_ready: a normal
-                // slow startup retries every retry_interval (default 1s) and would
-                // otherwise spam hundreds of lines.
-                tracing::warn!(
-                    dp_rank = dp_rank,
-                    listener = %endpoint,
-                    attempt,
-                    elapsed = ?started.elapsed(),
-                    remaining = ?deadline.saturating_duration_since(now),
-                    retry_interval = ?self.transport.retry_interval,
-                    reason = %retry_message,
-                    "SGLang not healthy yet; retrying"
-                );
-                last_logged_at = Some(now);
-            }
-            tokio::time::sleep_until((now + self.transport.retry_interval).min(deadline)).await;
-        }
+                ))
+            },
+        )
+        .await
     }
 
     /// Each listener's native HTTP, when every listener's is ready; native

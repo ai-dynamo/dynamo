@@ -19,21 +19,12 @@ use crate::discovery::EngineInfo;
 use crate::engine::discovery_bootstrap_port;
 use crate::proto as pb;
 
-/// One Rust listener of the node, as `DeploymentInfo.node_listeners` lists it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct NodeListener {
-    pub port_offset: u32,
-    pub dp_rank: u32,
-    pub http_port: u32,
-    pub grpc_port: Option<u32>,
-}
-
 /// The node's listener table as one listener reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct NodeTable {
     /// Every listener of the node, by DP rank: contiguous, unique, and below
     /// the deployment's DP size.
-    pub listeners: Vec<NodeListener>,
+    pub listeners: Vec<pb::NodeRustListener>,
     /// The entry of the listener that reported the table.
     pub own: usize,
 }
@@ -48,30 +39,21 @@ impl NodeTable {
     ) -> Result<Self, DynamoError> {
         let dp_size = deployment.dp_size.max(1);
         let own_rank = deployment.dp_rank.unwrap_or(0);
-        let mut listeners: Vec<NodeListener> = if deployment.node_listeners.is_empty() {
+        let mut listeners = if deployment.node_listeners.is_empty() {
             if dp_size > 1 {
                 return Err(client::invalid_arg(format!(
                     "SGLang reports dp_size {dp_size} but no DeploymentInfo.node_listeners; \
                      DP>1 needs an SGLang build that reports its node's listeners"
                 )));
             }
-            vec![NodeListener {
+            vec![pb::NodeRustListener {
                 port_offset: 0,
                 dp_rank: own_rank,
                 http_port: server_info.port,
                 grpc_port: None,
             }]
         } else {
-            deployment
-                .node_listeners
-                .iter()
-                .map(|listener| NodeListener {
-                    port_offset: listener.port_offset,
-                    dp_rank: listener.dp_rank,
-                    http_port: listener.http_port,
-                    grpc_port: listener.grpc_port,
-                })
-                .collect()
+            deployment.node_listeners.clone()
         };
         listeners.sort_by_key(|listener| listener.dp_rank);
         let mut offsets = HashSet::new();
