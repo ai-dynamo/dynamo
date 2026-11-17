@@ -433,3 +433,23 @@ def test_tito_adapter_resolves_omitted_max_tokens_from_server_limits():
 
     assert adapted is not None
     assert adapted.sampling_params.max_tokens == 17
+
+
+def test_prompt_response_fields_match_vllm_generate_api():
+    from vllm.multimodal.inputs import PlaceholderRange
+
+    from dynamo.vllm.engine_generate import prompt_response_fields
+
+    assert prompt_response_fields({"prompt_token_ids": [1, 2]}) == {
+        "prompt_token_ids": [1, 2],
+        "mm_placeholders": None,
+    }
+    rendered = {
+        "type": "multimodal",
+        "prompt_token_ids": [1, 7, 7, 2],
+        "mm_placeholders": {"image": [PlaceholderRange(offset=1, length=2)]},
+    }
+    assert prompt_response_fields(rendered) == {
+        "prompt_token_ids": [1, 7, 7, 2],
+        "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+    }
