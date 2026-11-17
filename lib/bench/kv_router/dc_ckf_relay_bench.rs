@@ -360,9 +360,11 @@ struct ActorSnapshot {
     physical_state: FinalPhysicalState,
 }
 
+// Events are nearly all of the channel traffic; boxing adds an allocation
+// and a free per event to the measured path.
+#[allow(clippy::large_enum_variant)]
 enum ActorCommand {
-    // Boxed: a RouterEvent is ~200 bytes and the other variants are one word.
-    Event(Box<RouterEvent>),
+    Event(RouterEvent),
     Barrier(std::sync::mpsc::Sender<ActorSnapshot>),
     Shutdown,
 }
@@ -466,7 +468,7 @@ fn actor_loop(
         };
         match command {
             ActorCommand::Event(event) => {
-                let outcome = state.apply_event(*event);
+                let outcome = state.apply_event(event);
                 counters.events.processed = counters.events.processed.saturating_add(1);
                 if let Some(error) = outcome.first_error() {
                     counters.events.errors = counters.events.errors.saturating_add(1);
@@ -1052,10 +1054,9 @@ async fn drive_phase(
                         if remaining.is_zero() {
                             break;
                         }
-                        match senders[frozen.dc_ordinal].send_timeout(
-                            ActorCommand::Event(Box::new(frozen.event.clone())),
-                            remaining,
-                        ) {
+                        match senders[frozen.dc_ordinal]
+                            .send_timeout(ActorCommand::Event(frozen.event.clone()), remaining)
+                        {
                             Ok(()) => admission.admitted = admission.admitted.saturating_add(1),
                             Err(crossbeam_channel::SendTimeoutError::Timeout(_)) => break,
                             Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => {

@@ -258,9 +258,7 @@ async fn collect_prepared_corpus_scores(
                     let overlap = indexer.find_matches(request.to_vec()).await?;
                     scores.push(ComparableOverlapScores::new(overlap, request.len()));
                 }
-                MooncakeOperationPayload::Event(event) => {
-                    indexer.apply_event(event.as_ref().clone()).await
-                }
+                MooncakeOperationPayload::Event(event) => indexer.apply_event(event.clone()).await,
             }
             idx += 1;
         }
@@ -349,9 +347,7 @@ fn collect_direct_ckf_overlap_scores(
                     let overlap = indexer.find_matches_with_mode(request, match_mode)?;
                     scores.push(ComparableOverlapScores::new(overlap, request.len()));
                 }
-                MooncakeOperationPayload::Event(event) => {
-                    indexer.submit_event(event.as_ref().clone())?
-                }
+                MooncakeOperationPayload::Event(event) => indexer.submit_event(event.clone())?,
             }
             idx += 1;
         }
