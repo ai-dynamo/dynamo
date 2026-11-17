@@ -2637,6 +2637,7 @@ def _explicit_grid_stub(mode="agg", points=None):
     stub._bench_prefill_capture_sizes = [8, 16]
     stub._bench_prefill_cudagraph_mode = "PIECEWISE"
     stub.num_lookahead_tokens = 0
+    stub.num_spec_tokens = 0
     stub._bench_skipped_points = []
     stub._bench_explicit_points = BenchmarkPoints.model_validate(
         points
@@ -3010,6 +3011,7 @@ def _prefill_grid_stub(
     stub._bench_prefill_capture_sizes = [8, 16]
     stub._bench_prefill_cudagraph_mode = "PIECEWISE"
     stub.num_lookahead_tokens = 0
+    stub.num_spec_tokens = 0
     _install_test_capacity_preflight(
         stub,
         _benchmark_capacity(
@@ -9845,6 +9847,35 @@ def _complete_realseed_cache_shot(stub):
         ]
         stub._bench_save_current_point()
     return requests, hits
+
+
+@pytest.mark.parametrize("num_spec_tokens", [0, 1, 3])
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [[1, 16]],
+        [[1, 16], [2, 0]],
+        [[1, 0]],
+        [[2, 16]],
+    ],
+)
+def test_prefill_grid_excludes_cached_single_token_speculative_admissions(
+    num_spec_tokens, rows
+):
+    grid = _prefill_grid_stub(block_size=16, num_gpu_blocks=2048)
+    grid.num_spec_tokens = num_spec_tokens
+    grid.num_hash_lookahead_tokens = 0
+    grid.kv_cache_manager.use_eagle = False
+    padded = num_spec_tokens > 0 and any(new == 1 and kv > 0 for new, kv in rows)
+
+    assert grid._bench_prefill_point_feasible(
+        sum(new for new, _ in rows),
+        len(rows),
+        sum(kv for _, kv in rows),
+        rows=rows,
+    ) == (not padded)
+    assert grid._bench_seed_prompt_len(16) == 16
+    assert grid._bench_seed_prompt_len(0) == 0
 
 
 @pytest.mark.parametrize(

@@ -3877,6 +3877,9 @@ class InstrumentedScheduler(AsyncScheduler):
             return False
 
         proof_tokens = self._bench_prefix_proof_tokens()
+        if self.num_spec_tokens > 0:
+            # Cached single-token admissions are padded even without EAGLE hashes.
+            proof_tokens = max(proof_tokens, 1)
         if proof_tokens and any(
             kv_read_tokens > 0 and new_tokens <= proof_tokens
             for new_tokens, kv_read_tokens in zip(
