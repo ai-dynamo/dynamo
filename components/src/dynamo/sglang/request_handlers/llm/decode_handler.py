@@ -311,6 +311,12 @@ def _apply_model_default_sampling_params(
 def _sampling_option_params(values: Dict[str, Any]) -> Dict[str, Any]:
     """Extract sampling options that SGLang accepts as sampling params."""
     params = {field: values.get(field) for field in _SAMPLING_OPTION_FIELDS}
+    # The msgpack request plane delivers logit_bias with int keys, and SGLang's
+    # msgpack IPC (SGLANG_USE_PICKLE_IPC=false) rejects anything but str keys.
+    if params["logit_bias"]:
+        params["logit_bias"] = {
+            str(token_id): bias for token_id, bias in params["logit_bias"].items()
+        }
     if values.get("seed") is not None:
         params["sampling_seed"] = values.get("seed")
     return params

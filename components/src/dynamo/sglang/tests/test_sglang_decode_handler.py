@@ -1449,7 +1449,8 @@ def test_build_sampling_params_forwards_sampling_options_for_token_requests():
                 "top_p": 0.95,
                 "top_k": 40,
                 "min_p": 0.01,
-                "logit_bias": {"18": -10.0},
+                # The msgpack request plane decodes the Rust u32 keys as ints.
+                "logit_bias": {18: -10.0},
                 "seed": 1234,
             },
             "stop_conditions": {"max_tokens": 8},

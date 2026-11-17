@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
-use dynamo_global_common::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
+use dynamo_global_common::{PoolIdDeriver, PoolKey, RouterRegistration, V1PoolIdDeriver};
 use dynamo_global_frontend::{
     Metrics, PoolSnapshot, RelayGatedPoolCatalog, affinity_store_ms, app, discover_pools,
     follow_relays, measure_round_trips, serve, serve_relay_views,
@@ -56,6 +56,12 @@ struct Args {
     /// Router discovery must use a probe independent of pool availability (such as /live).
     #[arg(long, conflicts_with = "pools", requires = "relay_view_port")]
     global_discovery_url: Option<Url>,
+    /// Unique process incarnation (for example a Kubernetes Pod UID).
+    #[arg(long, requires_all = ["router_advertise_url", "global_discovery_url", "relay_view_port"])]
+    router_replica_id: Option<String>,
+    /// Direct address of this replica's Relay receiver, reachable by every PoolRelay.
+    #[arg(long, requires_all = ["router_replica_id", "global_discovery_url", "relay_view_port"])]
+    router_advertise_url: Option<Url>,
     /// A pool as `<cluster>/<namespace>/<DGD name>=<model>@<frontend URL>`,
     /// where the cluster is the ID the pool's PoolRelay runs with. Separate
     /// several frontend URLs with commas, and repeat the flag for each pool.
@@ -175,6 +181,15 @@ async fn main() -> Result<()> {
         bail!("--affinity-store dynamodb requires --router-policy affinity");
     }
 
+    let registration = args
+        .router_replica_id
+        .zip(args.router_advertise_url)
+        .map(|(replica, url)| RouterRegistration { replica, url });
+    if let Some(registration) = &registration {
+        registration
+            .validate()
+            .context("router self-registration")?;
+    }
     let shutdown = CancellationToken::new();
     let signal = shutdown.clone();
     tokio::spawn(async move {
@@ -186,12 +201,18 @@ async fn main() -> Result<()> {
 
     // Keep the explicit catalog sender alive for the static-pool mode.
     let (_catalog, pools) = watch::channel(Arc::new(PoolSnapshot::new(args.pools)));
-    let pools = if let Some(url) = args.global_discovery_url {
-        let client = dynamo_global_discovery_client::GlobalDiscoveryClient::new(
-            url,
+    let discovery = args
+        .global_discovery_url
+        .map(|url| {
+            dynamo_global_discovery_client::GlobalDiscoveryClient::new(url, Duration::from_secs(5))
+        })
+        .transpose()?;
+    let pools = if let Some(client) = &discovery {
+        discover_pools(
+            client.clone(),
             Duration::from_secs(5),
-        )?;
-        discover_pools(client, Duration::from_secs(5), shutdown.child_token())
+            shutdown.child_token(),
+        )
     } else {
         pools
     };
@@ -287,6 +308,13 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&address)
         .await
         .with_context(|| format!("listen on {address}"))?;
+    let _registration = registration.zip(discovery).map(|(registration, client)| {
+        dynamo_global_discovery_client::RouterHeartbeat::spawn(
+            client,
+            registration,
+            shutdown.child_token(),
+        )
+    });
     tracing::info!(%address, "Global Frontend listening");
     if let Some((relay_listener, catalog)) = receiving {
         let http = async {
@@ -369,6 +397,27 @@ mod tests {
         assert_eq!(args.router_policy, RouterPolicy::Affinity);
         let args = Args::try_parse_from(["global-frontend", pool]).unwrap();
         assert_eq!(args.router_policy, RouterPolicy::RoundRobin);
+    }
+
+    #[test]
+    fn router_registration_requires_identity_endpoint_and_discovery() {
+        let base = [
+            "global-frontend",
+            "--global-discovery-url",
+            "http://discovery:8080",
+            "--relay-view-port",
+            "50051",
+        ];
+        let registration = [
+            "--router-replica-id",
+            "pod-uid",
+            "--router-advertise-url",
+            "http://10.0.0.1:50051",
+        ];
+        assert!(Args::try_parse_from([base.as_slice(), registration.as_slice()].concat()).is_ok());
+        assert!(Args::try_parse_from([base.as_slice(), &registration[..2]].concat()).is_err());
+        assert!(Args::try_parse_from([base.as_slice(), &registration[2..]].concat()).is_err());
+        assert!(Args::try_parse_from([&base[..1], registration.as_slice()].concat()).is_err());
     }
 
     #[test]

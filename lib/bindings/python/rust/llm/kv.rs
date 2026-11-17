@@ -617,29 +617,7 @@ fn extract_token_ids(tokens: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
             .extract::<Vec<u32>>()
             .map_err(|e| PyValueError::new_err(format!("token_ids: {e}")))
     };
-    let Ok(list) = tokens.downcast_exact::<pyo3::types::PyList>() else {
-        return generic();
-    };
-    let mut token_ids = Vec::with_capacity(list.len());
-    // SAFETY: the GIL is held and the loop runs no Python code (only exact `int`s are
-    // converted, and `PyLong_AsUnsignedLong` does not call `__index__`), so the exact
-    // list cannot change, every index is in range, and the borrowed items stay valid.
-    unsafe {
-        for index in 0..list.len() {
-            let item = pyo3::ffi::PyList_GetItem(list.as_ptr(), index as pyo3::ffi::Py_ssize_t);
-            if pyo3::ffi::PyLong_CheckExact(item) == 0 {
-                return generic();
-            }
-            // A negative int sets OverflowError and returns `c_ulong::MAX`; both it and
-            // values past `u32::MAX` fail `try_from`, and the generic path raises.
-            let Ok(id) = u32::try_from(pyo3::ffi::PyLong_AsUnsignedLong(item)) else {
-                pyo3::ffi::PyErr_Clear();
-                return generic();
-            };
-            token_ids.push(id);
-        }
-    }
-    Ok(token_ids)
+    super::py_convert::read_exact_u32_list(tokens).map_or_else(generic, Ok)
 }
 
 /// Map a [`SelectionError`] to a Python exception: invalid input becomes a

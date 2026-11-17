@@ -2401,9 +2401,6 @@ mod tests {
             r#"
 worker_selection:
   aggregated: test
-  instances:
-    - name: test
-      type: test
 request_classifier:
   type: test
 "#,
@@ -3527,7 +3524,7 @@ request_classifier:
         }
 
         let mut card = ModelDeploymentCard::with_name_only("model");
-        card.runtime_config.tool_call_parser = Some("hermes".to_string());
+        card.runtime_config.tool_call_parser = Some("llama3_json".to_string());
         card.model_type = ModelType::Embedding;
         assert!(validate_card_parser_version(&card, false).is_ok());
         card.model_type = ModelType::Chat;

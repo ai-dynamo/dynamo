@@ -4597,6 +4597,16 @@ async fn responses(
     if response_params.max_output_tokens.is_none() {
         request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
     }
+    // Clients get public tool names and namespaces, not backend aliases;
+    // request traces record them. Skip the map clone when traces are off.
+    if crate::request_trace::policy().emit_request_end_records()
+        && let Some(tool_names) = response_params.tool_names.clone()
+    {
+        request.insert(
+            crate::request_trace::CLIENT_TOOL_NAMES_CONTEXT_KEY,
+            crate::request_trace::ClientToolNames(std::sync::Arc::new(tool_names)),
+        );
+    }
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 

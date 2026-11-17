@@ -40,7 +40,7 @@ use dynamo_kv_router::plugins::{
     WorkerSelectionPolicyRegistryError,
 };
 
-/// Policy type selected by `worker_selection.instances[].type`.
+/// Policy type selected under a `worker_selection` role.
 pub const POLICY_TYPE: &str = "dynamo-two-tier-cost-fn";
 
 /// Keep these equal to `experimental/sgl-router`'s `cache_aware_zmq` defaults, so an instance
@@ -229,6 +229,7 @@ mod tests {
 
     fn select_with(parameters: Parameters, workers: [(u64, usize, usize); 2]) -> WorkerWithDpRank {
         let mut request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
             isl_tokens: TEN_BLOCKS,

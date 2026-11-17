@@ -15,11 +15,14 @@ pub mod sink;
 mod tool_relay;
 pub mod types;
 
+use std::sync::Arc;
+
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::DistributedRuntime;
 
 use crate::local_model::LocalModel;
+use crate::protocols::openai::responses::ToolNameMap;
 use crate::telemetry::bus::TelemetryBus;
 
 pub use agent_context::SharedFinishReasonMetadata;
@@ -64,6 +67,16 @@ pub const CLIENT_TOOL_CALL_IDS_CONTEXT_KEY: &str = "request_trace.client_tool_ca
 /// the endpoint and the trace agree whatever either one filters out.
 #[derive(Clone, Copy)]
 pub struct ClientToolCallIds(pub fn(&str, &str, u32) -> String);
+
+/// Context key for an endpoint that gives clients other tool names than the
+/// backend's; its value is the endpoint's [`ClientToolNames`].
+pub const CLIENT_TOOL_NAMES_CONTEXT_KEY: &str = "request_trace.client_tool_names";
+
+/// The request's Responses tool-name map, so `request_end` records each tool
+/// call's public leaf name and namespace as the client receives them, not the
+/// backend's qualified name or collision alias.
+#[derive(Clone)]
+pub struct ClientToolNames(pub Arc<ToolNameMap>);
 
 pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow::Result<()> {
     let policy = policy();

@@ -884,7 +884,7 @@ fn bare_json_starting_state(family: &str) -> UnifiedParserStartingState {
 fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserStartingState> {
     match family {
         "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "minimax_m3"
-        | "nemotron_v3" => {
+        | "nemotron_v3" | "hermes" => {
             let (opener_marker, closer_marker) = reasoning_marker_pair(family)
                 .expect("think-marker families have a configured reasoning pair");
             // Compare FIRST-occurrence positions, not mere presence: a prompt that
@@ -981,9 +981,8 @@ fn beam_prefill(content: &str) -> UnifiedParserStartingState {
 fn reasoning_marker_pair(family: &str) -> Option<(&'static str, &'static str)> {
     match family {
         "minimax_m3" => Some(("<mm:think>", "</mm:think>")),
-        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "nemotron_v3" => {
-            Some(("<think>", "</think>"))
-        }
+        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "nemotron_v3"
+        | "hermes" => Some(("<think>", "</think>")),
         "gemma4" => Some(("<|channel>", "<channel|>")),
         _ => None,
     }
@@ -12887,7 +12886,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn all_family_native_calls() -> [(&'static str, &'static str); 9] {
+    fn all_family_native_calls() -> [(&'static str, &'static str); 10] {
         [
             (
                 "minimax_m3",
@@ -12908,6 +12907,10 @@ pub(crate) mod tests {
             (
                 "glm47",
                 "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value></tool_call>",
+            ),
+            (
+                "hermes",
+                r#"<tool_call>{"name":"get_weather","arguments":{"city":"Tokyo"}}</tool_call>"#,
             ),
             (
                 "kimi_k2",
@@ -13549,7 +13552,7 @@ pub(crate) mod tests {
         for (tool, reasoning) in [
             (Some("qwen3_coder"), Some("glm47")),
             (Some("qwen3_coder"), Some("deepseek_r1")),
-            (Some("hermes"), None),
+            (Some("unknown_parser"), None),
             (None, Some("deepseek_r1")),
             (None, None),
         ] {

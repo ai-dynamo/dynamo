@@ -48,7 +48,7 @@ fn builtin_default_does_not_opt_into_custom_frontend_restrictions() {
 
 #[test]
 fn builtin_registration_preserves_classifiers_and_resolves_mixed_pools() {
-    for selection in ["default", "named-default"] {
+    for selection in ["default", "dynamo-default-cost-fn"] {
         let mut registry = dynamo_router_policies::default_registry();
         registry
             .register_request_classifier(
@@ -64,9 +64,6 @@ request_classifier:
   type: pass-through
 worker_selection:
   prefill: {selection}
-  instances:
-    - name: named-default
-      type: dynamo-default-cost-fn
 "#
         ));
         let plugins = registry.resolve_plugins(&config).unwrap();

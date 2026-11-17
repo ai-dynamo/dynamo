@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
 use pythonize::{depythonize, pythonize};
 use tokio_stream::StreamExt;
 use tracing::Instrument;
@@ -14,6 +17,7 @@ use dynamo_runtime::logging::{DistributedTraceContext, otel_parent_context_from_
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated as RsAnnotated;
 
+use super::py_convert;
 use crate::errors::routed_error_to_pyerr;
 use crate::to_pyerr;
 
@@ -26,6 +30,46 @@ impl RoutedEngine {
     pub fn new(inner: PrefillRoutedEngine) -> Self {
         Self { inner }
     }
+}
+
+/// The request with `token_ids` and `extra_args` read by [`py_convert`] and the rest by
+/// pythonize; `None` unless it is an exact `dict` whose two fields both read.
+fn fast_preprocessed_request(obj: &Bound<'_, PyAny>) -> Option<PreprocessedRequest> {
+    let py = obj.py();
+    let token_ids_key = pyo3::intern!(py, "token_ids");
+    let extra_args_key = pyo3::intern!(py, "extra_args");
+    let dict = obj.downcast_exact::<PyDict>().ok()?;
+    let token_ids = py_convert::read_exact_u32_list(&dict.get_item(token_ids_key).ok()??)?;
+    let extra_args = match dict.get_item(extra_args_key).ok()? {
+        Some(value) if !value.is_none() => Some(py_convert::exact_json_value(&value)?),
+        _ => None,
+    };
+    // `token_ids` is required, so the copy keeps an empty one for pythonize to read.
+    let rest = dict.copy().ok()?;
+    rest.set_item(token_ids_key, PyList::empty(py)).ok()?;
+    rest.set_item(extra_args_key, py.None()).ok()?;
+    let mut request: PreprocessedRequest = depythonize(rest.as_any()).ok()?;
+    request.token_ids = Arc::new(token_ids);
+    request.extra_args = extra_args;
+    Some(request)
+}
+
+/// Test hook: the fast path's request (`None` if it declines) or pythonize's, pythonized back.
+#[pyfunction]
+#[pyo3(signature = (preprocessed, fast_path))]
+pub fn _convert_preprocessed_request(
+    py: Python<'_>,
+    preprocessed: &Bound<'_, PyAny>,
+    fast_path: bool,
+) -> PyResult<Option<PyObject>> {
+    let request = if fast_path {
+        fast_preprocessed_request(preprocessed)
+    } else {
+        Some(depythonize::<PreprocessedRequest>(preprocessed).map_err(to_pyerr)?)
+    };
+    request
+        .map(|request| Ok(pythonize(py, &request).map_err(to_pyerr)?.unbind()))
+        .transpose()
 }
 
 fn copy_session_affinity(
@@ -47,7 +91,9 @@ impl RoutedEngine {
         preprocessed: PyObject,
         context: Option<crate::context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: PreprocessedRequest = depythonize(preprocessed.bind(py)).map_err(to_pyerr)?;
+        let preprocessed = preprocessed.bind(py);
+        let request = fast_preprocessed_request(preprocessed)
+            .map_or_else(|| depythonize(preprocessed).map_err(to_pyerr), Ok)?;
         let request_context = if let Some(parent_context) = context.as_ref() {
             let parent_metadata = parent_context.metadata_snapshot();
             let parent_controller = parent_context.inner();

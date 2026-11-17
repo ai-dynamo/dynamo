@@ -12,6 +12,7 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
 use crate::WorkerType;
+use crate::plugins::worker_selection::{WorkerSelectionConfig, WorkerSelectionPolicySelection};
 use crate::protocols::{
     BlockHashOptions, LocalBlockHash, complete_block_count, compute_block_hash_for_seq,
     compute_seq_hash_for_block,
@@ -40,12 +41,12 @@ pub const DYN_ROUTER_DECODE_POLICY: &str = "DYN_ROUTER_DECODE_POLICY";
 /// Selects the process-local retention policy for a primary approximate indexer.
 pub const DYN_ROUTER_APPROXIMATE_CACHE_POLICY: &str = "DYN_ROUTER_APPROXIMATE_CACHE_POLICY";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct WorkerSelectionPolicySelections {
-    pub(crate) aggregated: Option<String>,
-    pub(crate) prefill: Option<String>,
-    pub(crate) decode: Option<String>,
-    pub(crate) encode: Option<String>,
+    pub(crate) aggregated: Option<WorkerSelectionPolicySelection>,
+    pub(crate) prefill: Option<WorkerSelectionPolicySelection>,
+    pub(crate) decode: Option<WorkerSelectionPolicySelection>,
+    pub(crate) encode: Option<WorkerSelectionPolicySelection>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1293,7 +1294,8 @@ impl KvRouterConfig {
             .aggregated
             .or(selected.prefill)
             .or(selected.decode)
-            .or(selected.encode))
+            .or(selected.encode)
+            .map(|selection| selection.label().to_owned()))
     }
 
     /// Return the custom worker-selection instance selected for one explicit worker role.
@@ -1315,7 +1317,8 @@ impl KvRouterConfig {
             WorkerType::Prefill => selected.prefill,
             WorkerType::Decode => selected.decode,
             WorkerType::Encode => selected.encode,
-        })
+        }
+        .map(|selection| selection.label().to_owned()))
     }
 
     /// Return worker roles with a non-default policy selected after applying standard precedence.
@@ -1361,7 +1364,8 @@ impl KvRouterConfig {
             .aggregated
             .or(selected.prefill)
             .or(selected.decode)
-            .or(selected.encode))
+            .or(selected.encode)
+            .map(|selection| selection.label().to_owned()))
     }
 
     #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
@@ -1380,15 +1384,19 @@ impl KvRouterConfig {
         &self,
         selected: Result<Option<String>, VarError>,
     ) -> Result<WorkerSelectionPolicySelections, WorkerSelectionPolicyConfigError> {
-        fn normalized(value: Option<&str>) -> Option<String> {
+        /// A CLI or environment override names a policy: the reserved `default`, a registered
+        /// type, or (deprecated) an `instances:` entry. Blank values fall through.
+        fn named(value: Option<&str>) -> Option<WorkerSelectionPolicySelection> {
             value
                 .map(str::trim)
                 .filter(|name| !name.is_empty())
-                .map(str::to_owned)
+                .map(|name| WorkerSelectionPolicySelection::Named(name.to_owned()))
         }
 
-        fn custom_only(selected: Option<String>) -> Option<String> {
-            selected.filter(|name| name != "default")
+        fn custom_only(
+            selected: Option<WorkerSelectionPolicySelection>,
+        ) -> Option<WorkerSelectionPolicySelection> {
+            selected.filter(|selection| !selection.is_default())
         }
 
         let policy_config = self
@@ -1396,30 +1404,21 @@ impl KvRouterConfig {
             .map_err(|source| WorkerSelectionPolicyConfigError::Config { source })?;
         let global = selected
             .map_err(|source| WorkerSelectionPolicyConfigError::Environment { source })?
-            .and_then(|name| normalized(Some(&name)));
-        let yaml_aggregated = policy_config
-            .and_then(|config| config.aggregated_instance())
-            .map(str::to_owned);
-        let aggregated = global.clone().or(yaml_aggregated);
-        let prefill = normalized(self.router_prefill_policy.as_deref())
+            .and_then(|name| named(Some(&name)));
+        let yaml =
+            |select: fn(&WorkerSelectionConfig) -> Option<&WorkerSelectionPolicySelection>| {
+                policy_config.and_then(select).cloned()
+            };
+        let aggregated = global
+            .clone()
+            .or_else(|| yaml(WorkerSelectionConfig::aggregated));
+        let prefill = named(self.router_prefill_policy.as_deref())
             .or_else(|| global.clone())
-            .or_else(|| {
-                policy_config
-                    .and_then(|config| config.prefill_instance())
-                    .map(str::to_owned)
-            });
-        let decode = normalized(self.router_decode_policy.as_deref())
+            .or_else(|| yaml(WorkerSelectionConfig::prefill));
+        let decode = named(self.router_decode_policy.as_deref())
             .or_else(|| global.clone())
-            .or_else(|| {
-                policy_config
-                    .and_then(|config| config.decode_instance())
-                    .map(str::to_owned)
-            });
-        let encode = global.or_else(|| {
-            policy_config
-                .and_then(|config| config.encode_instance())
-                .map(str::to_owned)
-        });
+            .or_else(|| yaml(WorkerSelectionConfig::decode));
+        let encode = global.or_else(|| yaml(WorkerSelectionConfig::encode));
 
         Ok(WorkerSelectionPolicySelections {
             aggregated: custom_only(aggregated),
@@ -1742,6 +1741,10 @@ mod tests {
     use crate::identity::RoutingPartitionRef;
     use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo, compute_seq_hash_for_block};
     use std::collections::HashMap;
+
+    fn named(name: &str) -> WorkerSelectionPolicySelection {
+        WorkerSelectionPolicySelection::Named(name.to_owned())
+    }
 
     fn test_tracking_scope(block_size: u32) -> TrackingHashScope<'static> {
         TrackingHashScope {
@@ -2282,10 +2285,6 @@ mod tests {
             r#"
 worker_selection:
   aggregated: custom
-  instances:
-    - name: custom
-      type: acme
-      parameters: {}
 "#,
         )
         .unwrap();
@@ -2299,7 +2298,7 @@ worker_selection:
                 .selected_worker_selection_policy_instances_from(Ok(None))
                 .unwrap(),
             WorkerSelectionPolicySelections {
-                aggregated: Some("custom".to_string()),
+                aggregated: Some(named("custom")),
                 prefill: None,
                 decode: None,
                 encode: None,
@@ -2349,19 +2348,6 @@ worker_selection:
   prefill: yaml-prefill
   decode: yaml-decode
   encode: yaml-encode
-  instances:
-    - name: yaml-aggregated
-      type: acme
-    - name: yaml-prefill
-      type: acme
-    - name: yaml-decode
-      type: acme
-    - name: yaml-encode
-      type: acme
-    - name: global
-      type: acme
-    - name: cli-prefill
-      type: acme
 "#,
         )
         .unwrap();
@@ -2375,10 +2361,10 @@ worker_selection:
                 .selected_worker_selection_policy_instances_from(Ok(None))
                 .unwrap(),
             WorkerSelectionPolicySelections {
-                aggregated: Some("yaml-aggregated".to_string()),
-                prefill: Some("yaml-prefill".to_string()),
-                decode: Some("yaml-decode".to_string()),
-                encode: Some("yaml-encode".to_string()),
+                aggregated: Some(named("yaml-aggregated")),
+                prefill: Some(named("yaml-prefill")),
+                decode: Some(named("yaml-decode")),
+                encode: Some(named("yaml-encode")),
             }
         );
 
@@ -2389,10 +2375,10 @@ worker_selection:
                 .selected_worker_selection_policy_instances_from(Ok(Some("global".to_string())))
                 .unwrap(),
             WorkerSelectionPolicySelections {
-                aggregated: Some("global".to_string()),
-                prefill: Some("cli-prefill".to_string()),
+                aggregated: Some(named("global")),
+                prefill: Some(named("cli-prefill")),
                 decode: None,
-                encode: Some("global".to_string()),
+                encode: Some(named("global")),
             }
         );
 
@@ -2646,10 +2632,6 @@ worker_selection:
             r#"
 worker_selection:
   aggregated: custom
-  instances:
-    - name: custom
-      type: acme
-      parameters: {}
 "#,
         )
         .unwrap();

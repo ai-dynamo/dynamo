@@ -264,7 +264,15 @@ impl
             move |py, request| {
                 // Ordinary Chat Completions retain direct typed serialization.
                 if request.responses_tools.is_none() {
-                    return Ok(pythonize(py, &request)?.unbind());
+                    let object = pythonize(py, &request)?;
+                    // Named passthrough fields (`stop_token_ids`, ...) are not
+                    // serialized with the request; add them at the top level, as
+                    // the client sent them.
+                    let dict = object.downcast::<PyDict>()?;
+                    for (key, value) in request.passthrough_extra_fields() {
+                        dict.set_item(key, pythonize(py, value)?)?;
+                    }
+                    return Ok(object.unbind());
                 }
                 let value = request
                     .python_chat_processor_request_json(&runtime_config)

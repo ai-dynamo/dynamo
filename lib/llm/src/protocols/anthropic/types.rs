@@ -302,14 +302,13 @@ fn convert_user_blocks(
 fn convert_image(
     source: &AnthropicImageSource,
 ) -> Result<dynamo_protocols::types::ChatCompletionRequestMessageContentPartImage, anyhow::Error> {
-    if source.source_type != "base64" {
-        anyhow::bail!(
-            "unsupported image source type {:?}; only base64 is supported",
-            source.source_type
-        );
-    }
+    // URL sources are accepted by the protocol type but not fetched here;
+    // only inline base64 is converted.
+    let AnthropicImageSource::Base64 { media_type, data } = source else {
+        anyhow::bail!("unsupported image source type \"url\"; only base64 is supported");
+    };
 
-    let data_uri = format!("data:{};base64,{}", source.media_type, source.data);
+    let data_uri = format!("data:{media_type};base64,{data}");
     let url =
         url::Url::parse(&data_uri).map_err(|e| anyhow::anyhow!("invalid image data URI: {e}"))?;
     let image_url = ImageUrl::from(url.to_string());
@@ -2669,8 +2668,7 @@ mod tests {
                             cache_control: None,
                         },
                         AnthropicContentBlock::Image {
-                            source: AnthropicImageSource {
-                                source_type: "base64".into(),
+                            source: AnthropicImageSource::Base64 {
                                 media_type: "image/png".into(),
                                 data: "iVBORw0KGgo=".into(), // tiny valid-ish base64
                             },
@@ -2814,8 +2812,7 @@ mod tests {
                     content: AnthropicMessageContent::Blocks {
                         content: vec![
                             AnthropicContentBlock::Image {
-                                source: AnthropicImageSource {
-                                    source_type: "base64".into(),
+                                source: AnthropicImageSource::Base64 {
                                     media_type: "image/jpeg".into(),
                                     data: "/9j/4AAQ".into(),
                                 },

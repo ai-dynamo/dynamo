@@ -17,7 +17,9 @@ use crate::protocols::{
 };
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::queue::BookingHandle;
-use crate::scheduling::{AdvisoryWorkerLoad, QueueRejection, SchedulingResponse, SessionContext};
+use crate::scheduling::{
+    AccountingAttribution, AdvisoryWorkerLoad, QueueRejection, SchedulingResponse, SessionContext,
+};
 
 use super::super::error::SelectionError;
 use super::super::input::PromptView;
@@ -28,6 +30,8 @@ use super::super::input::PromptView;
 pub struct SelectionOperation<'a> {
     pub key: RoutingPartitionId,
     pub prompt: PromptView<'a>,
+    /// Attribute booking events independently of routing and cache identity.
+    pub accounting_attribution: AccountingAttribution,
     pub router_config_override: Option<RouterConfigOverride>,
     pub expected_output_tokens: Option<u32>,
     pub priority_jump: f64,
