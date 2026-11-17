@@ -505,6 +505,35 @@ def kv_events_config_with_dynamo_format(kv_events_config: str | None) -> str | N
     return json.dumps(config)
 
 
+@lru_cache(maxsize=32)
+def _dp_rank_keyword(async_generate: Any) -> str:
+    try:
+        param = inspect.signature(async_generate).parameters.get("routed_dp_rank")
+    except (TypeError, ValueError):
+        param = None
+    if param is not None and param.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    ):
+        return "routed_dp_rank"
+    # Compatibility with engines predating SGLang #19268 and opaque wrappers.
+    # Remove this adapter when all supported engines accept routed_dp_rank.
+    return "data_parallel_rank"
+
+
+def routed_dp_rank_kwargs(engine: Any, dp_rank: int | None) -> dict[str, int]:
+    """Pass a selected DP rank using the engine's keyword spelling."""
+    if dp_rank is None:
+        return {}
+    method = engine.async_generate
+    signature_source = getattr(method, "__func__", method)
+    try:
+        keyword = _dp_rank_keyword(signature_source)
+    except TypeError:  # Unhashable callable: inspect it without caching.
+        keyword = _dp_rank_keyword.__wrapped__(signature_source)
+    return {keyword: dp_rank}
+
+
 def prefill_dp_rank_kwargs(engine: Any, prefill_dp_rank: Any) -> dict[str, Any]:
     """Hand SGLang's decode the prefill DP rank the router already chose.
 
