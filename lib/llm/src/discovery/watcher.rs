@@ -488,7 +488,7 @@ impl ModelWatcher {
         // Build the WorkerSet with all applicable engines
         let mut worker_set =
             WorkerSet::new(namespace.clone(), spec.mdc_checksum.clone(), card.clone());
-        worker_set.set_input_policy(crate::chat_input::ChatInputPolicy::from_card(card));
+        worker_set.set_input_policy(crate::chat_input::ChatInputPolicy::from_card(card)?);
         let mut tokenizer = None;
         check_unified_family_tokens(card, &mut tokenizer)?;
         let allocator_trim = worker_set.initialize_allocator_trim_on_teardown();

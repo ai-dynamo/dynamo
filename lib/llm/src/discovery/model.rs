@@ -882,6 +882,21 @@ impl Model {
         capability: &str,
     ) -> Result<Option<(OpenAIChatCompletionsStreamingEngine, ParsingOptions)>, ModelManagerError>
     {
+        self.get_chat_engine_with_input_policy_for_capability(capability)
+            .map(|selected| selected.map(|(engine, parsing, _)| (engine, parsing)))
+    }
+
+    pub(crate) fn get_chat_engine_with_input_policy_for_capability(
+        &self,
+        capability: &str,
+    ) -> Result<
+        Option<(
+            OpenAIChatCompletionsStreamingEngine,
+            ParsingOptions,
+            crate::chat_input::ChatInputPolicy,
+        )>,
+        ModelManagerError,
+    > {
         if !self.has_chat_engine_for_capability(capability) {
             return if self.has_chat_engine() {
                 Ok(None)
@@ -891,7 +906,11 @@ impl Model {
         }
         self.select_worker_set_with(|ws| {
             ws.supports_runtime_capability(capability)
-                .then(|| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
+                .then(|| {
+                    ws.chat_engine
+                        .clone()
+                        .map(|engine| (engine, ws.parsing_options(), ws.input_policy()))
+                })
                 .flatten()
         })
         .map(Some)
@@ -1387,16 +1406,22 @@ mod tests {
     #[test]
     fn chat_selection_keeps_engine_parsing_and_input_policy_atomic() {
         use crate::chat_input::ChatInputPolicy;
+        use crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY;
         let model = Model::new("chat-policy".into());
         let make_set = |namespace: &str, native: bool| {
             let mut card = ModelDeploymentCard::default();
             card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
             card.runtime_config.tool_call_parser = native.then(|| "mistral".into());
+            card.runtime_config
+                .runtime_data
+                .insert(JSON_MULTIMODAL_CAPABILITY.to_string(), true.into());
             let mut set = WorkerSet::new(namespace.into(), namespace.into(), card);
             let engine: OpenAIChatCompletionsStreamingEngine = Arc::new(StubChatEngine);
             set.chat_engine = Some(engine.clone());
             let policy = if native {
-                ChatInputPolicy::Mistral
+                ChatInputPolicy::Mistral {
+                    effort_when_disabled: dynamo_protocols::types::ReasoningEffort::Low,
+                }
             } else {
                 ChatInputPolicy::Standard
             };
@@ -1433,6 +1458,13 @@ mod tests {
                 parsing.tool_call_parser.as_deref(),
                 native_active.then_some("mistral")
             );
+            let (capable_engine, capable_parsing, capable_policy) = model
+                .get_chat_engine_with_input_policy_for_capability(JSON_MULTIMODAL_CAPABILITY)
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(&capable_engine, &engine));
+            assert_eq!(capable_policy, policy);
+            assert_eq!(capable_parsing.tool_call_parser, parsing.tool_call_parser);
         }
     }
 

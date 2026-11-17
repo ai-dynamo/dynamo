@@ -767,7 +767,7 @@ mod tests {
         )
         .unwrap();
         let mut base = WorkerSet::new("ns1".to_string(), "abc123".to_string(), card);
-        base.set_input_policy(ChatInputPolicy::from_card(base.card()));
+        base.set_input_policy(ChatInputPolicy::from_card(base.card()).unwrap());
         let mut adapter_card = ModelDeploymentCard::with_name_only("adapter-model");
         adapter_card.lora = Some(crate::model_card::LoraInfo {
             name: "adapter-model".to_string(),
