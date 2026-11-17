@@ -256,7 +256,10 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 </ParamField>
 
 <ParamField path="DYN_HEALTH_CHECK_REQUEST_TIMEOUT" type="integer" default="3">
-  Maximum seconds to wait for a canary health-check response before marking the endpoint unhealthy.
+  Seconds to wait for a canary health-check response before marking the endpoint unhealthy. On
+  workers that publish forward-pass metrics, each completed engine forward pass restarts the wait,
+  up to 10 minutes in total. See
+  [Active Canary Configuration](health-checks.mdx#active-canary-configuration).
 </ParamField>
 
 <ParamField path="DYN_HEALTH_CHECK_PAYLOAD" type="string">
@@ -446,9 +449,20 @@ See [Measurement Protocol in the Self-Benchmark Artifact](forward-pass-metrics-t
 
 See [Request Trace Reference](request-traces.mdx) for compatibility aliases, sink behavior, and record semantics.
 
+## NVTX profiling
+
+One switch controls the NVTX annotations that Dynamo adds to an Nsight Systems timeline, in both the Rust runtime and the Python components. It is off by default.
+
+<ParamField path="DYN_NVTX" type="boolean" default="unset (off)">
+  Enables NVTX ranges and markers in the Rust runtime (frontend HTTP handling, preprocessing, routing, transport, worker ingress and egress) and in the Python components. Accepts `1`, `true`, `on`, or `yes` to enable and `0`, `false`, `off`, `no`, or empty to disable, trimmed and case-insensitive; any other value is an error at startup. The published wheels and container images include the Rust markers. The Python markers need the `nvtx` package from the `ai-dynamo[profiling]` extra; without it, the process logs a warning and starts without them. Replaces `DYN_ENABLE_RUST_NVTX`, which is no longer read.
+</ParamField>
+
+See [NVTX Profiling](nvtx-profiling.md) for the ranges, how to read the timeline, and the profiling overhead.
+
 ## Related
 
 - [Metrics Catalog](metrics-catalog.mdx) — the `dynamo_*` metrics these variables expose.
 - [Metric Labels](metric-labels.mdx) — the dimensions attached to those metrics.
 - [Operator Metrics](operator-metrics.mdx) — Kubernetes-only metrics enablement knobs.
 - [Local Resource Monitor (Local)](local-resource-monitor-local.mdx) — host-side per-process exporter.
+- [NVTX Profiling](nvtx-profiling.md) — Nsight Systems annotations for the Dynamo frontend and workers.
