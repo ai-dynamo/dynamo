@@ -298,6 +298,18 @@ def test_otlp_and_prometheus_expose_the_same_metrics(request, runtime_services):
             )
 
 
+# Registered into the HTTP service's own registry when the frontend starts,
+# one per registration site in `HttpService::build`: the start-time metric,
+# frontend perf, request plane, tokio perf, and transport metrics.
+FRONTEND_STARTUP_FAMILIES = {
+    "dynamo_frontend_metrics_start_time_seconds",
+    "dynamo_frontend_tokenizer_cache_hits_total",
+    "dynamo_request_plane_queue_seconds",
+    "dynamo_tokio_alive_tasks",
+    "dynamo_transport_tcp_bytes_sent_total",
+}
+
+
 class _Frontend(ManagedProcess):
     """`python -m dynamo.frontend` exporting over OTLP.
 
@@ -327,7 +339,8 @@ class _Frontend(ManagedProcess):
             ],
             env=env,
             health_check_urls=[f"http://localhost:{http_port}/metrics"],
-            timeout=300,
+            # Starts in a few seconds; must fit inside the test's own timeout.
+            timeout=60,
             display_output=True,
             terminate_all_matching_process_names=False,
             log_dir=f"{request.node.name}_otlp_parity_frontend",
@@ -343,12 +356,9 @@ class _Frontend(ManagedProcess):
 def test_frontend_otlp_and_prometheus_expose_the_same_metrics(
     request, runtime_services, file_storage_backend
 ):
-    """The frontend's `/metrics` merges two registries: the HTTP service's own
-    (`dynamo_frontend_*`: requests, TTFT, ITL, ...) and the runtime's tree. The
-    exporter reads only the runtime's tree, so a registry that is not attached
-    to it is scraped but never exported -- which is how every
-    `dynamo_frontend_*` family went missing from OTLP while the worker-only
-    parity test above stayed green.
+    """The frontend's `/metrics` serves the HTTP service's own registry and
+    the runtime's tree; the exporter reads the runtime's tree. Every family on
+    one must be on the other.
     """
     http_port, http_reservation = _reserved_port()
     otlp_port, otlp_reservation = _reserved_port()
@@ -356,10 +366,9 @@ def test_frontend_otlp_and_prometheus_expose_the_same_metrics(
     with _running_receiver(otlp_port, otlp_reservation) as receiver:
         http_reservation.close()
         with _Frontend(request, http_port, otlp_port):
-            # One request, so per-request families get a sample. With no
-            # worker it is rejected (404); the gauges it touches are still
-            # recorded under the unknown-model label.
-            requests.post(
+            # One request, so the request path's families get a sample. There
+            # is no worker, so the model is unknown and the request is refused.
+            response = requests.post(
                 f"http://localhost:{http_port}/v1/chat/completions",
                 json={
                     "model": "otlp-parity-no-such-model",
@@ -368,6 +377,7 @@ def test_frontend_otlp_and_prometheus_expose_the_same_metrics(
                 },
                 timeout=10,
             )
+            assert response.status_code == 404, response.text
             # Wait for an export that started after the request.
             seen = receiver.exports
             deadline = time.time() + 60
@@ -376,11 +386,14 @@ def test_frontend_otlp_and_prometheus_expose_the_same_metrics(
             assert (
                 receiver.exports > seen + 1
             ), "frontend never exported over OTLP; is export still wired to runtime startup?"
-            # Registered unlabelled at startup, so it is always present: a
-            # direct witness that the HTTP service's registry reaches OTLP.
-            assert (
-                "dynamo_frontend_metrics_start_time_seconds" in receiver.names()
-            ), "the HTTP service's registry is not reachable from the exporter"
+            # Independent of /metrics (which reads the same merged tree as the
+            # exporter): families the HTTP service registers into its own
+            # registry at startup, one per registration site.
+            not_exported = FRONTEND_STARTUP_FAMILIES - receiver.names()
+            assert not not_exported, (
+                "the HTTP service's registry is not reachable from the exporter; "
+                f"not exported: {sorted(not_exported)}"
+            )
             _assert_surfaces_agree(
                 f"http://localhost:{http_port}/metrics",
                 receiver,

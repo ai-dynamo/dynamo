@@ -3113,12 +3113,12 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
 
 /// Create a new router with optional DRT metrics integration.
 ///
-/// When `drt_metrics` is provided, `registry` is attached to the DRT's
-/// registry tree as a child, and `/metrics` serves that tree. Attaching it is
-/// what puts the HTTP service's own metrics (`dynamo_frontend_*` and the rest
-/// registered into `registry`) in the DRT's OTLP export, which reads only the
-/// tree; serving the tree keeps `/metrics` and OTLP on one merged view, with
-/// each family declared once.
+/// When `drt_metrics` is provided, `/metrics` serves the DRT registry tree's
+/// combined output, the same merged view the DRT's OTLP export reads, with each
+/// family declared once. `registry` must then be attached to that tree with
+/// [`MetricsRegistry::add_prometheus_registry`](dynamo_runtime::metrics::MetricsRegistry::add_prometheus_registry)
+/// for its families to appear; `HttpService::build` does this once the service
+/// is fully built. Without `drt_metrics`, `/metrics` serves `registry` alone.
 pub fn router(
     registry: Registry,
     path: Option<String>,
@@ -3127,42 +3127,32 @@ pub fn router(
     let path = path.unwrap_or_else(|| "/metrics".to_string());
     let doc = RouteDoc::new(axum::http::Method::GET, &path);
 
+    let metrics_state = MetricsHandlerState {
+        registry: Arc::new(registry),
+        drt_metrics,
+    };
+
     let route = Router::new()
         .route(&path, get(handler_metrics))
-        .with_state(Arc::new(MetricsHandlerState::new(registry, drt_metrics)));
+        .with_state(Arc::new(metrics_state));
     (vec![doc], route)
 }
 
 impl MetricsHandlerState {
-    fn new(
-        registry: Registry,
-        drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,
-    ) -> Self {
-        if let Some(drt_metrics) = &drt_metrics {
-            drt_metrics.add_child_registry(
-                &dynamo_runtime::metrics::MetricsRegistry::from_prometheus_registry(
-                    registry.clone(),
-                ),
-            );
-        }
-        Self {
-            registry: Arc::new(registry),
-            drt_metrics,
-        }
-    }
-
     /// The `/metrics` body.
     ///
     /// With a DRT, its combined output, which includes this service's registry
-    /// (attached in [`Self::new`]). If the merge fails -- two sources declaring
-    /// one family with different help or type -- fall back to this service's
+    /// once it is attached. If that gather fails, fall back to this service's
     /// own metrics rather than serving nothing.
     fn render(&self) -> anyhow::Result<String> {
         if let Some(drt_metrics) = &self.drt_metrics {
             match drt_metrics.prometheus_expfmt_combined() {
                 Ok(text) => return Ok(text),
                 Err(error) => {
-                    tracing::warn!(%error, "Failed to gather DRT metrics; serving HTTP service metrics only");
+                    tracing::warn!(
+                        %error,
+                        "Failed to gather DRT metrics; serving HTTP service metrics only"
+                    );
                 }
             }
         }
@@ -3173,14 +3163,28 @@ impl MetricsHandlerState {
 }
 
 /// Unified metrics handler. See [`MetricsHandlerState::render`].
+///
+/// Renders on the blocking pool: the gather runs update callbacks, some of
+/// which take the Python GIL.
 async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl IntoResponse {
-    match state.render() {
-        Ok(metrics) => (StatusCode::OK, metrics).into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to encode metrics",
-        )
-            .into_response(),
+    match tokio::task::spawn_blocking(move || state.render()).await {
+        Ok(Ok(metrics)) => (StatusCode::OK, metrics).into_response(),
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "Failed to encode metrics");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to encode metrics",
+            )
+                .into_response()
+        }
+        Err(error) => {
+            tracing::warn!(%error, "metrics render task failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to encode metrics",
+            )
+                .into_response()
+        }
     }
 }
 
@@ -6384,7 +6388,7 @@ mod tests {
 
     mod metrics_handler_state {
         use super::*;
-        use dynamo_runtime::metrics::MetricsRegistry;
+        use dynamo_runtime::metrics::{AttachedPrometheusRegistry, MetricsRegistry};
 
         fn declared(text: &str) -> Vec<&str> {
             text.lines()
@@ -6399,9 +6403,23 @@ mod tests {
                 .unwrap();
         }
 
-        /// The HTTP service's registry is attached to the DRT tree, so the
-        /// OTLP export path (`metric_families_combined`) sees it, and
-        /// `/metrics` declares each family exactly once.
+        /// Wire the handler state the way `HttpService::build` does: the local
+        /// registry attached to the DRT tree, the handler serving the tree.
+        fn attached(
+            local: Registry,
+            drt: &MetricsRegistry,
+        ) -> (MetricsHandlerState, AttachedPrometheusRegistry) {
+            let attachment = drt.add_prometheus_registry(local.clone());
+            let state = MetricsHandlerState {
+                registry: Arc::new(local),
+                drt_metrics: Some(drt.clone()),
+            };
+            (state, attachment)
+        }
+
+        /// With the local registry attached, the OTLP export path
+        /// (`metric_families_combined`) sees it, and `/metrics` declares each
+        /// family exactly once.
         #[test]
         fn local_registry_is_exported_and_scraped_once() {
             let drt = MetricsRegistry::new();
@@ -6411,12 +6429,10 @@ mod tests {
             );
             let local = Registry::new();
             counter(&local, "dynamo_frontend_requests_total");
-
-            let state = MetricsHandlerState::new(local, Some(drt.clone()));
+            let (state, _attachment) = attached(local, &drt);
 
             let exported: Vec<String> = drt
                 .metric_families_combined()
-                .unwrap()
                 .families
                 .iter()
                 .map(|family| family.name().to_string())
@@ -6425,22 +6441,18 @@ mod tests {
             assert!(exported.contains(&"dynamo_component_probe_total".to_string()));
 
             let text = state.render().unwrap();
-            let mut names = declared(&text);
             assert_eq!(
-                names,
+                declared(&text),
                 [
                     "dynamo_component_probe_total",
                     "dynamo_frontend_requests_total"
                 ],
                 "{text}"
             );
-            names.dedup();
-            assert_eq!(names.len(), 2);
         }
 
-        /// A family in both registries with the same help and type used to be
-        /// declared twice on `/metrics` (two text blocks concatenated). It is
-        /// now merged into one family.
+        /// A family in both registries with the same help and type is merged
+        /// into one family, with the series from both.
         #[test]
         fn family_in_both_registries_is_declared_once() {
             let drt = MetricsRegistry::new();
@@ -6453,8 +6465,9 @@ mod tests {
             .unwrap();
             labelled.with_label_values(&["local"]).inc();
             local.register(Box::new(labelled)).unwrap();
+            let (state, _attachment) = attached(local, &drt);
 
-            let text = MetricsHandlerState::new(local, Some(drt)).render().unwrap();
+            let text = state.render().unwrap();
             assert_eq!(declared(&text), ["dynamo_shared_total"], "{text}");
             assert!(
                 text.contains("dynamo_shared_total{source=\"local\"} 1"),
@@ -6463,18 +6476,21 @@ mod tests {
         }
 
         /// Without a DRT (standalone KVBM, tests) only the local registry is
-        /// served, as before.
+        /// served.
         #[test]
         fn without_drt_serves_local_registry() {
             let local = Registry::new();
             counter(&local, "kvbm_probe_total");
-            let text = MetricsHandlerState::new(local, None).render().unwrap();
-            assert_eq!(declared(&text), ["kvbm_probe_total"]);
+            let state = MetricsHandlerState {
+                registry: Arc::new(local),
+                drt_metrics: None,
+            };
+            assert_eq!(declared(&state.render().unwrap()), ["kvbm_probe_total"]);
         }
 
-        /// A help/type conflict between the two registries fails the DRT
-        /// merge. `/metrics` still serves the HTTP service's own metrics
-        /// rather than an error, matching the behaviour before the merge.
+        /// While a help/type conflict still fails the whole DRT gather (#18910),
+        /// `/metrics` falls back to the HTTP service's own metrics rather than
+        /// an error.
         #[test]
         fn merge_conflict_falls_back_to_local_registry() {
             let drt = MetricsRegistry::new();
@@ -6486,8 +6502,9 @@ mod tests {
             let local = Registry::new();
             counter(&local, "dynamo_conflict");
             counter(&local, "dynamo_frontend_requests_total");
+            let (state, _attachment) = attached(local, &drt);
 
-            let text = MetricsHandlerState::new(local, Some(drt)).render().unwrap();
+            let text = state.render().unwrap();
             assert_eq!(
                 declared(&text),
                 ["dynamo_conflict", "dynamo_frontend_requests_total"],

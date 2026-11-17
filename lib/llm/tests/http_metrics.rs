@@ -940,12 +940,69 @@ fn declared_families(text: &str) -> Vec<String> {
         .collect()
 }
 
+type Names = std::collections::BTreeSet<String>;
+
+fn family_names(families: &[prometheus::proto::MetricFamily]) -> Names {
+    families
+        .iter()
+        .map(|family| family.name().to_string())
+        .collect()
+}
+
+/// What the DRT's OTLP exporter sends: `otlp_export::run` exports exactly
+/// `metric_families_combined()` of the DRT registry.
+fn otlp_export_families(drt_metrics: &dynamo_runtime::metrics::MetricsRegistry) -> Names {
+    family_names(&drt_metrics.metric_families_combined().families)
+}
+
+/// Starts `service` on `listener`; returns its cancel token and task.
+fn spawn_service(
+    service: HttpService,
+    listener: tokio::net::TcpListener,
+) -> (
+    CancellationToken,
+    tokio::task::JoinHandle<Result<(), anyhow::Error>>,
+) {
+    let token = CancellationToken::new();
+    let task_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(task_token, listener).await });
+    (token, task)
+}
+
+async fn chat_once(port: u16, model: &str) {
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/chat/completions"))
+        .json(&serde_json::json!({
+            "model": model,
+            "stream": true,
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "{response:?}");
+    let _ = response.bytes().await.unwrap();
+}
+
+async fn scrape(port: u16) -> String {
+    reqwest::get(format!("http://localhost:{port}/metrics"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap()
+}
+
 /// A frontend wired to a DistributedRuntime exports over OTLP whatever the
-/// DRT's `metric_families_combined()` returns. Everything the frontend's
-/// `/metrics` serves must be in that set -- in particular its own
-/// `dynamo_frontend_*` metrics, which live in the HTTP service's registry
-/// rather than in one the DRT created. And `/metrics`, which already merged
-/// the two, must still declare each family exactly once.
+/// DRT's `metric_families_combined()` returns. That must include every family
+/// in the HTTP service's own registry -- checked against that registry
+/// directly, not only against `/metrics`, which reads the same merged tree as
+/// the export. `/metrics` must declare each family once.
+///
+/// Then the service is shut down and a second one is built on the same DRT:
+/// the first one's registry must leave the tree with it, so the second
+/// serves and exports only its own values.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_frontend_metrics_reach_the_otlp_export_path() {
     use dynamo_runtime::metrics::MetricsHierarchy;
@@ -970,6 +1027,7 @@ async fn test_frontend_metrics_reach_the_otlp_export_path() {
             ))
             .unwrap();
 
+        // --- First service: serves one request.
         let (listener, port) = bind_random_port().await;
         let service = HttpService::builder()
             .port(port)
@@ -977,68 +1035,45 @@ async fn test_frontend_metrics_reach_the_otlp_export_path() {
             .drt_metrics(Some(drt_metrics.clone()))
             .build()
             .unwrap();
+        let own_registry = service.metrics_registry().clone();
         let state = service.state_clone();
-        let manager = state.manager();
-        let token = CancellationToken::new();
-        let cancel_token = token.clone();
-        let task =
-            tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
-
         let card = ModelDeploymentCard::with_name_only("otlpmodel");
-        manager
+        state
+            .manager()
             .add_chat_completions_model("otlpmodel", card.mdcsum(), Arc::new(MockModelEngine {}))
             .unwrap();
+        let (token, task) = spawn_service(service, listener);
         wait_for_metrics_ready(port).await;
+        // A labelled family with no children is not gathered at all, so serve
+        // one request to give the per-model families a sample.
+        chat_once(port, "otlpmodel").await;
 
-        // Serve one request so the per-model frontend families have samples;
-        // a labelled family with no children is not gathered at all.
-        let client = reqwest::Client::new();
-        let response = client
-            .post(format!("http://localhost:{port}/v1/chat/completions"))
-            .json(&serde_json::json!({
-                "model": "otlpmodel",
-                "stream": true,
-                "max_tokens": 8,
-                "messages": [{"role": "user", "content": "hi"}]
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert!(response.status().is_success(), "{response:?}");
-        let _ = response.bytes().await.unwrap();
-
-        let scrape = client
-            .get(format!("http://localhost:{port}/metrics"))
-            .send()
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap();
-        let declared = declared_families(&scrape);
-        let scraped: std::collections::BTreeSet<String> = declared.iter().cloned().collect();
+        let text = scrape(port).await;
+        let declared = declared_families(&text);
+        let scraped: Names = declared.iter().cloned().collect();
         assert_eq!(
             declared.len(),
             scraped.len(),
-            "/metrics declares a family more than once:\n{scrape}"
+            "/metrics declares a family more than once:\n{text}"
         );
+        let exported = otlp_export_families(&drt_metrics);
+
+        // Independent source: the HTTP service's own registry.
+        let own = family_names(&own_registry.gather());
         for name in [
             "dynamo_frontend_requests_total",
             "dynamo_frontend_request_duration_seconds",
-            "dynamo_component_otlp_parity_probe_total",
+            "dynamo_frontend_time_to_first_token_seconds",
         ] {
-            assert!(scraped.contains(name), "{name} missing from /metrics");
+            assert!(own.contains(name), "{name} not in the service's registry");
         }
+        let not_exported: Vec<_> = own.difference(&exported).collect();
+        assert!(
+            not_exported.is_empty(),
+            "in the HTTP service's registry but not exported: {not_exported:?}"
+        );
+        assert!(exported.contains("dynamo_component_otlp_parity_probe_total"));
 
-        // What the OTLP exporter sends: `otlp_export::run` exports exactly
-        // `metric_families_combined()` of the DRT registry.
-        let exported: std::collections::BTreeSet<String> = drt_metrics
-            .metric_families_combined()
-            .unwrap()
-            .families
-            .iter()
-            .map(|family| family.name().to_string())
-            .collect();
         let missing: Vec<_> = scraped.difference(&exported).collect();
         let extra: Vec<_> = exported.difference(&scraped).collect();
         assert!(
@@ -1048,7 +1083,45 @@ async fn test_frontend_metrics_reach_the_otlp_export_path() {
              exported but not on /metrics: {extra:?}"
         );
 
-        cancel_token.cancel();
+        // --- Shut the first service down; the task held the last clone.
+        token.cancel();
+        task.await.unwrap().unwrap();
+        drop(state);
+        let exported = otlp_export_families(&drt_metrics);
+        assert!(
+            !exported.contains("dynamo_frontend_requests_total"),
+            "a stopped service's metrics are still exported"
+        );
+
+        // --- Second service on the same DRT, no requests yet: none of the
+        // first service's request series may be served or exported.
+        let (listener, port) = bind_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .enable_chat_endpoints(true)
+            .drt_metrics(Some(drt_metrics.clone()))
+            .build()
+            .unwrap();
+        let (token, task) = spawn_service(service, listener);
+        wait_for_metrics_ready(port).await;
+        let text = scrape(port).await;
+        assert!(
+            !text.contains("dynamo_frontend_requests_total"),
+            "the first service's series are still served:\n{text}"
+        );
+        assert!(
+            text.contains("dynamo_frontend_metrics_start_time_seconds"),
+            "{text}"
+        );
+        assert!(
+            text.contains("dynamo_component_otlp_parity_probe_total"),
+            "{text}"
+        );
+        let exported = otlp_export_families(&drt_metrics);
+        assert!(exported.contains("dynamo_frontend_metrics_start_time_seconds"));
+        assert!(!exported.contains("dynamo_frontend_requests_total"));
+
+        token.cancel();
         task.await.unwrap().unwrap();
         drt.shutdown();
     })
