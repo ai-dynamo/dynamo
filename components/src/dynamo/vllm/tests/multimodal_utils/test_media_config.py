@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from dynamo.llm import MediaDecoder
-from dynamo.vllm.multimodal_utils.media_config import create_frontend_media_config
 
 pytestmark = [
     pytest.mark.unit,
@@ -59,9 +58,12 @@ def test_frontend_media_config_applies_exif_orientation():
     # their own encoded-image loaders do not apply EXIF.
     assert MediaDecoder().apply_exif_orientation is False
 
+    # The multimodal_utils package imports vLLM, which runtime-only images lack.
+    media_config = pytest.importorskip("dynamo.vllm.multimodal_utils.media_config")
+
     # vLLM's loader applies EXIF, so the frontend must rotate to match it.
-    media_decoder, media_fetcher = create_frontend_media_config(True)
+    media_decoder, media_fetcher = media_config.create_frontend_media_config(True)
     assert media_decoder is not None and media_fetcher is not None
     assert media_decoder.apply_exif_orientation is True
 
-    assert create_frontend_media_config(False) == (None, None)
+    assert media_config.create_frontend_media_config(False) == (None, None)
