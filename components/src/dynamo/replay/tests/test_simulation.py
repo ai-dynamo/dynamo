@@ -1044,10 +1044,12 @@ def test_agentic_replay_matches_the_engine_stack(tmp_path):
             "agentic_snapshot": {"seed": 42},
             "agentic_warmup": True,
             "agentic_warmup_policy": "live_trajectory_v1",
+            # At 1 s the global cap makes the primer idle cap bind; a different
+            # tree cap catches reading the wrong field.
             "agentic_profile": {
                 "duration_seconds": 20.0,
                 "tree_idle_cap_seconds": 5.0,
-                "global_idle_cap_seconds": 5.0,
+                "global_idle_cap_seconds": 1.0,
             },
         },
         goal={"target": "throughput"},

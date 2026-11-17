@@ -315,6 +315,17 @@ mod tests {
                 None,
                 "live_trajectory_v1 requires agentic_warmup and agentic_profile",
             ),
+            (
+                AgenticReplayOptions {
+                    snapshot: Some(serde_json::from_value(json!({"seed": 7})).unwrap()),
+                    profile: Some(AgenticProfileOptions::default()),
+                    warmup_policy: AgenticWarmupPolicy::LiveTrajectoryV1,
+                    ..Default::default()
+                },
+                Some(1),
+                None,
+                "live_trajectory_v1 requires agentic_warmup and agentic_profile",
+            ),
         ];
         for (options, lanes, time_limit, expected) in cases {
             assert_eq!(
