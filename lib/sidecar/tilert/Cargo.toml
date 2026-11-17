@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-tilert-sidecar"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Experimental Dynamo sidecar for TileRT: vLLM prefill over gRPC, TileRT decode over HTTP"
+publish = false
+
+[[bin]]
+name = "dynamo-tilert-sidecar"
+path = "src/main.rs"
+
+[features]
+default = ["jemalloc"]
+# jemalloc as the binary's global allocator.
+jemalloc = ["dynamo-sidecar-common/jemalloc"]
+
+[dependencies]
+dynamo-backend-common = { workspace = true }
+dynamo-sidecar-common = { workspace = true, features = ["tonic-v14"] }
+
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+futures = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+tonic-v14 = { workspace = true }
+tonic-health-v14 = { workspace = true }
+vllm-proto = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+dynamo-backend-common = { workspace = true, features = ["testing"] }
+tempfile = { workspace = true }
+tokio-stream = { workspace = true, features = ["net"] }
