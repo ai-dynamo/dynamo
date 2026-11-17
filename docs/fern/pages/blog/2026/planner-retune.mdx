@@ -99,9 +99,10 @@ were live at 4:50 and 5:04.
    ended into one trace.
 3. **Sweep.** The Planner replays that window in AISim once for every candidate router and Planner setting. On
    Kubernetes the replays run as DynamoGraphDeploymentRequests, in parallel, next to the deployment.
-4. **Decide.** Each candidate is scored on goodput per GPU: requests that meet the time-to-first-token and
-   inter-token-latency SLA, per GPU. The best candidate replaces the current settings only if it is more than 3% better
-   on the same window. The decision is written to a Kubernetes Lease before anything changes.
+4. **Decide.** Each candidate is scored on goodput per GPU: the output tokens per second of requests that meet the
+   time-to-first-token and inter-token-latency SLA, divided by the GPUs provisioned. (The results in this post count
+   those requests instead of their tokens.) The best candidate replaces the current settings only if it is more than
+   3% better on the same window. The decision is written to a Kubernetes Lease before anything changes.
 5. **Apply.** The Planner pushes the router settings to every frontend and applies its own new settings in place.
    Traffic keeps flowing; nothing restarts.
 
@@ -111,13 +112,21 @@ with the 3% threshold, this keeps retune from switching back and forth on noise.
 before they act, and windows are aligned to wall-clock time, so a restarted Planner continues the same windows. And
 `advisory` mode records every decision without applying it, so you can watch what retune would do first.
 
-Turning it on is a block in the Planner configuration. This is the one from our autoscaling run:
+**Experimental.** Retune is an experimental feature, and on a running deployment it is for development clusters only:
+the Planner sets router parameters through the frontend's admin API, which has no authentication yet. Do not enable it
+on a cluster that serves production traffic.
+
+Turning it on is a block in the Planner configuration. This is the one from our autoscaling run, shortened: with
+`executor: dgdr` the Planner also needs a `retune.dgdr` section, which says where the recorded traffic is stored and
+which model and engine the replays simulate. See
+[Planner Live Retune](../../kubernetes/auto-deployment/planner-live-retune.md) for the complete setup.
 
 ```yaml
 enable_load_scaling: true
 retune:
   interval_seconds: 3600            # one window per hour
   grace_seconds: 120                # wait for late request records
+  timeout_seconds: 3000             # deadline for the sweep
   objective: GoodputPerGPU          # SLA goodput per GPU
   min_improvement_percentage: 3     # switch only for a clear win (default)
   router:
@@ -128,12 +137,12 @@ retune:
     scaling_policy: {preset: [load_180_5, load_180_10]}
     load_sensitivity: {preset: [aggressive, default, conservative]}
   executor: dgdr                    # run the sweep on the cluster
+  # dgdr: ...                       # required with executor dgdr, left out here
 ```
 
 Retune comes in two forms. **Replay retune** runs the whole loop inside a simulation, so you can measure what it would
 gain on your own traces before touching a cluster; Section 3 uses it. **Live retune** runs it on a Kubernetes
-deployment; Section 4 uses it. See [Planner Live Retune](../../kubernetes/auto-deployment/planner-live-retune.md) for
-the setup.
+deployment; Section 4 uses it.
 
 ## 3. Simulation: following the traffic
 
