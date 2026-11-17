@@ -311,7 +311,7 @@ class GMSWorker(_BaseWorker):
                 f"({self.requested_memory / (1 << 30):.2f} GiB). Increase "
                 "--gpu-memory-utilization."
             )
-        self.available_kv_cache_memory_bytes = corrected
+        self.available_kv_cache_memory_bytes -= weights_memory
         logger.info(
             "[GMS] Available KV cache memory after read-only GMS weights: "
             "%.2f GiB (vLLM %.2f GiB - imported weights %.2f GiB)",
@@ -394,9 +394,9 @@ class GMSWorker(_BaseWorker):
             memory_usage_offset_bytes = get_model_memory_usage_offset_bytes()
             # The offset is not committed/restored GMS weight state. It is
             # load-time memory excluded from committed GMS bytes (pruned
-            # load-time allocations plus private rebound clones). vLLM uses
-            # model_memory_usage for KV sizing, so omitting it can allocate
-            # an oversized cache.
+            # load-time allocations plus private rebound clones). vLLM only
+            # reports model_memory_usage; the KV budget is corrected in
+            # determine_available_memory.
             model_memory_usage_bytes = int(
                 imported_weights_bytes + memory_usage_offset_bytes
             )

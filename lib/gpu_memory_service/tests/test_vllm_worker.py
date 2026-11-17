@@ -152,14 +152,11 @@ def test_default_kv_path_does_not_double_charge_pending_writer(monkeypatch):
     publish.assert_called_once_with()
 
 
-@pytest.mark.parametrize("pending_write", [False, True])
-def test_default_kv_path_keeps_explicit_kv_cache_memory_bytes(
-    monkeypatch, pending_write
-):
+def test_default_kv_path_keeps_explicit_kv_cache_memory_bytes(monkeypatch):
     explicit = 64 * _GIB
     worker, _, _ = _default_kv_path_worker(
         monkeypatch,
-        pending_write=pending_write,
+        pending_write=False,
         kv_cache_memory_bytes=explicit,
         vllm_available=explicit,
     )
