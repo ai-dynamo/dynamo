@@ -2514,6 +2514,39 @@ mod tests {
         assert!(is_inhibited(&err));
     }
 
+    #[tokio::test]
+    async fn tcp_dial_failure_quarantines_the_worker() {
+        use crate::pipeline::network::egress::{
+            tcp_client::{TcpRequestClient, TcpRequestConfig},
+            unified_client::{Headers, RequestPlaneClient},
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let client = TcpRequestClient::with_config(TcpRequestConfig {
+            request_timeout: std::time::Duration::from_secs(1),
+            connect_timeout: std::time::Duration::from_secs(1),
+            pool_size: 1,
+            channel_buffer: 1,
+        })
+        .unwrap();
+        let error = client
+            .send_request(
+                format!("{addr}/generate"),
+                bytes::Bytes::from_static(b"ping"),
+                Headers::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(is_inhibited(error.as_ref()), "{error:#}");
+        assert_eq!(
+            route_span::error_type_from_chain(error.as_ref()),
+            ErrorType::CannotConnect
+        );
+    }
+
     /// A worker's admission refusal as the gate raises it, in process: for
     /// the whole worker, or for DP rank `dp_rank` alone.
     fn refusal(dp_rank: Option<u32>) -> DynamoError {
