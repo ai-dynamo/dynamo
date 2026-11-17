@@ -504,6 +504,18 @@ def _mock_get_llm_engine(engine_args, *args, **kwargs):
     raise EngineArgsCaptured(engine_args)
 
 
+def _sampling_params_recorder():
+    """Return a list and a SamplingParams side effect that appends to it."""
+    recorded = []
+
+    def _record(*args, **kwargs):
+        params = SamplingParams(*args, **kwargs)
+        recorded.append(params)
+        return params
+
+    return recorded, _record
+
+
 def test_resolve_streaming_kv_events_config_uses_nested_kv_cache_config():
     resolved = _resolve_streaming_kv_events_config(
         {
@@ -597,12 +609,7 @@ async def test_init_llm_worker_engine_args_without_overrides(
     if fpm_port_env is not None:
         monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", fpm_port_env)
 
-    sampling_params = []
-
-    def _record_sampling_params(*args, **kwargs):
-        params = SamplingParams(*args, **kwargs)
-        sampling_params.append(params)
-        return params
+    sampling_params, _record_sampling_params = _sampling_params_recorder()
 
     if publish_flags == ["--publish-events-and-metrics"]:
         with pytest.warns(
@@ -979,17 +986,13 @@ async def test_init_llm_worker_creates_multimodal_processor():
     ],
     ids=["text", "multimodal", "multimodal-prefill", "multimodal-decode"],
 )
+@pytest.mark.core
 @pytest.mark.asyncio
 async def test_init_llm_worker_turns_off_engine_detokenize(cli_args):
     """Workers return token ids and the frontend detokenizes them, so the
     engine must not also build output text, for text or multimodal requests."""
     config = parse_args(["--model", "fake-model", *cli_args])
-    sampling_params = []
-
-    def _record_sampling_params(*args, **kwargs):
-        params = SamplingParams(*args, **kwargs)
-        sampling_params.append(params)
-        return params
+    sampling_params, _record_sampling_params = _sampling_params_recorder()
 
     with (
         mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
