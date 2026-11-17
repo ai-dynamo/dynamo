@@ -24,9 +24,7 @@ The standard gRPC generation path requires one completion per request (`n=1`). I
 
 Media-aware KV routing on wide-token SGLang builds is not supported. See the [multimodal compatibility limits](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#wide-token-sglang-builds).
 
-The sidecar does not register the engine's LoRA adapter list. Dynamo cannot load or unload adapters through this sidecar. An adapter name in an internal request does not add the adapter to OpenAI model lookup.
-
-The optional native `/generate` passthrough can select a preloaded adapter with `lora_path`. You must enable this passthrough separately. This passthrough is separate from the standard generation path. Manually published adapter records are another integration option.
+SGLang's Rust server does not support LoRA adapters.
 
 Configure HiCache and speculative decoding in the native engine. The sidecar reports HiCache capacity for configurations that it recognizes. It also handles EAGLE-family routing metadata and draft-token reserves; the reserves need [sgl-project/sglang#45859](https://github.com/sgl-project/sglang/pull/45859), and without it an EAGLE engine gets no token budget. Test each model, algorithm, routing, disaggregation, and telemetry combination separately.
 
