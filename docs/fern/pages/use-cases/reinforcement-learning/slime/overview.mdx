@@ -40,11 +40,19 @@ Integrations with external RL frameworks are under development/testing and subje
 
 </llms-only>
 
+<Note title="Current limitations">
+- **Fixed engines.** Slime reads the engine addresses once, at startup. Adding or removing an engine means restarting the training job.
+- **Separate GPUs.** Training and inference use separate GPUs, three in the tutorial: one for each engine and one for the trainer. Slime's `--colocate` mode, which runs training and inference on the same GPUs, doesn't apply.
+- **No engine recovery.** If Kubernetes restarts or replaces an engine Pod, restart the training job. Slime doesn't recover the engine, and the new Pod loads the original model weights, not the trained ones.
+
+[Serve Inference with Dynamo](serve-inference.mdx#current-limitations) and [Train with Slime on KubeRay](train.mdx#current-limitations) list every limitation.
+</Note>
+
 ## Tutorial: Train Qwen3-0.6B with Slime + Dynamo
 
 This section will cover how to set up and use the Slime integration with an example of training Qwen3-0.6B to solve elementary math problems through reinforcement learning on the GSM8K (Grade School Math 8K) dataset using the GRPO algorithm.
 
-The following replay shows a demo of this tutorial in action. The logs and output are abrdiged and wait times skipped to highlight the main steps.
+The following replay shows a demo of this tutorial in action. The logs and output are abridged and wait times skipped to highlight the main steps.
 
 <TerminalDemo
   src="../../../../assets/slime-rl-demo.cast"

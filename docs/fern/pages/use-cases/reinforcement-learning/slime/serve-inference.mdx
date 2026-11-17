@@ -249,7 +249,7 @@ The frontend uses its default round-robin routing, the only routing mode tested 
 ## Current Limitations
 
 - The engine set is fixed. Each engine needs its own worker component with one replica and its own Service, and Slime reads the engine addresses only at startup. To add engines, add components and restart Slime.
-- Slime doesn't recover an external engine. If Kubernetes restarts or replaces an engine Pod, restart the training job.
+- Slime doesn't recover an external engine. If Kubernetes restarts or replaces an engine Pod, the new Pod loads the original model weights instead of the trained ones, so restart the training job.
 
 ## Next Steps
 
