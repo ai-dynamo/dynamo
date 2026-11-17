@@ -2504,14 +2504,14 @@ impl ModelManager {
             index_inputs,
         );
         // A frontend that dials its engines itself reaches them through the
-        // runtime's gRPC dispatch; they publish KV events on their own sockets
+        // runtime's direct dispatch; they publish KV events on their own sockets
         // and have no event-plane KV sources to track. Direct mode requires
         // process-local discovery, so it never sees sidecar workers and one
         // answer per router is enough. A router that wants no events keeps the
         // runtime ingress, which then subscribes to nothing.
         let direct_kv_events = endpoint
             .drt()
-            .grpc_dispatch::<
+            .direct_dispatch::<
                 crate::protocols::common::preprocessor::PreprocessedRequest,
                 crate::protocols::Annotated<
                     crate::protocols::common::llm_backend::LLMEngineOutput,

@@ -1236,7 +1236,8 @@ mod tests {
             let DiscoveryInstance::Endpoint(mut instance) = endpoint_instance(instance_id) else {
                 unreachable!()
             };
-            instance.transport = TransportType::Grpc(format!("http://engine-{instance_id}:30001"));
+            instance.transport =
+                TransportType::Direct(format!("http://engine-{instance_id}:30001"));
             hosted.push(
                 client
                     .register_instance(DiscoveryInstance::Endpoint(instance))
