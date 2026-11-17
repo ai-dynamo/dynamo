@@ -743,34 +743,6 @@ class DynamoVllmConfig(ConfigBase):
                 raise ValueError(
                     f"--systemone-serial is incompatible with --{name.replace('_', '-')}"
                 )
-        engine = self.engine_args
-        for name, expected in (
-            ("max_num_seqs", 1),
-            ("logprobs_mode", "raw_logprobs"),
-            ("data_parallel_size", 1),
-        ):
-            if getattr(engine, name) != expected:
-                raise ValueError(
-                    f"--systemone-serial requires --{name.replace('_', '-')}={expected}"
-                )
-        for name in (
-            "enable_lora",
-            "speculative_config",
-            "kv_transfer_config",
-            "ec_transfer_config",
-        ):
-            if getattr(engine, name):
-                raise ValueError(
-                    f"--systemone-serial is incompatible with --{name.replace('_', '-')}"
-                )
-        if engine.scheduler_cls not in (
-            None,
-            "vllm.v1.core.sched.scheduler.Scheduler",
-            "vllm.v1.core.sched.async_scheduler.AsyncScheduler",
-        ):
-            raise ValueError(
-                "--systemone-serial does not support custom --scheduler-cls"
-            )
 
     def _load_explicit_benchmark_points(self) -> None:
         self._benchmark_points = None

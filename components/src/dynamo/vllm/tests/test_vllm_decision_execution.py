@@ -99,6 +99,16 @@ def test_systemone_serial_rejects_invalid_environment(monkeypatch):
         DynamoVllmArgGroup().add_arguments(argparse.ArgumentParser())
 
 
+def test_wrapper_validates_opt_in_without_owning_engine_arguments():
+    parser = argparse.ArgumentParser()
+    DynamoVllmArgGroup().add_arguments(parser)
+    config = DynamoVllmConfig.from_cli_args(parser.parse_args(["--systemone-serial"]))
+    config.validate()
+    config.use_vllm_tokenizer = True
+    with pytest.raises(ValueError, match="--use-vllm-tokenizer"):
+        config.validate()
+
+
 @pytest.mark.usefixtures("vllm_cpu_platform_when_no_accelerator")
 @pytest.mark.parametrize(
     ("arguments", "setting"),
