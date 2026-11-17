@@ -14,7 +14,9 @@ import yaml
 
 try:
     from PIL import Image
+    from vllm.exceptions import VLLMValidationError
 
+    from dynamo.llm.exceptions import InvalidArgument
     from dynamo.vllm.omni.stage_worker import (
         OmniStageWorker,
         _create_engine,
@@ -702,8 +704,6 @@ def test_build_sampling_params_llm_applies_vllm_post_init_after_overrides(
 
 
 def test_build_sampling_params_llm_rejects_out_of_range_greedy_values():
-    from vllm.exceptions import VLLMValidationError
-
     with pytest.raises(VLLMValidationError, match="top_p"):
         _build_sampling_params(
             _llm_stage_with_sampling_defaults(), {"temperature": 0.0, "top_p": 0.0}
@@ -711,10 +711,18 @@ def test_build_sampling_params_llm_rejects_out_of_range_greedy_values():
 
 
 @pytest.mark.asyncio
-async def test_invalid_sampling_override_yields_error_chunk():
+@pytest.mark.parametrize(
+    "upstream",
+    [
+        {"engine_inputs": {"prompt": "hi"}},
+        SimpleNamespace(outputs=[SimpleNamespace(token_ids=[100, 200, 300])]),
+    ],
+    ids=["raw-prompt", "upstream-tokens"],
+)
+async def test_invalid_sampling_override_raises_invalid_argument(upstream):
     engine = _MockEngine()
     in_connector = MagicMock()
-    in_connector.get.return_value = {"engine_inputs": {"prompt": "hi"}}
+    in_connector.get.return_value = upstream
     stage_config = _llm_stage_with_sampling_defaults()
     stage_config.engine_input_source = [0]
     worker = OmniStageWorker(
@@ -730,11 +738,9 @@ async def test_invalid_sampling_override_yields_error_chunk():
         "sampling_params_list": {"temperature": 0.0, "top_p": 0.0},
     }
 
-    chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+    with pytest.raises(InvalidArgument, match="top_p"):
+        _ = [chunk async for chunk in worker.generate(request, _MockContext())]
 
-    assert len(chunks) == 1
-    assert chunks[0]["finished"] is True
-    assert "top_p" in chunks[0]["error"]
     assert engine.received_prompt is None
 
 
