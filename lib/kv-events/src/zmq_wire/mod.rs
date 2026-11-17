@@ -258,13 +258,18 @@ impl ZmqEventNormalizer {
             return Err(ZmqEventFilterReason::NonLocalLocality);
         }
 
-        // Classify by medium before touching normalizer state:
+        // Recurrent groups are classified first, on every medium: a Mamba store
+        // teaches its group, and an event of a recurrent group that this source
+        // has not opted into is filtered before the lower-tier bypass.
+        //
+        // Other events are then classified by medium:
         //  - Device / HostPinned (GPU, CPU offload #10368) stay on the normalizer
         //    path so their salted namespaces still propagate.
         //  - Disk / External (STORAGE) are hash-only lower-tier events with no
-        //    extra_keys/cache_namespace, so they must not mutate per-group
-        //    metadata or the salted-namespace chain for framework events. KVCR
-        //    still needs group classification before the conversion bypass.
+        //    extra_keys/cache_namespace, so framework events bypass the
+        //    normalizer without mutating per-group metadata or the
+        //    salted-namespace chain. KVCR still needs group classification
+        //    before the conversion bypass.
         //  - Unrecognized media (e.g. vLLM 0.26.0 FS/OBJ) fail closed here so the
         //    listener records an intentional filter. Bypassing to conversion,
         //    which drops them, would instead accept the event, burn a
@@ -646,8 +651,10 @@ impl ZmqEventNormalizer {
                     .is_some_and(|group| groups.contains(&group))
             }) {
                 None
-            } else {
+            } else if metadata.kv_cache_spec_kind.is_some() {
                 Some(ZmqEventFilterReason::NonMainAttentionKind)
+            } else {
+                Some(ZmqEventFilterReason::NonMainAttentionGroup)
             };
         }
         if let Some(kind) = metadata.kv_cache_spec_kind {

@@ -416,14 +416,13 @@ fn query_lower_tiers_inner(
 
         let merge_hint_chain =
             options.retain_kv_transfer_chain && storage_tier == StorageTier::HostPinned;
-        let retain_extensions = merge_hint_chain;
         if let Some(evaluator) = evaluator.as_mut() {
             evaluator.on_tier(storage_tier);
         }
         let mut tier_matches = indexer.backend().query_match_details_observed(
             sequence,
             &continuations,
-            retain_extensions,
+            merge_hint_chain,
             &snapshot,
             evaluator
                 .as_deref_mut()
@@ -444,16 +443,7 @@ fn query_lower_tiers_inner(
             "Queried lower-tier indexer"
         );
         continuations = tier_matches.next_continuations.clone();
-        if !merge_hint_chain && evaluator.is_none() {
-            tier_matches.kv_transfer_extensions = None;
-        }
         lower_tier_matches.insert(storage_tier, tier_matches);
-    }
-
-    for (tier, details) in &mut lower_tier_matches {
-        if *tier != StorageTier::HostPinned || !options.retain_kv_transfer_chain {
-            details.kv_transfer_extensions = None;
-        }
     }
     lower_tier_matches
 }

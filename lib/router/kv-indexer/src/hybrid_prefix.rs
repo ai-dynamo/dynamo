@@ -62,6 +62,9 @@ pub(crate) struct HybridPrefixEvaluator {
     max_blocks: usize,
     workers: FxHashMap<WorkerWithDpRank, DeviceWorkerState>,
     device_prepared: bool,
+    /// Blocks the walks visited, in visit order. Walks only append here;
+    /// checkpoint records are read once a walk has released its tree guards.
+    recorded: Vec<(StorageTier, usize, ExternalSequenceBlockHash)>,
 }
 
 impl HybridPrefixEvaluator {
@@ -73,6 +76,31 @@ impl HybridPrefixEvaluator {
             max_blocks: max_blocks.unwrap_or(usize::MAX),
             workers: FxHashMap::default(),
             device_prepared: false,
+            recorded: Vec::new(),
+        }
+    }
+
+    /// Size the block record for a query of `blocks` blocks before the walk
+    /// takes any tree guard.
+    pub(crate) fn reserve_blocks(&mut self, blocks: usize) {
+        self.recorded.reserve(blocks.min(self.max_blocks));
+    }
+
+    /// Read the checkpoint records of the visited blocks. The first hash seen
+    /// at a position wins, as it did when records were read during the walk.
+    fn resolve_recorded(&mut self) {
+        let candidates = &mut self.candidates;
+        for (tier, position, hash) in self.recorded.drain(..) {
+            self.view.with_owners(hash, tier, |owners| {
+                for &owner in owners {
+                    let points = candidates.entry((owner, tier)).or_default();
+                    if let Err(index) =
+                        points.binary_search_by_key(&position, |point| point.position)
+                    {
+                        points.insert(index, Checkpoint { position, hash });
+                    }
+                }
+            });
         }
     }
 
@@ -136,6 +164,7 @@ impl HybridPrefixEvaluator {
     }
 
     pub(crate) fn prepare_device(&mut self, raw: &MatchDetails) {
+        self.resolve_recorded();
         if self.device_prepared {
             return;
         }
@@ -191,6 +220,7 @@ impl HybridPrefixEvaluator {
         tiers: &mut HashMap<StorageTier, LowerTierMatchDetails>,
         snapshot: &ResidencyRoutingSnapshot,
     ) {
+        self.resolve_recorded();
         for (tier, details) in tiers.iter() {
             for (worker, hits) in &details.hits {
                 let Some(next) = details.next_continuations.get(worker) else {
@@ -364,19 +394,7 @@ impl MatchObserver for HybridPrefixEvaluator {
         if position > self.max_blocks {
             return;
         }
-        let candidates = &mut self.candidates;
-        let tier = self.tier;
-        self.view.with_owners(hash, tier, |owners| {
-            for (&owner, &alignment) in owners {
-                if !position.is_multiple_of(alignment.max(1)) {
-                    continue;
-                }
-                let points = candidates.entry((owner, tier)).or_default();
-                if let Err(index) = points.binary_search_by_key(&position, |point| point.position) {
-                    points.insert(index, Checkpoint { position, hash });
-                }
-            }
-        });
+        self.recorded.push((self.tier, position, hash));
     }
 }
 
@@ -445,21 +463,22 @@ mod tests {
         residency: &KvCacheGroupResidency,
         worker: WorkerWithDpRank,
         position: u64,
-        alignment: u32,
     ) {
-        let mut event =
-            crate::testing::recurrent_store(worker, StorageTier::Device, position, 0, 1);
-        event.kv_cache_group.as_mut().unwrap().alignment_blocks = Some(alignment);
-        residency.apply(&event);
+        residency.apply(&crate::testing::recurrent_store(
+            worker,
+            StorageTier::Device,
+            position,
+            0,
+            1,
+        ));
     }
 
     #[test]
-    fn device_candidates_preserve_raw_bounds_alignment_and_dp() {
+    fn device_candidates_preserve_raw_bounds_and_dp() {
         for case in [
             "bound",
             "bound_missing",
-            "alignment",
-            "alignment_missing",
+            "unsupported_alignment",
             "dp",
             "clear_readd",
         ] {
@@ -467,28 +486,31 @@ mod tests {
             let others: Vec<_> = (1..=63).map(|id| WorkerWithDpRank::new(id, 0)).collect();
             let residency = KvCacheGroupResidency::new();
             for &worker in &others {
-                residency.declare_groups(ResidencyOwner::worker(worker), &[0]);
+                residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
                 for position in 1..=8 {
-                    store_device_checkpoint(&residency, worker, position, 1);
+                    store_device_checkpoint(&residency, worker, position);
                 }
             }
-            let alignment = if case.starts_with("alignment") { 2 } else { 1 };
+            let alignment = if case == "unsupported_alignment" {
+                2
+            } else {
+                1
+            };
             residency.declare_layout(ResidencyOwner::worker(target), &[0], alignment);
             let positions: &[u64] = match case {
                 "bound" => &[8, 3],
                 "bound_missing" => &[8, 7],
-                "alignment" => &[7, 2],
-                "alignment_missing" => &[7],
+                "unsupported_alignment" => &[7, 2],
                 _ => &[999],
             };
             for &position in positions {
-                store_device_checkpoint(&residency, target, position, alignment);
+                store_device_checkpoint(&residency, target, position);
             }
             let wrong_dp = WorkerWithDpRank::new(64, 0);
             if case == "dp" {
-                residency.declare_groups(ResidencyOwner::worker(wrong_dp), &[0]);
+                residency.declare_layout(ResidencyOwner::worker(wrong_dp), &[0], 1);
                 for position in 1..=8 {
-                    store_device_checkpoint(&residency, wrong_dp, position, 1);
+                    store_device_checkpoint(&residency, wrong_dp, position);
                 }
             }
             let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
@@ -509,7 +531,7 @@ mod tests {
             if case == "clear_readd" {
                 residency.clear_worker(target);
                 for position in 1..=8 {
-                    store_device_checkpoint(&residency, target, position, 1);
+                    store_device_checkpoint(&residency, target, position);
                 }
             }
             for position in 1..=8 {
@@ -525,7 +547,6 @@ mod tests {
             evaluator.finish(&mut raw, &mut HashMap::new(), &Default::default());
             let expected = match case {
                 "bound" => 3,
-                "alignment" => 2,
                 "clear_readd" => 8,
                 _ => 0,
             };
@@ -591,7 +612,7 @@ mod tests {
         let hybrid = WorkerWithDpRank::new(7, 0);
         let dense = WorkerWithDpRank::new(8, 0);
         let residency = KvCacheGroupResidency::new();
-        residency.declare_groups(ResidencyOwner::worker(hybrid), &[0]);
+        residency.declare_layout(ResidencyOwner::worker(hybrid), &[0], 1);
         let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
         evaluator.prepare_device(&MatchDetails::default());
 
@@ -623,7 +644,7 @@ mod tests {
         let foreign = WorkerWithDpRank::new(10, 0);
         let residency = KvCacheGroupResidency::new();
         for worker in [hybrid, unmatched] {
-            residency.declare_groups(ResidencyOwner::worker(worker), &[0]);
+            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
         }
         let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
         for worker in [hybrid, unmatched, dense] {
@@ -654,7 +675,7 @@ mod tests {
         let owner = ResidencyOwner::worker(worker);
         for legacy_first in [false, true] {
             let residency = KvCacheGroupResidency::new();
-            residency.declare_groups(owner, &[0]);
+            residency.declare_layout(owner, &[0], 1);
             let gpu = crate::testing::recurrent_store(worker, StorageTier::Device, 2, 0, 1);
             let host = crate::testing::recurrent_store(worker, StorageTier::HostPinned, 2, 0, 1);
             residency.apply(&gpu);
@@ -705,7 +726,7 @@ mod tests {
         let residency = KvCacheGroupResidency::new();
         let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
         evaluator.observe_worker(worker);
-        residency.declare_groups(ResidencyOwner::worker(worker), &[0]);
+        residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
         residency.apply(&crate::testing::recurrent_store(
             worker,
             StorageTier::HostPinned,
@@ -743,7 +764,7 @@ mod tests {
         let other = WorkerWithDpRank::new(8, 0);
         for stale in [false, true] {
             let residency = KvCacheGroupResidency::new();
-            residency.declare_groups(ResidencyOwner::worker(worker), &[0]);
+            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
             let source = if stale { worker } else { other };
             let event = crate::testing::recurrent_store(source, StorageTier::Device, 2, 0, 1);
             residency.apply(&event);
@@ -815,7 +836,7 @@ mod tests {
             for mutation in ["unchanged", "add_owner", "remove", "remove_readd"] {
                 let residency = KvCacheGroupResidency::new();
                 for worker in [first, second] {
-                    residency.declare_groups(ResidencyOwner::worker(worker), &[0]);
+                    residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
                 }
                 let checkpoint = |worker, position: usize| {
                     crate::testing::recurrent_store(
@@ -984,7 +1005,7 @@ mod tests {
         let residency = KvCacheGroupResidency::new();
         let hybrid = WorkerWithDpRank::new(7, 0);
         let dense = WorkerWithDpRank::new(8, 0);
-        residency.declare_groups(ResidencyOwner::worker(hybrid), &[0]);
+        residency.declare_layout(ResidencyOwner::worker(hybrid), &[0], 1);
         let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
         evaluator.observe_worker(hybrid);
         let details = LowerTierMatchDetails {
@@ -1061,7 +1082,7 @@ mod tests {
                 .into_iter()
                 .map(ExternalSequenceBlockHash)
                 .collect();
-            indexer.declare_recurrent_groups(worker, &[0, 1, 2]);
+            indexer.declare_recurrent_layout(worker, &[0, 1, 2], 1);
             let stored = RouterEvent::new(
                 27,
                 KvCacheEvent {
@@ -1185,51 +1206,6 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(partial.overlap_scores.scores[&worker], 2);
-        }
-    }
-    #[test]
-    fn engine_alignment_never_rounds_a_checkpoint_into_an_unstored_boundary() {
-        let worker = WorkerWithDpRank::new(29, 0);
-        let table = KvCacheGroupResidency::new();
-        table.declare_layout(ResidencyOwner::worker(worker), &[7], 2);
-        let store = |position| {
-            let mut event =
-                crate::testing::recurrent_store(worker, StorageTier::Device, position, 7, 1);
-            event.kv_cache_group.as_mut().unwrap().alignment_blocks = Some(2);
-            table.apply(&event);
-        };
-        let raw = || {
-            let mut details = MatchDetails::default();
-            details.overlap_scores.scores.insert(worker, 4);
-            details
-                .last_matched_hashes
-                .insert(worker, ExternalSequenceBlockHash(4));
-            details
-        };
-        store(3);
-        for (with_aligned_state, limit, expected) in
-            [(false, None, 0), (true, None, 2), (true, Some(1), 0)]
-        {
-            if with_aligned_state {
-                store(2);
-            }
-            let mut evaluator = HybridPrefixEvaluator::new(&table, limit);
-            evaluator.observe_worker(worker);
-            for position in 1..=4 {
-                evaluator.observe_block(position, ExternalSequenceBlockHash(position as u64));
-            }
-            let mut details = raw();
-            evaluator.query_anchor(&details);
-            evaluator.finish(&mut details, &mut Default::default(), &Default::default());
-            assert_eq!(
-                details
-                    .overlap_scores
-                    .scores
-                    .get(&worker)
-                    .copied()
-                    .unwrap_or(0),
-                expected
-            );
         }
     }
 }

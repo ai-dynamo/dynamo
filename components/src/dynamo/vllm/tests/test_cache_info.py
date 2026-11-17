@@ -11,8 +11,6 @@ from dynamo.vllm.cache_info import (
     DYNAMO_KV_CACHE_GROUPS_KEY,
     DYNAMO_KV_EVENT_BLOCK_SIZE_KEY,
     configure_kv_event_block_size,
-    recurrent_alignment_blocks,
-    recurrent_kv_groups,
     recurrent_kv_layout,
 )
 
@@ -54,10 +52,10 @@ def test_group_layout_is_preserved_and_recurrent_publishing_is_explicit(monkeypa
     assert asyncio.run(configure_kv_event_block_size(engine, config)) == 576
     assert config.additional_config[DYNAMO_KV_CACHE_GROUPS_KEY] == metadata
     monkeypatch.delenv("DYN_VLLM_RECURRENT_KV_EVENTS", raising=False)
-    assert recurrent_kv_groups(config) is None
+    assert recurrent_kv_layout(config) is None
     monkeypatch.setenv("DYN_VLLM_RECURRENT_KV_EVENTS", "1")
-    assert recurrent_kv_groups(config) is None
-    assert recurrent_kv_groups(config, enabled=True) == [0, 1]
+    assert recurrent_kv_layout(config) is None
+    assert recurrent_kv_layout(config, enabled=True).recurrent_groups == [0, 1]
 
 
 def test_recurrent_opt_in_requires_successfully_fetched_layout():
@@ -72,7 +70,7 @@ def test_recurrent_opt_in_requires_successfully_fetched_layout():
     )
     assert asyncio.run(configure_kv_event_block_size(engine, config)) == 576
     with pytest.raises(ValueError, match="group metadata"):
-        recurrent_kv_groups(config, enabled=True)
+        recurrent_kv_layout(config, enabled=True)
 
 
 @pytest.mark.parametrize("unit", [32, 64, 576])
@@ -96,7 +94,6 @@ def test_supported_geometry_publishes_fixed_common_unit_contract(
         "cache_hit_alignment_tokens": unit,
         "cache_groups": config.additional_config[DYNAMO_KV_CACHE_GROUPS_KEY],
     }
-    assert recurrent_alignment_blocks(config) == 1
 
 
 def test_known_cpu_offloading_geometry_is_supported():
@@ -109,7 +106,7 @@ def test_known_cpu_offloading_geometry_is_supported():
             "cpu_bytes_to_use": 1 << 30,
         },
     )
-    assert recurrent_kv_groups(config, enabled=True) == [0, 1]
+    assert recurrent_kv_layout(config, enabled=True).recurrent_groups == [0, 1]
 
 
 @pytest.mark.parametrize(
@@ -170,7 +167,7 @@ def test_mixed_group_sizes_are_not_reduced_to_an_unverified_lcm():
     config = _config(16)
     config.additional_config[DYNAMO_KV_CACHE_GROUPS_KEY][0]["block_size"] = 24
     with pytest.raises(ValueError, match="one common block size"):
-        recurrent_alignment_blocks(config)
+        recurrent_kv_layout(config, enabled=True)
 
 
 def test_different_indexer_unit_is_rejected():
@@ -229,7 +226,6 @@ def test_unknown_connector_is_not_advertised():
 
 def test_default_off_does_not_read_or_validate_new_capabilities():
     assert recurrent_kv_layout(SimpleNamespace()) is None
-    assert recurrent_kv_groups(SimpleNamespace()) is None
 
 
 def test_dense_worker_does_not_need_a_recurrent_capability_contract():
@@ -241,4 +237,3 @@ def test_dense_worker_does_not_need_a_recurrent_capability_contract():
         }
     )
     assert recurrent_kv_layout(config, enabled=True) is None
-    assert recurrent_kv_groups(config, enabled=True) is None

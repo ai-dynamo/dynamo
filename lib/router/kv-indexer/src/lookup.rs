@@ -250,7 +250,8 @@ impl<'a> LookupPipeline<'a> {
             {
                 return Ok(details);
             }
-            let evaluator = HybridPrefixEvaluator::new(residency, max_blocks);
+            let mut evaluator = HybridPrefixEvaluator::new(residency, max_blocks);
+            evaluator.reserve_blocks(sequence.as_slice().len());
             let (mut raw, mut evaluator) = self
                 .primary
                 .find_observed(sequence, retain, evaluator)
@@ -314,7 +315,8 @@ impl<'a> LookupPipeline<'a> {
                     lower_tier: Default::default(),
                 });
             }
-            let evaluator = HybridPrefixEvaluator::new(residency, options.max_reusable_blocks);
+            let mut evaluator = HybridPrefixEvaluator::new(residency, options.max_reusable_blocks);
+            evaluator.reserve_blocks(sequence.as_slice().len());
             let (mut raw, mut evaluator) = self
                 .primary
                 .find_observed(sequence, options.retain_kv_transfer_chain, evaluator)
@@ -431,6 +433,7 @@ impl<'a> PrimaryLookup<'a> {
             return None;
         };
         let mut evaluator = ForwardDeviceEvaluator::new(residency, max_blocks);
+        evaluator.reserve_blocks(sequence.as_slice().len());
         let mut details = primary.backend().find_match_details_impl_with_observer(
             sequence.as_slice(),
             false,
@@ -913,7 +916,7 @@ mod tests {
                 } else {
                     make_test_indexer()
                 };
-                indexer.declare_recurrent_groups(worker, &[0]);
+                indexer.declare_recurrent_layout(worker, &[0], 1);
                 indexer
                     .try_apply_event(store_event(
                         7,
@@ -1087,7 +1090,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        indexer.declare_recurrent_groups(worker, &[0, 1, 2]);
+        indexer.declare_recurrent_layout(worker, &[0, 1, 2], 1);
         for group in [0, 1, 2] {
             for hash in [chain[1], chain[2]] {
                 indexer

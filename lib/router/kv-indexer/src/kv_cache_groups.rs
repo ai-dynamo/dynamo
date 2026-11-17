@@ -33,7 +33,7 @@ use crate::prelude::{
 };
 
 type GroupPresence = FxHashMap<u32, FxHashMap<u64, u8>>;
-type OwnerAlignments = FxHashMap<ResidencyOwner, usize>;
+type TierOwners = FxHashSet<ResidencyOwner>;
 
 /// An independently owned set with the same equal-set shortcut as CRTC's
 /// `WorkerSet`: compare length and a 64-bit XOR fingerprint. Unequal sets can
@@ -114,7 +114,7 @@ fn checkpoint_worker_fingerprint(worker: WorkerWithDpRank) -> u64 {
 /// side; readers need neither owner-layout joins nor publication certificates.
 #[derive(Debug, Default)]
 struct CheckpointPresence {
-    owners: [OwnerAlignments; 4],
+    owners: [TierOwners; 4],
     // Each hash owns its workers, even when another hash has identical members.
     device_workers: CheckpointWorkerSet,
 }
@@ -128,21 +128,24 @@ enum DeviceMembership {
 }
 
 impl CheckpointPresence {
-    fn update(&mut self, owner: ResidencyOwner, mask: u8, alignment: usize) -> DeviceMembership {
-        if self.owners.iter().enumerate().all(|(index, owners)| {
-            owners.get(&owner).copied() == (mask & (1 << index) != 0).then_some(alignment)
-        }) {
+    fn update(&mut self, owner: ResidencyOwner, mask: u8) -> DeviceMembership {
+        if self
+            .owners
+            .iter()
+            .enumerate()
+            .all(|(index, owners)| owners.contains(&owner) == (mask & (1 << index) != 0))
+        {
             return DeviceMembership::Unchanged;
         }
         for (index, owners) in self.owners.iter_mut().enumerate() {
             if mask & (1 << index) != 0 {
-                owners.insert(owner, alignment);
+                owners.insert(owner);
             } else {
                 owners.remove(&owner);
             }
         }
         if let Some(worker) = owner.as_worker() {
-            if mask & 1 != 0 && alignment == 1 {
+            if mask & 1 != 0 {
                 if self.device_workers.insert(worker) {
                     return DeviceMembership::Joined;
                 }
@@ -154,7 +157,7 @@ impl CheckpointPresence {
     }
 
     fn is_empty(&self) -> bool {
-        self.owners.iter().all(FxHashMap::is_empty)
+        self.owners.iter().all(FxHashSet::is_empty)
     }
 }
 
@@ -168,34 +171,15 @@ struct DeviceFilterSlot {
     /// Union of the filter bits of the workers in every Device set that maps
     /// here. Bits are cleared only when the last such set empties.
     workers: AtomicU64,
-    /// Number of nonempty Device sets that map here. The top bit serializes
+    /// Number of nonempty Device sets that map here. The mutex serializes
     /// this slot's writers, which hold it for a few instructions.
-    records: AtomicU64,
+    records: Mutex<u32>,
 }
 
+// Queries load one slot per block, so a slot stays at two words.
+const _: () = assert!(std::mem::size_of::<DeviceFilterSlot>() == 16);
+
 impl DeviceFilterSlot {
-    const BUSY: u64 = 1 << 63;
-
-    /// Returns the record count once no other writer is in this slot.
-    fn lock(&self) -> u64 {
-        loop {
-            let records = self.records.load(Ordering::Relaxed) & !Self::BUSY;
-            if self
-                .records
-                .compare_exchange_weak(
-                    records,
-                    records | Self::BUSY,
-                    Ordering::Acquire,
-                    Ordering::Relaxed,
-                )
-                .is_ok()
-            {
-                return records;
-            }
-            std::hint::spin_loop();
-        }
-    }
-
     /// A worker joined a Device set that maps here; `first` when the set was
     /// empty before.
     fn joined(&self, bit: u64, first: bool) {
@@ -204,19 +188,18 @@ impl DeviceFilterSlot {
         if !first && self.workers.load(Ordering::Relaxed) & bit != 0 {
             return;
         }
-        let records = self.lock();
+        let mut records = self.records.lock();
         self.workers.fetch_or(bit, Ordering::Release);
-        self.records
-            .store(records + u64::from(first), Ordering::Release);
+        *records += u32::from(first);
     }
 
     /// A Device set that maps here lost its last worker.
     fn emptied(&self) {
-        let records = self.lock().saturating_sub(1);
-        if records == 0 {
+        let mut records = self.records.lock();
+        *records = records.saturating_sub(1);
+        if *records == 0 {
             self.workers.store(0, Ordering::Release);
         }
-        self.records.store(records, Ordering::Release);
     }
 }
 
@@ -283,8 +266,8 @@ impl CheckpointDirectory {
 
     /// Directory-only publication for tests that do not read the owner count.
     #[cfg(test)]
-    fn publish(&self, owner: ResidencyOwner, updates: Vec<(u64, u8)>, alignment: usize) {
-        self.publish_counted(owner, updates, alignment, &AtomicUsize::new(0), 1);
+    fn publish(&self, owner: ResidencyOwner, updates: Vec<(u64, u8)>) {
+        self.publish_counted(owner, updates, &AtomicUsize::new(0), 1);
     }
 
     /// `device_checkpoints` counts the records whose Device worker set holds
@@ -296,11 +279,10 @@ impl CheckpointDirectory {
         &self,
         owner: ResidencyOwner,
         updates: Vec<(u64, u8)>,
-        alignment: usize,
         device_checkpoints: &AtomicUsize,
         filter_bit: u64,
     ) {
-        let may_join = if owner.as_worker().is_some() && alignment == 1 {
+        let may_join = if owner.as_worker().is_some() {
             updates.iter().filter(|(_, mask)| mask & 1 != 0).count()
         } else {
             0
@@ -318,7 +300,7 @@ impl CheckpointDirectory {
                 Entry::Occupied(mut entry) => {
                     let (change, empty) = {
                         let record = entry.get_mut();
-                        let change = record.update(owner, mask, alignment);
+                        let change = record.update(owner, mask);
                         let holders = record.device_workers.len();
                         self.track_filter(hash, filter_bit, change, holders);
                         (change, record.is_empty())
@@ -330,7 +312,7 @@ impl CheckpointDirectory {
                 }
                 Entry::Vacant(entry) if mask != 0 => {
                     let mut record = CheckpointPresence::default();
-                    let change = record.update(owner, mask, alignment);
+                    let change = record.update(owner, mask);
                     let holders = record.device_workers.len();
                     self.track_filter(hash, filter_bit, change, holders);
                     entry.insert(Box::new(record));
@@ -397,7 +379,7 @@ impl CheckpointDirectory {
         &self,
         hash: ExternalSequenceBlockHash,
         tier: StorageTier,
-        visit: impl FnOnce(&OwnerAlignments),
+        visit: impl FnOnce(&TierOwners),
     ) -> bool {
         let owners = {
             let Some(record) = self.entries.get(&hash.0) else {
@@ -443,9 +425,9 @@ struct OwnerPresence {
     complete_checkpoints: FxHashMap<u64, u8>,
     declared: bool,
     expected_group_count: Option<usize>,
-    alignment_blocks: usize,
     retired: bool,
-    published_general_device_eval: bool,
+    /// Mirror of `layout().complete_layout` that queries load without this lock.
+    published_layout: Arc<AtomicBool>,
     /// Shared with the registry snapshot so queries can read it without
     /// taking this owner's lock. See [`CheckpointDirectory::publish_counted`].
     device_checkpoints: Arc<AtomicUsize>,
@@ -455,21 +437,14 @@ struct OwnerPresence {
 }
 
 impl OwnerPresence {
-    fn refresh_general_requirement(&mut self, count: &AtomicU64) {
-        let requires_general = !self.retired && self.alignment_blocks > 1;
-        if requires_general != self.published_general_device_eval {
-            if requires_general {
-                count.fetch_add(1, Ordering::Release);
-            } else {
-                count.fetch_sub(1, Ordering::Release);
-            }
-            self.published_general_device_eval = requires_general;
-        }
+    /// Call after any change to the group set, the expected count or retirement.
+    fn publish_layout(&self) {
+        self.published_layout
+            .store(self.layout().complete_layout, Ordering::Relaxed);
     }
 
     fn layout(&self) -> CheckpointLayout {
         CheckpointLayout {
-            alignment_blocks: self.alignment_blocks.max(1),
             complete_layout: !self.retired
                 && !self.groups.is_empty()
                 && self.expected_group_count == Some(self.groups.len()),
@@ -573,7 +548,6 @@ fn complete_tiers(counts: &[u32; 4], required_groups: usize) -> u8 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CheckpointLayout {
-    pub alignment_blocks: usize,
     pub complete_layout: bool,
 }
 
@@ -581,12 +555,18 @@ pub struct CheckpointLayout {
 /// independent mutable records and has the same best-effort freshness as KV facts.
 #[derive(Debug, Default, Clone)]
 struct OwnerRegistry {
-    owners: FxHashMap<ResidencyOwner, Arc<RwLock<OwnerPresence>>>,
+    owners: FxHashMap<ResidencyOwner, OwnerEntry>,
     cache_owners: FxHashMap<ResidencyOwnerKey, ResidencyOwner>,
     /// What queries read about each registered worker, keyed like `owners`.
     workers: FxHashMap<WorkerWithDpRank, WorkerSummary>,
     /// Workers registered so far; the next one takes filter bit `n % 64`.
     filter_bits_assigned: u32,
+}
+
+#[derive(Debug, Clone)]
+struct OwnerEntry {
+    state: Arc<RwLock<OwnerPresence>>,
+    complete_layout: Arc<AtomicBool>,
 }
 
 /// What a query reads about one registered worker without taking its lock.
@@ -639,11 +619,14 @@ impl CheckpointReadView {
         if let Some(&layout) = self.layouts.get(&owner) {
             return layout;
         }
-        let state = self.registry.owners.get(&owner)?.read();
+        let entry = self.registry.owners.get(&owner)?;
         // A registered owner remains known to this query even if retirement
         // happens before its first layout read. Its retired layout is incomplete,
         // so absent checkpoints receive zero credit rather than dense KV credit.
-        Some(state.layout())
+        // The owner lock is not taken: writers hold it across republication.
+        Some(CheckpointLayout {
+            complete_layout: entry.complete_layout.load(Ordering::Relaxed),
+        })
     }
 
     pub fn remember_layout(&mut self, owner: ResidencyOwner, captured: Option<CheckpointLayout>) {
@@ -669,37 +652,16 @@ impl CheckpointReadView {
         Some(owner)
     }
 
-    /// The callback receives a copy of the current complete owners and their
-    /// alignment. All guards are released before invoking the callback;
-    /// separate calls may see newer versions.
+    /// The callback receives a copy of the current complete owners. All guards
+    /// are released before invoking the callback; separate calls may see newer
+    /// versions.
     pub fn with_owners(
         &self,
         hash: ExternalSequenceBlockHash,
         tier: StorageTier,
-        visit: impl FnOnce(&OwnerAlignments),
+        visit: impl FnOnce(&FxHashSet<ResidencyOwner>),
     ) -> bool {
         self.checkpoints.with_owners(hash, tier, visit)
-    }
-
-    pub fn owner_layouts_at(
-        &self,
-        hash: ExternalSequenceBlockHash,
-        tier: StorageTier,
-    ) -> impl Iterator<Item = (ResidencyOwner, CheckpointLayout)> {
-        let mut owners = Vec::new();
-        self.with_owners(hash, tier, |current| {
-            owners.extend(current.iter().map(|(&owner, &alignment_blocks)| {
-                (
-                    owner,
-                    CheckpointLayout {
-                        alignment_blocks,
-                        complete_layout: true,
-                    },
-                )
-            }));
-        });
-        owners.sort_by(|(left, _), (right, _)| compare_owners(left, right));
-        owners.into_iter()
     }
 
     /// Compatibility enumeration for explicitly tracked owners. Unlike the old
@@ -713,7 +675,7 @@ impl CheckpointReadView {
         self.with_owners(hash, tier, |current| {
             owners.extend(
                 current
-                    .keys()
+                    .iter()
                     .copied()
                     .filter(|owner| self.layouts.get(owner).is_some_and(Option::is_some)),
             );
@@ -738,7 +700,6 @@ pub struct KvCacheGroupResidency {
     registry_writer: Mutex<()>,
     active: AtomicBool,
     checkpoints: Arc<CheckpointDirectory>,
-    general_device_eval_layouts: AtomicU64,
 }
 
 impl KvCacheGroupResidency {
@@ -750,17 +711,13 @@ impl KvCacheGroupResidency {
         self.active.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn requires_general_device_eval(&self) -> bool {
-        self.general_device_eval_layouts.load(Ordering::Acquire) != 0
-    }
-
     pub(crate) fn known_worker_read(&self) -> KnownWorkerRead {
         KnownWorkerRead {
             registry: self.registry.load(),
         }
     }
 
-    /// Read this hash's complete, alignment-one Device workers. Each record owns
+    /// Read this hash's complete Device workers. Each record owns
     /// its set independently. Compare size and fingerprint with the query's
     /// current set under the shard read guard, copying when they differ. This
     /// uses the probabilistic equality contract of `CheckpointWorkerSet`.
@@ -785,7 +742,7 @@ impl KvCacheGroupResidency {
         Some(CheckpointWorkers::Changed(workers.clone()))
     }
 
-    /// Visit this hash's complete, alignment-one Device workers in place.
+    /// Visit this hash's complete Device workers in place.
     /// `bits` are the Device filter bits of the workers the caller is looking
     /// for; a record that cannot hold any of them is skipped without a
     /// directory read. The visitor runs under the directory shard read guard,
@@ -832,7 +789,11 @@ impl KvCacheGroupResidency {
     }
 
     fn owner(&self, owner: ResidencyOwner) -> Option<Arc<RwLock<OwnerPresence>>> {
-        self.registry.load().owners.get(&owner).cloned()
+        self.registry
+            .load()
+            .owners
+            .get(&owner)
+            .map(|entry| entry.state.clone())
     }
 
     fn publish_reset(
@@ -855,7 +816,6 @@ impl KvCacheGroupResidency {
         self.checkpoints.publish_counted(
             owner,
             updates,
-            state.alignment_blocks.max(1),
             &state.device_checkpoints,
             state.filter_bit,
         );
@@ -864,7 +824,6 @@ impl KvCacheGroupResidency {
     fn clear_owner(&self, owner: ResidencyOwner, state: &mut OwnerPresence) {
         let previous = std::mem::take(&mut state.complete_checkpoints);
         state.clear_checkpoints();
-        state.refresh_general_requirement(&self.general_device_eval_layouts);
         self.publish_reset(owner, previous, state);
     }
 
@@ -876,8 +835,8 @@ impl KvCacheGroupResidency {
         // are marked retired before a replacement can publish any checkpoints.
         let _writer = self.registry_writer.lock();
         let current = self.registry.load_full();
-        if let Some(state) = current.owners.get(&owner) {
-            return state.clone();
+        if let Some(entry) = current.owners.get(&owner) {
+            return entry.state.clone();
         }
         let mut next = (*current).clone();
         let mut presence = OwnerPresence::default();
@@ -892,8 +851,15 @@ impl KvCacheGroupResidency {
                 },
             );
         }
+        let complete_layout = presence.published_layout.clone();
         let state = Arc::new(RwLock::new(presence));
-        next.owners.insert(owner, state.clone());
+        next.owners.insert(
+            owner,
+            OwnerEntry {
+                state: state.clone(),
+                complete_layout,
+            },
+        );
         if matches!(owner, ResidencyOwner::CacheOwner(_)) {
             next.cache_owners.insert(owner.compact_key(), owner);
         }
@@ -902,15 +868,37 @@ impl KvCacheGroupResidency {
         state
     }
 
-    pub fn declare_groups(&self, owner: ResidencyOwner, groups: &[u32]) {
-        self.install_layout(owner, groups, None);
-    }
-
+    /// Only an alignment of one block is supported. Any other value keeps the
+    /// owner known as hybrid with no usable checkpoint.
     pub fn declare_layout(&self, owner: ResidencyOwner, groups: &[u32], alignment_blocks: u32) {
-        self.install_layout(owner, groups, Some(alignment_blocks.max(1) as usize));
+        if alignment_blocks > 1 && !groups.is_empty() {
+            self.close_layout(owner, alignment_blocks);
+            return;
+        }
+        self.install_layout(owner, groups);
     }
 
-    fn install_layout(&self, owner: ResidencyOwner, groups: &[u32], alignment: Option<usize>) {
+    fn close_layout(&self, owner: ResidencyOwner, alignment_blocks: u32) {
+        let state = self.get_or_create(owner);
+        let mut state = state.write();
+        if state.retired || (state.declared && state.groups.is_empty()) {
+            return;
+        }
+        tracing::warn!(
+            ?owner,
+            alignment_blocks,
+            "unsupported recurrent checkpoint alignment; the owner gets no checkpoint credit"
+        );
+        let previous = std::mem::take(&mut state.complete_checkpoints);
+        state.groups.clear();
+        state.group_counts.clear();
+        state.declared = true;
+        state.expected_group_count = None;
+        state.publish_layout();
+        self.publish_reset(owner, previous, &state);
+    }
+
+    fn install_layout(&self, owner: ResidencyOwner, groups: &[u32]) {
         if groups.is_empty() {
             if let ResidencyOwner::Worker(worker) = owner {
                 self.remove_worker_rank(worker);
@@ -927,13 +915,11 @@ impl KvCacheGroupResidency {
         let removed_groups = state.groups.keys().any(|group| !groups.contains(group));
         let layout_changed = previous_group_count != groups.len()
             || !groups.iter().all(|group| state.groups.contains_key(group))
-            || previous_expected_count != Some(groups.len())
-            || alignment.is_some_and(|alignment| state.alignment_blocks.max(1) != alignment);
+            || previous_expected_count != Some(groups.len());
         let previous = layout_changed.then(|| std::mem::take(&mut state.complete_checkpoints));
         let changed = state.declared
             && (state.groups.len() != groups.len()
-                || !groups.iter().all(|group| state.groups.contains_key(group))
-                || alignment.is_some_and(|alignment| state.alignment_blocks.max(1) != alignment));
+                || !groups.iter().all(|group| state.groups.contains_key(group)));
         if changed {
             state.groups.clear();
         }
@@ -943,16 +929,13 @@ impl KvCacheGroupResidency {
         }
         state.declared = true;
         state.expected_group_count = Some(groups.len());
-        if let Some(alignment) = alignment {
-            state.alignment_blocks = alignment;
-        }
+        state.publish_layout();
         if changed || removed_groups {
             state.rebuild_group_counts();
         } else if layout_changed {
             state.rebuild_complete_checkpoints();
         }
         if let Some(previous) = previous {
-            state.refresh_general_requirement(&self.general_device_eval_layouts);
             self.publish_reset(owner, previous, &state);
         }
     }
@@ -986,28 +969,20 @@ impl KvCacheGroupResidency {
                 {
                     return true;
                 }
-                if let Some(alignment) = tag.alignment_blocks {
-                    let alignment = alignment.max(1) as usize;
-                    if state.alignment_blocks != 0 && state.alignment_blocks != alignment {
-                        return true;
-                    }
+                if tag.alignment_blocks.is_some_and(|alignment| alignment > 1) {
+                    return true;
                 }
                 let layout_changed = !state.groups.contains_key(&tag.group_idx)
                     || tag
                         .expected_group_count
-                        .is_some_and(|count| state.expected_group_count != Some(count as usize))
-                    || tag.alignment_blocks.is_some_and(|alignment| {
-                        state.alignment_blocks.max(1) != alignment.max(1) as usize
-                    });
+                        .is_some_and(|count| state.expected_group_count != Some(count as usize));
                 let previous =
                     layout_changed.then(|| std::mem::take(&mut state.complete_checkpoints));
                 if let Some(count) = tag.expected_group_count {
                     state.expected_group_count = Some(count as usize);
                 }
-                if let Some(alignment) = tag.alignment_blocks {
-                    state.alignment_blocks = alignment.max(1) as usize;
-                }
                 state.groups.entry(tag.group_idx).or_default();
+                state.publish_layout();
                 if layout_changed {
                     state.rebuild_complete_checkpoints();
                 }
@@ -1022,13 +997,11 @@ impl KvCacheGroupResidency {
                     }
                 }
                 if let Some(previous) = previous {
-                    state.refresh_general_requirement(&self.general_device_eval_layouts);
                     self.publish_reset(owner, previous, &state);
                 } else {
                     self.checkpoints.publish_counted(
                         owner,
                         updates,
-                        state.alignment_blocks.max(1),
                         &state.device_checkpoints,
                         state.filter_bit,
                     );
@@ -1060,7 +1033,6 @@ impl KvCacheGroupResidency {
                     self.checkpoints.publish_counted(
                         owner,
                         updates,
-                        state.alignment_blocks.max(1),
                         &state.device_checkpoints,
                         state.filter_bit,
                     );
@@ -1077,7 +1049,7 @@ impl KvCacheGroupResidency {
         };
         let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
         let registry = self.registry.load();
-        for (owner, state) in &registry.owners {
+        for (owner, entry) in &registry.owners {
             let matches = match (scope, *owner) {
                 (
                     ResetScope::All | ResetScope::Domain(ResidencyDomain::Worker),
@@ -1091,7 +1063,7 @@ impl KvCacheGroupResidency {
             };
             if matches {
                 // A cache clear preserves the declared layout; it only invalidates checkpoints.
-                self.clear_owner(*owner, &mut state.write());
+                self.clear_owner(*owner, &mut entry.state.write());
             }
         }
     }
@@ -1114,10 +1086,11 @@ impl KvCacheGroupResidency {
         let _writer = self.registry_writer.lock();
         let current = self.registry.load_full();
         let mut next = (*current).clone();
-        next.owners.retain(|owner, state| {
+        next.owners.retain(|owner, entry| {
             if matches!(owner, ResidencyOwner::Worker(worker) if matches(*worker)) {
-                let mut state = state.write();
+                let mut state = entry.state.write();
                 state.retired = true;
+                state.publish_layout();
                 self.clear_owner(*owner, &mut state);
                 false
             } else {
@@ -1136,8 +1109,8 @@ impl KvCacheGroupResidency {
     pub fn dump_events(&self) -> Vec<RouterEvent> {
         let registry = self.registry.load();
         let mut out = Vec::new();
-        for (&owner, state) in &registry.owners {
-            let state = state.read();
+        for (&owner, entry) in &registry.owners {
+            let state = entry.state.read();
             for (&group_idx, group) in &state.groups {
                 for tier in [
                     StorageTier::Device,
@@ -1191,7 +1164,7 @@ impl KvCacheGroupResidency {
                         group_idx,
                         kind: KvCacheGroupKind::Mamba,
                         expected_group_count: state.expected_group_count.map(|count| count as u32),
-                        alignment_blocks: Some(state.alignment_blocks.max(1) as u32),
+                        alignment_blocks: Some(1),
                     }));
                 }
             }
@@ -1200,7 +1173,10 @@ impl KvCacheGroupResidency {
     }
 
     pub fn is_hybrid(&self, worker: WorkerWithDpRank) -> bool {
-        self.owner(ResidencyOwner::worker(worker)).is_some()
+        self.registry
+            .load()
+            .owners
+            .contains_key(&ResidencyOwner::worker(worker))
     }
 
     #[cfg(test)]
@@ -1281,7 +1257,7 @@ mod tests {
         let table = KvCacheGroupResidency::new();
         let worker = WorkerWithDpRank::new(7, 2);
         let owner = ResidencyOwner::worker(worker);
-        table.declare_groups(owner, &[0, 1, 2]);
+        table.declare_layout(owner, &[0, 1, 2], 1);
         for group in [0, 1] {
             table.apply(&checkpoint(worker, StorageTier::Device, group, 11, Some(3)));
         }
@@ -1323,7 +1299,7 @@ mod tests {
         let owner = ResidencyOwner::worker(worker);
         table.apply(&checkpoint(worker, StorageTier::Device, 0, 11, None));
         assert!(!has_checkpoint(&table, owner, 11, StorageTier::Device));
-        table.declare_groups(ResidencyOwner::worker(worker), &[0]);
+        table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
         assert!(has_checkpoint(&table, owner, 11, StorageTier::Device));
     }
 
@@ -1331,7 +1307,7 @@ mod tests {
     fn cache_clear_preserves_layout_but_worker_retirement_removes_it() {
         let table = KvCacheGroupResidency::new();
         let worker = WorkerWithDpRank::new(7, 0);
-        table.declare_groups(ResidencyOwner::worker(worker), &[0, 1]);
+        table.declare_layout(ResidencyOwner::worker(worker), &[0, 1], 1);
         table.apply(&checkpoint(worker, StorageTier::Device, 0, 11, Some(2)));
         let clear = RouterEvent::new(
             worker.worker_id,
@@ -1496,14 +1472,13 @@ mod tests {
         );
 
         table.declare_layout(owner, &[0, 1, 2], 2);
-        let mut realigned = table.read_view();
-        assert_eq!(realigned.track_owner(owner).unwrap().alignment_blocks, 2);
+        let mut unsupported = table.read_view();
+        assert!(!unsupported.track_owner(owner).unwrap().complete_layout);
         assert!(
-            realigned
+            unsupported
                 .owners_at(hash, StorageTier::Device)
-                .collect::<Vec<_>>()
-                .as_slice()
-                .is_empty()
+                .next()
+                .is_none()
         );
     }
 
@@ -1685,27 +1660,30 @@ mod tests {
     }
 
     #[test]
-    fn direct_workers_require_complete_groups_and_alignment_one() {
+    fn unsupported_alignment_keeps_the_owner_hybrid_without_checkpoints() {
         let table = KvCacheGroupResidency::new();
-        let first = WorkerWithDpRank::new(7, 0);
-        let second = WorkerWithDpRank::new(7, 1);
-        let hash = ExternalSequenceBlockHash(11);
-        table.declare_layout(ResidencyOwner::worker(first), &[0, 1], 1);
-        table.declare_layout(ResidencyOwner::worker(second), &[0], 2);
-        table.apply(&checkpoint(first, StorageTier::Device, 0, 11, Some(2)));
-        assert!(!table.with_checkpoint_workers(hash, |_| panic!("incomplete state")));
-        table.apply(&checkpoint(first, StorageTier::Device, 1, 11, Some(2)));
-        let mut aligned = checkpoint(second, StorageTier::Device, 0, 11, Some(1));
-        aligned.kv_cache_group.as_mut().unwrap().alignment_blocks = Some(2);
-        table.apply(&aligned);
-        assert!(table.requires_general_device_eval());
-        assert!(table.with_checkpoint_workers(hash, |workers| {
-            assert_eq!(workers.len(), 1);
-            assert!(workers.contains(&first));
-            assert!(!workers.contains(&second));
-        }));
-        table.remove_worker_rank(second);
-        assert!(!table.requires_general_device_eval());
+        let declared = WorkerWithDpRank::new(7, 0);
+        let tagged = WorkerWithDpRank::new(7, 1);
+        let owner = ResidencyOwner::worker(declared);
+        table.declare_layout(owner, &[0], 2);
+        table.apply(&checkpoint(declared, StorageTier::Device, 0, 11, Some(1)));
+        let mut event = checkpoint(tagged, StorageTier::Device, 0, 11, Some(1));
+        event.kv_cache_group.as_mut().unwrap().alignment_blocks = Some(2);
+        assert!(table.apply(&event));
+        for worker in [declared, tagged] {
+            assert!(table.is_hybrid(worker));
+            assert!(!has_checkpoint(
+                &table,
+                ResidencyOwner::worker(worker),
+                11,
+                StorageTier::Device
+            ));
+        }
+        assert!(table.checkpoints.is_empty());
+
+        table.declare_layout(owner, &[0], 1);
+        table.apply(&checkpoint(declared, StorageTier::Device, 0, 11, Some(1)));
+        assert!(has_checkpoint(&table, owner, 11, StorageTier::Device));
     }
 
     #[test]
@@ -1741,36 +1719,31 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_fingerprint_follows_tiers_alignment_and_owner_removal() {
+    fn checkpoint_fingerprint_follows_tiers_and_owner_removal() {
         let first = WorkerWithDpRank::new(7, 0);
         let other_rank = WorkerWithDpRank::new(7, 1);
         let first_owner = ResidencyOwner::worker(first);
         let other_owner = ResidencyOwner::worker(other_rank);
         let mut record = CheckpointPresence::default();
-        record.update(first_owner, 1, 1);
-        record.update(other_owner, 1, 1);
+        record.update(first_owner, 1);
+        record.update(other_owner, 1);
         let both = CheckpointWorkerSet::from_iter([other_rank, first]);
         assert_eq!(record.device_workers, both);
 
         // An idempotent publish and a non-device tier change must preserve the
-        // device fingerprint. Alignment changes do change device eligibility.
-        record.update(first_owner, 1, 1);
-        record.update(first_owner, 3, 1);
+        // device fingerprint.
+        record.update(first_owner, 1);
+        record.update(first_owner, 3);
         assert_eq!(record.device_workers, both);
-        record.update(first_owner, 3, 2);
-        assert_eq!(
-            record.device_workers,
-            CheckpointWorkerSet::from_iter([other_rank])
-        );
-        record.update(first_owner, 1, 1);
+        record.update(first_owner, 1);
         assert_eq!(record.device_workers, both);
-        record.update(other_owner, 2, 1);
+        record.update(other_owner, 2);
         assert_eq!(
             record.device_workers,
             CheckpointWorkerSet::from_iter([first])
         );
-        record.update(first_owner, 0, 1);
-        record.update(other_owner, 0, 1);
+        record.update(first_owner, 0);
+        record.update(other_owner, 0);
         assert!(record.is_empty());
         assert_eq!(record.device_workers, CheckpointWorkerSet::default());
     }
@@ -1822,7 +1795,6 @@ mod tests {
             table.checkpoints.publish(
                 ResidencyOwner::worker(worker),
                 vec![(first_hash.0, 1), (second_hash.0, 1)],
-                1,
             );
         }
         let mut captured =
@@ -1834,7 +1806,7 @@ mod tests {
 
         table
             .checkpoints
-            .publish(ResidencyOwner::worker(second), vec![(first_hash.0, 0)], 1);
+            .publish(ResidencyOwner::worker(second), vec![(first_hash.0, 0)]);
         assert_eq!(
             table.checkpoint_workers_since(first_hash, Some(&captured)),
             Some(CheckpointWorkers::Changed(CheckpointWorkerSet::from_iter(
@@ -1872,23 +1844,20 @@ mod tests {
         };
         // No Device set anywhere: nothing can hold anyone.
         assert!(!may_hold(11, u64::MAX));
-        directory.publish_counted(first, vec![(11, 1)], 1, &count, 0b01);
+        directory.publish_counted(first, vec![(11, 1)], &count, 0b01);
         assert!(may_hold(11, 0b01));
         assert!(!may_hold(11, 0b10));
-        directory.publish_counted(second, vec![(11, 1)], 1, &count, 0b10);
+        directory.publish_counted(second, vec![(11, 1)], &count, 0b10);
         assert!(may_hold(11, 0b10));
         // A departed worker's bit may linger, but a holder's bit never drops.
-        directory.publish_counted(first, vec![(11, 0)], 1, &count, 0b01);
+        directory.publish_counted(first, vec![(11, 0)], &count, 0b01);
         assert!(may_hold(11, 0b10));
-        // Other tiers and coarser alignments never enter the filter.
+        // Other tiers never enter the filter.
         assert_ne!(DeviceFilter::index(11), DeviceFilter::index(12));
-        assert_ne!(DeviceFilter::index(11), DeviceFilter::index(13));
-        directory.publish_counted(first, vec![(12, 2)], 1, &count, 0b01);
-        directory.publish_counted(first, vec![(13, 1)], 2, &count, 0b01);
+        directory.publish_counted(first, vec![(12, 2)], &count, 0b01);
         assert!(!may_hold(12, u64::MAX));
-        assert!(!may_hold(13, u64::MAX));
         // The last Device set leaving the slot clears every bit.
-        directory.publish_counted(second, vec![(11, 0)], 1, &count, 0b10);
+        directory.publish_counted(second, vec![(11, 0)], &count, 0b10);
         assert!(!may_hold(11, u64::MAX));
         assert_eq!(count.load(Ordering::Relaxed), 0);
     }
@@ -1907,24 +1876,24 @@ mod tests {
             scope.spawn(|| {
                 let count = AtomicUsize::new(0);
                 for _ in 0..50_000 {
-                    directory.publish_counted(first, vec![(first_hash, 1)], 1, &count, 0b01);
-                    directory.publish_counted(first, vec![(first_hash, 0)], 1, &count, 0b01);
+                    directory.publish_counted(first, vec![(first_hash, 1)], &count, 0b01);
+                    directory.publish_counted(first, vec![(first_hash, 0)], &count, 0b01);
                 }
             });
             scope.spawn(|| {
                 let count = AtomicUsize::new(0);
                 for _ in 0..50_000 {
-                    directory.publish_counted(second, vec![(second_hash, 1)], 1, &count, 0b10);
+                    directory.publish_counted(second, vec![(second_hash, 1)], &count, 0b10);
                     // The record holds the worker, so its bit must be visible.
                     assert!(directory.filter.get().unwrap().may_hold(second_hash, 0b10));
-                    directory.publish_counted(second, vec![(second_hash, 0)], 1, &count, 0b10);
+                    directory.publish_counted(second, vec![(second_hash, 0)], &count, 0b10);
                 }
             });
         });
         assert!(directory.is_empty());
         let filter = directory.filter.get().unwrap();
         assert!(!filter.may_hold(first_hash, u64::MAX));
-        assert_eq!(filter.slot(first_hash).records.load(Ordering::Relaxed), 0);
+        assert_eq!(*filter.slot(first_hash).records.lock(), 0);
     }
 
     #[test]
@@ -1932,30 +1901,21 @@ mod tests {
         let directory = CheckpointDirectory::default();
         let first = ResidencyOwner::worker(WorkerWithDpRank::new(7, 0));
         let second = ResidencyOwner::worker(WorkerWithDpRank::new(8, 0));
-        directory.publish(first, vec![(11, 0)], 1);
+        directory.publish(first, vec![(11, 0)]);
         assert!(directory.is_empty());
-        directory.publish(first, vec![(11, 1)], 1);
-        directory.publish(second, vec![(11, 2)], 1);
-        directory.publish(first, vec![(11, 0)], 1);
+        directory.publish(first, vec![(11, 1)]);
+        directory.publish(second, vec![(11, 2)]);
+        directory.publish(first, vec![(11, 0)]);
         {
             let entry = directory.entries.get(&11).unwrap();
             let record = entry.value();
             assert!(record.device_workers.is_empty());
             assert!(record.owners[0].is_empty());
-            assert_eq!(record.owners[1], FxHashMap::from_iter([(second, 1)]));
+            assert_eq!(record.owners[1], FxHashSet::from_iter([second]));
         }
-        directory.publish(second, vec![(11, 0)], 1);
+        directory.publish(second, vec![(11, 0)]);
         assert!(directory.is_empty());
-        directory.publish(first, vec![(11, 1)], 2);
-        assert!(
-            directory
-                .entries
-                .get(&11)
-                .unwrap()
-                .device_workers
-                .is_empty()
-        );
-        directory.publish(first, vec![(11, 1)], 1);
+        directory.publish(first, vec![(11, 1)]);
         assert_eq!(
             directory.entries.get(&11).unwrap().device_workers.workers,
             FxHashSet::from_iter([WorkerWithDpRank::new(7, 0)])
@@ -1984,7 +1944,7 @@ mod tests {
                 .checkpoints
                 .with_owners(hash, StorageTier::Device, |owners| {
                     assert_eq!(owners.len(), 1);
-                    assert!(owners.contains_key(&owner));
+                    assert!(owners.contains(&owner));
                 });
             send.send(found).unwrap();
         });
@@ -2046,7 +2006,7 @@ mod tests {
                     assert_eq!(owners.len(), 2);
                     table.clear_worker(first);
                     assert_eq!(owners.len(), 2);
-                    assert!(owners.contains_key(&ResidencyOwner::worker(first)));
+                    assert!(owners.contains(&ResidencyOwner::worker(first)));
                 })
         );
         assert_eq!(
@@ -2072,14 +2032,11 @@ mod tests {
                         .collect::<Vec<_>>();
                     barrier.wait();
                     for _ in 0..3 {
-                        directory.publish(owner, updates.clone(), 1);
-                        directory.publish(
-                            owner,
-                            updates.iter().map(|&(hash, _)| (hash, 0)).collect(),
-                            1,
-                        );
+                        directory.publish(owner, updates.clone());
+                        directory
+                            .publish(owner, updates.iter().map(|&(hash, _)| (hash, 0)).collect());
                     }
-                    directory.publish(owner, updates, 1);
+                    directory.publish(owner, updates);
                 });
             }
         });
@@ -2090,7 +2047,7 @@ mod tests {
             let worker = WorkerWithDpRank::new(hash / 256, 0);
             assert_eq!(
                 record.owners[0],
-                FxHashMap::from_iter([(ResidencyOwner::worker(worker), 1)])
+                FxHashSet::from_iter([ResidencyOwner::worker(worker)])
             );
             assert_eq!(
                 record.device_workers.workers,
@@ -2159,6 +2116,24 @@ mod tests {
     }
 
     #[test]
+    fn layout_capture_does_not_wait_for_the_owner_lock() {
+        let table = KvCacheGroupResidency::new();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let owner = ResidencyOwner::worker(worker);
+        table.apply(&checkpoint(worker, StorageTier::Device, 0, 11, Some(1)));
+        let state = table.owner(owner).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let _held = state.write();
+            scope.spawn(|| sender.send(table.read_view().track_owner(owner)).unwrap());
+            let layout = receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("layout capture waited for the owner lock");
+            assert!(layout.unwrap().complete_layout);
+        });
+    }
+
+    #[test]
     fn retired_owner_handle_cannot_publish_after_readd() {
         let table = KvCacheGroupResidency::new();
         let worker = WorkerWithDpRank::new(7, 0);
@@ -2224,10 +2199,10 @@ mod tests {
             assert!(workers.contains(&first));
             assert!(workers.contains(&second));
         });
-        let view = table.read_view();
+        let mut view = table.read_view();
+        view.track_owner(ResidencyOwner::worker(first));
         assert_eq!(
-            view.owner_layouts_at(hash, StorageTier::HostPinned)
-                .map(|(owner, _)| owner)
+            view.owners_at(hash, StorageTier::HostPinned)
                 .collect::<Vec<_>>(),
             vec![ResidencyOwner::worker(first)]
         );
@@ -2237,30 +2212,12 @@ mod tests {
             assert!(workers.contains(&second));
         }));
         assert!(
-            view.owner_layouts_at(hash, StorageTier::HostPinned)
+            view.owners_at(hash, StorageTier::HostPinned)
                 .next()
                 .is_none()
         );
         table.remove_worker(7);
         assert!(table.checkpoints.is_empty());
-    }
-
-    #[test]
-    fn general_gate_tracks_alignment_through_clear_remap_and_readd() {
-        let table = KvCacheGroupResidency::new();
-        let worker = WorkerWithDpRank::new(7, 0);
-        let owner = ResidencyOwner::worker(worker);
-        table.declare_layout(owner, &[0], 2);
-        assert!(table.requires_general_device_eval());
-        table.clear_worker(worker);
-        assert!(table.requires_general_device_eval());
-        table.declare_layout(owner, &[0], 1);
-        assert!(!table.requires_general_device_eval());
-        table.declare_layout(owner, &[0], 2);
-        table.remove_worker_rank(worker);
-        assert!(!table.requires_general_device_eval());
-        table.declare_layout(owner, &[0], 1);
-        assert!(!table.requires_general_device_eval());
     }
 
     #[test]

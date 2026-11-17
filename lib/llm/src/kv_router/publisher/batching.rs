@@ -43,42 +43,44 @@ impl<K: Eq> PlacementEventCoalescer<K> {
         if matches!(event.event.data, KvCacheEventData::Cleared) {
             return [self.flush(), self.flush(), Some(event)];
         }
-        let recurrent = event.placement.kv_cache_group.is_some();
-        if recurrent {
-            std::mem::swap(&mut self.pending, &mut self.recurrent_pending);
-        }
-        let [first, second] = self.push_lane(key, event);
-        if recurrent {
-            std::mem::swap(&mut self.pending, &mut self.recurrent_pending);
-        }
+        let lane = if event.placement.kv_cache_group.is_some() {
+            &mut self.recurrent_pending
+        } else {
+            &mut self.pending
+        };
+        let [first, second] = Self::push_lane(lane, self.max_batch_blocks, key, event);
         [first, second, None]
     }
 
-    fn push_lane(&mut self, key: K, event: PlacementEvent) -> [Option<PlacementEvent>; 2] {
-        let can_merge = self.pending.as_ref().is_some_and(|(pending_key, pending)| {
+    fn push_lane(
+        lane: &mut Option<(K, PlacementEvent)>,
+        max_batch_blocks: usize,
+        key: K,
+        event: PlacementEvent,
+    ) -> [Option<PlacementEvent>; 2] {
+        let can_merge = lane.as_ref().is_some_and(|(pending_key, pending)| {
             pending_key == &key
                 && pending.event.dp_rank == event.event.dp_rank
                 && pending.session_id == event.session_id
                 && compatible_data(&pending.event.data, &event.event.data)
         });
         if can_merge {
-            let pending = &mut self
-                .pending
+            let pending = &mut lane
                 .as_mut()
                 .expect("merge compatibility requires one pending event")
                 .1;
             merge_data(&mut pending.event.data, event.event.data);
-            if event_block_count(pending) >= self.max_batch_blocks {
-                return [self.pending.take().map(|(_, event)| event), None];
+            if event_block_count(pending) >= max_batch_blocks {
+                return [lane.take().map(|(_, event)| event), None];
             }
             return [None, None];
         }
 
-        let flushed = self.pending.take().map(|(_, event)| event);
-        if event_block_count(&event) >= self.max_batch_blocks {
+        let flushed = lane.take().map(|(_, event)| event);
+        if event_block_count(&event) >= max_batch_blocks {
             return [flushed, Some(event)];
         }
-        self.pending = Some((key, event));
+        *lane = Some((key, event));
         [flushed, None]
     }
 

@@ -437,19 +437,6 @@ impl Indexer {
         Ok(())
     }
 
-    pub fn declare_recurrent_groups(&self, worker: WorkerWithDpRank, groups: &[u32]) {
-        let residency = match self {
-            Self::Single { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
-                lower_tier.group_residency()
-            }
-            Self::Remote {
-                recurrent_layouts, ..
-            } => recurrent_layouts.as_ref(),
-            Self::None => return,
-        };
-        residency.declare_groups(crate::prelude::ResidencyOwner::worker(worker), groups);
-    }
-
     pub fn declare_recurrent_layout(
         &self,
         worker: WorkerWithDpRank,
@@ -1983,7 +1970,7 @@ mod tests {
         let flat = indexer.find_matches(sequence).await.unwrap();
         assert_eq!(flat.scores.get(&confirmed).copied(), Some(2));
         assert_eq!(flat.scores.get(&predicted).copied(), Some(1));
-        indexer.declare_recurrent_groups(predicted, &[0]);
+        indexer.declare_recurrent_layout(predicted, &[0], 1);
         let capped = indexer
             .find_tiered_matches(vec![
                 LocalBlockHash(11),
