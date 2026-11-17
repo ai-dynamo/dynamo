@@ -196,6 +196,13 @@ struct ControlledControl {
 
 #[tonic::async_trait]
 impl Control for ControlledControl {
+    async fn shutdown(
+        &self,
+        _request: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::unimplemented("engine shutdown is not implemented"))
+    }
+
     async fn get_model_info(
         &self,
         request: Request<pb::GetModelInfoRequest>,

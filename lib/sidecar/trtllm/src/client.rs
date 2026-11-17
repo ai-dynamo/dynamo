@@ -80,6 +80,9 @@ pub(crate) struct ModelLimits {
     /// Modalities advertised by both the portable and engine-specific capabilities.
     /// `None` is unresolved metadata; startup always resolves this.
     pub(crate) supported_media: Option<SupportedMedia>,
+    pub(crate) encoder_only: bool,
+    pub(crate) encoder_consumer: bool,
+    pub(crate) requires_encoder_handoff: bool,
     pub(crate) supports_image_routing: bool,
 }
 
@@ -265,6 +268,8 @@ impl TrtllmClient {
                 }
             }
         }
+        let (encoder_only, encoder_consumer) =
+            encoder_roles(&info, supported_media).map_err(tonic::Status::failed_precondition)?;
         Ok(ModelInfo {
             limits: ModelLimits {
                 context_length: info.max_context_length.filter(|len| *len > 0),
@@ -272,6 +277,12 @@ impl TrtllmClient {
                 max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
                 supported_inputs,
                 supported_media: Some(supported_media),
+                encoder_only,
+                encoder_consumer,
+                requires_encoder_handoff: info
+                    .encoder
+                    .as_ref()
+                    .is_some_and(|caps| caps.requires_handoff == Some(true)),
                 supports_image_routing: supported_media.image && has_image_routing_v1(&info),
             },
             served_model_name: info.served_model_name,
@@ -399,10 +410,23 @@ impl TrtllmClient {
     }
 
     pub(crate) async fn abort(&self, request_id: String) -> Result<(), DynamoError> {
+        self.abort_target(pb::abort_request::Target::RequestId(request_id))
+            .await
+    }
+
+    pub(crate) async fn release_encoder_handoff(
+        &self,
+        handoff: pb::EncoderHandoffRef,
+    ) -> Result<(), DynamoError> {
+        self.abort_target(pb::abort_request::Target::EncoderHandoff(handoff))
+            .await
+    }
+
+    async fn abort_target(&self, target: pb::abort_request::Target) -> Result<(), DynamoError> {
         let response = tokio::time::timeout(
             RPC_TIMEOUT,
             self.control().abort(pb::AbortRequest {
-                target: Some(pb::abort_request::Target::RequestId(request_id)),
+                target: Some(target),
             }),
         )
         .await
@@ -439,6 +463,7 @@ fn is_terminal_discovery_error(status: &tonic::Status) -> bool {
     matches!(
         status.code(),
         tonic::Code::InvalidArgument
+            | tonic::Code::FailedPrecondition
             | tonic::Code::NotFound
             | tonic::Code::Unimplemented
             | tonic::Code::Unauthenticated
@@ -497,4 +522,145 @@ pub(crate) fn engine_error(message: impl Into<String>) -> DynamoError {
         .error_type(ErrorType::Backend(BackendError::Unknown))
         .message(message)
         .build()
+}
+
+fn encoder_roles(
+    info: &pb::ModelInfo,
+    media: SupportedMedia,
+) -> Result<(bool, bool), &'static str> {
+    let Some(capabilities) = info.encoder.as_ref() else {
+        return Ok((false, false));
+    };
+    if capabilities.encoder_only.is_none() || capabilities.accepts_handoff.is_none() {
+        return Err(
+            "incompatible TensorRT-LLM encoder role: role flags must be explicitly reported",
+        );
+    }
+    let producer = capabilities.encoder_only == Some(true);
+    let consumer = capabilities.accepts_handoff == Some(true);
+    if capabilities.requires_handoff == Some(true) && (!consumer || producer) {
+        return Err(
+            "incompatible TensorRT-LLM encoder role: requires_handoff needs an encoder-handoff consumer",
+        );
+    }
+    if !producer && !consumer {
+        return Ok((false, false));
+    }
+    let compatible_backend = if producer {
+        capabilities.transfer_backend.as_deref()
+            == Some(crate::encoder_handoff::NIXL_ENCODER_BACKEND)
+            && capabilities.supported_transfer_backends.is_empty()
+            && capabilities.supports_abort_cleanup == Some(true)
+    } else {
+        capabilities.transfer_backend.is_none()
+            && capabilities.requires_handoff.is_some()
+            && capabilities
+                .supported_transfer_backends
+                .iter()
+                .any(|backend| backend == crate::encoder_handoff::NIXL_ENCODER_BACKEND)
+    };
+    if producer == consumer
+        || capabilities.schema_version != Some(1)
+        || !media.image
+        || !compatible_backend
+    {
+        return Err(
+            "incompatible TensorRT-LLM encoder role: require schema v1, image support and one explicit role with native NIXL; producers require a singular backend and supports_abort_cleanup",
+        );
+    }
+    Ok((producer, consumer))
+}
+
+#[cfg(test)]
+mod encoder_capability_tests {
+    use super::*;
+
+    #[test]
+    fn encoder_negotiation_uses_typed_presence_and_directional_backends() {
+        let media = SupportedMedia {
+            image: true,
+            ..Default::default()
+        };
+        for role in ["encode", "consume"] {
+            let info = crate::test_fixtures::encoder_model_info(role);
+            assert_eq!(
+                encoder_roles(&info, media).unwrap(),
+                (role == "encode", role == "consume")
+            );
+            for field in ["schema", "producer", "consumer", "backend", "direction"] {
+                let mut invalid = info.clone();
+                let caps = invalid.encoder.as_mut().unwrap();
+                match field {
+                    "schema" => caps.schema_version = None,
+                    "producer" => caps.encoder_only = None,
+                    "consumer" => caps.accepts_handoff = None,
+                    "backend" if role == "encode" => caps.transfer_backend = Some("unknown".into()),
+                    "backend" => caps.supported_transfer_backends.clear(),
+                    "direction" if role == "encode" => caps
+                        .supported_transfer_backends
+                        .push(crate::encoder_handoff::NIXL_ENCODER_BACKEND.into()),
+                    "direction" => {
+                        caps.transfer_backend =
+                            Some(crate::encoder_handoff::NIXL_ENCODER_BACKEND.into())
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(encoder_roles(&invalid, media).is_err(), "{role}/{field}");
+            }
+        }
+        let mut producer = crate::test_fixtures::encoder_model_info("encode");
+        for value in [None, Some(false)] {
+            producer.encoder.as_mut().unwrap().supports_abort_cleanup = value;
+            producer.extra.as_mut().unwrap().fields.insert(
+                "trtllm_encoder_cache_release".into(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::BoolValue(true)),
+                },
+            );
+            assert!(encoder_roles(&producer, media).is_err());
+        }
+        producer.encoder.as_mut().unwrap().supports_abort_cleanup = Some(true);
+        producer.extra.as_mut().unwrap().fields.insert(
+            "trtllm_encoder_cache_release".into(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::BoolValue(false)),
+            },
+        );
+        assert_eq!(encoder_roles(&producer, media).unwrap(), (true, false));
+        let mut consumer = crate::test_fixtures::encoder_model_info("consume");
+        consumer.encoder.as_mut().unwrap().requires_handoff = None;
+        assert!(encoder_roles(&consumer, media).is_err());
+        consumer.encoder.as_mut().unwrap().requires_handoff = Some(false);
+        consumer.encoder.as_mut().unwrap().supports_abort_cleanup = None;
+        consumer
+            .encoder
+            .as_mut()
+            .unwrap()
+            .supported_transfer_backends
+            .push("other-format-v1".into());
+        assert_eq!(encoder_roles(&consumer, media).unwrap(), (false, true));
+        consumer.encoder.as_mut().unwrap().requires_handoff = Some(true);
+        consumer.encoder.as_mut().unwrap().accepts_handoff = Some(false);
+        assert!(encoder_roles(&consumer, media).is_err());
+        consumer.encoder = None;
+        assert_eq!(encoder_roles(&consumer, media).unwrap(), (false, false));
+    }
+
+    #[test]
+    fn compatible_additive_fields_preserve_encoder_negotiation() {
+        use prost::Message;
+        let media = SupportedMedia {
+            image: true,
+            ..Default::default()
+        };
+        let info = crate::test_fixtures::encoder_model_info("consume");
+        let mut encoded = info.encoder.as_ref().unwrap().encode_to_vec();
+        // An unknown additive boolean field 100 remains compatible with schema 1.
+        encoded.extend_from_slice(&[0xa0, 0x06, 0x01]);
+        let mut extended = info.clone();
+        extended.encoder = Some(pb::EncoderCapabilities::decode(encoded.as_slice()).unwrap());
+        assert_eq!(encoder_roles(&extended, media).unwrap(), (false, true));
+        extended.encoder.as_mut().unwrap().schema_version = Some(2);
+        assert!(encoder_roles(&extended, media).is_err());
+    }
 }

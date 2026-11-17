@@ -138,6 +138,9 @@ impl RoutingHost {
             .as_ref()
             .and_then(|state| state.take_request_lifecycle());
         if lifecycle.is_none() {
+            lifecycle = ReplanLifecycle::take(request)?;
+        }
+        if lifecycle.is_none() {
             lifecycle = self
                 .kv_router()
                 .begin_request_lifecycle(request.context().id())

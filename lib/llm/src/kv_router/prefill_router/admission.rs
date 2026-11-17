@@ -292,7 +292,7 @@ mod tests {
                             );
                             let response = ResponseStream::new(Box::pin(stream), context.clone());
                             let task = if wrapped {
-                                let router = super::super::tests::active_conditional_router();
+                                let router = super::super::tests::conditional_router();
                                 let tracker = Arc::new(RequestTracker::new());
                                 let permit = tracker
                                     .set_phase(

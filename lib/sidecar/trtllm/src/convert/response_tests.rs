@@ -4,6 +4,7 @@
 //! Reducing the server's streamed events into `LLMEngineOutput`s.
 
 use super::*;
+use crate::encoder_handoff::NIXL_ENCODER_BACKEND;
 use crate::test_fixtures::*;
 use dynamo_backend_common::ErrorType;
 
@@ -593,5 +594,45 @@ fn visible_stop_token_arrives_with_the_terminal_usage() {
             .prompt_tokens_details
             .and_then(|details| details.cached_tokens),
         Some(2)
+    );
+}
+
+#[test]
+fn encode_ready_is_a_tokenless_terminal_with_an_opaque_handoff() {
+    let response = pb::GenerateResponse {
+        event: Some(pb::generate_response::Event::EncodeReady(pb::EncodeReady {
+            handoff: Some(pb::EncoderHandoffRef {
+                transfer_backend: NIXL_ENCODER_BACKEND.into(),
+                opaque_state: vec![1, 2, 3],
+            }),
+        })),
+        ..Default::default()
+    };
+    let mut encode = ResponseState::new(&request(), DisaggregationMode::Encode);
+    let result = encode.convert(response.clone()).unwrap().unwrap();
+    assert_eq!(result.finish_reason, Some(FinishReason::Stop));
+    assert!(result.token_ids.is_empty());
+    assert_eq!(
+        *result.extra_args.unwrap(),
+        serde_json::json!({"encoder_result_release": true})
+    );
+    assert_eq!(
+        *result.encoder_result.unwrap(),
+        serde_json::json!({"transfer_backend": NIXL_ENCODER_BACKEND, "opaque_state": "AQID"})
+    );
+    let mut with_usage = response.clone();
+    with_usage.usage = Some(pb::Usage::default());
+    let mut encode = ResponseState::new(&request(), DisaggregationMode::Encode);
+    assert!(encode.convert(with_usage).is_err());
+    let mut ordinary = ResponseState::new(&request(), AGG);
+    assert!(ordinary.convert(response).is_err());
+    let mut encode = ResponseState::new(&request(), DisaggregationMode::Encode);
+    assert!(
+        encode
+            .convert(pb::GenerateResponse {
+                event: Some(pb::generate_response::Event::Finished(Default::default())),
+                ..Default::default()
+            })
+            .is_err()
     );
 }

@@ -10,6 +10,7 @@
 //! Disaggregation is driven by [`DisaggregationMode`]: a prefill worker marks
 //! its request `context_only` and returns the `PrefillReady` handoff as its
 //! terminal chunk, and a decode worker replays that handoff in `kv.session`.
+//! Image encoder output is consumed by an aggregated or prefill worker.
 //! See [`crate::disagg`] for the codec.
 
 use std::collections::{BTreeSet, HashSet};
@@ -21,9 +22,11 @@ use dynamo_backend_common::{
 };
 
 use dynamo_kv_events::zmq_wire::IMAGE_ROUTING_UUID_PREFIX;
+use dynamo_llm::protocols::common::preprocessor::ENCODER_RESULT_RELEASE_SUPPORTED;
 
 use crate::client::{self, ModelLimits};
 use crate::disagg;
+use crate::encoder_handoff;
 use crate::proto as pb;
 
 /// A chunk's delta token IDs, the selected-token logprob sequence, and the
@@ -52,6 +55,7 @@ pub(crate) fn build_generate_request_with_routing(
     validate_request(&request, mode, allow_dp_rank)?;
     let request_has_media = has_media(&request);
     let media = media(&mut request, limits, mode)?;
+    let encoder = encoder_options(&request, limits, mode, request_has_media)?;
 
     // A prefill worker only needs the context phase; TensorRT-LLM still requires
     // a positive budget, and one token is what the context phase produces.
@@ -61,10 +65,10 @@ pub(crate) fn build_generate_request_with_routing(
     // prove the request impossible nor prove it servable, so checking it would
     // reject requests a wider decode window would serve. Releasing the handoff
     // when decode does reject is the sound fix and belongs on that side.
-    let max_tokens = if mode.is_prefill() {
-        Some(1)
-    } else {
-        max_tokens(&request, limits, request_has_media)?
+    let max_tokens = match mode {
+        DisaggregationMode::Prefill => Some(1),
+        DisaggregationMode::Encode => None,
+        _ => max_tokens(&request, limits, request_has_media)?,
     };
     // The decode worker replays the prefill worker's session; the prefill worker
     // marks its request `context_only` through `extra`.
@@ -83,8 +87,7 @@ pub(crate) fn build_generate_request_with_routing(
         },
         DisaggregationMode::Aggregated | DisaggregationMode::Encode => None,
     };
-    let conditions = stop_conditions(&request);
-    let guided = guided_decoding(&request)?;
+    let guided = guided_decoding(&request, mode)?;
     let session_id = request
         .agent_context
         .as_ref()
@@ -102,9 +105,12 @@ pub(crate) fn build_generate_request_with_routing(
             (allow_dp_rank && rank.is_some()).then_some(request_id)
         })
         .map(str::to_string);
-    let include_stop_in_output = has_visible_stop_tokens(&request).then_some(true);
+    let include_stop_in_output =
+        (!mode.is_encode() && has_visible_stop_tokens(&request)).then_some(true);
     let input = request_input(&mut request, limits)?;
     let sampling = &request.sampling_options;
+    let top_k = normalize_top_k(sampling.top_k)?;
+    let seed = normalize_seed(sampling.seed)?;
     let stop = &request.stop_conditions;
     let output = &request.output_options;
 
@@ -114,34 +120,42 @@ pub(crate) fn build_generate_request_with_routing(
         // served by the loaded model (single-model server).
         model: model.to_string(),
         input: Some(input),
-        sampling: Some(pb::SamplingParams {
-            temperature: sampling.temperature.map(f64::from),
-            top_p: sampling.top_p.map(f64::from),
-            top_k: normalize_top_k(sampling.top_k)?,
-            min_p: sampling.min_p.map(f64::from),
-            frequency_penalty: sampling.frequency_penalty.map(f64::from),
-            presence_penalty: sampling.presence_penalty.map(f64::from),
-            repetition_penalty: sampling.repetition_penalty.map(f64::from),
-            seed: normalize_seed(sampling.seed)?,
-            num_sequences: Some(1),
-        }),
-        stopping: Some(pb::StoppingOptions {
-            max_tokens,
-            // Forwarded on a context-only request too. The minimum only masks
-            // EOS until the sequence reaches it, so it cannot extend a context
-            // phase that `max_tokens` already caps at one token. Dropping it
-            // would let the prefill worker sample EOS on that token, finish with
-            // `Stop` instead of `PrefillReady`, and leave the frontend treating
-            // a request that never met its minimum as complete.
-            min_tokens: stop.min_tokens,
-            conditions,
-            ignore_eos: stop.ignore_eos,
-            // Keeps a matched visible stop token (e.g. Harmony's `<|call|>`) in
-            // the output. A visible token equal to `end_id` finishes as END_ID
-            // and may still be dropped.
-            include_stop_in_output,
-        }),
-        response: Some(pb::ResponseOptions {
+        sampling: if mode.is_encode() {
+            None
+        } else {
+            Some(pb::SamplingParams {
+                temperature: sampling.temperature.map(f64::from),
+                top_p: sampling.top_p.map(f64::from),
+                top_k,
+                min_p: sampling.min_p.map(f64::from),
+                frequency_penalty: sampling.frequency_penalty.map(f64::from),
+                presence_penalty: sampling.presence_penalty.map(f64::from),
+                repetition_penalty: sampling.repetition_penalty.map(f64::from),
+                seed,
+                num_sequences: Some(1),
+            })
+        },
+        stopping: if mode.is_encode() {
+            None
+        } else {
+            Some(pb::StoppingOptions {
+                max_tokens,
+                // Forwarded on a context-only request too. The minimum only masks
+                // EOS until the sequence reaches it, so it cannot extend a context
+                // phase that `max_tokens` already caps at one token. Dropping it
+                // would let the prefill worker sample EOS on that token, finish with
+                // `Stop` instead of `PrefillReady`, and leave the frontend treating
+                // a request that never met its minimum as complete.
+                min_tokens: stop.min_tokens,
+                conditions: stop_conditions(&request),
+                ignore_eos: stop.ignore_eos,
+                // Keeps a matched visible stop token (e.g. Harmony's `<|call|>`) in
+                // the output. A visible token equal to `end_id` finishes as END_ID
+                // and may still be dropped.
+                include_stop_in_output,
+            })
+        },
+        response: (!mode.is_encode()).then(|| pb::ResponseOptions {
             // A prefill worker streams no tokens to the client, but it must
             // still be asked for logprobs: the context phase produces the first
             // generated token, and its logprob only reaches the decode worker
@@ -158,6 +172,7 @@ pub(crate) fn build_generate_request_with_routing(
         }),
         guided,
         media,
+        encoder,
         lora_name: String::new(),
         kv,
         extra: Some(disagg::request_extra(
@@ -313,6 +328,17 @@ fn media(
     limits: Option<ModelLimits>,
     mode: DisaggregationMode,
 ) -> Result<Vec<pb::MediaItem>, DynamoError> {
+    if (mode.is_encode() || request.encoder_result.is_some())
+        && request.multi_modal_data.as_ref().is_some_and(|media| {
+            media
+                .iter()
+                .any(|(kind, items)| kind != IMAGE_KEY && !items.is_empty())
+        })
+    {
+        return Err(client::invalid_argument(
+            "encoder handoffs support image media only",
+        ));
+    }
     reject_media_override("mm_processor_kwargs", request.mm_processor_kwargs.as_ref())?;
     reject_media_override("media_io_kwargs", request.media_io_kwargs.as_ref())?;
 
@@ -404,6 +430,8 @@ fn media(
         .map_or(0, Vec::len);
     if image_count > 0
         && matches!(mode, DisaggregationMode::Aggregated)
+        // Encoder references bind the media envelope, including caller UUIDs.
+        && request.encoder_result.is_none()
         && limits.is_some_and(|limits| limits.supports_image_routing)
         && request
             .mm_routing_info
@@ -713,6 +741,7 @@ fn retained_hidden_stop_ids(request: &PreprocessedRequest) -> BTreeSet<u32> {
 
 fn guided_decoding(
     request: &PreprocessedRequest,
+    mode: DisaggregationMode,
 ) -> Result<Option<pb::GuidedDecoding>, DynamoError> {
     let Some(guided) = request.sampling_options.guided_decoding.as_ref() else {
         return Ok(None);
@@ -723,33 +752,43 @@ fn guided_decoding(
         ));
     }
 
-    use pb::guided_decoding::Guide;
-    let mut guides = Vec::new();
-    if let Some(json) = &guided.json {
-        guides.push(Guide::JsonSchema(json_guide(json)));
-    }
-    if let Some(regex) = &guided.regex {
-        guides.push(Guide::Regex(regex.clone()));
-    }
-    if let Some(grammar) = &guided.grammar {
-        guides.push(Guide::EbnfGrammar(grammar.clone()));
-    }
-    if let Some(tag) = &guided.structural_tag {
-        guides.push(Guide::StructuralTag(json_guide(tag)));
-    }
     if guided.choice.is_some() {
-        // `choice` is in the OpenEngine contract but the TensorRT-LLM server
-        // rejects it; fail fast with a clear message.
         return Err(client::invalid_argument(
             "guided decoding `choice` is not supported by the TensorRT-LLM OpenEngine server",
         ));
     }
-    if guides.len() > 1 {
+    if [
+        guided.json.is_some(),
+        guided.regex.is_some(),
+        guided.grammar.is_some(),
+        guided.structural_tag.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count()
+        > 1
+    {
         return Err(client::invalid_argument(
             "only one guided decoding constraint may be set",
         ));
     }
-    Ok(guides.pop().map(|guide| pb::GuidedDecoding {
+    if mode.is_encode() {
+        return Ok(None);
+    }
+    use pb::guided_decoding::Guide;
+    let guide = if let Some(json) = &guided.json {
+        Some(Guide::JsonSchema(json_guide(json)))
+    } else if let Some(regex) = &guided.regex {
+        Some(Guide::Regex(regex.clone()))
+    } else if let Some(grammar) = &guided.grammar {
+        Some(Guide::EbnfGrammar(grammar.clone()))
+    } else {
+        guided
+            .structural_tag
+            .as_ref()
+            .map(|tag| Guide::StructuralTag(json_guide(tag)))
+    };
+    Ok(guide.map(|guide| pb::GuidedDecoding {
         guide: Some(guide),
         backend: String::new(),
     }))
@@ -772,11 +811,6 @@ fn validate_request(
     if request.prompt_embeds.is_some() {
         return Err(client::invalid_argument(
             "prompt embeddings are not supported by the TensorRT-LLM sidecar",
-        ));
-    }
-    if request.encoder_result.is_some() {
-        return Err(client::invalid_argument(
-            "multimodal encoder handoffs are not supported by the TensorRT-LLM sidecar",
         ));
     }
     // Only a decode worker consumes a prefill handoff. Seeing one anywhere else
@@ -893,6 +927,7 @@ pub(crate) struct ResponseState {
     hidden_stop_ids: BTreeSet<u32>,
     pending_stop: Option<pb::TokenInfo>,
     phase: Phase,
+    encode_only: bool,
 }
 
 /// What this worker does with the tokens the engine streams back. Each arm owns
@@ -925,6 +960,7 @@ struct Handoff {
 impl ResponseState {
     pub(crate) fn new(request: &PreprocessedRequest, mode: DisaggregationMode) -> Self {
         Self {
+            encode_only: mode.is_encode(),
             prompt_tokens: request.token_ids.len() as u32,
             completion_tokens: 0,
             output_logprobs: request.output_options.logprobs,
@@ -963,7 +999,40 @@ impl ResponseState {
         let Some(event) = event else {
             return Err(client::protocol_error("response carried no event"));
         };
+        if self.encode_only
+            && !matches!(
+                &event,
+                pb::generate_response::Event::EncodeReady(_)
+                    | pb::generate_response::Event::Error(_)
+            )
+        {
+            return Err(client::protocol_error(
+                "encode stream must terminate with EncodeReady",
+            ));
+        }
         match event {
+            pb::generate_response::Event::EncodeReady(ready) => {
+                if usage.is_some() {
+                    return Err(client::protocol_error(
+                        "EncodeReady must omit generation usage",
+                    ));
+                }
+                if !self.encode_only {
+                    return Err(client::protocol_error(
+                        "unexpected EncodeReady on generation stream",
+                    ));
+                }
+                let handoff = ready
+                    .handoff
+                    .ok_or_else(|| client::protocol_error("EncodeReady has no handoff"))?;
+                let result = encoder_handoff::to_result(handoff)
+                    .map_err(|error| client::protocol_error(error.to_string()))?;
+                let mut output = LLMEngineOutput::encode_terminal(result);
+                output.extra_args = Some(Box::new(
+                    serde_json::json!({ENCODER_RESULT_RELEASE_SUPPORTED: true}),
+                ));
+                Ok(Some(output))
+            }
             pb::generate_response::Event::Token(token) => self.convert_token(token),
             pb::generate_response::Event::Finished(finished) => {
                 self.convert_finished(finished, usage).map(Some)
@@ -1308,6 +1377,56 @@ pub(crate) fn engine_error(error: pb::EngineError) -> DynamoError {
         }
         _ => client::engine_error(message),
     }
+}
+
+fn encoder_options(
+    request: &PreprocessedRequest,
+    limits: Option<ModelLimits>,
+    mode: DisaggregationMode,
+    request_has_media: bool,
+) -> Result<Option<pb::EncoderOptions>, DynamoError> {
+    if mode.is_encode() {
+        if !limits.is_some_and(|limits| limits.encoder_only)
+            || !request_has_media
+            || request.encoder_result.is_some()
+        {
+            return Err(client::invalid_argument(
+                "encode requires image media, a capable engine, and no encoder_result",
+            ));
+        }
+        return Ok(Some(pb::EncoderOptions {
+            mode: Some(pb::encoder_options::Mode::EncodeOnly(pb::EncodeOnly {})),
+        }));
+    }
+    let Some(result) = request.encoder_result.as_ref() else {
+        if limits.is_some_and(|limits| limits.requires_encoder_handoff)
+            && request_has_media
+            && !(mode.is_decode() && request.prefill_result.is_some())
+        {
+            return Err(client::engine_error(
+                "encoder handoff consumer received media without encoder_result; check encoder availability and --route-to-encoder",
+            ));
+        }
+        return Ok(None);
+    };
+    if mode.is_decode() && request.prefill_result.is_some() {
+        // The frontend retains the encoder result after prefill consumed it.
+        return Ok(None);
+    }
+    if !matches!(
+        mode,
+        DisaggregationMode::Aggregated | DisaggregationMode::Prefill
+    ) || !limits.is_some_and(|limits| limits.encoder_consumer)
+        || !request_has_media
+    {
+        return Err(client::invalid_argument(
+            "encoder_result requires an aggregated or prefill worker and a capable consumer",
+        ));
+    }
+    let handoff = encoder_handoff::from_result(result)?;
+    Ok(Some(pb::EncoderOptions {
+        mode: Some(pb::encoder_options::Mode::Handoff(handoff)),
+    }))
 }
 
 #[cfg(test)]

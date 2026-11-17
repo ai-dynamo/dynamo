@@ -230,6 +230,13 @@ impl Inference for ControlledService {
 
 #[tonic::async_trait]
 impl Control for ControlledService {
+    async fn shutdown(
+        &self,
+        _request: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::unimplemented("engine shutdown is not implemented"))
+    }
+
     async fn get_server_info(
         &self,
         request: Request<pb::GetServerInfoRequest>,

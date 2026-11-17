@@ -613,8 +613,8 @@ impl<T: AdmissionResponse> AdmissionResponse for Annotated<T> {
     }
 }
 
-/// A backend engine whose every request is admitted through its worker's gate
-/// first: the typed wrapper a native backend serves on its network ingress.
+/// A backend engine whose inference requests pass through its worker's gate:
+/// the typed wrapper a native backend serves on its network ingress.
 ///
 /// Each request is admitted under the rank it names, and its stream holds
 /// waiting capacity until the first response that ends the wait. Serve only
@@ -623,7 +623,10 @@ impl<T: AdmissionResponse> AdmissionResponse for Annotated<T> {
 pub struct AdmissionEngine<Req: Data, Resp: Data> {
     gate: Arc<BackendAdmissionGate>,
     engine: ServiceEngine<SingleIn<Req>, ManyOut<Resp>>,
+    is_cleanup: Option<Box<CleanupPredicate<Req>>>,
 }
+
+type CleanupPredicate<Req> = dyn Fn(&Req) -> bool + Send + Sync;
 
 impl<Req: Data, Resp: Data> AdmissionEngine<Req, Resp> {
     /// Admit `engine`'s network requests through `gate`, its worker's.
@@ -631,7 +634,24 @@ impl<Req: Data, Resp: Data> AdmissionEngine<Req, Resp> {
         gate: Arc<BackendAdmissionGate>,
         engine: ServiceEngine<SingleIn<Req>, ManyOut<Resp>>,
     ) -> Arc<Self> {
-        Arc::new(Self { gate, engine })
+        Arc::new(Self {
+            gate,
+            engine,
+            is_cleanup: None,
+        })
+    }
+
+    /// Bypass inference admission only for controls recognized by the backend.
+    pub fn new_with_cleanup(
+        gate: Arc<BackendAdmissionGate>,
+        engine: ServiceEngine<SingleIn<Req>, ManyOut<Resp>>,
+        is_cleanup: impl Fn(&Req) -> bool + Send + Sync + 'static,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            gate,
+            engine,
+            is_cleanup: Some(Box::new(is_cleanup)),
+        })
     }
 }
 
@@ -643,7 +663,12 @@ where
     Resp: Data + AdmissionResponse,
 {
     async fn generate(&self, request: SingleIn<Req>) -> anyhow::Result<ManyOut<Resp>> {
-        if !self.gate.enabled {
+        if !self.gate.enabled
+            || self
+                .is_cleanup
+                .as_ref()
+                .is_some_and(|is_cleanup| is_cleanup(&request))
+        {
             return self.engine.generate(request).await;
         }
         let context = request.context();
@@ -5397,6 +5422,104 @@ mod tests {
             (0, 0, 0),
             "nothing was reserved or queued"
         );
+    }
+
+    #[tokio::test]
+    async fn encoder_release_reaches_its_producer_when_worker_admission_is_full() {
+        use crate::protocols::common::{
+            llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest,
+        };
+        struct Producer(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl
+            AsyncEngine<
+                SingleIn<PreprocessedRequest>,
+                ManyOut<Annotated<LLMEngineOutput>>,
+                anyhow::Error,
+            > for Producer
+        {
+            async fn generate(
+                &self,
+                request: SingleIn<PreprocessedRequest>,
+            ) -> anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>> {
+                let stream: futures::stream::BoxStream<'static, Annotated<LLMEngineOutput>> =
+                    if request.is_encoder_result_release() {
+                        assert_eq!(
+                            request.encoder_result,
+                            Some(serde_json::json!({"ref": "original"}))
+                        );
+                        self.0.fetch_add(1, Ordering::SeqCst);
+                        Box::pin(futures::stream::once(async {
+                            Annotated::from_data(LLMEngineOutput::stop())
+                        }))
+                    } else {
+                        Box::pin(futures::stream::pending())
+                    };
+                Ok(dynamo_runtime::engine::ResponseStream::new(
+                    stream,
+                    request.context(),
+                ))
+            }
+        }
+        fn request(tokens: Vec<u32>) -> PreprocessedRequest {
+            PreprocessedRequest::builder()
+                .model("mock".to_string())
+                .token_ids(tokens)
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .build()
+                .unwrap()
+        }
+        let releases = Arc::new(AtomicUsize::new(0));
+        let gate = gate(1, 1, 0);
+        let served = AdmissionEngine::new_with_cleanup(
+            gate.clone(),
+            Arc::new(Producer(releases.clone())),
+            PreprocessedRequest::is_encoder_result_release,
+        );
+        let held = served
+            .generate(SingleIn::new(request(vec![1])))
+            .await
+            .unwrap();
+        assert_eq!(published(&gate), (1, 1, 0));
+        let refused = served
+            .generate(SingleIn::new(request(vec![2])))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            refused.downcast_ref::<DynamoError>().unwrap().error_type(),
+            ErrorType::WorkerOverloaded
+        );
+        let mut release = request(Vec::new());
+        release.encoder_result = Some(serde_json::json!({"ref": "original"}));
+        release.extra_args = Some(serde_json::json!({"release_encoder_result": true}));
+        let ack: Vec<_> = served
+            .generate(SingleIn::new(release.clone()))
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+        assert_eq!(ack.len(), 1);
+        assert_eq!(
+            ack[0].data.as_ref().unwrap().finish_reason,
+            Some(crate::protocols::common::FinishReason::Stop)
+        );
+        assert_eq!(
+            published(&gate),
+            (1, 1, 0),
+            "cleanup consumes no inference quota"
+        );
+        release.token_ids = Arc::new(vec![3]);
+        let refused = served.generate(SingleIn::new(release)).await.err().unwrap();
+        assert_eq!(
+            refused.downcast_ref::<DynamoError>().unwrap().error_type(),
+            ErrorType::WorkerOverloaded
+        );
+        drop(held);
+        assert_eq!(published(&gate), (0, 0, 0));
     }
 
     ///////////////////// DISABLED ADMISSION CONTROL /////////////////////

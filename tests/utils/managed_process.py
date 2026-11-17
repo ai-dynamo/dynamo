@@ -178,6 +178,15 @@ class ManagedProcess:
     straggler_commands: List[str] = field(default_factory=list)
     log_dir: str = os.getcwd()
     display_name: Optional[str] = None
+    # Engines that release shared GPU buffers must shut down before their workers.
+    graceful_shutdown: bool = False
+    _owned_children: dict[int, psutil.Process] = field(
+        default_factory=dict, init=False, repr=False
+    )
+
+    _ownership_inspection_error: Optional[ManagedProcessStopError] = field(
+        default=None, init=False, repr=False
+    )
 
     # Ensure attributes exist even if startup fails early
     proc: Optional[subprocess.Popen] = None
@@ -239,6 +248,8 @@ class ManagedProcess:
             elapsed = self._check_ports(self.timeout)
             self._check_urls(self.timeout - elapsed)
             self._check_funcs(self.timeout - elapsed)
+            if self.graceful_shutdown:
+                self._remember_children()
 
             return self
 
@@ -338,14 +349,171 @@ class ManagedProcess:
            per-process.
         2. Clean up data directory if configured.
         3. Run name-based straggler cleanup (only when not in xdist-safe mode).
+
+        With graceful_shutdown=True, wait for parent-owned shutdown before
+        releasing workers and log helpers; forced cleanup raises an error.
         """
         try:
-            self._stop_started_processes()
+            if self.graceful_shutdown:
+                self.stop_gracefully()
+            else:
+                self._stop_started_processes()
 
             if self.data_dir:
                 self._remove_directory(self.data_dir)
         finally:
             self._cleanup_stragglers()
+
+    def _remember_children(self) -> None:
+        if self._ownership_inspection_error is not None:
+            raise self._ownership_inspection_error
+        if self.proc is None or self.proc.poll() is not None:
+            return
+        try:
+            children = psutil.Process(self.proc.pid).children(recursive=True)
+            for child in children:
+                # Cache creation time so psutil's signal methods reject PID reuse.
+                child.create_time()
+                self._owned_children[child.pid] = child
+        except psutil.NoSuchProcess:
+            return
+        except psutil.AccessDenied as error:
+            # Ownership became unknowable. Retrying must not report a clean exit
+            # or signal a PID whose birth time we could not verify.
+            self._ownership_inspection_error = ManagedProcessStopError(
+                "worker", error.pid, "access denied inspecting owned worker identity"
+            )
+            raise self._ownership_inspection_error from error
+
+    def _remember_session_processes(self) -> None:
+        if self._pgid is None:
+            return
+        if self.proc is None or self.proc.poll() is not None:
+            try:
+                if os.getsid(self._pgid) == self._pgid:
+                    # A reaped launcher cannot still lead a session. Its SID has
+                    # been reused; retain known handles but adopt no new PIDs.
+                    return
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                return
+        for candidate in psutil.process_iter():
+            try:
+                if os.getsid(candidate.pid) != self._pgid:
+                    continue
+            except (ProcessLookupError, psutil.NoSuchProcess):
+                continue
+            except (PermissionError, psutil.AccessDenied) as error:
+                if candidate.pid in self._owned_children:
+                    raise ManagedProcessStopError(
+                        "worker",
+                        candidate.pid,
+                        "access denied inspecting owned session",
+                    ) from error
+                continue
+            try:
+                # process_iter caches Process objects, including their old birth
+                # times. Refresh only after establishing session ownership.
+                process = psutil.Process(candidate.pid)
+                process.create_time()
+                if os.getsid(process.pid) == self._pgid:
+                    self._owned_children[process.pid] = process
+            except (ProcessLookupError, psutil.NoSuchProcess):
+                continue
+            except (PermissionError, psutil.AccessDenied) as error:
+                self._ownership_inspection_error = ManagedProcessStopError(
+                    "worker",
+                    candidate.pid,
+                    "access denied inspecting owned worker identity",
+                )
+                raise self._ownership_inspection_error from error
+
+    def _owned_processes(self) -> list[psutil.Process]:
+        self._remember_children()
+        self._remember_session_processes()
+        alive = []
+        for process in self._owned_children.values():
+            try:
+                if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+                    alive.append(process)
+            except psutil.NoSuchProcess:
+                continue
+            except psutil.AccessDenied as error:
+                raise ManagedProcessStopError(
+                    "worker",
+                    process.pid,
+                    "access denied inspecting owned worker status",
+                ) from error
+        return alive
+
+    def _wait_owned_processes(self, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        while self._owned_processes():
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired("managed engine workers", timeout)
+            time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+
+    def stop_gracefully(self, timeout: float = 60, worker_timeout: float = 30) -> None:
+        """Stop the parent first and require observed/session-owned workers to exit.
+
+        Session membership survives reparenting. Separate sessions are covered
+        only if their processes were observed before detaching from the parent.
+        Any forced cleanup is reported as failure rather than a clean shutdown.
+        """
+        process = self.proc
+        if (
+            process is None
+            and not self._owned_children
+            and self._ownership_inspection_error is None
+        ):
+            self._stop_started_processes()
+            return
+        pid = (
+            process.pid if process is not None else next(iter(self._owned_children), 0)
+        )
+        try:
+            self._remember_children()
+            returncode = 0
+            if process is not None:
+                if process.poll() is None:
+                    process.terminate()
+                returncode = process.wait(timeout=timeout)
+            self._wait_owned_processes(worker_timeout)
+            # The engine session is settled even if a helper or exit-code check fails.
+            self._pgid = None
+            for helper in (self._sed_proc, self._tee_proc):
+                if helper is not None:
+                    helper.wait(timeout=worker_timeout)
+            if returncode != 0:
+                raise ManagedProcessStopError("proc", pid, f"exited with {returncode}")
+        except subprocess.TimeoutExpired as error:
+            owned = self._owned_processes()
+            for child in owned:
+                try:
+                    child.kill()
+                except psutil.NoSuchProcess:
+                    continue
+                except psutil.AccessDenied as denied:
+                    raise ManagedProcessStopError(
+                        "worker", child.pid, "access denied terminating owned worker"
+                    ) from denied
+            try:
+                self._wait_owned_processes(10)
+            except subprocess.TimeoutExpired as forced_error:
+                raise ManagedProcessStopError(
+                    "proc", pid, "workers did not exit after forced shutdown"
+                ) from forced_error
+            self._pgid = None
+            raise ManagedProcessStopError(
+                "proc", pid, "required forced shutdown"
+            ) from error
+        finally:
+            try:
+                self._stop_started_processes()
+            finally:
+                if not self._owned_processes():
+                    self._owned_children.clear()
 
     def _stop_started_processes(self, wait_timeout: float = 10.0):
         """Terminate launched subprocesses and close any open pipe handles.
@@ -374,7 +542,8 @@ class ManagedProcess:
                 self._logger.warning("Error closing process streams: %s", e)
 
             try:
-                terminate_process_tree(process.pid, self._logger)
+                if process.poll() is None:
+                    terminate_process_tree(process.pid, self._logger)
                 process.wait(timeout=wait_timeout)
             except (psutil.TimeoutExpired, subprocess.TimeoutExpired) as e:
                 self._logger.warning(
@@ -412,6 +581,8 @@ class ManagedProcess:
         wait_timeout: float,
     ) -> None:
         """Forcefully stop a process tree and confirm the launched child exits."""
+        if process.poll() is not None:
+            return
         try:
             terminate_process_tree(
                 process.pid,
@@ -663,6 +834,8 @@ class ManagedProcess:
     def _check_process_alive(self, context=""):
         """Check if the main process is still alive. Raises RuntimeError if dead."""
         self._check_startup_cancelled()
+        if self.graceful_shutdown:
+            self._remember_children()
         if self.proc and self.proc.poll() is not None:
             returncode = self.proc.returncode
             self._logger.error(

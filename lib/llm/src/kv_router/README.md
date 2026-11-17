@@ -27,7 +27,8 @@ operators in front of it, not `RoutingHost`s. `PrefillRouter` holds a separate `
 the prefill worker set (built in `prefill_router/activation.rs`) and sends the prefill hop
 through it. It also keeps a handle to the decode `RoutingHost`, which it uses only to preview
 decode for conditional disaggregation. `EncoderRouter` sends the encode hop through its own
-round-robin `PushRouter`.
+round-robin `PushRouter`. `prefill_router/mod.rs` coordinates conditional admission and parked
+classifier state; `prefill_router/dispatch.rs` handles the Prefill hop and Decode continuation.
 
 A `RoutingHost` serves one worker set. What it holds (composition, not call order):
 
@@ -64,7 +65,7 @@ What a KV request does in `RoutingHost::generate` (call order):
    (if dispatch fails under hard affinity and the worker is gone, invalidate the binding)
 ```
 
-A query-only request (`query_instance_id`) skips step 2, only looks up the session's target in
+On the KV plane, a query-only request (`query_instance_id`) skips step 2, only looks up the session's target in
 step 3 without acquiring it, selects with `Query` admission in step 4 so nothing is booked, and
 returns the selection instead of steps 5–7.
 
@@ -99,6 +100,12 @@ disabled one that always passes requests through. Prefill worker sets, and Encod
 that serve no model type of their own, build no pipeline: they are reached only through these
 hops.
 
+Encode workers can advertise `encoder_supported_modalities` using Dynamo media keys such as
+`image_url`. Unsupported optional requests stay inline as a whole. This is an optimization
+hint; required requests are validated by the selected producer. Missing metadata preserves
+legacy encoding. Failed Encode or downstream attempts try bounded disposal of unconsumed
+exports before retry or inline fallback. Successful consumption adds no cleanup wait.
+
 ## Per-stage roles
 
 | Stage | Router | Selection | Books | Notes |
@@ -106,7 +113,7 @@ hops.
 | Aggregated | `RoutingHost` of the aggregated set | KV or builtin | Yes (KV) | Owns the request's classifier lifecycle. |
 | Decode | `RoutingHost` of the decode set | KV with the decode profile written by `PrefillRouter` | Yes (KV) | Owns the request's classifier lifecycle. |
 | Prefill | `PrefillRouter` → prefill `RoutingHost` | KV or builtin; a prefill card that declares `router_config` overrides the decode set's mode | Yes (KV) | Never starts the classifier; a prefill retry must leave a parked decode lifecycle alone. |
-| Encode | `EncoderRouter` | Round-robin `PushRouter`; no `KvRouter` | No | On failure, falls back to inline encoding downstream. |
+| Encode | `EncoderRouter` | Round-robin `PushRouter`; no `KvRouter` | No | Optional consumers fall back inline; consumers declaring `requires_encoder_result` fail closed. |
 
 ### Prefill hop
 
@@ -136,6 +143,22 @@ hops.
    admission and pinned to it), and `dispatch_kv_plan` sends the request with the bypass
    annotation. Otherwise the request takes the remote prefill path.
 
+An encoder handoff to a prefill set declaring `encoder_result_requires_prefill` always takes
+remote prefill, even when that worker can encode inline. `requires_encoder_result` also
+retains this restriction. Raw media left after optional Encode failure follows the same restriction:
+the Prefill handoff policy does not establish that Decode can encode inline. This conservatively
+disables bypass for those media requests; text and compatible releasable handoffs can still bypass.
+When a Prefill pool is active, handoffs without producer release support always take remote
+Prefill, including cache-hot requests. Their independent consumption survives caller cancellation;
+paired KV cancellation support does not enable disposal of another producer's encoder allocation.
+If a binding changes after conditional admission, the abandoned decode booking is released and
+its classifier lifecycle is parked for the later decode selection. With migration disabled, a
+context-local owner completes it when Prefill alone finishes, or aborts it on error/cancellation;
+actual Decode takes ownership once. This does not enable migration for the request. Genuine
+migration retries keep their outer lifecycle owner. A late untargeted fallback
+restores the request's prior phase before forwarding. Releasable handoffs can fail before Prefill
+on caller cancellation; staged-KV cleanup always reaches its worker.
+
 A failed decision falls back to remote prefill, except for `Cancelled` and `InvalidArgument`
 errors, which return to the client.
 
@@ -153,7 +176,11 @@ errors, which return to the client.
 | Aggregated prompt-logprob cache credit | `output_options.prompt_logprobs`: when present, including zero, selection conservatively counts the full prompt without cache credit |
 | Excluded workers, parked classifier lifecycle | `PreprocessedRequest::migration_state` |
 | Staged KV that only this decode can release | `PreprocessedRequest::staged_kv_cleanup` |
+| Encoder handoff / mandatory prefill | `PreprocessedRequest::encoder_result` and `encoder_result_requires_prefill` (or `requires_encoder_result`) from the admitted prefill card |
 | Query-only selection (KV plane) | annotation `query_instance_id` in `PreprocessedRequest::annotations` |
+
+The frontend's prefill operator owns the handoff bypass decision. Runtime EPP query and
+reservation inputs are unchanged.
 
 The token-only Runtime EPP selection API has no output options and retains its existing cache
 behavior. Worker sampling options are unaffected by this conservative accounting rule.
@@ -209,6 +236,18 @@ newer booking that reused the same request id and worker.
   that the staged blocks will sit until they expire.
 - A request that took the conditional bypass reached decode without staged KV, so it cancels
   normally.
+- Encoder handoffs retain the original downstream request context. When the producer advertises
+  `encoder_result_release` on its terminal output, the encoder hop owns a cleanup guard. It sends
+  a separate `release_encoder_result` request with the unchanged opaque payload back to that
+  exact producer when the guard drops after dispatch failure, stream completion, or abandonment.
+  Tokens or successful completion (EOS, stop, or length) prove consumption and disarm release.
+  Error/cancelled terminals and uncertain failures retain cleanup, which runs in the
+  background with a fresh controller and a two-second deadline, without delaying response
+  delivery or forcing a cancelled request into its consumer. It never reselects another encoder
+  or carries generation sampling constraints or KV state. The resolved transport is retained at
+  Encode dispatch, so a live producer remains reachable after leaving admission or discovery;
+  an old allocation is never redirected to a replacement worker. Producer release is idempotent after
+  consumption. Backends that do not advertise this extension retain their existing behavior.
 
 ## Prefill activation
 
@@ -224,3 +263,16 @@ exactly one prefill worker set and one decode worker set. The encoder target fol
 `encoder_result_handoff` rules there. In Direct mode the prefill hop requires
 `routing.prefill_worker_id`. See [`../discovery/AGENTS.md`](../discovery/AGENTS.md) for worker-set
 admission and succession.
+
+Encoder routing policy also comes from the committed consumer card. A consumer declaring
+`requires_encoder_result` cannot encode inline: media requests fail when the encoder is absent,
+activating, or returns an error. The encoder worker validates its supported modalities before
+allocation. Text requests bypass the encoder. Decode pipelines inherit this requirement from
+committed Prefill groups even when no unique target is available. Consumers without the declaration retain
+optional inline fallback, rechecking the current requirement after Encode failure. The strictest
+requirement in the selected checksum cohort defines each serving generation, including member
+updates and removals. A stricter member cannot remain admitted to a retained permissive pipeline;
+canonical MDC checksums and metadata cache identities are unchanged.
+Dynamo's native TensorRT-LLM handoff requires producers to advertise
+NIXL as their single backend; consumers may list additional compatible backends.
+Shared-safetensors helpers are outside this integration.
