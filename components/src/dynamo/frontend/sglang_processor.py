@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from sglang.srt.parser.conversation import chat_template_exists
-from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 try:
     import fastokens
@@ -63,6 +62,16 @@ from .utils import (
     resolve_chat_template,
     worker_warmup,
 )
+
+try:
+    from sglang.srt.hf_transformers import get_tokenizer
+except ModuleNotFoundError as exc:
+    if exc.name != "sglang.srt.hf_transformers":
+        raise
+    # SGLang 0.5.11 to 0.5.23 (current CUDA and XPU pins).
+    # Remove once both pins are newer.
+    from sglang.srt.utils.hf_transformers import get_tokenizer
+
 
 logger = logging.getLogger(__name__)
 
@@ -439,6 +448,7 @@ def _init_worker(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    isolate_tool_call_markers: bool = False,
     tokenizer_backend: str = "huggingface",
     tokenizer_fallback: bool = True,
 ) -> None:
@@ -466,6 +476,7 @@ def _init_worker(
         chat_template=chat_template,
         tool_call_parser_name=tool_call_parser_name,
         reasoning_parser_name=reasoning_parser_name,
+        isolate_tool_call_markers=isolate_tool_call_markers,
     )
 
 
@@ -577,6 +588,13 @@ def _build_dynamo_preproc(
     else:
         routing = nvext_routing
 
+    # PreprocessedRequest.logit_bias is HashMap<u32, f32>, so JSON's str keys must
+    # become int; the HTTP layer has already validated the keys and values.
+    logit_bias = request.get("logit_bias")
+    logit_bias = (
+        {int(k): float(v) for k, v in logit_bias.items()} if logit_bias else None
+    )
+
     preproc = {
         "model": model_name,
         "token_ids": prompt_token_ids,
@@ -600,6 +618,7 @@ def _build_dynamo_preproc(
             "top_k": request.get("top_k", 0) or -1,
             "min_p": request.get("min_p", 0.0),
             "seed": request.get("seed"),
+            "logit_bias": logit_bias,
             "guided_decoding": guided_decoding,
         },
         "output_options": {
@@ -1354,6 +1373,7 @@ class SglangEngineFactory:
             chat_template=chat_template,
             tool_call_parser_name=tool_call_parser_name,
             reasoning_parser_name=reasoning_parser_name,
+            isolate_tool_call_markers=self.config.isolate_tool_call_markers,
         )
         preprocess_pool = None
         preprocess_workers = self.config.preprocess_workers
@@ -1379,6 +1399,7 @@ class SglangEngineFactory:
                     structural_tag_mode,
                     structural_tag_scope,
                     structural_tag_schema,
+                    self.config.isolate_tool_call_markers,
                     # The main process's result, so workers skip a failed backend.
                     tokenizer_backend,
                     self.tokenizer_fallback,

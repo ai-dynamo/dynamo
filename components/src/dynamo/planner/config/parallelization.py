@@ -3,8 +3,8 @@
 
 """Parallelization config shared between the profiler and the planner.
 
-``PickedParallelConfig`` stores the full ``(tp, pp, dp, moe_tp, moe_ep)`` tuple
-that AIConfigurator's picker emits. Both the profiler (which picks) and the
+``PickedParallelConfig`` stores the full ``(tp, pp, dp, moe_tp, moe_ep, cp)``
+tuple that AIConfigurator's picker emits. Both the profiler (which picks) and the
 planner (which consumes the pick to bootstrap perf models) need this type, so
 it lives under ``dynamo.planner.config`` rather than the profiler tree.
 
@@ -18,8 +18,12 @@ from pydantic import BaseModel, ConfigDict
 class PickedParallelConfig(BaseModel):
     """Lightweight representation of a picked parallelization config.
 
-    Uses the same ``(tp, pp, dp, moe_tp, moe_ep)`` tuple that AIC's enumeration
-    and picking pipelines produce. Frozen so instances are hashable.
+    Uses the same ``(tp, pp, dp, moe_tp, moe_ep, cp)`` tuple that AIC's
+    enumeration and picking pipelines produce. Frozen so instances are hashable.
+
+    ``cp`` is the picked context-parallel size (the picker's ``(p)cp``
+    column). It defaults to 1 so picks without CP, and planner ConfigMaps
+    serialised before the field existed, keep loading unchanged.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -29,6 +33,7 @@ class PickedParallelConfig(BaseModel):
     dp: int = 1
     moe_tp: int = 1
     moe_ep: int = 1
+    cp: int = 1
 
     @property
     def num_gpus(self) -> int:
@@ -63,10 +68,10 @@ class PickedParallelConfig(BaseModel):
         return self.tp
 
     def label(self) -> str:
-        """Build a label that is injective across all five parallel dimensions.
+        """Build a label that is injective across all six parallel dimensions.
 
-        Encodes ``(tp, pp, dp, moe_tp, moe_ep)`` so distinct topologies never
-        collide. Default-1 dimensions are omitted for readability.
+        Encodes ``(tp, pp, dp, moe_tp, moe_ep, cp)`` so distinct topologies
+        never collide. Default-1 dimensions are omitted for readability.
 
         Examples (MoE picks)::
 
@@ -74,6 +79,7 @@ class PickedParallelConfig(BaseModel):
             (tp=2, dp=1, moe_tp=1, moe_ep=2) -> "tp2-moeep2"
             (tp=1, dp=2, moe_tp=1, moe_ep=2) -> "tp1-dp2-moeep2"
             (tp=4, dp=1, moe_tp=4, moe_ep=1) -> "tp4-moetp4"
+            (tp=1, dp=1, moe_tp=4, moe_ep=1, cp=4) -> "tp1-moetp4-cp4"
 
         The prior 3-bucket form (``dep{moe_ep}`` / ``tep{moe_tp}`` / ``tp{tp}``)
         collapsed ``(tp=2, moe_ep=2)`` and ``(tp=1, dp=2, moe_ep=2)`` to the
@@ -90,6 +96,8 @@ class PickedParallelConfig(BaseModel):
             parts.append(f"moetp{self.moe_tp}")
         if self.moe_ep > 1:
             parts.append(f"moeep{self.moe_ep}")
+        if self.cp > 1:
+            parts.append(f"cp{self.cp}")
         return "-".join(parts)
 
 
@@ -97,20 +105,21 @@ def picked_to_aic_model_config_kwargs(p: PickedParallelConfig) -> dict[str, int]
     """Map a ``PickedParallelConfig`` to AIConfigurator ``ModelConfig`` kwargs.
 
     Returned keys: ``tp_size``, ``pp_size``, ``moe_tp_size``, ``moe_ep_size``,
-    ``attention_dp_size``.
+    ``attention_dp_size``, ``cp_size``.
 
     For MoE picks AIC's picker always emits
-    ``tp × dp == moe_tp × moe_ep`` (the attention-layer GPU width matches the
-    MoE-layer GPU width per replica), so the mapping is simply:
+    ``tp × dp × cp == moe_tp × moe_ep`` (the attention-layer GPU width matches
+    the MoE-layer GPU width per replica), so the mapping is simply:
 
     * ``tp_size = p.tp`` (AIC's attention TP per rank)
     * ``attention_dp_size = p.dp``
+    * ``cp_size = p.cp``
     * ``moe_tp_size = p.moe_tp``
     * ``moe_ep_size = p.moe_ep``
     * ``pp_size = p.pp``
 
     This satisfies AIC's MoE-only assertion
-    ``tp_size × attention_dp_size == moe_tp_size × moe_ep_size`` by
+    ``tp_size × attention_dp_size × cp_size == moe_tp_size × moe_ep_size`` by
     construction. For dense picks (``moe_tp = moe_ep = 1``) the assertion
     does not apply — AIC's ``BaseModel`` ignores the MoE fields.
 
@@ -124,4 +133,5 @@ def picked_to_aic_model_config_kwargs(p: PickedParallelConfig) -> dict[str, int]
         "moe_tp_size": p.moe_tp,
         "moe_ep_size": p.moe_ep,
         "attention_dp_size": p.dp,
+        "cp_size": p.cp,
     }

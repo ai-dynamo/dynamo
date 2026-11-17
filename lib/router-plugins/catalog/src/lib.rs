@@ -3,7 +3,7 @@
 
 //! The empty catalog used when a custom image does not replace Dynamo's catalog slot.
 
-use dynamo_kv_router::plugins::{RouterPluginRegistry, WorkerSelectionPolicyRegistryError};
+use dynamo_kv_router::plugins::prelude::*;
 
 /// Register policies linked into this image.
 ///

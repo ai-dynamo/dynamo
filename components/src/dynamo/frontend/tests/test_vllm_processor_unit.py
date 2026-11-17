@@ -1372,6 +1372,51 @@ async def test_generator_rejects_top_logprobs_without_logprobs(
 
 
 @pytest.mark.asyncio
+async def test_generator_vllm_validation_error_keeps_reason_for_client(
+    vllm_processor_module,
+):
+    from vllm.exceptions import VLLMValidationError
+
+    message = "The decoder prompt is longer than the maximum model length."
+
+    async def _inner(request, context=None):
+        raise VLLMValidationError(message)
+        yield  # pragma: no cover
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor._generator_inner = _inner
+
+    with pytest.raises(InvalidArgument, match="longer than the maximum model length"):
+        await anext(processor.generator({"model": "test"}))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_type", "expected_status"),
+    [("VLLMNotFoundError", 404), ("VLLMUnprocessableEntityError", 422)],
+)
+async def test_generator_vllm_non_400_client_error_keeps_status(
+    vllm_processor_module, error_type, expected_status
+):
+    from vllm import exceptions as vllm_exceptions
+
+    async def _inner(request, context=None):
+        raise getattr(vllm_exceptions, error_type)("rejected")
+        yield  # pragma: no cover
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor._generator_inner = _inner
+
+    with pytest.raises(HttpError) as excinfo:
+        await anext(processor.generator({"model": "test"}))
+    assert excinfo.value.code == expected_status
+
+
+@pytest.mark.asyncio
 async def test_generator_rejects_integer_chat_logprobs_before_preprocess(
     vllm_processor_module,
     monkeypatch,
@@ -1441,6 +1486,12 @@ async def test_generator_accepts_zero_top_logprobs(
         ({"logprobs": True, "top_logprobs": 1}, 1, None),
         ({"logprobs": True, "top_logprobs": 0, "prompt_logprobs": 0}, 0, 0),
         ({"logprobs": True, "top_logprobs": 1, "prompt_logprobs": 3}, 1, 3),
+        # Explicit ids replace the top-k count, as on the worker.
+        (
+            {"logprobs": True, "top_logprobs": 1, "logprob_token_ids": [5, 6]},
+            None,
+            None,
+        ),
         ({"prompt_logprobs": 0}, None, 0),
         ({"stream": True}, None, None),
         ({"stream": True, "prompt_logprobs": 0}, None, None),
@@ -1477,7 +1528,7 @@ async def test_generator_forwards_chat_logprobs_count(
     generation_config,
 ):
     class RequestForSampling(SimpleNamespace):
-        model_fields = frozenset({"prompt_logprobs"})
+        model_fields = frozenset({"prompt_logprobs", "logprob_token_ids"})
 
     monkeypatch.setattr(
         vllm_processor_module,
@@ -1490,6 +1541,7 @@ async def test_generator_forwards_chat_logprobs_count(
                     logprobs=request_options.get("logprobs"),
                     top_logprobs=request_options.get("top_logprobs"),
                     prompt_logprobs=request_options.get("prompt_logprobs"),
+                    logprob_token_ids=request_options.get("logprob_token_ids"),
                     top_k=None,
                     min_p=None,
                     cache_salt=None,
@@ -1558,6 +1610,12 @@ async def test_generator_forwards_chat_logprobs_count(
     assert (
         captured["dynamo_preproc"]["output_options"]["prompt_logprobs"]
         == expected_prompt_logprobs
+    )
+    sampling_passthrough = (
+        captured["dynamo_preproc"].get("extra_args", {}).get("sampling_options", {})
+    )
+    assert sampling_passthrough.get("logprob_token_ids") == request_options.get(
+        "logprob_token_ids"
     )
 
 
@@ -4958,6 +5016,23 @@ def test_sampling_logprobs_count_accepts_chat_bool(vllm_processor_module):
     assert count(False, 0) is None
     assert count(None, 0) is None
     assert count(False, True) is None
+
+
+@pytest.mark.parametrize(
+    "request_options,expected",
+    [
+        ({"logprobs": True}, 0),
+        ({"logprobs": True, "top_logprobs": 1}, 1),
+        ({"logprobs": True, "logprob_token_ids": [5, 6]}, 3),
+        ({"logprobs": True, "top_logprobs": 1, "logprob_token_ids": [5, 6]}, 3),
+        ({"logprob_token_ids": [5, 6]}, None),
+    ],
+)
+def test_choice_top_logprobs_lists_every_explicit_token(
+    vllm_processor_module, request_options, expected
+):
+    """Explicit ids list the sampled token and every named id, as vLLM does."""
+    assert vllm_processor_module._choice_top_logprobs(request_options) == expected
 
 
 def test_chat_choice_logprobs_from_worker_chunk(vllm_processor_module, tokenizer):

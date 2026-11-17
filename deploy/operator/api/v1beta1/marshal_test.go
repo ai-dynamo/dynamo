@@ -30,11 +30,14 @@ func unmarshalToMap(t *testing.T, b []byte) map[string]any {
 }
 
 type embeddedJSONCollision struct {
+	// +optional
 	Same *struct{} `json:"same,omitempty"`
 }
 
 type outerJSONCollision struct {
+	// +optional
 	Same struct{} `json:"same,omitempty"`
+	// +required
 	embeddedJSONCollision
 }
 

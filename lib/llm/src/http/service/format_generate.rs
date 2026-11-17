@@ -187,7 +187,7 @@ impl GenerateMetricCollector {
         };
 
         if let Some(routing_data) = output.routing_data.take() {
-            self.tracker.ingest_routing_data(routing_data);
+            self.tracker.ingest_routing_data(*routing_data);
         }
 
         self.observe_worker_info();

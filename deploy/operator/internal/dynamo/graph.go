@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"maps"
-	"path"
 	"regexp"
 	"slices"
 	"sort"
@@ -1469,7 +1468,10 @@ func PCSNameForDGD(
 	hash := fnv.New32a()
 	hash.Write([]byte(dgd.Name))
 	suffix := fmt.Sprintf("%04x", hash.Sum32()&0xFFFF)
-	return dgd.Name[:pcsBudget-5] + "-" + suffix
+	// Trim only dots, since ".-" is not a valid DNS-1123 subdomain. Trimming "-"
+	// too would rename the PodCliqueSet of a running DGD.
+	prefix := strings.TrimRight(dgd.Name[:pcsBudget-5], ".")
+	return prefix + "-" + suffix
 }
 
 func isDelegatedComponent(
@@ -2200,14 +2202,18 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		base.Env = MergeEnvs(baseEnv, user.Env)
 
 		// Replace complete probes so handlers cannot merge with the defaults.
-		if user.LivenessProbe != nil {
-			base.LivenessProbe = user.LivenessProbe.DeepCopy()
-		}
-		if user.ReadinessProbe != nil {
-			base.ReadinessProbe = user.ReadinessProbe.DeepCopy()
-		}
-		if user.StartupProbe != nil {
-			base.StartupProbe = user.StartupProbe.DeepCopy()
+		// Workloads created before operator 1.7.0 keep the field merge above so an
+		// operator-only upgrade does not change their rendered probes.
+		if compatibility.FrontendSidecarProbeReplacement.Enabled(parentContext.Annotations) {
+			if user.LivenessProbe != nil {
+				base.LivenessProbe = user.LivenessProbe.DeepCopy()
+			}
+			if user.ReadinessProbe != nil {
+				base.ReadinessProbe = user.ReadinessProbe.DeepCopy()
+			}
+			if user.StartupProbe != nil {
+				base.StartupProbe = user.StartupProbe.DeepCopy()
+			}
 		}
 
 		base.VolumeMounts = appendMissingVolumeMounts(base.VolumeMounts, parentMounts)
@@ -3319,14 +3325,12 @@ func GetDGDPreservedAlphaPVCs(dgd *v1beta1.DynamoGraphDeployment) []v1alpha1.PVC
 	return append([]v1alpha1.PVC(nil), alpha.Spec.PVCs...)
 }
 
-// DetectBackendFrameworkFromArgs detects the backend framework from command/args.
+// DetectBackendFrameworkFromArgs detects the backend framework from the Dynamo
+// launcher in command/args. Native engine commands such as vllm-rs are not
+// detected: the resolved backend is persisted on the child DCD and hashed into
+// the worker generation, so a new launcher heuristic would roll existing
+// workloads (#17543). Native engines set backendFramework explicitly.
 func DetectBackendFrameworkFromArgs(command []string, args []string) (BackendFramework, error) {
-	// Kubernetes command is argv, not shell source. Wrapped native launches
-	// require an explicit backendFramework rather than shell interpretation.
-	if len(command) > 0 && !strings.Contains(command[0], "$(") && path.Base(command[0]) == "vllm-rs" {
-		return BackendFrameworkVLLM, nil
-	}
-
 	// Combine command and args to search through all parts
 	allParts := slices.Concat(command, args)
 	fullCommand := strings.Join(allParts, " ")
@@ -3474,95 +3478,12 @@ func getBackendFrameworkFromComponent(
 	return determineBackendFrameworkForComponent(component, dynamoDeployment.Spec.BackendFramework)
 }
 
-// ConvertDynamoComponentDeploymentToSpec converts a DynamoComponentDeployment to our component spec interface
-// This is a helper for the controller to use our backend logic
-func ConvertDynamoComponentDeploymentToSpec(dynComponent *v1beta1.DynamoComponentDeployment) *v1beta1.DynamoComponentDeploymentSharedSpec {
-	return dynComponent.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy()
-}
-
 // GetBackendFrameworkFromDynamoComponent determines backend framework for a DynamoComponentDeployment
 func GetBackendFrameworkFromDynamoComponent(dynComponent *v1beta1.DynamoComponentDeployment) (BackendFramework, error) {
 	return determineBackendFrameworkForComponent(
 		&dynComponent.Spec.DynamoComponentDeploymentSharedSpec,
 		dynComponent.Spec.BackendFramework,
 	)
-}
-
-type GenerateBasePodSpecForControllerOptions struct {
-	// WorkloadComponentType overrides the component type used for pod workload
-	// defaults and env vars. Empty means use dynComponent.Spec.ComponentType.
-	WorkloadComponentType v1beta1.ComponentType
-}
-
-// GenerateBasePodSpecForController generates a PodSpec using backend logic for controller usage
-// This preserves the base pod generation while allowing controller-specific enhancements
-func GenerateBasePodSpecForController(
-	dynComponent *v1beta1.DynamoComponentDeployment,
-	secretsRetriever SecretsRetriever,
-	operatorConfig *configv1alpha1.OperatorConfiguration,
-	role Role,
-	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
-	containerGPUs ContainerGPUCount,
-	options GenerateBasePodSpecForControllerOptions,
-) (*corev1.PodSpec, error) {
-	// Validate the complete component before selecting its authored role template.
-	componentSpec, roleLaunchOwnership, nativeSidecar, err := lowerComponentForRole(&dynComponent.Spec.DynamoComponentDeploymentSharedSpec, role)
-	if err != nil {
-		return nil, err
-	}
-	if options.WorkloadComponentType != "" {
-		componentSpec.ComponentType = options.WorkloadComponentType
-	}
-	if workerHash := GetDCDEffectiveWorkerHash(dynComponent); workerHash != "" && IsWorkerComponent(string(componentSpec.ComponentType)) {
-		ensurePodTemplate(componentSpec).Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
-	}
-
-	numberOfNodes := componentSpec.GetNumberOfNodes()
-
-	// Backend configuration belongs to the engine in main, independently of the runtime launch.
-	var command, args []string
-	if main := GetMainContainer(componentSpec); main != nil {
-		command = main.Command
-		args = main.Args
-	}
-	backendFramework, err := determineBackendFramework(
-		string(componentSpec.ComponentType),
-		command,
-		args,
-		dynComponent.Spec.BackendFramework,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to determine backend framework: %w", err)
-	}
-
-	parentGraphDeploymentName := dynComponent.GetParentGraphDeploymentName()
-	if parentGraphDeploymentName == "" {
-		parentGraphDeploymentName = dynComponent.Name
-	}
-
-	// Generate base PodSpec with standard env vars using merged component envs
-	componentName := GetDCDComponentName(dynComponent)
-	podSpec, err := generateBasePodSpec(
-		componentSpec,
-		backendFramework,
-		secretsRetriever,
-		parentGraphDeploymentName,
-		dynComponent.Namespace,
-		role,
-		numberOfNodes,
-		operatorConfig,
-		multinodeDeploymentType,
-		componentName,
-		nil, // use default deployer
-		roleLaunchOwnership,
-		nativeSidecar,
-		containerGPUs,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return podSpec, nil
 }
 
 // getDefaultCompilationCacheMountPoint returns the default mount point for compilation cache based on backend framework
