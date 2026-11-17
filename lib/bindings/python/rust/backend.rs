@@ -507,7 +507,6 @@ impl WorkerConfig {
             })?;
         Ok(Self {
             inner: RsWorkerConfig {
-                router_config: None,
                 namespace,
                 component,
                 endpoint,
@@ -1635,6 +1634,7 @@ fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
             topic: item.getattr("topic")?.extract()?,
             dp_rank,
             image_token_id: None,
+            idempotent_stores: false,
         }),
         "PushSource" => {
             // Capture the Python callable as a `PyObject` and wrap in a

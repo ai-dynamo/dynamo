@@ -108,7 +108,6 @@ pub(crate) struct EngineInfo {
     pub reasoning_parser: Option<String>,
     pub tool_call_parser: Option<String>,
     pub skip_tokenizer_init: bool,
-    pub incremental_streaming_output: bool,
     /// Native HTTP port, when the server reports one.
     pub http_port: Option<Result<u16, DynamoError>>,
     pub page_size: Option<u32>,
@@ -255,7 +254,6 @@ pub(crate) fn engine_info(discovery: Discovery) -> Result<EngineInfo, DynamoErro
         reasoning_parser: non_empty(&model_info.reasoning_parser),
         tool_call_parser: non_empty(&model_info.tool_call_parser),
         skip_tokenizer_init: server_info.skip_tokenizer_init,
-        incremental_streaming_output: server_info.incremental_streaming_output,
         http_port: http_port(server_info.port),
         page_size: deployment.page_size,
         dcp_size: deployment.dcp_size.max(1),

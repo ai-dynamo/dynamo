@@ -528,6 +528,11 @@ fn media(
                     ))
                 })?;
             let source = match item {
+                MultimodalData::Json(_) => {
+                    return Err(client::invalid_argument(
+                        "Custom JSON content requires a dynamo.vllm worker; the TensorRT-LLM sidecar does not support it",
+                    ));
+                }
                 MultimodalData::Url(url) => media_source(String::from(url), kind.key, index)?,
                 MultimodalData::RawUrl(url) => media_source(url, kind.key, index)?,
                 MultimodalData::Decoded(_) => {
