@@ -41,22 +41,38 @@ pub(crate) struct PrefillTimeLoad {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PrefillSnapshotDecay {
+    Modeled {
+        millis: u64,
+        token_carry: bool,
+        time_carry: bool,
+    },
+    Mixed {
+        discarded_tokens: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PrefillLoadSnapshot {
+    /// Includes discarded progress for fully modeled snapshots.
     pub(super) prefill_full_tokens_sum: usize,
     pub(super) anchored_prefill: Option<AnchoredPrefillSnapshot>,
-    pub(super) total_modeled_prefill_time_ms: Option<u64>,
-    pub(super) discarded_completed_tokens: usize,
-    pub(super) discarded_elapsed_ms: u64,
+    pub(super) decay: PrefillSnapshotDecay,
 }
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<PrefillLoadSnapshot>() == 64);
 
 impl Default for PrefillLoadSnapshot {
     fn default() -> Self {
         Self {
             prefill_full_tokens_sum: 0,
             anchored_prefill: None,
-            total_modeled_prefill_time_ms: Some(0),
-            discarded_completed_tokens: 0,
-            discarded_elapsed_ms: 0,
+            decay: PrefillSnapshotDecay::Modeled {
+                millis: 0,
+                token_carry: false,
+                time_carry: false,
+            },
         }
     }
 }
@@ -67,26 +83,45 @@ impl PrefillLoadSnapshot {
             return 0;
         };
 
-        if self.total_modeled_prefill_time_ms.is_none() {
-            return self.anchor_only_active_tokens_at(anchored_prefill, now);
-        }
+        let token_carry = match self.decay {
+            PrefillSnapshotDecay::Modeled { token_carry, .. } => token_carry,
+            PrefillSnapshotDecay::Mixed { discarded_tokens } => {
+                return self.anchor_only_active_tokens_at(anchored_prefill, discarded_tokens, now);
+            }
+        };
 
         let completed_tokens = completed_prefill_tokens(
             anchored_prefill.initial_effective_prefill_tokens,
             anchored_prefill.expected_prefill_duration,
             now.saturating_duration_since(anchored_prefill.anchored_since),
-        )
-        .saturating_sub(self.discarded_completed_tokens);
-        self.prefill_full_tokens_sum
-            .saturating_sub(completed_tokens)
+        );
+        if token_carry {
+            (usize::MAX as u128 + 1 + self.prefill_full_tokens_sum as u128
+                - completed_tokens as u128)
+                .min(usize::MAX as u128) as usize
+        } else {
+            self.prefill_full_tokens_sum
+                .saturating_sub(completed_tokens)
+        }
     }
 
     fn anchor_only_active_tokens_at(
         &self,
         anchored_prefill: AnchoredPrefillSnapshot,
+        discarded_tokens: usize,
         now: Instant,
     ) -> usize {
         let anchored_full = anchored_prefill.initial_effective_prefill_tokens;
+        if discarded_tokens != 0 {
+            let completed = completed_prefill_tokens(
+                anchored_full,
+                anchored_prefill.expected_prefill_duration,
+                now.saturating_duration_since(anchored_prefill.anchored_since),
+            )
+            .saturating_sub(discarded_tokens)
+            .min(anchored_full);
+            return self.prefill_full_tokens_sum.saturating_sub(completed);
+        }
         let anchored_remaining = match anchored_prefill.expected_prefill_duration {
             None => anchored_full,
             Some(expected_prefill_duration) if expected_prefill_duration.is_zero() => 0,
@@ -108,14 +143,16 @@ impl PrefillLoadSnapshot {
     /// Return modeled remaining prefill time in non-negative milliseconds.
     ///
     /// Formula:
-    /// `total_modeled_prefill_ms.saturating_sub(elapsed_ms - discarded_elapsed_ms)`,
-    /// with both subtractions saturating at zero.
+    /// `folded_total_ms.saturating_sub(elapsed_ms)`. Discarded pre-arrival
+    /// progress is folded into the total when the snapshot is created.
     ///
     /// Elapsed time from the oldest active prefill is intentionally applied to the
     /// aggregate modeled backlog, so work can spill past the front request and
     /// reduce later modeled prefills. Progress beyond available work is discarded
     /// before adding a new prefill, so it cannot consume work before its arrival.
     /// The final worker backlog is clipped at zero.
+    /// A read instant preceding snapshot publication can conservatively
+    /// overestimate the backlog. Overflow carry is retained until subtraction.
     ///
     /// `Err(MissingExpectedDuration)` means at least one active prefill was added
     /// without a modeled duration, which is expected when AIS is absent or
@@ -125,12 +162,21 @@ impl PrefillLoadSnapshot {
         &self,
         now: Instant,
     ) -> Result<u64, PrefillTimeLoadError> {
-        let total_modeled_ms = self
-            .total_modeled_prefill_time_ms
-            .ok_or(PrefillTimeLoadError::MissingExpectedDuration)?;
+        let PrefillSnapshotDecay::Modeled {
+            millis: total_modeled_ms,
+            time_carry,
+            ..
+        } = self.decay
+        else {
+            return Err(PrefillTimeLoadError::MissingExpectedDuration);
+        };
 
         let Some(anchored_prefill) = self.anchored_prefill else {
-            return Ok(total_modeled_ms);
+            return Ok(if time_carry {
+                u64::MAX
+            } else {
+                total_modeled_ms
+            });
         };
 
         anchored_prefill
@@ -138,7 +184,12 @@ impl PrefillLoadSnapshot {
             .ok_or(PrefillTimeLoadError::MissingExpectedDuration)?;
         let elapsed_ms =
             duration_millis_u64(now.saturating_duration_since(anchored_prefill.anchored_since));
-        Ok(total_modeled_ms.saturating_sub(elapsed_ms.saturating_sub(self.discarded_elapsed_ms)))
+        Ok(if time_carry {
+            (u128::from(u64::MAX) + 1 + u128::from(total_modeled_ms) - u128::from(elapsed_ms))
+                .min(u128::from(u64::MAX)) as u64
+        } else {
+            total_modeled_ms.saturating_sub(elapsed_ms)
+        })
     }
 }
 
@@ -377,11 +428,31 @@ impl PrefillLoadTracker {
     }
 
     pub(super) fn snapshot(&self) -> PrefillLoadSnapshot {
-        let total_modeled_prefill_time_ms = (self.unmodeled_prefill_count == 0)
-            .then(|| self.modeled_prefill_ms.min(u128::from(u64::MAX)) as u64);
+        let (prefill_full_tokens_sum, decay) = if self.unmodeled_prefill_count == 0 {
+            let (tokens, token_carry) = self
+                .prefill_full_tokens_sum
+                .overflowing_add(self.discarded_completed_tokens);
+            let (millis, time_carry) = (self.modeled_prefill_ms.min(u128::from(u64::MAX)) as u64)
+                .overflowing_add(self.discarded_elapsed_ms);
+            (
+                tokens,
+                PrefillSnapshotDecay::Modeled {
+                    millis,
+                    token_carry,
+                    time_carry,
+                },
+            )
+        } else {
+            (
+                self.prefill_full_tokens_sum,
+                PrefillSnapshotDecay::Mixed {
+                    discarded_tokens: self.discarded_completed_tokens,
+                },
+            )
+        };
 
         PrefillLoadSnapshot {
-            prefill_full_tokens_sum: self.prefill_full_tokens_sum,
+            prefill_full_tokens_sum,
             anchored_prefill: self.anchored_prefill.as_ref().map(|(_, anchored_since)| {
                 let prefill = self
                     .anchored_load
@@ -392,9 +463,7 @@ impl PrefillLoadTracker {
                     anchored_since: *anchored_since,
                 }
             }),
-            total_modeled_prefill_time_ms,
-            discarded_completed_tokens: self.discarded_completed_tokens,
-            discarded_elapsed_ms: self.discarded_elapsed_ms,
+            decay,
         }
     }
 
@@ -924,6 +993,7 @@ mod tests {
         assert_eq!(tracker.prefill_order.values().next(), Some(&anchor));
         assert_eq!(tracker.prefill_order.len(), 1);
     }
+
     #[test]
     fn new_arrival_keeps_its_work_when_token_and_time_models_drain_separately() {
         for (case, first, second, arrival_ms) in [
@@ -1036,7 +1106,20 @@ mod tests {
                 Ok(10),
                 "{case}",
             );
-            tracker.remove(&"B".into(), later);
+            let after_front_change = later + Duration::from_millis(1);
+            assert_eq!(
+                tracker.snapshot().active_tokens_at(after_front_change),
+                90,
+                "{case}",
+            );
+            assert_eq!(
+                tracker
+                    .snapshot()
+                    .modeled_remaining_prefill_time_ms_at(after_front_change),
+                Ok(9),
+                "{case}",
+            );
+            tracker.remove(&"B".into(), after_front_change);
             let reuse = epoch + Duration::from_millis(100);
             tracker.insert(&"A".into(), prefill_state_ms(100, 10), reuse);
             tracker.assert_consistent();
@@ -1078,6 +1161,91 @@ mod tests {
                 .snapshot()
                 .modeled_remaining_prefill_time_ms_at(later),
             Ok(9)
+        );
+
+        // Switching to anchor-only decay must not erase settled work.
+        let mut tracker = PrefillLoadTracker::default();
+        tracker.insert(&"A".into(), prefill_state_ms(100, 10), epoch);
+        tracker.insert(&"B".into(), prefill_state_ms(100, 10), now);
+        tracker.insert(&"C".into(), prefill_state_ms(100, 10), later);
+        let completion = later + Duration::from_millis(1);
+        tracker.remove(&"C".into(), completion);
+        assert_eq!(tracker.snapshot().active_tokens_at(completion), 180);
+        tracker.insert(&"unknown".into(), unmodeled_prefill_state(1), completion);
+        tracker.assert_consistent();
+        assert_eq!(tracker.snapshot().active_tokens_at(completion), 181);
+        assert_eq!(
+            tracker
+                .snapshot()
+                .modeled_remaining_prefill_time_ms_at(completion),
+            Err(PrefillTimeLoadError::MissingExpectedDuration),
+        );
+        assert_eq!(
+            tracker
+                .snapshot()
+                .active_tokens_at(completion + Duration::from_millis(1)),
+            171,
+        );
+        assert_eq!(
+            tracker
+                .snapshot()
+                .active_tokens_at(completion + Duration::from_millis(100)),
+            101,
+        );
+    }
+
+    #[test]
+    fn folded_snapshot_retains_carry_until_progress_is_subtracted() {
+        let epoch = Instant::now();
+        let now = epoch + Duration::from_millis(30);
+        for (case, tokens, duration, expected_tokens, expected_ms) in [
+            ("token carry", usize::MAX - 1, 1, usize::MAX - 1, 1),
+            ("time carry", 1, u64::MAX, 1, u64::MAX - 1),
+        ] {
+            let mut tracker = PrefillLoadTracker::default();
+            tracker.insert(&"A".into(), prefill_state_ms(1, 1), epoch);
+            tracker.insert(&"B".into(), prefill_state_ms(tokens, duration), now);
+            tracker.assert_consistent();
+            let snapshot = tracker.snapshot();
+            assert_eq!(snapshot.active_tokens_at(now), expected_tokens, "{case}");
+            assert_eq!(
+                snapshot.modeled_remaining_prefill_time_ms_at(now),
+                Ok(expected_ms),
+                "{case}",
+            );
+            let later = now + Duration::from_millis(1);
+            assert_eq!(
+                snapshot.active_tokens_at(later),
+                expected_tokens.saturating_sub(1),
+                "{case}",
+            );
+            assert_eq!(
+                snapshot.modeled_remaining_prefill_time_ms_at(later),
+                Ok(expected_ms.saturating_sub(1)),
+                "{case}",
+            );
+        }
+    }
+
+    #[test]
+    fn stale_read_instant_remains_conservative_after_later_arrival() {
+        let epoch = Instant::now();
+        let mut tracker = PrefillLoadTracker::default();
+        tracker.insert(&"A".into(), prefill_state_ms(100, 10), epoch);
+        let arrival = epoch + Duration::from_millis(30);
+        tracker.insert(&"B".into(), prefill_state_ms(100, 10), arrival);
+        let snapshot = tracker.snapshot();
+        // A reader can capture its instant before a concurrent writer publishes.
+        assert!(snapshot.active_tokens_at(epoch + Duration::from_millis(10)) >= 200);
+        assert!(
+            snapshot
+                .modeled_remaining_prefill_time_ms_at(epoch + Duration::from_millis(10))
+                .is_ok_and(|remaining| remaining >= 20)
+        );
+        assert_eq!(snapshot.active_tokens_at(arrival), 100);
+        assert_eq!(
+            snapshot.modeled_remaining_prefill_time_ms_at(arrival),
+            Ok(10)
         );
     }
 }

@@ -625,7 +625,7 @@ mod tests {
     use rustc_hash::{FxHashMap, FxHashSet};
 
     use super::*;
-    use crate::prefill_tracker::AnchoredPrefillSnapshot;
+    use crate::prefill_tracker::{AnchoredPrefillSnapshot, PrefillSnapshotDecay};
     use crate::prelude::WorkerWithDpRank;
     use crate::single::{PromptMembershipRemove, PromptMembershipStore};
     use crate::topology::RemovedWorkerState;
@@ -671,9 +671,16 @@ mod tests {
                     expected_prefill_duration,
                     anchored_since,
                 }),
-                total_modeled_prefill_time_ms: expected_prefill_duration
-                    .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64),
-                ..PrefillLoadSnapshot::default()
+                decay: match expected_prefill_duration {
+                    Some(duration) => PrefillSnapshotDecay::Modeled {
+                        millis: duration.as_millis().min(u64::MAX as u128) as u64,
+                        token_carry: false,
+                        time_carry: false,
+                    },
+                    None => PrefillSnapshotDecay::Mixed {
+                        discarded_tokens: 0,
+                    },
+                },
             },
         }
     }
