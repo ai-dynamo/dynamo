@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 _Build, push, and install the two forks that give each model a hard compute and memory share of a GPU_
 
-This guide builds two forks from source, pushes the images to a registry you control, and installs them on a Kubernetes cluster. Together they give each pod a hard share of a GPU's streaming multiprocessors (SMs) and memory, enforced by CUDA Multi-Process Service (MPS) v3 namespaces. You need them for the "KAI + GPU fractions" experiment in [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx): 16 Qwen3-4B models on 8 A100 GPUs, each model capped at 50% of the SMs and 50% of the memory of one GPU.
+This guide builds two forks from source, pushes the images to a registry you control, and installs them on a Kubernetes cluster. Together they give each pod a hard share of a GPU's streaming multiprocessors (SMs) and memory, enforced by CUDA Multi-Process Service (MPS) v3 namespaces. You need them for the "KAI + GPU fractions" experiment in [Benchmark GPU Fractions](../../../docs/fern/pages/use-cases/gpu-sharing/benchmark-gpu-fractions.mdx): 16 Qwen3-4B models on 8 A100 GPUs, each model capped at 50% of the SMs and 50% of the memory of one GPU.
 
 When the install is done, a pod that asks for `gpu-fraction: "0.5"` lands on a shared GPU in its own MPS namespace. The MPS server enforces the pod's SM share, and the driver enforces its memory cap, so the pod cannot raise either one. The next step is [deploying the models](deploy-kai-gpu-fractions.md).
 
@@ -494,4 +494,4 @@ kubectl delete namespace kai-resource-reservation kai-scheduler gpu-fractioning
 
 - [Deploy the 16-model experiment](deploy-kai-gpu-fractions.md) on the cluster you just built.
 - [Per-GPU Compute and Memory Limits with MPS](mps-per-gpu-limits.md) covers the MPS v3 mechanism that these forks drive for you.
-- [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx) explains how to read the benchmark.
+- [Benchmark GPU Fractions](../../../docs/fern/pages/use-cases/gpu-sharing/benchmark-gpu-fractions.mdx) explains how to read the benchmark.

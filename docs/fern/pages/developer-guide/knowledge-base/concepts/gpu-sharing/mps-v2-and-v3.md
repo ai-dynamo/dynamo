@@ -7,7 +7,7 @@ subtitle: How the MPS v3 interface changes where limits live, and why per-model 
 
 CUDA Multi-Process Service (MPS) has two control interfaces. The v2 interface, now called the legacy interface, runs one MPS server per Linux user, and each client sets its own limits. The v3 interface runs many named servers, each holding namespaces, and the limits live in the namespace on the server. Packing distinct models with a different size for each pod depends on v3. This page explains what changed. [How GPU Sharing Works](how-gpu-sharing-works.md) covers MPS itself.
 
-![Left, MPS v2: one control daemon per Linux user runs one MPS server with default limits; client A sets 60% of SMs and 30 GB in its environment, and client B sets 40% and 20 GB, and each can only lower the server's defaults. On Kubernetes, the NVIDIA device plugin's MPS mode cuts a GPU into equal replicas. Right, MPS v3: one control daemon per node runs a server per GPU. Server gpu-0 holds three namespaces, chat-8b at 50% of SMs and 32 GB, code-7b at 30% and 24 GB, and guard-1b at 20% and 8 GB, each serving one pod. Each pod sees only its own namespace's pipe directory. V3 also adds cgroup memory limits per container per GPU, several named servers in one daemon, a TOML configuration file, and client priority per namespace.](../../../assets/img/gpu-sharing-mps-v2-v3.svg)
+![MPS v2: one control daemon runs one MPS server; client A sets 60% of SMs and 30 GB, client B 40% and 20 GB. MPS v3: one control daemon runs a server per GPU; server gpu-0 holds namespaces chat-8b at 50% and 32 GB, code-7b at 30% and 24 GB, and guard-1b at 20% and 8 GB, each with one pod; server gpu-1 holds more namespaces.](../../../../../assets/img/gpu-sharing-mps-v2-v3.svg)
 
 ## MPS v2: Limits Travel With the Client
 
@@ -40,7 +40,7 @@ v3 also adds:
 
 ## Static SM Partitions
 
-Both interfaces can give a client an exact set of SMs instead of a percentage ceiling. Static partitions are supported on Ampere and newer GPUs, and on Hopper and newer they are allocated in chunks of 8 SMs. They are the only spatial SM isolation MPS offers, and they change how faults spread: a memory fault stops only the clients in the faulting partition. [What Happens When a Model Faults](how-gpu-sharing-works.md#what-happens-when-a-model-faults) shows what partitions contain and what they don't.
+Both interfaces can give a client an exact set of SMs instead of a percentage ceiling. Static partitions are supported on Ampere and newer GPUs, and on Hopper and newer they are allocated in chunks of 8 SMs. They are the only spatial SM isolation MPS offers, and they change how faults spread: a memory fault stops only the clients in the faulting partition. [MPS Fault Isolation](mps-fault-isolation.md) shows what partitions contain and what they don't.
 
 You create a partition through the control daemon, then point a client at it:
 
@@ -76,18 +76,10 @@ GPU fractions gives every model its own share of a GPU. When KAI-Scheduler place
 
 ## Sharp Edges in v3
 
-MPS v3 enforces limits only for clients that actually connect to their namespace, and some failures are silent. Run with these in mind, and verify the limits on every new deployment:
-
-- **A client that misses its namespace runs unlimited.** In the default compute mode, a client whose pipe directory is missing or misspelled runs as an ordinary CUDA process with the whole GPU, and nothing reports an error.
-- **One bad per-GPU memory entry removes every memory cap.** If any entry in a client's `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT` names a GPU the client can't see, the client drops every pinned memory limit, including its namespace's. Its compute limit still applies.
-- **A root container can raise its own limits.** The GPU fractions DGDs run workers as non-root for this reason.
-- **The reported total memory is the whole GPU.** Under a pinned memory limit, `cudaMemGetInfo` reports the limit as free memory but the whole GPU as total. Set a framework's memory fraction from the cap explicitly. For vLLM, set `--gpu-memory-utilization` to the cap divided by the GPU's total memory, or lower.
-- **A server can disappear quietly.** A server whose allowed devices name a GPU that isn't on the node is accepted, then exits, and its clients run without MPS. Check `server list` and the server log after every start.
-
-[Per-GPU Compute and Memory Limits with MPS](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/docs/mps-per-gpu-limits.md) walks through MPS v3 servers, namespaces, and cgroup memory limits by hand, with the behavior measured on an RTX PRO 6000 Blackwell and the fixes for each of these problems.
+MPS v3 enforces limits only for clients that actually connect to their namespace, and some failures are silent: a client that misses its namespace runs with the whole GPU, and nothing reports an error. [Operate Shared GPUs](../../../../use-cases/gpu-sharing/operate-shared-gpus.md#avoid-the-mps-v3-sharp-edges) lists each one and how to guard against it. [Per-GPU Compute and Memory Limits with MPS](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/docs/mps-per-gpu-limits.md) walks through MPS v3 servers, namespaces, and cgroup memory limits by hand, with the behavior measured on an RTX PRO 6000 Blackwell.
 
 ## Next Steps
 
-- [Which Models to Share a GPU](which-models-to-share.md)
-- [Example MPS Architecture](example-mps-architecture.md)
-- [Choosing a GPU Sharing Approach](choosing-a-gpu-sharing-approach.md)
+- [How GPU Sharing Works](how-gpu-sharing-works.md): MPS compared with time-slicing, HAMi, and MIG.
+- [MPS Fault Isolation](mps-fault-isolation.md): which faults reach the other models on a GPU.
+- [Try MPS on One GPU](../../../../use-cases/gpu-sharing/try-mps-on-one-gpu.mdx): run MPS v3 servers and namespaces by hand.

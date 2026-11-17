@@ -1,0 +1,212 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Deploy Models on GPU Fractions
+subtitle: Give each Dynamo worker a share of a GPU, deploy two models onto one GPU, and send them requests
+---
+
+This guide deploys two Qwen3-4B models, each in its own DynamoGraphDeployment (DGD), onto one GPU, with each worker capped at half of the GPU's compute and memory. Along the way it explains every field that puts a worker on a GPU fraction, so you can apply the same fields to your own models.
+
+The commands use the manifests and scripts in [`examples/gpu-sharing`](https://github.com/ai-dynamo/dynamo/tree/main/examples/gpu-sharing). Run them from that directory in a checkout of the Dynamo repository.
+
+## Prerequisites
+
+- KAI-Scheduler and the GPU fractioning agents, installed and passing the smoke test in [Install GPU Fractions on Kubernetes](install-gpu-fractions.mdx).
+- A GPU node with at least one free GPU. The commands below were written for an A100 40GB; [step 4](#set-the-engines-memory-setting) shows what to change for other GPUs.
+- `kubectl` and `helm` with cluster-admin, and egress to Hugging Face and `nvcr.io`.
+- Pods in the target namespace may mount `hostPath` volumes, and the model download runs a root init container. If your cluster enforces the `baseline` or `restricted` Pod Security Standard, use a namespace labeled `pod-security.kubernetes.io/enforce=privileged`, and set `NAMESPACE` for every command.
+
+Pick the GPU node. Every later step uses it:
+
+```bash
+kubectl get nodes -L nvidia.com/gpu.product,nvidia.com/gpu.count
+export GPU_NODE=<node-name>
+```
+
+<Steps toc={true}>
+<Step title="Install the Dynamo platform" id="install-the-dynamo-platform">
+
+```bash
+cd examples/gpu-sharing
+common/install-dynamo-platform.sh
+```
+
+The script installs the `dynamo-platform` Helm chart, version 1.4.2, into the `dynamo-system` namespace, with etcd and NATS. The DGDs in this guide use etcd for discovery: with the platform's default Kubernetes-based discovery, the `vllm-runtime:1.3.0` frontend never lists the model.
+
+</Step>
+<Step title="Download the model to the GPU node" id="download-the-model-to-the-gpu-node">
+
+```bash
+NODE_NAME="$GPU_NODE" common/download-model.sh
+```
+
+A Kubernetes Job on `$GPU_NODE` downloads `Qwen/Qwen3-4B` at a pinned revision into the `hostPath` cache `/opt/hf-cache`. Set `HF_TOKEN` if your Hugging Face account needs one.
+
+</Step>
+<Step title="Request a share for each worker" id="request-a-share-for-each-worker">
+
+A worker asks for its share with a label, two annotations, and three fields on its pod template. This is the worker of each DGD this guide deploys:
+
+```yaml {6,8-9,11-12,14}
+- name: worker
+  type: worker
+  podTemplate:
+    metadata:
+      labels:
+        kai.scheduler/queue: default-queue
+      annotations:
+        gpu-fraction: "0.5"
+        nvidia.com/container.main.gpu-compute.mode: sm-sharing
+    spec:
+      schedulerName: kai-scheduler
+      runtimeClassName: nvidia
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: main
+          # ... the vLLM worker command, with no nvidia.com/gpu resource
+```
+
+| Field | What it does |
+|---|---|
+| `kai.scheduler/queue` | Puts the pod in a KAI queue. Every fractional pod needs one, and the chart creates `default-queue` |
+| `gpu-fraction: "0.5"` | Asks for half of one GPU's memory, after a 1 GiB reserve for the MPS server. The compute share follows the memory share |
+| `nvidia.com/container.main.gpu-compute.mode: sm-sharing` | Runs the container in its own MPS namespace, so it runs at the same time as its neighbors, capped at its compute share. `main` is the container's name |
+| `schedulerName: kai-scheduler` | Hands the pod to KAI-Scheduler instead of the default scheduler |
+| `runtimeClassName: nvidia` | Gives the container the driver libraries |
+| `runAsNonRoot: true` | Stops the pod from raising its own share. A root container can change any MPS namespace on the GPU |
+
+Leave out `nvidia.com/gpu`: KAI rejects a pod that asks for both a fraction and a whole GPU.
+
+To give a model more compute than memory, or the reverse, ask for each one on its own instead of `gpu-fraction`. This form comes from the [pinned KAI-Scheduler pull request](https://github.com/kai-scheduler/KAI-Scheduler/pull/2368):
+
+```yaml
+annotations:
+  nvidia.com/container.main.gpu-compute.mode: sm-sharing
+  nvidia.com/container.main.gpu-compute.request: "0.3"
+  nvidia.com/container.main.gpu-memory.request: "24576Mi"
+```
+
+Use the values you recorded in [Size Each Model's Share](size-each-models-share.mdx).
+
+</Step>
+<Step title="Set the engine's memory setting" id="set-the-engines-memory-setting">
+
+The engine sees the GPU's full memory as its total, not its cap. Set vLLM's `--gpu-memory-utilization` to a fraction that fits under the cap:
+
+```text
+--gpu-memory-utilization  ≤  memory cap ÷ GPU memory
+```
+
+On an A100 40GB, half the GPU is a 19,968 MiB cap, so the DGDs in this guide set `--gpu-memory-utilization 0.40`, about 15.8 GiB. On another GPU, recompute it. The next step shows where to change it.
+
+</Step>
+<Step title="Deploy two models onto one GPU" id="deploy-two-models-onto-one-gpu">
+
+[`kai-gpu-fractions/gen-dgds.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/kai-gpu-fractions/gen-dgds.sh) renders one DGD per model, each with a frontend and the worker from step 3. Render two and apply them:
+
+```bash
+NUM_MODELS=2 NODE_NAME="$GPU_NODE" kai-gpu-fractions/gen-dgds.sh | kubectl apply -f -
+kubectl get dgd -n default -w      # wait until qwen3-4b-01 and qwen3-4b-02 are Ready
+```
+
+For a GPU other than an A100 40GB, render to a file first, change `"0.40"` after `--gpu-memory-utilization` to your value, and apply the file.
+
+While the DGDs start, this is what happens to each worker:
+
+1. KAI-Scheduler finds a GPU with half its compute and half its memory free, and records the GPU and the share on the pod. Both workers fit on one GPU, so the scheduler packs them together.
+2. On that node, `mpsd` creates an MPS namespace for the pod on the GPU's MPS server, capped at 50% of the SMs.
+3. When the container starts, `fractiond` mounts only that namespace's pipe directory into it, and sets its memory cap.
+4. vLLM starts as an MPS client of that namespace, and runs under its limits.
+
+<Warning>
+Don't edit a running DGD's worker. The operator starts the new worker before it removes the old one, and with every share on the GPU allocated, the new worker stays `Pending`. Delete the DGD and apply it again instead.
+</Warning>
+
+</Step>
+<Step title="Verify placement and limits" id="verify-placement-and-limits">
+
+Check that both workers landed on the same GPU, each with its share:
+
+```bash
+for p in $(kubectl get pods -n default -l experiment.nvidia.com/role=worker -o name); do
+  echo "$p"
+  kubectl exec -n default "${p#pod/}" -- env | grep -E 'NVIDIA_VISIBLE_DEVICES|CUDA_MPS_ACTIVE_THREAD_PERCENTAGE|CUDA_MPS_PINNED_DEVICE_MEM_LIMIT'
+done
+```
+
+Both workers report the same `NVIDIA_VISIBLE_DEVICES` GPU UUID, `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=50`, and, on an A100 40GB, `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT=0=19968M`.
+
+Then check what the MPS server enforces, which is the ground truth:
+
+```bash
+kubectl -n gpu-fractioning exec ds/gpu-fractioning-mpsd -- \
+  nvidia-cuda-mps-control -p 3 namespace list --server=shared
+```
+
+Expect two `kai_*` namespaces at `50.00`, plus `default` at `10.00`.
+
+</Step>
+<Step title="Send a request" id="send-a-request">
+
+Forward the first model's frontend to your workstation:
+
+```bash
+kubectl port-forward -n default svc/qwen3-4b-01-frontend 8000:8000
+```
+
+In another terminal, list the model and send a chat request:
+
+```bash
+curl -s localhost:8000/v1/models
+curl -s localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3-4B",
+    "messages": [{"role": "user", "content": "In one sentence, what is a GPU?"}],
+    "max_tokens": 64
+  }'
+```
+
+Repeat with `svc/qwen3-4b-02-frontend` to reach the second model. Each model has its own frontend and endpoint.
+
+</Step>
+</Steps>
+
+## What You Did
+
+- Installed the Dynamo platform and downloaded a model to the GPU node.
+- Deployed two models, each as its own DGD, onto one GPU, with each worker in its own MPS namespace at half the GPU.
+- Confirmed the placement and the limits, and sent each model a request.
+
+## Put It All Together
+
+The same fields scale to a cluster. This example serves fifteen distinct models on GPU fractions, and one large model on whole GPUs, across two nodes. Each colored block is one worker in its own MPS namespace, and its height is the worker's share of the GPU's SMs:
+
+![Cluster services: KAI-Scheduler, Dynamo operator, Dynamo frontends, GPU Operator. Two GPU nodes, each with four H100 80GB GPUs, mpsd, and fractiond. gpu-node-1: GPU 0 holds chat-8b 0.5, code-7b 0.3, guard-1b 0.2; GPU 1 holds tenant-a-8b 0.4, tenant-b-8b 0.4, embed 0.2; GPU 2 holds sql-7b 0.3, summarize-3b 0.3, rerank 0.2, with 0.2 free; GPU 3 is free. gpu-node-2: GPUs 0 and 1 run chat-70b on whole GPUs without MPS; GPU 2 holds four tenant models at 0.25 each; GPU 3 holds vision-7b 0.6 and ocr-2b 0.2, with 0.2 free.](../../../assets/img/gpu-sharing-two-node-architecture.svg)
+
+| Component | Where it runs | What it does |
+|---|---|---|
+| KAI-Scheduler | Cluster services | Places each fractional worker on a GPU with room for both its compute share and its memory |
+| Dynamo operator | Cluster services | Turns each DGD into a frontend and a worker |
+| Dynamo frontends | CPU nodes | Serve each model's OpenAI-compatible API and route to that model's worker |
+| GPU Operator | Every GPU node | Installs the driver, the device plugin, and the GPU labels KAI-Scheduler reads |
+| `mpsd` | Every GPU node | Runs the MPS v3 control daemon, one MPS server per GPU, and a namespace for each fractional worker |
+| `fractiond` | Every GPU node | Gives each fractional container its namespace's pipe directory and its memory cap |
+
+Workers that need whole GPUs, such as the two ranks of `chat-70b`, ask for `nvidia.com/gpu` as usual and run without MPS, on the same nodes as the fractional workers.
+
+## Clean Up
+
+```bash
+NUM_MODELS=2 NODE_NAME="$GPU_NODE" kai-gpu-fractions/gen-dgds.sh | kubectl delete -f -
+kubectl delete job download-qwen3-4b -n default --ignore-not-found
+```
+
+The model cache stays in `/opt/hf-cache` on `$GPU_NODE`.
+
+## Next Steps
+
+- [Benchmark GPU Fractions](benchmark-gpu-fractions.mdx): measure throughput and latency with every model loaded.
+- [Operate Shared GPUs](operate-shared-gpus.md): place critical models, resize a model, and fix common problems.

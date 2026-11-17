@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 _Run 8 Qwen3-4B models on 8 A100 GPUs, one model per GPU, as the reference for the GPU sharing experiments_
 
-This guide deploys the baseline for the many-model GPU sharing benchmark: eight Qwen3-4B models, each in its own `DynamoGraphDeployment` (DGD), each on a dedicated A100 40GB GPU. You then sweep concurrency against all eight models at once. The numbers you collect are the denominator for every percentage in [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx).
+This guide deploys the baseline for the many-model GPU sharing benchmark: eight Qwen3-4B models, each in its own `DynamoGraphDeployment` (DGD), each on a dedicated A100 40GB GPU. You then sweep concurrency against all eight models at once. The numbers you collect are the denominator for every percentage in [Benchmark GPU Fractions](../../../docs/fern/pages/use-cases/gpu-sharing/benchmark-gpu-fractions.mdx).
 
 The baseline uses the stock Kubernetes scheduler and whole-GPU requests, so it needs no scheduler or isolation add-ons. The other two experiments pack two models per GPU and differ only in how they isolate the models:
 
@@ -178,7 +178,7 @@ The published run on 8x A100 40GB, driver 615.71.09, completed all 5,440 measure
 | 16 | 431.0 | 15.56 | 7,434 | 929.2 |
 | 32 | 481.8 | 26.20 | 9,134 | 1,141.8 |
 
-The `tok/s per GPU` column is the baseline column in [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx); each GPU hosts one model, so it equals per-model throughput. Per-worker throughput varied by less than 0.2% at every point. Your absolute numbers will differ; compare ratios against the other two experiments, not raw values.
+The `tok/s per GPU` column is the baseline column in [Benchmark GPU Fractions](../../../docs/fern/pages/use-cases/gpu-sharing/benchmark-gpu-fractions.mdx); each GPU hosts one model, so it equals per-model throughput. Per-worker throughput varied by less than 0.2% at every point. Your absolute numbers will differ; compare ratios against the other two experiments, not raw values.
 
 ## Key Configuration
 
@@ -206,4 +206,4 @@ The model cache stays in `/opt/hf-cache` on `$GPU_NODE`; keep it if you plan to 
 
 - [Deploy the KAI + HAMi Experiment](deploy-kai-hami.md) packs two models per GPU with memory caps and time-sliced compute.
 - [Build the KAI-Scheduler and GPU Fractioning Forks](build-gpu-fractioning-forks.md), then [deploy the KAI + GPU Fractions experiment](deploy-kai-gpu-fractions.md), which adds a hard 50% compute share per model.
-- [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx) explains how to compare your sweep with the other two.
+- [Benchmark GPU Fractions](../../../docs/fern/pages/use-cases/gpu-sharing/benchmark-gpu-fractions.mdx) explains how to compare your sweep with the other two.

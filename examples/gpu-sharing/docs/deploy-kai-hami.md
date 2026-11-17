@@ -9,7 +9,7 @@ _Run 16 Qwen3-4B models on 8 A100 GPUs, two per GPU, with KAI-Scheduler and HAMi
 
 This guide deploys 16 Qwen3-4B models, each in its own `DynamoGraphDeployment` (DGD), packed two per A100 40GB GPU. The upstream [KAI-Scheduler](https://github.com/kai-scheduler/KAI-Scheduler) places each worker on a half-GPU fraction, and the HAMi resource isolator enforces a per-pod memory cap. HAMi limits memory only: the two models on a GPU share all of its streaming multiprocessors (SMs), and the CUDA driver time-slices between them.
 
-This is the middle configuration in [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx). It uses stock upstream components, so you can run it without building anything:
+This is the middle configuration in [Benchmark GPU Fractions](../../../docs/fern/pages/use-cases/gpu-sharing/benchmark-gpu-fractions.mdx). It uses stock upstream components, so you can run it without building anything:
 
 | Experiment | DGDs | Placement | Isolation | Guide |
 |---|---:|---|---|---|
@@ -184,7 +184,7 @@ The published run (8x A100 40GB, driver 595.91.07) used the same payload and req
 | 16 | 777 | 35.6 | 6,651 | 831.4 |
 | 32 | 1,702 | 55.9 | 7,544 | 943.0 |
 
-The first five rows of `tok/s per GPU` are the HAMi column in [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx), which matches rows on requests resident per GPU (this configuration at `c` equals the baseline at `2c`). The `c=32` row has no counterpart there, because the baseline would need `c=64`.
+The first five rows of `tok/s per GPU` are the HAMi column in [Benchmark GPU Fractions](../../../docs/fern/pages/use-cases/gpu-sharing/benchmark-gpu-fractions.mdx), which matches rows on requests resident per GPU (this configuration at `c` equals the baseline at `2c`). The `c=32` row has no counterpart there, because the baseline would need `c=64`.
 
 Throughput scales about 9.3x from `c=1` to `c=32`, but the gain from `c=16` to `c=32` is only 13%: the shared GPUs saturate near `c=16`. At `c=32` the TTFT p90 reaches about 5.5 s as prefills queue behind full batches. Per-model results were uniform to within a few percent at every point, because the two models on a GPU are identical.
 
@@ -217,4 +217,4 @@ The model cache stays in `/opt/hf-cache` on `$GPU_NODE`; keep it if you plan to 
 
 - [Deploy the Baseline Experiment](deploy-baseline.md) produces the dedicated-GPU numbers that the percentages are measured against.
 - [Build the KAI-Scheduler and GPU Fractioning Forks](build-gpu-fractioning-forks.md), then [deploy the KAI + GPU Fractions experiment](deploy-kai-gpu-fractions.md), to give each model a hard 50% compute share.
-- [GPU Sharing](../../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx) explains how to compare the three sweeps.
+- [Benchmark GPU Fractions](../../../docs/fern/pages/use-cases/gpu-sharing/benchmark-gpu-fractions.mdx) explains how to compare the three sweeps.

@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Many Models per GPU: Reference Manifests and Scripts
 
 This directory holds the manifests and scripts behind the
-[GPU sharing results](../../docs/fern/pages/use-cases/gpu-sharing/overview.mdx)
+[GPU sharing results](../../docs/fern/pages/use-cases/gpu-sharing/benchmark-gpu-fractions.mdx)
 for many-model serving. It reproduces three experiments on one node with 8x A100 40GB GPUs:
 
 | Experiment | Directory | DGDs | Placement | Isolation |
