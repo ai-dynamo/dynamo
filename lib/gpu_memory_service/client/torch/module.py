@@ -69,7 +69,7 @@ def _iter_module_tensors(
         | set(module._buffers.keys())
         | set(module._modules.keys())
     )
-    for attr_name in vars(module):
+    for attr_name in dir(module):
         if attr_name in skip or attr_name.startswith("__"):
             continue
         try:
@@ -221,8 +221,6 @@ def materialize_module_from_gms(
     meta_tensors = [n for n, p in model.named_parameters() if p.is_meta]
     meta_tensors += [n for n, b in model.named_buffers() if b.is_meta]
     if meta_tensors:
-        # Not fatal: engines may still replace or drop them after attach
-        # (TRT-LLM post_load_weights runs after this call).
         logger.warning(
             "[GMS] %d meta tensors not in metadata: %s",
             len(meta_tensors),
@@ -233,8 +231,6 @@ def materialize_module_from_gms(
 def rebind_nonparameter_tensors(
     gms_client_memory_manager: "GMSClientMemoryManager",
     model: torch.nn.Module,
-    *,
-    retain_gms_tensors: list[torch.Tensor] | None = None,
 ) -> int:
     """Re-bind GMS-resident non-parameter tensors to private clones.
 
@@ -253,11 +249,6 @@ def rebind_nonparameter_tensors(
 
     Returns the number of bytes rebound, i.e. how much memory is duplicated
     between the read-only GMS copies and the private clones.
-
-    If ``retain_gms_tensors`` is provided, the original GMS-backed tensors
-    are appended to it. A deferred writer that rebinds before commit must
-    keep those references alive so the underlying GMS pool allocations are
-    not freed before the layout is published.
     """
     mappings = gms_client_memory_manager.mappings
     rebound_bytes = 0
@@ -304,8 +295,6 @@ def rebind_nonparameter_tensors(
                 logger.debug("[GMS] Skipping property attribute %r", name)
                 continue
             setattr(mod, attr, tensor.detach().clone())
-        if retain_gms_tensors is not None:
-            retain_gms_tensors.append(tensor)
         rebound_bytes += tensor.numel() * tensor.element_size()
 
     return rebound_bytes
