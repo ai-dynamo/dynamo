@@ -960,11 +960,14 @@ impl OfflineReplayRouter {
     /// Apply, in arrival order, every lagged KV event batch visible at `now_ms`. KV events change
     /// no load, so this never admits queued requests on its own.
     fn apply_due_kv_events(&mut self, now_ms: f64) -> Result<()> {
-        while let Some((_, events)) = self
+        while self
             .lagged_kv_events
-            .pop_front_if(|(visible_ms, _)| *visible_ms <= now_ms)
+            .front()
+            .is_some_and(|(visible_ms, _)| *visible_ms <= now_ms)
         {
-            self.on_kv_events(events)?;
+            if let Some((_, events)) = self.lagged_kv_events.pop_front() {
+                self.on_kv_events(events)?;
+            }
         }
         Ok(())
     }

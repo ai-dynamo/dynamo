@@ -125,26 +125,36 @@ vllm:
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu
-    base_image_tag: v0.32.0
-    runtime_image_tag: v0.32.0
-    baseline_sbom: vllm-openai-xpu@20509fab
+    base_image_tag: v0.33.0
+    runtime_image_tag: v0.33.0
+    # vLLM 0.33 requires Transformers >=5.16.1,<5.21 and tokenizers >=0.23.2;
+    # Omni v0.33.0rc1 still requires Transformers <5.20, and the v0.33.0 image
+    # ships 5.20.2. 5.19.0 is the newest in both.
+    transformers_version: "5.19.0"
+    tokenizers_version: "0.23.3"
+    baseline_sbom: vllm-openai-xpu@be3a9aea
+    # vLLM 0.33's NIXL connector requires NIXL >= 1.5.0 (check_nixl_version).
     nixl_ref: v1.5.0
     nixl_ucx_ref: v1.23.0-rc1
   cpu:
     base_image: ubuntu
     runtime_image: vllm/vllm-openai-cpu
     base_image_tag: 22.04
-    runtime_image_tag: v0.32.0
+    runtime_image_tag: v0.33.0
+    # vLLM 0.33 requires Transformers >=5.16.1,<5.21 and tokenizers >=0.23.2;
+    # Omni v0.33.0rc1 still requires Transformers <5.20. 5.19.0 is the newest in both.
+    transformers_version: "5.19.0"
+    tokenizers_version: "0.23.3"
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
     nixl_ref: v1.5.0
     nixl_ucx_ref: v1.23.0-rc1
-  vllm_omni_ref: "v0.32.0rc1"
+  vllm_omni_ref: "v0.33.0rc1"
   nixl_ref: v1.5.0
   max_jobs: "10"
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_modelexpress: "true"
-  modelexpress_version: "0.7.0"
+  modelexpress_version: "0.8.0"
   # aws-sdk-cpp tag for the NIXL OBJ / S3 backend (built in wheel_builder).
   aws_sdk_cpp_version: "1.11.760"
 
@@ -166,21 +176,16 @@ sglang:
     # same codec-limited build for frontend video decoding.
     baseline_sbom: cuda@0230b7f2
   xpu:
-    # oneAPI 2026.0 is required by the SGLang XPU pins below: torch 2.13.0+xpu
-    # links intel-sycl-rt 2026.0.0 (libsycl.so.9), and sgl-kernel-xpu's SYCL
-    # kernels must be compiled by the matching icpx. The 2025.3 base ships
-    # libsycl.so.8, so its icpx produces a kernel .so that torch cannot load.
-    base_image: intel/deep-learning-essentials
-    base_image_tag: 2026.0.0-devel-ubuntu24.04
-    runtime_image: intel/deep-learning-essentials
-    runtime_image_tag: 2026.0.0-devel-ubuntu24.04
-    sglang_ref: v0.5.19
-    sglang_git_url: https://github.com/sgl-project/sglang.git
-    sglang_kernel_ref: v0.2.0
-    sglang_kernel_git_url: https://github.com/sgl-project/sgl-kernel-xpu.git
-    # XPU SGLang requires a newer NIXL than the framework default; scoped here
+    base_image: lmsysorg/sglang
+    base_image_tag: v0.5.23-xpu
+    runtime_image: lmsysorg/sglang
+    runtime_image_tag: v0.5.23-xpu
+    baseline_sbom: sglang@f5627c5e
+    # The NIXL versions in the XPU and CUDA base images are sometimes out of sync,
+    # so Dynamo builds and installs its own at this ref, scoped here
     # to avoid affecting sglang-cuda or other frameworks.
-    nixl_ref: v1.1.0
+    nixl_ref: v1.5.0
+    nixl_ucx_ref: v1.23.0-rc1
   # Builds the NIXL C++ SDK in wheel_builder so the dev stage can link nixl-sys
   # (see templates/dev.Dockerfile). Runtime stays on the upstream lmsysorg/sglang
   # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK
@@ -189,7 +194,7 @@ sglang:
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_modelexpress: "true"
-  modelexpress_version: "0.7.0"
+  modelexpress_version: "0.8.0"
 
 trtllm:
   cuda13.1:
