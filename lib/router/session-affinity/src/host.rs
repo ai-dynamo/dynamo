@@ -4,7 +4,7 @@
 //! What an in-tree host names from the session-affinity stage: the table and its
 //! configuration, the replication sink it implements, the versioned target it forwards, and the
 //! limits it validates against. Every item is re-exported from the crate root; this list is the
-//! host contract (hosts inventory v2, section 3).
+//! host contract.
 
 pub use crate::{
     AcquireStep, AffinityError, AffinityLease, AffinityReplicaSink, AffinityTarget,

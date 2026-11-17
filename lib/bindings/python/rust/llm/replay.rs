@@ -646,6 +646,7 @@ pub fn run_mocker_trace_replay(
         kv_event_lag_ms,
         conversation_affinity,
         router_controls: None,
+        router_plugins: Some(dynamo_llm::kv_router::plugins::router_plugin_registry()),
         determinism: if deterministic {
             ReplayDeterminism::CanonicalV1
         } else {
@@ -1281,6 +1282,7 @@ pub fn run_mocker_synthetic_trace_replay(
     };
     let scope = ReplayScope {
         kv_event_lag_ms,
+        router_plugins: Some(dynamo_llm::kv_router::plugins::router_plugin_registry()),
         ..Default::default()
     };
     let report_result = if let Some(callback) = scaling_policy {

@@ -777,10 +777,14 @@ def build_ais_perf_model_spec(
                 "attention_dp": pick.dp,
                 "moe_tp_size": pick.moe_tp,
                 "moe_ep_size": pick.moe_ep,
+                "cp_size": pick.cp,
             }
             for field, selected in expected.items():
                 authored = configured[field]
-                if field in ("moe_tp_size", "moe_ep_size") and authored is None:
+                if (
+                    field in ("moe_tp_size", "moe_ep_size", "cp_size")
+                    and authored is None
+                ):
                     authored = 1
                 if authored != selected:
                     raise ValueError(
@@ -832,6 +836,9 @@ def build_ais_perf_model_spec(
             "moe_ep_size": pick.moe_ep
             if (pick.moe_tp, pick.moe_ep) != (1, 1)
             else None,
+            # Like AIS's own compiler, spell CP out only above one so CP1
+            # identities stay byte-identical to roles written before CP.
+            "cp_size": pick.cp if pick.cp > 1 else None,
         }
     return AISPerfModelSpec(roles=roles)
 
