@@ -5,13 +5,13 @@ title: Decision Models with SGLang
 subtitle: Run a dedicated text-scoring worker for both Dynamo decision APIs
 ---
 
-**Experimental.** Run an aggregated SGLang CUDA worker to serve OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone` through Dynamo. Both routes use the same candidate-scoring implementation. They do not expose SGLang's native Decisions wire schema.
+**Experimental.** Run an aggregated SGLang CUDA worker to serve OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone` through NVIDIA Dynamo. Both routes use the same candidate-scoring implementation. They do not expose SGLang's native Decisions wire schema.
 
 ## Prerequisites
 
 Use a Dynamo environment built with SGLang and the etcd/NATS services described in [Local Installation](../../cli/installation/install-dynamo.mdx). Use a supported GPU and ensure the checkpoint fits available memory. The example uses `Qwen/Qwen3-0.6B` as a small integration-test target, not a claim of decision-task quality or qualification of larger Qwen models.
 
-The worker capability gate accepts SGLang 0.5.19, 0.5.22, and 0.5.23, including their recognized CUDA package suffixes. The current CUDA container pins 0.5.23. Other versions require explicit qualification; they do not become supported by changing a version string. Model, tokenizer, chat template, runtime, and precision must be recorded independently when qualifying a deployment.
+The worker capability gate accepts SGLang 0.5.19, 0.5.22, and 0.5.23, including their recognized CUDA package suffixes. The current CUDA container pins 0.5.23. An otherwise eligible worker on an unsupported version logs a warning and does not advertise decision scoring. Other versions require explicit qualification; they do not become supported by changing a version string. Model, tokenizer, chat template, runtime, and precision must be recorded independently when qualifying a deployment.
 
 > [!WARNING]
 > The entire worker is serialized, including chat and completion traffic. Keep this worker separate from throughput-oriented chat serving. Increasing concurrency or enabling overlap scheduling removes it from the supported decision profile.
@@ -44,7 +44,7 @@ python -m dynamo.sglang \
   --disable-piecewise-cuda-graph
 ```
 
-Wait for the `Published SGLang ... System One capability` message before sending requests. Keep attention data parallelism, speculative/diffusion execution, LoRA, disaggregated serving, and priority preemption disabled. A worker that does not meet the profile is not eligible for decision scoring even if ordinary generation works.
+Wait for the `Published SGLang ... System One capability` message before sending requests. Keep attention data parallelism, pipeline parallelism, speculative/diffusion execution, LoRA, disaggregated serving, and priority preemption disabled. A worker that does not meet the profile is not eligible for decision scoring even if ordinary generation works.
 
 ## Verify Both APIs
 
@@ -76,4 +76,4 @@ The small-model [SGLang numerical qualification fixture](https://github.com/ai-d
 
 ## Stop the Example
 
-Stop the worker and frontend with Ctrl-C in their respective terminals. Keep shared etcd/NATS services running if another deployment uses them. Do not terminate unrelated workers or rely on a cancelled HTTP request as proof of physical GPU settlement.
+Stop the worker and frontend with Ctrl-C in their respective terminals. Keep shared etcd/NATS services running if another deployment uses them. Do not terminate unrelated workers. Cancelling an HTTP request does not by itself confirm that GPU work has stopped.

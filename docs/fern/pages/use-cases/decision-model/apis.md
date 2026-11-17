@@ -5,7 +5,7 @@ title: Decision APIs
 subtitle: Classify and score text with the OpenAI Decisions and Jev System One contracts
 ---
 
-**Experimental.** NVIDIA Dynamo exposes two non-streaming decision APIs over one scoring pipeline. Start a [SGLang decision worker](sglang.md) before running these examples. The HTTP route chooses the public contract; the registered model chooses the executor. Neither route is a chat/completions alias, and neither returns generated prose.
+**Experimental.** NVIDIA Dynamo exposes two non-streaming decision APIs over one scoring pipeline. Start an [SGLang decision worker](sglang.md) before running these examples. The HTTP route chooses the public contract; the registered model chooses the executor. Neither route is a chat/completions alias, and neither returns generated prose.
 
 ## Choose a Contract
 
@@ -30,7 +30,7 @@ Use the exact alias returned by `GET /v1/models`, not the hosted provider's mode
 
 ## Call OpenAI Decisions with curl
 
-The following examples use the `Qwen/Qwen3-0.6B` alias from the backend guide and a trusted local server without gateway authentication. For an authenticated deployment, configure the gateway's required credentials and HTTPS endpoint for curl and the SDKs.
+The following examples use the `Qwen/Qwen3-0.6B` alias from the [SGLang guide](sglang.md) and a trusted local server without gateway authentication. For an authenticated deployment, configure the gateway's required credentials and HTTPS endpoint for curl and the SDKs.
 
 ```bash
 curl --fail-with-body http://localhost:8000/v1/decisions \
@@ -98,7 +98,6 @@ curl --fail-with-body http://localhost:8000/v1/systemone \
   -d '{
     "model": "Qwen/Qwen3-0.6B",
     "state": "A customer was charged twice and requests a refund today.",
-    "chat_template_kwargs": {"enable_thinking": false},
     "questions": {
       "route": {
         "type": "choice", "instructions": "Choose the responsible team.",
@@ -173,11 +172,11 @@ with OpenAI(base_url="http://localhost:8000/v1", api_key=os.environ.get("DYNAMO_
     print(result.usage, result._request_id)
 ```
 
-Answers are a union of types. Check `answer.type` before accessing type-specific fields; a genuine executor refusal must not be interpreted as a normal classification. Current causal executors score candidates and do not establish hosted-provider refusal behavior.
+Answers are a union of types. Check `answer.type` before accessing type-specific fields. The causal profile documented here returns scored answers, not hosted-provider safety refusals; clients must not treat a refusal answer from another executor as a normal classification.
 
 ## Use the Official Jev/TypeSafe SDK
 
-Use the same client environment. Set the System One model explicitly so the SDK does not negotiate a hosted model catalog. The TypeSafe SDK base URL is the server origin **without `/v1`**; the client supplies its own `/v1/systemone` path.
+Use the TypeSafe SDK (`typesafe-sdk`) to call Jev's System One API, in the same client environment. Set the System One model explicitly so the SDK does not negotiate a hosted model catalog. The TypeSafe SDK base URL is the server origin **without `/v1`**; the client supplies its own `/v1/systemone` path.
 
 ```python
 import os
@@ -215,6 +214,7 @@ Input usage counts rendered prompts across question executions, not only the sha
 | Unknown model | 404 | 404 |
 | Registered model lacks decision capability | 400 | 400 |
 | Eligible worker unavailable | 503 | 503 |
+| Invalid backend scoring result or usage | 500 | 500 |
 | Admission capacity exhausted | Configured overload status, default 529 | Configured overload status, default 529 |
 | Request deadline exceeded | 504 | 504 |
 
