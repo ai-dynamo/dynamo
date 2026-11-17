@@ -5,16 +5,19 @@
 //! listener runs every request on its own DP rank, so the router's rank
 //! picks the listener.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, PreprocessedRequest,
 };
 use dynamo_sidecar_common::GrpcEndpoint;
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
+use futures::stream::{BoxStream, FuturesUnordered};
+use futures::{Stream, StreamExt};
 
 use crate::client::{self, AbortRpc, Pool};
 use crate::native_http::NativeHttp;
@@ -41,6 +44,14 @@ pub(crate) struct Listener {
     pub bootstrap_port: Option<u16>,
 }
 
+/// Each running dispatch's listener index and rid, keyed by the address of
+/// its context allocation.
+type Dispatches = Arc<Mutex<HashMap<usize, (usize, String)>>>;
+
+fn context_key(ctx: &Arc<dyn AsyncEngineContext>) -> usize {
+    Arc::as_ptr(ctx).addr()
+}
+
 /// The node's listeners, by DP rank `[start_rank, start_rank + len)`.
 pub(crate) struct NodeListeners {
     pub start_rank: u32,
@@ -49,6 +60,62 @@ pub(crate) struct NodeListeners {
     pub listeners: Vec<Listener>,
     /// Round-robin position for requests that name no rank.
     next: AtomicUsize,
+    /// Where each running request was sent, so that its abort reaches only
+    /// that dispatch.
+    dispatches: Dispatches,
+}
+
+/// Records one dispatch while it runs. See [`NodeListeners::dispatch`].
+pub(crate) struct Dispatched {
+    dispatches: Dispatches,
+    // Holding the allocation keeps its address, the map key, from being
+    // reused before the entry is removed.
+    context: Arc<dyn AsyncEngineContext>,
+    rid: String,
+}
+
+impl Dispatched {
+    /// The rid SGLang knows this dispatch by.
+    pub(crate) fn rid(&self) -> &str {
+        &self.rid
+    }
+
+    /// Keep the dispatch recorded for as long as `stream` exists, not just
+    /// while it runs: the framework holds a cancelled request's stream until
+    /// its abort has run, and the abort looks the dispatch up.
+    pub(crate) fn attach<T: 'static>(self, stream: BoxStream<'static, T>) -> BoxStream<'static, T> {
+        Box::pin(Attached {
+            stream,
+            _dispatched: self,
+        })
+    }
+}
+
+impl Drop for Dispatched {
+    fn drop(&mut self) {
+        let mut dispatches = self.dispatches.lock().unwrap_or_else(|e| e.into_inner());
+        let key = context_key(&self.context);
+        // A later dispatch of the same context owns the entry.
+        if dispatches
+            .get(&key)
+            .is_some_and(|(_, rid)| *rid == self.rid)
+        {
+            dispatches.remove(&key);
+        }
+    }
+}
+
+struct Attached<T> {
+    stream: BoxStream<'static, T>,
+    _dispatched: Dispatched,
+}
+
+impl<T> Stream for Attached<T> {
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        self.stream.as_mut().poll_next(cx)
+    }
 }
 
 impl NodeListeners {
@@ -59,6 +126,7 @@ impl NodeListeners {
             global_dp_size,
             listeners,
             next: AtomicUsize::new(0),
+            dispatches: Dispatches::default(),
         }
     }
 
@@ -86,28 +154,43 @@ impl NodeListeners {
         })
     }
 
-    /// Abort the request of `ctx`. A native `/generate` dispatch is aborted
-    /// by its own rid on the listener that runs it. A gRPC request's rid is
-    /// `ctx.id()` and its listener is not recorded, so that rid goes to every
-    /// listener: it runs on exactly one, and the others answer that nothing
-    /// matched. Each RPC is bounded by `timeout`.
-    pub(crate) async fn abort(&self, ctx: &Arc<dyn AsyncEngineContext>, timeout: Duration) {
-        let native = self.listeners.iter().find_map(|listener| {
-            let rid = listener.native_http.as_ref()?.request_id(ctx)?;
-            Some((listener, rid))
-        });
-        if let Some((listener, rid)) = native {
-            return AbortRpc::new(listener.pool.control_client())
-                .abort(&rid, timeout)
-                .await;
+    /// Record that `ctx` runs on listener `index`, under a rid of its own: its
+    /// public ID plus a random suffix. A retry keeps the public ID and can
+    /// run beside the failed attempt, on this listener or another, and SGLang
+    /// aborts every generation that shares a rid. The record lasts until the
+    /// returned guard drops.
+    pub(crate) fn dispatch(&self, ctx: Arc<dyn AsyncEngineContext>, index: usize) -> Dispatched {
+        let rid = format!("{}-{:08x}", ctx.id(), rand::random::<u32>());
+        self.dispatches
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(context_key(&ctx), (index, rid.clone()));
+        Dispatched {
+            dispatches: self.dispatches.clone(),
+            context: ctx,
+            rid,
         }
-        let request_id = ctx.id();
-        let aborts = self.listeners.iter().map(|listener| async move {
-            AbortRpc::new(listener.pool.control_client())
-                .abort(request_id, timeout)
-                .await
-        });
-        futures::future::join_all(aborts).await;
+    }
+
+    /// The listener index and rid that `ctx` runs under, while it runs.
+    fn running(&self, ctx: &Arc<dyn AsyncEngineContext>) -> Option<(usize, String)> {
+        self.dispatches
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&context_key(ctx))
+            .cloned()
+    }
+
+    /// Abort the request of `ctx` by its own rid, on the listener that runs
+    /// it, within `timeout`. Another request with the same public ID is left
+    /// alone. A request that is no longer running has nothing to abort.
+    pub(crate) async fn abort(&self, ctx: &Arc<dyn AsyncEngineContext>, timeout: Duration) {
+        let Some((index, rid)) = self.running(ctx) else {
+            return;
+        };
+        AbortRpc::new(self.listeners[index].pool.control_client())
+            .abort(&rid, timeout)
+            .await;
     }
 
     /// Polls every listener and resolves when the first one stops serving,
@@ -258,5 +341,50 @@ mod tests {
                 .prefill_rank,
             None
         );
+    }
+
+    #[tokio::test]
+    async fn repeated_public_ids_have_their_own_abort_targets() {
+        use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
+        let listeners = node(0, 2, 2);
+        let context =
+            || Context::with_id_and_metadata((), "same-id".into(), Default::default()).context();
+        let (failed, retry) = (context(), context());
+        assert_eq!(failed.id(), retry.id());
+        // The failed attempt runs on rank 0 and its retry on rank 1.
+        let first = listeners.dispatch(failed.clone(), 0);
+        let second = listeners.dispatch(retry.clone(), 1);
+        assert!(first.rid().starts_with("same-id-") && second.rid().starts_with("same-id-"));
+        assert_ne!(first.rid(), second.rid());
+        assert_eq!(listeners.running(&failed), Some((0, first.rid().into())));
+        assert_eq!(listeners.running(&retry), Some((1, second.rid().into())));
+        drop(first);
+        assert_eq!(listeners.running(&failed), None);
+        assert_eq!(listeners.running(&retry), Some((1, second.rid().into())));
+        drop(second);
+        assert!(listeners.dispatches.lock().unwrap().is_empty());
+
+        // A later dispatch of the same context owns its entry.
+        let ctx = dynamo_backend_common::testing::mock_context();
+        let earlier = listeners.dispatch(ctx.clone(), 0);
+        let later = listeners.dispatch(ctx.clone(), 1);
+        drop(earlier);
+        assert_eq!(listeners.running(&ctx), Some((1, later.rid().into())));
+        drop(later);
+        assert!(listeners.dispatches.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatch_stays_recorded_until_its_stream_drops() {
+        let listeners = node(0, 1, 1);
+        let ctx = dynamo_backend_common::testing::mock_context();
+        let mut stream = listeners
+            .dispatch(ctx.clone(), 0)
+            .attach(futures::stream::empty::<()>().boxed());
+        assert_eq!(stream.next().await, None);
+        // A cancelled request's abort runs after its stream ends.
+        assert!(listeners.running(&ctx).is_some());
+        drop(stream);
+        assert_eq!(listeners.running(&ctx), None);
     }
 }

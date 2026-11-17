@@ -472,8 +472,10 @@ impl LLMEngine for SglangSidecarEngine {
         let listeners = &state.listeners;
         let dispatch = listeners.select(&request, mode)?;
         let listener = &listeners.listeners[dispatch.index];
+        let dispatched = listeners.dispatch(ctx.inner_arc(), dispatch.index);
         tracing::debug!(
             request_id = %ctx.id(),
+            rid = dispatched.rid(),
             dp_rank = listener.dp_rank,
             listener = %listener.endpoint,
             "dispatching to SGLang listener"
@@ -484,13 +486,16 @@ impl LLMEngine for SglangSidecarEngine {
             prefill_rank: dispatch.prefill_rank,
             global_dp_size: listeners.global_dp_size,
         };
-        if let Some(native_request) = native_http::request(&request, ctx.id(), mode, target)? {
+        if let Some(native_request) =
+            native_http::request(&request, dispatched.rid(), mode, target)?
+        {
             let native_http = listener.native_http.clone().ok_or_else(|| {
                 client::invalid_arg(
                     "native SGLang Generate is unavailable because no ready incremental HTTP endpoint was discovered",
                 )
             })?;
-            return Ok(native_http.generate(native_request, ctx, self.cancel.child_token()));
+            let stream = native_http.generate(native_request, ctx, self.cancel.child_token());
+            return Ok(dispatched.attach(stream));
         }
         if request.stop_conditions.max_tokens.is_none() {
             request.stop_conditions.max_tokens = omitted_max_tokens_default(
@@ -506,7 +511,8 @@ impl LLMEngine for SglangSidecarEngine {
             .output_options
             .return_tokens_as_token_ids
             .unwrap_or(false);
-        let (grpc_request, rendezvous) = build_generate_request(&request, ctx.id(), mode, target)?;
+        let (grpc_request, rendezvous) =
+            build_generate_request(&request, dispatched.rid(), mode, target)?;
         let is_prefill = mode.is_prefill();
         let mut prefill_handoff = if is_prefill { rendezvous } else { None };
         let cancel = self.cancel.child_token();
@@ -517,7 +523,7 @@ impl LLMEngine for SglangSidecarEngine {
             prompt_tokens,
         );
 
-        Ok(Box::pin(async_stream::stream! {
+        Ok(dispatched.attach(Box::pin(async_stream::stream! {
             if ctx.is_stopped() || cancel.is_cancelled() {
                 yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_tokens, 0)));
                 return;
@@ -616,12 +622,11 @@ impl LLMEngine for SglangSidecarEngine {
                     }
                 }
             }
-        }))
+        })))
     }
 
-    /// A native dispatch is aborted on its own listener; otherwise the Abort
-    /// RPC goes to every listener. It also cancels requests opened through
-    /// native HTTP.
+    /// Aborts the request by its dispatch's rid, on the listener that runs
+    /// it, whether it was opened through gRPC or native HTTP.
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
         let Some(state) = self.state.get() else {
             return;

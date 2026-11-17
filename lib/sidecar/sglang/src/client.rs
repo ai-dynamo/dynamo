@@ -487,11 +487,11 @@ impl AbortRpc {
     }
 
     /// Failures are logged, not returned.
-    pub(crate) async fn abort(&self, request_id: &str, timeout: Duration) {
-        match abort(&mut self.0.clone(), request_id, timeout).await {
+    pub(crate) async fn abort(&self, rid: &str, timeout: Duration) {
+        match abort(&mut self.0.clone(), rid, timeout).await {
             Ok(true) => {}
-            Ok(false) => tracing::debug!(request_id, "SGLang Abort matched no active request"),
-            Err(error) => tracing::debug!(request_id, %error, "SGLang Abort RPC failed"),
+            Ok(false) => tracing::debug!(rid, "SGLang Abort matched no active request"),
+            Err(error) => tracing::debug!(rid, %error, "SGLang Abort RPC failed"),
         }
     }
 

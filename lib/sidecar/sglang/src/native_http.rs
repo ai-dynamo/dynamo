@@ -3,16 +3,11 @@
 
 //! Opaque transport for SGLang's native streaming `/generate` API.
 
-use std::{
-    collections::HashMap,
-    io,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{io, time::Duration};
 
 use dynamo_backend_common::{
-    AsyncEngineContext, DisaggregationMode, DynamoError, FirstTokenNotifier, GenerateContext,
-    LLMEngineOutput, PreprocessedRequest,
+    DisaggregationMode, DynamoError, FirstTokenNotifier, GenerateContext, LLMEngineOutput,
+    PreprocessedRequest,
 };
 use dynamo_llm::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION;
 use dynamo_sglang_generate::{Inspected, PAYLOAD_KEY, inspect};
@@ -35,8 +30,7 @@ use crate::protocol::{self, Target};
 const DECODE_DRAIN_TIMEOUT: Duration = Duration::from_secs(300);
 pub(crate) struct NativeRequest {
     body: Value,
-    /// Unique per dispatch: a retry may reach an engine still running the
-    /// failed attempt, and SGLang rejects a duplicate request ID.
+    /// The dispatch's own rid (see `NodeListeners::dispatch`).
     rid: String,
     is_prefill: bool,
     is_decode: bool,
@@ -49,7 +43,7 @@ pub(crate) struct NativeRequest {
 /// envelope, replacing only fields owned by Dynamo routing.
 pub(crate) fn request(
     request: &PreprocessedRequest,
-    request_id: &str,
+    rid: &str,
     mode: DisaggregationMode,
     target: Target<'_>,
 ) -> Result<Option<NativeRequest>, DynamoError> {
@@ -71,7 +65,7 @@ pub(crate) fn request(
         ));
     }
 
-    let rid = format!("{request_id}-{:08x}", rand::random::<u32>());
+    let rid = rid.to_string();
     body.insert("input_ids".into(), serde_json::json!(request.token_ids));
     body.insert("rid".into(), Value::String(rid.clone()));
     body.insert("stream".into(), Value::Bool(true));
@@ -154,7 +148,6 @@ pub(crate) struct NativeHttp {
     endpoint: HttpEndpoint,
     abort: AbortRpc,
     max_event_bytes: usize,
-    rids: Arc<Mutex<HashMap<usize, String>>>,
     abort_timeout: Duration,
     decode_drain_timeout: Duration,
 }
@@ -241,24 +234,6 @@ impl Drop for AbortGuard<'_> {
     }
 }
 
-/// Forgets a dispatch's SGLang request ID when its stream ends.
-struct Dispatched {
-    rids: Arc<Mutex<HashMap<usize, String>>>,
-    // Keep the allocation alive until its map entry has been removed.
-    context: Arc<dyn AsyncEngineContext>,
-    rid: String,
-}
-
-impl Drop for Dispatched {
-    fn drop(&mut self) {
-        let mut rids = self.rids.lock().unwrap_or_else(|e| e.into_inner());
-        let key = Arc::as_ptr(&self.context).addr();
-        if rids.get(&key) == Some(&self.rid) {
-            rids.remove(&key);
-        }
-    }
-}
-
 fn build_http_client(connect_timeout: Duration) -> Result<reqwest::Client, DynamoError> {
     reqwest::Client::builder()
         .connect_timeout(connect_timeout)
@@ -300,7 +275,6 @@ impl NativeHttp {
             max_event_bytes,
             abort_timeout: connect_timeout,
             decode_drain_timeout: DECODE_DRAIN_TIMEOUT,
-            rids: Default::default(),
         }))
     }
 
@@ -344,16 +318,6 @@ impl NativeHttp {
         }
     }
 
-    /// The context allocation identifies a local dispatch, even when public IDs repeat.
-    /// Its Arc is held by both the stream and the adapter's abort callback.
-    pub(crate) fn request_id(&self, ctx: &Arc<dyn AsyncEngineContext>) -> Option<String> {
-        self.rids
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&Arc::as_ptr(ctx).addr())
-            .cloned()
-    }
-
     async fn open(self, body: Value) -> Result<Response, DynamoError> {
         let response = self
             .client
@@ -381,19 +345,7 @@ impl NativeHttp {
         ctx: GenerateContext,
         cancel: CancellationToken,
     ) -> BoxStream<'static, Result<LLMEngineOutput, DynamoError>> {
-        let context = ctx.inner_arc();
-        let context_key = Arc::as_ptr(&context).addr();
-        self.rids
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(context_key, request.rid.clone());
-        let dispatched = Dispatched {
-            rids: self.rids.clone(),
-            context,
-            rid: request.rid.clone(),
-        };
         Box::pin(async_stream::stream! {
-            let _dispatched = dispatched;
             let is_prefill = request.is_prefill;
             let keep_prefill_output = request.keep_prefill_output;
             let mut prefill_handoff = request.prefill_handoff;
@@ -709,7 +661,6 @@ mod tests {
             endpoint: HttpEndpoint::from_grpc(&grpc, port).unwrap(),
             abort: AbortRpc::unreachable(),
             max_event_bytes: MAX_EVENT_BYTES,
-            rids: Default::default(),
             abort_timeout: Duration::from_secs(1),
             decode_drain_timeout: Duration::from_secs(1),
         }
@@ -857,8 +808,8 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(native.body["input_ids"], json!([1, 2, 3]));
-        assert!(native.rid.starts_with("actual-rid-"));
-        assert_eq!(native.body["rid"], native.rid.as_str());
+        assert_eq!(native.rid, "actual-rid");
+        assert_eq!(native.body["rid"], "actual-rid");
         assert_eq!(native.body["stream"], true);
         assert_eq!(native.body["priority"], -5);
         assert!(native.body.get("routed_dp_rank").is_none());
@@ -1621,88 +1572,6 @@ mod tests {
             release_tx.send(()).unwrap();
             server.await.unwrap();
         }
-    }
-
-    // AbortRpc's lazy channel needs a runtime.
-    #[tokio::test]
-    async fn repeated_public_ids_have_independent_abort_targets() {
-        use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
-        let native = native_http(1234);
-        let context =
-            || Context::with_id_and_metadata((), "same-id".into(), Default::default()).context();
-        let (first, second) = (context(), context());
-        let start = |ctx, rid: &str| {
-            native.clone().generate(
-                NativeRequest {
-                    rid: rid.into(),
-                    body: json!({}),
-                    is_prefill: false,
-                    is_decode: false,
-                    prefill_handoff: None,
-                    keep_prefill_output: false,
-                },
-                GenerateContext::new(ctx, None),
-                CancellationToken::new(),
-            )
-        };
-        let first_stream = start(first.clone(), "first-dispatch");
-        let second_stream = start(second.clone(), "second-dispatch");
-        assert_eq!(first.id(), second.id());
-        assert_eq!(native.request_id(&first).as_deref(), Some("first-dispatch"));
-        assert_eq!(
-            native.request_id(&second).as_deref(),
-            Some("second-dispatch")
-        );
-        drop(first_stream);
-        assert!(native.request_id(&first).is_none());
-        assert_eq!(
-            native.request_id(&second).as_deref(),
-            Some("second-dispatch")
-        );
-        drop(second_stream);
-        assert!(native.rids.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn each_dispatch_has_a_private_request_id() {
-        let mut canonical = canonical_request();
-        canonical.extra_args = Some(json!({"sglang_tito": {}}));
-        let dispatch = |request: &PreprocessedRequest| {
-            super::request(
-                request,
-                "public",
-                DisaggregationMode::Aggregated,
-                target(None, None),
-            )
-            .unwrap()
-            .unwrap()
-            .rid
-        };
-        let first = dispatch(&canonical);
-        let second = dispatch(&canonical);
-        assert!(first.starts_with("public-") && second.starts_with("public-"));
-        assert_ne!(first, second);
-    }
-
-    // AbortRpc's lazy channel needs a runtime.
-    #[tokio::test]
-    async fn old_dispatch_cleanup_preserves_the_retry_abort_target() {
-        let native = native_http(1234);
-        let context = dynamo_backend_common::testing::mock_context();
-        let key = std::sync::Arc::as_ptr(&context).addr();
-        native.rids.lock().unwrap().insert(key, "retry".into());
-        drop(super::Dispatched {
-            rids: native.rids.clone(),
-            context: context.clone(),
-            rid: "first".into(),
-        });
-        assert_eq!(native.rids.lock().unwrap().get(&key).unwrap(), "retry");
-        drop(super::Dispatched {
-            rids: native.rids.clone(),
-            context: context.clone(),
-            rid: "retry".into(),
-        });
-        assert!(native.rids.lock().unwrap().is_empty());
     }
 
     #[test]

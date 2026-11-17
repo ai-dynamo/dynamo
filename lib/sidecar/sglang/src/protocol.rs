@@ -47,7 +47,7 @@ pub(crate) struct Target<'a> {
 /// prefill/decode rendezvous the request carries, in the handoff's JSON form.
 pub(crate) fn build_generate_request(
     request: &PreprocessedRequest,
-    request_id: &str,
+    rid: &str,
     mode: DisaggregationMode,
     target: Target<'_>,
 ) -> Result<(pb::GenerateRequest, Option<Value>), DynamoError> {
@@ -141,7 +141,7 @@ pub(crate) fn build_generate_request(
     // their own rank, so the rank chose the listener.
     let generate = pb::GenerateRequest {
         rid: Some(pb::StringOrList {
-            value: Some(pb::string_or_list::Value::One(request_id.to_string())),
+            value: Some(pb::string_or_list::Value::One(rid.to_string())),
         }),
         input_ids: Some(pb::TokenIdsOrList {
             value: Some(pb::token_ids_or_list::Value::One(pb::TokenIds {
