@@ -36,8 +36,7 @@ for the architecture.
 SGLang's Rust server runs one listener per DP rank: listener `k` on a node
 binds `--port + k` and `--grpc-port + k`, so keep the two ports at least the
 node's listener count apart. One sidecar per node serves all of the node's
-listeners as one worker. DP>1 needs SGLang main at or after
-[sgl-project/sglang#46637](https://github.com/sgl-project/sglang/pull/46637); v0.5.23 does not have it.
+listeners as one worker.
 
 Media-aware KV routing on wide-token SGLang builds is not supported by the sidecar; see the [multimodal compatibility limits](multimodal.md#wide-token-sglang-builds).
 
@@ -81,7 +80,7 @@ Multinode deployments require complete `leader` and `worker` role PodTemplates. 
 `backendFramework: sglang` as the examples do; the operator does not infer a backend from
 a native engine launch. The templates own the native engine commands and
 sidecar placement. See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and
-[attention-DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml). DP>1 needs SGLang main at or after [sgl-project/sglang#46637](https://github.com/sgl-project/sglang/pull/46637); v0.5.23 does not have it.
+[attention-DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml).
 Engine-failure KV recovery remains
 incomplete and is tracked in [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
 
