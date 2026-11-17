@@ -1,0 +1,37 @@
+{
+  "source_bundle_sha256": "46e89fc094f5e9f7b8eb7465a5169c51014b23ef6fd2b973e44905cce38cb263",
+  "curator_base": "b56bd6cd4fd563d2acadc463cbf01c92a12ef0bb",
+  "curator_baseline": "PR 2526 source baseline, not a released consumer qualification",
+  "dynamo_base": "909d4efa64df404e6acb2dac8c72c22b5f58c62a",
+  "parse_model_revision": "62cb1e4ba153d113ff64aaf2be6e068c377cf53c",
+  "original_files_sha256": {
+    "curator/tutorials/interleaved/nemotron_parse_pdf/batch.py": "cc1caaaa79401320a5095f3e64a8fadddf8085ab4f1d4944752739aa07f32247",
+    "curator/tutorials/interleaved/nemotron_parse_pdf/batch_client.py": "a601f7c1237eda9e7c947b97025fc589a3fd2331d191c9814335ae978e408e4a",
+    "curator/tutorials/interleaved/nemotron_parse_pdf/BATCH_ASYNC_PREVIEW.md": "0350155194a698fba0d1dd506ea5445313c6a6f864cc4ea97f167186a844ffe1",
+    "dynamo/examples/deployments/batch-gateway/profile-parse.yaml": "c305db6f6e80ddfa36c933a5e5cb591d1a6a77f5f88afb8e86e72673a430af29"
+  },
+  "recorded_host_dependencies": {
+    "python": "3.12",
+    "ray": "2.57.0",
+    "httpx": "0.28.1",
+    "pyarrow": "23.0.1",
+    "torch": "2.11.0+cpu"
+  },
+  "dependency_status": "Recorded versions only. No installation lock or clean-install qualification.",
+  "source_changes": [
+    "Reject decoded documents with zero blocks as per-page failures.",
+    "Do not exclude zero-block pages from structural coverage.",
+    "Replace archive patch instructions with source overlay instructions.",
+    "Record cumulative client phase timings and local Ray pipeline timings, including failed transport calls.",
+    "Use Ray's default temporary directory instead of an experiment-specific /work path.",
+    "Move the public example into Dynamo and use the existing Batch deployment configuration."
+  ],
+  "qualification": "The historical one-page host run predates the zero-block correction and phase instrumentation. Offline tests do not qualify a serving deployment or explain the historical Parse performance gap.",
+  "source_example_origin": {
+    "repository": "llm-d/llm-d-batch-gateway",
+    "commit": "1648198",
+    "path": "examples/nemotron-parse",
+    "migration": "Example moved into Dynamo; Curator still owns PDF preparation and postprocessing."
+  },
+  "dynamo_example_base": "40fcf89875"
+}

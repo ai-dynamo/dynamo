@@ -133,9 +133,8 @@ jobs:
       with:
         python-version: '3.13'
     - name: Install recipe check dependencies
-      # These packages provide options and warning types from the repository's
-      # shared pytest configuration. The recipe tests themselves do not import
-      # them.
+      # Include plugins required by the shared pytest configuration and the
+      # CPU-only Parse client test dependencies.
       run: |
         python3 -m pip install \
           'pytest>=8.0' \
@@ -145,7 +144,10 @@ jobs:
           'pydantic>=2' \
           'pytest-asyncio>=1.0' \
           'pytest-benchmark>=4' \
-          'pytest-timeout==2.4.0'
+          'pytest-timeout==2.4.0' \
+          'httpx==0.28.1' \
+          'pyarrow==23.0.1' \
+          'pillow>=11'
     - name: Install qualified Kustomize renderer
       # kustomize-matrix.py finds kustomize on PATH, and the tests read KUSTOMIZE_BIN.
       env:
@@ -163,7 +165,7 @@ jobs:
     - name: Check generated recipe manifests
       run: python3 scripts/kustomize-matrix.py check
     - name: Test recipe generators and docs artifacts
-      run: python3 -m pytest --noconftest tests/test_kustomize_matrix.py tests/test_generate_kustomize_openapi.py docs/tests/ tests/deploy/test_batch_profile_values.py
+      run: python3 -m pytest --noconftest tests/test_kustomize_matrix.py tests/test_generate_kustomize_openapi.py docs/tests/ tests/deploy/test_batch_profile_values.py examples/deployments/batch-gateway/nemotron-parse/tests
 
   api-docs:
     name: Generated API References

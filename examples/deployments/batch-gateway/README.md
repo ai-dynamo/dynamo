@@ -139,6 +139,10 @@ For slow decoding or file writes, process independent results in a bounded worke
 
 Use dedicated offline capacity unless you've configured and validated a separate admission policy. The readiness gate doesn't reserve capacity for online requests.
 
+## Parse PDFs
+
+Use the [Nemotron Parse recipe](nemotron-parse/README.md) to prepare PDF pages with Curator, submit them to a Parse model through Dynamo Batch, and write Parquet output. It includes a Parse deployment profile and client timing fields. The recipe is experimental; clean installation and Async end-to-end validation remain open.
+
 ## Use an Existing DGD
 
 Set `targetDGD.name`, `targetDGD.namespace`, and `model` in the profile to match your deployment. Add `--batch-gateway-url http://<dgd>-batch-api.<namespace>.svc:8000` to every frontend replica, using a runtime image containing the proxy. The integration calls the standard `<dgd>-frontend` Service on port 8000. Regenerate the values into a new output directory, then install the chart in that namespace.
