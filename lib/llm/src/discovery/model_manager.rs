@@ -1625,6 +1625,25 @@ impl ModelManager {
             .get_chat_engine_with_parsing()
     }
 
+    pub fn get_chat_completions_engine_with_parsing_for_capability(
+        &self,
+        model: &str,
+        capability: &str,
+    ) -> Result<
+        Option<(
+            OpenAIChatCompletionsStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+        )>,
+        ModelManagerError,
+    > {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_chat_engine_with_parsing_for_capability(capability)
+    }
+
     pub(crate) fn get_chat_completions_engine_with_input_policy(
         &self,
         model: &str,
@@ -1642,6 +1661,26 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_chat_engine_with_input_policy()
+    }
+
+    pub(crate) fn get_chat_completions_engine_with_input_policy_for_capability(
+        &self,
+        model: &str,
+        capability: &str,
+    ) -> Result<
+        Option<(
+            OpenAIChatCompletionsStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+            crate::chat_input::ChatInputPolicy,
+        )>,
+        ModelManagerError,
+    > {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_chat_engine_with_input_policy_for_capability(capability)
     }
 
     pub fn get_completions_engine_with_parsing(
