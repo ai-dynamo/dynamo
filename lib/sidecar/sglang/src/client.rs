@@ -375,8 +375,9 @@ const SERVING_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SERVING_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 const SERVING_POLL_FAILURES: u32 = 3;
 
-/// api.v1 has no engine-state stream, so this polls GetModelInfo until
-/// [`SERVING_POLL_FAILURES`] polls in a row fail or time out, and returns why.
+/// api.v1 has no engine-state stream, so this polls GetModelInfo and returns
+/// why once a poll cannot reach SGLang (UNAVAILABLE), or once
+/// [`SERVING_POLL_FAILURES`] polls in a row fail otherwise or time out.
 /// SGLang answers GetModelInfo from static metadata. HealthCheck instead runs
 /// a probe generation, which also fails while the scheduler is paused.
 pub(crate) async fn watch_serving(mut client: Client, attempt_timeout: Duration) -> String {
@@ -390,10 +391,14 @@ pub(crate) async fn watch_serving(mut client: Client, attempt_timeout: Duration)
                 failures = 0;
                 continue;
             }
+            Ok(Err(status)) if status.code() == tonic::Code::Unavailable => {
+                return format!("GetModelInfo: {} ({:?})", status.message(), status.code());
+            }
             Ok(Err(status)) => format!("GetModelInfo: {} ({:?})", status.message(), status.code()),
             Err(_) => format!("GetModelInfo did not answer in {poll_timeout:?}"),
         };
         failures += 1;
+        tracing::debug!(failures, %failure, "SGLang GetModelInfo poll failed");
         if failures == SERVING_POLL_FAILURES {
             return format!("{failure}; {failures} polls in a row failed");
         }
