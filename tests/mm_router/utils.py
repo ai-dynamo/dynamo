@@ -13,10 +13,11 @@ from PIL import Image
 from tests.utils.gpu_args import build_vllm_gpu_mem_args, pynvvideocodec_reserved_bytes
 
 # Shared GPU budget for the Qwen3-VL-2B MM router workers: a 2x-safety KV cap
-# (min 859_537_408) and its measured solo peak, plus any video decoder
-# reservation vLLM takes out of the KV cache.
+# (min 859_537_408) plus any video decoder reservation vLLM takes out of the KV
+# cache, and the measured solo peak. These workers never decode video, so the
+# reservation is never allocated and stays out of the peak.
 MM_KV_CACHE_BYTES = 1_719_075_000 + pynvvideocodec_reserved_bytes()
-MM_PROFILED_VRAM_GIB = round(7.6 + pynvvideocodec_reserved_bytes() / 1024**3, 1)
+MM_PROFILED_VRAM_GIB = 7.6
 
 COMMON_PROCESS_KWARGS: Mapping[str, Any] = MappingProxyType(
     {

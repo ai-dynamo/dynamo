@@ -7557,6 +7557,7 @@ class TestGlmNativeOutput:
 
     @pytest.mark.asyncio
     async def test_terminal_drain_preserves_event_order_and_metadata(self, tokenizer):
+        assert sglang_prepost_module.tool_call_marker_token_ids(tokenizer, "glm47")
         text = (
             "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>"
             " then "
