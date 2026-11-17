@@ -106,14 +106,6 @@ async def configure_kv_event_block_size(
     return kv_event_block_size
 
 
-def recurrent_kv_groups(
-    vllm_config: VllmConfig, *, enabled: bool = False
-) -> list[int] | None:
-    """Return the complete recurrent layout for an explicitly enabled publisher."""
-    layout = recurrent_kv_layout(vllm_config, enabled=enabled)
-    return layout.recurrent_groups if layout is not None else None
-
-
 def recurrent_kv_layout(
     vllm_config: VllmConfig, *, enabled: bool = False
 ) -> RecurrentKvLayout | None:
@@ -223,9 +215,3 @@ def recurrent_kv_layout(
         scheduler_block_size=unit,
         cache_hit_alignment_tokens=unit,
     )
-
-
-def recurrent_alignment_blocks(vllm_config: VllmConfig) -> int:
-    """Return alignment only after validating the fixed-common-unit contract."""
-    layout = recurrent_kv_layout(vllm_config, enabled=True)
-    return layout.alignment_blocks if layout is not None else 1
