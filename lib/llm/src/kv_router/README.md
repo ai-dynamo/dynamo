@@ -60,7 +60,8 @@ What a KV request does in `RoutingHost::generate` (call order):
 4. KvRouter → SelectionCore: select and book the worker (Lease admission)
 5. track: RequestGuard takes ownership of the booking and records the routing decision
 6. PushRouter: dispatch to the worker, stamped with `elapsed_since_arrival_ms` (time since the
-   frontend received the request) so a backend can order admission by the original arrival
+   frontend received the request, plus the time a gateway in front of it reports in
+   `x-dynamo-elapsed-since-arrival-ms`) so a backend can order admission by the original arrival
 7. affinity: bind the session to the worker once the stream starts
    (if dispatch fails under hard affinity and the worker is gone, invalidate the binding)
 ```
