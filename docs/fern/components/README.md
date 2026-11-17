@@ -112,6 +112,18 @@ import { TerminalDemo } from "@/components/TerminalDemo";
 />
 ```
 
+### SlimeIntegrationMap
+
+On the Slime Integration overview only. It takes no props and renders its own
+styles from `SlimeIntegrationMapStyles.tsx`. Its numbers follow the Slime
+tutorial pages, so update the component when the tutorial's run changes.
+
+```mdx
+import { SlimeIntegrationMap } from "@/components/SlimeIntegrationMap";
+
+<SlimeIntegrationMap />
+```
+
 ## Generated Modules
 
 `nightly-selector-data.generated.ts` is gitignored and rebuilt by the docs

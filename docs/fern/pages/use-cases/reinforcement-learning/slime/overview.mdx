@@ -4,17 +4,8 @@
 title: Slime Integration
 ---
 
+import { SlimeIntegrationMap } from "@/components/SlimeIntegrationMap";
 import { TerminalDemo } from "@/components/TerminalDemo";
-
-<Warning title="Experimental">
-Integrations with external RL frameworks are under development/testing and subject to change.
-</Warning>
-
-[Slime](https://github.com/THUDM/slime) is a reinforcement learning framework that uses Megatron-LM for training and SGLang for inference through KubeRay. The Dynamo integration with Slime lets Dynamo handle the inference and rollouts, which is served through a DynamoGraphDeployment.
-
-## Tutorial: Train Qwen3-0.6B with Slime + Dynamo
-
-This tutorial covers how to use the Dynamo integration with Slime to train Qwen3-0.6B to solve elementary math problems through reinforcement learning on the GSM8K (Grade School Math 8K) dataset using the GRPO algorithm.
 
 <CardGroup cols={3}>
   <Card title="1. Install + Setup" icon="regular download" href="installation.mdx">
@@ -28,7 +19,32 @@ This tutorial covers how to use the Dynamo integration with Slime to train Qwen3
   </Card>
 </CardGroup>
 
-## Seeing it in action
+## Overview
+
+<Warning title="Experimental">
+Integrations with external RL frameworks are under development/testing and subject to change.
+</Warning>
+
+[Slime](https://github.com/THUDM/slime) is a reinforcement learning framework that uses Megatron-LM for training and SGLang for inference through KubeRay. The Dynamo integration with Slime lets Dynamo handle the inference and rollouts, which is served through a DynamoGraphDeployment.
+
+<SlimeIntegrationMap />
+
+<llms-only>
+
+| Part | Managed by | What it does |
+|---|---|---|
+| Frontend and SGLang engine Pods | Dynamo operator, from a DynamoGraphDeployment | The frontend routes each rollout request to an engine, round-robin. Each engine generates and streams back tokens and log-probabilities. |
+| GRPO loop | Slime, with Megatron-LM | Sends the rollouts to the frontend, scores them, trains, writes the new weights to the shared volume, and has each engine load them through its own Service on port 30000. |
+| Ray cluster | KubeRay, from a RayJob | Runs Slime's training script on the Ray head Pod and deletes the cluster when the job ends. |
+| Shared volume at `/data` | The `slime-data` PersistentVolumeClaim that you create in Installation and Setup | Holds the model, the dataset, and each weight update. The engines and the Ray head Pod both mount it. |
+
+</llms-only>
+
+## Tutorial: Train Qwen3-0.6B with Slime + Dynamo
+
+This section will cover how to set up and use the Slime integration with an example of training Qwen3-0.6B to solve elementary math problems through reinforcement learning on the GSM8K (Grade School Math 8K) dataset using the GRPO algorithm.
+
+The following replay shows a demo of this tutorial in action. The logs and output are abrdiged and wait times skipped to highlight the main steps.
 
 <TerminalDemo
   src="../../../../assets/slime-rl-demo.cast"
