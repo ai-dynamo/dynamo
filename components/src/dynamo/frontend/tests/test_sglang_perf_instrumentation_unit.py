@@ -1,13 +1,6 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests for the --dyn-debug-perf instrumentation module.
-
-#16572: ``SglangProcessor.generator`` imported ``perf_instrumentation`` per
-request when ``--dyn-debug-perf`` was on, but the module had been removed, so
-every chat request failed with ``ModuleNotFoundError``.
-"""
-
 import asyncio
 
 import pytest
@@ -17,7 +10,13 @@ import dynamo.frontend.sglang_processor as sglang_processor_module
 from dynamo.frontend import perf_instrumentation
 from dynamo.frontend.sglang_processor import SglangProcessor
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.sglang,
+    pytest.mark.core,
+]
 
 
 @pytest.fixture
