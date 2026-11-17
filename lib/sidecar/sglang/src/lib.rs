@@ -12,7 +12,8 @@
 //!
 //! SGLang's Rust server runs one listener per data-parallel group leader. One
 //! sidecar serves every listener of its node as one worker that owns their DP
-//! ranks, and sends each request to the listener of its rank.
+//! ranks. A request runs on the listener of the rank it names, and requests
+//! that name none take the node's listeners in turn.
 //!
 //! The crate never depends on the SGLang engine. It uses `sglang-api-types`,
 //! `dynamo-backend-common`, `dynamo-llm`, `dynamo-runtime`, `tonic`, `clap`,

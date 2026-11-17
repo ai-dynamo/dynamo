@@ -134,10 +134,11 @@ impl NodeListeners {
         self.start_rank..self.start_rank + self.listeners.len() as u32
     }
 
-    /// Choose the listener for `request` by the rank the router named. A
-    /// rank this node does not serve is refused before any stream opens,
-    /// which keeps the worker routable. Only the KV router names a rank, so
-    /// other requests go round-robin over the node's listeners.
+    /// Choose the listener for `request` by the rank it names: the KV
+    /// router's choice, or a rank the client pinned. A rank this node does
+    /// not serve is refused before any stream opens, which keeps the worker
+    /// routable. Requests that name no rank go round-robin over the node's
+    /// listeners.
     pub(crate) fn select(
         &self,
         request: &PreprocessedRequest,
