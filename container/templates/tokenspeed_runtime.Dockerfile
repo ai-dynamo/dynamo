@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         {{ context.tokenspeed.cuda_jit_packages | join(" ") }} \
         python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
         build-essential ca-certificates git ninja-build pkg-config \
-        libnuma1 libibverbs1 ibverbs-providers libopenmpi-dev libssl-dev \
+        libnuma1 libibverbs1 ibverbs-providers libopenmpi3t64 libssl-dev \
         libspdlog-dev libturbojpeg libjemalloc2 && \
     rm -rf /var/lib/apt/lists/* && ldconfig
 
