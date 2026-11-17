@@ -7,6 +7,8 @@ subtitle: Classify and score text with the OpenAI Decisions and Jev System One c
 
 **Experimental.** NVIDIA Dynamo exposes two non-streaming decision APIs over one scoring pipeline. Start a [SGLang decision worker](sglang.md) before running these examples. The HTTP route chooses the public contract; the registered model chooses the executor. Neither route is a chat/completions alias, and neither returns generated prose.
 
+For causal vLLM scoring, follow [Decision Models with vLLM](vllm.md), which requires its separately tracked implementation. The curl and SDK requests below stay the same; the SGLang response examples show zero output tokens, while the vLLM profile generates and accounts for one internal token per question.
+
 ## Choose a Contract
 
 | Property | OpenAI Decisions | Jev System One |
@@ -207,7 +209,7 @@ with TypeSafeClient(
 
 ## Interpret Usage and Failures
 
-Input usage counts rendered prompts across question executions, not only the shared input text. SGLang scores without decoding output tokens. The OpenAI `cache_write_tokens=0` value is a Dynamo accounting convention, not a measured physical KV-write counter or a claim about OpenAI's policy. Cache-read values come from backend measurements; an absent measurement must not be treated as zero. Request-local prefix sharing does not enable trusted cross-request KV reuse.
+Input usage counts rendered prompts across question executions, not only the shared input text. SGLang scores without decoding output tokens. The vLLM causal profile generates one internal token per question; a successful three-question request therefore reports `output_tokens: 3`, and OpenAI `total_tokens` includes those tokens. The sampled token is not the API answer: distributions come from the requested candidate scores. The OpenAI `cache_write_tokens=0` value is a Dynamo accounting convention, not a measured physical KV-write counter or a claim about OpenAI's policy. Cache-read values come from backend measurements; an absent measurement must not be treated as zero. Request-local prefix sharing does not enable trusted cross-request KV reuse.
 
 | Outcome | OpenAI Decisions | Jev System One |
 | --- | --- | --- |

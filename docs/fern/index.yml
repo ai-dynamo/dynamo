@@ -759,6 +759,9 @@ navigation:
           - page: SGLang
             slug: sglang
             path: pages/use-cases/decision-model/sglang.md
+          - page: vLLM
+            slug: vllm
+            path: pages/use-cases/decision-model/vllm.md
 
       # ==================== Agents ====================
       - section: Agents
