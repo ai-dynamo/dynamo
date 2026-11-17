@@ -599,6 +599,27 @@ mod tests {
         assert!(NodeMetadata::new(0, 1, 1, None, unbound).is_err());
         // Several nodes need dist_init_addr for their worker group id.
         assert!(NodeMetadata::new(0, 2, 1, None, Vec::new()).is_err());
+        let mut empty_blocks = source(0, "tcp://127.0.0.1:5557");
+        empty_blocks.block_size = 0;
+        for (dp_size, sources, message) in [
+            (
+                1,
+                vec![source(1, "tcp://127.0.0.1:5557")],
+                "outside deployment DP size",
+            ),
+            (
+                2,
+                vec![
+                    source(0, "tcp://127.0.0.1:5557"),
+                    source(1, "tcp://127.0.0.1:5557"),
+                ],
+                "duplicate local KV source endpoint",
+            ),
+            (1, vec![empty_blocks], "block_size must be positive"),
+        ] {
+            let error = NodeMetadata::new(0, 1, dp_size, None, sources).unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+        }
     }
 
     #[tokio::test]
