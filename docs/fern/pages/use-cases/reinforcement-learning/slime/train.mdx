@@ -202,6 +202,10 @@ The other flags are standard Slime settings. See the [Slime usage guide](https:/
 | `--actor-num-nodes` through `--max-tokens-per-gpu` | Train with Megatron-LM on one GPU, packing up to 9,216 tokens into each micro-batch. |
 | `--advantage-estimator` through `--attention-backend` | Use GRPO with an upper clip range of 0.28, Adam at a constant learning rate of 1e-6, no dropout, FP32 gradient accumulation and softmax, and FlashAttention. |
 
+<Tip title="Keep the trained model">
+This run doesn't save the trained model. To keep it, add `--save` with a directory on `/data` and `--save-interval` to `entrypoint` before you apply the RayJob. Slime saves a checkpoint every `--save-interval` rollouts and after the last one.
+</Tip>
+
   </Step>
   <Step title="Follow the training log" id="follow-the-training-log">
 
@@ -291,7 +295,7 @@ Each engine reloads the weights once before the first rollout and once after eac
 
 ## Clean Up
 
-Delete the namespace. This removes the RayJob, the DGD and its Services, the setup Job, the ConfigMap, and the PersistentVolumeClaim. If the StorageClass uses the `Delete` reclaim policy, the storage provider also deletes the volume with the downloaded model:
+If the job saved checkpoints, copy the ones that you want to keep off the volume first. Then delete the namespace. This removes the RayJob, the DGD and its Services, the setup Job, the ConfigMap, and the PersistentVolumeClaim. If the StorageClass uses the `Delete` reclaim policy, the storage provider also deletes the volume, with the downloaded model and any checkpoints:
 
 ```bash
 kubectl delete namespace "$NAMESPACE"
@@ -319,6 +323,5 @@ kubectl delete namespace "$NAMESPACE"
 
 - **Add engines.** Add `worker-2` and later components to the DGD, each with one replica and its own engine Service, and list every engine address in `--rollout-external-engine-addrs`.
 - **Train on more GPUs.** Add a `workerGroupSpecs` group to the RayJob with the same image and volumes, and raise `--actor-num-nodes` or `--actor-num-gpus-per-node` to match. Keep the GPU on the head.
-- **Keep the trained model.** Add `--save` with a directory on `/data` and `--save-interval`. Slime also saves after the last rollout.
 - **Compare routing.** The frontend uses round-robin routing, although the 8 samples for each prompt share a prefix. See [Routing](serve-inference.mdx#routing) to decide whether KV-aware routing suits your rollouts.
 - **Compare weight-update transports.** Slime's [external rollout engine guide](https://github.com/THUDM/slime/blob/main/docs/en/advanced/external-rollout-engines.md) covers NCCL, full-checkpoint disk, and delta disk updates.
