@@ -235,11 +235,16 @@ def test_send_on_closing_transport_is_rejected(run, payload):
     run(body)
 
 
-def test_close_while_waiting_for_the_peer_rejects_the_send(run, payload):
+@pytest.mark.parametrize("already_sent", ["nothing", "part of the frame"])
+def test_close_while_waiting_for_the_peer_rejects_the_send(run, payload, already_sent):
+    message = _large_export() if already_sent != "nothing" else ErrorResponse(error="x")
+    frame = wire._frame_message(message)
+
     async def body():
         async with _stream_pair(sndbuf=_SMALL_SNDBUF) as (writer, peer):
-            _fill_send_buffer(writer)
-            task = _start_send(writer, ErrorResponse(error="x"), payload)
+            if already_sent == "nothing":
+                _fill_send_buffer(writer)
+            task = _start_send(writer, message, payload)
             await asyncio.sleep(0)
             assert not task.done()
             writer.close()
@@ -249,8 +254,12 @@ def test_close_while_waiting_for_the_peer_rejects_the_send(run, payload):
                 os.close(fd)
             with pytest.raises(ConnectionResetError):
                 await asyncio.wait_for(task, _TIMEOUT)
-            assert not data.strip(b"\0")
-            assert not fds
+            if already_sent == "nothing":
+                assert not data.strip(b"\0")
+                assert not fds
+            else:
+                # Only what went out before the close arrives.
+                assert frame.startswith(data) and len(data) < len(frame)
 
     run(body)
 
