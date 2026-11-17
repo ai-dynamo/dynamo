@@ -152,9 +152,17 @@ Video requests fail with the referenced Dynamo image because it does not include
 
 </div>
 
-<div data-engine="trtllm" data-sku="gb200 gb300">
+<div data-engine="trtllm" data-sku="gb200">
 
-- A Kubernetes cluster with the Dynamo platform installed and 4 GB200 or GB300 GPUs available.
+- A Kubernetes cluster with the Dynamo platform installed and 4 GB200 GPUs available.
+- Access to the Muse-Spark-Open-816B-A42B checkpoint and tokenizer. The public model identifier is `meta-models/Muse-Spark-Open-816B-A42B-NVFP4`.
+- Access to the TensorRT-LLM runtime image referenced by the deployment manifest.
+
+</div>
+
+<div data-engine="trtllm" data-sku="gb300">
+
+- A Kubernetes cluster with the Dynamo platform installed and 4 GB300 GPUs available.
 - Access to the Muse-Spark-Open-816B-A42B checkpoint and tokenizer. The public model identifier is `meta-models/Muse-Spark-Open-816B-A42B-NVFP4`.
 - Access to the TensorRT-LLM runtime image referenced by the deployment manifest.
 
@@ -580,12 +588,12 @@ The table lists the measured operating point for each of the six recipe targets.
 <table className="dynamo-variant-table">
 <thead><tr><th>Recipe</th><th>GPUs</th><th>Workload</th><th>Concurrency</th><th>Requests</th><th>Passing</th><th>Failing</th><th>Output throughput (tok/s)</th><th>Output throughput/GPU (tok/s/GPU)</th><th>Output throughput/user p50 (tok/s/user)</th><th>TTFT p50 (ms)</th></tr></thead>
 <tbody>
-<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb200" data-variant="agg"><td>sglang/agg-gb200-agentic</td><td>4</td><td>trace</td><td>12</td><td>3,541</td><td>3,526</td><td>15</td><td>514.30</td><td>128.58</td><td>57.43</td><td>221.70</td></tr>
-<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb200" data-variant="disagg"><td>sglang/disagg-gb200-agentic</td><td>8</td><td>trace</td><td>16</td><td>3,541</td><td>3,526</td><td>15</td><td>768.50</td><td>96.07</td><td>58.77</td><td>1,335.20</td></tr>
-<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb300" data-variant="agg"><td>sglang/agg-gb300-agentic</td><td>4</td><td>trace</td><td>16</td><td>3,541</td><td>3,526</td><td>15</td><td>635.80</td><td>158.95</td><td>50.97</td><td>177.90</td></tr>
-<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb300" data-variant="disagg"><td>sglang/disagg-gb300-agentic</td><td>8</td><td>trace</td><td>16</td><td>3,541</td><td>3,526</td><td>15</td><td>835.80</td><td>104.48</td><td>62.12</td><td>289.40</td></tr>
-<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb200" data-variant="kv-router"><td>sglang/agg-gb200-agentic-kv-router</td><td>8</td><td>trace</td><td>22</td><td>3,541</td><td>3,526</td><td>15</td><td>934.20</td><td>116.78</td><td>54.51</td><td>239.20</td></tr>
-<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb300" data-variant="kv-router"><td>sglang/agg-gb300-agentic-kv-router</td><td>8</td><td>trace</td><td>20</td><td>3,541</td><td>3,526</td><td>15</td><td>1,054.70</td><td>131.84</td><td>66.70</td><td>158.40</td></tr>
+<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-muse-sku="gb200" data-muse-variant="agg"><td>sglang/agg-gb200-agentic</td><td>4</td><td>trace</td><td>12</td><td>3,541</td><td>3,526</td><td>15</td><td>514.30</td><td>128.58</td><td>57.43</td><td>221.70</td></tr>
+<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-muse-sku="gb200" data-muse-variant="disagg"><td>sglang/disagg-gb200-agentic</td><td>8</td><td>trace</td><td>16</td><td>3,541</td><td>3,526</td><td>15</td><td>768.50</td><td>96.07</td><td>58.77</td><td>1,335.20</td></tr>
+<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-muse-sku="gb200" data-muse-variant="kv-router"><td>sglang/agg-gb200-agentic-kv-router</td><td>8</td><td>trace</td><td>22</td><td>3,541</td><td>3,526</td><td>15</td><td>934.20</td><td>116.78</td><td>54.51</td><td>239.20</td></tr>
+<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-muse-sku="gb300" data-muse-variant="agg"><td>sglang/agg-gb300-agentic</td><td>4</td><td>trace</td><td>16</td><td>3,541</td><td>3,526</td><td>15</td><td>635.80</td><td>158.95</td><td>50.97</td><td>177.90</td></tr>
+<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-muse-sku="gb300" data-muse-variant="disagg"><td>sglang/disagg-gb300-agentic</td><td>8</td><td>trace</td><td>16</td><td>3,541</td><td>3,526</td><td>15</td><td>835.80</td><td>104.48</td><td>62.12</td><td>289.40</td></tr>
+<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-muse-sku="gb300" data-muse-variant="kv-router"><td>sglang/agg-gb300-agentic-kv-router</td><td>8</td><td>trace</td><td>20</td><td>3,541</td><td>3,526</td><td>15</td><td>1,054.70</td><td>131.84</td><td>66.70</td><td>158.40</td></tr>
 </tbody>
 </table>
 </div>
@@ -600,8 +608,8 @@ These results cover the first 500 trace requests and establish functional operat
 <table className="dynamo-variant-table">
 <thead><tr><th>Recipe</th><th>GPUs</th><th>Workload</th><th>Concurrency</th><th>Requests</th><th>Passing</th><th>Failing</th><th>Output throughput (tok/s)</th><th>Output throughput/GPU (tok/s/GPU)</th><th>Output throughput/user p50 (tok/s/user)</th><th>TTFT p50 (ms)</th></tr></thead>
 <tbody>
-<tr className="dynamo-performance-row" data-sku="gb200" data-highlight-sku="gb200"><td>vllm/agg-gb200-agentic</td><td>4</td><td>trace (first 500; functional)</td><td>24</td><td>500</td><td>499</td><td>1</td><td>475.20</td><td>118.81</td><td>27.23</td><td>2,339.90</td></tr>
-<tr className="dynamo-performance-row" data-sku="gb300" data-highlight-sku="gb300"><td>vllm/agg-gb300-agentic</td><td>4</td><td>trace (first 500; functional)</td><td>24</td><td>500</td><td>499</td><td>1</td><td>564.80</td><td>141.20</td><td>28.84</td><td>292.90</td></tr>
+<tr className="dynamo-performance-row" data-highlight-sku="gb200"><td>vllm/agg-gb200-agentic</td><td>4</td><td>trace (first 500; functional)</td><td>24</td><td>500</td><td>499</td><td>1</td><td>475.20</td><td>118.81</td><td>27.23</td><td>2,339.90</td></tr>
+<tr className="dynamo-performance-row" data-highlight-sku="gb300"><td>vllm/agg-gb300-agentic</td><td>4</td><td>trace (first 500; functional)</td><td>24</td><td>500</td><td>499</td><td>1</td><td>564.80</td><td>141.20</td><td>28.84</td><td>292.90</td></tr>
 </tbody>
 </table>
 </div>
@@ -616,8 +624,8 @@ These results cover the first 500 trace requests and are functional validation, 
 <table className="dynamo-variant-table">
 <thead><tr><th>Recipe</th><th>GPUs</th><th>Workload</th><th>Concurrency</th><th>Requests</th><th>Passing</th><th>Failing</th><th>Output throughput (tok/s)</th><th>Output throughput/GPU (tok/s/GPU)</th><th>Output throughput/user p50 (tok/s/user)</th><th>TTFT p50 (ms)</th></tr></thead>
 <tbody>
-<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb200" data-variant="agg"><td>trtllm/agg-gb200-agentic</td><td>4</td><td>trace (first 500; functional)</td><td>24</td><td>500</td><td>499</td><td>1</td><td>384.58</td><td>96.15</td><td>30.82</td><td>11,533.66</td></tr>
-<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb300" data-variant="agg"><td>trtllm/agg-gb300-agentic</td><td>4</td><td>trace (first 500; functional)</td><td>24</td><td>500</td><td>499</td><td>1</td><td>583.23</td><td>145.81</td><td>31.37</td><td>600.34</td></tr>
+<tr className="dynamo-performance-row" data-highlight-sku="gb200"><td>trtllm/agg-gb200-agentic</td><td>4</td><td>trace (first 500; functional)</td><td>24</td><td>500</td><td>499</td><td>1</td><td>384.58</td><td>96.15</td><td>30.82</td><td>11,533.66</td></tr>
+<tr className="dynamo-performance-row" data-highlight-sku="gb300"><td>trtllm/agg-gb300-agentic</td><td>4</td><td>trace (first 500; functional)</td><td>24</td><td>500</td><td>499</td><td>1</td><td>583.23</td><td>145.81</td><td>31.37</td><td>600.34</td></tr>
 </tbody>
 </table>
 </div>
@@ -632,12 +640,12 @@ These results cover the first 500 trace requests and are functional validation, 
 <table className="dynamo-variant-table">
 <thead><tr><th>Target</th><th>Framework</th><th>Topology</th><th>Parallelism</th><th>KV cache</th><th>KV transfer</th><th>GPU count</th><th>Context length</th></tr></thead>
 <tbody>
-<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb200" data-variant="agg"><td>GB200 aggregated</td><td>SGLang</td><td>Aggregated</td><td>TP4/EP4</td><td>FP8</td><td>N/A</td><td>4</td><td>1M</td></tr>
-<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb200" data-variant="disagg"><td>GB200 disaggregated</td><td>SGLang</td><td>1P1D disaggregated</td><td>TP4/EP4 per worker</td><td>FP8</td><td>NIXL</td><td>8</td><td>1M</td></tr>
-<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb300" data-variant="agg"><td>GB300 aggregated</td><td>SGLang</td><td>Aggregated</td><td>TP4/EP4</td><td>FP8</td><td>N/A</td><td>4</td><td>1M</td></tr>
-<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb300" data-variant="disagg"><td>GB300 disaggregated</td><td>SGLang</td><td>1P1D disaggregated</td><td>TP4/EP4 per worker</td><td>FP8</td><td>NIXL</td><td>8</td><td>1M</td></tr>
-<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb200" data-variant="kv-router"><td>GB200 KV-aware routing</td><td>SGLang</td><td>Aggregated, 2 replicas</td><td>2 × TP4/EP4</td><td>FP8</td><td>N/A</td><td>8</td><td>1M</td></tr>
-<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb300" data-variant="kv-router"><td>GB300 KV-aware routing</td><td>SGLang</td><td>Aggregated, 2 replicas</td><td>2 × TP4/EP4</td><td>FP8</td><td>N/A</td><td>8</td><td>1M</td></tr>
+<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-muse-sku="gb200" data-muse-variant="agg"><td>GB200 aggregated</td><td>SGLang</td><td>Aggregated</td><td>TP4/EP4</td><td>FP8</td><td>N/A</td><td>4</td><td>1M</td></tr>
+<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-muse-sku="gb200" data-muse-variant="disagg"><td>GB200 disaggregated</td><td>SGLang</td><td>1P1D disaggregated</td><td>TP4/EP4 per worker</td><td>FP8</td><td>NIXL</td><td>8</td><td>1M</td></tr>
+<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-muse-sku="gb200" data-muse-variant="kv-router"><td>GB200 KV-aware routing</td><td>SGLang</td><td>Aggregated, 2 replicas</td><td>2 × TP4/EP4</td><td>FP8</td><td>N/A</td><td>8</td><td>1M</td></tr>
+<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-muse-sku="gb300" data-muse-variant="agg"><td>GB300 aggregated</td><td>SGLang</td><td>Aggregated</td><td>TP4/EP4</td><td>FP8</td><td>N/A</td><td>4</td><td>1M</td></tr>
+<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-muse-sku="gb300" data-muse-variant="disagg"><td>GB300 disaggregated</td><td>SGLang</td><td>1P1D disaggregated</td><td>TP4/EP4 per worker</td><td>FP8</td><td>NIXL</td><td>8</td><td>1M</td></tr>
+<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-muse-sku="gb300" data-muse-variant="kv-router"><td>GB300 KV-aware routing</td><td>SGLang</td><td>Aggregated, 2 replicas</td><td>2 × TP4/EP4</td><td>FP8</td><td>N/A</td><td>8</td><td>1M</td></tr>
 </tbody>
 </table>
 </div>
@@ -650,8 +658,8 @@ These results cover the first 500 trace requests and are functional validation, 
 <table className="dynamo-variant-table">
 <thead><tr><th>Target</th><th>Framework</th><th>Topology</th><th>Parallelism</th><th>KV cache</th><th>KV transfer</th><th>GPU count</th><th>Context length</th></tr></thead>
 <tbody>
-<tr className="dynamo-performance-row" data-sku="gb200" data-highlight-sku="gb200"><td>GB200 aggregated</td><td>vLLM</td><td>Aggregated</td><td>TP4/EP4</td><td>FP8</td><td>N/A</td><td>4</td><td>1M</td></tr>
-<tr className="dynamo-performance-row" data-sku="gb300" data-highlight-sku="gb300"><td>GB300 aggregated</td><td>vLLM</td><td>Aggregated</td><td>TP4/EP4</td><td>FP8</td><td>N/A</td><td>4</td><td>1M</td></tr>
+<tr className="dynamo-performance-row" data-highlight-sku="gb200"><td>GB200 aggregated</td><td>vLLM</td><td>Aggregated</td><td>TP4/EP4</td><td>FP8</td><td>N/A</td><td>4</td><td>1M</td></tr>
+<tr className="dynamo-performance-row" data-highlight-sku="gb300"><td>GB300 aggregated</td><td>vLLM</td><td>Aggregated</td><td>TP4/EP4</td><td>FP8</td><td>N/A</td><td>4</td><td>1M</td></tr>
 </tbody>
 </table>
 </div>
@@ -664,8 +672,8 @@ These results cover the first 500 trace requests and are functional validation, 
 <table className="dynamo-variant-table">
 <thead><tr><th>Target</th><th>Framework</th><th>Topology</th><th>Parallelism</th><th>KV cache</th><th>KV transfer</th><th>GPU count</th><th>Context length</th></tr></thead>
 <tbody>
-<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb200" data-variant="agg"><td>GB200 aggregated</td><td>TensorRT-LLM</td><td>Aggregated</td><td>TP4/EP4</td><td>FP8</td><td>N/A</td><td>4</td><td>1M</td></tr>
-<tr className="dynamo-performance-row dynamo-muse-spark-performance-row" data-sku="gb300" data-variant="agg"><td>GB300 aggregated</td><td>TensorRT-LLM</td><td>Aggregated</td><td>TP4/EP4</td><td>FP8</td><td>N/A</td><td>4</td><td>1M</td></tr>
+<tr className="dynamo-performance-row" data-highlight-sku="gb200"><td>GB200 aggregated</td><td>TensorRT-LLM</td><td>Aggregated</td><td>TP4/EP4</td><td>FP8</td><td>N/A</td><td>4</td><td>1M</td></tr>
+<tr className="dynamo-performance-row" data-highlight-sku="gb300"><td>GB300 aggregated</td><td>TensorRT-LLM</td><td>Aggregated</td><td>TP4/EP4</td><td>FP8</td><td>N/A</td><td>4</td><td>1M</td></tr>
 </tbody>
 </table>
 </div>

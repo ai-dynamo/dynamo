@@ -3,6 +3,7 @@
 
 import asyncio
 import base64
+import binascii
 import functools
 import importlib
 import inspect
@@ -36,6 +37,7 @@ import numpy as np
 import torch
 from vllm import PoolingParams
 from vllm.config import ModelConfig
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -88,7 +90,12 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
-from dynamo.llm.exceptions import EngineShutdown, InvalidArgument, WorkerOverloaded
+from dynamo.llm.exceptions import (
+    Cancelled,
+    EngineShutdown,
+    InvalidArgument,
+    WorkerOverloaded,
+)
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_connector_protocols import (
@@ -162,6 +169,11 @@ def _discard_orphan_result(fut: "asyncio.Future[dict]") -> None:
 
 
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
+# vLLM fills these extra_args keys from dedicated request fields; never from
+# client-supplied `vllm_xargs`.
+_RESERVED_VLLM_XARGS_KEYS: Final = frozenset(
+    {_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY, "ec_transfer_params"}
+)
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -602,7 +614,7 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     )
 
 
-# Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
+# Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-events/src/zmq_wire/extra_keys.rs.
 _DYNAMO_CACHE_SALT_PREFIX = "dynamo-cache-salt:"
 
 
@@ -822,6 +834,18 @@ def build_sampling_params(
         passthrough_sampling_options = extra_args.get("sampling_options")
         if isinstance(passthrough_sampling_options, dict):
             sampling_options.update(passthrough_sampling_options)
+    # `vllm_xargs` becomes SamplingParams.extra_args, as in vLLM's OpenAI server.
+    # Connector inputs stay excluded: only the router hint below may set them.
+    vllm_xargs = sampling_options.pop("vllm_xargs", None)
+    if isinstance(vllm_xargs, dict) and vllm_xargs:
+        sampling_params.extra_args = {
+            **(sampling_params.extra_args or {}),
+            **{
+                key: value
+                for key, value in vllm_xargs.items()
+                if key not in _RESERVED_VLLM_XARGS_KEYS
+            },
+        }
     guided_decoding = sampling_options.get("guided_decoding")
     if guided_decoding is not None and isinstance(guided_decoding, dict):
         json_schema = guided_decoding.get("json")
@@ -842,6 +866,11 @@ def build_sampling_params(
     for key, value in sampling_options.items():
         # Skip guided_decoding - already handled above
         if key == "guided_decoding":
+            continue
+        if key == "logit_bias" and value is not None:
+            sampling_params.logit_bias = {
+                int(token_id): float(bias) for token_id, bias in value.items()
+            }
             continue
         if key == "bad_words_token_ids" and value is not None:
             # vLLM has no public setter for token-id bad words; we write the
@@ -931,15 +960,33 @@ def build_sampling_params(
     # Dynamo detokenizes in the Rust backend, which reads skip_special_tokens
     # directly from the request output_options (lib/llm/src/backend.rs).
 
-    # If max_tokens wasn't provided (None or missing), compute a dynamic default
+    # Legacy completions use SamplingParams defaults; chat and Responses use
+    # the remaining context when the model has no generation limit.
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
     token_ids = request.get("token_ids", [])
     input_length = len(token_ids)
-    if model_max_len is not None and provided_max_tokens is None:
-        # Ensure at least 1 token generation by default when possible
-        dynamic_default = max(1, model_max_len - input_length)
-        configured_default = default_sampling_params.get("max_tokens", dynamic_default)
-        sampling_params.max_tokens = min(configured_default, dynamic_default)
+    if model_max_len is not None:
+        # vLLM caps prompt + output but rejects output alone above the model length.
+        if provided_max_tokens is not None and provided_max_tokens > model_max_len:
+            raise InvalidArgument(
+                f"max_tokens={provided_max_tokens} cannot be greater than "
+                f"max_model_len={model_max_len}. Please request fewer output tokens."
+            )
+        use_sampling_default = (
+            isinstance(extra_args, dict)
+            and extra_args.get("request_type") == "completions"
+            and not (enable_rl and _is_token_in_request(request))
+        )
+        max_tokens = (
+            sampling_params.max_tokens if use_sampling_default else provided_max_tokens
+        )
+        if not use_sampling_default or max_tokens is not None:
+            sampling_params.max_tokens = get_max_tokens(
+                max_model_len=model_max_len,
+                max_tokens=max_tokens,
+                input_length=input_length,
+                default_sampling_params=default_sampling_params,
+            )
 
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
     # the SGLang integration and lets vLLM's stream_interval gate reduce backend
@@ -2547,7 +2594,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def _resolve_lora_request(self, model_name: str | None) -> LoRARequest | None:
         """Return a LoRARequest for loaded adapters, or None for base model names.
 
-        Raises ValueError for unknown non-base names when LoRA is enabled.
+        Raises InvalidArgument for unknown non-base names when LoRA is enabled.
 
         **Contract for subclasses**: This method requires the following attributes
         to be defined by subclasses:
@@ -2745,7 +2792,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "rejecting the request",
                     lora_request.lora_name,
                 )
-                raise ValueError(
+                raise InvalidArgument(
                     f"unknown model or LoRA adapter: '{lora_request.lora_name}'"
                 )
             self._track_lora_request_activation(admitted_lora_request)
@@ -3248,8 +3295,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             torch.Tensor: Decoded prompt embeddings with dim == 2
 
         Raises:
-            ValueError: If decoding fails or format is invalid
+            InvalidArgument: If the payload is not valid base64 or the loader
+                rejects it as a client input fault.
+            ValueError: If the input is not a string (internal contract), or
+                any other decoding failure on the caller's payload, including
+                `.encode()` failures before the load and tensor operation
+                failures after it.
+            RuntimeError: If ModelConfig is unavailable.
         """
+        from vllm.exceptions import VLLMClientError
+
         if not isinstance(prompt_embeds_base64, str):
             raise ValueError(
                 f"Prompt embeds must be base64 encoded string. Got {type(prompt_embeds_base64)}."
@@ -3268,11 +3323,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # Resource failures are server-side faults. Preserve their type so
             # the bindings return a retryable 5xx instead of a client 400.
             raise
+        except VLLMClientError as e:
+            raise InvalidArgument(f"Invalid prompt_embeds: {e}") from e
+        except binascii.Error as e:
+            raise InvalidArgument("prompt_embeds is not valid base64") from e
         except Exception as e:
-            logger.error(f"Failed to decode prompt_embeds: {e}")
-            raise ValueError(
-                f"Failed to decode prompt_embeds as PyTorch tensor: {e}"
-            ) from e
+            raise ValueError(f"Failed to decode prompt_embeds: {e}") from e
 
     def _create_prompt_from_embeddings(
         self, prompt_embeds_base64: str
@@ -3289,7 +3345,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             - tensor: The decoded tensor (for logging shape/dtype)
 
         Raises:
-            ValueError: If decoding fails or tensor is invalid
+            ValueError: If the decoded tensor is not 2-D (internal contract).
+            Exception: whatever `_decode_prompt_embeds` raised, unchanged.
         """
         embeddings_tensor = self._decode_prompt_embeds(prompt_embeds_base64)
         if embeddings_tensor.dim() != 2:
@@ -3325,8 +3382,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             The vLLM prompt built from prompt embeddings or token IDs.
 
         Raises:
-            InvalidArgument: Prompt embeddings are disabled.
-            ValueError: Prompt embeddings cannot be decoded or validated.
+            InvalidArgument: Prompt embeddings are disabled or fail payload
+                validation.
         """
         if "prompt_embeds" in request and request["prompt_embeds"]:
             if not self.config.engine_args.enable_prompt_embeds:
@@ -3375,16 +3432,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     @staticmethod
     def _build_completion_usage(
         request_output: RequestOutput,
-        completion_token_counts: dict[int, int] | None = None,
+        completion_tokens: int | None = None,
     ) -> Dict[str, Any]:
         """
         Build completion usage statistics.
 
         Args:
             request_output: vLLM RequestOutput object
-            completion_token_counts: Optional cumulative generated-token counts by
-                                     output index. DELTA-mode streams need this
-                                     because the final vLLM chunk is not cumulative.
+            completion_tokens: Optional cumulative request-wide generated-token
+                               count. DELTA-mode streams maintain this total because
+                               each vLLM chunk contains only newly generated tokens.
 
         Returns:
             Dict with prompt_tokens, completion_tokens, total_tokens, prompt_tokens_details
@@ -3395,9 +3452,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             else None
         )
 
-        if completion_token_counts is not None:
-            completion_tokens = sum(completion_token_counts.values())
-        else:
+        if completion_tokens is None:
             completion_tokens = sum(
                 len(output.token_ids) for output in request_output.outputs
             )
@@ -3518,6 +3573,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             )
 
             total_output_tokens_by_index: dict[int, int] = {}
+            total_output_tokens = 0
+            usage_metadata_by_index: dict[int, tuple[int | None, int | None]] = {}
             raw_routed_experts_by_output: dict[int, Any] = {}
             raw_sampling_mask_by_output: dict[int, Any] = {}
             # vLLM surfaces prompt_logprobs once (at end-of-prefill) and clears
@@ -3568,6 +3625,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         (output, output_idx, token_ids, finish_reason, stop_reason)
                     )
 
+                usage_metadata = (
+                    len(res.prompt_token_ids) if res.prompt_token_ids else None,
+                    getattr(res, "num_cached_tokens", None),
+                )
                 for (
                     output,
                     output_idx,
@@ -3575,6 +3636,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     finish_reason,
                     stop_reason,
                 ) in prepared_outputs:
+                    total_output_tokens += len(token_ids)
                     out: Dict[str, Any] = {
                         "index": output_idx,
                         "token_ids": token_ids,
@@ -3613,18 +3675,26 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
 
+                    # The frontend retains prompt/cache metadata and counts output
+                    # tokens itself. Send changes and final totals, not per-token usage.
+                    if (
+                        finish_reason
+                        or usage_metadata_by_index.get(output_idx) != usage_metadata
+                    ):
+                        out[
+                            "completion_usage"
+                        ] = BaseWorkerHandler._build_completion_usage(
+                            request_output=res,
+                            completion_tokens=total_output_tokens,
+                        )
+                        usage_metadata_by_index[output_idx] = usage_metadata
+
                     if finish_reason:
                         out["finish_reason"] = normalized_finish_reason
                         if engine_prompt_token_ids is not None:
                             out["engine_data"] = {
                                 "prompt_token_ids": list(engine_prompt_token_ids)
                             }
-                        out[
-                            "completion_usage"
-                        ] = BaseWorkerHandler._build_completion_usage(
-                            request_output=res,
-                            completion_token_counts=total_output_tokens_by_index,
-                        )
                         # With n > 1, later samples hit the prompt blocks earlier
                         # ones just cached, and vLLM keeps the first buffered
                         # sample's count when it merges outputs, so no sample's
@@ -3881,12 +3951,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Log with the traceback here — this is the last frame that knows
             # which request and which encoder — then re-raise unchanged.
             #
-            # Deliberately not converted to `InvalidArgument`. The adapters
-            # raise `ValueError`/`TypeError` for genuine input faults, which the
-            # bindings already map to `Backend(InvalidArgument)` → 400 carrying
-            # the message, so the actionable case needs no help. Coercing the
-            # rest would relabel timeouts, CUDA faults, batcher shutdown and
-            # cancellations as client errors, suppressing retries — and since
+            # Deliberately not converted to `InvalidArgument`: adapter
+            # `ValueError`/`TypeError` map to 400, but with a generic
+            # body — only `InvalidArgument` carries its message to the client.
+            # Coercing the rest would relabel timeouts, CUDA faults, batcher shutdown
+            # and cancellations as client errors, suppressing retries — and since
             # `encode()` is co-batched, it could blame a caller for a failure
             # that originated in someone else's request.
             logger.exception("Request %s: CustomEncoder failed", request_id)
@@ -4150,10 +4219,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 raise InvalidArgument("artifact capture requires an exact token prompt")
             artifact_runtime = None
             if artifact_settings.get("mode") != "inline_base64":
+                # Object-store delivery needs opendal from the optional
+                # artifact-delivery extra, so load it only for these requests.
                 from dynamo.artifacts.runtime import (
                     ArtifactAuthorityClosed,
                     configured_artifact_runtime,
                 )
+                from dynamo.artifacts.storage import ArtifactStorageError
 
                 artifact_runtime = configured_artifact_runtime()
                 if artifact_runtime is None:
@@ -4192,6 +4264,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 ):
                     raise WorkerOverloaded(str(exc)) from None
                 raise InvalidArgument(str(exc)) from None
+            except RuntimeError as exc:
+                # Storage policy rejects the requested destination before
+                # inference with a credential-safe message. A provider without
+                # conditional creation is a server fault and stays one.
+                if (
+                    artifact_runtime is not None
+                    and isinstance(exc, ArtifactStorageError)
+                    and exc.code in ("invalid_target", "destination_denied", "expired")
+                ):
+                    raise InvalidArgument(str(exc)) from None
+                raise
 
         # In disagg decode mode, defer engine_client.abort() until the first
         # token so we don't abort while a NIXL KV transfer is still in flight
@@ -4676,8 +4759,9 @@ class EmbeddingWorkerHandler:
     Does NOT inherit BaseWorkerHandler. The base class does generation-only
     init (media loaders, KV-block lookup via get_dp_range_for_worker, embedding
     cache manager) that would either fail or be meaningless on a pooling
-    engine. Embedding inference is a single forward pass with no KV cache, no
-    multimodal data, and no streamed decode.
+    engine. Embedding inference is a single forward pass with no KV cache and
+    no streamed decode. Multimodal input arrives as vLLM's chat-style
+    ``messages`` and is rendered by vLLM's own renderer, which loads the media.
     """
 
     def __init__(
@@ -4788,6 +4872,117 @@ class EmbeddingWorkerHandler:
                 # Re-raise EngineShutdown if the monitor task raised it.
                 task.result()
 
+    async def _render_chat_embedding_input(self, request: dict) -> list[Any]:
+        """Render chat-style ``messages`` into one engine prompt per conversation.
+
+        Uses vLLM's own embedding request model and renderer, as ``vllm serve``
+        does for ``/v1/embeddings``: the model's chat template (or
+        ``--custom-jinja-template``) and multimodal processor see the same
+        conversation, and vLLM loads the media of every content part it
+        accepts (``image_url``, ``video_url``, ``audio_url``, ``input_audio``),
+        subject to the engine's media limits and allowed media sources.
+
+        Input vLLM rejects is a client error rather than a 500. vLLM's typed
+        client errors go through ``vllm_client_error_to_http_error``, as on the
+        other vLLM request paths: the worker raises their status (422 for
+        media that can't be loaded), and the frontend maps it to its error
+        class and keeps the message private, since it can name the media URL.
+        Other validation failures (a text-only model given media, a malformed
+        message) raise ``InvalidArgument``, a 400 with vLLM's message.
+        """
+        from vllm.entrypoints.pooling.embed.protocol import (
+            EmbeddingBatchChatRequest,
+            EmbeddingChatRequest,
+        )
+        from vllm.exceptions import VLLMClientError
+        from vllm.renderers.chat_utils import load_chat_template
+        from vllm.utils.mistral import is_mistral_tokenizer
+
+        from .errors import vllm_client_error_to_http_error
+
+        messages = request["messages"]
+        batched = (
+            isinstance(messages, list)
+            and bool(messages)
+            and isinstance(messages[0], list)
+        )
+        request_cls = EmbeddingBatchChatRequest if batched else EmbeddingChatRequest
+        model_config = self.engine_client.model_config
+        renderer = self.engine_client.renderer
+        mm_config = model_config.multimodal_config
+        try:
+            chat_request = request_cls.model_validate(
+                {
+                    key: request[key]
+                    for key in _CHAT_EMBEDDING_REQUEST_FIELDS
+                    if request.get(key) is not None
+                }
+            )
+            # ``--custom-jinja-template``, or None for the model's own, as with
+            # ``vllm serve`` without ``--chat-template``. vLLM caches the load.
+            chat_params = chat_request.build_chat_params(
+                load_chat_template(self.config.custom_jinja_template), "auto"
+            ).with_defaults(
+                {"tokenize": is_mistral_tokenizer(renderer.tokenizer)},
+                default_media_io_kwargs=(
+                    mm_config.media_io_kwargs if mm_config else None
+                ),
+            )
+            conversations = (
+                list(chat_request.messages) if batched else [chat_request.messages]
+            )
+            _, engine_prompts = await renderer.render_chat_async(
+                conversations,
+                chat_params,
+                chat_request.build_tok_params(model_config),
+            )
+        except VLLMClientError as e:
+            raise vllm_client_error_to_http_error(e) from e
+        # The other errors vLLM's server answers with 400 (pydantic's
+        # ValidationError is a ValueError).
+        except (ValueError, TypeError) as e:
+            raise InvalidArgument(str(e)) from e
+        return list(engine_prompts)
+
+    async def _render_chat_embedding_input_until_stopped(
+        self, request: dict, context: Context
+    ) -> list[Any]:
+        """Render chat-style input unless the request stops first.
+
+        Rendering can download media before any engine request exists, so
+        ``_abort_monitor`` has nothing to abort yet. Instead the render is
+        raced against the request stopping and the worker shutting down; when
+        either wins, the render is canceled and nothing is encoded. Media
+        already handed to vLLM's decode thread pool finishes decoding in the
+        background. Raises Cancelled if the request stopped (an empty stream
+        would aggregate to a successful response with no embeddings), and
+        EngineShutdown on shutdown.
+        """
+        render_task = asyncio.create_task(self._render_chat_embedding_input(request))
+        stopped = context.async_killed_or_stopped()
+        waiters: list[Any] = [render_task, stopped]
+        shutdown_task: Optional[asyncio.Task] = None
+        if self.shutdown_event is not None:
+            shutdown_task = asyncio.create_task(self.shutdown_event.wait())
+            waiters.append(shutdown_task)
+
+        done: set[Any] = set()
+        try:
+            done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for waiter in waiters:
+                if not waiter.done():
+                    waiter.cancel()
+            # Also collects a render error nobody will read, so asyncio
+            # doesn't log it as never retrieved.
+            await asyncio.gather(*waiters, return_exceptions=True)
+
+        if shutdown_task is not None and shutdown_task in done:
+            raise EngineShutdown("Engine was shut down during embedding.")
+        if stopped in done:
+            raise Cancelled("Embedding request stopped while rendering its input")
+        return render_task.result()
+
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncIterator[Dict[str, Any]]:
@@ -4807,15 +5002,22 @@ class EmbeddingWorkerHandler:
         ``add_special_tokens`` is also forwarded for raw text; when omitted,
         vLLM's embedding default is retained. Rust-preprocessed and
         caller-supplied token IDs are never modified.
+
+        Instead of ``input``, the request can carry vLLM's chat-style
+        ``messages`` (one conversation, or a list of conversations), which may
+        contain image, video and audio content parts; see
+        ``_render_chat_embedding_input``. Each conversation yields one vector.
         """
         model_name = request.get("model") or self.config.served_model_name or ""
-        # Raw OpenAI requests carry 'input'. Rust-preprocessed embedding
-        # requests carry the same logical batch as 'token_ids'.
+        # Raw OpenAI requests carry 'input' (or chat-style 'messages').
+        # Rust-preprocessed embedding requests carry the same logical batch as
+        # 'token_ids'.
         token_ids_batch = request.get("token_ids")
         is_tokens_path = token_ids_batch is not None
+        messages = None if is_tokens_path else request.get("messages")
         input_field = token_ids_batch if is_tokens_path else request.get("input")
-        if input_field is None:
-            raise ValueError(
+        if input_field is None and messages is None:
+            raise InvalidArgument(
                 "Embedding request missing required 'input' or 'token_ids' field"
             )
 
@@ -4827,17 +5029,20 @@ class EmbeddingWorkerHandler:
         # Token-id forms must be passed to vLLM as TokensPrompt so the engine
         # skips its own tokenizer; the previous str()-coercion path turned
         # `[1, 2, 3]` into three text prompts ("1", "2", "3") instead of one.
-        prompts: list[Any] = _classify_embedding_input(input_field)
+        # Chat-style input is rendered below, once its options are validated.
+        prompts: list[Any] = (
+            [] if messages is not None else _classify_embedding_input(input_field)
+        )
 
         dimensions = request.get("dimensions")
         if dimensions is not None and (
             not isinstance(dimensions, int) or isinstance(dimensions, bool)
         ):
-            raise TypeError(
+            raise InvalidArgument(
                 f"Invalid 'dimensions' type {type(dimensions).__name__}; expected int"
             )
         if dimensions is not None and dimensions < 1:
-            raise ValueError(f"dimensions must be >= 1, got {dimensions}")
+            raise InvalidArgument(f"dimensions must be >= 1, got {dimensions}")
 
         # Rust's preprocessed request represents an omitted client format as
         # ``None``. Treat both an absent key and an explicit internal null as
@@ -4846,7 +5051,7 @@ class EmbeddingWorkerHandler:
         if encoding_format is None:
             encoding_format = "float"
         if encoding_format not in ("float", "base64"):
-            raise ValueError(
+            raise InvalidArgument(
                 f"Invalid 'encoding_format' value {encoding_format!r}; "
                 "expected 'float' or 'base64'"
             )
@@ -4857,12 +5062,12 @@ class EmbeddingWorkerHandler:
             if not isinstance(truncate_prompt_tokens, int) or isinstance(
                 truncate_prompt_tokens, bool
             ):
-                raise TypeError(
+                raise InvalidArgument(
                     "Invalid 'truncate_prompt_tokens' type "
                     f"{type(truncate_prompt_tokens).__name__}; expected int"
                 )
             if truncate_prompt_tokens < -1:
-                raise ValueError(
+                raise InvalidArgument(
                     "truncate_prompt_tokens must be >= -1, "
                     f"got {truncate_prompt_tokens}"
                 )
@@ -4871,7 +5076,7 @@ class EmbeddingWorkerHandler:
         add_special_tokens = request.get("add_special_tokens")
         if add_special_tokens is not None:
             if not isinstance(add_special_tokens, bool):
-                raise TypeError(
+                raise InvalidArgument(
                     "Invalid 'add_special_tokens' type "
                     f"{type(add_special_tokens).__name__}; expected bool"
                 )
@@ -4900,6 +5105,10 @@ class EmbeddingWorkerHandler:
         if dimensions is not None:
             pooling_kwargs["dimensions"] = dimensions
         pooling_params = PoolingParams(**pooling_kwargs)
+        if messages is not None:
+            prompts = await self._render_chat_embedding_input_until_stopped(
+                request, context
+            )
         # Use the per-request context id (same as the chat/completion paths
         # in this file) so concurrent embeddings never collide inside
         # ``AsyncLLM``. ``context.trace_id`` is a distributed-trace id
@@ -4910,11 +5119,14 @@ class EmbeddingWorkerHandler:
 
         async def _encode_one(idx: int, prompt: Any):
             request_id = f"{base_request_id}-{idx}"
-            encode_arg: Any = (
-                prompt
-                if isinstance(prompt, str)
-                else TokensPrompt(prompt_token_ids=prompt)
-            )
+            encode_arg: Any
+            if isinstance(prompt, str):
+                encode_arg = prompt
+            elif isinstance(prompt, list):
+                encode_arg = TokensPrompt(prompt_token_ids=prompt)
+            else:
+                # Already rendered by vLLM (chat-style input).
+                encode_arg = prompt
             final_output = None
             async with self._abort_monitor(context, request_id):
                 encode_kwargs: dict[str, Any] = {
@@ -4925,7 +5137,11 @@ class EmbeddingWorkerHandler:
                 if tokenization_kwargs and isinstance(encode_arg, str):
                     encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
 
-                async for out in self.engine_client.encode(**encode_kwargs):
+                # Input vLLM rejects here (e.g. a conversation that renders
+                # to an empty prompt) is a client error, as with ``vllm serve``.
+                async for out in _translate_vllm_client_errors(
+                    self.engine_client.encode(**encode_kwargs)
+                ):
                     final_output = out
             if final_output is None:
                 raise RuntimeError(
@@ -4978,7 +5194,7 @@ class EmbeddingWorkerHandler:
                     else len(_pooling_output_to_list(embedding_row))
                 )
                 if actual_dim < dimensions:
-                    raise ValueError(
+                    raise InvalidArgument(
                         f"dimensions={dimensions} exceeds model embedding "
                         f"dimension {actual_dim}"
                     )
@@ -5022,6 +5238,17 @@ class EmbeddingWorkerHandler:
         }
 
 
+# Fields of a chat-style embedding request that vLLM's request model consumes
+# while rendering. ``dimensions`` and ``encoding_format`` are applied by the
+# handler itself.
+_CHAT_EMBEDDING_REQUEST_FIELDS = (
+    "model",
+    "messages",
+    "add_special_tokens",
+    "truncate_prompt_tokens",
+)
+
+
 def _is_token_id(x: Any) -> bool:
     """True iff ``x`` is an int that could be a vLLM token id.
 
@@ -5039,24 +5266,24 @@ def _classify_embedding_input(input_field: Any) -> list[Any]:
       - ``list[int]``  — wrapped in ``TokensPrompt`` by the caller.
 
     Rejects mixed lists (e.g. ``["foo", 42]`` or ``[[1, 2], "bar"]``) with
-    a clear ``TypeError`` rather than silently coercing.
+    a clear ``InvalidArgument`` rather than silently coercing.
     """
     if isinstance(input_field, str):
         return [input_field]
     if not isinstance(input_field, list):
-        raise TypeError(
+        raise InvalidArgument(
             f"Invalid 'input' type {type(input_field).__name__}; "
             "expected str, list[str], list[int], or list[list[int]]"
         )
     if not input_field:
-        raise ValueError("Embedding request 'input' must be non-empty")
+        raise InvalidArgument("Embedding request 'input' must be non-empty")
 
     first = input_field[0]
     if isinstance(first, str):
         texts: list[str] = []
         for item in input_field:
             if not isinstance(item, str):
-                raise TypeError(
+                raise InvalidArgument(
                     "'input' list mixes str and non-str entries; pass either "
                     "all strings or all token-id arrays"
                 )
@@ -5066,7 +5293,7 @@ def _classify_embedding_input(input_field: Any) -> list[Any]:
         token_ids: list[int] = []
         for item in input_field:
             if not _is_token_id(item):
-                raise TypeError(
+                raise InvalidArgument(
                     "'input' list mixes int and non-int entries; for tokenized "
                     "input pass all integers (single prompt) or list[list[int]]"
                 )
@@ -5077,21 +5304,21 @@ def _classify_embedding_input(input_field: Any) -> list[Any]:
         prompts: list[list[int]] = []
         for i, item in enumerate(input_field):
             if not isinstance(item, list):
-                raise TypeError(
+                raise InvalidArgument(
                     f"'input' list element at index {i} must be a list of "
                     "ints (token IDs); mixed batches are not supported"
                 )
             inner: list[int] = []
             for x in item:
                 if not _is_token_id(x):
-                    raise TypeError(
+                    raise InvalidArgument(
                         f"'input' list element at index {i} must be a list of "
                         "ints (token IDs); mixed batches are not supported"
                     )
                 inner.append(x)
             prompts.append(inner)
         return prompts
-    raise TypeError(
+    raise InvalidArgument(
         f"Unsupported 'input' element type {type(first).__name__}; "
         "expected str, int, or list[int]"
     )

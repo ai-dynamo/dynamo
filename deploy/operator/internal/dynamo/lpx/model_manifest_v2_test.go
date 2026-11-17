@@ -22,9 +22,9 @@ func TestBuildFromGbuildManifestV2ProjectsRuntimeIO(t *testing.T) {
 	t.Log("Project the complete build contract")
 	build, err := buildFromGbuildManifestV2("gs://models/build", manifest)
 	require.NoError(t, err)
-	require.EqualValues(t, 4, build.IOFPGACount)
-	require.EqualValues(t, 2, build.IOFanoutFactor)
-	require.Len(t, build.Partitions, 1)
+	require.EqualValues(t, 4, build.ioFPGACount)
+	require.EqualValues(t, 2, build.ioFanoutFactor)
+	require.Len(t, build.partitions, 1)
 
 	t.Log("Reject an unsupported contract revision before lowering the manifest")
 	manifest.SetContractRevision(manifest.ContractRevision() + 1)
@@ -101,7 +101,7 @@ func TestManifestReadersIgnoreExecutionMetadata(t *testing.T) {
 	}
 }
 
-func TestNormalizeBuildSnapshotRejectsInvalidHXArtifacts(t *testing.T) {
+func TestAcquireBuildRejectsInvalidHXArtifacts(t *testing.T) {
 	t.Log("Define malformed HX artifact inventories")
 	tests := []struct {
 		name    string
@@ -126,11 +126,13 @@ func TestNormalizeBuildSnapshotRejectsInvalidHXArtifacts(t *testing.T) {
 			case "singleton selected prop-sync chain":
 				fixture.selectedPropSyncChains = [][]uint32{{1}}
 			}
-			snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
+			buildDir := writeCompilerFixture(t, fixture)
 
-			t.Log("Reject malformed HX artifacts during manifest normalization")
-			_, err := normalizeBuildSnapshot(snapshot)
+			t.Log("Reject malformed HX artifacts before publishing the acquired snapshot")
+			snapshot, err := (&defaultModelRegistry{}).AcquireBuild(t.Context(), buildDir)
+			require.ErrorIs(t, err, errInvalidBuildManifest)
 			require.ErrorContains(t, err, test.wantErr)
+			require.Nil(t, snapshot)
 		})
 	}
 }
@@ -186,6 +188,6 @@ func TestBuildFromGbuildManifestV2DetectsCUDAPartitions(t *testing.T) {
 	t.Log("Retain CUDA requirements independently of the compilation mode label")
 	build, err := buildFromGbuildManifestV2("gs://bucket/registry/build-id", manifest)
 	require.NoError(t, err)
-	require.True(t, build.HasCUDAPartitions)
-	require.Len(t, build.Partitions, 1)
+	require.True(t, build.hasCUDAPartitions)
+	require.Len(t, build.partitions, 1)
 }

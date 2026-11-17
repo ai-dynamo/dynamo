@@ -33,6 +33,7 @@ from aisimulate.sweeper.replay import (
 
 from dynamo.llm import AisPerfConfig, KvRouterConfig
 from dynamo.mocker.config import normalize_mocker_config
+from dynamo.planner.core.types import TrafficObservation
 from dynamo.replay.api import (
     TelemetryOptions,
     run_synthetic_trace_replay,
@@ -105,6 +106,8 @@ class DynamoReplayRunnerFactory:
             ),
             supported_agentic_backends=engine_capabilities.supported_agentic_backends,
             agentic_qualification="functional_only",
+            # The AIS model config carries these to replay timing and capacity.
+            supported_engine_model_controls=("gemm_quant_mode", "kvcache_quant_mode"),
         )
 
     def create(self, worker_id: int) -> DynamoReplayRunner:
@@ -143,7 +146,9 @@ class DynamoReplayRunner:
             router_mode,
             router_config,
             ais_perf_config,
+            conversation_affinity,
         ) = self._resolve_hooks(spec.runtime_hooks)
+        planner_warmup = self._planner_warmup(spec.runtime_hooks)
         common: dict[str, Any] = {
             "router_mode": router_mode,
             "router_config": router_config,
@@ -169,6 +174,16 @@ class DynamoReplayRunner:
             **self._goodput_sla_kwargs(spec),
         }
 
+        if planner_warmup is not None:
+            # A live retune sweep's candidate warms its load predictor with
+            # the recorded history before the window.
+            if not self._is_trace(spec):
+                raise ValueError("planner warmup observations require a trace replay")
+            common["_planner_warmup_observations"] = planner_warmup
+        if conversation_affinity is not None:
+            if not self._is_trace(spec):
+                raise ValueError("conversation_affinity requires an agentic trace")
+            common["conversation_affinity"] = conversation_affinity
         if self._is_trace(spec):
             report = self._run_trace(spec, common, execution_model=execution_model)
         else:
@@ -199,6 +214,27 @@ class DynamoReplayRunner:
         """
 
     @staticmethod
+    def _planner_warmup(
+        hooks: tuple[RuntimeHookSpec, ...],
+    ) -> list[TrafficObservation] | None:
+        """The Planner hook's ``warmup_observations`` rows, if it has any."""
+
+        for hook in hooks:
+            if not _PLANNER_HOOK.supports(hook):
+                continue
+            rows = hook.config.get("warmup_observations")
+            if rows is None:
+                return None
+            if not isinstance(rows, list) or not all(
+                isinstance(row, list) for row in rows
+            ):
+                raise TypeError(
+                    "Dynamo Planner hook warmup_observations must be a list of rows"
+                )
+            return [TrafficObservation(*row) for row in rows]
+        return None
+
+    @staticmethod
     def _resolve_hooks(
         hooks: tuple[RuntimeHookSpec, ...],
     ) -> tuple[
@@ -206,11 +242,13 @@ class DynamoReplayRunner:
         str,
         KvRouterConfig | None,
         AisPerfConfig | None,
+        dict[str, JSONValue] | None,
     ]:
         planner_config: dict[str, JSONValue] | None = None
         router_mode = "round_robin"
         router_config: KvRouterConfig | None = None
         ais_perf_config: AisPerfConfig | None = None
+        conversation_affinity = None
         planner_seen = False
         router_seen = False
         for hook in hooks:
@@ -233,6 +271,7 @@ class DynamoReplayRunner:
                         "ReplaySpec contains multiple Router placement hooks"
                     )
                 router_seen = True
+                conversation_affinity = hook.config.get("conversation_affinity")
                 router_mode = str(hook.config.get("router_mode", "kv_router"))
                 raw_config = hook.config.get("router_config")
                 if not isinstance(raw_config, dict):
@@ -252,7 +291,13 @@ class DynamoReplayRunner:
                 f"unsupported Dynamo runtime hook "
                 f"{hook.provider}:{hook.kind}@{hook.api_version}"
             )
-        return planner_config, router_mode, router_config, ais_perf_config
+        return (
+            planner_config,
+            router_mode,
+            router_config,
+            ais_perf_config,
+            conversation_affinity,
+        )
 
     @staticmethod
     def _is_trace(spec: ReplaySpec) -> bool:
@@ -395,6 +440,9 @@ class DynamoReplayRunner:
         # embedded value instead of imposing the synthetic-workload default.
         if trace_format not in {"weka", "dynamo"} and trace_block_size is None:
             trace_block_size = self.trace_block_size
+        # Trace replays use ordinal request ids and the canonical router seed,
+        # so a candidate's score depends only on its configuration and the
+        # trace.
         if deployment.deployment_mode == "agg":
             return run_trace_replay(
                 trace_files=trace_files,
@@ -409,6 +457,7 @@ class DynamoReplayRunner:
                 execution_model=execution_model,
                 extra_engine_args=self._engine_args(deployment, "aggregated"),
                 num_workers=deployment.num_workers,
+                _deterministic=True,
                 **common,
             )
         return run_trace_replay(
@@ -426,6 +475,7 @@ class DynamoReplayRunner:
             decode_engine_args=self._engine_args(deployment, "decode"),
             num_prefill_workers=deployment.num_prefill_workers,
             num_decode_workers=deployment.num_decode_workers,
+            _deterministic=True,
             **common,
         )
 
@@ -518,6 +568,11 @@ class DynamoReplayRunner:
             ),
             "inter_turn_delay_ms": _float_value(
                 workload.get("inter_turn_delay_ms", 0.0), "inter_turn_delay_ms"
+            ),
+            # Session sources author each turn's new input; replay prefixes it
+            # with the earlier turns, as AISimulate's engine stack does.
+            "accumulate_session_deltas": (
+                workload.get("source_type") == "synthetic-session"
             ),
         }
 

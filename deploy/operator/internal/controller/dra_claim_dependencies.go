@@ -14,7 +14,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	resourcev1 "k8s.io/api/resource/v1"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -117,10 +116,9 @@ func (r *DynamoComponentDeploymentReconciler) mapDRAClaimToDCDRequests(
 	for i := range deployments.Items {
 		deployment := &deployments.Items[i]
 		if componentReferencesDRAClaim(&deployment.Spec.DynamoComponentDeploymentSharedSpec, obj.GetName(), template) {
-			requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{
+			requests = append(requests, ctrl.Request{
 				Namespace: deployment.Namespace,
-				Name:      deployment.Name,
-			}})
+				Name:      deployment.Name})
 		}
 	}
 	return requests
@@ -141,10 +139,9 @@ func (r *DynamoComponentDeploymentReconciler) mapDeviceClassToDCDRequests(
 		deployment := &deployments.Items[i]
 		if commonController.NamespaceAllowed(r.Config, r.RuntimeConfig, deployment, deployment.Namespace) &&
 			componentUsesDRAClaims(&deployment.Spec.DynamoComponentDeploymentSharedSpec) {
-			requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{
+			requests = append(requests, ctrl.Request{
 				Namespace: deployment.Namespace,
-				Name:      deployment.Name,
-			}})
+				Name:      deployment.Name})
 		}
 	}
 	return requests
@@ -180,10 +177,9 @@ func (r *DynamoGraphDeploymentReconciler) mapDRAClaimToDGDRequests(
 		deployment := &deployments.Items[i]
 		for componentIndex := range deployment.Spec.Components {
 			if componentReferencesDRAClaim(&deployment.Spec.Components[componentIndex], obj.GetName(), template) {
-				requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{
+				requests = append(requests, ctrl.Request{
 					Namespace: deployment.Namespace,
-					Name:      deployment.Name,
-				}})
+					Name:      deployment.Name})
 				break
 			}
 		}
@@ -209,10 +205,9 @@ func (r *DynamoGraphDeploymentReconciler) mapDeviceClassToDGDRequests(
 		}
 		for componentIndex := range deployment.Spec.Components {
 			if componentUsesDRAClaims(&deployment.Spec.Components[componentIndex]) {
-				requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{
+				requests = append(requests, ctrl.Request{
 					Namespace: deployment.Namespace,
-					Name:      deployment.Name,
-				}})
+					Name:      deployment.Name})
 				break
 			}
 		}

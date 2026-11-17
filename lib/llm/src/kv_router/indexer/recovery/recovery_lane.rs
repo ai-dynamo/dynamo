@@ -58,7 +58,17 @@ where
     }
 
     pub(super) async fn cancel_all(&self) {
-        let keys: Vec<_> = self.tasks.iter().map(|entry| *entry.key()).collect();
+        self.cancel_where(|_| true).await;
+    }
+
+    /// Cancels and joins every task whose key matches.
+    pub(super) async fn cancel_where(&self, mut matches: impl FnMut(&K) -> bool) {
+        let keys: Vec<_> = self
+            .tasks
+            .iter()
+            .map(|entry| *entry.key())
+            .filter(|key| matches(key))
+            .collect();
         for key in keys {
             let _ = self.cancel(key).await;
         }

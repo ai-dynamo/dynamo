@@ -20,3 +20,9 @@ SPDX-License-Identifier: Apache-2.0
 - Do not share DGD, DGDR, or other test fixtures between tests. Every fixture must be owned by one test.
 - Keep fixtures in local variables or constants so their ownership remains visible.
 - Prefer a shared construction DSL when complex fixtures repeat boilerplate. The DSL should describe the object at a domain level; share the DSL, never the constructed fixture.
+
+# clusterenv golden review
+
+- Before changing clusterenv goldens, their normalization, or hash bindings, read [the golden review rules](testdata/README.md). These rules cover all controller goldens, including DCD, DGD, DGDR, and upgrade scenarios.
+- Every change to an existing golden requires a field-by-field semantic review. Never replace expected output, recompute expected hashes, or add wildcards merely to make a failing test pass. Regeneration does not establish correctness.
+- Treat changes to rollout-relevant hashes, generated names, selectors, and pod templates as potential production rollouts, even when DGD intent and runtime images are unchanged. Investigate the production change first; preserve compatibility or document and validate an intentional migration. Explain each semantic golden change and its upgrade consequences in the PR.

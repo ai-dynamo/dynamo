@@ -22,7 +22,7 @@ With GPUDirect RDMA enabled, the NIC reads and writes GPU memory directly, so a 
 Dynamo needs RDMA for **disaggregated serving**, where prefill workers generate KV cache and hand it to decode workers. Each handoff is a large GPU-to-GPU transfer, and the transport decides whether it takes milliseconds or seconds.
 
 - **Across nodes** — NVLink does not span nodes, so an RDMA fabric is the only fast path between a prefill worker and a decode worker on different machines.
-- **Same node, different pods** — Kubernetes process isolation and GPU partitioning block NVLink between pods, so even co-located prefill and decode workers transfer over the NIC. Use RDMA here too.
+- **Same node, different pods** — By default, Kubernetes process isolation and GPU partitioning block NVLink between pods, so even co-located prefill and decode workers transfer over the NIC. Use RDMA here too. Pods that share the host PID namespace and can see each other's GPUs can use NVLink instead; see [Use NVLink between pods on one node](../../disaggregated-serving/overview.md#use-nvlink-between-pods-on-one-node) for this opt-in and its security trade-offs.
 - **The alternative is TCP over Ethernet**, which is 200-500x slower for this transfer: roughly 98s Time To First Token (TTFT) on TCP versus 200-500ms with RDMA.
 
 Aggregated deployments run prefill and decode in one worker, transfer no KV cache between workers, and do not need RDMA.

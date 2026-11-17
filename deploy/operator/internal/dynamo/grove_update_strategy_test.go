@@ -19,7 +19,6 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/utils/ptr"
 )
 
 func TestGenerateGrovePodCliqueSet_CoherentStrategyPreservesTemplates(t *testing.T) {
@@ -28,15 +27,13 @@ func TestGenerateGrovePodCliqueSet_CoherentStrategyPreservesTemplates(t *testing
 		t.Run(fmt.Sprintf("multinode=%t/hashSuffix=%t", multinode, workerHashSuffix), func(t *testing.T) {
 			t.Log("Render an existing disaggregated graph with RollingRecreate")
 			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "graph", Namespace: "default",
-					Annotations: map[string]string{commonconsts.KubeAnnotationGroveUpdateStrategy: "RollingRecreate", commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"},
-				},
+				Name: "graph", Namespace: "default",
+				Annotations: map[string]string{commonconsts.KubeAnnotationGroveUpdateStrategy: "RollingRecreate", commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"},
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
-						{ComponentName: "Prefill", ComponentType: commonconsts.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
-						{ComponentName: "Decode", ComponentType: commonconsts.ComponentTypeDecode, Replicas: ptr.To(int32(2))},
+						{ComponentName: "Prefill", ComponentType: commonconsts.ComponentTypePrefill, Replicas: new(int32(1))},
+						{ComponentName: "Decode", ComponentType: commonconsts.ComponentTypeDecode, Replicas: new(int32(2))},
 					},
 				},
 			}
@@ -77,8 +74,8 @@ func TestGroveUpdateStrategyPolicy(t *testing.T) {
 				for _, form := range []string{"omitted", "legacy", nativeMinimumForm} {
 					t.Run(fmt.Sprintf("origin=%s/annotation=%s/disagg=%t/form=%s", origin, annotation, disagg, form), func(t *testing.T) {
 						t.Log("Author an old or new graph with optional explicit strategy")
-						dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", Annotations: map[string]string{}}, Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
-							{ComponentName: "Worker", ComponentType: commonconsts.ComponentTypeWorker, Replicas: ptr.To(int32(2))},
+						dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "default", Annotations: map[string]string{}, Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+							{ComponentName: "Worker", ComponentType: commonconsts.ComponentTypeWorker, Replicas: new(int32(2))},
 						}}}
 						if origin != "" {
 							dgd.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = origin
@@ -88,12 +85,12 @@ func TestGroveUpdateStrategyPolicy(t *testing.T) {
 						}
 						if disagg {
 							dgd.Spec.Components = []v1beta1.DynamoComponentDeploymentSharedSpec{
-								{ComponentName: "Prefill", ComponentType: commonconsts.ComponentTypePrefill, Replicas: ptr.To(int32(2))},
-								{ComponentName: "Decode", ComponentType: commonconsts.ComponentTypeDecode, Replicas: ptr.To(int32(3))},
+								{ComponentName: "Prefill", ComponentType: commonconsts.ComponentTypePrefill, Replicas: new(int32(2))},
+								{ComponentName: "Decode", ComponentType: commonconsts.ComponentTypeDecode, Replicas: new(int32(3))},
 							}
 						}
 						if form == "legacy" {
-							dgd.Spec.Components[0].MinAvailable = ptr.To(int32(1))
+							dgd.Spec.Components[0].MinAvailable = new(int32(1))
 						}
 						if form == nativeMinimumForm {
 							dgd.Spec.Components[0].ProviderOverride = &v1beta1.ProviderOverride{APIVersion: provideroverride.GroveAPIVersion, Target: provideroverride.TargetPodCliqueTemplateSpec, Value: apiextensionsv1.JSON{Raw: []byte(`{"spec":{"minAvailable":1}}`)}}
@@ -127,7 +124,7 @@ func TestGroveUpdateStrategyTransitionsWait(t *testing.T) {
 			for _, annotation := range []string{"", string(grovev1alpha1.CoherentStrategy), "RollingRecreate", "OnDelete"} {
 				t.Run(fmt.Sprintf("multinode=%t/observed=%s/annotation=%s", multinode, observed, annotation), func(t *testing.T) {
 					t.Log("Render a PCS and mark a standalone or scaling-group rollout in progress")
-					dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}}, Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "Worker", ComponentType: commonconsts.ComponentTypeWorker, Replicas: ptr.To(int32(3))}}}}
+					dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "default", Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}, Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "Worker", ComponentType: commonconsts.ComponentTypeWorker, Replicas: new(int32(3))}}}}
 					if multinode {
 						dgd.Spec.Components[0].Multinode = &v1beta1.MultinodeSpec{NodeCount: 2}
 					}
@@ -154,7 +151,7 @@ func TestGroveUpdateStrategyTransitionsWait(t *testing.T) {
 					require.Equal(t, before, existing)
 
 					t.Log("Apply the pending intent after Grove finishes the current rollout")
-					existing.Status.UpdateProgress.UpdateEndedAt = ptr.To(metav1.Now())
+					existing.Status.UpdateProgress.UpdateEndedAt = new(metav1.Now())
 					desired, err = GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtime, nil, &mockSecretsRetriever{}, nil, existing, true, nil)
 					require.NoError(t, err)
 					want := annotation
@@ -189,7 +186,7 @@ func TestGroveMinAvailableMigrationPreservesWorkload(t *testing.T) {
 	for _, multinode := range []bool{false, true} {
 		t.Run(fmt.Sprintf("multinode=%t", multinode), func(t *testing.T) {
 			t.Log("Render a legacy graph and record its complete workload identity")
-			dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"}, Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "Worker", ComponentType: commonconsts.ComponentTypeWorker, Replicas: ptr.To(int32(4)), MinAvailable: ptr.To(int32(2))}}}}
+			dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "default", Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "Worker", ComponentType: commonconsts.ComponentTypeWorker, Replicas: new(int32(4)), MinAvailable: new(int32(2))}}}}
 			component := &dgd.Spec.Components[0]
 			if multinode {
 				component.Multinode = &v1beta1.MultinodeSpec{NodeCount: 2}
@@ -244,21 +241,21 @@ func TestGroveScalingBlocked(t *testing.T) {
 		{name: "before creation", missingPCS: true},
 		{name: "initial configuration without observed generation", noProgress: true},
 		{name: "initial coherent configuration without observed generation", strategy: grovev1alpha1.CoherentStrategy, noProgress: true, blocked: true},
-		{name: "coherent configuration before an update starts", strategy: grovev1alpha1.CoherentStrategy, observed: ptr.To(int64(1)), noProgress: true, blocked: true},
-		{name: "acknowledged coherent configuration without a rollout", strategy: grovev1alpha1.CoherentStrategy, observed: ptr.To(int64(2)), noProgress: true},
-		{name: "active coherent update with lagging observed generation", strategy: grovev1alpha1.CoherentStrategy, observed: ptr.To(int64(1)), active: true, blocked: true},
+		{name: "coherent configuration before an update starts", strategy: grovev1alpha1.CoherentStrategy, observed: new(int64(1)), noProgress: true, blocked: true},
+		{name: "acknowledged coherent configuration without a rollout", strategy: grovev1alpha1.CoherentStrategy, observed: new(int64(2)), noProgress: true},
+		{name: "active coherent update with lagging observed generation", strategy: grovev1alpha1.CoherentStrategy, observed: new(int64(1)), active: true, blocked: true},
 		{name: "active coherent update without observed generation", strategy: grovev1alpha1.CoherentStrategy, active: true, blocked: true},
-		{name: "active coherent update after generation acknowledgement", strategy: grovev1alpha1.CoherentStrategy, observed: ptr.To(int64(2)), active: true, blocked: true},
-		{name: "completed coherent update with lagging observed generation", strategy: grovev1alpha1.CoherentStrategy, observed: ptr.To(int64(1)), blocked: true},
-		{name: "completed acknowledged coherent update", strategy: grovev1alpha1.CoherentStrategy, observed: ptr.To(int64(2))},
-		{name: "active rolling recreate with lagging observed generation", strategy: grovev1alpha1.RollingRecreateStrategy, observed: ptr.To(int64(1)), active: true},
-		{name: "on delete with lagging observed generation", strategy: grovev1alpha1.OnDeleteStrategy, observed: ptr.To(int64(1))},
-		{name: "implicit rolling recreate with lagging observed generation", observed: ptr.To(int64(1)), active: true},
+		{name: "active coherent update after generation acknowledgement", strategy: grovev1alpha1.CoherentStrategy, observed: new(int64(2)), active: true, blocked: true},
+		{name: "completed coherent update with lagging observed generation", strategy: grovev1alpha1.CoherentStrategy, observed: new(int64(1)), blocked: true},
+		{name: "completed acknowledged coherent update", strategy: grovev1alpha1.CoherentStrategy, observed: new(int64(2))},
+		{name: "active rolling recreate with lagging observed generation", strategy: grovev1alpha1.RollingRecreateStrategy, observed: new(int64(1)), active: true},
+		{name: "on delete with lagging observed generation", strategy: grovev1alpha1.OnDeleteStrategy, observed: new(int64(1))},
+		{name: "implicit rolling recreate with lagging observed generation", observed: new(int64(1)), active: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Observe the PCS strategy, generation acknowledgement, and update progress")
 			pcs := &grovev1alpha1.PodCliqueSet{
-				ObjectMeta: metav1.ObjectMeta{Generation: 2},
+				Generation: 2,
 				Status: grovev1alpha1.PodCliqueSetStatus{
 					ObservedGeneration: test.observed,
 					UpdateProgress:     &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now()},
@@ -268,7 +265,7 @@ func TestGroveScalingBlocked(t *testing.T) {
 				pcs.Spec.UpdateStrategy = &grovev1alpha1.PodCliqueSetUpdateStrategy{Type: test.strategy}
 			}
 			if !test.active {
-				pcs.Status.UpdateProgress.UpdateEndedAt = ptr.To(metav1.Now())
+				pcs.Status.UpdateProgress.UpdateEndedAt = new(metav1.Now())
 			}
 			if test.noProgress {
 				pcs.Status.UpdateProgress = nil

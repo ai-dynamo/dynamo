@@ -6,6 +6,10 @@ use std::process::Command;
 #[test]
 fn executable_exposes_native_grpc_configuration() {
     let output = Command::new(env!("CARGO_BIN_EXE_dynamo-trtllm-sidecar"))
+        .env(
+            "TRTLLM_SUBAGENT_AFFINITY_AUTH_KEY",
+            "test-only-affinity-secret",
+        )
         .arg("--help")
         .output()
         .expect("run dynamo-trtllm-sidecar --help");
@@ -28,6 +32,9 @@ fn executable_exposes_native_grpc_configuration() {
         assert!(stdout.contains(flag), "missing {flag} in help output");
     }
     assert!(stdout.contains("DYN_SIDECAR_GRPC_ENDPOINT"));
+    assert!(stdout.contains("TRTLLM_SUBAGENT_AFFINITY_AUTH_KEY"));
+    assert!(!stdout.contains("test-only-affinity-secret"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("test-only-affinity-secret"));
 }
 
 #[test]
@@ -47,4 +54,23 @@ fn invalid_arguments_fail_before_runtime_configuration() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("model-path must not be empty"), "{stderr}");
+}
+
+#[test]
+fn invalid_remote_url_policy_fails_before_runtime_configuration() {
+    let output = Command::new(env!("CARGO_BIN_EXE_dynamo-trtllm-sidecar"))
+        .args([
+            "--grpc-endpoint",
+            "http://127.0.0.1:1",
+            "--model-path",
+            "model",
+        ])
+        .env("DYN_MM_ALLOW_REMOTE_URLS", "invalid")
+        .env("ETCD_ENDPOINTS", "://invalid")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("DYN_MM_ALLOW_REMOTE_URLS"), "{stderr}");
+    assert!(stderr.contains("Invalid boolean value"), "{stderr}");
 }

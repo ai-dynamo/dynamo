@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use futures::{StreamExt, stream::BoxStream};
@@ -17,6 +17,7 @@ pub trait Protocol: Send + Sync + 'static {
     fn record_tokens(response: &Self::Response, tokens: &mut Vec<u32>) -> bool;
     fn is_terminal(response: &Self::Response) -> bool;
     fn injected_error(message: &'static str) -> Self::Error;
+    fn invalid_argument_error(message: &'static str) -> Self::Error;
 }
 
 #[derive(Clone, Copy, Default)]
@@ -24,6 +25,7 @@ pub enum OpenAction {
     #[default]
     Continue,
     Fail,
+    Reject,
     Hold,
 }
 
@@ -153,12 +155,15 @@ impl<P: Protocol> RequestHandle<P> {
 
 pub struct Controller<P: Protocol> {
     requests: Arc<Mutex<HashMap<String, RequestHandle<P>>>>,
+    /// Plans for requests whose worker id is not known in advance, claimed in arrival order.
+    unbound: Arc<Mutex<VecDeque<RequestHandle<P>>>>,
 }
 
 impl<P: Protocol> Default for Controller<P> {
     fn default() -> Self {
         Self {
             requests: Arc::default(),
+            unbound: Arc::default(),
         }
     }
 }
@@ -167,6 +172,7 @@ impl<P: Protocol> Clone for Controller<P> {
     fn clone(&self) -> Self {
         Self {
             requests: Arc::clone(&self.requests),
+            unbound: Arc::clone(&self.unbound),
         }
     }
 }
@@ -183,13 +189,29 @@ impl<P: Protocol> Controller<P> {
         handle
     }
 
+    /// Bind `plan` to the next request whose id was not registered with [`Self::request`].
+    ///
+    /// HTTP ingress mints the worker request id on the server, so a test driving the frontend
+    /// cannot choose it; it queues the plan here before sending the request instead.
+    pub fn next_request(&self, plan: RequestPlan) -> RequestHandle<P> {
+        let handle = RequestHandle::new(plan);
+        self.unbound.lock().unwrap().push_back(handle.clone());
+        handle
+    }
+
     pub async fn open(&self, request: &P::Request) -> Result<OpenedRequest<P>, P::Error> {
         let handle = self
             .requests
             .lock()
             .unwrap()
             .entry(P::request_id(request).to_owned())
-            .or_insert_with(|| RequestHandle::new(RequestPlan::default()))
+            .or_insert_with(|| {
+                self.unbound
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| RequestHandle::new(RequestPlan::default()))
+            })
             .clone();
         {
             let mut observed = handle.0.observed.lock().unwrap();
@@ -207,6 +229,11 @@ impl<P: Protocol> Controller<P> {
         match handle.0.plan.open {
             OpenAction::Continue => {}
             OpenAction::Fail => return Err(P::injected_error("injected open failure")),
+            OpenAction::Reject => {
+                return Err(P::invalid_argument_error(
+                    "injected native request rejection",
+                ));
+            }
             OpenAction::Hold => handle.0.release.notified().await,
         }
         Ok(OpenedRequest { handle, guard })
@@ -316,6 +343,10 @@ mod tests {
         }
 
         fn injected_error(message: &'static str) -> Self::Error {
+            message
+        }
+
+        fn invalid_argument_error(message: &'static str) -> Self::Error {
             message
         }
     }

@@ -14,7 +14,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 )
 
 // ComponentRuntimeStatus is the provider-neutral runtime identity projected
@@ -33,7 +32,19 @@ func ResolveComponentRuntimeStatus(
 	annotations map[string]string,
 ) ComponentRuntimeStatus {
 	status := ComponentRuntimeStatus{}
-	main := mainContainerFromPodSpec(podSpec)
+	main := GetMainContainerFromPodSpec(podSpec)
+
+	// Native sidecars publish their identity through runtime registration. Do not
+	// predict it from either the engine flags or the sidecar's launch command.
+	if podSpec != nil {
+		for _, container := range podSpec.InitContainers {
+			if container.Name == commonconsts.RuntimeContainerName {
+				main = nil
+				break
+			}
+		}
+	}
+
 	if main != nil {
 		tokens := shellCommandLineTokens(main.Command, main.Args)
 		status.ServedModelName = firstFlagValue(
@@ -52,7 +63,7 @@ func ResolveComponentRuntimeStatus(
 
 	if raw := annotations[commonconsts.KubeAnnotationGPUPowerLimit]; raw != "" {
 		if watts, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil && watts > 0 {
-			status.GPUPowerLimitWatts = ptr.To(watts)
+			status.GPUPowerLimitWatts = new(watts)
 		}
 	}
 	return status
@@ -91,18 +102,6 @@ func ResolveGroveComponentRuntimeStatuses(
 		)
 	}
 	return statuses
-}
-
-func mainContainerFromPodSpec(podSpec *corev1.PodSpec) *corev1.Container {
-	if podSpec == nil {
-		return nil
-	}
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
-			return &podSpec.Containers[i]
-		}
-	}
-	return nil
 }
 
 func shellCommandLineTokens(command, args []string) []string {

@@ -267,6 +267,7 @@ impl MockerBackend {
             engine_args,
             disaggregation_mode,
         );
+        let structural_tag = args.common.structural_tag(false);
         let config = WorkerConfig {
             runtime: args.common.runtime,
             namespace: args.common.namespace,
@@ -282,6 +283,7 @@ impl MockerBackend {
             tool_call_parser,
             reasoning_parser,
             exclude_tools_when_tool_choice_none: args.common.exclude_tools_when_tool_choice_none,
+            structural_tag,
             ..Default::default()
         };
         Ok((engine, config))
@@ -533,10 +535,10 @@ impl LLMEngine for MockerBackend {
                             // no real KV transfer; the handle is opaque and
                             // exists only to exercise the wire format.
                             if is_prefill {
-                                terminal.disaggregated_params = Some(serde_json::json!({
+                                terminal.disaggregated_params = Some(Box::new(serde_json::json!({
                                     "mocker_handle": uuid.to_string(),
                                     "completed_tokens": [token_id],
-                                }));
+                                })));
                             }
                             yield Ok(terminal);
                             break;

@@ -17,7 +17,11 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
+from PIL import Image
+from vllm.config import ModelConfig
 from vllm.inputs import TokensPrompt
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import convert_image_mode, normalize_image
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 
 from dynamo.common.constants import DisaggregationMode
@@ -120,6 +124,11 @@ def _build_forwarded_mm_uuids(
     return None
 
 
+def _vllm_rgb(image: Image.Image) -> Image.Image:
+    """Apply EXIF orientation, then composite transparency, as vLLM's loader does."""
+    return convert_image_mode(normalize_image(image), "RGB")
+
+
 def _video_media_io_kwargs(request: dict) -> dict:
     """Request-level video decode options, shape-checked the way vLLM does.
 
@@ -134,13 +143,13 @@ def _video_media_io_kwargs(request: dict) -> dict:
     if media_io_kwargs is None:
         return {}
     if not isinstance(media_io_kwargs, dict):
-        raise ValueError("media_io_kwargs must be an object")
+        raise InvalidArgument("media_io_kwargs must be an object")
 
     video_kwargs = media_io_kwargs.get("video")
     if video_kwargs is None:
         return {}
     if not isinstance(video_kwargs, dict):
-        raise ValueError("media_io_kwargs['video'] must be an object")
+        raise InvalidArgument("media_io_kwargs['video'] must be an object")
     return video_kwargs
 
 
@@ -160,15 +169,15 @@ def _build_user_mm_uuids(
     if raw_uuids is None:
         return None
     if not isinstance(raw_uuids, dict):
-        raise ValueError("multi_modal_uuids must be an object")
+        raise InvalidArgument("multi_modal_uuids must be an object")
 
     mm_uuids: dict[str, list[str | None]] = {}
     for modality, values in raw_uuids.items():
         if not isinstance(values, list):
-            raise ValueError(f"multi_modal_uuids[{modality!r}] must be a list")
+            raise InvalidArgument(f"multi_modal_uuids[{modality!r}] must be a list")
         for index, value in enumerate(values):
             if value is not None and (not isinstance(value, str) or not value):
-                raise ValueError(
+                raise InvalidArgument(
                     f"multi_modal_uuids[{modality!r}] entries must be non-empty "
                     f"strings or null; got invalid entry at index {index}"
                 )
@@ -268,7 +277,7 @@ def compute_mm_uuids(
     if not images:
         return None
     if any(image is None for image in images):
-        raise ValueError(
+        raise InvalidArgument(
             "UUID-only image slots require aligned multi_modal_uuids; "
             "no cache UUID was provided"
         )
@@ -355,6 +364,7 @@ class VllmMultimodalRequestProcessor:
         use_unified_vision_chunk: Optional[bool] = None,
         trust_remote_code: bool = False,
     ) -> None:
+        """Bind the engine client, loaders, and model-specific multimodal policy."""
         self.model = model
         self.engine_client = engine_client
         self.enable_multimodal = enable_multimodal
@@ -362,7 +372,7 @@ class VllmMultimodalRequestProcessor:
         self.trust_remote_code = trust_remote_code
         self.embedding_loader = embedding_loader
         self.image_loader = image_loader or ImageLoader(
-            enable_frontend_decoding=enable_frontend_decoding
+            enable_frontend_decoding=enable_frontend_decoding, to_rgb=_vllm_rgb
         )
         self.video_loader = video_loader or VideoLoader(
             enable_frontend_decoding=enable_frontend_decoding
@@ -371,6 +381,7 @@ class VllmMultimodalRequestProcessor:
             enable_frontend_decoding=enable_frontend_decoding
         )
         self._mm_kwargs_receiver: Optional[MmKwargsNixlReceiver] = None
+        self._cached_supported_modalities: Optional[frozenset[str]] = None
         self._model_family = resolve_model_family(model)
         self._qwen_grid_params: Optional[QwenGridParams] = None
         self._k3_expansion: Optional[tuple[int, list[int]]] = None
@@ -485,7 +496,7 @@ class VllmMultimodalRequestProcessor:
                 break
 
         if len(pad_positions) != expected:
-            raise ValueError(
+            raise InvalidArgument(
                 f"Kimi-K3 prompt carries {len(pad_positions)} <|media_pad|> "
                 f"token(s) but {expected} image(s) were supplied; refusing to "
                 "expand."
@@ -499,6 +510,35 @@ class VllmMultimodalRequestProcessor:
             previous = position + 1
         expanded.extend(token_ids[previous:])
         return expanded
+
+    def _supported_modalities(self) -> Optional[frozenset[str]]:
+        """Modalities this model can accept, or None when that is unknown.
+
+        vLLM's per-prompt limit treats an unspecified modality as 999. That is
+        a user cap, not model capability. A vision-language model with no audio
+        tower omits ``audio`` from its supported limits; using 999 decodes the
+        clip and reports a missing decoder as HTTP 500.
+        """
+        if self._cached_supported_modalities is not None:
+            return self._cached_supported_modalities
+
+        model_config = getattr(
+            getattr(self.engine_client, "vllm_config", None), "model_config", None
+        )
+        # Unit-test doubles are not a loaded model. Leave their limits alone.
+        if not isinstance(model_config, ModelConfig):
+            return None
+
+        try:
+            info = MULTIMODAL_REGISTRY.get_processing_info(model_config)
+        except ValueError:
+            # No registered processor means the model accepts no media.
+            modalities: frozenset[str] = frozenset()
+        else:
+            modalities = frozenset(info.supported_mm_limits)
+
+        self._cached_supported_modalities = modalities
+        return modalities
 
     @staticmethod
     def _multimodal_disabled_error() -> InvalidArgument:
@@ -540,6 +580,7 @@ class VllmMultimodalRequestProcessor:
         )
 
         # These are inbound media items, not decoded frames or image crops.
+        supported = self._supported_modalities()
         for modality, key in (
             ("image", IMAGE_URL_KEY),
             ("video", VIDEO_URL_KEY),
@@ -549,9 +590,14 @@ class VllmMultimodalRequestProcessor:
             count = len(items)
             if modality == "audio":
                 count += video_audio_count
+            # Kimi registers images as vision_chunk, so compare that key.
             limit_modality = _normalize_forwarded_mm_modality(
                 modality, self.use_unified_vision_chunk
             )
+            if supported is not None and limit_modality not in supported:
+                if count > 0:
+                    raise InvalidArgument(f"Model does not support {modality} input.")
+                continue
             limit = mm_config.get_limit_per_prompt(limit_modality)
             if count > limit:
                 raise InvalidArgument(
@@ -691,7 +737,7 @@ class VllmMultimodalRequestProcessor:
                 for item in video_items:
                     url = item.get(URL_VARIANT_KEY) if isinstance(item, dict) else None
                     if not url:
-                        raise ValueError(
+                        raise InvalidArgument(
                             "use_audio_in_video requires all video items to be "
                             "URL-based. Got a non-URL video item (e.g. frontend-"
                             "decoded). Audio extraction from decoded video data "

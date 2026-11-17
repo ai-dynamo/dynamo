@@ -422,11 +422,9 @@ func TestCheckPodCliqueReady(t *testing.T) {
 			resourceName: "ready-podclique",
 			namespace:    "default",
 			existingPodClique: &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "ready-podclique",
-					Namespace:  "default",
-					Generation: 1,
-				},
+				Name:       "ready-podclique",
+				Namespace:  "default",
+				Generation: 1,
 				Spec: grovev1alpha1.PodCliqueSpec{
 					Replicas: 3,
 				},
@@ -435,7 +433,7 @@ func TestCheckPodCliqueReady(t *testing.T) {
 					ReadyReplicas:      3,
 					UpdatedReplicas:    3,
 					ScheduledReplicas:  3,
-					ObservedGeneration: ptr.To(int64(1)),
+					ObservedGeneration: new(int64(1)),
 				},
 			},
 			wantReady:          true,
@@ -445,8 +443,8 @@ func TestCheckPodCliqueReady(t *testing.T) {
 				ComponentNames:    []string{"ready-podclique"},
 				Replicas:          3,
 				UpdatedReplicas:   3,
-				ReadyReplicas:     ptr.To(int32(3)),
-				ScheduledReplicas: ptr.To(int32(3)),
+				ReadyReplicas:     new(int32(3)),
+				ScheduledReplicas: new(int32(3)),
 			},
 		},
 		{
@@ -454,11 +452,9 @@ func TestCheckPodCliqueReady(t *testing.T) {
 			resourceName: "zero-replicas-podclique",
 			namespace:    "default",
 			existingPodClique: &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "zero-replicas-podclique",
-					Namespace:  "default",
-					Generation: 1,
-				},
+				Name:       "zero-replicas-podclique",
+				Namespace:  "default",
+				Generation: 1,
 				Spec: grovev1alpha1.PodCliqueSpec{
 					Replicas: 0,
 				},
@@ -466,7 +462,7 @@ func TestCheckPodCliqueReady(t *testing.T) {
 					Replicas:           0,
 					ReadyReplicas:      0,
 					UpdatedReplicas:    0,
-					ObservedGeneration: ptr.To(int64(1)),
+					ObservedGeneration: new(int64(1)),
 				},
 			},
 			wantReady:          true,
@@ -476,8 +472,8 @@ func TestCheckPodCliqueReady(t *testing.T) {
 				ComponentNames:    []string{"zero-replicas-podclique"},
 				Replicas:          0,
 				UpdatedReplicas:   0,
-				ReadyReplicas:     ptr.To(int32(0)),
-				ScheduledReplicas: ptr.To(int32(0)),
+				ReadyReplicas:     new(int32(0)),
+				ScheduledReplicas: new(int32(0)),
 			},
 		},
 		{
@@ -485,11 +481,9 @@ func TestCheckPodCliqueReady(t *testing.T) {
 			resourceName: "stale-podclique",
 			namespace:    "default",
 			existingPodClique: &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "stale-podclique",
-					Namespace:  "default",
-					Generation: 3,
-				},
+				Name:       "stale-podclique",
+				Namespace:  "default",
+				Generation: 3,
 				Spec: grovev1alpha1.PodCliqueSpec{
 					Replicas: 2,
 				},
@@ -497,7 +491,7 @@ func TestCheckPodCliqueReady(t *testing.T) {
 					Replicas:           2,
 					ReadyReplicas:      2,
 					UpdatedReplicas:    2,
-					ObservedGeneration: ptr.To(int64(2)),
+					ObservedGeneration: new(int64(2)),
 				},
 			},
 			wantReady:          false,
@@ -508,7 +502,7 @@ func TestCheckPodCliqueReady(t *testing.T) {
 				ComponentNames:  []string{"stale-podclique"},
 				Replicas:        2,
 				UpdatedReplicas: 2,
-				ReadyReplicas:   ptr.To(int32(2)),
+				ReadyReplicas:   new(int32(2)),
 			},
 		},
 		{
@@ -516,11 +510,9 @@ func TestCheckPodCliqueReady(t *testing.T) {
 			resourceName: "not-ready-podclique",
 			namespace:    "default",
 			existingPodClique: &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "not-ready-podclique",
-					Namespace:  "default",
-					Generation: 1,
-				},
+				Name:       "not-ready-podclique",
+				Namespace:  "default",
+				Generation: 1,
 				Spec: grovev1alpha1.PodCliqueSpec{
 					Replicas: 3,
 				},
@@ -529,7 +521,7 @@ func TestCheckPodCliqueReady(t *testing.T) {
 					ReadyReplicas:      1,
 					UpdatedReplicas:    3,
 					ScheduledReplicas:  3,
-					ObservedGeneration: ptr.To(int64(1)),
+					ObservedGeneration: new(int64(1)),
 				},
 			},
 			wantReady:          false,
@@ -540,8 +532,8 @@ func TestCheckPodCliqueReady(t *testing.T) {
 				ComponentNames:    []string{"not-ready-podclique"},
 				Replicas:          3,
 				UpdatedReplicas:   3,
-				ReadyReplicas:     ptr.To(int32(1)),
-				ScheduledReplicas: ptr.To(int32(3)),
+				ReadyReplicas:     new(int32(1)),
+				ScheduledReplicas: new(int32(3)),
 			},
 		},
 		{
@@ -549,11 +541,9 @@ func TestCheckPodCliqueReady(t *testing.T) {
 			resourceName: "not-updated-podclique",
 			namespace:    "default",
 			existingPodClique: &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "not-updated-podclique",
-					Namespace:  "default",
-					Generation: 1,
-				},
+				Name:       "not-updated-podclique",
+				Namespace:  "default",
+				Generation: 1,
 				Spec: grovev1alpha1.PodCliqueSpec{
 					Replicas: 3,
 				},
@@ -562,7 +552,7 @@ func TestCheckPodCliqueReady(t *testing.T) {
 					ReadyReplicas:      3,
 					UpdatedReplicas:    2,
 					ScheduledReplicas:  3,
-					ObservedGeneration: ptr.To(int64(1)),
+					ObservedGeneration: new(int64(1)),
 				},
 			},
 			wantReady:          false,
@@ -573,8 +563,8 @@ func TestCheckPodCliqueReady(t *testing.T) {
 				ComponentNames:    []string{"not-updated-podclique"},
 				Replicas:          3,
 				UpdatedReplicas:   2,
-				ReadyReplicas:     ptr.To(int32(3)),
-				ScheduledReplicas: ptr.To(int32(3)),
+				ReadyReplicas:     new(int32(3)),
+				ScheduledReplicas: new(int32(3)),
 			},
 		},
 		{
@@ -582,11 +572,9 @@ func TestCheckPodCliqueReady(t *testing.T) {
 			resourceName: "rolling-update-podclique",
 			namespace:    "default",
 			existingPodClique: &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "rolling-update-podclique",
-					Namespace:  "default",
-					Generation: 1,
-				},
+				Name:       "rolling-update-podclique",
+				Namespace:  "default",
+				Generation: 1,
 				Spec: grovev1alpha1.PodCliqueSpec{
 					Replicas: 3,
 				},
@@ -595,7 +583,7 @@ func TestCheckPodCliqueReady(t *testing.T) {
 					ReadyReplicas:      3,
 					UpdatedReplicas:    3,
 					ScheduledReplicas:  4,
-					ObservedGeneration: ptr.To(int64(1)),
+					ObservedGeneration: new(int64(1)),
 				},
 			},
 			wantReady:          false,
@@ -606,8 +594,8 @@ func TestCheckPodCliqueReady(t *testing.T) {
 				ComponentNames:    []string{"rolling-update-podclique"},
 				Replicas:          4,
 				UpdatedReplicas:   3,
-				ReadyReplicas:     ptr.To(int32(3)),
-				ScheduledReplicas: ptr.To(int32(4)),
+				ReadyReplicas:     new(int32(3)),
+				ScheduledReplicas: new(int32(4)),
 			},
 		},
 		{
@@ -615,11 +603,9 @@ func TestCheckPodCliqueReady(t *testing.T) {
 			resourceName: "nil-observed-gen-podclique",
 			namespace:    "default",
 			existingPodClique: &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "nil-observed-gen-podclique",
-					Namespace:  "default",
-					Generation: 1,
-				},
+				Name:       "nil-observed-gen-podclique",
+				Namespace:  "default",
+				Generation: 1,
 				Spec: grovev1alpha1.PodCliqueSpec{
 					Replicas: 2,
 				},
@@ -638,7 +624,7 @@ func TestCheckPodCliqueReady(t *testing.T) {
 				ComponentNames:  []string{"nil-observed-gen-podclique"},
 				Replicas:        2,
 				UpdatedReplicas: 2,
-				ReadyReplicas:   ptr.To(int32(2)),
+				ReadyReplicas:   new(int32(2)),
 			},
 		},
 	}
@@ -709,11 +695,9 @@ func TestCheckPCSGReady(t *testing.T) {
 			resourceName: "ready-pcsg",
 			namespace:    "default",
 			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "ready-pcsg",
-					Namespace:  "default",
-					Generation: 1,
-				},
+				Name:       "ready-pcsg",
+				Namespace:  "default",
+				Generation: 1,
 				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
 					Replicas: 3,
 				},
@@ -722,7 +706,7 @@ func TestCheckPCSGReady(t *testing.T) {
 					AvailableReplicas:  3,
 					UpdatedReplicas:    3,
 					ScheduledReplicas:  3,
-					ObservedGeneration: ptr.To(int64(1)),
+					ObservedGeneration: new(int64(1)),
 				},
 			},
 			wantReady:          true,
@@ -732,8 +716,8 @@ func TestCheckPCSGReady(t *testing.T) {
 				ComponentNames:    []string{"ready-pcsg"},
 				Replicas:          3,
 				UpdatedReplicas:   3,
-				AvailableReplicas: ptr.To(int32(3)),
-				ScheduledReplicas: ptr.To(int32(3)),
+				AvailableReplicas: new(int32(3)),
+				ScheduledReplicas: new(int32(3)),
 			},
 		},
 		{
@@ -741,11 +725,9 @@ func TestCheckPCSGReady(t *testing.T) {
 			resourceName: "zero-replicas-pcsg",
 			namespace:    "default",
 			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "zero-replicas-pcsg",
-					Namespace:  "default",
-					Generation: 1,
-				},
+				Name:       "zero-replicas-pcsg",
+				Namespace:  "default",
+				Generation: 1,
 				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
 					Replicas: 0,
 				},
@@ -753,7 +735,7 @@ func TestCheckPCSGReady(t *testing.T) {
 					Replicas:           0,
 					AvailableReplicas:  0,
 					UpdatedReplicas:    0,
-					ObservedGeneration: ptr.To(int64(1)),
+					ObservedGeneration: new(int64(1)),
 				},
 			},
 			wantReady:          true,
@@ -763,8 +745,8 @@ func TestCheckPCSGReady(t *testing.T) {
 				ComponentNames:    []string{"zero-replicas-pcsg"},
 				Replicas:          0,
 				UpdatedReplicas:   0,
-				AvailableReplicas: ptr.To(int32(0)),
-				ScheduledReplicas: ptr.To(int32(0)),
+				AvailableReplicas: new(int32(0)),
+				ScheduledReplicas: new(int32(0)),
 			},
 		},
 		{
@@ -772,11 +754,9 @@ func TestCheckPCSGReady(t *testing.T) {
 			resourceName: "stale-pcsg",
 			namespace:    "default",
 			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "stale-pcsg",
-					Namespace:  "default",
-					Generation: 3,
-				},
+				Name:       "stale-pcsg",
+				Namespace:  "default",
+				Generation: 3,
 				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
 					Replicas: 2,
 				},
@@ -784,7 +764,7 @@ func TestCheckPCSGReady(t *testing.T) {
 					Replicas:           2,
 					AvailableReplicas:  2,
 					UpdatedReplicas:    2,
-					ObservedGeneration: ptr.To(int64(2)),
+					ObservedGeneration: new(int64(2)),
 				},
 			},
 			wantReady:          false,
@@ -795,7 +775,7 @@ func TestCheckPCSGReady(t *testing.T) {
 				ComponentNames:    []string{"stale-pcsg"},
 				Replicas:          2,
 				UpdatedReplicas:   2,
-				AvailableReplicas: ptr.To(int32(2)),
+				AvailableReplicas: new(int32(2)),
 			},
 		},
 		{
@@ -803,11 +783,9 @@ func TestCheckPCSGReady(t *testing.T) {
 			resourceName: "not-ready-pcsg",
 			namespace:    "default",
 			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "not-ready-pcsg",
-					Namespace:  "default",
-					Generation: 1,
-				},
+				Name:       "not-ready-pcsg",
+				Namespace:  "default",
+				Generation: 1,
 				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
 					Replicas: 3,
 				},
@@ -816,7 +794,7 @@ func TestCheckPCSGReady(t *testing.T) {
 					AvailableReplicas:  1,
 					UpdatedReplicas:    3,
 					ScheduledReplicas:  3,
-					ObservedGeneration: ptr.To(int64(1)),
+					ObservedGeneration: new(int64(1)),
 				},
 			},
 			wantReady:          false,
@@ -827,8 +805,8 @@ func TestCheckPCSGReady(t *testing.T) {
 				ComponentNames:    []string{"not-ready-pcsg"},
 				Replicas:          3,
 				UpdatedReplicas:   3,
-				AvailableReplicas: ptr.To(int32(1)),
-				ScheduledReplicas: ptr.To(int32(3)),
+				AvailableReplicas: new(int32(1)),
+				ScheduledReplicas: new(int32(3)),
 			},
 		},
 		{
@@ -836,11 +814,9 @@ func TestCheckPCSGReady(t *testing.T) {
 			resourceName: "not-updated-pcsg",
 			namespace:    "default",
 			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "not-updated-pcsg",
-					Namespace:  "default",
-					Generation: 1,
-				},
+				Name:       "not-updated-pcsg",
+				Namespace:  "default",
+				Generation: 1,
 				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
 					Replicas: 3,
 				},
@@ -849,7 +825,7 @@ func TestCheckPCSGReady(t *testing.T) {
 					AvailableReplicas:  3,
 					UpdatedReplicas:    2,
 					ScheduledReplicas:  3,
-					ObservedGeneration: ptr.To(int64(1)),
+					ObservedGeneration: new(int64(1)),
 				},
 			},
 			wantReady:          false,
@@ -860,8 +836,8 @@ func TestCheckPCSGReady(t *testing.T) {
 				ComponentNames:    []string{"not-updated-pcsg"},
 				Replicas:          3,
 				UpdatedReplicas:   2,
-				AvailableReplicas: ptr.To(int32(3)),
-				ScheduledReplicas: ptr.To(int32(3)),
+				AvailableReplicas: new(int32(3)),
+				ScheduledReplicas: new(int32(3)),
 			},
 		},
 		{
@@ -869,11 +845,9 @@ func TestCheckPCSGReady(t *testing.T) {
 			resourceName: "rolling-update-pcsg",
 			namespace:    "default",
 			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "rolling-update-pcsg",
-					Namespace:  "default",
-					Generation: 1,
-				},
+				Name:       "rolling-update-pcsg",
+				Namespace:  "default",
+				Generation: 1,
 				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
 					Replicas: 3,
 				},
@@ -882,7 +856,7 @@ func TestCheckPCSGReady(t *testing.T) {
 					AvailableReplicas:  3,
 					UpdatedReplicas:    3,
 					ScheduledReplicas:  4,
-					ObservedGeneration: ptr.To(int64(1)),
+					ObservedGeneration: new(int64(1)),
 				},
 			},
 			wantReady:          false,
@@ -893,8 +867,8 @@ func TestCheckPCSGReady(t *testing.T) {
 				ComponentNames:    []string{"rolling-update-pcsg"},
 				Replicas:          4,
 				UpdatedReplicas:   3,
-				AvailableReplicas: ptr.To(int32(3)),
-				ScheduledReplicas: ptr.To(int32(4)),
+				AvailableReplicas: new(int32(3)),
+				ScheduledReplicas: new(int32(4)),
 			},
 		},
 		{
@@ -902,11 +876,9 @@ func TestCheckPCSGReady(t *testing.T) {
 			resourceName: "nil-observed-gen-pcsg",
 			namespace:    "default",
 			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "nil-observed-gen-pcsg",
-					Namespace:  "default",
-					Generation: 1,
-				},
+				Name:       "nil-observed-gen-pcsg",
+				Namespace:  "default",
+				Generation: 1,
 				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
 					Replicas: 2,
 				},
@@ -925,7 +897,7 @@ func TestCheckPCSGReady(t *testing.T) {
 				ComponentNames:    []string{"nil-observed-gen-pcsg"},
 				Replicas:          2,
 				UpdatedReplicas:   2,
-				AvailableReplicas: ptr.To(int32(2)),
+				AvailableReplicas: new(int32(2)),
 			},
 		},
 	}
@@ -986,9 +958,9 @@ func TestEvaluateGroveReadinessUsesDeclaredLayout(t *testing.T) {
 			g := gomega.NewWithT(t)
 			t.Log("Render the declared ordinary layout through the production renderer")
 			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+				Name: "test-dgd", Namespace: "default",
 				Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
-					ComponentName: "Worker", ComponentType: v1beta1.ComponentTypeWorker, Replicas: ptr.To(int32(2)),
+					ComponentName: "Worker", ComponentType: v1beta1.ComponentTypeWorker, Replicas: new(int32(2)),
 					Multinode: &v1beta1.MultinodeSpec{NodeCount: tt.nodes},
 					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
 						Name: commonconsts.MainContainerName, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}},
@@ -1033,10 +1005,10 @@ func TestEvaluateGroveReadinessUsesDeclaredLayout(t *testing.T) {
 			if dgd.Spec.Components[0].UsesPCSG() {
 				t.Log("Ordinary and GMS layouts use group availability without requiring child observations")
 				g.Expect(reader.Create(t.Context(), &grovev1alpha1.PodCliqueScalingGroup{
-					ObjectMeta: metav1.ObjectMeta{Name: wantName, Namespace: dgd.Namespace, Generation: 1},
-					Spec:       grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 2},
+					Name: wantName, Namespace: dgd.Namespace, Generation: 1,
+					Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 2},
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-						Replicas: 2, AvailableReplicas: 2, UpdatedReplicas: 2, ObservedGeneration: ptr.To(int64(1)),
+						Replicas: 2, AvailableReplicas: 2, UpdatedReplicas: 2, ObservedGeneration: new(int64(1)),
 					},
 				})).To(gomega.Succeed())
 				readiness, err = EvaluateGroveReadiness(t.Context(), reader, dgd, nil, pcs)
@@ -1064,18 +1036,16 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"frontend": {
 						ServiceName:     "frontend",
-						DynamoNamespace: ptr.To("default"),
+						DynamoNamespace: new("default"),
 						ComponentType:   string(commonconsts.ComponentTypeFrontend),
-						Replicas:        ptr.To(int32(2)),
+						Replicas:        new(int32(2)),
 					},
 				},
 			},
 			existingGroveResources: []client.Object{
 				&grovev1alpha1.PodClique{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-0-frontend",
-						Namespace: "default",
-					},
+					Name:      "test-dgd-0-frontend",
+					Namespace: "default",
 					Spec: grovev1alpha1.PodCliqueSpec{
 						Replicas: 2,
 					},
@@ -1084,7 +1054,7 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 						UpdatedReplicas:    2,
 						ReadyReplicas:      1,
 						ScheduledReplicas:  2,
-						ObservedGeneration: ptr.To(int64(1)),
+						ObservedGeneration: new(int64(1)),
 					},
 				},
 			},
@@ -1096,8 +1066,8 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 					ComponentNames:    []string{"test-dgd-0-frontend"},
 					Replicas:          2,
 					UpdatedReplicas:   2,
-					ReadyReplicas:     ptr.To(int32(1)),
-					ScheduledReplicas: ptr.To(int32(2)),
+					ReadyReplicas:     new(int32(1)),
+					ScheduledReplicas: new(int32(2)),
 				},
 			},
 		},
@@ -1107,18 +1077,18 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"decode": {
 						ServiceName:     "decode",
-						DynamoNamespace: ptr.To("default"),
+						DynamoNamespace: new("default"),
 						ComponentType:   string(commonconsts.ComponentTypeDecode),
-						Replicas:        ptr.To(int32(2)),
+						Replicas:        new(int32(2)),
 						Multinode: &v1alpha1.MultinodeSpec{
 							NodeCount: 2,
 						},
 					},
 					"prefill": {
 						ServiceName:     "prefill",
-						DynamoNamespace: ptr.To("default"),
+						DynamoNamespace: new("default"),
 						ComponentType:   string(commonconsts.ComponentTypePrefill),
-						Replicas:        ptr.To(int32(3)),
+						Replicas:        new(int32(3)),
 						Multinode: &v1alpha1.MultinodeSpec{
 							NodeCount: 4,
 						},
@@ -1127,10 +1097,8 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 			},
 			existingGroveResources: []client.Object{
 				&grovev1alpha1.PodCliqueScalingGroup{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-0-decode",
-						Namespace: "default",
-					},
+					Name:      "test-dgd-0-decode",
+					Namespace: "default",
 					Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
 						Replicas: 2,
 					},
@@ -1139,14 +1107,12 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 						UpdatedReplicas:    2,
 						AvailableReplicas:  2,
 						ScheduledReplicas:  2,
-						ObservedGeneration: ptr.To(int64(1)),
+						ObservedGeneration: new(int64(1)),
 					},
 				},
 				&grovev1alpha1.PodCliqueScalingGroup{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-0-prefill",
-						Namespace: "default",
-					},
+					Name:      "test-dgd-0-prefill",
+					Namespace: "default",
 					Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
 						Replicas: 3,
 					},
@@ -1155,7 +1121,7 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 						UpdatedReplicas:    3,
 						AvailableReplicas:  3,
 						ScheduledReplicas:  3,
-						ObservedGeneration: ptr.To(int64(1)),
+						ObservedGeneration: new(int64(1)),
 					},
 				},
 			},
@@ -1167,16 +1133,16 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 					ComponentNames:    []string{"test-dgd-0-decode"},
 					Replicas:          2,
 					UpdatedReplicas:   2,
-					AvailableReplicas: ptr.To(int32(2)),
-					ScheduledReplicas: ptr.To(int32(2)),
+					AvailableReplicas: new(int32(2)),
+					ScheduledReplicas: new(int32(2)),
 				},
 				"prefill": {
 					ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 					ComponentNames:    []string{"test-dgd-0-prefill"},
 					Replicas:          3,
 					UpdatedReplicas:   3,
-					AvailableReplicas: ptr.To(int32(3)),
-					ScheduledReplicas: ptr.To(int32(3)),
+					AvailableReplicas: new(int32(3)),
+					ScheduledReplicas: new(int32(3)),
 				},
 			},
 		},
@@ -1186,9 +1152,9 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"worker": {
 						ServiceName:     "worker",
-						DynamoNamespace: ptr.To("default"),
+						DynamoNamespace: new("default"),
 						ComponentType:   string(commonconsts.ComponentTypeWorker),
-						Replicas:        ptr.To(int32(2)),
+						Replicas:        new(int32(2)),
 						Multinode: &v1alpha1.MultinodeSpec{
 							NodeCount: 4,
 						},
@@ -1197,10 +1163,8 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 			},
 			existingGroveResources: []client.Object{
 				&grovev1alpha1.PodCliqueScalingGroup{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-0-worker",
-						Namespace: "default",
-					},
+					Name:      "test-dgd-0-worker",
+					Namespace: "default",
 					Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
 						Replicas: 2,
 					},
@@ -1209,7 +1173,7 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 						UpdatedReplicas:    2,
 						AvailableReplicas:  1,
 						ScheduledReplicas:  2,
-						ObservedGeneration: ptr.To(int64(1)),
+						ObservedGeneration: new(int64(1)),
 					},
 				},
 			},
@@ -1221,8 +1185,8 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 					ComponentNames:    []string{"test-dgd-0-worker"},
 					Replicas:          2,
 					UpdatedReplicas:   2,
-					AvailableReplicas: ptr.To(int32(1)),
-					ScheduledReplicas: ptr.To(int32(2)),
+					AvailableReplicas: new(int32(1)),
+					ScheduledReplicas: new(int32(2)),
 				},
 			},
 		},
@@ -1232,24 +1196,24 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"frontend": {
 						ServiceName:     "frontend",
-						DynamoNamespace: ptr.To("default"),
+						DynamoNamespace: new("default"),
 						ComponentType:   string(commonconsts.ComponentTypeFrontend),
-						Replicas:        ptr.To(int32(1)),
+						Replicas:        new(int32(1)),
 					},
 					"decode": {
 						ServiceName:     "decode",
-						DynamoNamespace: ptr.To("default"),
+						DynamoNamespace: new("default"),
 						ComponentType:   string(commonconsts.ComponentTypeDecode),
-						Replicas:        ptr.To(int32(2)),
+						Replicas:        new(int32(2)),
 						Multinode: &v1alpha1.MultinodeSpec{
 							NodeCount: 2,
 						},
 					},
 					"prefill": {
 						ServiceName:     "prefill",
-						DynamoNamespace: ptr.To("default"),
+						DynamoNamespace: new("default"),
 						ComponentType:   string(commonconsts.ComponentTypePrefill),
-						Replicas:        ptr.To(int32(2)),
+						Replicas:        new(int32(2)),
 						Multinode: &v1alpha1.MultinodeSpec{
 							NodeCount: 2,
 						},
@@ -1258,10 +1222,8 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 			},
 			existingGroveResources: []client.Object{
 				&grovev1alpha1.PodClique{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-0-frontend",
-						Namespace: "default",
-					},
+					Name:      "test-dgd-0-frontend",
+					Namespace: "default",
 					Spec: grovev1alpha1.PodCliqueSpec{
 						Replicas: 1,
 					},
@@ -1270,14 +1232,12 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 						UpdatedReplicas:    1,
 						ReadyReplicas:      1,
 						ScheduledReplicas:  1,
-						ObservedGeneration: ptr.To(int64(1)),
+						ObservedGeneration: new(int64(1)),
 					},
 				},
 				&grovev1alpha1.PodCliqueScalingGroup{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-0-decode",
-						Namespace: "default",
-					},
+					Name:      "test-dgd-0-decode",
+					Namespace: "default",
 					Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
 						Replicas: 2,
 					},
@@ -1286,14 +1246,12 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 						UpdatedReplicas:    2,
 						AvailableReplicas:  1,
 						ScheduledReplicas:  2,
-						ObservedGeneration: ptr.To(int64(1)),
+						ObservedGeneration: new(int64(1)),
 					},
 				},
 				&grovev1alpha1.PodCliqueScalingGroup{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-0-prefill",
-						Namespace: "default",
-					},
+					Name:      "test-dgd-0-prefill",
+					Namespace: "default",
 					Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
 						Replicas: 2,
 					},
@@ -1302,7 +1260,7 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 						UpdatedReplicas:    2,
 						AvailableReplicas:  2,
 						ScheduledReplicas:  2,
-						ObservedGeneration: ptr.To(int64(1)),
+						ObservedGeneration: new(int64(1)),
 					},
 				},
 			},
@@ -1314,24 +1272,24 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 					ComponentNames:    []string{"test-dgd-0-frontend"},
 					Replicas:          1,
 					UpdatedReplicas:   1,
-					ReadyReplicas:     ptr.To(int32(1)),
-					ScheduledReplicas: ptr.To(int32(1)),
+					ReadyReplicas:     new(int32(1)),
+					ScheduledReplicas: new(int32(1)),
 				},
 				"decode": {
 					ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 					ComponentNames:    []string{"test-dgd-0-decode"},
 					Replicas:          2,
 					UpdatedReplicas:   2,
-					AvailableReplicas: ptr.To(int32(1)),
-					ScheduledReplicas: ptr.To(int32(2)),
+					AvailableReplicas: new(int32(1)),
+					ScheduledReplicas: new(int32(2)),
 				},
 				"prefill": {
 					ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 					ComponentNames:    []string{"test-dgd-0-prefill"},
 					Replicas:          2,
 					UpdatedReplicas:   2,
-					AvailableReplicas: ptr.To(int32(2)),
-					ScheduledReplicas: ptr.To(int32(2)),
+					AvailableReplicas: new(int32(2)),
+					ScheduledReplicas: new(int32(2)),
 				},
 			},
 		},
@@ -1341,9 +1299,9 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"frontend": {
 						ServiceName:     "frontend",
-						DynamoNamespace: ptr.To("default"),
+						DynamoNamespace: new("default"),
 						ComponentType:   string(commonconsts.ComponentTypeFrontend),
-						Replicas:        ptr.To(int32(1)),
+						Replicas:        new(int32(1)),
 					},
 				},
 			},
@@ -1370,11 +1328,9 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			dgd := &v1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd",
-					Namespace: "default",
-				},
-				Spec: tt.dgdSpec,
+				Name:      "test-dgd",
+				Namespace: "default",
+				Spec:      tt.dgdSpec,
 			}
 
 			betaDGD := betaDGD(t, dgd)
@@ -1445,13 +1401,13 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 		{name: "accepted PCS revision publishes its rendered hash instead of the desired DGD hash", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: acceptedHash},
 		{name: "PCS observation ahead of its generation preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, pcsObservedGenerationAhead: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "active"},
 		{name: "accepted PCS with a stale child generation preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, childReady: true, childGenerationStale: true, wantNamespace: "active"},
-		{name: "cached pre-scale-up spec cannot publish readiness or the new namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: ptr.To(int32(2)), wantNamespace: "active"},
-		{name: "cached pre-scale-down spec cannot publish readiness or the new namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: ptr.To(int32(1)), childReplicas: ptr.To(int32(2)), wantNamespace: "active"},
-		{name: "cached zero replicas cannot complete scale-up", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: ptr.To(int32(1)), childReplicas: ptr.To(int32(0)), wantNamespace: "active"},
-		{name: "scale-to-zero waits for the cached spec", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: ptr.To(int32(0)), wantNamespace: "active"},
-		{name: "observed scale-up publishes readiness and the new namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: ptr.To(int32(2)), childReplicas: ptr.To(int32(2)), wantReady: true, wantNamespace: acceptedHash},
-		{name: "observed scale-to-zero publishes readiness and the new namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: ptr.To(int32(0)), childReplicas: ptr.To(int32(0)), wantReady: true, wantNamespace: acceptedHash},
-		{name: "omitted replicas preserve externally managed capacity", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, childReplicas: ptr.To(int32(2)), wantReady: true, wantNamespace: acceptedHash},
+		{name: "cached pre-scale-up spec cannot publish readiness or the new namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: new(int32(2)), wantNamespace: "active"},
+		{name: "cached pre-scale-down spec cannot publish readiness or the new namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: new(int32(1)), childReplicas: new(int32(2)), wantNamespace: "active"},
+		{name: "cached zero replicas cannot complete scale-up", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: new(int32(1)), childReplicas: new(int32(0)), wantNamespace: "active"},
+		{name: "scale-to-zero waits for the cached spec", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: new(int32(0)), wantNamespace: "active"},
+		{name: "observed scale-up publishes readiness and the new namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: new(int32(2)), childReplicas: new(int32(2)), wantReady: true, wantNamespace: acceptedHash},
+		{name: "observed scale-to-zero publishes readiness and the new namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: new(int32(0)), childReplicas: new(int32(0)), wantReady: true, wantNamespace: acceptedHash},
+		{name: "omitted replicas preserve externally managed capacity", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, childReplicas: new(int32(2)), wantReady: true, wantNamespace: acceptedHash},
 		{name: "accepted completed PCS revision remains published after worker health loss", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, wantNamespace: acceptedHash},
 		{name: "accepted legacy PCS with an unfinished child preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, legacyPCS: true, childRevision: targetRevision, updateInProgress: true, childReady: true, wantReady: true, wantNamespace: "active"},
 		{name: "accepted legacy PCS publishes the base namespace", pcsAccepted: true, legacyPCS: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "base"},
@@ -1461,7 +1417,7 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Build a DGD, PCS snapshot, and child status for the requested cutover state")
 			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+				Name: "test-dgd", Namespace: "default",
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
@@ -1491,24 +1447,22 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 				labels[commonconsts.KubeLabelDynamoWorkerHash] = acceptedHash
 			}
 			podCliqueSet := &grovev1alpha1.PodCliqueSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       PCSNameForDGD(dgd, nil),
-					Namespace:  dgd.Namespace,
-					Generation: 1,
-				},
+				Name:       PCSNameForDGD(dgd, nil),
+				Namespace:  dgd.Namespace,
+				Generation: 1,
 				Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{Labels: labels}},
 				}},
 				Status: grovev1alpha1.PodCliqueSetStatus{
-					ObservedGeneration:    ptr.To(int64(0)),
+					ObservedGeneration:    new(int64(0)),
 					CurrentGenerationHash: ptr.To(targetRevision),
 				},
 			}
 			if tt.pcsAccepted {
-				podCliqueSet.Status.ObservedGeneration = ptr.To(int64(1))
+				podCliqueSet.Status.ObservedGeneration = new(int64(1))
 			}
 			if tt.pcsObservedGenerationAhead {
-				podCliqueSet.Status.ObservedGeneration = ptr.To(int64(2))
+				podCliqueSet.Status.ObservedGeneration = new(int64(2))
 			}
 			completedAt := metav1.Now()
 			childGeneration := int64(1)
@@ -1517,15 +1471,15 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 			}
 			replicas := ptr.Deref(tt.childReplicas, int32(1))
 			podClique := &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(PCSNameForDGD(dgd, nil), componentName), Namespace: dgd.Namespace, Generation: childGeneration},
-				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: replicas},
+				Name: GroveComponentResourceName(PCSNameForDGD(dgd, nil), componentName), Namespace: dgd.Namespace, Generation: childGeneration,
+				Spec: grovev1alpha1.PodCliqueSpec{Replicas: replicas},
 				Status: grovev1alpha1.PodCliqueStatus{
 					Replicas:                          replicas,
 					ReadyReplicas:                     replicas,
 					UpdatedReplicas:                   replicas,
 					ScheduledReplicas:                 replicas,
-					ObservedGeneration:                ptr.To(int64(1)),
-					CurrentPodCliqueSetGenerationHash: ptr.To(tt.childRevision),
+					ObservedGeneration:                new(int64(1)),
+					CurrentPodCliqueSetGenerationHash: new(tt.childRevision),
 				},
 			}
 			if tt.updateInProgress || tt.updateEnded {
@@ -1582,7 +1536,7 @@ func TestEvaluateGroveReadinessSwitchesWorkersAtomically(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Build two workers with an accepted PCS revision and active namespaces")
 			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+				Name: "test-dgd", Namespace: "default",
 				Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 					{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill},
 					{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeDecode},
@@ -1597,29 +1551,29 @@ func TestEvaluateGroveReadinessSwitchesWorkersAtomically(t *testing.T) {
 			}
 
 			podCliqueSet := &grovev1alpha1.PodCliqueSet{
-				ObjectMeta: metav1.ObjectMeta{Name: PCSNameForDGD(dgd, nil), Namespace: dgd.Namespace, Generation: 1},
+				Name: PCSNameForDGD(dgd, nil), Namespace: dgd.Namespace, Generation: 1,
 				Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
 						{Labels: map[string]string{commonconsts.KubeLabelDynamoComponent: "prefill", commonconsts.KubeLabelDynamoWorkerHash: acceptedHash}},
 						{Labels: map[string]string{commonconsts.KubeLabelDynamoComponent: "decode", commonconsts.KubeLabelDynamoWorkerHash: acceptedHash}},
 					},
 				}},
-				Status: grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: ptr.To(int64(1)), CurrentGenerationHash: ptr.To(acceptedRevision)},
+				Status: grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: new(int64(1)), CurrentGenerationHash: ptr.To(acceptedRevision)},
 			}
 			completedAt := metav1.Now()
 			prefill := &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(PCSNameForDGD(dgd, nil), "prefill"), Namespace: dgd.Namespace, Generation: 1},
-				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
-				Status:     grovev1alpha1.PodCliqueStatus{Replicas: 1, ReadyReplicas: 1, UpdatedReplicas: 1, ObservedGeneration: ptr.To(int64(1)), CurrentPodCliqueSetGenerationHash: ptr.To(acceptedRevision), UpdateProgress: &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt}},
+				Name: GroveComponentResourceName(PCSNameForDGD(dgd, nil), "prefill"), Namespace: dgd.Namespace, Generation: 1,
+				Spec:   grovev1alpha1.PodCliqueSpec{Replicas: 1},
+				Status: grovev1alpha1.PodCliqueStatus{Replicas: 1, ReadyReplicas: 1, UpdatedReplicas: 1, ObservedGeneration: new(int64(1)), CurrentPodCliqueSetGenerationHash: ptr.To(acceptedRevision), UpdateProgress: &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt}},
 			}
 			decodeRevision := previousRevision
 			if tt.secondWorkerCompleted {
 				decodeRevision = acceptedRevision
 			}
 			decode := &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(PCSNameForDGD(dgd, nil), "decode"), Namespace: dgd.Namespace, Generation: 1},
-				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
-				Status:     grovev1alpha1.PodCliqueStatus{Replicas: 1, ReadyReplicas: 1, UpdatedReplicas: 1, ObservedGeneration: ptr.To(int64(1)), CurrentPodCliqueSetGenerationHash: ptr.To(decodeRevision), UpdateProgress: &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt}},
+				Name: GroveComponentResourceName(PCSNameForDGD(dgd, nil), "decode"), Namespace: dgd.Namespace, Generation: 1,
+				Spec:   grovev1alpha1.PodCliqueSpec{Replicas: 1},
+				Status: grovev1alpha1.PodCliqueStatus{Replicas: 1, ReadyReplicas: 1, UpdatedReplicas: 1, ObservedGeneration: new(int64(1)), CurrentPodCliqueSetGenerationHash: new(decodeRevision), UpdateProgress: &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt}},
 			}
 
 			t.Log("Evaluate the worker group against the single accepted PCS snapshot")
@@ -1649,7 +1603,7 @@ func TestEvaluateGroveReadinessPreservesPreviousWorkerNamespaceWithoutPodCliqueS
 
 	t.Log("Build a worker with a previously published suffixed runtime namespace")
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Name: "test-dgd", Namespace: "default",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 			ComponentName: componentName,
 			ComponentType: v1beta1.ComponentTypePrefill,
@@ -1665,18 +1619,16 @@ func TestEvaluateGroveReadinessPreservesPreviousWorkerNamespaceWithoutPodCliqueS
 		componentName: {RuntimeNamespace: previousNamespace},
 	}
 	podClique := &grovev1alpha1.PodClique{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       GroveComponentResourceName(PCSNameForDGD(dgd, nil), componentName),
-			Namespace:  dgd.Namespace,
-			Generation: 1,
-		},
-		Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1},
+		Name:       GroveComponentResourceName(PCSNameForDGD(dgd, nil), componentName),
+		Namespace:  dgd.Namespace,
+		Generation: 1,
+		Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
 		Status: grovev1alpha1.PodCliqueStatus{
 			Replicas:           1,
 			ReadyReplicas:      1,
 			UpdatedReplicas:    1,
 			ScheduledReplicas:  1,
-			ObservedGeneration: ptr.To(int64(1)),
+			ObservedGeneration: new(int64(1)),
 		},
 	}
 
@@ -1747,23 +1699,21 @@ func TestEvaluateGroveReadinessRejectsInvalidAcceptedWorkerPodCliqueSet(t *testi
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Build an accepted PCS and completed worker children with the invalid layout")
 			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+				Name: "test-dgd", Namespace: "default",
 				Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 					{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill},
 					{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeDecode},
 				}},
 			}
 			podCliqueSet := &grovev1alpha1.PodCliqueSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       PCSNameForDGD(dgd, nil),
-					Namespace:  dgd.Namespace,
-					Generation: 1,
-				},
+				Name:       PCSNameForDGD(dgd, nil),
+				Namespace:  dgd.Namespace,
+				Generation: 1,
 				Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 					Cliques: tt.cliques,
 				}},
 				Status: grovev1alpha1.PodCliqueSetStatus{
-					ObservedGeneration:    ptr.To(int64(1)),
+					ObservedGeneration:    new(int64(1)),
 					CurrentGenerationHash: ptr.To(acceptedRevision),
 				},
 			}
@@ -1772,18 +1722,16 @@ func TestEvaluateGroveReadinessRejectsInvalidAcceptedWorkerPodCliqueSet(t *testi
 			for i := range dgd.Spec.Components {
 				component := &dgd.Spec.Components[i]
 				children = append(children, &grovev1alpha1.PodClique{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:       GroveComponentResourceName(PCSNameForDGD(dgd, nil), component.ComponentName),
-						Namespace:  dgd.Namespace,
-						Generation: 1,
-					},
-					Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1},
+					Name:       GroveComponentResourceName(PCSNameForDGD(dgd, nil), component.ComponentName),
+					Namespace:  dgd.Namespace,
+					Generation: 1,
+					Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
 					Status: grovev1alpha1.PodCliqueStatus{
 						Replicas:                          1,
 						ReadyReplicas:                     1,
 						UpdatedReplicas:                   1,
 						ScheduledReplicas:                 1,
-						ObservedGeneration:                ptr.To(int64(1)),
+						ObservedGeneration:                new(int64(1)),
 						CurrentPodCliqueSetGenerationHash: ptr.To(acceptedRevision),
 						UpdateProgress:                    &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt},
 					},
@@ -1828,15 +1776,13 @@ func TestEvaluateGroveReadinessPublishesAcceptedNamespaceForZeroReplicaWorkers(t
 				component.Multinode = &v1beta1.MultinodeSpec{NodeCount: 2}
 			}
 			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
-				Spec:       v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}},
+				Name: "test-dgd", Namespace: "default",
+				Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}},
 			}
 			podCliqueSet := &grovev1alpha1.PodCliqueSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       PCSNameForDGD(dgd, nil),
-					Namespace:  dgd.Namespace,
-					Generation: 1,
-				},
+				Name:       PCSNameForDGD(dgd, nil),
+				Namespace:  dgd.Namespace,
+				Generation: 1,
 				Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
 						Labels: map[string]string{
@@ -1846,21 +1792,19 @@ func TestEvaluateGroveReadinessPublishesAcceptedNamespaceForZeroReplicaWorkers(t
 					}},
 				}},
 				Status: grovev1alpha1.PodCliqueSetStatus{
-					ObservedGeneration:    ptr.To(int64(1)),
+					ObservedGeneration:    new(int64(1)),
 					CurrentGenerationHash: ptr.To(acceptedRevision),
 				},
 			}
 			var child client.Object
 			if tt.multinode {
 				child = &grovev1alpha1.PodCliqueScalingGroup{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:       GroveComponentResourceName(PCSNameForDGD(dgd, nil), componentName),
-						Namespace:  dgd.Namespace,
-						Generation: 1,
-					},
-					Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 0},
+					Name:       GroveComponentResourceName(PCSNameForDGD(dgd, nil), componentName),
+					Namespace:  dgd.Namespace,
+					Generation: 1,
+					Spec:       grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 0},
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-						ObservedGeneration:                ptr.To(int64(1)),
+						ObservedGeneration:                new(int64(1)),
 						CurrentPodCliqueSetGenerationHash: ptr.To(acceptedRevision),
 					},
 				}
@@ -1868,14 +1812,12 @@ func TestEvaluateGroveReadinessPublishesAcceptedNamespaceForZeroReplicaWorkers(t
 				child.SetOwnerReferences([]metav1.OwnerReference{*metav1.NewControllerRef(podCliqueSet, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))})
 			} else {
 				child = &grovev1alpha1.PodClique{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:       GroveComponentResourceName(PCSNameForDGD(dgd, nil), componentName),
-						Namespace:  dgd.Namespace,
-						Generation: 1,
-					},
-					Spec: grovev1alpha1.PodCliqueSpec{Replicas: 0},
+					Name:       GroveComponentResourceName(PCSNameForDGD(dgd, nil), componentName),
+					Namespace:  dgd.Namespace,
+					Generation: 1,
+					Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 0},
 					Status: grovev1alpha1.PodCliqueStatus{
-						ObservedGeneration:                ptr.To(int64(1)),
+						ObservedGeneration:                new(int64(1)),
 						CurrentPodCliqueSetGenerationHash: ptr.To(acceptedRevision),
 					},
 				}
@@ -1912,10 +1854,8 @@ func TestEvaluateGroveReadinessReadsEachGroveChildOnce(t *testing.T) {
 
 	t.Log("Build a Grove worker whose accepted child revision has completed.")
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd",
-			Namespace: "default",
-		},
+		Name:      "test-dgd",
+		Namespace: "default",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 				ComponentName: "prefill",
@@ -1925,11 +1865,9 @@ func TestEvaluateGroveReadinessReadsEachGroveChildOnce(t *testing.T) {
 	}
 	component := dgd.GetComponentByName("prefill")
 	podCliqueSet := &grovev1alpha1.PodCliqueSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       PCSNameForDGD(dgd, nil),
-			Namespace:  dgd.Namespace,
-			Generation: 1,
-		},
+		Name:       PCSNameForDGD(dgd, nil),
+		Namespace:  dgd.Namespace,
+		Generation: 1,
 		Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 			Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{Labels: map[string]string{
 				commonconsts.KubeLabelDynamoComponent:  component.ComponentName,
@@ -1937,23 +1875,21 @@ func TestEvaluateGroveReadinessReadsEachGroveChildOnce(t *testing.T) {
 			}}},
 		}},
 		Status: grovev1alpha1.PodCliqueSetStatus{
-			ObservedGeneration:    ptr.To(int64(1)),
+			ObservedGeneration:    new(int64(1)),
 			CurrentGenerationHash: &targetRevision,
 		},
 	}
 	podClique := &grovev1alpha1.PodClique{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       GroveComponentResourceName(PCSNameForDGD(dgd, nil), component.ComponentName),
-			Namespace:  dgd.Namespace,
-			Generation: 1,
-		},
-		Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1},
+		Name:       GroveComponentResourceName(PCSNameForDGD(dgd, nil), component.ComponentName),
+		Namespace:  dgd.Namespace,
+		Generation: 1,
+		Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
 		Status: grovev1alpha1.PodCliqueStatus{
 			Replicas:                          1,
 			ReadyReplicas:                     1,
 			UpdatedReplicas:                   1,
 			ScheduledReplicas:                 1,
-			ObservedGeneration:                ptr.To(int64(1)),
+			ObservedGeneration:                new(int64(1)),
 			CurrentPodCliqueSetGenerationHash: &targetRevision,
 			UpdateProgress:                    &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt},
 		},
@@ -2050,7 +1986,7 @@ func TestCheckPodCliqueReadyClassification(t *testing.T) {
 			name: "fully ready",
 			podClique: newPodClique(grovev1alpha1.PodCliqueStatus{
 				Replicas: 3, ReadyReplicas: 3, UpdatedReplicas: 3,
-				ScheduledReplicas: 3, ObservedGeneration: ptr.To(int64(1)),
+				ScheduledReplicas: 3, ObservedGeneration: new(int64(1)),
 			}),
 			wantReady:          true,
 			wantClassification: "",
@@ -2059,7 +1995,7 @@ func TestCheckPodCliqueReadyClassification(t *testing.T) {
 			name: "scheduling condition InsufficientScheduledPods -> InsufficientCapacity",
 			podClique: newPodClique(grovev1alpha1.PodCliqueStatus{
 				Replicas: 3, ReadyReplicas: 0, UpdatedReplicas: 3,
-				ScheduledReplicas: 1, ObservedGeneration: ptr.To(int64(1)),
+				ScheduledReplicas: 1, ObservedGeneration: new(int64(1)),
 				Conditions: []metav1.Condition{{
 					Type:               groveconstants.ConditionTypePodCliqueScheduled,
 					Status:             metav1.ConditionFalse,
@@ -2076,7 +2012,7 @@ func TestCheckPodCliqueReadyClassification(t *testing.T) {
 			podClique: newPodClique(grovev1alpha1.PodCliqueStatus{
 				Replicas: 3, ReadyReplicas: 0, UpdatedReplicas: 3,
 				ScheduledReplicas: 3, ScheduleGatedReplicas: 2,
-				ObservedGeneration: ptr.To(int64(1)),
+				ObservedGeneration: new(int64(1)),
 			}),
 			wantReady:          false,
 			wantClassification: v1beta1.DGDReadyReasonInsufficientCapacity,
@@ -2086,7 +2022,7 @@ func TestCheckPodCliqueReadyClassification(t *testing.T) {
 			name: "scheduled condition false with insufficient-pods reason -> InsufficientCapacity",
 			podClique: newPodClique(grovev1alpha1.PodCliqueStatus{
 				Replicas: 3, ReadyReplicas: 0, UpdatedReplicas: 3,
-				ScheduledReplicas: 3, ObservedGeneration: ptr.To(int64(1)),
+				ScheduledReplicas: 3, ObservedGeneration: new(int64(1)),
 				Conditions: []metav1.Condition{{
 					Type:               groveconstants.ConditionTypePodCliqueScheduled,
 					Status:             metav1.ConditionFalse,
@@ -2102,7 +2038,7 @@ func TestCheckPodCliqueReadyClassification(t *testing.T) {
 			name: "scheduled but not updated -> Updating",
 			podClique: newPodClique(grovev1alpha1.PodCliqueStatus{
 				Replicas: 3, ReadyReplicas: 3, UpdatedReplicas: 2,
-				ScheduledReplicas: 3, ObservedGeneration: ptr.To(int64(1)),
+				ScheduledReplicas: 3, ObservedGeneration: new(int64(1)),
 			}),
 			wantReady:          false,
 			wantClassification: v1beta1.DGDReadyReasonUpdating,
@@ -2112,7 +2048,7 @@ func TestCheckPodCliqueReadyClassification(t *testing.T) {
 			name: "rolling update (replicas != desired) -> Updating",
 			podClique: newPodClique(grovev1alpha1.PodCliqueStatus{
 				Replicas: 4, ReadyReplicas: 3, UpdatedReplicas: 3,
-				ScheduledReplicas: 3, ObservedGeneration: ptr.To(int64(1)),
+				ScheduledReplicas: 3, ObservedGeneration: new(int64(1)),
 			}),
 			wantReady:          false,
 			wantClassification: v1beta1.DGDReadyReasonUpdating,
@@ -2122,7 +2058,7 @@ func TestCheckPodCliqueReadyClassification(t *testing.T) {
 			name: "scheduled and updated but not ready -> PodsNotReady",
 			podClique: newPodClique(grovev1alpha1.PodCliqueStatus{
 				Replicas: 3, ReadyReplicas: 1, UpdatedReplicas: 3,
-				ScheduledReplicas: 3, ObservedGeneration: ptr.To(int64(1)),
+				ScheduledReplicas: 3, ObservedGeneration: new(int64(1)),
 			}),
 			wantReady:          false,
 			wantClassification: v1beta1.DGDReadyReasonPodsNotReady,
@@ -2150,7 +2086,7 @@ func TestCheckPodCliqueReadyClassification(t *testing.T) {
 			podClique: newPodClique(grovev1alpha1.PodCliqueStatus{
 				Replicas: 3, ReadyReplicas: 0, UpdatedReplicas: 3,
 				ScheduledReplicas: 1, ScheduleGatedReplicas: 2,
-				ObservedGeneration: ptr.To(int64(1)),
+				ObservedGeneration: new(int64(1)),
 			}),
 			wantReady:          false,
 			wantClassification: v1beta1.DGDReadyReasonInsufficientCapacity,
@@ -2193,7 +2129,7 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 			name: "fully ready",
 			pcsg: newPCSG(grovev1alpha1.PodCliqueScalingGroupStatus{
 				Replicas: 2, AvailableReplicas: 2, UpdatedReplicas: 2,
-				ScheduledReplicas: 2, ObservedGeneration: ptr.To(int64(1)),
+				ScheduledReplicas: 2, ObservedGeneration: new(int64(1)),
 			}),
 			wantReady:          true,
 			wantClassification: "",
@@ -2202,7 +2138,7 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 			name: "available below desired, fully scheduled -> PodsNotReady",
 			pcsg: newPCSG(grovev1alpha1.PodCliqueScalingGroupStatus{
 				Replicas: 2, AvailableReplicas: 0, UpdatedReplicas: 2,
-				ScheduledReplicas: 2, ObservedGeneration: ptr.To(int64(1)),
+				ScheduledReplicas: 2, ObservedGeneration: new(int64(1)),
 			}),
 			wantReady:          false,
 			wantClassification: v1beta1.DGDReadyReasonPodsNotReady,
@@ -2212,7 +2148,7 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 			name: "partial scheduled count below desired -> InsufficientCapacity",
 			pcsg: newPCSG(grovev1alpha1.PodCliqueScalingGroupStatus{
 				Replicas: 2, AvailableReplicas: 0, UpdatedReplicas: 2,
-				ScheduledReplicas: 1, ObservedGeneration: ptr.To(int64(1)),
+				ScheduledReplicas: 1, ObservedGeneration: new(int64(1)),
 			}),
 			wantReady:          false,
 			wantClassification: v1beta1.DGDReadyReasonInsufficientCapacity,
@@ -2222,7 +2158,7 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 			name: "MinAvailableBreached=False with PCSG-scheduling reason -> InsufficientCapacity",
 			pcsg: newPCSG(grovev1alpha1.PodCliqueScalingGroupStatus{
 				Replicas: 2, AvailableReplicas: 0, UpdatedReplicas: 2,
-				ScheduledReplicas: 2, ObservedGeneration: ptr.To(int64(1)),
+				ScheduledReplicas: 2, ObservedGeneration: new(int64(1)),
 				Conditions: []metav1.Condition{{
 					// Grove alpha.8 emits the scheduling-shortfall reason with
 					// Status=False (Status=True is the availability reason).
@@ -2240,7 +2176,7 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 			name: "scheduled but not updated -> Updating",
 			pcsg: newPCSG(grovev1alpha1.PodCliqueScalingGroupStatus{
 				Replicas: 2, AvailableReplicas: 2, UpdatedReplicas: 1,
-				ScheduledReplicas: 2, ObservedGeneration: ptr.To(int64(1)),
+				ScheduledReplicas: 2, ObservedGeneration: new(int64(1)),
 			}),
 			wantReady:          false,
 			wantClassification: v1beta1.DGDReadyReasonUpdating,
@@ -2250,7 +2186,7 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 			name: "scheduled and updated but not available -> PodsNotReady",
 			pcsg: newPCSG(grovev1alpha1.PodCliqueScalingGroupStatus{
 				Replicas: 2, AvailableReplicas: 1, UpdatedReplicas: 2,
-				ScheduledReplicas: 2, ObservedGeneration: ptr.To(int64(1)),
+				ScheduledReplicas: 2, ObservedGeneration: new(int64(1)),
 			}),
 			wantReady:          false,
 			wantClassification: v1beta1.DGDReadyReasonPodsNotReady,
@@ -2302,17 +2238,17 @@ const (
 
 func newPodClique(status grovev1alpha1.PodCliqueStatus) *grovev1alpha1.PodClique {
 	return &grovev1alpha1.PodClique{
-		ObjectMeta: metav1.ObjectMeta{Name: testPodCliqueName, Namespace: "default", Generation: 1},
-		Spec:       grovev1alpha1.PodCliqueSpec{Replicas: testPodCliqueReplicas},
-		Status:     status,
+		Name: testPodCliqueName, Namespace: "default", Generation: 1,
+		Spec:   grovev1alpha1.PodCliqueSpec{Replicas: testPodCliqueReplicas},
+		Status: status,
 	}
 }
 
 func newPCSG(status grovev1alpha1.PodCliqueScalingGroupStatus) *grovev1alpha1.PodCliqueScalingGroup {
 	return &grovev1alpha1.PodCliqueScalingGroup{
-		ObjectMeta: metav1.ObjectMeta{Name: testPCSGName, Namespace: "default", Generation: 1},
-		Spec:       grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: testPCSGReplicas},
-		Status:     status,
+		Name: testPCSGName, Namespace: "default", Generation: 1,
+		Spec:   grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: testPCSGReplicas},
+		Status: status,
 	}
 }
 
@@ -2379,13 +2315,13 @@ func TestGroveReadinessTransientErrorsPropagate(t *testing.T) {
 	t.Run("EvaluateGroveReadiness propagates a child read error", func(t *testing.T) {
 		g := gomega.NewGomegaWithT(t)
 		dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Name: "test-dgd", Namespace: "default",
 			Spec: v1alpha1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"frontend": {
 						ComponentType: string(commonconsts.ComponentTypeFrontend),
-						Replicas:      ptr.To(int32(1)),
+						Replicas:      new(int32(1)),
 					},
 				},
 			},

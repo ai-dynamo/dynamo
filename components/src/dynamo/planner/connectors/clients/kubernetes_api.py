@@ -617,16 +617,50 @@ class KubernetesAPI:
         return True
 
     def non_planner_components_stable(self, deployment: dict) -> tuple[bool, list[str]]:
-        """Return ``(all_stable, unstable_names)`` for non-planner components."""
+        """Return ``(all_stable, unstable_names)`` for non-planner components.
+
+        Frontend components are skipped too: the planner never scales them, and
+        one Frontend Pod short of ready replicas must not block worker scaling.
+        """
         components = get_components_by_name(deployment)
         not_ready: list[str] = []
         for component_name, component_spec in components.items():
-            if get_component_type(component_spec) == "planner":
+            if get_component_type(component_spec) in ("planner", "frontend"):
                 continue
             _, is_stable = self.get_service_replica_status(deployment, component_name)
             if not is_stable:
                 not_ready.append(component_name)
         return not not_ready, not_ready
+
+    def only_frontend_unready(self, deployment: dict) -> bool:
+        """True when DGD ``Ready`` is False only because of Frontend components.
+
+        The operator reports ``Ready=False`` when the graph failed, a rolling
+        update is in progress, or any component is short of ready replicas.
+        This rules out the first two and requires every non-planner,
+        non-frontend component to be stable on an observed spec generation,
+        measured against the owned DGDSA targets: an adapter write can lead the
+        DGD spec, and that scaling is not settled until status catches up.
+        """
+        status = deployment.get("status", {}) or {}
+        state = status.get("state")
+        if isinstance(state, str) and state.lower() == "failed":
+            return False
+        phase = (status.get("rollingUpdate") or {}).get("phase")
+        if phase not in (None, "", "Completed"):
+            return False
+        if not self.is_spec_generation_observed(deployment):
+            return False
+        try:
+            authoritative = self.fetch_authoritative_replica_targets(deployment)
+        except (client.ApiException, ValueError) as exc:
+            logger.warning(
+                "Cannot read authoritative replica targets; not treating the "
+                "deployment as Frontend-only unready: %s",
+                exc,
+            )
+            return False
+        return self.non_planner_components_stable(authoritative)[0]
 
     def fetch_authoritative_replica_targets(self, deployment: dict) -> dict:
         """Overlay declared DGDSA targets onto a DGD settlement snapshot.
@@ -946,7 +980,7 @@ class KubernetesAPI:
             if not all_stable:
                 logger.info(
                     f"[Attempt {attempt + 1}/{max_attempts}] "
-                    f"Waiting for components (excluding planner): "
+                    f"Waiting for components (excluding planner and frontend): "
                     f"not ready: {not_ready}"
                 )
                 continue
