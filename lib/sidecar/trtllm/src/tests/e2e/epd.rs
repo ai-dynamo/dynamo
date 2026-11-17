@@ -228,6 +228,8 @@ async fn reject_replay(endpoint: &str, mut request: pb::GenerateRequest) -> Stri
 
 #[tokio::test]
 async fn replay_check_uses_the_shared_endpoint_connector() {
+    // Tonic requires the interceptor to return Status directly.
+    #[allow(clippy::result_large_err)]
     fn spent_export(_: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
         Err(tonic::Status::invalid_argument(
             "encoder export expired or was already consumed",
