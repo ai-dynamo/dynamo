@@ -71,10 +71,10 @@ The selection path's rules are in `lib/router/scheduler/AGENTS.md` and the index
 
 - **Adding a stage to KV event ingest.** Keep per-publisher work off the shared reader. On the
   brokered path, give each publisher a bounded lane and drop the newest batch from a full one,
-  as `indexer/recovery/broker_zmq.rs` does. On the direct path a full lane backpressures its
-  socket and nothing is dropped, so a slow stage stalls every publisher on that socket. On
-  neither path raise a channel capacity or a ZMQ high-water mark to hide a slow stage
-  (#14167, #16568).
+  as `indexer/recovery/broker_zmq.rs` does. On the direct path a full lane makes its socket's
+  reader wait instead of dropping, so a slow stage stalls every publisher on that socket, and
+  once the stall fills the ZMQ high-water marks the publishers drop. On neither path raise a
+  channel capacity or a ZMQ high-water mark to hide a slow stage (#14167, #16568).
 - **Adding state that every request or load event touches.** If they write it, shard it by
   worker as `ACTIVE_LOAD_SHARDS` does. If they only read it, publish a copy-on-write snapshot.
   One mutex there is contended by every task on the path (#16118).

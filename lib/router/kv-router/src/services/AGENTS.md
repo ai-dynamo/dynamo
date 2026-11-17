@@ -13,4 +13,4 @@ These services must not depend on `dynamo-runtime`.
 ## Performance
 
 - **Adding a field to a request type that carries a prompt.** Add it to the flat wire struct (`inline_prompt_wire!` in `lib/router/scheduler/src/selection/types.rs`) and parse from bytes as `PromptJson` does. `#[serde(flatten)]` or an intermediate `serde_json::Value` buffers the whole body, which holds every prompt token (#17238).
-- **Opening a ZMQ socket.** Use the helpers in `common/zmq.rs`, which share pooled contexts; a context per socket costs two threads per socket. Open a per-worker socket that is rarely used on demand, as `replay_gap` dials its DEALER (#17253).
+- **Opening a ZMQ socket.** Use the pooled helpers in `common/zmq.rs` (`create_sub_socket_topics`, `connect_sub_socket`, `connect_dealer_socket`); a context per socket costs two threads per socket. `create_bound_pub_socket` is the exception: it takes its own context so its port is free as soon as its owner shuts down, so don't open one per worker. Open a per-worker socket that is rarely used on demand, as `replay_gap` dials its DEALER (#17253).
