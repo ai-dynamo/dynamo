@@ -9,7 +9,7 @@ subtitle: Run a dedicated text-scoring worker for both Dynamo decision APIs
 
 ## Prerequisites
 
-Use a Dynamo environment built with SGLang and the etcd/NATS services described in [Local Installation](../../cli/installation/install-dynamo.mdx). Use a supported GPU and ensure the checkpoint fits available memory. The example uses `Qwen/Qwen3-0.6B` as a small integration-test target, not a claim of decision-task quality or qualification of larger Qwen models.
+Use a Dynamo environment built with SGLang and the services described in [Local Installation](../../cli/installation/install-dynamo.mdx). Use a supported GPU and ensure the checkpoint fits available memory. The example uses `Qwen/Qwen3-0.6B` as a small integration-test target, not a claim of decision-task quality or qualification of larger Qwen models.
 
 The worker capability gate accepts SGLang 0.5.19, 0.5.22, and 0.5.23, including their recognized CUDA package suffixes. The current CUDA container pins 0.5.23. An otherwise eligible worker on an unsupported version logs a warning and does not advertise decision scoring. Other versions require explicit qualification; they do not become supported by changing a version string. Model, tokenizer, chat template, runtime, and precision must be recorded independently when qualifying a deployment.
 
