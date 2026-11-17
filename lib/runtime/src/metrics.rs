@@ -1176,6 +1176,18 @@ struct FamilyMerger {
     seen_series: HashSet<String>,
 }
 
+/// True the first time a help/type conflict is reported for `name` in this
+/// process, false after that.
+fn first_conflict_for(name: &str) -> bool {
+    static REPORTED: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> =
+        std::sync::OnceLock::new();
+    REPORTED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(name.to_string())
+}
+
 impl FamilyMerger {
     /// Merge every registry's families. A family whose help or type conflicts
     /// with one already merged under its name is logged and skipped, exactly as
@@ -1190,12 +1202,23 @@ impl FamilyMerger {
             for family in registry.get_prometheus_registry().gather() {
                 let name = family.name().to_string();
                 if let Err(error) = merger.add_family(family) {
-                    tracing::warn!(
-                        metric_name = %name,
-                        registry_index = idx,
-                        %error,
-                        "skipping metric family"
-                    );
+                    // A conflict persists across gathers, so warn once per
+                    // name rather than at the scrape and export rate.
+                    if first_conflict_for(&name) {
+                        tracing::warn!(
+                            metric_name = %name,
+                            registry_index = idx,
+                            %error,
+                            "skipping metric family; repeats of this conflict are logged at debug"
+                        );
+                    } else {
+                        tracing::debug!(
+                            metric_name = %name,
+                            registry_index = idx,
+                            %error,
+                            "skipping metric family"
+                        );
+                    }
                 }
             }
         }
@@ -2406,6 +2429,15 @@ mod test_metric_families_combined {
             !text.lines().any(|line| line == "dynamo_conflict 5"),
             "{text}"
         );
+    }
+
+    /// A conflict persists across gathers; only the first report per name is
+    /// a warning.
+    #[test]
+    fn conflict_is_reported_once_per_name() {
+        assert!(first_conflict_for("dynamo_test_reported_once"));
+        assert!(!first_conflict_for("dynamo_test_reported_once"));
+        assert!(first_conflict_for("dynamo_test_reported_once_other"));
     }
 
     #[test]
