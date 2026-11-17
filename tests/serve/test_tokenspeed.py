@@ -72,6 +72,10 @@ def test_tokenspeed_single_request(
             "0.4",
             "--enforce-eager",
             "--disable-kvstore",
+            # The pinned CUDA sampling binaries have no L40S image. Use the
+            # Triton sampler with the request's temperature=0 greedy decoding.
+            "--sampling-backend",
+            "triton",
         ]
         with DynamoFrontendProcess(
             request, frontend_port=ports.frontend_port, extra_env=env

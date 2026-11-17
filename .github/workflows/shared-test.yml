@@ -44,6 +44,11 @@ on:
         required: false
         type: string
         default: '/workspace'
+      pytest_paths:
+        description: 'Optional pytest collection paths or node IDs; empty uses the repository test paths'
+        required: false
+        type: string
+        default: ''
       kvbm_mla_backend:
         description: 'KVBM MLA attention backend exported for KVBM tests'
         required: false
@@ -151,6 +156,11 @@ on:
         required: false
         type: string
         default: 'true'
+      dd_early_flake_detection_enabled:
+        description: 'Datadog early-flake retries for new tests; disable for a single-attempt inference smoke'
+        required: false
+        type: string
+        default: 'true'
       sidecar_backend:
         description: 'Backend name (vllm/sglang/trtllm) to install a dynamo-*-sidecar binary for before running tests. Empty = skip (non-sidecar callers).'
         required: false
@@ -215,6 +225,7 @@ jobs:
         # fallback if that step does not run.
         DD_TAGS: 'team:dynamo'
         DD_CIVISIBILITY_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
+        DD_CIVISIBILITY_EARLY_FLAKE_DETECTION_ENABLED: ${{ inputs.dd_early_flake_detection_enabled }}
         DD_CIVISIBILITY_FLAKY_RETRY_COUNT: '2'
         # dynamo tests run product code in subprocesses, so ddtrace's in-process
         # coverage.py collects nothing ("No data was collected" warnings) and TIA
@@ -232,6 +243,7 @@ jobs:
         DD_GIT_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         PYTEST_ADDOPTS: >
           --ddtrace
+          ${{ inputs.pytest_paths }}
           ${{ inputs.framework == 'triton' && '--ignore=tests/fault_tolerance/test_canary_rank_pause.py' || '' }}
           ${{ inputs.framework == 'triton' && '--ignore=tests/serve/test_vllm.py' || '' }}
           ${{ inputs.framework == 'triton' && '--ignore=tests/serve/test_sglang.py' || '' }}

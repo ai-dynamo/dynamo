@@ -1007,6 +1007,7 @@ jobs:
     with:
       test_suite_name: tokenspeed
       framework: tokenspeed
+      pytest_paths: tests/serve/test_tokenspeed.py::test_tokenspeed_single_request
       test_type: Test
       minio_service: false
       amd_runner: prod-tester-amd-gpu-v2
@@ -1020,6 +1021,7 @@ jobs:
       gpu_test_timeout_minutes: 15
       job_timeout_minutes: 45
       dd_flaky_retry_enabled: 'false'
+      dd_early_flake_detection_enabled: 'false'
     secrets: inherit
 
   triton-test:
