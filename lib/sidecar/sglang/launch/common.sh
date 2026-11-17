@@ -9,7 +9,7 @@ sglang_check_listener_ports() {
         return 1
     fi
     if (( 10#$2 - 10#$1 < 10#$3 && 10#$1 - 10#$2 < 10#$3 )); then
-        echo "SGLANG_HTTP_PORT and SGLANG_GRPC_PORT must be at least $3 apart: each of the $3 listeners binds both + k" >&2
+        echo "SGLang HTTP port $1 and gRPC port $2 must be at least $3 apart: each of the $3 listeners binds both + k" >&2
         return 1
     fi
 }
