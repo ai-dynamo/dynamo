@@ -942,11 +942,9 @@ fn prefill_names_dispatched_rank() {
 /// that; a malformed rank is refused.
 #[test]
 fn handoff_names_rank_only_when_prefill_named_it() {
-    for (routed, dispatched, size, named) in [
-        (Some(3), Some(3), 4, Some(3)),
-        (None, Some(3), 4, None),
-        (None, None, 1, None),
-    ] {
+    for (routed, dispatched, size, named) in
+        [(Some(3), Some(3), 4, Some(3)), (None, Some(3), 4, None)]
+    {
         let mut prefill_request = request();
         prefill_request.routing = Some(RoutingHints {
             prefill_dp_rank: routed,

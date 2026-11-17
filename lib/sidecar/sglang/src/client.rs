@@ -420,7 +420,6 @@ impl Pool {
         self.clients[0].clone()
     }
 
-    /// One connection to `uri`, opened on first use.
     #[cfg(test)]
     pub(crate) fn lazy(uri: &GrpcEndpoint) -> Self {
         let channel = tonic::transport::Endpoint::from_shared(uri.as_str().to_string())
