@@ -2885,14 +2885,13 @@ dependencies = [
  "dynamo-sglang-generate",
  "dynamo-sidecar-common",
  "futures",
- "prost 0.13.5",
  "rand 0.9.4",
  "reqwest 0.12.28",
  "serde_json",
+ "sglang-api-types",
  "tokio",
  "tokio-util",
- "tonic 0.13.1",
- "tonic-build 0.13.1",
+ "tonic 0.14.6",
  "tracing",
  "url",
 ]
@@ -8450,6 +8449,18 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "sglang-api-types"
+version = "0.1.1"
+dependencies = [
+ "bytes",
+ "prost 0.14.4",
+ "serde",
+ "serde_json",
+ "tonic 0.14.6",
+ "tonic-prost",
 ]
 
 [[package]]
