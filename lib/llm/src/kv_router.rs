@@ -405,8 +405,7 @@ fn start_recurrent_layout_reconciler(
 ) {
     tokio::spawn(async move {
         loop {
-            let snapshot = workers.borrow_and_update().clone();
-            reconcile_recurrent_layouts(&indexer, &snapshot);
+            reconcile_recurrent_layouts(&indexer, &workers.borrow_and_update());
             tokio::select! {
                 _ = cancellation.cancelled() => break,
                 changed = workers.changed() => if changed.is_err() { break; },
@@ -894,7 +893,6 @@ impl KvRouter {
         })
         .await?;
         let indexer = ingress.indexer().clone();
-        reconcile_recurrent_layouts(&indexer, &workers_with_configs.borrow());
         start_recurrent_layout_reconciler(
             indexer.clone(),
             workers_with_configs.clone(),
