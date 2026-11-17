@@ -89,7 +89,9 @@ An illustrative SGLang response follows. These probabilities, confidence values,
 }
 ```
 
-For the score above, the result is `0 × 0.1 + 1 × 0.3 + 2 × 0.6 = 1.5`, not the most likely level index. Choice values remain typed: `true` and `"true"` are different options.
+Score levels are numbered from zero: Low is 0, Moderate is 1, and High is 2. The returned `score` is their probability-weighted average: `0 × 0.1 + 1 × 0.3 + 2 × 0.6 = 1.5`. High has the largest probability (0.6), but the API returns the average (1.5), not High's index (2). Use the distribution to select the most likely level when you need a single label.
+
+Choice values remain typed: `true` and `"true"` are different options.
 
 ## Call Jev System One with curl
 
