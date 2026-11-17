@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterator
 
 import torch
 from gpu_memory_service.client.torch.allocator import (
@@ -386,22 +386,18 @@ def _prepare_write(
     return model.eval()
 
 
-def _release_pool_and_copy_out(
+def _registered_non_parameters(
     gms_client: "GMSClientMemoryManager", model: torch.nn.Module
-) -> tuple[GMSCommittedMemoryStats, int, list[torch.UntypedStorage]]:
-    """Drop the weight pool and move live non-Parameters to private memory.
+) -> tuple[list[torch.UntypedStorage], set[int]]:
+    """GMS storages behind registered non-Parameter metadata, and tensor ids.
 
-    Runs after registration. Returns the committed/pruned stats, the bytes
-    copied out, and the GMS storages that back registered non-Parameter
-    metadata (they must outlive publication).
+    The metadata references the initial values, so one owner per storage must
+    outlive the rebinding of the live tensors, including after commit.
+    Returning also drops tensors that properties created during the walk,
+    before the heap scan could mistake them for live ones.
     """
-    before_bytes = gms_client.total_bytes
-    before_count = len(gms_client.mappings)
-    # Metadata for private buffers references an immutable initial-value copy.
-    # Keep one source storage owner, including after commit, independently of
-    # the mutable TensorImpls that will be rebound below.
-    retained_gms_tensors = []
-    seen = set()
+    retained: list[torch.UntypedStorage] = []
+    seen: set[int] = set()
     in_tree: set[int] = set()
     for _, tensor, kind in _iter_module_tensors(model):
         if kind == "parameter":
@@ -416,10 +412,33 @@ def _release_pool_and_copy_out(
         ):
             continue
         seen.add(int(storage._cdata))
-        retained_gms_tensors.append(storage)
-    # Repacking may fill the device with cached pool segments. Dropping the
-    # pool owner first lets Torch free only unused blocks; live StorageImpls
-    # remain owned while the copy executes on the default allocator.
+        retained.append(storage)
+    return retained, in_tree
+
+
+def _held_non_parameters(model: torch.nn.Module) -> Iterator[torch.Tensor]:
+    """Non-Parameter tensors that modules hold directly."""
+    for module in model.modules():
+        for value in (*module._buffers.values(), *vars(module).values()):
+            for item in value if isinstance(value, (list, tuple)) else (value,):
+                if torch.is_tensor(item) and not isinstance(item, torch.nn.Parameter):
+                    yield item
+
+
+def _release_pool_and_copy_out(
+    gms_client: "GMSClientMemoryManager", model: torch.nn.Module
+) -> tuple[GMSCommittedMemoryStats, int, list[torch.UntypedStorage]]:
+    """Drop the weight pool and move live non-Parameters to private memory.
+
+    Runs after registration. Returns the committed/pruned stats, the bytes
+    copied out, and the GMS storages that back registered non-Parameter
+    metadata (they must outlive publication).
+    """
+    before_bytes = gms_client.total_bytes
+    before_count = len(gms_client.mappings)
+    retained_gms_tensors, in_tree = _registered_non_parameters(gms_client, model)
+    # Dropping the pool lets Torch free only unused blocks; live StorageImpls
+    # stay owned while the copy runs on the default allocator.
     torch_device().synchronize(gms_client.device)
     # Releasing the pool runs the full garbage collection the heap scan needs.
     release_gms_mem_pool(gms_client)
@@ -432,6 +451,9 @@ def _release_pool_and_copy_out(
         ),
         collect_garbage=False,
         copied=copied,
+        # The heap scan cannot see tensors frozen by gc.freeze(). Frozen
+        # tensors held outside the module tree stay in GMS memory.
+        known_tensors=_held_non_parameters(model),
     )
     torch_device().synchronize(gms_client.device)
     torch_device().empty_cache()

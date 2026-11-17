@@ -9,6 +9,7 @@ prepare step (``_load_write_mode``) with CPU tensors standing in for the GMS
 pool: one "allocation" is a single storage that the model's tensors view.
 """
 
+import gc
 import sys
 from contextlib import nullcontext
 from types import ModuleType, SimpleNamespace
@@ -31,12 +32,6 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.none,
 ]
-
-# Stand-in for vllm.v1.attention.backends.flashinfer's module global: the
-# multi-CTA KV counter that FlashInferImpl.__init__ creates during model
-# construction (so inside the GMS pool) and the TRT-LLM attention kernels
-# update atomically on every launch.
-_fi_multi_ctas_kv_counter = None
 
 _ARENA_BYTES = 1 << 16
 
@@ -97,9 +92,6 @@ def write_with(monkeypatch):
     monkeypatch.setattr(model_loader, "_last_imported_weights_bytes", 0)
     monkeypatch.setattr(model_loader, "_last_model_memory_usage_offset_bytes", 0)
     monkeypatch.setattr(model_loader, "_published_gms_tensor_owners", [], raising=False)
-    monkeypatch.setattr(
-        sys.modules[__name__], "_fi_multi_ctas_kv_counter", None, raising=True
-    )
     monkeypatch.setattr(module, "_is_accelerator_tensor", lambda t: True)
     device = SimpleNamespace(synchronize=lambda index: None, empty_cache=lambda: None)
     monkeypatch.setattr(model_loader, "torch_device", lambda: device)
@@ -153,12 +145,11 @@ class _SparseMLAIndexGroup:
 class _AttentionImpl:
     """Attention impls are plain objects held by the attention layer."""
 
-    def __init__(self, storage):
-        global _fi_multi_ctas_kv_counter
-        # FlashInfer's counter: 512 KiB uint8 at +0x200 of a pool segment the
-        # layer's scales also use. Here: same allocation as the weights.
-        _fi_multi_ctas_kv_counter = _view(storage, torch.uint8, 0x2200, (512,))
-        self._multi_ctas_kv_counter_buffer = _fi_multi_ctas_kv_counter
+    def __init__(self, storage, backend):
+        # A kernel counter that the attention backend keeps in a module global
+        # and creates during model construction, so inside the GMS pool.
+        backend.kv_counter = _view(storage, torch.uint8, 0x2200, (512,))
+        self._kv_counter_buffer = backend.kv_counter
         topk = _view(storage, torch.int32, 0x4000, (8, 64))
         topk.copy_(torch.arange(8 * 64, dtype=torch.int32).view(8, 64))
         self.index_group = _SparseMLAIndexGroup(topk)
@@ -167,9 +158,8 @@ class _AttentionImpl:
 def test_writable_buffer_held_outside_the_module_tree_leaves_gms(write_with):
     """A kernel-written buffer in a kept allocation but outside the module tree
     must not stay in memory that publication remaps read-only (FlashInfer's
-    multi-CTA KV counter on vLLM 0.33; GLM's
-    SparseMLAIndexGroup.physical_topk_indices). Upstream main's writer only
-    rebinds module-tree tensors; the GPU then reports FAULT_RO_VIOLATION."""
+    multi-CTA KV counter, SparseMLAIndexGroup.physical_topk_indices)."""
+    backend = SimpleNamespace()
 
     def build(storage):
         model = torch.nn.Module()
@@ -181,37 +171,56 @@ def test_writable_buffer_held_outside_the_module_tree_leaves_gms(write_with):
         model.attn.register_buffer(
             "_k_scale", _view(storage, torch.float32, 0x2000, (1,))
         )
-        model.attn.impl = _AttentionImpl(storage)
+        model.attn.impl = _AttentionImpl(storage, backend)
         return model
 
     manager, model, storage = write_with(build)
 
-    counter = _fi_multi_ctas_kv_counter
+    counter = backend.kv_counter
     topk = model.attn.impl.index_group.physical_topk_indices
-    # The kept allocation is still the weights' allocation.
     assert manager.in_gms(model.weight)
     assert "weight" in manager.metadata
     # Neither out-of-tree buffer may remain in it ...
     assert [manager.in_gms(counter), manager.in_gms(topk)] == [False, False]
     # ... and every holder still sees one writable tensor with the old values.
-    assert model.attn.impl._multi_ctas_kv_counter_buffer is counter
+    assert model.attn.impl._kv_counter_buffer is counter
     assert topk.flatten().tolist() == list(range(8 * 64))
     counter.add_(1)
     assert torch.equal(
-        model.attn.impl._multi_ctas_kv_counter_buffer,
-        torch.ones(512, dtype=torch.uint8),
+        model.attn.impl._kv_counter_buffer, torch.ones(512, dtype=torch.uint8)
     )
-    # The in-tree buffer leaves GMS too.
     assert not manager.in_gms(model.attn._k_scale)
+
+
+def test_module_buffers_frozen_by_gc_still_leave_gms(write_with):
+    """gc.freeze() hides objects from the heap scan (Dynamo's benchmark GC
+    policy freezes periodically); tensors that modules hold are still found."""
+
+    def build(storage):
+        model = torch.nn.Module()
+        model.weight = torch.nn.Parameter(
+            _view(storage, torch.float32, 0, (1024,)), requires_grad=False
+        )
+        model.register_buffer("_k_scale", _view(storage, torch.float32, 0x2000, (1,)))
+        model.scales = [_view(storage, torch.float32, 0x2100, (4,))]
+        gc.freeze()
+        return model
+
+    try:
+        manager, model, storage = write_with(build)
+    finally:
+        gc.unfreeze()
+
+    assert manager.in_gms(model.weight)
+    assert not manager.in_gms(model._k_scale)
+    assert not manager.in_gms(model.scales[0])
 
 
 def test_one_tensor_under_many_names_stays_one_copy(write_with):
     """GLM-5.2's topk_indices_buffer is one tensor reachable under 121 module
     names (the model, and every layer's attention and indexer). The indexer
     writes it and sparse attention reads it, so the writer must move it out
-    once and keep every name on the same memory. Upstream main clones per
-    name: 121 private copies, and the indexer's writes no longer reach the
-    attention (wrong output on GLM)."""
+    once and keep every name on the same memory."""
     layers = 60
 
     def build(storage):

@@ -56,13 +56,18 @@ else:
 
 
 from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
+from gpu_memory_service.client.torch import allocator as gms_allocator
+from gpu_memory_service.client.torch.extensions import _allocator_ext
 from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
     register_module_tensors,
 )
 from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
+from gpu_memory_service.common import utils as common_utils
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.vmm import _reset_vmm_singleton
+from gpu_memory_service.integrations.common.utils import publish_gms_write
+from gpu_memory_service.integrations.vllm import model_loader
 from gpu_memory_service.server.rpc import GMSRPCServer
 
 pytestmark = [
@@ -439,12 +444,6 @@ def _in_gms(manager: GMSClientMemoryManager, tensor: torch.Tensor) -> bool:
 def test_vllm_writer_publishes_from_a_released_pool(running_gms, monkeypatch):
     """vLLM first writer: drop the weight pool, copy live non-Parameters out of
     GMS, publish, and keep the committed layout intact across a later free."""
-    from gpu_memory_service.client.torch import allocator as gms_allocator
-    from gpu_memory_service.client.torch.extensions import _allocator_ext
-    from gpu_memory_service.common import utils as common_utils
-    from gpu_memory_service.integrations.common.utils import publish_gms_write
-    from gpu_memory_service.integrations.vllm import model_loader
-
     if _allocator_ext is None:
         pytest.skip("GMS allocator extension is not built")
     socket_path = running_gms

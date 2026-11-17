@@ -89,7 +89,8 @@ def _gms_free(ptr: int, size: int, device: int, stream: int) -> None:
             state.manager.destroy_mapping(va)
         except Exception as exc:
             # The native shim cannot propagate free callback exceptions.
-            # Preserve the failure for the publication barrier.
+            # Preserve the first failure for the publication barrier.
+            logger.exception("[GMS] free(tag=%s): failed to release va=0x%x", tag, va)
             if state.callback_failure is None:
                 state.callback_failure = exc
         return
@@ -388,21 +389,17 @@ def gms_use_mem_pool(tag: str, device: "torch.device | int") -> Iterator[None]:
 def release_gms_mem_pool(manager: "GMSClientMemoryManager") -> None:
     """Release cached blocks through Torch's allocator, preserving live storage.
 
-    Called outside the pool region after synchronizing. Live StorageImpls keep
-    their backing while cached blocks are released. Module traversal cannot
-    establish allocation liveness.
-
-    Runs one full garbage collection: a full collection walks the whole
-    Python heap (about 0.3 s per million objects in a vLLM engine), so a
-    second one runs only if a reference cycle still holds the pool.
+    Called outside the pool region after synchronizing. Dropping the pool
+    frees the blocks it has cached; blocks that live StorageImpls own keep
+    their backing. Module traversal cannot establish allocation liveness.
     """
     state = _tag_states.get(manager.tag)
     if state is None or state.manager is not manager or state.mem_pool is None:
-        raise RuntimeError("GMS weight pool is missing or already finalized")
+        raise RuntimeError("GMS memory pool is missing or already released")
     if _active_tag.get() == manager.tag:
-        raise RuntimeError("Cannot finalize an active GMS memory pool")
-    # Free tensors that only cyclic garbage references while the pool still
-    # exists: dropping the pool releases the blocks it has cached by then.
+        raise RuntimeError("Cannot release an active GMS memory pool")
+    # Tensors that only reference cycles keep alive must die while the pool
+    # still exists, so that dropping the pool releases their blocks too.
     gc.collect()
     pool = state.mem_pool
     state.mem_pool = None
@@ -412,7 +409,14 @@ def release_gms_mem_pool(manager: "GMSClientMemoryManager") -> None:
         pool_ref = None
     del pool
     if pool_ref is None or pool_ref() is not None:
+        # A reference cycle may hold the pool itself.
         gc.collect()
+        if pool_ref is not None and pool_ref() is not None:
+            logger.warning(
+                "[GMS] The %s memory pool is still referenced; its cached "
+                "blocks were not released",
+                manager.tag,
+            )
     raise_if_gms_allocator_failed(manager)
 
 

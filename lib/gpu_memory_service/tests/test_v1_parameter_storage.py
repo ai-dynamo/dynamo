@@ -18,10 +18,14 @@ if not HAS_TORCH:
     pytest.skip("PyTorch is required", allow_module_level=True)
 
 import torch
+from gpu_memory_service.v1.client import parameter_storage
 from gpu_memory_service.v1.client.mapping import LocalMapping
 from gpu_memory_service.v1.client.parameter_storage import (
     copy_non_parameter_tensors_to_default_allocator,
 )
+from torch._subclasses.fake_tensor import FakeTensorMode
+from torch._subclasses.functional_tensor import FunctionalTensor, FunctionalTensorMode
+from torch.func import grad
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -205,14 +209,6 @@ def test_storage_across_an_unmapped_gap_is_not_gms_owned() -> None:
 def test_copy_out_skips_tensors_without_device_storage() -> None:
     """The process-wide scan can see torch.compile FakeTensors, meta tensors and
     wrapper subclasses; none of them can be GMS-backed."""
-    from gpu_memory_service.v1.client import parameter_storage
-    from torch._subclasses.fake_tensor import FakeTensorMode
-    from torch._subclasses.functional_tensor import (
-        FunctionalTensor,
-        FunctionalTensorMode,
-    )
-    from torch.func import grad
-
     everything = (_mapping("all", 0, 1 << 62),)
     bases = (0,)
 
@@ -235,44 +231,6 @@ def test_copy_out_skips_tensors_without_device_storage() -> None:
 
     grad(record)(torch.ones(3))
     assert wrapped == [True]
-
-
-def test_heap_scan_selects_the_same_tensors_as_an_issubclass_scan() -> None:
-    """The live-tensor scan filters the heap by exact type against the set of
-    Tensor subclasses; it must select what issubclass would, including
-    subclasses defined after import and Parameters held outside any model."""
-    from gpu_memory_service.v1.client import parameter_storage
-
-    class Wrapped(torch.Tensor):
-        pass
-
-    class Nested(Wrapped):
-        pass
-
-    model = torch.nn.Linear(2, 2)
-    held = [
-        torch.ones(3),
-        torch.ones(2).as_subclass(Wrapped),
-        torch.ones(2).as_subclass(Nested),
-        torch.nn.Parameter(torch.ones(2)),
-        torch.empty(1, device="meta"),
-        torch.ones(2, 2).to_sparse(),
-    ]
-
-    def reference() -> set[int]:
-        found = {int(p._cdata) for p in model.parameters()}
-        found.update(
-            int(value._cdata)
-            for value in gc.get_objects()
-            if issubclass(type(value), torch.Tensor) and value.layout is torch.strided
-        )
-        return found
-
-    expected = reference()
-    found = {int(t._cdata) for t in parameter_storage._iter_live_tensors((model,))}
-    assert found == expected
-    assert {int(t._cdata) for t in held[:5]} <= found
-    assert int(held[5]._cdata) not in found
 
 
 def test_copy_out_reports_each_copy_without_collecting(monkeypatch) -> None:

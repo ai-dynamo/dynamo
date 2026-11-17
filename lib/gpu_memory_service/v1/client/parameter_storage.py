@@ -159,22 +159,27 @@ def _tensor_types() -> frozenset[type]:
     return frozenset(types)
 
 
-def _iter_live_tensors(models: Iterable[object]):
+def _iter_live_tensors(
+    models: Iterable[object], known_tensors: Iterable[torch.Tensor] = ()
+):
     for model in models:
         yield from model.parameters()
-    # The heap holds about a million objects in an inference engine. A set
-    # lookup on the exact type selects the same objects as
-    # issubclass(type(value), torch.Tensor) without a __subclasscheck__ call
-    # per object (torch.Tensor has a metaclass).
+    # An exact-type set lookup per heap object is much cheaper than issubclass.
     tensor_types = _tensor_types()
     for value in gc.get_objects():
         if type(value) in tensor_types and value.layout is torch.strided:
             yield value
+    # gc.get_objects() omits objects that gc.freeze() moved out of the heap.
+    for value in known_tensors:
+        if value.layout is torch.strided:
+            yield value
 
 
-def _discover_live_tensors(models: Iterable[object]) -> list[tuple[torch.Tensor, bool]]:
+def _discover_live_tensors(
+    models: Iterable[object], known_tensors: Iterable[torch.Tensor] = ()
+) -> list[tuple[torch.Tensor, bool]]:
     objects: dict[int, tuple[torch.Tensor, bool]] = {}
-    for tensor in _iter_live_tensors(models):
+    for tensor in _iter_live_tensors(models, known_tensors):
         tensor_id = int(tensor._cdata)
         tensor_object = objects.get(tensor_id)
         if tensor_object is None:
@@ -226,11 +231,14 @@ def copy_non_parameter_tensors_to_default_allocator(
     *,
     collect_garbage: bool = True,
     copied: list[tuple[int, tuple[torch.Tensor, ...]]] | None = None,
+    known_tensors: Iterable[torch.Tensor] = (),
 ) -> tuple[int, int]:
     """Copy live non-Parameters out of GMS and return span/copy byte counts.
 
     ``collect_garbage=False`` skips the full garbage collection for a caller
     that has just run one. ``copied`` receives ``(bytes, tensors)`` per copy.
+    ``known_tensors`` are considered in addition to the heap scan, which
+    cannot see objects frozen by ``gc.freeze()``.
     """
     if collect_garbage:
         gc.collect()
@@ -238,7 +246,7 @@ def copy_non_parameter_tensors_to_default_allocator(
     mapping_bases = tuple(mapping.base for mapping in mappings)
     retained_parameter_spans: list[tuple[int, int]] = []
     non_parameters: list[torch.Tensor] = []
-    for tensor, is_parameter in _discover_live_tensors(models):
+    for tensor, is_parameter in _discover_live_tensors(models, known_tensors):
         if _containing_mapping(tensor, mappings, mapping_bases) is None:
             continue
         if not is_parameter:
