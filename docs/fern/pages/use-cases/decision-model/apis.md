@@ -5,7 +5,10 @@ title: Decision APIs
 subtitle: Classify and score text with the OpenAI Decisions and Jev System One contracts
 ---
 
-**Experimental.** NVIDIA Dynamo exposes two non-streaming decision APIs over one scoring pipeline. Start an [SGLang decision worker](sglang.md) before running these examples. The HTTP route chooses the public contract; the registered model chooses the executor. Neither route is a chat/completions alias, and neither returns generated prose.
+> [!IMPORTANT]
+> **Experimental.** Start an [SGLang decision worker](sglang.md) with the required scoring configuration before running these examples.
+
+NVIDIA Dynamo exposes two non-streaming decision APIs over one scoring pipeline. The HTTP route chooses the public contract; the registered model chooses the executor. Neither route is a chat/completions alias, and neither returns generated prose.
 
 ## Choose a Contract
 
