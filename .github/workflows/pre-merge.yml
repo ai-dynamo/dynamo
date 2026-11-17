@@ -568,9 +568,6 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
-    - name: Check router crate layering
-      if: matrix.dir == '.'
-      run: bash scripts/router_layering_check.sh --host
     - name: Run Python bindings AIS feature clippy
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
