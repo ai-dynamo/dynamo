@@ -367,6 +367,7 @@ type RecommendationSpec struct {
 type RerunSpec struct {
 	// Reason records why the user requested another Run. Changing this value creates a new
 	// Request generation and the value is frozen into that generation's immutable Run.
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	Reason string `json:"reason"`
 }
