@@ -507,7 +507,6 @@ impl WorkerConfig {
             })?;
         Ok(Self {
             inner: RsWorkerConfig {
-                router_config: None,
                 namespace,
                 component,
                 endpoint,
