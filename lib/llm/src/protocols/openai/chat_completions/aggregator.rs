@@ -3746,8 +3746,6 @@ mod tests {
             Some(dynamo_protocols::types::FinishReason::Stop)
         );
 
-        // Without the flag the same text is parsed into a call: the flag is what
-        // keeps it as content.
         let response = DeltaAggregator::apply(
             stream::iter(deltas),
             ParsingOptions::new(Some("hermes".to_string()), None),
