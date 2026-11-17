@@ -90,7 +90,11 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         ErrorType::WorkerUnavailable,
     ];
     // Pre-stream request rejections can carry an outer CannotConnect wrapper.
-    // A `Conflict` is a worker refusing a request id it is still serving.
+    // A `Conflict` is a worker refusing a request id it is still serving. The
+    // other request-scoped classes are worker answers that carry a defined
+    // status: an engine's generate() rpc refusal (a guided-decoding/grammar or
+    // settings rejection answering before the response stream) proves the worker
+    // is reachable, so only that request may fail, never its routing health.
     !is_worker_overloaded(err)
         && match_error_chain(
             err,
@@ -100,6 +104,9 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
                 ErrorType::InvalidArgument,
                 ErrorType::Backend(BackendError::InvalidArgument),
                 ErrorType::Conflict,
+                ErrorType::NotImplemented,
+                ErrorType::Internal,
+                ErrorType::Backend(BackendError::Unknown),
             ],
         )
 }
@@ -2689,11 +2696,19 @@ mod tests {
             StreamPrologueError, egress::addressed_router::pre_stream_failure_error,
         };
 
+        // A typed engine refusal answering before the response stream — the
+        // production case was a TRTLLM `Unimplemented` for
+        // guided-decoding mode `json_schema` — must stay request-scoped:
+        // its own status on the route span (not `cannot_connect`) and no
+        // quarantine. Genuine transport failures keep quarantining.
         for (error_type, is_worker_fault) in [
             (ErrorType::InvalidRequest, false),
             (ErrorType::InvalidArgument, false),
             (ErrorType::Backend(BackendError::InvalidArgument), false),
             (ErrorType::Conflict, false),
+            (ErrorType::NotImplemented, false),
+            (ErrorType::Internal, false),
+            (ErrorType::Backend(BackendError::Unknown), false),
             (ErrorType::CannotConnect, true),
             (ErrorType::Unavailable, true),
         ] {
@@ -2704,6 +2719,15 @@ mod tests {
             let error =
                 pre_stream_failure_error(StreamPrologueError::new("Generate Error", rejection));
             assert_eq!(is_inhibited(&error), is_worker_fault, "{error_type:?}");
+            assert_eq!(
+                crate::pipeline::network::egress::route_span::error_type_from_chain(&error),
+                if is_worker_fault {
+                    ErrorType::CannotConnect
+                } else {
+                    error_type
+                },
+                "the route span must label a worker refusal by its own status, got: {error}"
+            );
         }
     }
 

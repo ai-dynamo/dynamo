@@ -553,6 +553,28 @@ mod tests {
         assert_eq!(error_outcome(ErrorType::DeadlineExceeded), "cancelled");
     }
 
+    /// A worker's pre-stream rpc answer (the sidecar maps an engine's explicit
+    /// statuses, such as `Unimplemented` guided-decoding refusals, to
+    /// `Backend(Unknown)`) is labelled by that answer, never as a connection
+    /// failure: the worker answered, so only the request failed.
+    #[test]
+    fn pre_stream_worker_rejection_is_not_a_connection_failure() {
+        for error_type in [
+            ErrorType::Backend(BackendError::Unknown),
+            ErrorType::NotImplemented,
+            ErrorType::Internal,
+        ] {
+            let name = error_type_name(error_type);
+            let outcome = error_outcome(error_type);
+            assert_eq!(outcome, "error", "{name} is a request-scoped outcome");
+            assert_ne!(
+                (name, outcome),
+                ("cannot_connect", "connection_failed"),
+                "a worker answer must not be labelled a connection failure"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn route_span_covers_attempt_lifecycle_and_retry_metadata() {
         let captured = Arc::new(Captured::default());
