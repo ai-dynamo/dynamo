@@ -263,6 +263,11 @@ impl KvReplayRouter {
         num_workers: usize,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
+        // Only offline replay models the approximate index of a router without KV events.
+        anyhow::ensure!(
+            config.use_kv_events,
+            "online replay requires use_kv_events=true; use offline replay"
+        );
         let tracking_hash = tracking_hash_context(&config)?;
         let indexer =
             create_replay_indexer(args.block_size as u32, config.router_event_threads as usize);
@@ -848,6 +853,30 @@ mod tests {
             0
         );
         router.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn online_replay_refuses_a_router_without_kv_events() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "max_num_batched_tokens": 64
+            }
+        }))
+        .unwrap();
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            ..KvRouterConfig::default()
+        };
+        let Err(error) =
+            ReplayRouter::new(ReplayRouterMode::KvRouter, &args, Some(config), None, 1)
+        else {
+            panic!("online replay accepted use_kv_events=false");
+        };
+        assert!(
+            format!("{error:#}").contains("online replay requires use_kv_events=true"),
+            "{error:#}"
+        );
     }
 
     #[tokio::test]

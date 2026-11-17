@@ -10,7 +10,14 @@ from collections.abc import Mapping
 from typing import Annotated, Any, Literal, TypeAlias
 
 from aisimulate.config.common import Choices, NumericRange
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    field_validator,
+    model_validator,
+)
 
 from dynamo.aisimulate.domains import (
     CHOICE_FORM,
@@ -112,6 +119,8 @@ class RouterPredictionConfig(BaseModel):
     overlap_score_credit: StrictFiniteFloat | None = None
     prefill_load_scale: StrictFiniteFloat | None = None
     temperature: StrictFiniteFloat | None = None
+    # --no-router-kv-events: the router indexes its own routing decisions instead.
+    use_kv_events: StrictBool | None = None
     conversation_affinity: ConversationAffinityConfig | None = None
     # Router policy YAML, the file the live router takes as ``--router-policy-config``.
     # A worker-selection policy it selects replaces the default cost function.
@@ -121,12 +130,13 @@ class RouterPredictionConfig(BaseModel):
         "overlap_score_credit",
         "prefill_load_scale",
         "temperature",
+        "use_kv_events",
         mode="before",
     )
     @classmethod
     def _reject_explicit_null(cls, value: Any) -> Any:
         if value is None:
-            raise ValueError("Router numeric knobs do not accept null")
+            raise ValueError("Router knobs do not accept null")
         return value
 
     @model_validator(mode="after")
@@ -138,6 +148,7 @@ class RouterPredictionConfig(BaseModel):
                 "policy_config",
                 "prefill_load_scale",
                 "temperature",
+                "use_kv_events",
             }.intersection(self.model_fields_set)
             if self.prefill_load_model.type != "none" or conflicts:
                 raise ValueError(
