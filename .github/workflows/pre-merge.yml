@@ -542,8 +542,11 @@ jobs:
     - name: Run NVTX feature tests
       # Only this step and "Lint the NVTX feature" turn on the nvtx feature here.
       # The lint step and the image builds compile it but run no tests. So this
-      # step is the only one that runs the feature-on tests in lib/runtime/src/nvtx.rs.
-      run: "cargo test --locked -p dynamo-runtime --features nvtx --lib nvtx::"
+      # step is the only one that runs the feature-on tests in lib/runtime/src/nvtx.rs
+      # and lib/runtime/tests/nvtx_payload.rs, which records what reaches NVTX.
+      run: |
+        cargo test --locked -p dynamo-runtime --features nvtx --lib nvtx::
+        cargo test --locked -p dynamo-runtime --features nvtx --test nvtx_payload
 
   rust-clippy:
     needs: changed-files
