@@ -274,7 +274,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 bootstrap_room=bootstrap_room,
                 external_trace_header=trace_header,
                 rid=sglang_request_id,
-                data_parallel_rank=dp_rank,
+                routed_dp_rank=dp_rank,
                 lora_path=lora_path,
                 **priority_kwargs,
                 **agent_session_kwargs(self.engine, inner_request),

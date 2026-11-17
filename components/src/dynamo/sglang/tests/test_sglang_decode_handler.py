@@ -3331,7 +3331,7 @@ async def test_disagg_decode_passes_prefill_dp_rank_to_engine():
     [output async for output in handler.generate(request, context)]
     kwargs = handler.engine.async_generate.await_args.kwargs
     assert kwargs["disagg_prefill_dp_rank"] == 3
-    assert kwargs["data_parallel_rank"] == 1
+    assert kwargs["routed_dp_rank"] == 1
 
 
 def test_build_native_generate_request_forwards_prefill_dp_rank():
