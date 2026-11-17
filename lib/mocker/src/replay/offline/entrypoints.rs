@@ -232,34 +232,20 @@ fn run_aggregated_with_capture_options(
             input,
             telemetry,
         ),
-        ReplayRouterMode::KvRouter => {
-            let composition = KvReplayComposition::aggregated(
+        ReplayRouterMode::KvRouter => run_kv_composition(
+            spec,
+            factory,
+            KvReplayComposition::aggregated(
                 args,
                 num_workers,
                 router_config,
                 prefill_load_estimator,
                 scaling_policy,
-            );
-            if composition.reads_engine_kv_events() {
-                run_composition(
-                    spec,
-                    factory,
-                    composition,
-                    capture_options,
-                    input,
-                    telemetry,
-                )
-            } else {
-                run_composition(
-                    spec,
-                    factory,
-                    composition.without_engine_kv_events(),
-                    capture_options,
-                    input,
-                    telemetry,
-                )
-            }
-        }
+            ),
+            capture_options,
+            input,
+            telemetry,
+        ),
     }
 }
 
@@ -275,6 +261,36 @@ fn run_composition<C: ReplayComposition>(
         .with_capture_options(capture_options)
         .with_runtime_input(input);
     Ok(with_telemetry(replayer, telemetry)?.run()?)
+}
+
+/// Runs a KV-router composition; engines export no KV events when its router reads none.
+fn run_kv_composition(
+    spec: ReplaySpec,
+    factory: ReplayEngineFactory,
+    composition: KvReplayComposition,
+    capture_options: ReplayCaptureOptions,
+    input: ReplayRuntimeInput,
+    telemetry: Option<ReplayTelemetryOptions>,
+) -> Result<TraceSimulationReport> {
+    if composition.reads_engine_kv_events() {
+        run_composition(
+            spec,
+            factory,
+            composition,
+            capture_options,
+            input,
+            telemetry,
+        )
+    } else {
+        run_composition(
+            spec,
+            factory,
+            composition.without_engine_kv_events(),
+            capture_options,
+            input,
+            telemetry,
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -362,8 +378,10 @@ fn run_disaggregated_with_capture_options(
             input,
             telemetry,
         ),
-        ReplayRouterMode::KvRouter => {
-            let composition = KvReplayComposition::disaggregated(
+        ReplayRouterMode::KvRouter => run_kv_composition(
+            spec,
+            factory,
+            KvReplayComposition::disaggregated(
                 config.prefill_args,
                 config.decode_args,
                 config.num_prefill_workers,
@@ -371,27 +389,11 @@ fn run_disaggregated_with_capture_options(
                 router_config,
                 prefill_load_estimator,
                 scaling_policy,
-            );
-            if composition.reads_engine_kv_events() {
-                run_composition(
-                    spec,
-                    factory,
-                    composition,
-                    capture_options,
-                    input,
-                    telemetry,
-                )
-            } else {
-                run_composition(
-                    spec,
-                    factory,
-                    composition.without_engine_kv_events(),
-                    capture_options,
-                    input,
-                    telemetry,
-                )
-            }
-        }
+            ),
+            capture_options,
+            input,
+            telemetry,
+        ),
     }
 }
 

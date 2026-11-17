@@ -919,10 +919,6 @@ impl OfflineReplayRouter {
                 .reads_kv_index();
         let kv_transfer_chain_supported =
             reads_kv_index && config.supports_kv_transfer_chain_retention();
-        // This is only a base Instant for converting replay `now_ms` values into
-        // synthetic `Instant`s. All subsequent decay/accounting uses virtual replay
-        // time derived from this epoch, not wall-clock progression.
-        let decay_time_epoch = Instant::now();
         if !config.use_kv_events {
             config.validate().map_err(anyhow::Error::msg)?;
             anyhow::ensure!(
@@ -956,7 +952,10 @@ impl OfflineReplayRouter {
             pending: PolicyQueue::new(&profile),
             indexer,
             prefill_load_estimator,
-            decay_time_epoch,
+            // This is only a base Instant for converting replay `now_ms` values into
+            // synthetic `Instant`s. All subsequent decay/accounting uses virtual replay
+            // time derived from this epoch, not wall-clock progression.
+            decay_time_epoch: Instant::now(),
             tracking_hash,
             kv_event_lag_ms: 0.0,
             lagged_kv_events: VecDeque::new(),
@@ -1757,6 +1756,7 @@ mod tests {
     use dynamo_kv_events::residency::StorageTier;
     use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
     use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_kv_indexer::host::ApproximateCachePolicyKind;
     use dynamo_kv_router::config::KvRouterConfig;
     use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
     use dynamo_scheduler::host::{
@@ -4123,6 +4123,28 @@ policy_classes:
         assert_eq!(cached_blocks(&mut placement, 1_950.0), 0);
         let expired = place_now(&mut placement, &kv_fetch_target(3), 1_950.0);
         assert_eq!(expired.reported_overlap_tokens, 0);
+    }
+
+    #[test]
+    fn approximate_index_rejects_the_lru_cache_policy() {
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            router_approximate_cache_policy: ApproximateCachePolicyKind::Lru,
+            ..KvRouterConfig::default()
+        };
+        let Err(error) = KvRouterPlacement::new_with_selector_seed(
+            &replay_args(),
+            Some(config),
+            None,
+            &topology(2, 1, false),
+            Some(0),
+        ) else {
+            panic!("offline replay accepted the lru approximate cache policy");
+        };
+        assert!(
+            format!("{error:#}").contains("ttl retention, not lru"),
+            "{error:#}"
+        );
     }
 
     /// A removed worker's decision timers go with it, as in production, so their

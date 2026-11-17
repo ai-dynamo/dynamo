@@ -855,6 +855,30 @@ mod tests {
         router.shutdown().await.unwrap();
     }
 
+    #[test]
+    fn online_replay_refuses_a_router_without_kv_events() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "max_num_batched_tokens": 64
+            }
+        }))
+        .unwrap();
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            ..KvRouterConfig::default()
+        };
+        let Err(error) =
+            ReplayRouter::new(ReplayRouterMode::KvRouter, &args, Some(config), None, 1)
+        else {
+            panic!("online replay accepted use_kv_events=false");
+        };
+        assert!(
+            format!("{error:#}").contains("online replay requires use_kv_events=true"),
+            "{error:#}"
+        );
+    }
+
     #[tokio::test]
     async fn online_replay_forwards_policy_class_and_returns_config_errors() {
         let args = MockerConfig::from_value(serde_json::json!({
