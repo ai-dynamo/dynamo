@@ -1128,7 +1128,8 @@ impl SelectionService {
         self.inner.list_replica_peers()
     }
 
-    /// Subscribe to a worker's request-event publisher. Returns whether membership changed.
+    /// Subscribe to a worker's prefill and request completion events.
+    /// Returns `true` if the subscription was added.
     fn register_worker_publisher<'p>(
         &self,
         py: Python<'p>,
@@ -1143,7 +1144,7 @@ impl SelectionService {
         })
     }
 
-    /// Unsubscribe from a worker's request-event publisher. Returns whether membership changed.
+    /// Unsubscribe from a worker publisher. Returns `true` if the subscription was removed.
     fn deregister_worker_publisher<'p>(
         &self,
         py: Python<'p>,

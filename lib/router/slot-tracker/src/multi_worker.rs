@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::prefill_tracker::PrefillTimeLoad;
 use super::prompt_registry::{PromptRegistry, WorkerLoadReader, WorkerLoadSnapshot};
-use super::replica_sync::EarlyWorkerMarks;
+use super::replica_sync::PendingWorkerEvents;
 use super::request_maps::{RequestBooking, RequestIndex};
 use super::sharded_lock::ShardedRwLock;
 use super::single::{
@@ -389,7 +389,7 @@ pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
     pub(super) replica_sync: bool,
     pub(super) replica_worker_policy: ReplicaWorkerPolicy,
     replica_request_lease_observer: OnceLock<Arc<dyn ReplicaRequestLeaseObserver>>,
-    pub(super) early_worker_marks: Mutex<EarlyWorkerMarks>,
+    pub(super) pending_worker_events: Mutex<PendingWorkerEvents>,
     worker_type: &'static str,
 }
 
@@ -500,7 +500,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             replica_sync,
             replica_worker_policy: options.replica_worker_policy,
             replica_request_lease_observer: OnceLock::new(),
-            early_worker_marks: Mutex::default(),
+            pending_worker_events: Mutex::default(),
             worker_type,
         }
     }
@@ -3613,7 +3613,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_events_before_the_replica_booking() {
+    fn worker_events_before_admission_are_applied() {
         let worker = WorkerWithDpRank::new(1, 0);
         let other_worker = WorkerWithDpRank::new(2, 0);
         let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1)), (2, (0, 1))]));
@@ -3645,7 +3645,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn early_worker_marks_expire() {
+    async fn pending_worker_events_expire() {
         let worker = WorkerWithDpRank::new(1, 0);
         for event in [replica_free("stale", worker), replica_mark("stale", worker)] {
             let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1))]));

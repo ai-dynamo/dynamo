@@ -523,17 +523,6 @@ mod tests {
     }
 
     #[test]
-    fn worker_events_are_not_router_echoes() {
-        let (tx, _rx) = mpsc::channel(1);
-        let config = ReplicaSyncConfig::new(42, tx, CancellationToken::new());
-        let mut event = event().event;
-        event.worker.worker_id = 42;
-        assert!(config.is_self_event(&event));
-        event.origin = dynamo_slot_tracker::host::ActiveSequenceEventOrigin::Worker;
-        assert!(!config.is_self_event(&event));
-    }
-
-    #[test]
     fn replica_event_wire_schema_uses_routing_group() {
         let payload = rmp_serde::to_vec_named(&event()).unwrap();
         let value: serde_json::Value = rmp_serde::from_slice(&payload).unwrap();

@@ -733,11 +733,9 @@ impl SelectionService {
             .unwrap_or_default()
     }
 
-    /// Subscribe to a worker that publishes its own requests' prefill-completed and free
-    /// events as [`ScopedReplicaEvent`](dynamo_scheduler::replication::ScopedReplicaEvent)s
-    /// on the replica topic, with `origin: Worker`. They apply to this
-    /// service's booking, local or replicated, and are not republished. Requires replica
-    /// sync. Returns whether membership changed.
+    /// Subscribe to a worker's prefill and request completion events.
+    /// Events update local and replicated reservations without being republished.
+    /// Requires replica sync. Returns `true` if the subscription was added.
     #[cfg(feature = "replica-sync-zmq")]
     pub async fn register_worker_publisher(
         &self,

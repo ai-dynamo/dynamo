@@ -1976,7 +1976,7 @@ fn service_load(service: &SelectionService) -> (usize, usize, usize) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn worker_events_reach_every_selector_after_the_booking_one_leaves() {
+async fn worker_events_release_peer_load_after_router_shutdown() {
     let port_a = reserve_tcp_port();
     let service_a = mesh_service(port_a).await;
     let service_b = mesh_service(reserve_tcp_port()).await;

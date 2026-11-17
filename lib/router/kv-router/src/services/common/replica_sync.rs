@@ -567,7 +567,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn dynamic_peer_registration_controls_delivery() {
+    async fn subscriptions_preserve_shared_connections() {
         let endpoint = reserve_tcp_endpoint();
         let cancel_token = CancellationToken::new();
         let (outbound, _affinity, publisher_task) =
@@ -595,9 +595,64 @@ mod tests {
         }
         assert!(delivered, "dynamically registered peer received no events");
 
+        async fn wait_for_request(
+            received_rx: &mut mpsc::Receiver<ScopedReplicaEvent>,
+            request_id: &str,
+        ) {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while let Some(event) = received_rx.recv().await {
+                    if event.event.request_id == request_id {
+                        return;
+                    }
+                }
+                panic!("subscriber closed before receiving {request_id}");
+            })
+            .await
+            .expect("shared subscription stopped delivering events");
+        }
+
+        assert!(!manager.register_peer(endpoint.clone()).await.unwrap());
+        assert!(
+            manager
+                .register_worker_publisher(endpoint.clone())
+                .await
+                .unwrap()
+        );
+        assert!(
+            !manager
+                .register_worker_publisher(endpoint.clone())
+                .await
+                .unwrap()
+        );
+        assert!(manager.deregister_peer(endpoint.clone()).await.unwrap());
+        assert!(!manager.deregister_peer(endpoint.clone()).await.unwrap());
+        let mut worker_only = event();
+        worker_only.event.request_id = "worker-only".to_string();
+        outbound.send(worker_only).await.unwrap();
+        wait_for_request(&mut received_rx, "worker-only").await;
+
+        assert!(manager.register_peer(endpoint.clone()).await.unwrap());
+        assert!(
+            manager
+                .deregister_worker_publisher(endpoint.clone())
+                .await
+                .unwrap()
+        );
+        assert!(
+            !manager
+                .deregister_worker_publisher(endpoint.clone())
+                .await
+                .unwrap()
+        );
+        assert!(manager.list_worker_publishers().is_empty());
+        assert_eq!(manager.list_peers(), vec![endpoint.clone()]);
+        let mut peer_only = event();
+        peer_only.event.request_id = "peer-only".to_string();
+        outbound.send(peer_only).await.unwrap();
+        wait_for_request(&mut received_rx, "peer-only").await;
+
         assert!(manager.deregister_peer(endpoint).await.unwrap());
         while received_rx.try_recv().is_ok() {}
-
         let mut after_disconnect = event();
         after_disconnect.event.request_id = "after-disconnect".to_string();
         outbound.send(after_disconnect).await.unwrap();
@@ -606,58 +661,6 @@ mod tests {
                 .await
                 .is_err()
         );
-
-        cancel_token.cancel();
-        manager.shutdown().await;
-        publisher_task.await.unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn endpoint_stays_connected_while_either_set_holds_it() {
-        let endpoint = reserve_tcp_endpoint();
-        let cancel_token = CancellationToken::new();
-        let (outbound, _affinity, publisher_task) =
-            start_replica_publisher(&endpoint, cancel_token.child_token()).unwrap();
-        let (received_tx, mut received_rx) = mpsc::channel(64);
-        let manager = PeerManager::start(Vec::new(), cancel_token.child_token(), move |event| {
-            let _ = received_tx.try_send(event);
-        })
-        .unwrap();
-        async fn delivers(
-            outbound: &ReplicaEventSender,
-            received_rx: &mut mpsc::Receiver<ScopedReplicaEvent>,
-        ) -> bool {
-            while received_rx.try_recv().is_ok() {}
-            for _ in 0..20 {
-                outbound.send(event()).await.unwrap();
-                let received =
-                    tokio::time::timeout(std::time::Duration::from_millis(50), received_rx.recv());
-                if received.await.is_ok() {
-                    return true;
-                }
-            }
-            false
-        }
-
-        assert!(
-            manager
-                .register_worker_publisher(endpoint.clone())
-                .await
-                .unwrap()
-        );
-        assert!(manager.register_peer(endpoint.clone()).await.unwrap());
-        assert!(
-            manager
-                .deregister_worker_publisher(endpoint.clone())
-                .await
-                .unwrap()
-        );
-        assert!(manager.list_worker_publishers().is_empty());
-        assert_eq!(manager.list_peers(), vec![endpoint.clone()]);
-        assert!(delivers(&outbound, &mut received_rx).await);
-
-        assert!(manager.deregister_peer(endpoint).await.unwrap());
-        assert!(!delivers(&outbound, &mut received_rx).await);
 
         cancel_token.cancel();
         manager.shutdown().await;

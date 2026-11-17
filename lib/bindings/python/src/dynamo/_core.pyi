@@ -898,16 +898,20 @@ class SelectionService:
         ...
 
     async def register_worker_publisher(self, endpoint: str) -> bool:
-        """Subscribe to a worker that publishes its own requests' prefill-completed
-        and free events (requires replica sync).
+        """Subscribe to a worker's prefill and request completion events.
 
-        They apply to this service's booking, local or replicated, and are not
-        republished. Returns whether membership changed.
+        Events update local and replicated reservations without being republished.
+        Requires replica sync. Returns True if the subscription was added, or
+        False if the endpoint was already registered.
         """
         ...
 
     async def deregister_worker_publisher(self, endpoint: str) -> bool:
-        """Unsubscribe from a worker publisher. Returns whether membership changed."""
+        """Unsubscribe from a worker publisher.
+
+        Returns True if the subscription was removed, or False if the endpoint
+        was not registered.
+        """
         ...
 
     def list_worker_publishers(self) -> list[str]:

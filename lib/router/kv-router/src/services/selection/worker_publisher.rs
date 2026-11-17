@@ -11,8 +11,6 @@ use dynamo_slot_tracker::host::{
 use crate::services::common::replica_sync::REPLICA_TOPIC;
 use crate::services::common::zmq::create_bound_pub_socket_sync;
 
-const ZMQ_SNDHWM: i32 = 2000;
-
 /// Publishes worker-origin active-sequence events directly to selector subscribers.
 pub struct ActiveSequenceEventPublisher {
     socket: zmq::Socket,
@@ -29,7 +27,7 @@ impl ActiveSequenceEventPublisher {
         block_size: u32,
     ) -> Result<Self> {
         anyhow::ensure!(block_size > 0, "block_size must be positive");
-        let socket = create_bound_pub_socket_sync(bind_endpoint, Some(ZMQ_SNDHWM))?;
+        let socket = create_bound_pub_socket_sync(bind_endpoint)?;
         let endpoint = socket
             .get_last_endpoint()?
             .map_err(|_| anyhow!("publisher endpoint is not UTF-8"))?;
