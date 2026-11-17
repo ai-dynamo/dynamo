@@ -437,17 +437,47 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
 {% endif %}
 
 {% if device == "cuda" and target == "runtime" %}
-# The upstream renderer bundles a software AAC decoder. Removing it also defers
-# Inkling serving, including text-only requests, in the published runtime.
+# The renderer bundles AAC and its removal disables Inkling, including text-only
+# requests. EasyDict supports optional remote model code.
+# SGLang 0.5.23 declares both; other applicable base requirements block removal.
 # Run after all installs and before compliance inventories the final environment.
-RUN python3 -m pip uninstall --yes --break-system-packages tml-renderers && python3 - <<'PYTHON'
+RUN python3 - <<'PYTHON'
+import subprocess
+import sys
 from importlib import metadata, util
 
-if (
-    list(metadata.distributions(name="tml-renderers"))
-    or util.find_spec("tml_renderers") is not None
-):
-    raise SystemExit("tml-renderers remains installed; Inkling is disabled in this runtime")
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
+removed = {"tml-renderers": "tml_renderers", "easydict": "easydict"}
+for distribution in metadata.distributions():
+    name = canonicalize_name(distribution.metadata["Name"])
+    if name in removed or (name == "sglang" and distribution.version == "0.5.23"):
+        continue
+    for declared in distribution.requires or ():
+        requirement = Requirement(declared)
+        if canonicalize_name(requirement.name) in removed and (
+            requirement.marker is None or requirement.marker.evaluate({"extra": ""})
+        ):
+            raise SystemExit(
+                f"Cannot remove {requirement.name}: {name} {distribution.version} requires {declared}"
+            )
+
+subprocess.run(
+    [
+        sys.executable,
+        "-m",
+        "pip",
+        "uninstall",
+        "--yes",
+        "--break-system-packages",
+        *removed,
+    ],
+    check=True,
+)
+for name, module in removed.items():
+    if list(metadata.distributions(name=name)) or util.find_spec(module) is not None:
+        raise SystemExit(f"{name} remains installed")
 PYTHON
 {% endif %}
 
