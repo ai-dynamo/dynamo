@@ -3200,10 +3200,18 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             let message = error_payload
                 .message
                 .unwrap_or_else(|| status_message.to_string());
+            // Keep the typed error when it carries a public message, so the
+            // unary response renders it. Other messages stay diagnostic.
+            let keep_semantic =
+                overloaded || semantic.is_some_and(|error| error.public_message().is_some());
             return Some(BackendErrorInfo {
                 message,
                 status: code,
-                semantic: if overloaded { semantic.cloned() } else { None },
+                semantic: if keep_semantic {
+                    semantic.cloned()
+                } else {
+                    None
+                },
                 sanitized: overloaded.then_some(SanitizedError::Overloaded),
                 metric_error_type,
             });
@@ -3480,10 +3488,11 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
     }
 
     if let Some(error) = &semantic {
-        let is_classified = !matches!(
-            error.reason().as_str(),
-            "backend.unknown" | "runtime.unclassified"
-        );
+        let is_classified = error.public_message().is_some()
+            || !matches!(
+                error.reason().as_str(),
+                "backend.unknown" | "runtime.unclassified"
+            );
         if is_classified
             && let Some(response) =
                 ErrorMessage::from_semantic_error_with_recording(error, record_failure)
@@ -4239,14 +4248,33 @@ async fn chat_completions(
     // The lookup sits inside validation, so this range nests in
     // frontend.http.chat.validate, whose duration includes it.
     let nvtx_lookup = dynamo_nvtx_range!("frontend.http.chat.engine_lookup");
-    let (engine, parsing_options) = state
-        .manager()
-        .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_model_error(&e);
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    // Text-input WorkerSets never run the preprocessor gate, so admit custom
+    // content only where a WorkerSet advertises it.
+    let (engine, parsing_options) = if crate::preprocessor::has_custom_content(request.content()) {
+        state
+            .manager()
+            .get_chat_completions_engine_with_parsing_for_capability(
+                &model,
+                crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+            )
+    } else {
+        state
+            .manager()
+            .get_chat_completions_engine_with_parsing(&model)
+            .map(Some)
+    }
+    .map_err(|e| ErrorMessage::from_model_error(&e))
+    .and_then(|selected| {
+        selected.ok_or_else(|| {
+            ErrorMessage::from_anyhow(
+                invalid_argument(crate::preprocessor::CUSTOM_CONTENT_UNSUPPORTED).into(),
+                crate::preprocessor::CUSTOM_CONTENT_UNSUPPORTED,
+            )
+        })
+    })
+    .inspect_err(|err_response| {
+        inflight_guard.mark_error(extract_error_type_from_response(err_response));
+    })?;
     drop(nvtx_lookup);
 
     // Beam route, before generic validation (which rejects what this normalizes): a
@@ -8802,6 +8830,33 @@ mod tests {
         let body = serde_json::to_string(&response.1.0).expect("error response serializes");
         assert!(!body.contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
         assert!(!body.contains("/srv/frontend.rs"));
+    }
+
+    #[test]
+    fn unsupported_video_public_message_reaches_the_http_body() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic(r#"{"message":"Unsupported video media","code":415}"#)
+            .public_message("Unsupported video media")
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.1.code, 415);
+        assert_eq!(response.1.message, "Unsupported video media");
+    }
+
+    #[test]
+    fn unsupported_media_without_public_message_uses_catalog_text() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic("private fetch https://example.com/?sig=secret")
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.1.message, "Unsupported media type");
+        assert!(!response.1.message.contains("secret"));
     }
 
     #[test]
