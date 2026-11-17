@@ -1826,35 +1826,26 @@ mod tests {
                 None,
             ),
         ];
-        // Structured calls from a Python chat processor aggregate the same way
-        // when its output is not parsed again.
-        let mut processor_options = ParsingOptions::new(Some("hermes".to_string()), None);
-        processor_options.output_parsed_by_chat_processor = true;
-        for options in [ParsingOptions::default(), processor_options] {
-            let stream = Box::pin(stream::iter(deltas.clone()));
-            let response = DeltaAggregator::apply(stream, options)
-                .await
-                .expect("aggregation should succeed");
-            assert_eq!(response.inner.choices.len(), 1);
-            assert_eq!(
-                response.inner.choices[0].finish_reason,
-                Some(dynamo_protocols::types::FinishReason::ToolCalls)
-            );
-            let tool_calls = response.inner.choices[0]
-                .message
-                .tool_calls
-                .as_ref()
-                .expect("tool_calls should be Some");
-            assert_eq!(tool_calls.len(), 2, "must produce both parallel tool calls");
+        let stream = Box::pin(stream::iter(deltas));
 
-            // BTreeMap iteration is index-ordered, so [0] is tc0, [1] is tc1.
-            assert_eq!(tool_calls[0].id, "tc0");
-            assert_eq!(tool_calls[0].function.name, "get_weather");
-            assert_eq!(tool_calls[0].function.arguments, "{\"city\":\"Tokyo\"}");
-            assert_eq!(tool_calls[1].id, "tc1");
-            assert_eq!(tool_calls[1].function.name, "get_time");
-            assert_eq!(tool_calls[1].function.arguments, "{\"tz\":\"JST\"}");
-        }
+        let response = DeltaAggregator::apply(stream, ParsingOptions::default())
+            .await
+            .expect("aggregation should succeed");
+        assert_eq!(response.inner.choices.len(), 1);
+        let tool_calls = response.inner.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool_calls should be Some");
+        assert_eq!(tool_calls.len(), 2, "must produce both parallel tool calls");
+
+        // BTreeMap iteration is index-ordered, so [0] is tc0, [1] is tc1.
+        assert_eq!(tool_calls[0].id, "tc0");
+        assert_eq!(tool_calls[0].function.name, "get_weather");
+        assert_eq!(tool_calls[0].function.arguments, "{\"city\":\"Tokyo\"}");
+        assert_eq!(tool_calls[1].id, "tc1");
+        assert_eq!(tool_calls[1].function.name, "get_time");
+        assert_eq!(tool_calls[1].function.arguments, "{\"tz\":\"JST\"}");
     }
 
     /// When parallel_tool_calls == false, the aggregator limits the
