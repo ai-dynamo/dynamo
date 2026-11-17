@@ -42,6 +42,8 @@ import hashlib
 import io
 import json
 import math
+import os
+import stat
 import time
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -304,6 +306,8 @@ class BatchClient:
             "phases": {},
         }
         self.jobs: dict[str, str] = {}
+        self._raw_file_ids: dict[str, set[str]] = {}
+        self._raw_retained: dict[tuple[str, str], tuple[int, int, str]] = {}
         self.request_submission_attempts = 0
         self.requests_confirmed_submitted = 0
         if evidence_path is not None:
@@ -334,6 +338,67 @@ class BatchClient:
             )
         }
 
+    def _retain_raw_download(self, job_id: str, file_id: str, content: bytes) -> None:
+        """Save downloaded bytes and their job association before parsing results."""
+        if self.evidence_path is None:
+            return
+        if job_id not in self.jobs or file_id not in self._raw_file_ids.get(
+            job_id, set()
+        ):
+            raise ValueError("Raw Batch file is not advertised by an owned job")
+        key = (job_id, file_id)
+        digest = hashlib.sha256(content).hexdigest()
+        previous = self._raw_retained.get(key)
+        if previous is not None and previous[2] != digest:
+            raise ValueError("Owned raw Batch content changed")
+        directory = self.evidence_path.parent / "native-output"
+        directory.mkdir(mode=0o700, exist_ok=True)
+        name = hashlib.sha256((job_id + "/" + file_id).encode()).hexdigest() + ".jsonl"
+        path = directory / name
+        if previous is None:
+            # Exclusive creation preserves evidence from an earlier run or another client.
+            with os.fdopen(
+                os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb"
+            ) as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            for parent in (directory, directory.parent):
+                fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+        with os.fdopen(
+            os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb"
+        ) as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("Raw Batch output is not a regular file")
+            identity = (info.st_dev, info.st_ino, digest)
+            if previous is not None and identity != previous:
+                raise ValueError("Owned raw Batch file identity changed")
+            readback = hashlib.sha256()
+            size = 0
+            while size <= len(content):
+                block = stream.read(min(1024**2, len(content) + 1 - size))
+                if not block:
+                    break
+                size += len(block)
+                readback.update(block)
+            if size != len(content) or readback.hexdigest() != digest:
+                raise ValueError("Raw Batch output readback differs")
+        self._record(
+            "raw_result_retained",
+            job_id=job_id,
+            file_id=file_id,
+            path=str(path),
+            bytes=len(content),
+            sha256=digest,
+            reused=previous is not None,
+        )
+        self._raw_retained[key] = identity
+
     def _record(self, event: str, **fields: Any) -> None:
         record = {
             "event": event,
@@ -344,6 +409,9 @@ class BatchClient:
         if self.evidence_path is not None:
             with self.evidence_path.open("a") as stream:
                 stream.write(json.dumps(record) + "\n")
+                if event == "raw_result_retained":
+                    stream.flush()
+                    os.fsync(stream.fileno())
         print(json.dumps(record), flush=True)
 
     @contextmanager
@@ -541,12 +609,22 @@ class BatchClient:
                             f"Batch job {job_id} ended with {job['status']}"
                         )
                     job_results: dict[str, dict[str, Any]] = {}
-                    for file_id in (
-                        job.get("output_file_id"),
-                        job.get("error_file_id"),
+                    advertised_files = tuple(
+                        file_id
+                        for file_id in (
+                            job.get("output_file_id"),
+                            job.get("error_file_id"),
+                        )
+                        if file_id
+                    )
+                    if any(
+                        not isinstance(file_id, str) for file_id in advertised_files
                     ):
-                        if not file_id:
-                            continue
+                        raise ValueError("Batch result file ID is not a string")
+                    self._raw_file_ids.setdefault(job_id, set()).update(
+                        advertised_files
+                    )
+                    for file_id in advertised_files:
                         with self._measure(
                             "result_download", job_id=job_id, file_id=file_id
                         ):
@@ -563,6 +641,7 @@ class BatchClient:
                             bytes=len(response.content),
                             sha256=hashlib.sha256(response.content).hexdigest(),
                         )
+                        self._retain_raw_download(job_id, file_id, response.content)
                         for custom_id, row in _batch_results(
                             response.content, expected
                         ).items():

@@ -14,8 +14,10 @@
 # limitations under the License.
 
 """Exercise the Parse example without a server, model package or Curator install."""
+import hashlib
 import importlib.util
 import json
+import os
 import sys
 import time
 import types
@@ -529,3 +531,218 @@ def test_local_pipeline_profile_includes_shutdown_after_failure():
         "pipeline_run_s": 5.0,
         "ray_shutdown_s": 3.0,
     }
+
+
+def raw_transport(payloads):
+    """Complete one owned job for each upload, with explicit result file IDs."""
+    submitted = []
+
+    def handler(request):
+        path = request.url.path
+        if path == "/v1/files":
+            submitted.append(len(submitted))
+            return httpx.Response(200, json={"id": f"input-{submitted[-1]}"})
+        if path == "/v1/batches" and request.method == "POST":
+            index = int(json.loads(request.read())["input_file_id"].split("-")[-1])
+            return httpx.Response(200, json={"id": f"job-{index}"})
+        if path.startswith("/v1/batches/"):
+            index = int(path.split("job-")[-1])
+            files = payloads[index]
+            return httpx.Response(
+                200,
+                json={
+                    "id": f"job-{index}",
+                    "status": "completed",
+                    "output_file_id": f"output-{index}" if "output" in files else None,
+                    "error_file_id": f"error-{index}" if "error" in files else None,
+                    "request_counts": {
+                        "total": 1,
+                        "completed": int(bool(files.get("output"))),
+                        "failed": int("error" in files),
+                    },
+                },
+            )
+        if path.startswith("/v1/files/") and path.endswith("/content"):
+            kind, index = path.split("/")[-2].split("-")
+            return httpx.Response(200, content=payloads[int(index)][kind])
+        raise AssertionError(str(request.url))
+
+    return httpx.MockTransport(handler)
+
+
+def evidence_records(path):
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+@pytest.mark.parametrize(
+    "payload", [b"{not json\n", b'{"custom_id":"","error":{"message":"failed"}}\n']
+)
+def test_raw_payload_survives_strict_rejection(tmp_path, payload):
+    evidence = tmp_path / "events.jsonl"
+    with httpx.Client(transport=raw_transport([{"error": payload}])) as http:
+        gateway = client_module.BatchClient(
+            "https://batch.test/v1", client=http, evidence_path=evidence
+        )
+        with pytest.raises(RuntimeError):
+            gateway.run([chunk("a")])
+    retained = [
+        row
+        for row in evidence_records(evidence)
+        if row["event"] == "raw_result_retained"
+    ]
+    assert len(retained) == 1
+    assert (retained[0]["job_id"], retained[0]["file_id"]) == ("job-0", "error-0")
+    assert Path(retained[0]["path"]).read_bytes() == payload
+    assert retained[0]["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert gateway.profile["runs_failed"] == 1
+
+
+@pytest.mark.parametrize("fail_association", [False, True])
+def test_raw_fsync_failure_stops_before_parser(tmp_path, monkeypatch, fail_association):
+    evidence = tmp_path / "events.jsonl"
+    original_fsync = os.fsync
+    parsed = []
+
+    def fsync(fd):
+        is_evidence = os.fstat(fd).st_ino == evidence.stat().st_ino
+        if is_evidence == fail_association:
+            raise OSError("injected durability failure")
+        return original_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(
+        client_module, "_batch_results", lambda *args: parsed.append(args)
+    )
+    with httpx.Client(
+        transport=raw_transport([{"output": json.dumps(result("a")).encode()}])
+    ) as http:
+        gateway = client_module.BatchClient(
+            "https://batch.test/v1", client=http, evidence_path=evidence
+        )
+        with pytest.raises(RuntimeError, match="injected durability failure"):
+            gateway.run([chunk("a")])
+    assert not parsed
+    assert not gateway._raw_retained
+
+
+def test_raw_retention_supports_seventeen_owned_jobs(tmp_path):
+    payloads = [
+        {"output": json.dumps(result(str(index))).encode()} for index in range(17)
+    ]
+    evidence = tmp_path / "events.jsonl"
+    with httpx.Client(transport=raw_transport(payloads)) as http:
+        gateway = client_module.BatchClient(
+            "https://batch.test/v1", client=http, evidence_path=evidence
+        )
+        actual = gateway.run([chunk(str(index)) for index in range(17)])
+    assert set(actual) == {str(index) for index in range(17)}
+    assert len(list((tmp_path / "native-output").glob("*.jsonl"))) == 17
+
+
+def test_raw_output_and_error_files_are_both_retained(tmp_path):
+    payload = json.dumps(
+        {"custom_id": "a", "error": {"message": "failed"}, "response": None}
+    ).encode()
+    evidence = tmp_path / "events.jsonl"
+    with httpx.Client(
+        transport=raw_transport([{"output": b"", "error": payload}])
+    ) as http:
+        gateway = client_module.BatchClient(
+            "https://batch.test/v1", client=http, evidence_path=evidence
+        )
+        actual = gateway.run([chunk("a")])
+        assert actual["a"]["error"] == {"message": "failed"}
+    retained = [
+        row
+        for row in evidence_records(evidence)
+        if row["event"] == "raw_result_retained"
+    ]
+    assert {row["file_id"] for row in retained} == {"output-0", "error-0"}
+    assert {Path(row["path"]).read_bytes() for row in retained} == {b"", payload}
+
+
+def test_raw_repeat_and_foreign_file_ownership(tmp_path):
+    evidence = tmp_path / "events.jsonl"
+    payload = json.dumps(result("a")).encode()
+    with httpx.Client(transport=raw_transport([{"output": payload}])) as http:
+        gateway = client_module.BatchClient(
+            "https://batch.test/v1", client=http, evidence_path=evidence
+        )
+        gateway.run([chunk("a")])
+        retained = next(
+            row
+            for row in evidence_records(evidence)
+            if row["event"] == "raw_result_retained"
+        )
+        output = Path(retained["path"])
+        inode = output.stat().st_ino
+        gateway._retain_raw_download("job-0", "output-0", payload)
+        assert output.stat().st_ino == inode
+        for job, file_id in [("foreign", "output-0"), ("job-0", "foreign")]:
+            with pytest.raises(ValueError, match="owned job"):
+                gateway._retain_raw_download(job, file_id, payload)
+        with pytest.raises(ValueError, match="content changed"):
+            gateway._retain_raw_download("job-0", "output-0", b"changed")
+        assert output.read_bytes() == payload
+
+
+def test_raw_path_collision_does_not_overwrite(tmp_path):
+    directory = tmp_path / "native-output"
+    directory.mkdir()
+    name = hashlib.sha256(b"job-0/output-0").hexdigest() + ".jsonl"
+    collision = directory / name
+    collision.write_bytes(b"existing evidence")
+    with httpx.Client(
+        transport=raw_transport([{"output": json.dumps(result("a")).encode()}])
+    ) as http:
+        gateway = client_module.BatchClient(
+            "https://batch.test/v1",
+            client=http,
+            evidence_path=tmp_path / "events.jsonl",
+        )
+        with pytest.raises(RuntimeError, match="File exists"):
+            gateway.run([chunk("a")])
+    assert collision.read_bytes() == b"existing evidence"
+
+
+@pytest.mark.parametrize("replacement", ["file", "symlink", "fifo"])
+def test_raw_repeat_rejects_replaced_path(tmp_path, replacement):
+    payload = json.dumps(result("a")).encode()
+    evidence = tmp_path / "events.jsonl"
+    with httpx.Client(transport=raw_transport([{"output": payload}])) as http:
+        gateway = client_module.BatchClient(
+            "https://batch.test/v1", client=http, evidence_path=evidence
+        )
+        gateway.run([chunk("a")])
+        retained = next(
+            row
+            for row in evidence_records(evidence)
+            if row["event"] == "raw_result_retained"
+        )
+        path = Path(retained["path"])
+        backup = path.with_suffix(".saved")
+        path.rename(backup)
+        if replacement == "file":
+            path.write_bytes(payload)
+        elif replacement == "symlink":
+            path.symlink_to(backup)
+        else:
+            os.mkfifo(path)
+        with pytest.raises((ValueError, OSError)):
+            gateway._retain_raw_download("job-0", "output-0", payload)
+        assert backup.read_bytes() == payload
+
+
+def test_raw_retention_accepts_symlinked_output_parent(tmp_path):
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(actual, target_is_directory=True)
+    with httpx.Client(
+        transport=raw_transport([{"output": json.dumps(result("a")).encode()}])
+    ) as http:
+        gateway = client_module.BatchClient(
+            "https://batch.test/v1", client=http, evidence_path=alias / "events.jsonl"
+        )
+        assert set(gateway.run([chunk("a")])) == {"a"}
+    assert len(list((actual / "native-output").glob("*.jsonl"))) == 1
