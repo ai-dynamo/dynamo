@@ -104,6 +104,26 @@ impl ReplayEngineObservation for RouterEventObservation {
     }
 }
 
+/// Observation for a router without KV events (`--no-router-kv-events`), which indexes its own
+/// routing decisions and never reads engine KV events, so its engines export none.
+#[derive(Debug, Default)]
+pub(in crate::replay) struct NoRouterEventObservation;
+
+impl ReplayEngineObservation for NoRouterEventObservation {
+    type Batch = RouterEventBatch;
+
+    const CAPTURE_ENGINE_KV_EVENTS: bool = false;
+
+    fn observe_engine_events(
+        _stage: WorkerStage,
+        _worker_id: usize,
+        _dp_rank: u32,
+        _events: Vec<KvEvent>,
+    ) -> Self::Batch {
+        RouterEventBatch::default()
+    }
+}
+
 fn encode_events(
     encoder: &mut KvIngestEventEncoder<'_>,
     events: &[RouterEvent],

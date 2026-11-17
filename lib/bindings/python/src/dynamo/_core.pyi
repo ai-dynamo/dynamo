@@ -962,6 +962,7 @@ class ModelRuntimeConfig:
 
     context_length: int | None
     total_kv_blocks: int | None
+    cache_owner_capacity_blocks: int | None
     max_num_seqs: int | None
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
@@ -1271,6 +1272,7 @@ class KvEventPublisher:
         kv_state_endpoint: Optional[str] = None,
         video_token_id: Optional[int] = None,
         engine_owned_mm_identity: bool = False,
+        idempotent_stores: bool = False,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
@@ -1298,6 +1300,7 @@ class KvEventPublisher:
                 format (after sgl-project/sglang#43043), including for caller hashes,
                 so every event token at or above 1,000,000 is excluded from the index.
                 Otherwise only values that do not fit in 32 bits are.
+            idempotent_stores: Do not refcount repeated stores. Set for SGLang.
         """
 
     def publish_stored(

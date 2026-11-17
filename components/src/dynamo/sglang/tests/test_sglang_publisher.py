@@ -628,6 +628,7 @@ def test_init_kv_event_publish_passes_engine_owned_mm_identity(
 
     assert len(calls) == 2
     assert [call["engine_owned_mm_identity"] for call in calls] == [engine_owned] * 2
+    assert [call["idempotent_stores"] for call in calls] == [True] * 2
 
 
 def test_init_kv_event_publish_subscribes_to_every_pure_dp_replica(monkeypatch):

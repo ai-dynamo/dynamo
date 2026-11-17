@@ -1659,6 +1659,44 @@ impl ModelManager {
             .get_chat_engine_with_parsing_where(predicate)
     }
 
+    pub fn get_chat_completions_engine_with_parsing_for_capability(
+        &self,
+        model: &str,
+        capability: &str,
+    ) -> Result<
+        Option<(
+            OpenAIChatCompletionsStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+        )>,
+        ModelManagerError,
+    > {
+        self.get_chat_completions_engine_with_parsing_for_capability_where(
+            model,
+            capability,
+            |_| true,
+        )
+    }
+
+    pub(crate) fn get_chat_completions_engine_with_parsing_for_capability_where(
+        &self,
+        model: &str,
+        capability: &str,
+        predicate: impl Fn(&WorkerSet) -> bool,
+    ) -> Result<
+        Option<(
+            OpenAIChatCompletionsStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+        )>,
+        ModelManagerError,
+    > {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_chat_engine_with_parsing_for_capability_where(capability, predicate)
+    }
+
     pub fn get_completions_engine_with_parsing(
         &self,
         model: &str,

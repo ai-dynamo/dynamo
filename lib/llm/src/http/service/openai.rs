@@ -68,8 +68,9 @@ use crate::preprocessor::{
 };
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, NvExt as CommonNvExt,
-    SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, agent_context_from_headers,
-    apply_frontend_nvext_policy, has_non_cache_salt_routing_headers, session_affinity_from_headers,
+    SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, UPSTREAM_ELAPSED_CONTEXT_KEY,
+    agent_context_from_headers, apply_frontend_nvext_policy, has_non_cache_salt_routing_headers,
+    session_affinity_from_headers, upstream_elapsed_from_headers,
 };
 use crate::protocols::common::input_trigger::{
     classify_chat_request, classify_completion_request, classify_response_request,
@@ -1248,6 +1249,18 @@ where
     Ok(request)
 }
 
+/// Record how long a gateway held the request before forwarding it, from its routing header.
+/// Like the other routing headers it is honored only while NvExt is enabled.
+pub(super) fn attach_upstream_elapsed<T: Send + Sync + 'static>(
+    request: &mut Context<T>,
+    headers: &HeaderMap,
+    nvext_enabled: bool,
+) {
+    if nvext_enabled && let Some(upstream_elapsed) = upstream_elapsed_from_headers(headers) {
+        request.insert(UPSTREAM_ELAPSED_CONTEXT_KEY, upstream_elapsed);
+    }
+}
+
 /// [`context_from_headers`] for handlers that build the [`PreprocessedRequest`] themselves.
 ///
 /// The OpenAI routes get `agent_context` copied onto the request by the preprocessor
@@ -1289,6 +1302,9 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     }
     if let Ok(runtime_lora) = source.get::<RuntimeLoraSelection>(RUNTIME_LORA_CONTEXT_KEY) {
         target.insert(RUNTIME_LORA_CONTEXT_KEY, runtime_lora.as_ref().clone());
+    }
+    if let Ok(upstream_elapsed) = source.get::<std::time::Duration>(UPSTREAM_ELAPSED_CONTEXT_KEY) {
+        target.insert(UPSTREAM_ELAPSED_CONTEXT_KEY, *upstream_elapsed);
     }
 }
 
@@ -1469,6 +1485,7 @@ async fn handler_completions(
     if let Some(runtime_lora) = runtime_lora {
         request.insert(RUNTIME_LORA_CONTEXT_KEY, runtime_lora);
     }
+    attach_upstream_elapsed(&mut request, &headers, state.nvext_enabled());
     let context = request.context();
 
     // create the connection handles
@@ -2863,6 +2880,7 @@ async fn handler_chat_completions(
     if let Some(runtime_lora) = runtime_lora {
         request.insert(RUNTIME_LORA_CONTEXT_KEY, runtime_lora);
     }
+    attach_upstream_elapsed(&mut request, &headers, state.nvext_enabled());
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -4419,16 +4437,36 @@ async fn chat_completions(
     // The lookup sits inside validation, so this range nests in
     // frontend.http.chat.validate, whose duration includes it.
     let nvtx_lookup = dynamo_nvtx_range!("frontend.http.chat.engine_lookup");
-    let (engine, parsing_options) = state
-        .manager()
-        .get_chat_completions_engine_with_parsing_where(&model, |worker_set| {
-            runtime_lora.is_none() || worker_set.supports_runtime_lora_chat()
+    // Text-input WorkerSets never run the preprocessor gate, so admit custom
+    // content only where a WorkerSet advertises it.
+    let eligible =
+        |worker_set: &WorkerSet| runtime_lora.is_none() || worker_set.supports_runtime_lora_chat();
+    let (engine, parsing_options) = if crate::preprocessor::has_custom_content(request.content()) {
+        state
+            .manager()
+            .get_chat_completions_engine_with_parsing_for_capability_where(
+                &model,
+                crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+                eligible,
+            )
+    } else {
+        state
+            .manager()
+            .get_chat_completions_engine_with_parsing_where(&model, eligible)
+            .map(Some)
+    }
+    .map_err(|e| ErrorMessage::from_model_error(&e))
+    .and_then(|selected| {
+        selected.ok_or_else(|| {
+            ErrorMessage::from_anyhow(
+                invalid_argument(crate::preprocessor::CUSTOM_CONTENT_UNSUPPORTED).into(),
+                crate::preprocessor::CUSTOM_CONTENT_UNSUPPORTED,
+            )
         })
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_model_error(&e);
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    })
+    .inspect_err(|err_response| {
+        inflight_guard.mark_error(extract_error_type_from_response(err_response));
+    })?;
     drop(nvtx_lookup);
 
     // Beam route, before generic validation (which rejects what this normalizes): a
@@ -5011,6 +5049,7 @@ async fn handler_responses(
         context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
             Some(classify_response_request(request))
         })?;
+    attach_upstream_elapsed(&mut request, &headers, state.nvext_enabled());
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -7765,6 +7804,52 @@ mod tests {
                 .input_trigger,
             Some(InputTrigger::Other)
         );
+    }
+
+    #[test]
+    fn test_upstream_elapsed_follows_the_nvext_switch_and_survives_a_context_copy() {
+        use std::time::Duration;
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dynamo-elapsed-since-arrival-ms", "1500".parse().unwrap());
+
+        let mut disabled = context_from_headers((), "request-1".to_string(), &headers).unwrap();
+        attach_upstream_elapsed(&mut disabled, &headers, false);
+        assert!(
+            disabled
+                .get::<Duration>(UPSTREAM_ELAPSED_CONTEXT_KEY)
+                .is_err()
+        );
+
+        let mut source = context_from_headers((), "request-2".to_string(), &headers).unwrap();
+        attach_upstream_elapsed(&mut source, &headers, true);
+        let runtime_lora = resolve_runtime_lora_model(
+            "base|custom:///adapter",
+            &RuntimeLoraConfig { enabled: true },
+            |name| name == "base",
+            |name| Some(name.to_string()),
+            || Ok("base".to_string()),
+        )
+        .unwrap()
+        .unwrap();
+        source.insert(RUNTIME_LORA_CONTEXT_KEY, runtime_lora.clone());
+        let mut target = Context::new(());
+        copy_context_metadata(&source, &mut target);
+        for context in [&source, &target] {
+            assert_eq!(
+                *context
+                    .get::<Duration>(UPSTREAM_ELAPSED_CONTEXT_KEY)
+                    .unwrap(),
+                Duration::from_millis(1500)
+            );
+            assert_eq!(
+                context
+                    .get::<RuntimeLoraSelection>(RUNTIME_LORA_CONTEXT_KEY)
+                    .unwrap()
+                    .adapter_key,
+                runtime_lora.adapter_key,
+            );
+        }
     }
 
     #[test]
