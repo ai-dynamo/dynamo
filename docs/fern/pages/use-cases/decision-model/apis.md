@@ -27,7 +27,7 @@ NVIDIA Dynamo exposes two non-streaming decision APIs over one scoring pipeline.
 | Distributions | Ordered arrays of value/probability entries | Probability maps keyed by choice or score index |
 | SDK `base_url` | API root, including `/v1` | Server origin, without `/v1` |
 
-The public contracts are the supported text-evaluation subset of [OpenAI Decisions](https://developers.openai.com/api/reference/resources/decisions/methods/create) and [Jev/TypeSafe System One](https://docs.typesafe.ai/sdk/python). Do not send SGLang-native `/v1/decisions` request fields to Dynamo. Neither route accepts `nvext`, including `{}` or `{"format":"oai"}`. Internal SGLang scoring transport does not add a third public contract.
+The public contracts are the supported text-evaluation subset of [OpenAI Decisions](https://developers.openai.com/api/reference/resources/decisions/methods/create) and [Jev/TypeSafe System One](https://docs.typesafe.ai/sdk/python). Do not send SGLang-native `/v1/decisions` request fields to Dynamo. Neither route accepts `nvext`, including `{}` or `{"format":"oai"}`.
 
 Use the exact alias returned by `GET /v1/models`, not the hosted provider's model name. Selecting a wire contract does not select an OpenAI- or Jev-hosted checkpoint. Supported inputs, candidate counts, and accounting depend on the model/executor profile. Dynamo currently admits at most 128 questions per request, subject to independent aggregate resource limits; this is not the hosted providers' request limit.
 
