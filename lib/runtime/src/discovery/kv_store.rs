@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
@@ -13,7 +13,8 @@ use tokio_util::sync::CancellationToken;
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     DiscoverySpec, DiscoveryStream, EndpointInstanceId, EventChannelInstanceId, EventScope,
-    EventSourceInstanceId, ModelCardInstanceId, classify_discovery_change, encode_event_segment,
+    EventSourceInstanceId, ModelCardInstanceId, ModelRegistrationIdentity,
+    classify_discovery_change, encode_event_segment, extract_model_registration_identity,
     model_with_updated_taints, resync_discovery_events, validate_event_source_reregistration,
     validate_model_reregistration,
 };
@@ -23,6 +24,13 @@ const INSTANCES_BUCKET: &str = "v1/instances";
 const MODELS_BUCKET: &str = "v1/mdc";
 const EVENT_CHANNELS_BUCKET: &str = "v1/event_channels";
 const EVENT_SOURCES_BUCKET: &str = "v1/event_sources";
+/// One record per model card, keyed `{ns}/{comp}/{ep}/{identity_digest}/{instance_id:x}[/{suffix}]`
+/// with the card's identity as the value, so the conflict check in `Discovery::register` reads
+/// one key per distinct identity instead of every card. A record is per card, not shared per
+/// identity, so it ends with its worker's lease as the card does. It is written before the card
+/// and deleted after it: a card without its record would be invisible to other workers' checks.
+/// The name does not start with `v1/mdc`, so readers of the cards never see these records.
+const MODEL_IDENTITIES_BUCKET: &str = "v1/model_identities";
 const UPDATE_MODEL_TAINTS_MAX_ATTEMPTS: usize = 8;
 
 async fn update_model_taints_in_bucket(
@@ -62,6 +70,53 @@ async fn update_model_taints_in_bucket(
     Err(kv::StoreError::Retry.into())
 }
 
+/// The distinct identities in the model identity index under `endpoint_path`
+/// (`{ns}/{comp}/{ep}`). On a store that ranges keys in order (etcd) this reads one entry per
+/// distinct identity plus one, however many workers share the endpoint.
+async fn model_identities_in_bucket(
+    bucket: &dyn kv::Bucket,
+    endpoint_path: &str,
+) -> Result<Vec<ModelRegistrationIdentity>> {
+    let endpoint_prefix = format!("{endpoint_path}/");
+    let mut identities = Vec::new();
+    let mut start = endpoint_prefix.clone();
+    loop {
+        let mut records: Vec<(String, bytes::Bytes)> = bucket
+            .first_entry_under(endpoint_path, &start)
+            .await?
+            .into_iter()
+            .filter_map(|(key, value)| {
+                let key =
+                    KVStoreDiscovery::strip_bucket_prefix(key.as_ref(), MODEL_IDENTITIES_BUCKET);
+                (key.starts_with(&endpoint_prefix) && key >= start.as_str())
+                    .then(|| (key.to_string(), value))
+            })
+            .collect();
+        if records.is_empty() {
+            return Ok(identities);
+        }
+        records.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut last_digest = String::new();
+        for (key, value) in records {
+            let digest = key[endpoint_prefix.len()..]
+                .split('/')
+                .next()
+                .unwrap_or_default();
+            if digest == last_digest {
+                continue;
+            }
+            last_digest = digest.to_string();
+            identities.push(
+                serde_json::from_slice(&value)
+                    .with_context(|| format!("invalid model identity record '{key}'"))?,
+            );
+        }
+        // '0' is the byte after '/', so the next read starts past every record of this digest.
+        start = format!("{endpoint_prefix}{last_digest}0");
+    }
+}
+
 /// Discovery implementation backed by a kv::Store
 pub struct KVStoreDiscovery {
     store: Arc<kv::Manager>,
@@ -84,6 +139,47 @@ impl KVStoreDiscovery {
     /// Build the key path for a model (relative to bucket, not absolute)
     fn model_key(namespace: &str, component: &str, endpoint: &str, instance_id: u64) -> String {
         format!("{}/{}/{}/{:x}", namespace, component, endpoint, instance_id)
+    }
+
+    /// The key and value of a model card's record in [`MODEL_IDENTITIES_BUCKET`], or `None` for
+    /// other instances.
+    fn model_identity_record(
+        instance: &DiscoveryInstance,
+    ) -> Result<Option<(kv::Key, ModelRegistrationIdentity)>> {
+        let DiscoveryInstance::Model {
+            namespace,
+            component,
+            endpoint,
+            instance_id,
+            card_json,
+            model_suffix,
+            ..
+        } = instance
+        else {
+            return Ok(None);
+        };
+        let mut identity = extract_model_registration_identity(card_json, model_suffix.as_deref())?;
+        // Compatibility ignores alias order and repeats, so equal identities share one digest.
+        identity.aliases.sort();
+        identity.aliases.dedup();
+        // Peers on other versions read this digest, so it must not depend on the process.
+        let digest = blake3::hash(&serde_json::to_vec(&identity)?).to_hex();
+        let mut key = format!("{namespace}/{component}/{endpoint}/{digest}/{instance_id:x}");
+        if let Some(suffix) = model_suffix
+            && !suffix.is_empty()
+        {
+            key = format!("{key}/{suffix}");
+        }
+        Ok(Some((kv::Key::new(key), identity)))
+    }
+
+    /// Best-effort removal of an identity record whose card was not written.
+    async fn remove_unused_identity_record(record: Option<(Box<dyn kv::Bucket>, kv::Key)>) {
+        if let Some((bucket, key)) = record
+            && let Err(error) = bucket.delete(&key).await
+        {
+            tracing::warn!(%key, %error, "Failed to remove the identity record of an unregistered model");
+        }
     }
 
     /// Build the key path for an event channel relative to bucket, not absolute)
@@ -525,6 +621,22 @@ impl Discovery for KVStoreDiscovery {
             return Ok(existing);
         }
 
+        // The identity record goes first, so other workers' conflict checks see this card.
+        // `created_identity_record` is set only when this call created it, for cleanup.
+        let mut created_identity_record = None;
+        if let Some((record_key, identity)) = Self::model_identity_record(&instance)? {
+            let identities = self
+                .store
+                .get_or_create_bucket(MODEL_IDENTITIES_BUCKET, None)
+                .await?;
+            let outcome = identities
+                .insert(&record_key, serde_json::to_vec(&identity)?.into(), 0)
+                .await?;
+            if matches!(outcome, kv::StoreOutcome::Created(_)) {
+                created_identity_record = Some((identities, record_key));
+            }
+        }
+
         tracing::debug!(
             "KVStoreDiscovery::register: Inserting into bucket={}, key={}",
             bucket_name,
@@ -541,7 +653,10 @@ impl Discovery for KVStoreDiscovery {
                 validate_event_source_reregistration(&existing, &instance)?;
                 return Ok(existing);
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                Self::remove_unused_identity_record(created_identity_record).await;
+                return Err(error.into());
+            }
         };
         tracing::debug!(
             "KVStoreDiscovery::register: Registration insert completed instance_id={}, key={}, outcome={:?}",
@@ -551,17 +666,40 @@ impl Discovery for KVStoreDiscovery {
         );
 
         if is_model && matches!(outcome, kv::StoreOutcome::Exists(_)) {
-            let existing = bucket.get(&key).await?.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "model discovery record disappeared during same-ID registration replay"
-                )
-            })?;
-            let existing: DiscoveryInstance = serde_json::from_slice(existing.as_ref())?;
-            validate_model_reregistration(&existing, &instance)?;
-            return Ok(existing);
+            let replay = async {
+                let existing = bucket.get(&key).await?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "model discovery record disappeared during same-ID registration replay"
+                    )
+                })?;
+                let existing: DiscoveryInstance = serde_json::from_slice(existing.as_ref())?;
+                validate_model_reregistration(&existing, &instance)?;
+                Ok(existing)
+            }
+            .await;
+            if replay.is_err() {
+                Self::remove_unused_identity_record(created_identity_record).await;
+            }
+            return replay;
         }
 
         Ok(instance)
+    }
+
+    async fn endpoint_model_identities(
+        &self,
+        namespace: &str,
+        component: &str,
+        endpoint: &str,
+    ) -> Result<Vec<ModelRegistrationIdentity>> {
+        let Some(identities) = self.store.get_bucket(MODEL_IDENTITIES_BUCKET).await? else {
+            return Ok(Vec::new());
+        };
+        model_identities_in_bucket(
+            identities.as_ref(),
+            &format!("{namespace}/{component}/{endpoint}"),
+        )
+        .await
     }
 
     async fn update_model_taints_internal(
@@ -667,6 +805,9 @@ impl Discovery for KVStoreDiscovery {
             }
         };
 
+        // A card with no readable identity was never given a record.
+        let identity_record = Self::model_identity_record(&instance).ok().flatten();
+
         // Get the bucket - if it doesn't exist, the instance is already removed from the KV store
         let Some(bucket) = self.store.get_bucket(bucket_name).await? else {
             tracing::warn!(
@@ -680,6 +821,16 @@ impl Discovery for KVStoreDiscovery {
 
         // Delete the entry from the bucket
         bucket.delete(&key).await?;
+
+        // After the card, so the card is never visible without its identity record.
+        if let Some((record_key, _)) = identity_record
+            && let Some(identities) = self.store.get_bucket(MODEL_IDENTITIES_BUCKET).await?
+        {
+            match identities.delete(&record_key).await {
+                Ok(()) | Err(kv::StoreError::MissingKey(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
 
         Ok(())
     }
@@ -1541,6 +1692,289 @@ mod tests {
         assert!(taints.contains(&serde_json::json!("third")));
         assert!(!taints.contains(&serde_json::json!("second")));
     }
+
+    fn named_model_spec(name: &str, source_path: &str) -> DiscoverySpec {
+        DiscoverySpec::Model {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            card_json: serde_json::json!({"display_name": name, "source_path": source_path}),
+            model_suffix: None,
+        }
+    }
+
+    /// A bucket that ranges its keys in order, as etcd does, and counts the reads.
+    #[derive(Default)]
+    struct OrderedBucket {
+        entries: std::collections::BTreeMap<String, bytes::Bytes>,
+        reads: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl kv::Bucket for OrderedBucket {
+        async fn insert(
+            &self,
+            _key: &kv::Key,
+            _value: bytes::Bytes,
+            _revision: u64,
+        ) -> Result<kv::StoreOutcome, kv::StoreError> {
+            unreachable!("insert is not used by this test")
+        }
+
+        async fn get(&self, _key: &kv::Key) -> Result<Option<bytes::Bytes>, kv::StoreError> {
+            unreachable!("get is not used by this test")
+        }
+
+        async fn compare_and_replace(
+            &self,
+            _key: &kv::Key,
+            _expected: bytes::Bytes,
+            _value: bytes::Bytes,
+        ) -> Result<kv::StoreOutcome, kv::StoreError> {
+            unreachable!("compare_and_replace is not used by this test")
+        }
+
+        async fn delete(&self, _key: &kv::Key) -> Result<(), kv::StoreError> {
+            unreachable!("delete is not used by this test")
+        }
+
+        async fn watch(
+            &self,
+        ) -> Result<Pin<Box<dyn futures::Stream<Item = kv::WatchEvent> + Send + '_>>, kv::StoreError>
+        {
+            unreachable!("watch is not used by this test")
+        }
+
+        async fn entries(&self) -> Result<HashMap<kv::Key, bytes::Bytes>, kv::StoreError> {
+            unreachable!("the identity lookup must not read every record")
+        }
+
+        async fn first_entry_under(
+            &self,
+            sub: &str,
+            start: &str,
+        ) -> Result<HashMap<kv::Key, bytes::Bytes>, kv::StoreError> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            let prefix = format!("{sub}/");
+            Ok(self
+                .entries
+                .range(start.to_string()..)
+                .take_while(|(key, _)| key.starts_with(&prefix))
+                .take(1)
+                .map(|(key, value)| {
+                    (
+                        kv::Key::new(format!("{MODEL_IDENTITIES_BUCKET}/{key}")),
+                        value.clone(),
+                    )
+                })
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn identity_lookup_reads_one_record_per_distinct_identity() {
+        let mut bucket = OrderedBucket::default();
+        for instance_id in 1..=64u64 {
+            let name = if instance_id % 2 == 0 { "a" } else { "b" };
+            let instance =
+                named_model_spec(name, &format!("/models/{name}")).into_instance(instance_id);
+            let (key, identity) = KVStoreDiscovery::model_identity_record(&instance)
+                .unwrap()
+                .unwrap();
+            bucket.entries.insert(
+                key.to_string(),
+                serde_json::to_vec(&identity).unwrap().into(),
+            );
+        }
+        let sibling = KVStoreDiscovery::model_identity_record(
+            &named_model_spec("c", "/models/c").into_instance(1),
+        )
+        .unwrap()
+        .unwrap()
+        .1;
+        for key in ["ns/worker/generate-2/00/1", "ns/worker/generatex/00/1"] {
+            bucket.entries.insert(
+                key.to_string(),
+                serde_json::to_vec(&sibling).unwrap().into(),
+            );
+        }
+
+        let identities = model_identities_in_bucket(&bucket, "ns/worker/generate")
+            .await
+            .unwrap();
+
+        let mut names: Vec<_> = identities
+            .iter()
+            .map(|identity| identity.display_name.as_str())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["a", "b"]);
+        // One read per distinct identity and one that finds none, for 64 cards.
+        assert_eq!(bucket.reads.load(Ordering::Relaxed), 3);
+    }
+
+    async fn identity_record_count(client: &KVStoreDiscovery) -> usize {
+        client
+            .store
+            .get_bucket(MODEL_IDENTITIES_BUCKET)
+            .await
+            .unwrap()
+            .unwrap()
+            .entries()
+            .await
+            .unwrap()
+            .len()
+    }
+
+    #[tokio::test]
+    async fn model_identity_records_follow_their_cards() {
+        let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
+
+        let model = client
+            .register(named_model_spec("a", "/models/a"))
+            .await
+            .unwrap();
+        assert_eq!(identity_record_count(&client).await, 1);
+        let identities = client
+            .endpoint_model_identities("ns", "worker", "generate")
+            .await
+            .unwrap();
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].display_name, "a");
+
+        // A same-ID replay with another identity is rejected and leaves no record behind.
+        assert!(
+            client
+                .register_internal(named_model_spec("b", "/models/b"))
+                .await
+                .is_err()
+        );
+        assert_eq!(identity_record_count(&client).await, 1);
+
+        client.unregister(model).await.unwrap();
+        assert_eq!(identity_record_count(&client).await, 0);
+    }
+
+    /// Registers `concurrent_spec` through `concurrent` while `inner` is inside
+    /// `register_internal`, after its write: an incompatible registration that passed its first
+    /// check before this one was written.
+    struct RacedDiscovery {
+        inner: KVStoreDiscovery,
+        concurrent: KVStoreDiscovery,
+        concurrent_spec: DiscoverySpec,
+    }
+
+    #[async_trait]
+    impl Discovery for RacedDiscovery {
+        fn instance_id(&self) -> u64 {
+            self.inner.instance_id()
+        }
+
+        async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
+            let instance = self.inner.register_internal(spec).await?;
+            self.concurrent
+                .register_internal(self.concurrent_spec.clone())
+                .await?;
+            Ok(instance)
+        }
+
+        async fn endpoint_model_identities(
+            &self,
+            namespace: &str,
+            component: &str,
+            endpoint: &str,
+        ) -> Result<Vec<ModelRegistrationIdentity>> {
+            self.inner
+                .endpoint_model_identities(namespace, component, endpoint)
+                .await
+        }
+
+        async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
+            self.inner.unregister(instance).await
+        }
+
+        async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
+            self.inner.list(query).await
+        }
+
+        async fn list_and_watch(
+            &self,
+            query: DiscoveryQuery,
+            cancel_token: Option<CancellationToken>,
+        ) -> Result<DiscoveryStream> {
+            self.inner.list_and_watch(query, cancel_token).await
+        }
+    }
+
+    #[tokio::test]
+    async fn register_rolls_back_after_a_concurrent_conflicting_registration() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store_cancel = CancellationToken::new();
+        let worker = || {
+            KVStoreDiscovery::new(
+                kv::Manager::file(store_cancel.clone(), tempdir.path()),
+                CancellationToken::new(),
+            )
+        };
+        let raced = RacedDiscovery {
+            inner: worker(),
+            concurrent: worker(),
+            concurrent_spec: named_model_spec("a", "/models/a"),
+        };
+
+        let error = raced
+            .register(named_model_spec("b", "/models/b"))
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains(
+                "Cannot register model 'b' on endpoint 'ns/worker/generate': a different model 'a' is already registered there"
+            ),
+            "unexpected error: {error:#}"
+        );
+        let models = raced
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: "ns".to_string(),
+                component: "worker".to_string(),
+                endpoint: "generate".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].instance_id(), raced.concurrent.instance_id());
+        let identities = raced
+            .endpoint_model_identities("ns", "worker", "generate")
+            .await
+            .unwrap();
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].display_name, "a");
+        store_cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn register_checks_every_identity_in_the_index() {
+        // B is compatible with A by name and C by source, but A and C conflict.
+        let cards = [("a", "/mount/a"), ("a", "/mount/b"), ("b", "/mount/b")];
+        for order in [[0, 1, 2], [2, 1, 0]] {
+            let tempdir = tempfile::tempdir().unwrap();
+            let store_cancel = CancellationToken::new();
+            for (position, index) in order.into_iter().enumerate() {
+                let client = KVStoreDiscovery::new(
+                    kv::Manager::file(store_cancel.clone(), tempdir.path()),
+                    CancellationToken::new(),
+                );
+                let (name, source) = cards[index];
+                let result = client.register(named_model_spec(name, source)).await;
+                assert_eq!(
+                    result.is_ok(),
+                    position < 2,
+                    "card {index} at position {position}: {result:?}"
+                );
+            }
+            store_cancel.cancel();
+        }
+    }
 }
 
 #[cfg(feature = "integration")]
@@ -1576,6 +2010,91 @@ mod etcd_tests {
             .collect();
         names.sort();
         names
+    }
+
+    /// On etcd, the identity lookup returns every distinct identity on the endpoint and none
+    /// from a sibling endpoint (`ep` and `ep-2`), and unregistering removes the records.
+    #[test]
+    fn identity_lookup_covers_only_its_endpoint() {
+        let rt = Runtime::single_threaded().unwrap();
+        let rt_clone = rt.clone();
+
+        rt_clone.primary().block_on(async move {
+            let etcd_client =
+                etcd_transport::Client::new(etcd_transport::ClientOptions::default(), rt)
+                    .await
+                    .unwrap();
+            let client =
+                KVStoreDiscovery::new(kv::Manager::etcd(etcd_client), CancellationToken::new());
+            let ns = format!(
+                "identity-{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            );
+            let model = |endpoint: &str, card_json: serde_json::Value, suffix: Option<&str>| {
+                DiscoverySpec::Model {
+                    namespace: ns.clone(),
+                    component: "comp".to_string(),
+                    endpoint: endpoint.to_string(),
+                    card_json,
+                    model_suffix: suffix.map(str::to_string),
+                }
+            };
+            let mut registered = Vec::new();
+            for spec in [
+                model(
+                    "ep",
+                    serde_json::json!({"display_name": "base", "source_path": "/m/base"}),
+                    None,
+                ),
+                model(
+                    "ep",
+                    serde_json::json!({
+                        "display_name": "adapter",
+                        "source_path": "/m/base",
+                        "lora": {"name": "adapter"},
+                    }),
+                    Some("adapter"),
+                ),
+                model(
+                    "ep-2",
+                    serde_json::json!({"display_name": "other", "source_path": "/m/other"}),
+                    None,
+                ),
+            ] {
+                registered.push(client.register(spec).await.unwrap());
+            }
+
+            let names = |identities: Vec<ModelRegistrationIdentity>| {
+                let mut names: Vec<_> = identities
+                    .into_iter()
+                    .map(|identity| identity.display_name)
+                    .collect();
+                names.sort();
+                names
+            };
+            assert_eq!(
+                names(
+                    client
+                        .endpoint_model_identities(&ns, "comp", "ep")
+                        .await
+                        .unwrap()
+                ),
+                ["adapter", "base"]
+            );
+
+            for instance in registered {
+                client.unregister(instance).await.unwrap();
+            }
+            for endpoint in ["ep", "ep-2"] {
+                assert!(
+                    client
+                        .endpoint_model_identities(&ns, "comp", endpoint)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        });
     }
 
     /// On etcd, a scoped namespaced list and a scoped component watch still return every

@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::transports::etcd;
 use async_stream::stream;
 use async_trait::async_trait;
-use etcd_client::PutOptions;
+use etcd_client::{GetOptions, PutOptions};
 
 use super::{Bucket, Key, KeyValue, Store, StoreError, StoreOutcome, WatchEvent};
 
@@ -222,6 +222,35 @@ impl Bucket for EtcdBucket {
             .collect();
 
         Ok(out)
+    }
+
+    /// Ranges from `bucket/start` to the end of `bucket/sub/`, with limit 1.
+    async fn first_entry_under(
+        &self,
+        sub: &str,
+        start: &str,
+    ) -> Result<HashMap<Key, bytes::Bytes>, StoreError> {
+        let prefix = self.key_prefix(sub);
+        // The prefix ends in '/'; '0' is the next byte, so this is the end of the prefix range.
+        let range_end = format!("{}0", prefix.trim_end_matches('/'));
+        let from = make_key(&self.bucket_name, &Key::new(start.to_string()));
+        tracing::trace!("etcd first entry: {from}..{range_end}");
+
+        let kvs = self
+            .client
+            .kv_get(
+                from,
+                Some(GetOptions::new().with_range(range_end).with_limit(1)),
+            )
+            .await
+            .map_err(|e| StoreError::EtcdError(e.to_string()))?;
+        Ok(kvs
+            .into_iter()
+            .map(|kv| {
+                let (k, v) = kv.into_key_value();
+                (Key::new(String::from_utf8_lossy(&k).to_string()), v.into())
+            })
+            .collect())
     }
 }
 
@@ -486,6 +515,49 @@ mod concurrent_create_tests {
             assert_eq!(item.key_str(), make_key(&bucket_name, &inside));
 
             for key in keys.iter().chain([&sibling, &inside]) {
+                bucket.delete(key).await.unwrap();
+            }
+        });
+    }
+
+    /// `first_entry_under` returns the lowest key at or after `start` inside `bucket/sub/`,
+    /// never one from a sibling (`ep-2`, `epx`).
+    #[test]
+    fn first_entry_under_stays_in_its_subtree() {
+        let rt = Runtime::single_threaded().unwrap();
+        let rt_clone = rt.clone();
+
+        rt_clone.primary().block_on(async move {
+            let etcd_client =
+                etcd_transport::Client::new(etcd_transport::ClientOptions::default(), rt)
+                    .await
+                    .unwrap();
+            let storage = crate::storage::kv::Manager::etcd(etcd_client);
+            let bucket_name = format!("test_first_entry_{}", uuid::Uuid::new_v4());
+            let bucket = storage
+                .get_or_create_bucket(&bucket_name, None)
+                .await
+                .unwrap();
+            let keys =
+                ["ep/a/1", "ep/a/2", "ep/b/1", "ep-2/0/1", "epx/0/1"].map(|k| Key::new(k.into()));
+            for key in &keys {
+                bucket.insert(key, "v".into(), 0).await.unwrap();
+            }
+            let first = |start: &'static str| {
+                let bucket = &bucket;
+                async move {
+                    let entries = bucket.first_entry_under("ep", start).await.unwrap();
+                    entries.into_keys().collect::<Vec<_>>()
+                }
+            };
+            let full = |key: &Key| Key::new(make_key(&bucket_name, key));
+
+            assert_eq!(first("ep/").await, vec![full(&keys[0])]);
+            assert_eq!(first("ep/a/2").await, vec![full(&keys[1])]);
+            assert_eq!(first("ep/a0").await, vec![full(&keys[2])]);
+            assert!(first("ep/b0").await.is_empty());
+
+            for key in &keys {
                 bucket.delete(key).await.unwrap();
             }
         });
