@@ -117,14 +117,19 @@ def _template_text() -> str:
 
 
 def _guard_versions(text: str) -> list[set[str]]:
-    """The version literals of each instruction that names the distribution."""
+    """The version literals of each command that names the distribution.
+
+    One RUN chains the checks of several packages with `&&`, so the literals are
+    read per command, not per instruction.
+    """
     guards = []
     for block in _instructions(text):
-        if not any(name in block for name in _NAMES):
-            continue
-        versions = set(_VERSION_LITERAL.findall(block))
-        if versions:
-            guards.append(versions)
+        for command in block.split("&&"):
+            if not any(name in command for name in _NAMES):
+                continue
+            versions = set(_VERSION_LITERAL.findall(command))
+            if versions:
+                guards.append(versions)
     return guards
 
 
@@ -184,6 +189,17 @@ def test_template_installs_the_same_spec() -> None:
 
 def test_template_guards_on_the_same_bounds() -> None:
     check_template_guard_bounds()
+
+
+def test_guards_are_read_per_command() -> None:
+    """Another package's bounds in the same RUN must not count as Mooncake's."""
+    template = (
+        "RUN /usr/bin/python3 -c 'bounds = "
+        '{"datasets": ("5.1.0", "5.1.1")}\' && \\\n'
+        "    /usr/bin/python3 -c 'bounds = "
+        f'{{"{DISTRIBUTION}": ("0.3.14", "0.4")}}\'\n'
+    )
+    assert _guard_versions(template) == [{"0.3.14", "0.4"}]
 
 
 def test_requirements_missing_from_the_image_skip(tmp_path, monkeypatch) -> None:
