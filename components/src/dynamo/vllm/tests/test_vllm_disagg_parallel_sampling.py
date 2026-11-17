@@ -23,6 +23,7 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.vllm,
     pytest.mark.gpu_0,
+    pytest.mark.core,
 ]
 
 _PROMPT = {"prompt_token_ids": [1, 2, 3]}
