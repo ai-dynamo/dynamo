@@ -40,6 +40,9 @@ outputs:
   dgdr:
     description: 'Whether DGDR deploy-test files changed'
     value: ${{ steps.filter.outputs.dgdr_any_modified }}
+  gaie:
+    description: 'Whether files the GAIE deploy test runs changed'
+    value: ${{ steps.filter.outputs.gaie_any_modified }}
   vllm:
     description: 'Whether vllm files changed'
     value: ${{ steps.filter.outputs.vllm_any_modified }}
