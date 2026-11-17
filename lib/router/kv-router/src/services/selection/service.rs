@@ -213,7 +213,7 @@ impl SelectionServiceBuilder {
             dynamo_session_affinity::SessionAffinity::validate_ttl(ttl)?;
         }
         self.kv_router_config
-            .validate_config()
+            .validate()
             .map_err(anyhow::Error::msg)?;
         if !self.host_manages_request_lifecycle
             && self.kv_router_config.request_classifier_config()?.is_some()
@@ -378,9 +378,7 @@ pub fn local_selection_core_with_host(
     kv_router_config
         .apply_policy_config()
         .map_err(anyhow::Error::msg)?;
-    kv_router_config
-        .validate_config()
-        .map_err(anyhow::Error::msg)?;
+    kv_router_config.validate().map_err(anyhow::Error::msg)?;
     let tracking_hash = Arc::new(tracking_hash_context(&kv_router_config)?);
     let indexer_policy =
         IndexerPolicy::from_config(&dynamo_kv_indexer::IndexerConfig::from(&kv_router_config))?;
