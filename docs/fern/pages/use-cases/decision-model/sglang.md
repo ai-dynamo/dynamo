@@ -14,7 +14,7 @@ Use a Dynamo environment built with SGLang and the services described in [Local 
 The worker capability gate accepts SGLang 0.5.19, 0.5.22, and 0.5.23, including their recognized CUDA package suffixes. The current CUDA container pins 0.5.23.
 
 > [!WARNING]
-> The entire worker is serialized, including chat and completion traffic. Keep this worker separate from throughput-oriented chat serving. Increasing concurrency or enabling overlap scheduling removes it from the supported decision profile.
+> Decision scoring requires `--max-running-requests 1 --disable-overlap-schedule`. The worker processes one inference request at a time, including any chat or completion requests sent to it. Dynamo does not advertise decision scoring if either scheduling requirement is violated. Use a separate worker for throughput-oriented chat traffic to avoid this serialization; separation is a serving recommendation, while the scheduling settings are requirements.
 
 ## Start the Frontend
 
