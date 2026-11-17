@@ -202,6 +202,78 @@ class _Worker(ManagedProcess):
             return False
 
 
+def _assert_surfaces_agree(
+    metrics_url: str, receiver: _OtlpReceiver, *, renders_created: bool
+) -> None:
+    """Scrape `metrics_url` and compare its families with what OTLP received.
+
+    `renders_created` is true for a process whose scrape includes
+    `prometheus_client` families, which always carry `_created`; a process with
+    only Rust-registered metrics has none to check.
+    """
+    # Scrape after an export so both surfaces describe the same process at
+    # roughly the same point in its life. A family registered between the two
+    # reads shows up as drift, so allow retries.
+    drift: Optional[str] = None
+    for _ in range(3):
+        scrape = requests.get(metrics_url, timeout=10)
+        scrape.raise_for_status()
+        declared = _prometheus_families(scrape.text)
+        exported = {_comparable(n) for n in receiver.names()} - OTLP_ONLY
+
+        assert declared, "no families on /metrics; the scrape path is broken"
+
+        # The scrape must keep Prometheus conventions even though OTLP
+        # transforms them. Only the export changes shape; if a spec
+        # transformation ever leaks into /metrics, dashboards and recording
+        # rules built on it break silently.
+        rendered_counters = [
+            n for n, k in declared.items() if k == "counter" and n.endswith("_total")
+        ]
+        assert rendered_counters, (
+            "/metrics no longer renders counters with _total; an OTLP-side "
+            "transformation has leaked into the scrape path"
+        )
+        if renders_created:
+            assert any(n.endswith("_created") for n in declared), (
+                "/metrics no longer renders _created; it is dropped from OTLP "
+                "by design, but the scrape must still carry it"
+            )
+
+        # Each scraped family maps to the name the spec requires, or to
+        # nothing when the spec says it must not be exported.
+        prometheus = {
+            expected
+            for name, kind in declared.items()
+            if (expected := _expected_otlp_name(name, kind)) is not None
+        }
+        must_not_export = {name for name in declared if name.endswith("_created")}
+
+        wrongly_exported = must_not_export & receiver.names()
+        assert not wrongly_exported, (
+            "_created is a client artifact, not a metric; the spec says "
+            f"it becomes the parent's start time: {sorted(wrongly_exported)}"
+        )
+
+        missing_from_otlp = prometheus - exported
+        missing_from_prometheus = exported - prometheus
+        if not missing_from_otlp and not missing_from_prometheus:
+            drift = None
+            break
+
+        drift = (
+            f"on /metrics but not exported: {sorted(missing_from_otlp)}\n"
+            f"exported but not on /metrics: {sorted(missing_from_prometheus)}"
+        )
+        time.sleep(2)
+
+    assert drift is None, (
+        "OTLP and /metrics disagree about which metrics exist.\n"
+        "One surface is silently missing metrics the other reports.\n"
+        f"{drift}"
+    )
+
+
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.e2e
@@ -219,70 +291,98 @@ def test_otlp_and_prometheus_expose_the_same_metrics(request, runtime_services):
             assert receiver.wait_for_export(
                 timeout=60
             ), "worker never exported over OTLP; is export still wired to runtime startup?"
+            _assert_surfaces_agree(
+                f"http://localhost:{system_port}/metrics",
+                receiver,
+                renders_created=True,
+            )
 
-            # Scrape after an export so both surfaces describe the same process
-            # at roughly the same point in its life. A family registered
-            # between the two reads shows up as drift, so allow one retry.
-            drift: Optional[str] = None
-            for _ in range(3):
-                scrape = requests.get(
-                    f"http://localhost:{system_port}/metrics", timeout=10
-                )
-                scrape.raise_for_status()
-                declared = _prometheus_families(scrape.text)
-                exported = {_comparable(n) for n in receiver.names()} - OTLP_ONLY
 
-                assert declared, "no families on /metrics; the scrape path is broken"
+class _Frontend(ManagedProcess):
+    """`python -m dynamo.frontend` exporting over OTLP.
 
-                # The scrape must keep Prometheus conventions even though OTLP
-                # transforms them. Only the export changes shape; if a spec
-                # transformation ever leaks into /metrics, dashboards and
-                # recording rules built on it break silently.
-                rendered_counters = [
-                    n
-                    for n, k in declared.items()
-                    if k == "counter" and n.endswith("_total")
-                ]
-                assert rendered_counters, (
-                    "/metrics no longer renders counters with _total; an OTLP-side "
-                    "transformation has leaked into the scrape path"
-                )
-                assert any(n.endswith("_created") for n in declared), (
-                    "/metrics no longer renders _created; it is dropped from OTLP "
-                    "by design, but the scrape must still carry it"
-                )
+    File discovery and the TCP request plane, so it needs neither etcd nor
+    NATS: the test is about which registries the exporter reads, not about
+    serving.
+    """
 
-                # Each scraped family maps to the name the spec requires, or to
-                # nothing when the spec says it must not be exported.
-                prometheus = {
-                    expected
-                    for name, kind in declared.items()
-                    if (expected := _expected_otlp_name(name, kind)) is not None
-                }
-                must_not_export = {
-                    name for name in declared if name.endswith("_created")
-                }
+    def __init__(self, request, http_port: int, otlp_port: int):
+        env = os.environ.copy()
+        env.pop("DYN_SYSTEM_PORT", None)
+        env["OTEL_METRICS_EXPORTER"] = "otlp"
+        env["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"] = f"http://127.0.0.1:{otlp_port}"
+        env["OTEL_METRIC_EXPORT_INTERVAL"] = "1000"
 
-                wrongly_exported = must_not_export & receiver.names()
-                assert not wrongly_exported, (
-                    "_created is a client artifact, not a metric; the spec says "
-                    f"it becomes the parent's start time: {sorted(wrongly_exported)}"
-                )
+        super().__init__(
+            command=[
+                "python3",
+                "-m",
+                "dynamo.frontend",
+                "--http-port",
+                str(http_port),
+                "--discovery-backend",
+                "file",
+                "--request-plane",
+                "tcp",
+            ],
+            env=env,
+            health_check_urls=[f"http://localhost:{http_port}/metrics"],
+            timeout=300,
+            display_output=True,
+            terminate_all_matching_process_names=False,
+            log_dir=f"{request.node.name}_otlp_parity_frontend",
+        )
 
-                missing_from_otlp = prometheus - exported
-                missing_from_prometheus = exported - prometheus
-                if not missing_from_otlp and not missing_from_prometheus:
-                    drift = None
-                    break
 
-                drift = (
-                    f"on /metrics but not exported: {sorted(missing_from_otlp)}\n"
-                    f"exported but not on /metrics: {sorted(missing_from_prometheus)}"
-                )
-                time.sleep(2)
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.e2e
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize("discovery_backend", ["file"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+def test_frontend_otlp_and_prometheus_expose_the_same_metrics(
+    request, runtime_services, file_storage_backend
+):
+    """The frontend's `/metrics` merges two registries: the HTTP service's own
+    (`dynamo_frontend_*`: requests, TTFT, ITL, ...) and the runtime's tree. The
+    exporter reads only the runtime's tree, so a registry that is not attached
+    to it is scraped but never exported -- which is how every
+    `dynamo_frontend_*` family went missing from OTLP while the worker-only
+    parity test above stayed green.
+    """
+    http_port, http_reservation = _reserved_port()
+    otlp_port, otlp_reservation = _reserved_port()
 
-            assert drift is None, (
-                "OTLP and /metrics disagree about which metrics exist.\n"
-                "One surface is silently missing metrics the other reports.\n"
-                f"{drift}"
+    with _running_receiver(otlp_port, otlp_reservation) as receiver:
+        http_reservation.close()
+        with _Frontend(request, http_port, otlp_port):
+            # One request, so per-request families get a sample. With no
+            # worker it is rejected (404); the gauges it touches are still
+            # recorded under the unknown-model label.
+            requests.post(
+                f"http://localhost:{http_port}/v1/chat/completions",
+                json={
+                    "model": "otlp-parity-no-such-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 1,
+                },
+                timeout=10,
+            )
+            # Wait for an export that started after the request.
+            seen = receiver.exports
+            deadline = time.time() + 60
+            while receiver.exports <= seen + 1 and time.time() < deadline:
+                time.sleep(0.25)
+            assert (
+                receiver.exports > seen + 1
+            ), "frontend never exported over OTLP; is export still wired to runtime startup?"
+            # Registered unlabelled at startup, so it is always present: a
+            # direct witness that the HTTP service's registry reaches OTLP.
+            assert (
+                "dynamo_frontend_metrics_start_time_seconds" in receiver.names()
+            ), "the HTTP service's registry is not reachable from the exporter"
+            _assert_surfaces_agree(
+                f"http://localhost:{http_port}/metrics",
+                receiver,
+                renders_created=False,
             )

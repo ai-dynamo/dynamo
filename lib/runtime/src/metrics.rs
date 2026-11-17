@@ -859,8 +859,21 @@ impl std::fmt::Debug for MetricsRegistry {
 impl MetricsRegistry {
     /// Create a new metrics registry with an empty Prometheus registry and callback lists
     pub fn new() -> Self {
+        Self::from_prometheus_registry(prometheus::Registry::new())
+    }
+
+    /// Wrap an existing Prometheus registry, sharing its collectors.
+    ///
+    /// For a component that owns a plain `prometheus::Registry` (the HTTP
+    /// frontend registers its `dynamo_frontend_*` metrics into one) and needs
+    /// it in a hierarchy's combined output. Attach the result with
+    /// [`Self::add_child_registry`] so both `/metrics` and the OTLP export
+    /// (`metric_families_combined`) see it. Attach it once: dedup is by
+    /// wrapper, so two wrappers of one registry gather it twice (the merger
+    /// then drops the repeated series with a warning).
+    pub fn from_prometheus_registry(registry: prometheus::Registry) -> Self {
         Self {
-            prometheus_registry: Arc::new(std::sync::RwLock::new(prometheus::Registry::new())),
+            prometheus_registry: Arc::new(std::sync::RwLock::new(registry)),
             child_registries: Arc::new(std::sync::RwLock::new(Vec::new())),
             prometheus_update_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
             prometheus_expfmt_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
@@ -2554,6 +2567,33 @@ mod test_metric_families_combined {
             !first_conflict_for(NAME),
             "the first gather must record the conflicting name"
         );
+    }
+
+    /// A component's own `prometheus::Registry`, attached as a child, reaches
+    /// both the scrape and the export, and later registrations into it are
+    /// seen too: the wrapper shares the registry rather than copying it.
+    #[test]
+    fn wrapped_prometheus_registry_reaches_scrape_and_export() {
+        let root = registry();
+        let own = prometheus::Registry::new();
+        let early = prometheus::IntCounter::new("dynamo_frontend_early_total", "Early").unwrap();
+        own.register(Box::new(early)).unwrap();
+        root.add_child_registry(&MetricsRegistry::from_prometheus_registry(own.clone()));
+        let late = prometheus::IntGauge::new("dynamo_frontend_late", "Late").unwrap();
+        own.register(Box::new(late)).unwrap();
+
+        let exported = root.metric_families_combined().families;
+        for name in ["dynamo_frontend_early_total", "dynamo_frontend_late"] {
+            assert!(names(&exported).contains(&name), "{name} not exported");
+        }
+        let text = root.prometheus_expfmt_combined().unwrap();
+        for name in ["dynamo_frontend_early_total", "dynamo_frontend_late"] {
+            assert_eq!(
+                text.matches(&format!("# TYPE {name} ")).count(),
+                1,
+                "{name} not declared exactly once:\n{text}"
+            );
+        }
     }
 
     #[test]
