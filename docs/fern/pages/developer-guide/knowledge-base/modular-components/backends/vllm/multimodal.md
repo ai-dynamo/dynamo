@@ -322,8 +322,12 @@ parts must include a URL even when they also provide a UUID.
 
 UUIDs are opaque nonempty strings and must use the top-level field shown above.
 A UUID-only request fails on a cache miss because it contains no media payload
-to process. Dynamo also rejects a media content part that has neither a URL nor
-a UUID.
+to process. The error asks the client to resend the request with the image URL
+or inline image data and the same UUID. This repopulates the selected worker's
+cache; subsequent UUID-only requests must reach that worker. Eviction, a worker
+restart, or routing to a different worker can require another resend. An ordinary
+URL-based cache miss downloads the image again without client intervention.
+Dynamo also rejects a media content part that has neither a URL nor a UUID.
 
 When KV-aware routing is enabled, requests with client UUIDs use text-prefix
 routing. Dynamo cannot convert an opaque client key into its content-derived

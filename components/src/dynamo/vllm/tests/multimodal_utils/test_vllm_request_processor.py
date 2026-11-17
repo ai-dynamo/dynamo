@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import base64
 from io import BytesIO
 from types import SimpleNamespace
@@ -828,7 +829,11 @@ def test_build_tokens_prompt_forwards_opaque_uuid_for_unified_vision_chunk():
     assert prompt["multi_modal_uuids"] == {"vision_chunk": ["catalog/image:v2"]}
 
 
-def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
+@pytest.mark.asyncio
+async def test_uuid_only_image_cache_miss_can_be_recovered():
+    from vllm import SamplingParams
+    from vllm.multimodal.cache import MultiModalProcessorOnlyCache
+    from vllm.multimodal.inputs import MultiModalKwargsItem
     from vllm.multimodal.parse import (
         MultiModalDataItems,
         VisionChunkProcessorItems,
@@ -837,54 +842,82 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
     from vllm.multimodal.processing.inputs import ProcessorInputs
     from vllm.multimodal.processing.processor import BaseMultiModalProcessor
     from vllm.renderers.base import BaseRenderer
+    from vllm.v1.engine.async_llm import AsyncLLM
+    from vllm.v1.engine.exceptions import EngineGenerateError
 
+    from dynamo.llm.exceptions import InvalidArgument
+    from dynamo.vllm.handlers import _translate_vllm_client_errors
+
+    uuid = "catalog/image:v2"
     data_items = MultiModalDataItems(
         {"vision_chunk": VisionChunkProcessorItems([None])}
     )
-    uuid_items = parse_mm_uuids({"vision_chunk": ["catalog/image:v2"]})
-
+    uuid_items = parse_mm_uuids({"vision_chunk": [uuid]})
     BaseRenderer._validate_mm_uuids(
-        None,
-        {"vision_chunk": [None]},
-        data_items,
-        uuid_items,
+        None, {"vision_chunk": [None]}, data_items, uuid_items
     )
-    processor_inputs = ProcessorInputs([], data_items, uuid_items)
-    mm_hashes = processor_inputs.get_mm_hashes("test-model", "blake3")
-
-    assert mm_hashes == {"vision_chunk": ["catalog/image:v2"]}
-
-    empty_items = MultiModalDataItems()
-    parse_mm_data = MagicMock(return_value=empty_items)
-    processor = SimpleNamespace(info=SimpleNamespace(parse_mm_data=parse_mm_data))
-    cache = SimpleNamespace(is_cached=MagicMock(return_value=[True]))
-
-    is_cached, missing_items = BaseMultiModalProcessor._get_cache_missing_items(
-        processor,
-        cache,
-        data_items,
-        mm_hashes,
+    mm_hashes = ProcessorInputs([], data_items, uuid_items).get_mm_hashes(
+        "test-model", "blake3"
     )
+    assert mm_hashes == {"vision_chunk": [uuid]}
 
-    assert is_cached == {"vision_chunk": [True]}
-    assert missing_items is empty_items
-    parse_mm_data.assert_called_once()
-    assert parse_mm_data.call_args.args[0] in ({}, {"vision_chunk": []})
-    assert parse_mm_data.call_args.kwargs == {"validate": False}
-
-    cache.is_cached.return_value = [False]
-    parse_mm_data.reset_mock()
-    with pytest.raises(
-        ValueError,
-        match="Cache miss for vision_chunk at index 0 but data is not provided",
-    ):
-        BaseMultiModalProcessor._get_cache_missing_items(
-            processor,
-            cache,
-            data_items,
-            mm_hashes,
+    def parse_mm_data(data, *, validate):
+        return MultiModalDataItems(
+            {
+                modality: VisionChunkProcessorItems(items)
+                for modality, items in data.items()
+            }
         )
-    parse_mm_data.assert_not_called()
+
+    processor = SimpleNamespace(info=SimpleNamespace(parse_mm_data=parse_mm_data))
+    cache = MultiModalProcessorOnlyCache(
+        SimpleNamespace(
+            get_multimodal_config=lambda: SimpleNamespace(mm_processor_cache_gb=0.001)
+        )
+    )
+
+    async def add_request(*args, **kwargs):
+        return BaseMultiModalProcessor._get_cache_missing_items(
+            processor, cache, data_items, mm_hashes
+        )
+
+    # Exercise vLLM's actual wrapping of a processor failure, not a fabricated
+    # exception chain that could diverge from AsyncLLM.generate.
+    engine = SimpleNamespace(add_request=add_request, log_requests=False)
+    stream = AsyncLLM.generate(
+        engine, {"prompt_token_ids": [1]}, SamplingParams(max_tokens=1), "cache-miss"
+    )
+    request = {
+        "multi_modal_data": {"image_url": [{"UuidOnly": uuid}]},
+        "multi_modal_uuids": {"image_url": [uuid]},
+    }
+    with pytest.raises(InvalidArgument, match="Resend.*same UUID") as raised:
+        await asyncio.wait_for(
+            anext(_translate_vllm_client_errors(stream, request)), timeout=5
+        )
+    assert isinstance(raised.value.__cause__, EngineGenerateError)
+    assert type(raised.value.__cause__.__cause__) is ValueError
+    assert uuid not in str(raised.value)
+
+    # Resending materialized data makes the miss processable and populates the
+    # real CPU cache; the next UUID-only lookup must resolve on that worker.
+    image = Image.new("RGB", (2, 2))
+    materialized = MultiModalDataItems(
+        {"vision_chunk": VisionChunkProcessorItems([image])}
+    )
+    is_cached, missing = BaseMultiModalProcessor._get_cache_missing_items(
+        processor, cache, materialized, mm_hashes
+    )
+    assert is_cached == {"vision_chunk": [False]}
+    assert missing["vision_chunk"][0] is image
+    item = MultiModalKwargsItem.dummy(1)
+    cache.get_and_update_item((item, []), uuid)
+    is_cached, missing = BaseMultiModalProcessor._get_cache_missing_items(
+        processor, cache, data_items, mm_hashes
+    )
+    assert is_cached == {"vision_chunk": [True]}
+    assert missing.get_count("vision_chunk", strict=False) == 0
+    assert cache.get_and_update_item(None, uuid)[0] is item
 
 
 def test_build_tokens_prompt_forwards_user_uuids_for_each_modality() -> None:

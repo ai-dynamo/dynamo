@@ -393,10 +393,10 @@ pub enum BackendErrorCheck {
 }
 
 impl BackendErrorCheck {
-    /// Policy from `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`: unset or `0` is `Skip`;
-    /// any other value is `Bounded` for that many milliseconds. A value that
-    /// cannot be read is `Skip` and warns, so a typo does not silently disable
-    /// the peek someone meant to turn on.
+    const DEFAULT_WINDOW: Duration = Duration::from_millis(100);
+
+    /// Wait up to 100 ms by default. An explicit `0` disables the peek;
+    /// invalid values warn and retain the default.
     fn from_env() -> Self {
         Self::parse(std::env::var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS))
     }
@@ -404,14 +404,14 @@ impl BackendErrorCheck {
     fn parse(value: Result<String, std::env::VarError>) -> Self {
         let value = match value {
             Ok(value) => value,
-            Err(std::env::VarError::NotPresent) => return Self::Skip,
+            Err(std::env::VarError::NotPresent) => return Self::Bounded(Self::DEFAULT_WINDOW),
             Err(error @ std::env::VarError::NotUnicode(_)) => {
                 tracing::warn!(
                     env = env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
                     %error,
                     "ignoring invalid pre-commit error peek window"
                 );
-                return Self::Skip;
+                return Self::Bounded(Self::DEFAULT_WINDOW);
             }
         };
 
@@ -425,7 +425,7 @@ impl BackendErrorCheck {
                     %error,
                     "ignoring invalid pre-commit error peek window"
                 );
-                Self::Skip
+                Self::Bounded(Self::DEFAULT_WINDOW)
             }
         }
     }
@@ -4116,20 +4116,18 @@ mod tests {
 
     #[test]
     fn test_backend_error_check_env_var() {
-        assert_eq!(
-            BackendErrorCheck::parse(Err(std::env::VarError::NotPresent)),
-            BackendErrorCheck::Skip
-        );
+        for value in [
+            Err(std::env::VarError::NotPresent),
+            Ok("invalid".to_string()),
+            Err(std::env::VarError::NotUnicode("500".into())),
+        ] {
+            assert_eq!(
+                BackendErrorCheck::parse(value),
+                BackendErrorCheck::Bounded(Duration::from_millis(100))
+            );
+        }
         assert_eq!(
             BackendErrorCheck::parse(Ok("0".to_string())),
-            BackendErrorCheck::Skip
-        );
-        assert_eq!(
-            BackendErrorCheck::parse(Ok("invalid".to_string())),
-            BackendErrorCheck::Skip
-        );
-        assert_eq!(
-            BackendErrorCheck::parse(Err(std::env::VarError::NotUnicode("500".into()))),
             BackendErrorCheck::Skip
         );
         assert_eq!(

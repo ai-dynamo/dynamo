@@ -123,10 +123,11 @@ async def generate(request, context):
 
 The header is on the response, error responses included, when the Frontend reads your engine's
 stream before it commits the response. That is every non-streaming `/v1/chat/completions` request,
-and a streaming one only when `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS` is set.
+and a streaming one while its pre-commit wait is enabled (100 ms by default,
+configured by `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`).
 
-Otherwise the call returns `False` and sets nothing. That covers a streaming request without that
-setting, a call made after a streaming response has started, and every `/v1/responses` and
+Otherwise the call returns `False` and sets nothing. That covers a streaming request with the
+wait disabled (`0`), a call made after a streaming response has started, and every `/v1/responses` and
 `/v1/messages` request.
 
 When the response can carry the header, the call raises `ValueError` for a name or value that is

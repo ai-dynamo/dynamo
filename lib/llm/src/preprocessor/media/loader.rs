@@ -29,6 +29,8 @@ const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 3;
 
 const IMAGE_FETCH_FAILED: &str = "Failed to fetch the image_url media";
+const IMAGE_FORBIDDEN: &str = "Image download returned HTTP 403. Refresh the URL or access permissions, or resend the image data before retrying.";
+const IMAGE_NOT_FOUND: &str = "Image download returned HTTP 404. Verify the image URL or resend the image data before retrying.";
 const IMAGE_DECODE_FAILED: &str =
     "Failed to decode the image_url data: it is not a valid or supported image";
 #[cfg(feature = "media-ffmpeg")]
@@ -171,6 +173,27 @@ fn media_input_error(public: &'static str, error: anyhow::Error) -> anyhow::Erro
     DynamoError::builder()
         .error_type(ErrorType::InvalidArgument)
         .message(format!("{public}: {error:#}"))
+        .public_message(public)
+        .build()
+        .into()
+}
+
+fn image_fetch_error(error: anyhow::Error) -> anyhow::Error {
+    if error.downcast_ref::<DynamoError>().is_some() {
+        return error;
+    }
+    let status = error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .find_map(reqwest::Error::status);
+    let (class, public) = match status {
+        Some(reqwest::StatusCode::FORBIDDEN) => (ErrorType::PermissionDenied, IMAGE_FORBIDDEN),
+        Some(reqwest::StatusCode::NOT_FOUND) => (ErrorType::NotFound, IMAGE_NOT_FOUND),
+        _ => return media_input_error(IMAGE_FETCH_FAILED, error),
+    };
+    DynamoError::builder()
+        .class(class)
+        .diagnostic(format!("{IMAGE_FETCH_FAILED}: {error:#}"))
         .public_message(public)
         .build()
         .into()
@@ -689,7 +712,7 @@ impl MediaLoader {
                 let data = EncodedMediaData::from_url(url, &self.http_client)
                     .await
                     .map_err(MediaFetcher::map_fetch_error)
-                    .map_err(|e| media_input_error(IMAGE_FETCH_FAILED, e))?;
+                    .map_err(image_fetch_error)?;
 
                 // Use runtime decoder if provided, with MDC limits enforced
                 let decoder =
@@ -1257,10 +1280,43 @@ mod tests_non_nixl {
             .build()
             .into();
         let passed = media_input_error(IMAGE_DECODE_FAILED, host_fault);
+        let passed = image_fetch_error(passed);
         let dynamo_error = passed
             .downcast_ref::<DynamoError>()
             .expect("classified error passes through");
         assert_eq!(dynamo_error.error_type(), ErrorType::Internal);
+    }
+
+    #[tokio::test]
+    async fn image_fetch_errors_preserve_status_and_safe_recovery_message() {
+        let mut server = mockito::Server::new_async().await;
+        let client = reqwest::Client::new();
+        for (status, class) in [
+            (403, ErrorType::PermissionDenied),
+            (404, ErrorType::NotFound),
+        ] {
+            let origin = server
+                .mock("GET", "/image?token=SECRET")
+                .with_status(status)
+                .with_body("private origin response")
+                .create_async()
+                .await;
+            let url = format!("{}/image?token=SECRET", server.url())
+                .parse()
+                .unwrap();
+            let error = EncodedMediaData::from_url(&url, &client)
+                .await
+                .expect_err("origin refused the image");
+            let error = image_fetch_error(error);
+            let error = error.downcast_ref::<DynamoError>().unwrap();
+            assert_eq!(error.class(), class);
+            let public = error.public_message().unwrap();
+            assert!(public.starts_with(&format!("Image download returned HTTP {status}.")));
+            assert!(public.contains("resend the image data before retrying"));
+            assert!(!public.contains("SECRET"));
+            assert!(!public.contains("private origin response"));
+            origin.assert_async().await;
+        }
     }
 
     #[rstest::rstest]

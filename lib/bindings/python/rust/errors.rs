@@ -393,7 +393,11 @@ pub(crate) fn http_like_error_to_dynamo(py: Python<'_>, err: &PyErr) -> Option<D
 /// anything else stays diagnostic and the renderer uses the class catalog.
 /// Python producers must use the same text: the Python test
 /// `test_video_public_message_matches_binding_allowlist` fails if they diverge.
-const PUBLIC_HTTP_MESSAGES: &[&str] = &["Unsupported video media"];
+const PUBLIC_HTTP_MESSAGES: &[&str] = &[
+    "Unsupported video media",
+    "Image download returned HTTP 403. Refresh the URL or access permissions, or resend the image data before retrying.",
+    "Image download returned HTTP 404. Verify the image URL or resend the image data before retrying.",
+];
 
 fn build_http_like_error(code: u16, message: String) -> DynamoError {
     let legacy_message = serde_json::json!({

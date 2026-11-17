@@ -13,6 +13,42 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
   These are the frontend-specific flags. The frontend also parses the shared Dynamo runtime flags (namespace, discovery, planes, parsing) — see [Runtime Configuration](runtime-configuration.mdx). For the router cost model and tuning guidance behind the router flags below, see [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md).
 </Note>
 
+## Streaming errors
+
+The frontend waits briefly for the first backend event before committing a
+streaming response. An error received during this wait can return its HTTP error
+status instead of HTTP 200.
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS` | `100` | Maximum pre-commit wait in milliseconds. `0` disables the wait. Invalid values retain the default. |
+
+Set this variable on the frontend before starting it; it is read once when the
+HTTP service is created. Increase it if media fetching or request validation
+regularly takes longer than the default, for example to `500`. If the first normal
+event arrives sooner, it is forwarded immediately without waiting for the rest
+of the window. Request-ID annotations do not end the wait.
+
+This applies to streaming chat completions, completions, Responses, and Anthropic
+messages. Once a normal event arrives or the window expires, HTTP headers are
+committed. Later failures arrive as error events in the stream, even when the
+HTTP status is 200. Clients must check these events rather than treating HTTP 200
+as successful completion. An error ends the current stream; any retry is a new
+request.
+
+Known image errors include recovery advice in both HTTP and stream error
+messages:
+
+| Error | Recovery |
+| --- | --- |
+| Image download returned 404 | Verify the URL or resend the image data before retrying. |
+| Image download returned 403 | Refresh the URL or access permissions, or resend the image data before retrying. |
+| UUID-only image is missing from the selected worker's cache | Resend the URL or inline image data with the same UUID. Retrying only the UUID does not reliably restore the missing entry. |
+
+An ordinary URL-based image-cache miss is handled internally by downloading the
+image again. UUID-only reuse requires an existing entry on the selected worker;
+see [vLLM multimodal cache reuse](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#reuse-vllm-multimodal-processor-cache-entries).
+
 ## Decision APIs
 
 **Experimental.** `--enable-systemone-api` (environment variable `DYN_ENABLE_SYSTEMONE_API`, default `false`) enables both OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. The qualified backend is an aggregated, single-rank SGLang CUDA worker using the serialized scoring profile. See [Start a Decision Worker](../../cli/model-deployment/introduction.mdx#decision-api-workers) for launch commands and smoke requests.

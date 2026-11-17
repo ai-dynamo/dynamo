@@ -27,6 +27,7 @@ from typing import AsyncGenerator, Dict
 import aiohttp
 import numpy as np
 import pytest
+from aiohttp import web
 
 from dynamo._core import Context, _raise_routed_http_error
 from dynamo.frontend.utils import PromptLogprobsAccumulator
@@ -58,13 +59,17 @@ class _OpenIfCodec:
         return frames, {"fps": 1.0, "frames_indices": [0]}
 
 
-async def _decode_request_videos(content: list) -> None:
-    """Run each video part through the real loader before the mock completion."""
+async def _decode_request_media(content: list) -> None:
+    """Load media through the real loaders before the mock completion."""
+    from dynamo.common.multimodal.image_loader import ImageLoader
     from dynamo.common.multimodal.media_source import decode_data_uri
     from dynamo.common.multimodal.video_loader import VideoLoader
 
     loader = VideoLoader()
     for part in content:
+        if isinstance(part, dict) and part.get("type") == "image_url":
+            await ImageLoader().load_image(part["image_url"]["url"])
+            continue
         if not isinstance(part, dict) or part.get("type") != "video_url":
             continue
         url = part["video_url"]["url"]
@@ -145,7 +150,7 @@ class MockHttpEngine:
                 user_message = message.get("content", "")
                 break
         if isinstance(user_message, list):
-            await _decode_request_videos(user_message)
+            await _decode_request_media(user_message)
             user_message = ""
         # verifies that cancellation is propagated
         if context.is_stopped():
@@ -214,13 +219,21 @@ def test_batch_endpoint_cannot_be_changed_at_runtime():
 
 
 @pytest.fixture(scope="function", autouse=False)
-async def http_server(request, unused_tcp_port: int, runtime: DistributedRuntime):
+async def http_server(
+    request, unused_tcp_port: int, runtime: DistributedRuntime, monkeypatch
+):
     """Fixture to start a mock HTTP server using HttpService, contributed by Baseten.
 
-    Parametrize indirectly with a bool to set ``wait_for_first_item`` on the
-    service; the default is False.
+    Parametrize indirectly with ``wait_for_first_item`` or ``peek_ms`` settings.
     """
-    wait_for_first_item = getattr(request, "param", False)
+    settings = getattr(request, "param", {})
+    if "peek_ms" in settings:
+        monkeypatch.setenv(
+            "DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS", str(settings["peek_ms"])
+        )
+    else:
+        monkeypatch.delenv("DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS", raising=False)
+    wait_for_first_item = settings.get("wait_for_first_item", False)
     port = unused_tcp_port
     model_name = "test_model"
     start_done = asyncio.Event()
@@ -291,8 +304,10 @@ async def http_server(request, unused_tcp_port: int, runtime: DistributedRuntime
     await stop_server()
 
 
-WAIT_FOR_FIRST_ITEM = pytest.param(True, id="wait_for_first_item")
-DEFAULT_SERVICE = pytest.param(False, id="default")
+WAIT_FOR_FIRST_ITEM = pytest.param(
+    {"wait_for_first_item": True}, id="wait_for_first_item"
+)
+DEFAULT_SERVICE = pytest.param({}, id="default")
 
 
 @pytest.mark.asyncio
@@ -467,6 +482,7 @@ async def test_non_video_data_url_is_unsupported_over_http(http_server):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("http_server", [{"peek_ms": 0}], indirect=True)
 @pytest.mark.timeout(60)
 @pytest.mark.forked
 async def test_non_video_data_url_is_unsupported_over_sse(http_server):
@@ -511,6 +527,76 @@ def test_video_public_message_matches_binding_allowlist():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "http_server,origin_status,after_commit",
+    [({"wait_for_first_item": True}, 403, False), ({}, 404, True)],
+    indirect=["http_server"],
+)
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_image_fetch_recovery_advice_survives_http_and_sse(
+    http_server, unused_tcp_port_factory, monkeypatch, origin_status, after_commit
+):
+    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    origin_port = unused_tcp_port_factory()
+    release_origin = asyncio.Event()
+
+    async def refuse_image(request):
+        await asyncio.wait_for(release_origin.wait(), timeout=10)
+        return web.Response(status=origin_status, text="PRIVATE_ORIGIN_DETAILS")
+
+    app = web.Application()
+    app.router.add_get("/image.png", refuse_image)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    try:
+        await web.TCPSite(runner, "127.0.0.1", origin_port).start()
+        if not after_commit:
+            release_origin.set()
+        base_url, model_name = http_server
+        data = {
+            "model": model_name,
+            "stream": True,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"http://127.0.0.1:{origin_port}/image.png?token=SECRET"
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as session:
+            async with session.post(
+                f"{base_url}/v1/chat/completions", json=data
+            ) as response:
+                assert response.status == (200 if after_commit else origin_status)
+                # The origin cannot fail until HTTP 200 has been committed.
+                release_origin.set()
+                raw = await response.text()
+        error = _sse_error(raw) if after_commit else json.loads(raw)
+        assert error["code"] == origin_status
+        assert error["message"].startswith(
+            f"Image download returned HTTP {origin_status}."
+        )
+        assert "resend the image data before retrying" in error["message"]
+        assert "SECRET" not in raw
+        assert "PRIVATE_ORIGIN_DETAILS" not in raw
+        assert "This is a mock response." not in raw
+    finally:
+        release_origin.set()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("http_server", [WAIT_FOR_FIRST_ITEM], indirect=True)
 @pytest.mark.timeout(60)
 @pytest.mark.forked
@@ -540,12 +626,11 @@ async def test_streaming_chat_completion_http_error_waits_for_first_item(http_se
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("http_server", [{"peek_ms": 0}], indirect=True)
 @pytest.mark.timeout(60)
 @pytest.mark.forked
-async def test_streaming_chat_completion_http_error_default_commits_200(http_server):
-    """Without wait_for_first_item, a streaming request commits HTTP 200 before
-    the generator runs, so an exception raised before its first yield arrives
-    inside the SSE stream instead."""
+async def test_streaming_chat_completion_http_error_with_peek_disabled(http_server):
+    """Disabling the peek preserves HTTP 200 with an in-stream error."""
     base_url, model_name = http_server
     url = f"{base_url}/v1/chat/completions"
     data = {
@@ -564,9 +649,9 @@ async def test_streaming_chat_completion_http_error_default_commits_200(http_ser
     # The frame carries the sanitized stream error, not the backend's own
     # message: HTTP 200 is already committed, so there is no status left to
     # carry the 400, and the stream formatter does not forward backend text.
-    assert (
-        '"error"' in body
-    ), f"the pre-yield failure must arrive as an SSE error frame; got: {body}"
+    assert '"error"' in body, (
+        f"the pre-yield failure must arrive as an SSE error frame; got: {body}"
+    )
     assert "mock response" not in body, (
         f"the generator raised before its first yield, so the stream must "
         f"carry no content; got: {body}"
@@ -577,10 +662,18 @@ async def test_streaming_chat_completion_http_error_default_commits_200(http_ser
 @pytest.mark.parametrize(
     ("http_server", "stream", "trigger", "status", "has_header"),
     [
-        pytest.param(False, False, "", 200, True, id="unary"),
-        pytest.param(False, False, MSG_CONTAINS_ERROR, 400, True, id="unary_error"),
-        pytest.param(True, True, "", 200, True, id="stream_wait_for_first_item"),
-        pytest.param(False, True, "", 200, False, id="stream_default"),
+        pytest.param({}, False, "", 200, True, id="unary"),
+        pytest.param({}, False, MSG_CONTAINS_ERROR, 400, True, id="unary_error"),
+        pytest.param(
+            {"wait_for_first_item": True},
+            True,
+            "",
+            200,
+            True,
+            id="stream_wait_for_first_item",
+        ),
+        pytest.param({}, True, "", 200, True, id="stream_default"),
+        pytest.param({"peek_ms": 0}, True, "", 200, False, id="stream_peek_disabled"),
     ],
     indirect=["http_server"],
 )
@@ -591,8 +684,7 @@ async def test_chat_engine_response_header(
 ):
     """A header the engine sets through its context is on the response, error
     responses included, when the service reads the engine's stream before it
-    commits the response. The default service commits a streaming response
-    first, so that response never carries the header."""
+    commits the response. Disabling the peek commits streaming headers first."""
     base_url, model_name = http_server
     data = {
         "model": model_name,
