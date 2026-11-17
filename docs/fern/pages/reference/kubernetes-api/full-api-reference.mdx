@@ -5613,9 +5613,9 @@ RerunSpec records explicit intent to create another Run without changing search 
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
-<ParamField path="reason" type="string">
+<ParamField path="reason" type="string" required={true}>
 Reason records why the user requested another Run. Changing this value creates a new Request generation and the value is frozen into that generation's immutable Run.
-**Validation:** MinLength: 1
+**Validation:** MinLength: 1  Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 

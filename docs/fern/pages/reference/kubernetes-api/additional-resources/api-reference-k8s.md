@@ -3897,7 +3897,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `reason` _string_ | Reason records why the user requested another Run. Changing this value creates a new<br />Request generation and the value is frozen into that generation's immutable Run. |  | MinLength: 1 <br /> |
+| `reason` _string_ | Reason records why the user requested another Run. Changing this value creates a new<br />Request generation and the value is frozen into that generation's immutable Run. |  | MinLength: 1 <br />Required: \{\} <br /> |
 
 
 #### ResourceReference
