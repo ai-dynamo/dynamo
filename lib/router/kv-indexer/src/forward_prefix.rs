@@ -3,7 +3,7 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{KvCacheGroupResidency, MatchDetails, MatchEdge, MatchFirstEdge, MatchObserver};
+use super::{KvCacheGroupResidency, MatchDetails, MatchEdge, MatchObserver};
 use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 use crate::prelude::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
@@ -471,35 +471,10 @@ impl MatchObserver for ForwardDeviceEvaluator<'_> {
         self.start();
     }
 
-    fn begin_path(&mut self, _count: usize, _endpoint_hint: Option<ExternalSequenceBlockHash>) {
-        self.start();
-    }
-
-    fn begin_first_edge(&mut self, edge: MatchFirstEdge<'_>) -> Option<usize> {
-        self.begin_edge(MatchEdge {
-            full_workers: edge.full_workers,
-            worker_cutoffs: edge.worker_cutoffs,
-            prefix_depth: 0,
-            first_node: true,
-            incoming_workers: &FxHashSet::default(),
-            all_workers_continue: false,
-        });
-        None
-    }
-
     fn observe_worker(&mut self, _worker: WorkerWithDpRank) {}
 
     fn observe_block(&mut self, position: usize, hash: ExternalSequenceBlockHash) {
         self.record_block(position, hash);
-    }
-
-    fn observe_block_with_coverage(
-        &mut self,
-        position: usize,
-        hash: ExternalSequenceBlockHash,
-        _edge: &MatchEdge<'_>,
-    ) {
-        self.observe_block(position, hash);
     }
 
     fn emit_match_details(
@@ -712,7 +687,7 @@ mod tests {
     ) -> (MatchDetails, MatchDetails) {
         let mut forward = ForwardDeviceEvaluator::new(residency, max_blocks);
         let mut legacy = HybridPrefixEvaluator::new(residency, max_blocks);
-        let (full_workers, worker_cutoffs) = begin_forward(&mut forward, raw, visited);
+        begin_forward(&mut forward, raw, visited);
         legacy.reserve_workers(raw.overlap_scores.scores.len());
         for &worker in raw.overlap_scores.scores.keys() {
             forward.observe_worker(worker);
@@ -720,18 +695,7 @@ mod tests {
         }
         for position in 1..=visited {
             let hash = ExternalSequenceBlockHash(position as u64);
-            forward.observe_block_with_coverage(
-                position,
-                hash,
-                &MatchEdge {
-                    full_workers: &full_workers,
-                    worker_cutoffs: &worker_cutoffs,
-                    incoming_workers: &FxHashSet::default(),
-                    prefix_depth: 0,
-                    first_node: true,
-                    all_workers_continue: false,
-                },
-            );
+            forward.observe_block(position, hash);
             legacy.observe_block(position, hash);
         }
         let mut actual = raw.clone();
@@ -746,9 +710,6 @@ mod tests {
         evaluator: &mut ForwardDeviceEvaluator<'_>,
         raw: &MatchDetails,
         visited: usize,
-    ) -> (
-        FxHashSet<WorkerWithDpRank>,
-        FxHashMap<WorkerWithDpRank, usize>,
     ) {
         let mut full_workers = FxHashSet::default();
         let mut worker_cutoffs = FxHashMap::default();
@@ -762,12 +723,8 @@ mod tests {
         evaluator.begin_edge(MatchEdge {
             full_workers: &full_workers,
             worker_cutoffs: &worker_cutoffs,
-            prefix_depth: 0,
             first_node: true,
-            incoming_workers: &FxHashSet::default(),
-            all_workers_continue: false,
         });
-        (full_workers, worker_cutoffs)
     }
 
     fn raw_device(workers: impl Iterator<Item = (WorkerWithDpRank, u32)>) -> MatchDetails {
@@ -895,34 +852,20 @@ mod tests {
         let first = MatchEdge {
             full_workers: &first_workers,
             worker_cutoffs: &cutoffs,
-            incoming_workers: &FxHashSet::default(),
-            prefix_depth: 0,
             first_node: true,
-            all_workers_continue: false,
         };
         assert!(evaluator.begin_edge(first));
         for position in 1..=4 {
-            evaluator.observe_block_with_coverage(
-                position,
-                ExternalSequenceBlockHash(position as u64),
-                &first,
-            );
+            evaluator.observe_block(position, ExternalSequenceBlockHash(position as u64));
         }
         let last = MatchEdge {
             full_workers: &last_workers,
             worker_cutoffs: &cutoffs,
-            incoming_workers: &first_workers,
-            prefix_depth: 4,
             first_node: false,
-            all_workers_continue: false,
         };
         assert!(evaluator.begin_edge(last));
         for position in 5..=8 {
-            evaluator.observe_block_with_coverage(
-                position,
-                ExternalSequenceBlockHash(position as u64),
-                &last,
-            );
+            evaluator.observe_block(position, ExternalSequenceBlockHash(position as u64));
         }
         let mut raw = raw_device([(dropped, 4), (surviving, 8)].into_iter());
         evaluator.finish(&mut raw);
@@ -974,10 +917,7 @@ mod tests {
         assert!(evaluator.begin_edge(MatchEdge {
             full_workers: &full,
             worker_cutoffs: &partial,
-            prefix_depth: 0,
             first_node: true,
-            incoming_workers: &FxHashSet::default(),
-            all_workers_continue: false,
         }));
         for position in 1..=4 {
             evaluator.observe_block(position, ExternalSequenceBlockHash(position as u64));
@@ -985,10 +925,7 @@ mod tests {
         assert!(evaluator.begin_edge(MatchEdge {
             full_workers: &FxHashSet::from_iter([surviving]),
             worker_cutoffs: &partial,
-            prefix_depth: 4,
-            incoming_workers: &full,
             first_node: false,
-            all_workers_continue: false,
         }));
         for position in 5..=6 {
             evaluator.observe_block(position, ExternalSequenceBlockHash(position as u64));
@@ -996,10 +933,7 @@ mod tests {
         assert!(evaluator.begin_edge(MatchEdge {
             full_workers: &FxHashSet::from_iter([surviving]),
             worker_cutoffs: &partial,
-            prefix_depth: 6,
-            incoming_workers: &FxHashSet::from_iter([surviving]),
             first_node: false,
-            all_workers_continue: true,
         }));
         for position in 7..=8 {
             evaluator.observe_block(position, ExternalSequenceBlockHash(position as u64));
@@ -1080,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn forward_device_first_edge_requires_exact_workers_and_reachable_bound() {
+    fn forward_device_requires_exact_workers_and_reachable_bound() {
         let residency = KvCacheGroupResidency::new();
         let first = WorkerWithDpRank::new(1, 0);
         let second = WorkerWithDpRank::new(2, 0);
@@ -1093,27 +1027,12 @@ mod tests {
         }
         store_device_checkpoint(&residency, second, 999);
         let workers = FxHashSet::from_iter([first, second]);
-        let blocks: Vec<_> = (1..=8)
-            .map(|hash| {
-                (
-                    crate::prelude::LocalBlockHash(hash),
-                    ExternalSequenceBlockHash(hash),
-                )
-            })
-            .collect();
         let mut evaluator = ForwardDeviceEvaluator::new(&residency, Some(3));
-        assert_eq!(
-            evaluator.begin_first_edge(MatchFirstEdge {
-                full_workers: &workers,
-                worker_cutoffs: &FxHashMap::default(),
-                matched_blocks: &blocks,
-                query_blocks: 8,
-                requested_endpoint: Some(ExternalSequenceBlockHash(8)),
-                terminal: true,
-            }),
-            None,
-            "equal cardinality cannot substitute a different eligible worker"
-        );
+        assert!(evaluator.begin_edge(MatchEdge {
+            full_workers: &workers,
+            worker_cutoffs: &FxHashMap::default(),
+            first_node: true,
+        }));
         for position in 1..=8 {
             evaluator.observe_block(position, ExternalSequenceBlockHash(position as u64));
         }
@@ -1135,10 +1054,7 @@ mod tests {
             assert!(evaluator.begin_edge(MatchEdge {
                 full_workers: &full,
                 worker_cutoffs: &partial,
-                prefix_depth: 0,
                 first_node: true,
-                incoming_workers: &FxHashSet::default(),
-                all_workers_continue: false,
             }));
             for position in 1..=8 {
                 evaluator.observe_block(position, ExternalSequenceBlockHash(position as u64));

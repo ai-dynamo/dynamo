@@ -43,13 +43,8 @@ fn fused_observer_runs_before_comparing_the_next_block() {
     impl MatchObserver for Observer {
         fn begin_edge(&mut self, edge: crate::MatchEdge<'_>) -> bool {
             assert!(edge.first_node);
-            assert_eq!(edge.prefix_depth, 0);
-            self.0.lock().push(('e', edge.prefix_depth));
+            self.0.lock().push(('e', 0));
             true
-        }
-
-        fn begin_first_edge(&mut self, _edge: crate::MatchFirstEdge<'_>) -> Option<usize> {
-            panic!("fused observers must not probe the terminal checkpoint first");
         }
 
         fn observe_worker(&mut self, _worker: WorkerWithDpRank) {

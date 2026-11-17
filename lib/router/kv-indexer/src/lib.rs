@@ -173,7 +173,7 @@ pub use lower_tier_indexers::{
     lower_tier_query_order, query_lower_tiers_with_options,
     query_lower_tiers_with_options_and_snapshot,
 };
-pub use match_observer::{MatchEdge, MatchFirstEdge, MatchObserver};
+pub use match_observer::{MatchEdge, MatchObserver};
 pub use metrics::{
     CkfMutationKind, EventKind, EventWarningKind, KvIndexerMetrics,
     METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED, METRIC_CKF_MUTATION_UNKNOWN_REMOVE,

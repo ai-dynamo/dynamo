@@ -190,10 +190,10 @@ impl ConcurrentRadixTreeCompressed {
     fn record_surviving_details(
         details: &mut MatchDetails,
         walk_result: MatchWalkResult,
-        mut observer: Option<&mut dyn MatchObserver>,
+        observer: Option<&mut dyn MatchObserver>,
     ) {
         let mut active = walk_result.active.into_workers();
-        if let Some(observer) = observer.as_deref_mut() {
+        if let Some(observer) = observer {
             match observer.emit_match_details(
                 active,
                 walk_result.matched_depth,
@@ -204,44 +204,13 @@ impl ConcurrentRadixTreeCompressed {
                 Err(workers) => active = workers,
             }
         }
-        // A uniform result has no earlier cutoffs or workers dropped at a node
-        // boundary. Its already-owned active set can carry the immutable caps.
-        let eligible = if details.overlap_scores.scores.is_empty() && !active.is_empty() {
-            walk_result.prev_edge_last_hash.and_then(|hash| {
-                observer.as_mut().and_then(|observer| {
-                    observer.uniform_resume_workers(walk_result.matched_depth, hash)
-                })
-            })
-        } else {
-            None
-        };
-        if let Some(eligible) = eligible {
-            let mut confirmed = true;
-            for worker in &active {
-                confirmed &= eligible.contains(worker);
-                details
-                    .overlap_scores
-                    .scores
-                    .insert(*worker, walk_result.matched_depth);
-                if let Some(hash) = walk_result.prev_edge_last_hash {
-                    details.last_matched_hashes.insert(*worker, hash);
-                }
-            }
-            if confirmed {
-                details.hybrid_resume_caps = super::super::HybridResumeCaps::uniform_confirmed(
-                    active,
-                    walk_result.matched_depth,
-                );
-            }
-        } else {
-            for worker in &active {
-                details
-                    .overlap_scores
-                    .scores
-                    .insert(*worker, walk_result.matched_depth);
-                if let Some(hash) = walk_result.prev_edge_last_hash {
-                    details.last_matched_hashes.insert(*worker, hash);
-                }
+        for worker in &active {
+            details
+                .overlap_scores
+                .scores
+                .insert(*worker, walk_result.matched_depth);
+            if let Some(hash) = walk_result.prev_edge_last_hash {
+                details.last_matched_hashes.insert(*worker, hash);
             }
         }
     }
