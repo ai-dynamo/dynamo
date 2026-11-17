@@ -6,14 +6,18 @@
 
 use dynamo_backend_common::{
     CompletionUsage, DisaggregationMode, DynamoError, GuidedDecodingOptions, KvHint,
-    LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest, PromptTokensDetails, StopConditions,
-    StopReason, TopLogprob, usage,
+    LLMEngineOutput, LLMEngineOutputExt, MultimodalData, PreprocessedRequest, PromptTokensDetails,
+    StopConditions, StopReason, TopLogprob, usage,
 };
 use serde_json::{Map, Value};
 
 use crate::client;
 use crate::proto as pb;
 use crate::proto::finish_reason::Kind as FinishKind;
+
+const IMAGE_URL_KEY: &str = "image_url";
+const VIDEO_URL_KEY: &str = "video_url";
+const AUDIO_URL_KEY: &str = "audio_url";
 
 /// The prefill/decode rendezvous of one request: SGLang's bootstrap address
 /// and room.
@@ -118,6 +122,7 @@ pub(crate) fn build_generate_request(
     let routing = request.routing.as_ref();
     let disaggregated =
         resolve_disaggregated_params(request, mode, bootstrap_host, bootstrap_port)?;
+    let [image_data, video_data, audio_data] = media_data(request)?;
 
     // `routed_dp_rank` is not sent: the engine serves one DP rank, which
     // `validate_dp_rank` checks.
@@ -148,6 +153,9 @@ pub(crate) fn build_generate_request(
         bootstrap_room: disaggregated
             .as_ref()
             .map(|params| optional_int64_one(params.bootstrap_room)),
+        image_data,
+        video_data,
+        audio_data,
         priority: routing.and_then(|routing| routing.priority).map(i64::from),
         require_reasoning: Some(request.require_reasoning),
         lora_path: routing
@@ -169,6 +177,78 @@ pub(crate) fn build_generate_request(
         generate,
         disaggregated.as_ref().map(disaggregated_params_to_json),
     ))
+}
+
+/// The request's image, video and audio items, one list per modality. SGLang
+/// matches each list to that modality's placeholder runs in `input_ids`, so
+/// each list keeps the request order.
+fn media_data(request: &PreprocessedRequest) -> Result<[Option<pb::MediaInput>; 3], DynamoError> {
+    let (mut image_data, mut video_data, mut audio_data) = (Vec::new(), Vec::new(), Vec::new());
+    for (key, items) in request.multi_modal_data.iter().flatten() {
+        let data = match key.as_str() {
+            IMAGE_URL_KEY => &mut image_data,
+            VIDEO_URL_KEY => &mut video_data,
+            AUDIO_URL_KEY => &mut audio_data,
+            _ => {
+                return Err(client::invalid_request(
+                    "SGLang's native Generate RPC accepts only image, video, and audio media",
+                ));
+            }
+        };
+        for item in items {
+            data.push(media_source(item)?);
+        }
+    }
+    let media = [image_data, video_data, audio_data];
+    // Text requests ignore these options, but SGLang would decode media with its own defaults.
+    if request.media_io_kwargs.is_some() && media.iter().any(|data| !data.is_empty()) {
+        return Err(client::invalid_request(
+            "media_io_kwargs are not supported by SGLang's native Generate RPC",
+        ));
+    }
+    Ok(media.map(|sources| {
+        (!sources.is_empty()).then(|| pb::MediaInput {
+            value: Some(pb::media_input::Value::Many(pb::MediaItems {
+                items: sources
+                    .into_iter()
+                    .map(|source| pb::OptionalMediaItem {
+                        item: Some(pb::MediaItem {
+                            value: Some(pb::media_item::Value::Source(source)),
+                        }),
+                    })
+                    .collect(),
+            })),
+        })
+    }))
+}
+
+/// SGLang would read `file://` URLs and bare paths from its own disk, so only
+/// network and inline sources are forwarded.
+fn media_source(item: &MultimodalData) -> Result<String, DynamoError> {
+    let source = match item {
+        MultimodalData::Url(url) => url.as_str(),
+        MultimodalData::RawUrl(source) => source,
+        MultimodalData::Decoded(_) => {
+            return Err(client::invalid_request(
+                "the SGLang sidecar cannot read frontend-decoded media; configure URL passthrough",
+            ));
+        }
+        MultimodalData::UuidOnly(_) => {
+            return Err(client::invalid_request(
+                "the SGLang sidecar needs a media URL and cannot resolve UUID-only media",
+            ));
+        }
+    };
+    if ["http://", "https://", "data:"]
+        .iter()
+        .any(|scheme| source.starts_with(scheme))
+    {
+        Ok(source.to_string())
+    } else {
+        Err(client::invalid_request(
+            "the SGLang sidecar accepts media only as http://, https://, or data: URLs",
+        ))
+    }
 }
 
 /// The DP rank the router chose for this request: prefill takes its own rank
@@ -349,11 +429,6 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
     }
     if request.token_ids.is_empty() {
         return Err(client::invalid_request("token_ids must not be empty"));
-    }
-    if request.multi_modal_data.is_some() {
-        return Err(client::invalid_request(
-            "multimodal payloads are not supported by SGLang's native Generate RPC",
-        ));
     }
     if request.mm_processor_kwargs.is_some() {
         return Err(client::invalid_request(
