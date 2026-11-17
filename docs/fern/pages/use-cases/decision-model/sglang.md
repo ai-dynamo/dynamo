@@ -79,4 +79,4 @@ The small-model [SGLang numerical qualification fixture](https://github.com/ai-d
 
 ## Stop the Example
 
-Stop the worker and frontend with Ctrl-C in their respective terminals. Keep shared etcd/NATS services running if another deployment uses them. Do not terminate unrelated workers. Cancelling an HTTP request does not by itself confirm that GPU work has stopped.
+Stop the worker and frontend with Ctrl-C in their respective terminals. Keep shared services running if another deployment uses them.
