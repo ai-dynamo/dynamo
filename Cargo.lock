@@ -3464,7 +3464,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-stream",
- "tonic 0.13.1",
+ "tonic 0.14.6",
  "tracing",
  "tracing-subscriber",
  "uuid",

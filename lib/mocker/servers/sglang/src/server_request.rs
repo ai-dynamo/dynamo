@@ -3,6 +3,8 @@
 
 //! Validation and frame building for one Generate request.
 
+use tonic_v14 as tonic;
+
 use std::time::Instant;
 
 use dynamo_mocker::common::protocols::DirectRequest;
@@ -226,7 +228,7 @@ impl PreparedRequest {
             output_ids: (!output_tokens.is_empty()).then(|| pb::TokenIds {
                 ids: output_tokens.iter().copied().map(i64::from).collect(),
             }),
-            index: None,
+            ..Default::default()
         }
     }
 
