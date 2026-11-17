@@ -23,6 +23,7 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 
 #[path = "support/process.rs"]
+#[allow(dead_code)]
 mod process;
 #[allow(dead_code)]
 mod support;
