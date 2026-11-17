@@ -45,11 +45,14 @@ _SOURCE_BLOBS = (
 
 
 class ClefHealthCheckPayload(HealthCheckPayload):
+    """Select native joint-head scoring instead of generic pooling for health checks."""
+
     def __init__(self, model: str):
         self.default_payload = {"native_pooling_health": True, "model": model}
         super().__init__()
 
     def to_dict(self):
+        """Include the health marker required by the worker dispatch contract."""
         return {**super().to_dict(), HEALTH_CHECK_KEY: True}
 
 
@@ -97,6 +100,8 @@ class _Prepared:
 
 
 class ClefDecisionExecutor:
+    """Execute internal joint-head requests with bounded admission and owned cleanup."""
+
     def __init__(self, handler, native, strategy, *, max_concurrency):
         self.handler, self.native, self.strategy = handler, native, strategy
         self._admission = asyncio.Semaphore(max_concurrency)
@@ -163,6 +168,7 @@ class ClefDecisionExecutor:
         )
 
     def prepare(self, wire):
+        """Validate internal decision_head wire and render within caller and worker budgets."""
         if not isinstance(wire, dict) or set(wire) != {"decision_head"}:
             raise HttpError(502, "invalid native decision envelope")
         raw = wire["decision_head"]
@@ -254,6 +260,7 @@ class ClefDecisionExecutor:
         return await asyncio.shield(task)
 
     def decode(self, prepared, output):
+        """Validate terminal scores and restore probabilities to request option order."""
         if output.error is not None and isinstance(
             output.error, import_module("vllm.outputs").RequestError
         ):
@@ -383,6 +390,7 @@ class ClefDecisionExecutor:
             self.handler.shutdown_event.set()
 
     async def execute(self, wire, context):
+        """Own the engine request and withdraw admission if cleanup cannot be confirmed."""
         if context.is_stopped() or context.is_killed():
             raise asyncio.CancelledError
         task = asyncio.create_task(self._execute(wire, context))
@@ -424,6 +432,7 @@ class ClefDecisionExecutor:
                     )
 
     async def health(self, context):
+        """Require a successful native scoring request before publishing readiness."""
         wire = {
             "decision_head": {
                 "protocol_version": 1,
@@ -542,6 +551,7 @@ async def initialize_clef(handler, runtime, config):
 def publish_clef_capability(
     runtime_config, enabled, model_input, model_type, worker_type, needs
 ):
+    """Advertise initialized text-only, aggregated Clef pooling workers."""
     if (
         enabled is True
         and model_input == ModelInput.Text
