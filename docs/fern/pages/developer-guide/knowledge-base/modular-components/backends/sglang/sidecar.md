@@ -33,8 +33,10 @@ for the architecture.
 | Replica DP (`--dp-size N`) | Aggregated and decode; SGLang's Rust server rejects it for prefill |
 | Image, video, and audio input | Yes, as URLs |
 
-SGLang's Rust server runs one listener per DP rank. One sidecar per node serves
-all of the node's listeners as one worker.
+SGLang's Rust server runs one listener per DP rank: listener `k` on a node
+binds `--port + k` and `--grpc-port + k`, so keep the two ports at least the
+node's listener count apart. One sidecar per node serves all of the node's
+listeners as one worker.
 
 Media-aware KV routing on wide-token SGLang builds is not supported by the sidecar; see the [multimodal compatibility limits](multimodal.md#wide-token-sglang-builds).
 

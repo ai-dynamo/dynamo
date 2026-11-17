@@ -13,3 +13,22 @@ sglang_check_listener_ports() {
         return 1
     fi
 }
+
+# Usage: sglang_listener_count [SGLang options...]
+# Prints how many Rust listeners one single-node SGLang server runs: its
+# --attn-dp-size with attention DP, else its --dp-size replicas.
+sglang_listener_count() {
+    local dp=1 attn_dp=1 previous= arg
+    for arg in "$@"; do
+        case $previous in
+            --dp-size|--data-parallel-size) dp=$arg ;;
+            --attn-dp-size|--attention-data-parallel-size) attn_dp=$arg ;;
+        esac
+        case $arg in
+            --dp-size=*|--data-parallel-size=*) dp=${arg#*=} ;;
+            --attn-dp-size=*|--attention-data-parallel-size=*) attn_dp=${arg#*=} ;;
+        esac
+        previous=$arg
+    done
+    if [[ $attn_dp != 1 ]]; then echo "$attn_dp"; else echo "$dp"; fi
+}
