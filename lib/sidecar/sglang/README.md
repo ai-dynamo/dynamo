@@ -29,7 +29,7 @@ server. See the [sidecar overview](../README.md) for installation.
 | KV routing | Yes |
 | Kubernetes multinode tensor parallelism (TP) | Yes |
 | Data parallelism (DP>1) | Not yet |
-| Image, video, and audio input | No |
+| Image, video, and audio input | Yes, as URLs |
 
 See [support notes](../SUPPORT_NOTES.md#sglang) for feature restrictions and operational limits.
 

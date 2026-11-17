@@ -20,7 +20,7 @@ If an output stream closes early without an error, the sidecar treats the closur
 
 ## SGLang
 
-The standard gRPC generation path requires one completion per request (`n=1`). It refuses image, video, and audio input with HTTP 400. The sidecar does not accept per-request `mm_processor_kwargs` or separate encoder handoffs. The sidecar provides basic structured output. It supports fewer constraint controls than the in-process backend.
+The standard gRPC generation path requires one completion per request (`n=1`). It accepts image, video, and audio input as `http://`, `https://`, or `data:` URLs. The sidecar does not accept per-request `mm_processor_kwargs` or separate encoder handoffs. The sidecar provides basic structured output. It supports fewer constraint controls than the in-process backend.
 
 Media-aware KV routing on wide-token SGLang builds is not supported. See the [multimodal compatibility limits](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#wide-token-sglang-builds).
 

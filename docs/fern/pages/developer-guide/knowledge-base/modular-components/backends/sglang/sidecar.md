@@ -30,7 +30,7 @@ for the architecture.
 | KV routing | Yes |
 | Kubernetes multinode tensor parallelism (TP) | Yes |
 | Data parallelism (DP>1) | Not yet |
-| Image, video, and audio input | No |
+| Image, video, and audio input | Yes, as URLs |
 
 Media-aware KV routing on wide-token SGLang builds is not supported by the sidecar; see the [multimodal compatibility limits](multimodal.md#wide-token-sglang-builds).
 
