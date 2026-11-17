@@ -28,18 +28,6 @@ pytestmark = [
 ]
 
 
-@pytest.mark.parametrize(
-    "kind", ["text", "image_url", "video_url", "audio_url", "input_audio"]
-)
-@pytest.mark.parametrize("mixed", [False, True])
-def test_custom_wire_key_collisions_are_rejected(kind, mixed):
-    items = [{"Json": {"metadata": 1}}]
-    if mixed:
-        items.append({"Url": "https://example.com/media"})
-    with pytest.raises(mod.InvalidArgument, match="reserved for built-in"):
-        mod._split_multimodal_data({"multi_modal_data": {kind: items}})
-
-
 def _processor(
     *,
     model: str = "Qwen/Qwen3-VL-2B-Instruct",
@@ -87,7 +75,7 @@ async def _prepare_prompt(processor, request, request_id, context, mode):
         prepared.request,
         prepared.multi_modal_data,
         prepared.mm_processor_kwargs,
-        backend_owned=prepared.backend_owned,
+        custom_data=prepared.custom_data,
     )
     return SimpleNamespace(
         prompt=prompt,
@@ -98,7 +86,7 @@ async def _prepare_prompt(processor, request, request_id, context, mode):
 
 
 @pytest.mark.asyncio
-async def test_backend_multimodal_data_reaches_the_registered_processor():
+async def test_custom_data_reaches_the_registered_processor():
     processor = _processor()  # Qwen3-VL: the geometry gate is P/D-only
     descriptor = {
         "dtype": "float32-le",
@@ -119,7 +107,6 @@ async def test_backend_multimodal_data_reaches_the_registered_processor():
     )
 
     assert "multi_modal_data" not in prepared.request
-    assert prepared.multi_modal_data == {"custom_input": descriptor}
     assert prepared.prompt["multi_modal_data"] == {"custom_input": descriptor}
 
 
@@ -143,12 +130,10 @@ async def test_custom_json_disaggregation_is_rejected(model, mode):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("modality", ["image", "vision_chunk"])
 @pytest.mark.parametrize("mode", [DisaggregationMode.AGGREGATED])
-async def test_backend_multimodal_data_passes_frontend_modality_names_through(
-    modality, mode
-):
+async def test_custom_data_passes_engine_modality_names_through(modality, mode):
     """Modality names belong to the engine's processor, not to Dynamo.
 
-    A backend payload never reaches frontend media handling, so a name the
+    A custom payload never reaches frontend media handling, so a name the
     frontend also uses for its own media must survive untouched rather than be
     interpreted by UUID inference or structural pad expansion.
     """
@@ -168,14 +153,13 @@ async def test_backend_multimodal_data_passes_frontend_modality_names_through(
 
     prepared = await _prepare_prompt(processor, request, "request-1", None, mode)
 
-    assert prepared.multi_modal_data == payload
     assert prepared.prompt["multi_modal_data"] == payload
     assert "multi_modal_uuids" not in prepared.prompt
     assert prepared.prompt["prompt_token_ids"] == [1, 2, 3]
 
 
 @pytest.mark.asyncio
-async def test_json_multimodal_data_merges_with_frontend_media():
+async def test_custom_data_merges_with_frontend_media():
     processor = _processor()
     image = Image.new("RGB", (2, 2))
     request = {
@@ -2684,7 +2668,7 @@ def test_video_derived_audio_respects_flag_and_limit(
 
 
 @pytest.mark.parametrize("value", [None, [1, 2], {"atoms": ["C", "O"]}])
-def test_json_payload_values_and_repeated_parts(value):
+def test_custom_payload_values_and_repeated_parts(value):
     single, media = mod._split_multimodal_data(
         {"multi_modal_data": {"custom": [{"Json": value}]}}
     )
@@ -2697,7 +2681,7 @@ def test_json_payload_values_and_repeated_parts(value):
 
 
 @pytest.mark.asyncio
-async def test_json_and_media_engine_key_collision_is_rejected():
+async def test_custom_and_media_engine_key_collision_is_rejected():
     processor = _processor()
     processor.extract_multimodal_data = AsyncMock(
         return_value={"image": [Image.new("RGB", (1, 1))]}
@@ -2710,8 +2694,8 @@ async def test_json_and_media_engine_key_collision_is_rejected():
         },
     }
     with pytest.raises(mod.InvalidArgument, match="same engine modality"):
-        await processor.prepare_input(
-            request, "request-1", None, DisaggregationMode.AGGREGATED
+        await _prepare_prompt(
+            processor, request, "request-1", None, DisaggregationMode.AGGREGATED
         )
 
 

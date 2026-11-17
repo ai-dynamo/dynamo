@@ -288,25 +288,19 @@ def compute_mm_uuids(
 def _split_multimodal_data(
     request: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    json_data: dict[str, Any] = {}
+    custom_data: dict[str, Any] = {}
     media_data: dict[str, Any] = {}
     for modality, items in (request.get("multi_modal_data") or {}).items():
-        if (
-            modality in {"text", "image_url", "video_url", "audio_url", "input_audio"}
-            and isinstance(items, list)
-            and any(isinstance(item, dict) and "Json" in item for item in items)
-        ):
-            raise InvalidArgument("Custom kind is reserved for built-in content")
         if (
             isinstance(items, list)
             and items
             and all(isinstance(item, dict) and set(item) == {"Json"} for item in items)
         ):
             values = [item["Json"] for item in items]
-            json_data[modality] = values[0] if len(values) == 1 else values
+            custom_data[modality] = values[0] if len(values) == 1 else values
         else:
             media_data[modality] = items
-    return json_data, media_data
+    return custom_data, media_data
 
 
 def get_mm_processor_kwargs(request: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -327,10 +321,8 @@ class PreparedMultimodalInput:
     multi_modal_data: Optional[dict[str, Any]]
     mm_processor_kwargs: Optional[dict[str, Any]]
     pre_rendered_prompt: Any = None
-    # The payload came from `multi_modal_data` JSON variants, so its modality names
-    # belong to the engine's processor and frontend media policy must not read
-    # them.
-    backend_owned: bool = False
+    # Custom JSON by engine modality; kept apart so media policy never reads it.
+    custom_data: Optional[dict[str, Any]] = None
 
 
 class MissingMultimodalHandoffError(ValueError):
@@ -945,25 +937,9 @@ class VllmMultimodalRequestProcessor:
         multi_modal_data: Optional[dict[str, Any]],
         mm_processor_kwargs: Optional[dict[str, Any]],
         *,
-        backend_owned: bool = False,
+        custom_data: Optional[dict[str, Any]] = None,
     ) -> TokensPrompt:
-        """Create a TokensPrompt with stable multimodal UUIDs.
-
-        ``backend_owned`` marks a payload the frontend never interpreted. Its
-        modality names belong to the engine's registered processor, so neither
-        UUID inference nor structural pad expansion may read them: both are
-        frontend media policy and would either mis-hash the payload or reject a
-        value only the processor can validate.
-        """
-        if backend_owned:
-            backend_prompt_kwargs: dict[str, Any] = {
-                "prompt_token_ids": request["token_ids"],
-                "multi_modal_data": multi_modal_data,
-            }
-            if mm_processor_kwargs is not None:
-                backend_prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
-            return TokensPrompt(**backend_prompt_kwargs)
-
+        """Create a TokensPrompt with stable multimodal UUIDs."""
         extra_args = request.get("extra_args") or {}
         raw_mm_data = request.get("multi_modal_data") or {}
         mm_uuids = _build_user_mm_uuids(
@@ -1000,31 +976,14 @@ class VllmMultimodalRequestProcessor:
             prompt_kwargs["multi_modal_uuids"] = mm_uuids
         if mm_processor_kwargs is not None:
             prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
+        if custom_data:
+            media = multi_modal_data or {}
+            if media.keys() & custom_data.keys():
+                raise InvalidArgument(
+                    "Custom JSON and media inputs target the same engine modality"
+                )
+            prompt_kwargs["multi_modal_data"] = {**media, **custom_data}
         return TokensPrompt(**prompt_kwargs)
-
-    def _prepare_backend_multimodal_input(
-        self,
-        request: dict[str, Any],
-        mode: DisaggregationMode,
-        backend_data: dict[str, Any],
-    ) -> PreparedMultimodalInput:
-        """Prepare JSON for the aggregated engine's modality processor."""
-        if mode is not DisaggregationMode.AGGREGATED:
-            raise InvalidArgument(
-                "Custom JSON content is supported only in aggregated serving; "
-                "disaggregated payload cache identity is not supported"
-            )
-        mm_processor_kwargs = get_mm_processor_kwargs(request)
-        request_for_prompt = dict(request)
-        request_for_prompt.pop("multi_modal_data")
-
-        return PreparedMultimodalInput(
-            request=request_for_prompt,
-            multi_modal_data=backend_data,
-            mm_processor_kwargs=mm_processor_kwargs,
-            pre_rendered_prompt=None,
-            backend_owned=True,
-        )
 
     async def prepare_input(
         self,
@@ -1039,34 +998,16 @@ class VllmMultimodalRequestProcessor:
         request before invoking this transformation. The handler validates at
         ``generate`` so text and token modes share the same security boundary.
         """
-        json_data, media_data = _split_multimodal_data(request)
-        if json_data:
-            opaque = self._prepare_backend_multimodal_input(request, mode, json_data)
-            if not media_data:
-                return opaque
-            media_request = dict(request, multi_modal_data=media_data)
-            prepared = await self.prepare_input(
-                media_request, request_id, context, mode
-            )
-            prompt = prepared.pre_rendered_prompt or self.build_tokens_prompt(
-                prepared.request,
-                prepared.multi_modal_data,
-                prepared.mm_processor_kwargs,
-            )
-            if prompt.get("type") == "multimodal":
+        custom_data, media_data = _split_multimodal_data(request)
+        if custom_data:
+            if mode is not DisaggregationMode.AGGREGATED:
                 raise InvalidArgument(
-                    "Custom JSON cannot be merged into frontend-processed multimodal kwargs"
+                    "Custom JSON content is supported only in aggregated serving; "
+                    "disaggregated payload cache identity is not supported"
                 )
-            engine_media = prompt.get("multi_modal_data") or {}
-            if engine_media.keys() & json_data.keys():
-                raise InvalidArgument(
-                    "JSON and media inputs target the same engine modality"
-                )
-            merged = {**engine_media, **json_data}
-            prompt["multi_modal_data"] = merged
-            prepared.multi_modal_data = merged
-            prepared.pre_rendered_prompt = prompt
-            return prepared
+            request = {k: v for k, v in request.items() if k != "multi_modal_data"}
+            if media_data:
+                request["multi_modal_data"] = media_data
 
         mm_processor_kwargs = get_mm_processor_kwargs(request)
         request_for_prompt = dict(request)
@@ -1189,9 +1130,14 @@ class VllmMultimodalRequestProcessor:
                     ),
                 )
 
+        if custom_data and pre_rendered is not None:
+            raise InvalidArgument(
+                "Custom JSON cannot be merged into frontend-processed multimodal kwargs"
+            )
         return PreparedMultimodalInput(
             request=request_for_prompt,
             multi_modal_data=multi_modal_data,
             mm_processor_kwargs=mm_processor_kwargs,
             pre_rendered_prompt=pre_rendered,
+            custom_data=custom_data or None,
         )

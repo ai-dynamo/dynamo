@@ -3373,7 +3373,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         multi_modal_data: Dict[str, Any] | None,
         log_prefix: str = "",
         mm_processor_kwargs: Dict[str, Any] | None = None,
-        backend_owned: bool = False,
+        custom_data: Dict[str, Any] | None = None,
     ) -> TokensPrompt | EmbedsPrompt:
         """
         Build a prompt from request, handling both prompt_embeds and token_ids.
@@ -3434,7 +3434,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             request,
             multi_modal_data,
             mm_processor_kwargs,
-            backend_owned=backend_owned,
+            custom_data=custom_data,
         )
         return prompt
 
@@ -4091,7 +4091,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             multi_modal_data = None
             mm_processor_kwargs = None
             pre_rendered = None
-            backend_owned = False
+            custom_data = None
         else:
             try:
                 prepared_input = await self._multimodal_request_processor.prepare_input(
@@ -4113,7 +4113,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             multi_modal_data = prepared_input.multi_modal_data
             mm_processor_kwargs = prepared_input.mm_processor_kwargs
             pre_rendered = prepared_input.pre_rendered_prompt
-            backend_owned = prepared_input.backend_owned
+            custom_data = prepared_input.custom_data
 
         # Build prompt from request. `prompt` is either a pre-rendered
         # MultiModalInput dict (fast path) or a TokensPrompt/EmbedsPrompt from
@@ -4138,7 +4138,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request_id,
                     multi_modal_data,
                     mm_processor_kwargs=mm_processor_kwargs,
-                    backend_owned=backend_owned,
+                    custom_data=custom_data,
                 )
 
         _apply_nvext_cache_salt(request, prompt)
@@ -4392,19 +4392,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     async def _generate_text_mode(self, request, context, request_id):
         """Generate text using OpenAI-compatible format (text-in-text-out)."""
-        # Text-input models bypass frontend multimodal preprocessing, so Custom
-        # parts can arrive in the original messages instead of multi_modal_data.
-        if request.get("multi_modal_data") is not None or any(
-            isinstance(part, dict) and part.get("type") == "custom"
-            for message in request.get("messages") or []
-            if isinstance(message.get("content"), list)
-            for part in message["content"]
-        ):
-            raise InvalidArgument(
-                "Custom content requires frontend tokenization; this "
-                "worker was started with --use-vllm-tokenizer"
-            )
-
         # Get text input using InputParamManager
         input_data = self.input_param_manager.get_input_param(
             request, use_tokenizer=True
@@ -4654,7 +4641,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             multi_modal_data,
             log_prefix="Prefill ",
             mm_processor_kwargs=mm_processor_kwargs,
-            backend_owned=prepared_input.backend_owned,
         )
 
         _apply_nvext_cache_salt(request, prompt)
