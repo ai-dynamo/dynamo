@@ -36,7 +36,7 @@ SPDX-License-Identifier: Apache-2.0
 # Ownership and Identity
 
 - The DynamoGraphDeployment (DGD) owns the LPXGraphDeployment (LPXGD). The LPXGD
-  owns its PodCliqueSet (PCS), runtime ConfigMaps, and Services. The PCS owns the
+  owns its PodCliqueSet (PCS) and Services. The PCS owns the
   LPUPipelineRequests (LPRs) and Grove hierarchy. Each independent workload has one
   PodCliqueScalingGroup (PCSG). A shared draft/target runtime remains one workload.
 - LPRs have a controlling PCS owner reference with `blockOwnerDeletion: true`.
@@ -97,6 +97,11 @@ SPDX-License-Identifier: Apache-2.0
   requests in the same ordered pass that constructs desired requests. An
   immutable mismatch waits for its Grove engine to roll and LPX to release the
   old requests; incompatible layouts require PCS replacement.
+- Before a PCS spec update, dry-run create each missing request, so the API
+  server refuses an invalid request while the previous workload still runs.
+  Only an `Invalid` response stops the pass; any other failure of the dry run,
+  such as a full quota, does not. The dry run does not cover PCS replacement or
+  validation that the scheduler performs after creation.
 - Publish missing requests independently in workload/PCSG ordinal/model order.
   Partial publication and idempotent retries are supported; exactly-once
   batches are not required. Creation order does not guarantee scheduler order or prevent
@@ -248,13 +253,8 @@ SPDX-License-Identifier: Apache-2.0
   Reuse fresh successful observations by build URL across revisions, without
   renewing `LastCheckedAt`. Check new or expired builds. Only a Ready deployment
   whose generation has been observed may ignore a failed periodic refresh.
-- Runtime ConfigMaps are immutable, content-addressed, LPXGD-owned, and labeled
-  with its UID. Find obsolete maps by label, verify ownership before deletion,
-  and retain desired names. Delete obsolete maps only after readiness, not during
-  PCS replacement, so existing pods keep their configuration.
-- A workload whose builds contain `lpuUnits` gets no runtime ConfigMap; its
-  runtimes read placement from the build. The builds of one workload all contain
-  `lpuUnits` or none do. Independent workloads in one graph may differ.
+- Each build supplies nonempty `lpuUnits`. Runtimes read placement from the
+  build, so the operator does not create runtime ConfigMaps.
 
 # Tests
 

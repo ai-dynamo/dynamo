@@ -194,6 +194,32 @@ async def test_an_unplaced_program_sends_no_pin_and_is_counted():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "agent_context", [{"session_id": "p1"}, None], ids=["program", "passthrough"]
+)
+async def test_the_upstream_arrival_stamp_reaches_the_kv_router(agent_context):
+    """The KvRouter adds its own time to the age the frontend stamped. Without the
+    stamp it starts from zero, and a backend that admits by arrival treats the
+    request as new."""
+    handler = make_handler()
+    handler._scheduler = FakeScheduler(replica_hint=(7, 3))  # type: ignore[assignment]
+    handler._kv_router = FakeKvRouter()  # type: ignore[assignment]
+
+    request: dict[str, Any] = {
+        "token_ids": [1, 2, 3],
+        "elapsed_since_arrival_ms": 1500.0,
+    }
+    if agent_context is not None:
+        request["agent_context"] = agent_context
+    async for _ in handler.generate(request):
+        pass
+
+    sent = handler._kv_router.sent
+    assert sent is not None
+    assert sent["elapsed_since_arrival_ms"] == 1500.0
+
+
+@pytest.mark.asyncio
 async def test_an_unplaced_program_back_fills_the_replica_from_the_first_chunk():
     handler = make_handler()
     scheduler = FakeScheduler(replica_hint=None, admission_epoch=4)
