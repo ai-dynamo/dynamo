@@ -570,10 +570,9 @@ impl ResponseConverter {
             terminal.token_ids = token_ids;
             terminal.log_probs = log_probs;
             terminal.top_logprobs = top_logprobs;
-            terminal.engine_data = self
-                .prompt_logprobs
-                .to_value()?
-                .map(|prompt_logprobs| serde_json::json!({"prompt_logprobs": prompt_logprobs}));
+            terminal.engine_data = self.prompt_logprobs.to_value()?.map(|prompt_logprobs| {
+                Box::new(serde_json::json!({"prompt_logprobs": prompt_logprobs}))
+            });
             return Ok(FrameOutput::Terminal(terminal));
         }
         if token_ids.is_empty() {

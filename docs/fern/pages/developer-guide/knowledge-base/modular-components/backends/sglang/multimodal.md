@@ -33,7 +33,7 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 >
 > NVDEC requires a GPU with a video decode engine and a container granted the
 > `video` driver capability — see
-> [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
+> [Video Decode GPU Requirements](../../../../../use-cases/video-understanding/video-decoding.md).
 > `file://` sources additionally require `DYN_MM_LOCAL_PATH` to permit local reads.
 
 ### Supported URL Formats
@@ -56,7 +56,7 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 
 ## Deployment Patterns
 
-SGLang supports EPD, EP/D, E/PD, and E/P/D patterns. See [Multimodal Model Serving](../../../../../use-cases/multimodal-serving/overview.md) for detailed explanations.
+SGLang supports EPD, EP/D, E/PD, and E/P/D patterns. See [Multimodal Model Serving](../../../../../use-cases/image-understanding/vlm-performance-optimization.md) for detailed explanations.
 
 | Pattern | Supported | Launch Script | Notes |
 |---------|-----------|---------------|-------|
@@ -175,7 +175,7 @@ Prefer upgrading to 0.5.13 or later instead of patching an installed package.
 
 Enable `DYN_LOG=info,mm_routing=debug` to inspect media-token counts, multimodal hashes, the video processor contract, and the selected worker's overlap. On compatible builds, a repeated request should select the same worker with high block overlap. Builds using the newer identities only predict the text-prefix overlap described above.
 
-For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/multimodal-serving/multimodal-kv-routing.md).
+For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/image-understanding/vlm-performance-optimization/multimodal-kv-routing.md).
 
 ## Use the Latest Release
 
@@ -609,7 +609,9 @@ DYN_NVTX=1 nsys profile --trace=cuda,nvtx -o profile.nsys-rep \
 
 | ENV Variable | Default | Description |
 |---|---|---|
-| `DYN_NVTX` | `0` | Set to `1` to enable NVTX range/mark annotations in multimodal encode/prefill/decode worker paths for `nsys` profiling |
+| `DYN_NVTX` | unset (off) | Set to `1`, `true`, `on`, or `yes` to enable NVTX range/mark annotations in multimodal encode/prefill/decode worker paths for `nsys` profiling. Before v1.7.0, only `0` and `1` are accepted, and any other value raises an error at import, so the worker does not start |
+
+The markers need the `nvtx` package, which ships in the container images and is otherwise installed with `pip install "ai-dynamo[profiling]"`. Without it, the worker logs a warning and starts without the markers. The same switch also enables the Rust runtime's ranges on the frontend and worker paths; see [NVTX Profiling](../../../../../reference/observability/nvtx-profiling.md).
 
 Key NVTX ranges emitted:
 

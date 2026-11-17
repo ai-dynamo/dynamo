@@ -322,11 +322,11 @@ fn prompt_logprobs_from_the_first_frame_attach_to_the_terminal_only() {
     assert_eq!(terminal.log_probs, Some(vec![-0.7]));
     assert_eq!(
         terminal.engine_data,
-        Some(json!({"prompt_logprobs": [
+        Some(Box::new(json!({"prompt_logprobs": [
             null,
             {"2": {"logprob": -0.1}, "9": {"logprob": -0.4}},
             {"3": {"logprob": -0.2}},
-        ]}))
+        ]})))
     );
     let usage = terminal.completion_usage.unwrap();
     assert_eq!((usage.prompt_tokens, usage.completion_tokens), (3, 3));

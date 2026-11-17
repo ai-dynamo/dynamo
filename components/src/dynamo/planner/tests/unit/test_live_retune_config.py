@@ -6,7 +6,7 @@
 """Configuration premises of live retune (``retune.executor: dgdr``).
 
 P1 (Kubernetes, decision latency, explicit timeout within the interval), P2
-(retune-only, router only), P3 (the DGDR router knobs), P5 (a pinned engine
+(a router domain; scaling and a planner domain are Scenario 2), P3 (the DGDR router knobs), P5 (a pinned engine
 section) and P13 (the largest grid shard fits the sweep deadline), plus the
 shard-split and need-seconds helpers the executor shares with validation.
 """
@@ -225,37 +225,56 @@ def test_p1_rejects_a_timeout_within_ten_minutes_of_the_interval():
 # --------------------------------------------------------------------- P2
 
 
+# Two credits, the rest pinned: a 2-point router grid.
+PINNED_ROUTER = {
+    "overlap_score_credit": {"choices": [0.5, 1.0]},
+    "prefill_load_scale": 1.0,
+    "temperature": 0.0,
+}
+LOAD_ONLY = {"enable_load_scaling": True, "enable_throughput_scaling": False}
+SLA_THROUGHPUT = {
+    "enable_load_scaling": False,
+    "enable_throughput_scaling": True,
+    "optimization_target": "sla",
+}
+
+
 @pytest.mark.parametrize(
-    "scaling",
+    ("scaling", "planner"),
     [
-        {"enable_load_scaling": True, "enable_throughput_scaling": False},
-        {
-            "enable_load_scaling": False,
-            "enable_throughput_scaling": True,
-            "optimization_target": "sla",
-        },
+        (LOAD_ONLY, {"load_sensitivity": {"preset": ["default", "conservative"]}}),
+        (SLA_THROUGHPUT, "default"),
+        # Easy mode keeps load scaling on without the flags written.
+        ({"enable_throughput_scaling": False}, None),
+        (
+            {**SLA_THROUGHPUT, "enable_load_scaling": True},
+            {"scaling_policy": {"preset": ["hybrid_180_5", "hybrid_600_5"]}},
+        ),
     ],
+    ids=["load", "sla-throughput", "easy-mode", "scaling-policy"],
 )
-def test_p2_requires_retune_only(scaling):
-    _rejects(r"retune-only mode \(P2\)", **scaling)
+def test_p2_accepts_scaling_and_a_planner_domain(scaling, planner):
+    # Scenario 2: candidates replay an inner planner from the window start.
+    retune = _retune(router=PINNED_ROUTER)
+    if planner is not None:
+        retune["planner"] = planner
+    config = PlannerConfig(
+        namespace="test-ns",
+        environment="kubernetes",
+        mode="agg",
+        retune=retune,
+        **scaling,
+    )
+    assert config.scaling_enabled()
 
 
-def test_p2_requires_both_scaling_flags_explicitly():
-    # Without both flags written, easy mode keeps load scaling on.
-    with pytest.raises(ValidationError, match=r"retune-only mode \(P2\)"):
-        PlannerConfig(
-            namespace="test-ns",
-            environment="kubernetes",
-            mode="agg",
-            enable_throughput_scaling=False,
-            retune=_retune(),
-        )
-
-
-def test_p2_rejects_a_planner_domain():
+def test_p2_requires_a_router_domain():
+    # Every DGDR Request sets the three router knobs; pin them to retune the
+    # Planner alone.
     _rejects(
-        r"retunes the router only \(P2\)",
-        _retune(planner={"load_sensitivity": {"preset": ["default"]}}),
+        r"requires retune.router \(P2\)",
+        _retune(router=None, planner="default"),
+        **LOAD_ONLY,
     )
 
 
@@ -617,10 +636,55 @@ def test_p13_counts_the_largest_shard_of_fewer_max_shards():
 
 def test_p13_rejects_a_grid_that_needs_more_shards():
     _rejects(
-        r"router grid of 108 points cannot be split into at most "
+        r"retune grid of 108 points cannot be split into at most "
         r"retune.dgdr.run.max_shards=1 Cartesian shards of at most 100 points "
         r"\(P13\); the largest would have 108",
         _retune(dgdr=_dgdr(run={"max_shards": 1})),
+    )
+
+
+def test_p13_shards_the_planner_points_too():
+    # The 108 router points x the 3 default sensitivities: 324 points need a
+    # fourth shard, which cuts the temperature axis.
+    retune = _retune(planner="default")
+    _rejects(
+        r"retune grid of 324 points cannot be split into at most "
+        r"retune.dgdr.run.max_shards=3 Cartesian shards",
+        retune,
+        **LOAD_ONLY,
+    )
+    dgdr = _dgdr(run={"max_shards": 4, "parallelism": 16})
+    config = _config(_retune(planner="default", dgdr=dgdr), **LOAD_ONLY)
+    assert config.retune is not None
+
+
+def test_p13_budgets_the_history_read_of_a_scaling_planner():
+    dgdr = _dgdr(
+        cut_budget_seconds=60,
+        job_startup_seconds=0,
+        run={"parallelism": 36, "candidate_timeout_seconds": 100},
+    )
+    retune = _retune(router=PINNED_ROUTER, planner=None, dgdr=dgdr)
+    # Two one-point shards: cut 60 + history 60 + 0 + 1 round x 100 = 220.
+    assert _config({**retune, "timeout_seconds": 220}, **LOAD_ONLY).retune is not None
+    _rejects(
+        r"needs 220s: cut_budget_seconds 60 for the history \+ cut_budget_seconds 60",
+        {**retune, "timeout_seconds": 219},
+        **LOAD_ONLY,
+    )
+    # Fixed replicas read no history.
+    assert _config({**retune, "timeout_seconds": 160}).retune is not None
+
+
+def test_p13_bounds_the_warmup_a_request_carries():
+    # 180-s buckets: 1024 fit, 1025 do not.
+    retune = _retune(router=PINNED_ROUTER, planner=None)
+    accepted = {**retune, "history_seconds": 180.0 * 1024}
+    assert _config(accepted, **SLA_THROUGHPUT).retune is not None
+    _rejects(
+        r"is 1025 warmup buckets, more than the 1024 a DGDR Request carries \(P13\)",
+        {**retune, "history_seconds": 180.0 * 1025},
+        **SLA_THROUGHPUT,
     )
 
 
