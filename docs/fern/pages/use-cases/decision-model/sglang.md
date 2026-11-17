@@ -31,7 +31,7 @@ python -m dynamo.frontend \
   --enable-systemone-api
 ```
 
-`--enable-systemone-api` defaults to `false` and enables both public decision APIs. It also enables internal scoring transport; no public `/generate` route is needed.
+`--enable-systemone-api` defaults to `false` and enables both public decision APIs.
 
 ## Start the Worker
 
