@@ -427,14 +427,6 @@ impl Indexer {
         Ok(())
     }
 
-    pub fn declare_recurrent_groups(&self, worker: WorkerWithDpRank, groups: &[u32]) {
-        if let Self::Single { lower_tier, .. } | Self::Concurrent { lower_tier, .. } = self {
-            lower_tier
-                .group_residency()
-                .declare_groups(crate::prelude::ResidencyOwner::worker(worker), groups);
-        }
-    }
-
     pub fn declare_recurrent_layout(
         &self,
         worker: WorkerWithDpRank,
