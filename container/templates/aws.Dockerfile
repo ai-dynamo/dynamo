@@ -38,6 +38,17 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 ENV EFA_VERSION="${EFA_VERSION}"
 
+# Temporarily override NIXL to 1.5.2: vLLM 0.33.0 pins nixl==1.5.0, which leaves
+# EFA unsolicited write receive enabled (ai-dynamo/nixl#2529).
+# Remove once vLLM's kv_connectors pin is nixl>=1.5.2.
+{% if framework == "vllm" %}
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
+    set -eux; \
+    export UV_CACHE_DIR=/root/.cache/uv; \
+    uv pip install --system --no-deps \
+        nixl==1.5.2 nixl-cu12==1.5.2 nixl-cu13==1.5.2
+{% endif %}
+
 {% if framework == "trtllm" %}
 # Upstream NIXL ships UCX/GDS but no LIBFABRIC backend. Add only the missing
 # API-compatible plugin, preserving its native libraries and Python

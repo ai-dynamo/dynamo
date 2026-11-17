@@ -3,7 +3,7 @@
 
 use anyhow::{Result, anyhow};
 use dynamo_router_protocol::worker::WorkerWithDpRank;
-use dynamo_scheduler::replication::ScopedReplicaEvent;
+use dynamo_scheduler::ScopedReplicaEvent;
 use dynamo_slot_tracker::host::{
     ActiveSequenceEvent, ActiveSequenceEventData, ActiveSequenceEventOrigin,
 };

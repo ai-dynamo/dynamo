@@ -117,6 +117,11 @@ def mx_load_context(
         def discover_tensors(self, result):
             return dict(tensors)
 
+        def requires_exact_tensor_catalog(self) -> bool:
+            # By default ModelExpress fills only the tensors both sides name and
+            # reports success. Every allocation must come from the peer.
+            return True
+
         def reinit_for_retry(self, result):
             # The next source overwrites every byte of these preallocated buffers.
             return result
@@ -187,19 +192,8 @@ class MXTransferSession:
         extents = [(targets[s.allocation_id].va, s.byte_count) for s in self._sources]
         tensors = byte_tensors(extents, device)
 
-        class _SameAllocationsRdmaStrategy(RdmaStrategy):
-            """Accepts only a source with exactly these allocation sizes."""
-
-            def _scope_source_tensors(self, ctx, source_tensors):
-                scoped = super()._scope_source_tensors(ctx, source_tensors)
-                theirs = {t.name: t.size for t in scoped}
-                ours = {name: t.numel() for name, t in ctx.tensors.items()}
-                if theirs != ours:
-                    raise RuntimeError(
-                        f"source allocations differ: {len(theirs)} vs {len(ours)} allocations, "
-                        f"{sum(theirs.values())} vs {sum(ours.values())} bytes"
-                    )
-                return scoped
+        class _ListenPortRdmaStrategy(RdmaStrategy):
+            """Restarts the NIXL agent on this device's listen port after a retry."""
 
             def rollback(self, ctx) -> None:
                 # Without an agent, ModelExpress would start one on
@@ -211,7 +205,7 @@ class MXTransferSession:
         torch.cuda.set_device(device)
         ctx = mx_load_context(backend, rank, device, tensors, nixl_manager=manager)
         try:
-            strategy = _SameAllocationsRdmaStrategy()
+            strategy = _ListenPortRdmaStrategy()
             if not strategy.is_available(ctx):
                 raise RuntimeError("ModelExpress RDMA P2P is unavailable")
             strategy.load(LoadResult(value=None, model=nn.Module()), ctx)

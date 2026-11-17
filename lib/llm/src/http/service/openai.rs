@@ -54,6 +54,7 @@ use super::{
         process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
     },
+    response_headers::{RESPONSE_HEADERS_CONTEXT_KEY, ResponseHeaders},
     service_v2::{self, BackendErrorCheck},
 };
 use crate::engines::ValidateRequest;
@@ -2725,6 +2726,13 @@ async fn handler_chat_completions(
             captured,
         );
     }
+    // Headers the chat engine sets on this response. The request carries them
+    // only when the engine's stream is read before the response is committed;
+    // otherwise the engine would race the commit.
+    let response_headers = ResponseHeaders::default();
+    if !streaming || state.streaming_backend_error_check() != BackendErrorCheck::Skip {
+        request.insert(RESPONSE_HEADERS_CONTEXT_KEY, response_headers.clone());
+    }
     let context = request.context();
 
     if lifecycle.is_enabled() {
@@ -2786,7 +2794,22 @@ async fn handler_chat_completions(
     // without need to be cancelled.
     connection_handle.disarm();
 
-    response
+    with_response_headers(response, response_headers.take())
+}
+
+/// Add the headers a chat engine set to its response, error responses included.
+fn with_response_headers(
+    response: Result<Response, ErrorResponse>,
+    headers: HeaderMap,
+) -> Result<Response, ErrorResponse> {
+    if headers.is_empty() {
+        return response;
+    }
+    let mut response = response.unwrap_or_else(IntoResponse::into_response);
+    for (name, value) in &headers {
+        response.headers_mut().append(name, value.clone());
+    }
+    Ok(response)
 }
 
 /// Parse typed JSON with the existing control-character recovery and error mapping.
@@ -3177,10 +3200,18 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             let message = error_payload
                 .message
                 .unwrap_or_else(|| status_message.to_string());
+            // Keep the typed error when it carries a public message, so the
+            // unary response renders it. Other messages stay diagnostic.
+            let keep_semantic =
+                overloaded || semantic.is_some_and(|error| error.public_message().is_some());
             return Some(BackendErrorInfo {
                 message,
                 status: code,
-                semantic: if overloaded { semantic.cloned() } else { None },
+                semantic: if keep_semantic {
+                    semantic.cloned()
+                } else {
+                    None
+                },
                 sanitized: overloaded.then_some(SanitizedError::Overloaded),
                 metric_error_type,
             });
@@ -3457,10 +3488,11 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
     }
 
     if let Some(error) = &semantic {
-        let is_classified = !matches!(
-            error.reason().as_str(),
-            "backend.unknown" | "runtime.unclassified"
-        );
+        let is_classified = error.public_message().is_some()
+            || !matches!(
+                error.reason().as_str(),
+                "backend.unknown" | "runtime.unclassified"
+            );
         if is_classified
             && let Some(response) =
                 ErrorMessage::from_semantic_error_with_recording(error, record_failure)
@@ -4954,6 +4986,7 @@ async fn responses(
         text: request.inner.text.clone(),
         service_tier: request.inner.service_tier.clone(),
         include: request.inner.include.clone(),
+        top_logprobs: request.inner.top_logprobs,
         truncation: request.inner.truncation,
         // Upstream `CreateResponse` doesn't carry these yet; plumbed through so
         // the response serializer can default to 0.0 without hardcoding at the
@@ -8778,6 +8811,33 @@ mod tests {
         let body = serde_json::to_string(&response.1.0).expect("error response serializes");
         assert!(!body.contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
         assert!(!body.contains("/srv/frontend.rs"));
+    }
+
+    #[test]
+    fn unsupported_video_public_message_reaches_the_http_body() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic(r#"{"message":"Unsupported video media","code":415}"#)
+            .public_message("Unsupported video media")
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.1.code, 415);
+        assert_eq!(response.1.message, "Unsupported video media");
+    }
+
+    #[test]
+    fn unsupported_media_without_public_message_uses_catalog_text() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic("private fetch https://example.com/?sig=secret")
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.1.message, "Unsupported media type");
+        assert!(!response.1.message.contains("secret"));
     }
 
     #[test]

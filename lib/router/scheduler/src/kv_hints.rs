@@ -7,20 +7,10 @@
 //! candidates with worker keys under a selection scope, and the KV copies hint policies send.
 
 pub use dynamo_kv_hints::{
-    KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, KvTransferTarget,
+    KvHint, KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary,
     ResolvedTransferSource, WorkerKvTransferKeys, WorkerKvTransferKeysCache,
 };
-pub use dynamo_kv_indexer::kv_hints::CacheOwnerKvTransferKeys;
-
-pub use dynamo_kv_hints::{
-    KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
-    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, KvHint, KvHintAction, KvHintActionLimitError,
-    KvSourceLocationsPayload, MAX_KV_HINT_ACTIONS,
-};
-
-pub use dynamo_kv_indexer::kv_hints::{
-    KvTransferCandidateSource, KvTransferCandidates, KvTransferSourceInterval,
-};
+pub use dynamo_kv_indexer::{KvTransferCandidateSource, KvTransferCandidates};
 
 use std::collections::HashMap;
 
@@ -343,26 +333,27 @@ mod tests {
 
 #[cfg(test)]
 mod summary_tests {
+    use dynamo_kv_indexer::KvTransferSourceInterval;
     use std::collections::HashMap;
 
     use dynamo_router_protocol::worker::WorkerWithDpRank;
 
     use super::KvTransferCandidates;
     use crate::protocols::WorkerConfigLike;
-    use dynamo_kv_indexer::residency::ResidencyOwnerKeyExt;
+    use dynamo_kv_indexer::ResidencyOwnerKeyExt;
     use dynamo_router_protocol::worker::WorkerId;
     use std::sync::Arc;
 
     use super::*;
-    use crate::identity::{
-        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
-        RoutingScopeId, StableDpSlotId,
-    };
     use dynamo_kv_events::residency::ResidencyOwner;
     use dynamo_kv_hashing::ExternalSequenceBlockHash;
     use dynamo_kv_hints::KvHintTransferWorkerMetadata;
-    use dynamo_kv_indexer::residency::{
+    use dynamo_kv_indexer::{
         ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
+    };
+    use dynamo_router_protocol::identity::{
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
     };
 
     struct Worker;

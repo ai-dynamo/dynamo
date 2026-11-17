@@ -14,12 +14,12 @@ use crate::services::common::replica_sync::{
     PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
 };
 use crate::tracking_hash::tracking_hash_context;
-use dynamo_kv_indexer::backend::IndexerPolicy;
+use dynamo_kv_indexer::IndexerPolicy;
 use dynamo_router_protocol::worker::WorkerId;
-use dynamo_scheduler::config::RouterConfig;
-use dynamo_scheduler::protocols::PotentialLoad;
-use dynamo_scheduler::replication::AffinityBindingEvent;
-use dynamo_scheduler::types::WorkerSelectionPolicyFactory;
+use dynamo_scheduler::PotentialLoad;
+use dynamo_scheduler::RouterConfig;
+use dynamo_scheduler::WorkerSelectionPolicyFactory;
+use dynamo_session_affinity::AffinityBindingEvent;
 
 #[cfg(feature = "ingest-zmq")]
 use super::zmq_ingress::ZmqDirectIngress;
@@ -235,9 +235,9 @@ impl SelectionServiceBuilder {
             );
         }
         let tracking_hash = Arc::new(tracking_hash_context(&self.kv_router_config)?);
-        let indexer_policy = IndexerPolicy::from_config(
-            &dynamo_kv_indexer::config::IndexerConfig::from(&self.kv_router_config),
-        )?;
+        let indexer_policy = IndexerPolicy::from_config(&dynamo_kv_indexer::IndexerConfig::from(
+            &self.kv_router_config,
+        ))?;
         let cancel_token = CancellationToken::new();
         let mut startup_guard = StartupGuard::new(cancel_token.clone());
         #[cfg(feature = "replica-sync-zmq")]
@@ -382,9 +382,8 @@ pub fn local_selection_core_with_host(
         .validate_config()
         .map_err(anyhow::Error::msg)?;
     let tracking_hash = Arc::new(tracking_hash_context(&kv_router_config)?);
-    let indexer_policy = IndexerPolicy::from_config(
-        &dynamo_kv_indexer::config::IndexerConfig::from(&kv_router_config),
-    )?;
+    let indexer_policy =
+        IndexerPolicy::from_config(&dynamo_kv_indexer::IndexerConfig::from(&kv_router_config))?;
     let config = RouterConfig::from(&kv_router_config).validate()?;
     Ok(SelectionCore::new(
         config,
