@@ -270,6 +270,11 @@ struct Coordinator<P> {
     source_failed: bool,
 }
 
+/// The dedup filter a slot on `protocol` publishes through.
+fn dedup_filter_for(protocol: KvStateIngressProtocol) -> EventDedupFilter {
+    EventDedupFilter::new().with_idempotent_worker_stores(protocol.has_idempotent_stores())
+}
+
 impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
     async fn run(mut self, cancel: CancellationToken) {
         loop {
@@ -1010,8 +1015,7 @@ impl KvStateAgent {
                 next_outbound_id: 1,
                 next_attachment_generation: 1,
                 source_cursor: SourceCursorState::default(),
-                dedup: EventDedupFilter::new()
-                    .with_idempotent_worker_stores(config.ingress_protocol.has_idempotent_stores()),
+                dedup: dedup_filter_for(config.ingress_protocol),
                 worker_domain_failed: false,
                 cache_owner_domain_failed: false,
                 source_failed: false,
@@ -1935,7 +1939,7 @@ mod tests {
         },
     };
 
-    use dynamo_kv_events::event::{KvCacheStoreData, KvCacheStoredBlockData};
+    use dynamo_kv_events::event::{KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData};
     use dynamo_kv_events::placement::{Placement, PlacementOwner};
     use dynamo_kv_events::zmq_wire::{BlockHashValue, RawKvEvent};
     use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
@@ -2813,6 +2817,98 @@ mod tests {
             .unwrap();
         received.await.unwrap();
         task.await.unwrap();
+    }
+
+    /// Whether a slot on `protocol` publishes the only remove of a Worker-domain block it saw
+    /// stored twice.
+    async fn repeated_store_publishes_its_remove(protocol: KvStateIngressProtocol) -> bool {
+        let worker = WorkerWithDpRank::new(17, 3);
+        let identity = KvStateAgentIdentity {
+            cache_owner_id: cache_owner_id(),
+            publisher_id: 41,
+            protocol_version: KvStateProtocolVersion::V2,
+        };
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
+            identity: identity.clone(),
+            attachment: None,
+            cache_owner_ready: true,
+            outbound_cursor: 0,
+        }));
+        let local_indexer = Arc::new(LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            32,
+        ));
+        let sink = RecordingSink::default();
+        let output = sink.events.clone();
+        let (_control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
+        let (_ingress_tx, ingress_rx) = mpsc::unbounded_channel();
+        let mut coordinator = Coordinator {
+            publisher: sink,
+            local_indexer,
+            identity,
+            slot_dp_rank: 3,
+            status,
+            withdrawal_tx: mpsc::unbounded_channel().0,
+            control_rx,
+            ingress_rx,
+            attachment: None,
+            ingress_generation: None,
+            next_outbound_id: 1,
+            next_attachment_generation: 1,
+            source_cursor: SourceCursorState::default(),
+            dedup: dedup_filter_for(protocol),
+            worker_domain_failed: false,
+            cache_owner_domain_failed: false,
+            source_failed: false,
+        };
+        let mut attachment = test_attachment(worker, "tcp://framework");
+        attachment.ingress_protocol = protocol;
+        coordinator.attach(&mut attachment).await.unwrap();
+
+        let mut removal = store(worker, ResidencyDomain::Worker, None, 101, 11);
+        removal.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: vec![ExternalSequenceBlockHash(101)],
+        });
+        let events = [
+            store(worker, ResidencyDomain::Worker, None, 101, 11),
+            store(worker, ResidencyDomain::Worker, None, 101, 11),
+            removal,
+        ];
+        for (source_cursor, event) in (1..).zip(events) {
+            coordinator
+                .handle_ingress(IngressBatch {
+                    generation: attachment.generation,
+                    source_cursor,
+                    chunk_index: 0,
+                    final_chunk: true,
+                    events: vec![event],
+                    source_fault: None,
+                    cache_owner_fault: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let published = output.lock().unwrap();
+        published
+            .iter()
+            .any(|event| matches!(event.event.data, KvCacheEventData::Removed(_)))
+    }
+
+    #[tokio::test]
+    async fn sglang_slot_publishes_the_only_remove_of_a_repeated_store() {
+        // SGLang emits one remove per block however many times it stored it.
+        let protocol = KvStateIngressProtocol::SglangHiCacheV1;
+        assert!(repeated_store_publishes_its_remove(protocol).await);
+    }
+
+    #[tokio::test]
+    async fn vllm_slot_keeps_counting_repeated_stores() {
+        // vLLM emits a remove per store, so the first of two removes must not pass.
+        let protocol = KvStateIngressProtocol::VllmResidencyV1;
+        assert!(!repeated_store_publishes_its_remove(protocol).await);
     }
 
     #[tokio::test]

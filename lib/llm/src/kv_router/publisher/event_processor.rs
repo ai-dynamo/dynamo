@@ -17,6 +17,7 @@ use super::batching::BatchingState;
 use super::dedup::{EventDedupFilter, EventDedupPolicy};
 use super::sinks::{RouterEventBatchSink, emit};
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
     publisher: P,
     worker_id: u64,
