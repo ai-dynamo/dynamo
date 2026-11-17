@@ -51,7 +51,7 @@ If you install Grove and KAI Scheduler externally, ensure that the versions are 
 | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
 | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
 | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
-| 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.15 |
+| 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.14 |
   </Note>
 
   </Tab>
@@ -241,7 +241,7 @@ the aliases when they need the same topology values.
 The immutable operator origin version controls this behavior. An operator-only upgrade does not add
 the variables or change the command line of an existing DGD, so it does not roll that workload. To
 use the aliases, create the DGD with Dynamo Operator 1.6.0 or later. When Grove is managed outside
-the Dynamo platform chart, install Grove `v0.1.0-alpha.15` or later before creating the DGD.
+the Dynamo platform chart, install Grove `v0.1.0-alpha.14` or later before creating the DGD.
 
 ### Use the variables in a DGD created before 1.6.0
 
@@ -262,7 +262,7 @@ worker that starts while the old leader terminates can handshake with the old le
 frontend then fails its ZMQ connection after 30 seconds and exits.
 </Warning>
 
-For a Grove-managed DGD, `GROVE_PCSG_POD_INDEX` requires Grove `v0.1.0-alpha.15` or later and
+For a Grove-managed DGD, `GROVE_PCSG_POD_INDEX` requires Grove `v0.1.0-alpha.14` or later and
 matching CRDs. Replace the variables with these values:
 
 | Variable | Grove | LeaderWorkerSet |
