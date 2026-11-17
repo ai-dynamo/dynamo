@@ -261,6 +261,8 @@ class FakeFrontend:
         self._ids = itertools.count()
         self.kube = kube
         self.down = False
+        # The pod answers, but its listener serves no /router_policy (404).
+        self.no_policy_api = False
         # (writer, advisory, kind, router_id)
         self.writes: list[tuple[str, bool, str, str]] = []
         self.routers: dict[str, Router] = {}
@@ -317,6 +319,8 @@ class FrontendPolicyClient:
         frontend = self.world.frontend
         if frontend.down:
             return PolicyCallResult(status=0, error="connection refused")
+        if frontend.no_policy_api:
+            return PolicyCallResult(status=404, error="Not Found")
         routers = tuple(self._info(r) for r in frontend.routers.values())
         return PolicyCallResult(status=200, routers=routers)
 
@@ -579,6 +583,8 @@ class FakeHost:
             retune_inputs=inputs,
             retune_hooks=hooks,
         )
+        # The Planner's live configuration, as NativePlannerBase.config.
+        self.config = self._engine._config
         if self.controller is not None:
             # What the adapter's initial_tick does.
             self.controller.start(world.clock.time(), hooks.phase_s)
@@ -586,10 +592,15 @@ class FakeHost:
         self.variant = "a" if inputs is None else variant_of(inputs)
         self.replacements: list[tuple[Any, int]] = []
         self.fail_replace = False
+        # Decisions whose Planner fields the supervisor handed over.
+        self.persisted: list[Any] = []
 
     @property
     def controller(self) -> Optional[TracedController]:
         return self._engine.retune_controller
+
+    def retune_decision_persisted(self, decision):
+        self.persisted.append(decision)
 
     async def replace_live_retune(self, inputs, *, generation):
         async with self._config_lock:
@@ -790,8 +801,9 @@ async def settle(processes: list[Process], world: World, rounds: int = 6) -> Non
                 await process.sup.control_round()
 
 
-def enqueue(process: Process, *decisions: RetuneDecision) -> None:
-    """Hand the supervisor a tick's decisions with the controller's routers."""
+def enqueue(process: Process, *decisions: RetuneDecision) -> list[RetuneDecision]:
+    """Hand the supervisor a tick's decisions with the controller's routers;
+    the ones it accepted."""
 
     controller = process.controller
     desired = (
@@ -799,7 +811,7 @@ def enqueue(process: Process, *decisions: RetuneDecision) -> None:
         if controller is not None
         else startup_flat("a")
     )
-    process.sup.on_effects(
+    return process.sup.on_effects(
         SimpleNamespace(
             retune_decisions=list(decisions),
             router_parameters=by_wt(process.host.variant, desired),
@@ -1018,6 +1030,48 @@ async def test_gate_reasons_and_the_skip_metric() -> None:
     assert sup.launch_gate(K0 + 2, window(K0 + 2)).reason == "not_ready"
 
 
+async def test_not_ready_and_p12_say_why(caplog) -> None:
+    world = World()
+    process = await leading(world)
+    sup = process.sup
+    assert sup.ready() and sup.not_ready_reasons() == []
+    with caplog.at_level(logging.INFO, logger="dynamo.planner.retune.live"):
+        world.frontend.down = True
+        await sup.control_round()
+        assert "retune: P12 fails: P12: not every ready frontend has its routers" in (
+            caplog.text
+        )
+        assert sup.launch_gate(K0 + 1, window(K0 + 1)).reason == "not_ready"
+        gate_logs = [r for r in caplog.records if "retune gate" in r.message]
+        assert gate_logs[-1].levelname == "WARNING"
+        assert f"window {K0 + 1} not_ready: P12:" in gate_logs[-1].message
+
+        # A frontend that answers 404 on /router_policy serves no router
+        # policy API on that port: after ADMIN_API_DISABLED_ROUNDS rounds,
+        # P12 names the admin listener.
+        world.frontend.down = False
+        world.frontend.no_policy_api = True
+        caplog.clear()
+        for _ in range(3):
+            await sup.control_round()
+        assert not sup.ready()
+        assert any(
+            "DYN_ENABLE_FRONTEND_ADMIN_API" in reason
+            for reason in sup.not_ready_reasons()
+        )
+        # P12 stayed false, but its cause changed: logged again.
+        assert "admin listener is off" in caplog.text
+        caplog.clear()
+        world.frontend.no_policy_api = False
+        await sup.control_round()
+        assert sup.ready()
+        assert "retune: P12 ok" in caplog.text
+        # Logged once per change, not every round.
+        caplog.clear()
+        await sup.control_round()
+        assert "P12" not in caplog.text
+
+
 async def test_harvest_allowed_needs_leader_initialized_and_generation() -> None:
     world = World()
     process = await leading(world)
@@ -1062,6 +1116,51 @@ async def test_applied_decision_is_persisted_then_deployed() -> None:
     assert frontend_configs(world) == [by_wt("a", chosen)["aggregated"]]
     # The next window launches; the decided one does not.
     assert sup.launch_gate(K0 + 1, window(K0 + 1)).reason == "already_decided"
+
+
+def _with_planner_changes(process: Process, k: int) -> RetuneDecision:
+    """An applied decision with a Planner field, recorded in the controller
+    as its decide step does."""
+
+    chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
+    process.controller.restore_desired(chosen)
+    changes = {"load_scaling_down_sensitivity": 70}
+    process.controller._pending_planner.update(changes)
+    return dataclasses.replace(
+        make_decision(k, "applied", chosen=chosen), planner_changes=changes
+    )
+
+
+async def test_planner_fields_apply_only_once_their_decision_is_persisted() -> None:
+    world = World()
+    process = await leading(world)
+    decision = _with_planner_changes(process, K0 + 1)
+
+    enqueue(process, decision)
+    assert process.host.persisted == []  # queued, not written yet
+    await process.sup.outbox_round()
+
+    assert world.shared_state().history[-1]["decision_id"] == decision.decision_id
+    assert process.host.persisted == [decision]
+
+
+async def test_planner_fields_of_an_unwritten_decision_are_discarded() -> None:
+    world = World()
+    process = await leading(world)
+    sup = process.sup
+    store = StateStore(world.kube, sup.dgd)
+    snapshot = store.read()
+    store.write(dataclasses.replace(snapshot.state, leader_term="9/x/1"), snapshot)
+    decision = _with_planner_changes(process, K0 + 1)
+
+    enqueue(process, decision)
+    await sup.outbox_round()  # lost_term: not written
+    await sup.lease_round()  # re-initializes and drops the outbox
+
+    assert sup.outbox_size == 0
+    assert process.host.persisted == []
+    # The controller's current point is the running configuration again.
+    assert process.controller._pending_planner == {}
 
 
 async def test_advisory_decision_records_the_recommendation_only() -> None:
@@ -1201,7 +1300,8 @@ async def test_every_failed_state_write_counts_as_state_write() -> None:
     store = StateStore(world.kube, sup.dgd)
     snapshot = store.read()
     store.write(dataclasses.replace(snapshot.state, leader_term="9/x/1"), snapshot)
-    enqueue(process, make_decision(K0 + 1, "kept"))
+    decision = make_decision(K0 + 1, "kept")
+    assert enqueue(process, decision) == [decision]
     await sup.outbox_round()
     assert not sup.initialized and failures() == ["state_write"] * 3
 
@@ -1211,9 +1311,14 @@ async def test_decisions_are_dropped_and_rewound_without_leadership() -> None:
     process = await started(world)
     controller = process.controller
     controller._last_k = K0 + 1
-    enqueue(process, make_decision(K0 + 1, "kept"))
+    # Dropped decisions are not handed back: the planner applies none of
+    # their planner changes, and the controller forgets them.
+    decision = _with_planner_changes(process, K0 + 1)
+    assert enqueue(process, make_decision(K0 + 1, "kept"), decision) == []
     assert process.sup.outbox_size == 0
     assert controller._last_k == -1  # no state: every window is due again
+    assert controller._pending_planner == {}
+    assert process.host.persisted == []
 
 
 async def test_a_foreign_term_forces_reinitialization() -> None:
@@ -1309,6 +1414,34 @@ async def test_restart_restores_the_persisted_point() -> None:
     state = world.shared_state()
     assert state.leader_term == second.sup.term and state.deploy_seq == 2
     assert second.sup.target().desired_by_wt == by_wt("a", chosen)
+
+
+async def test_planner_changes_are_recorded_but_not_restored_after_a_restart(
+    caplog,
+) -> None:
+    world = World()
+    first = await leading(world)
+    chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
+    first.controller.restore_desired(chosen)
+    decision = dataclasses.replace(
+        make_decision(K0 + 1, "applied", chosen=chosen),
+        planner_changes={"load_scaling_down_sensitivity": 70},
+    )
+    enqueue(first, decision)
+    await first.sup.outbox_round()
+    assert world.shared_state().history[-1]["planner"] == {
+        "load_scaling_down_sensitivity": 70
+    }
+    await first.sup.stop()
+
+    with caplog.at_level(logging.WARNING, logger="dynamo.planner.retune.live"):
+        second = await leading(world, "p2")
+
+    # The router point is restored; the Planner field runs its configured
+    # value, and the restart says so.
+    assert second.controller.current_point().router == chosen
+    assert "load_scaling_down_sensitivity': 70} of decision" in caplog.text
+    assert "are not restored after the restart" in caplog.text
 
 
 async def test_fingerprint_change_resets_with_a_two_phase_rollback() -> None:

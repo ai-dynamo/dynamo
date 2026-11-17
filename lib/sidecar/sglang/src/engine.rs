@@ -465,7 +465,7 @@ impl LLMEngine for SglangSidecarEngine {
                 // Publish the handoff only after the gRPC transport opens the
                 // response stream so decode can rendezvous while prefill runs.
                 yield Ok(LLMEngineOutput {
-                    disaggregated_params: Some(handoff),
+                    disaggregated_params: Some(Box::new(handoff)),
                     ..Default::default()
                 });
             }

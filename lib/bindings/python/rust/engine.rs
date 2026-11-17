@@ -39,7 +39,8 @@ use dynamo_runtime::pipeline::ManyIn;
 
 use super::context::{Context, callable_accepts_kwarg};
 use super::errors::{
-    http_like_error_to_dynamo, py_exception_to_backend_error, worker_unavailable_to_dynamo,
+    http_like_error_to_dynamo, py_exception_to_backend_error, routed_engine_error_to_dynamo,
+    worker_unavailable_to_dynamo,
 };
 use crate::python_payload::{
     EncodedPythonResponse, PythonPayload, PythonResponseItem, WaitClassification,
@@ -264,7 +265,15 @@ impl
             move |py, request| {
                 // Ordinary Chat Completions retain direct typed serialization.
                 if request.responses_tools.is_none() {
-                    return Ok(pythonize(py, &request)?.unbind());
+                    let object = pythonize(py, &request)?;
+                    // Named passthrough fields (`stop_token_ids`, ...) are not
+                    // serialized with the request; add them at the top level, as
+                    // the client sent them.
+                    let dict = object.downcast::<PyDict>()?;
+                    for (key, value) in request.passthrough_extra_fields() {
+                        dict.set_item(key, pythonize(py, value)?)?;
+                    }
+                    return Ok(object.unbind());
                 }
                 let value = request
                     .python_chat_processor_request_json(&runtime_config)
@@ -452,7 +461,8 @@ where
         Some(
             Context::new(ctx.clone(), current_trace_context, None, metadata)
                 .with_session_affinity_from(&context)
-                .map_err(anyhow::Error::msg)?,
+                .map_err(anyhow::Error::msg)?
+                .with_response_headers_from(&context),
         )
     } else {
         None
@@ -535,6 +545,11 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
         // Checked before the backend mapping, whose `DynamoException` fallback
         // would otherwise classify it as `Unknown`.
         if let Some(error) = worker_unavailable_to_dynamo(py, &error) {
+            return error;
+        }
+        // A `RoutedEngineError` a chat engine let escape keeps its backend's
+        // class and status. No worker endpoint can hold one.
+        if let Some(error) = routed_engine_error_to_dynamo(py, &error) {
             return error;
         }
 
