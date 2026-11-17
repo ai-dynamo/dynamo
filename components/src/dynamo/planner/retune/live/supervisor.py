@@ -43,7 +43,9 @@ thread with a timeout):
   leader of the round's epoch or the budget has passed.
 - outbox: write each decision, conditional on the state's ``leader_term``
   being this process's term and on the resourceVersion read; N consecutive
-  failures re-initialize.
+  failures re-initialize. Once an applied decision is written, its Planner
+  fields go to ``host.retune_decision_persisted``; a decision dropped
+  before that has its Planner fields discarded from the controller.
 
 Local leadership loss, a failed outbox, and a controller rebuild share one
 path: clear ``initialized``, stop the outbox writer and the in-flight
@@ -219,6 +221,11 @@ class LiveRetuneHost(Protocol):
     async def replace_live_retune(
         self, inputs: Optional[RetuneInputs], *, generation: int
     ) -> None:
+        ...
+
+    def retune_decision_persisted(self, decision: RetuneDecision) -> None:
+        """Apply a persisted ``applied`` decision's Planner fields (in the
+        background; must not block)."""
         ...
 
 
@@ -676,6 +683,8 @@ class LiveRetuneSupervisor:
         self._canary_ok: Optional[bool] = None
         self._canary_at: Optional[float] = None
         self._last_report: Optional[ActuationReport] = None
+        # (P12, admin API disabled) as last logged; a change is logged once.
+        self._p12_logged: Optional[tuple[bool, bool]] = None
         # (deploy_seq, monotonic since) of a converged rollback.
         self._rollback_since: Optional[tuple[int, float]] = None
 
@@ -782,14 +791,28 @@ class LiveRetuneSupervisor:
     def ready(self) -> bool:
         """Whether a due window may launch (spec, controller and health)."""
 
-        return (
-            self._spec_ok
-            and self._controller_ok
-            and self._evaluation.spec_replicas is not None
-            and self._canary_ok is True
-            and self._p12_ok()
-            and not self._settings.decommission
-        )
+        return not self.not_ready_reasons()
+
+    def not_ready_reasons(self) -> list[str]:
+        """The launch conditions that fail now; ``ready()`` when none."""
+
+        reasons: list[str] = []
+        if not self._spec_ok:
+            spec = list(self._evaluation.report.reasons) or ["P14 parity"]
+            reasons.append("spec: " + "; ".join(spec))
+        if not self._controller_ok:
+            reasons.append("no retune controller")
+        if self._evaluation.spec_replicas is None:
+            reasons.append("worker replicas unknown")
+        if self._canary_ok is not True:
+            reasons.append(
+                "P11 canary pending" if self._canary_ok is None else "P11 canary failed"
+            )
+        if not self._p12_ok():
+            reasons.append(self._p12_detail())
+        if self._settings.decommission:
+            reasons.append("decommissioning")
+        return reasons
 
     def retune_inputs(self) -> Optional[RetuneInputs]:
         """Inputs for the engine's first controller; ``None`` if P4 fails."""
@@ -857,7 +880,15 @@ class LiveRetuneSupervisor:
             if (k, reason) not in self._skips_seen:
                 self._skips_seen.append((k, reason))
                 self._metrics.skipped(reason)
-                logger.info("retune gate: window %d %s", k, reason)
+                if reason == "not_ready":
+                    why = self.not_ready_reasons()
+                    if not self._initialized or state is None:
+                        why.insert(0, "state not initialized")
+                    logger.warning(
+                        "retune gate: window %d not_ready: %s", k, "; ".join(why)
+                    )
+                else:
+                    logger.info("retune gate: window %d %s", k, reason)
             return GateResult(reason=reason)
         # Set by the controller's drop_pending (local loss, rebuild, stop).
         return GateResult(
@@ -898,20 +929,23 @@ class LiveRetuneSupervisor:
                 failure_reason="sweep_error",
             )
 
-    def on_effects(self, effects: PlannerEffects) -> None:
-        """Enqueue the tick's decisions; never raises into the tick."""
+    def on_effects(self, effects: PlannerEffects) -> list[RetuneDecision]:
+        """Enqueue the tick's decisions and return them, or ``[]`` when they
+        are dropped; never raises into the tick. Their Planner fields apply
+        once written (``outbox_round``)."""
 
         decisions = list(effects.retune_decisions or ())
         if not decisions:
-            return
+            return []
         if not (self.is_leader() and self._initialized):
             logger.warning(
                 "retune: dropping %d decision(s) %s: not an initialized leader",
                 len(decisions),
                 [decision.decision_id for decision in decisions],
             )
+            self._discard_planner_changes(decisions)
             self._rewind_now()
-            return
+            return []
         router_parameters = effects.router_parameters
         for decision in decisions:
             self._outbox.append(
@@ -929,6 +963,7 @@ class LiveRetuneSupervisor:
                 )
             )
         self._outbox_wake.set()
+        return decisions
 
     # ------------------------------------------------------------ lifecycle
 
@@ -1059,12 +1094,17 @@ class LiveRetuneSupervisor:
                     "retune outbox: dropped %s of an earlier term/generation",
                     entry.decision.decision_id,
                 )
+                self._discard_planner_changes([entry.decision])
                 continue
             outcome = await self._write_decision(entry)
             if outcome in ("ok", "already", "discarded"):
                 if self._outbox and self._outbox[0] is entry:
                     self._outbox.popleft()
                 self._write_failures = 0
+                if outcome == "discarded":
+                    self._discard_planner_changes([entry.decision])
+                else:
+                    self._decision_persisted(entry.decision)
                 continue
             if outcome == "lost_term":
                 self._request_reinit("the state's leader_term is not ours")
@@ -1281,12 +1321,47 @@ class LiveRetuneSupervisor:
             return False
         self._initialized = True
         self._rollback_since = None
+        self._warn_planner_reset(plan.state)
         if self._background:
             self._outbox_task = asyncio.create_task(
                 self._outbox_loop(), name="planner-retune-outbox"
             )
         self._outbox_wake.set()
         return True
+
+    def _warn_planner_reset(self, state: RetuneState) -> None:
+        """Report applied Planner changes a restart did not restore.
+
+        Router parameters live in the frontends and survive a Planner
+        restart; Planner fields live in this process, which starts from its
+        configuration. Retune does not restore them (restoring a predictor
+        needs a warmup): the next window's baseline is the running
+        configuration, and a later sweep may choose the change again.
+        """
+
+        config = getattr(self._host, "config", None)
+        if config is None:
+            return
+        last = next(
+            (
+                item
+                for item in reversed(state.history)
+                if item.get("outcome") == "applied" and item.get("planner")
+            ),
+            None,
+        )
+        if last is None:
+            return
+        planner = last["planner"]
+        running = {key: getattr(config, key, None) for key in planner}
+        if running != planner:
+            logger.warning(
+                "retune: Planner fields %s of decision %s are not restored after "
+                "the restart; the Planner runs %s",
+                planner,
+                last.get("decision_id"),
+                running,
+            )
 
     async def _read_own_snapshot(self) -> Optional[StateSnapshot]:
         """Read the state; drop a snapshot of another DGD uid.
@@ -1361,6 +1436,7 @@ class LiveRetuneSupervisor:
         await self._cancel(self._reconcile_task)
         self._reconcile_task = None
         dropped = len(self._outbox)
+        unwritten = [entry.decision for entry in self._outbox]
         self._outbox.clear()
         self._write_failures = 0
         controller = self._controller()
@@ -1370,6 +1446,7 @@ class LiveRetuneSupervisor:
                     controller.drop_pending()
                 except Exception:
                     logger.exception("retune: drop_pending failed")
+                self._discard_planner_changes(unwritten)
                 self._rewind(controller)
         if was:
             logger.info(
@@ -1538,6 +1615,10 @@ class LiveRetuneSupervisor:
             item["by_wt"] = entry.router_parameters
         elif decision.outcome == "advisory":
             item["by_wt"] = self._resolve_by_wt(flat)
+        if decision.planner_changes and decision.outcome in ("applied", "advisory"):
+            # The Planner fields the decision changes (or recommends). A
+            # restarted Planner does not restore them (_warn_planner_reset).
+            item["planner"] = dict(decision.planner_changes)
         details = decision.details
         image = {
             key: details[key]
@@ -1619,6 +1700,13 @@ class LiveRetuneSupervisor:
         if epoch != self._epoch:
             return None
         self._last_report = report
+        p12 = (self._p12_ok(), bool(report.admin_api_disabled))
+        if p12 != self._p12_logged:
+            if p12[0]:
+                logger.info("retune: P12 ok (every frontend's routers answer)")
+            else:
+                logger.warning("retune: P12 fails: %s", self._p12_detail())
+            self._p12_logged = p12
         if startup is not None and report.parity_ok is not None:
             if report.parity_ok != self._p14_ok:
                 logger.info(
@@ -1997,6 +2085,27 @@ class LiveRetuneSupervisor:
         present = report.routers_present
         return bool(report.converged if present is None else present)
 
+    def _p12_detail(self) -> str:
+        """Why P12 fails, from the last actuator round."""
+
+        report = self._last_report
+        if report is None:
+            return "P12: no router round yet"
+        if report.admin_api_disabled:
+            return (
+                "P12: a frontend serves no /router_policy the planner can reach: "
+                "its admin listener is off, unreadable from the pod spec, or "
+                "answers 404 (DYN_ENABLE_FRONTEND_ADMIN_API, "
+                "DYN_FRONTEND_ADMIN_HOST, DYN_FRONTEND_ADMIN_PORT)"
+            )
+        errors = ", ".join(
+            f"{kind} x{count}"
+            for kind, count in sorted(report.errors.items(), key=lambda kv: str(kv[0]))
+        )
+        return "P12: not every ready frontend has its routers" + (
+            f" (errors: {errors})" if errors else ""
+        )
+
     def _last_decided_k(self) -> Optional[int]:
         state = self.state
         if state is None or state.last_window_end_ms is None:
@@ -2018,6 +2127,42 @@ class LiveRetuneSupervisor:
         controller = self._controller()
         if controller is not None:
             self._rewind(controller)
+
+    def _decision_persisted(self, decision: RetuneDecision) -> None:
+        """Hand a written ``applied`` decision's Planner fields to the host."""
+
+        if decision.outcome != "applied" or not decision.planner_changes:
+            return
+        host = self._host
+        try:
+            if host is None:
+                raise RuntimeError("no planner host")
+            host.retune_decision_persisted(decision)
+        except Exception:
+            logger.exception(
+                "retune: applying the Planner fields of %s failed",
+                decision.decision_id,
+            )
+            self._discard_planner_changes([decision])
+
+    def _discard_planner_changes(self, decisions: Sequence[RetuneDecision]) -> None:
+        """Forget the Planner fields of ``applied`` decisions that will not be
+        applied, so the controller's current point is the running
+        configuration again."""
+
+        controller = self._controller()
+        if controller is None:
+            return
+        for decision in decisions:
+            if decision.outcome != "applied" or not decision.planner_changes:
+                continue
+            try:
+                controller.discard_planner_changes(decision.planner_changes)
+            except Exception:
+                logger.exception(
+                    "retune: discarding the Planner fields of %s failed",
+                    decision.decision_id,
+                )
 
     def _engine(self) -> Any:
         """The host's engine adapter; ``None`` before ``start`` or without one."""

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use tonic_v14 as tonic;
+
 use std::sync::Arc;
 
 use dynamo_backend_common::{
@@ -179,16 +181,13 @@ async fn sidecar_streams_incremental_mocker_tokens_logprobs_and_usage() {
     assert_eq!((usage.prompt_tokens, usage.completion_tokens), (4, 3));
     assert!(terminal.engine_data.as_ref().unwrap()["prompt_logprobs"].is_array());
 
+    // A repeated public ID is a new dispatch with an rid of its own, so the
+    // Mocker's tokens, seeded by the rid, may differ.
     let repeated = collect_with_context(&engine, request(3), context).await;
+    assert_eq!(repeated.len(), 3);
     assert_eq!(
-        outputs
-            .iter()
-            .flat_map(|output| output.token_ids.iter())
-            .collect::<Vec<_>>(),
-        repeated
-            .iter()
-            .flat_map(|output| output.token_ids.iter())
-            .collect::<Vec<_>>()
+        repeated.last().unwrap().finish_reason,
+        Some(FinishReason::Length)
     );
     assert_eq!(server.service.active_request_count(), 0);
 }
@@ -208,7 +207,8 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
     assert!(prefill_outputs[0].finish_reason.is_none());
     let handoff = prefill_outputs[0]
         .disaggregated_params
-        .clone()
+        .as_deref()
+        .cloned()
         .expect("prefill response should carry SGLang rendezvous metadata");
     assert_eq!(handoff["bootstrap_host"], "127.0.0.1");
     assert_eq!(handoff["bootstrap_port"], 8_998);

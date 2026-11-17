@@ -5,6 +5,8 @@
 //! shaped like SGLang's Rust server, with typed discovery, `GenerateStreamItem`
 //! frames, and in-stream error items carrying HTTP status codes.
 
+use tonic_v14 as tonic;
+
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -340,6 +342,7 @@ impl SglangMockerService {
                 kv_event_sources,
                 ..Default::default()
             }),
+            ..Default::default()
         }
     }
 }
@@ -517,7 +520,11 @@ fn error_item(code: u32, message: String) -> pb::GenerateStreamItem {
     pb::GenerateStreamItem {
         item: Some(pb::generate_stream_item::Item::Error(
             pb::GenerateStreamError {
-                error: Some(pb::ErrorBody { message, code }),
+                error: Some(pb::ErrorBody {
+                    message,
+                    code,
+                    ..Default::default()
+                }),
                 index: None,
             },
         )),

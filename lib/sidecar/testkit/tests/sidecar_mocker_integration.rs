@@ -875,7 +875,7 @@ async fn sglang_stream_error_codes_map_before_and_after_a_token_then_recover() {
 }
 
 // An abort the request did not ask for ends its stream with SGLang's 499
-// item; Abort reports whether it matched an active generation.
+// item; Abort reports that it matched the running generation.
 #[tokio::test]
 async fn sglang_abort_rpc_reports_499_and_match_flag() {
     bounded("Abort RPC", async {
@@ -904,7 +904,8 @@ async fn sglang_abort_rpc_reports_499_and_match_flag() {
         fixture.scheduler_active().await;
         engine.abort(ctx.clone()).await;
         fixture.wait_aborts(1).await;
-        assert_eq!(fixture.aborts(), [(id.clone(), true)]);
+        let rid = sglang_fixture::rid(&handle.native_request().unwrap()).to_string();
+        assert_eq!(fixture.aborts(), [(rid, true)]);
         handle.release();
         outputs.extend(bounded("aborted stream", stream.collect::<Outputs>()).await);
         let error = failure(outputs, &handle.tokens(), BackendError::Cancelled);
@@ -912,19 +913,61 @@ async fn sglang_abort_rpc_reports_499_and_match_flag() {
         bounded("aborted RPC released", handle.wait(Event::Dropped)).await;
         fixture.scheduler_idle().await;
 
-        // A finished request matches nothing, and repeating Abort is harmless.
+        // A finished request is not running, so there is nothing to abort.
         engine.abort(ctx).await;
-        fixture.wait_aborts(2).await;
-        assert_eq!(fixture.aborts()[1], (id, false));
+        assert_eq!(fixture.aborts().len(), 1);
         healthy(&fixture, &engine, &control).await;
         finish(&mut fixture, &engine).await;
     })
     .await;
 }
 
-// A request runs on one listener. The gRPC Abort reaches every listener and
-// matches only on the owner; native /generate aborts through its own
-// listener only.
+// A cancelled request's stream can end before the framework's abort runs,
+// which then still reaches that dispatch while the stream exists.
+#[tokio::test]
+async fn sglang_abort_after_cancelled_stream_ends_reaches_its_dispatch() {
+    bounded("abort after cancelled stream", async {
+        let control = Controller::<sglang_fixture::Adapter>::default();
+        let mut fixture = sglang_fixture::Fixture::start(
+            control.clone(),
+            FixtureConfig {
+                speedup_ratio: 0.1,
+                ..Default::default()
+            },
+        )
+        .await;
+        let engine = fixture.engine().await;
+        engine.start(0).await.unwrap();
+        let ctx = mock_context();
+        let handle = control.request(ctx.id(), after_token_responses(1, StreamAction::Continue));
+        let mut stream = engine
+            .generate(
+                request("mocker-model", vec![11, 22, 33], 10_000),
+                GenerateContext::new(ctx.clone(), None),
+            )
+            .await
+            .unwrap();
+        let mut outputs = checkpoint_outputs(&mut stream, &handle).await;
+        ctx.stop_generating();
+        outputs.extend(bounded("cancelled stream", stream.by_ref().collect::<Outputs>()).await);
+        terminal(outputs, &handle.tokens(), 3, FinishReason::Cancelled);
+        engine.abort(ctx.clone()).await;
+        fixture.wait_aborts(1).await;
+        let rid = sglang_fixture::rid(&handle.native_request().unwrap()).to_string();
+        assert_eq!(fixture.aborts()[0].0, rid);
+        drop(stream);
+        engine.abort(ctx).await;
+        assert_eq!(fixture.aborts().len(), 1);
+        bounded("cancelled RPC released", handle.wait(Event::Dropped)).await;
+        fixture.scheduler_idle().await;
+        healthy(&fixture, &engine, &control).await;
+        finish(&mut fixture, &engine).await;
+    })
+    .await;
+}
+
+// A request runs on one listener, and its abort goes only there, by the rid
+// of that dispatch, for gRPC and native /generate alike.
 #[tokio::test]
 async fn sglang_node_sidecar_aborts_on_the_owning_listener() {
     bounded("node abort", async {
@@ -957,10 +1000,10 @@ async fn sglang_node_sidecar_aborts_on_the_owning_listener() {
             .unwrap();
         let mut outputs = checkpoint_outputs(&mut stream, &handle).await;
         engine.abort(ctx).await;
-        node[0].wait_aborts(1).await;
         node[1].wait_aborts(1).await;
-        assert_eq!(node[0].aborts(), [(id.clone(), false)]);
-        assert_eq!(node[1].aborts(), [(id.clone(), true)]);
+        let rid = sglang_fixture::rid(&handle.native_request().unwrap()).to_string();
+        assert_eq!(node[1].aborts(), [(rid, true)]);
+        assert!(node[0].aborts().is_empty());
         handle.release();
         outputs.extend(bounded("aborted stream", stream.collect::<Outputs>()).await);
         let error = failure(outputs, &handle.tokens(), BackendError::Cancelled);
@@ -991,7 +1034,7 @@ async fn sglang_node_sidecar_aborts_on_the_owning_listener() {
         node[1].http().wait_aborted(&native_id).await;
         bounded("HTTP target released", target.wait(Event::Dropped)).await;
         assert!(node[1].http().aborted_requests().contains(&native_id));
-        assert_eq!(node[0].aborts(), [(id, false)]);
+        assert!(node[0].aborts().is_empty());
         for listener in &node {
             listener.scheduler_idle().await;
         }
@@ -1130,7 +1173,7 @@ fn assert_http_completed(outputs: Outputs, request_id: &str) {
     for (output, expected) in outputs.iter().zip(http::responses(native_id)) {
         assert_eq!(
             output.engine_data,
-            Some(json!({"sglang_response": expected}))
+            Some(Box::new(json!({"sglang_response": expected})))
         );
     }
 }

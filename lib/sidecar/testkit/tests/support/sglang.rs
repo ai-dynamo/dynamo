@@ -4,6 +4,8 @@
 //! The SGLang fixture for `sglang.api.v1`, the gRPC contract of SGLang's Rust
 //! server.
 
+use tonic_v14 as tonic;
+
 use std::collections::{HashMap, VecDeque};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -424,6 +426,7 @@ pub fn error_item(code: u32, message: &str) -> pb::GenerateStreamItem {
             error: Some(pb::ErrorBody {
                 message: message.to_string(),
                 code,
+                ..Default::default()
             }),
             index: None,
         })),
@@ -780,16 +783,21 @@ impl SglangService for ControlledService {
 #[derive(Clone, Copy)]
 pub struct Adapter;
 
+/// The rid of one Generate request, as the sidecar sent it.
+pub fn rid(request: &pb::GenerateRequest) -> &str {
+    match request.rid.as_ref().and_then(|rid| rid.value.as_ref()) {
+        Some(pb::string_or_list::Value::One(rid)) => rid,
+        other => panic!("sidecar request ID: {other:?}"),
+    }
+}
+
 impl Protocol for Adapter {
     type Request = pb::GenerateRequest;
     type Response = pb::GenerateStreamItem;
     type Error = Status;
 
     fn request_id(request: &Self::Request) -> &str {
-        match request.rid.as_ref().and_then(|rid| rid.value.as_ref()) {
-            Some(pb::string_or_list::Value::One(rid)) => rid,
-            other => panic!("sidecar request ID: {other:?}"),
-        }
+        logical_request_id(rid(request))
     }
 
     fn record_tokens(response: &Self::Response, tokens: &mut Vec<u32>) -> bool {
@@ -936,6 +944,15 @@ impl HandoffFixture for Fixture {
         assert_eq!(port, Some(8998));
         assert!(room.is_some_and(|room| room >= 0));
     }
+}
+
+/// The public request ID of a dispatch's rid, which the sidecar suffixes
+/// with 8 hex digits of its own.
+pub fn logical_request_id(rid: &str) -> &str {
+    let (id, attempt) = rid.rsplit_once('-').expect("dispatch-specific engine ID");
+    assert_eq!(attempt.len(), 8);
+    assert!(attempt.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    id
 }
 
 pub mod http {
@@ -1155,14 +1172,7 @@ pub mod http {
         ]
     }
 
-    pub fn logical_request_id(native_id: &str) -> &str {
-        let (id, attempt) = native_id
-            .rsplit_once('-')
-            .expect("dispatch-specific engine ID");
-        assert_eq!(attempt.len(), 8);
-        assert!(attempt.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        id
-    }
+    pub use super::logical_request_id;
 
     pub struct Adapter;
 

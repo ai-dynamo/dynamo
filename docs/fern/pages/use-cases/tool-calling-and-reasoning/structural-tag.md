@@ -34,15 +34,16 @@ Benefits:
 Structural tags are enabled by default. Configure the tool-call parser on the
 **worker**; the Frontend needs no extra flags:
 
-> [!NOTE]
-> TensorRT-LLM guided decoding remains **opt-in** pending
-> [TensorRT-LLM #19913](https://github.com/NVIDIA/TensorRT-LLM/issues/19913).
-> Its `--guided-decoding-backend` default is unset, so default deployments ignore
-> structural tags and do not enforce their tool argument schemas. For affected
-> deployments using `--guided-decoding-backend xgrammar`, pass
-> `--dyn-structural-tag false` until a supported upgrade resolves the issue.
-> The TensorRT-LLM sidecar publishes no structural tags unless you pass
-> `--dyn-structural-tag`.
+<Note>
+TensorRT-LLM guided decoding remains **opt-in** pending
+[TensorRT-LLM #19913](https://github.com/NVIDIA/TensorRT-LLM/issues/19913).
+Its `--guided-decoding-backend` default is unset, so default deployments ignore
+structural tags and do not enforce their tool argument schemas. For affected
+deployments using `--guided-decoding-backend xgrammar`, pass
+`--dyn-structural-tag false` until a supported upgrade resolves the issue.
+The TensorRT-LLM sidecar publishes no structural tags unless you pass
+`--dyn-structural-tag`.
+</Note>
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -133,6 +134,7 @@ python3 -m dynamo.vllm ... --dyn-structural-tag false
 python3 -m dynamo.sglang ... --dyn-structural-tag false
 python3 -m dynamo.trtllm ... --dyn-structural-tag false
 dynamo-sglang-sidecar ... --dyn-structural-tag false
+dynamo-vllm-sidecar ... --dyn-structural-tag false
 ```
 
 Or set the equivalent environment variable before starting the worker:
@@ -168,10 +170,12 @@ environment variables remain accepted with a deprecation warning.
 The native Rust sidecars accept `--dyn-structural-tag` and `DYN_STRUCTURAL_TAG`
 as described in [CLI Flags](#cli-flags), but not the legacy flags or their
 environment variables. The SGLang sidecar uses the same default-on policy. The
-vLLM and TensorRT-LLM sidecars default to `false`: vLLM's gRPC server compiles
-structured outputs with guidance, which rejects these tags until
-vllm-project/vllm#61892, and the xgrammar version TensorRT-LLM pins rejects
-several tool-call tag formats.
+vLLM sidecar uses it when vLLM reports version 0.33 or later, the first release
+whose gRPC server compiles these tags with xgrammar. Against older vLLM it
+defaults to `false`, because that gRPC server compiles them with guidance,
+which rejects them. 0.33 release candidates and development builds also use
+it. The TensorRT-LLM sidecar defaults to `false`: the
+xgrammar version TensorRT-LLM pins rejects several tool-call tag formats.
 
 Setting `strict: false` on a tool relaxes its argument schema. On vLLM
 0.30.0, pinned by Dynamo's CUDA image, auto choice with every tool explicitly
@@ -300,14 +304,15 @@ builder cannot produce an automatically added tool-call tag, Dynamo uses the exi
 compatibility path rather than introducing a new request error; automatic tool
 choice may therefore remain unconstrained for that parser/schema combination.
 
-> [!WARNING]
-> Valid tool schemas containing constructs unsupported by the backend's
-> XGrammar version, such as regex lookahead, can cause request rejection.
-> Backend compilation errors do not trigger Dynamo's builder fallback.
-> With XGrammar 0.2.1 or 0.2.7 and schema mode `auto`, setting the tool
-> function's `strict: false` avoids this lookahead rejection by disabling
-> argument-schema enforcement. This workaround is not guaranteed on older
-> versions. The deployment opt-out still retains Rust Kimi K3 named-call tags.
+<Warning>
+Valid tool schemas containing constructs unsupported by the backend's
+XGrammar version, such as regex lookahead, can cause request rejection.
+Backend compilation errors do not trigger Dynamo's builder fallback.
+With XGrammar 0.2.1 or 0.2.7 and schema mode `auto`, setting the tool
+function's `strict: false` avoids this lookahead rejection by disabling
+argument-schema enforcement. This workaround is not guaranteed on older
+versions. The deployment opt-out still retains Rust Kimi K3 named-call tags.
+</Warning>
 
 In vLLM 0.30.0, pinned by Dynamo's CUDA image, `tool_choice="auto"` returns no
 structural tag when every tool is explicitly `strict: false`. The `always`

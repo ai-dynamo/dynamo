@@ -279,7 +279,7 @@ impl KvEventConsolidatorPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::zmq_wire::{KvEventBatch, RawKvEvent};
+    use dynamo_kv_events::zmq_wire::{KvEventBatch, RawKvEvent};
     use rmp_serde as rmps;
 
     #[test]

@@ -60,6 +60,7 @@ fn stream_error(code: u32, message: &str) -> pb::GenerateStreamError {
         error: Some(pb::ErrorBody {
             message: message.to_string(),
             code,
+            ..Default::default()
         }),
         index: None,
     }
@@ -169,11 +170,11 @@ fn terminal_errors_preserve_backend_category_and_details() {
         (Some(500), BackendError::Unknown),
         (None, BackendError::Unknown),
     ] {
-        let abort = meta_with_finish(FinishKind::Abort(pb::FinishAbort {
+        let abort = meta_with_finish(FinishKind::Abort(Box::new(pb::FinishAbort {
             message: Some("generation failed".into()),
             status_code: status,
             err_type: Some("NativeError".into()),
-        }));
+        })));
         let error_type = unknown(
             &json!({
                 "type": "error", "message": "generation failed", "status_code": status,
@@ -198,7 +199,7 @@ fn terminal_errors_preserve_backend_category_and_details() {
         }
     }
     let error = terminal_from_meta(
-        &meta_with_finish(FinishKind::Abort(pb::FinishAbort::default())),
+        &meta_with_finish(FinishKind::Abort(Box::default())),
         4,
         0,
         &StopConditions::default(),
@@ -322,11 +323,11 @@ fn prompt_logprobs_from_the_first_frame_attach_to_the_terminal_only() {
     assert_eq!(terminal.log_probs, Some(vec![-0.7]));
     assert_eq!(
         terminal.engine_data,
-        Some(json!({"prompt_logprobs": [
+        Some(Box::new(json!({"prompt_logprobs": [
             null,
             {"2": {"logprob": -0.1}, "9": {"logprob": -0.4}},
             {"3": {"logprob": -0.2}},
-        ]}))
+        ]})))
     );
     let usage = terminal.completion_usage.unwrap();
     assert_eq!((usage.prompt_tokens, usage.completion_tokens), (3, 3));

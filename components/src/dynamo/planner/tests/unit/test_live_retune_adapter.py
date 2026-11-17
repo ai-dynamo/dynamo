@@ -375,6 +375,7 @@ class FakeLiveRetune:
         self.effects.append(effects)
         if self.on_effects_error is not None:
             raise self.on_effects_error
+        return list(effects.retune_decisions or ())
 
 
 def _live_config(executor: str = "dgdr") -> PlannerConfig:

@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::Result;
-use dynamo_kv_router::protocols::{ActiveLoad, WorkerWithDpRank};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     component::{Component, Endpoint},
     protocols::EndpointId,
@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::KV_METRICS_SUBJECT;
+use crate::kv_router::ActiveLoad;
 use crate::{
     direct_zmq_fan_in::{
         ContinuityMode, FanInEvent, FanInObservation, start_direct_zmq_fan_in_for_endpoint_id,

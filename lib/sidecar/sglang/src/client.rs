@@ -3,6 +3,8 @@
 
 //! Thin sidecar client for SGLang's native `sglang.api.v1.SglangService`.
 
+use tonic_v14 as tonic;
+
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -12,9 +14,8 @@ use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
 use dynamo_backend_common::{BackendError, DynamoError, ErrorType};
-use dynamo_sidecar_common::{
-    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
-};
+use dynamo_sidecar_common::v14::GrpcChannelPool;
+use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig};
 use tokio::time::error::Elapsed;
 use tokio::time::{Instant, timeout_at};
 use tonic::transport::Channel;
@@ -223,7 +224,7 @@ fn validate_endpoint(endpoint: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
+const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Connect and discover the engine before the worker registers, which fixes
 /// its role and identity.
@@ -245,6 +246,57 @@ pub(crate) async fn bootstrap_discover(
     discovery::engine_info(discovery)
 }
 
+/// What one try of a startup wait found.
+pub(crate) enum Retry<T> {
+    /// Stop with this result.
+    Stop(Result<T, DynamoError>),
+    /// Try again after the retry interval, for this reason.
+    Again(String),
+}
+
+/// Run `attempt` every `retry_interval` until it stops. Retries are logged at
+/// most every `RETRY_LOG_INTERVAL`, so a slow startup is neither silent nor
+/// noisy. When the next try would start at or after `deadline`, the last
+/// reason to retry goes to `timed_out` instead.
+pub(crate) async fn retry_until<T, F>(
+    retry_interval: Duration,
+    deadline: Instant,
+    waiting: &str,
+    mut attempt: impl FnMut() -> F,
+    timed_out: impl FnOnce(String) -> DynamoError,
+) -> Result<T, DynamoError>
+where
+    F: Future<Output = Retry<T>>,
+{
+    let started = Instant::now();
+    let mut attempts = 0_u64;
+    let mut last_logged_at: Option<Instant> = None;
+    loop {
+        attempts += 1;
+        let reason = match attempt().await {
+            Retry::Stop(result) => return result,
+            Retry::Again(reason) => reason,
+        };
+        let now = Instant::now();
+        let retry_at = now + retry_interval;
+        if retry_at >= deadline {
+            return Err(timed_out(reason));
+        }
+        if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL) {
+            tracing::warn!(
+                attempt = attempts,
+                elapsed = ?started.elapsed(),
+                remaining = ?deadline.saturating_duration_since(now),
+                retry_interval = ?retry_interval,
+                %reason,
+                "{waiting}; retrying"
+            );
+            last_logged_at = Some(now);
+        }
+        tokio::time::sleep_until(retry_at).await;
+    }
+}
+
 /// Retry `attempt` while it fails UNAVAILABLE, every `retry_interval` until
 /// `deadline`; any other result returns at once. GetServerInfo answers
 /// UNAVAILABLE until every DP rank's listener is bound
@@ -257,38 +309,32 @@ async fn retry_unavailable<T, F>(
 where
     F: Future<Output = Result<T, DynamoError>>,
 {
-    let started = Instant::now();
-    let mut attempts = 0_u64;
-    let mut last_logged_at: Option<Instant> = None;
-    loop {
-        attempts += 1;
-        // status_to_dynamo maps UNAVAILABLE, and only that, to CannotConnect.
-        let error = match attempt().await {
-            Err(error) if error.error_type() == ErrorType::Backend(BackendError::CannotConnect) => {
-                error
+    retry_until(
+        retry_interval,
+        deadline,
+        "SGLang discovery unavailable",
+        || {
+            let result = attempt();
+            async move {
+                match result.await {
+                    // status_to_dynamo maps UNAVAILABLE, and only that, to CannotConnect.
+                    Err(error)
+                        if error.error_type()
+                            == ErrorType::Backend(BackendError::CannotConnect) =>
+                    {
+                        Retry::Again(error.to_string())
+                    }
+                    result => Retry::Stop(result),
+                }
             }
-            result => return result,
-        };
-        let now = Instant::now();
-        let retry_at = now + retry_interval;
-        if retry_at >= deadline {
-            return Err(cannot_connect(format!(
-                "SGLang discovery did not succeed within the startup deadline: {error}"
-            )));
-        }
-        if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL) {
-            tracing::warn!(
-                attempt = attempts,
-                elapsed = ?started.elapsed(),
-                remaining = ?deadline.saturating_duration_since(now),
-                retry_interval = ?retry_interval,
-                reason = %error,
-                "SGLang discovery unavailable; retrying"
-            );
-            last_logged_at = Some(now);
-        }
-        tokio::time::sleep_until(retry_at).await;
-    }
+        },
+        |reason| {
+            cannot_connect(format!(
+                "SGLang discovery did not succeed within the startup deadline: {reason}"
+            ))
+        },
+    )
+    .await
 }
 
 /// `bootstrap`: true for synchronous constructors before logging setup;
@@ -374,7 +420,6 @@ impl Pool {
         self.clients[0].clone()
     }
 
-    /// One connection to `uri`, opened on first use.
     #[cfg(test)]
     pub(crate) fn lazy(uri: &GrpcEndpoint) -> Self {
         let channel = tonic::transport::Endpoint::from_shared(uri.as_str().to_string())
@@ -486,11 +531,11 @@ impl AbortRpc {
     }
 
     /// Failures are logged, not returned.
-    pub(crate) async fn abort(&self, request_id: &str, timeout: Duration) {
-        match abort(&mut self.0.clone(), request_id, timeout).await {
+    pub(crate) async fn abort(&self, rid: &str, timeout: Duration) {
+        match abort(&mut self.0.clone(), rid, timeout).await {
             Ok(true) => {}
-            Ok(false) => tracing::debug!(request_id, "SGLang Abort matched no active request"),
-            Err(error) => tracing::debug!(request_id, %error, "SGLang Abort RPC failed"),
+            Ok(false) => tracing::debug!(rid, "SGLang Abort matched no active request"),
+            Err(error) => tracing::debug!(rid, %error, "SGLang Abort RPC failed"),
         }
     }
 
@@ -613,17 +658,19 @@ pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
 }
 
 /// For a generate stream: a broken stream maps as in
-/// [`dynamo_sidecar_common::stream_status_to_dynamo`]; a status SGLang sent
-/// keeps this module's mapping.
+/// [`dynamo_sidecar_common::v14::stream_status_to_dynamo`]; a status SGLang
+/// sent keeps this module's mapping.
 pub fn stream_status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
-    if dynamo_sidecar_common::is_broken_stream(&status) {
-        return dynamo_sidecar_common::stream_status_to_dynamo(rpc, status);
+    if dynamo_sidecar_common::v14::is_broken_stream(&status) {
+        return dynamo_sidecar_common::v14::stream_status_to_dynamo(rpc, status);
     }
     status_to_dynamo(rpc, status)
 }
 
 #[cfg(test)]
 mod tests {
+    use tonic_v14 as tonic;
+
     use std::time::Duration;
 
     use dynamo_backend_common::{BackendError, ErrorType};

@@ -4,10 +4,10 @@
 use std::collections::{HashMap, HashSet};
 
 use super::*;
-use dynamo_kv_router::protocols::{
+use dynamo_runtime::protocols::EndpointId;
+use dynamo_scheduler::host::{
     KvTransferEnforcement as RsKvTransferEnforcement, RoutingConstraints as RsRoutingConstraints,
 };
-use dynamo_runtime::protocols::EndpointId;
 use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
 use llm_rs::local_model::runtime_config::StructuralTagConfig as RsStructuralTagConfig;
