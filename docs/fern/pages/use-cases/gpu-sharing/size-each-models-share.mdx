@@ -29,17 +29,42 @@ Round the total up, and record it as the model's memory request.
 </Step>
 <Step title="Find each model's compute share" id="find-each-models-compute-share">
 
-The compute share is the smallest share of the SMs at which the model still meets its latency targets at its expected traffic. Measure it:
+The compute share is the smallest share of the SMs at which the model still meets its latency targets at its expected traffic. Instead of load-testing one share at a time, measure how the engine's speed changes with its share once, then work out which shares meet the targets.
 
-1. Run the model at a few shares, such as 0.2, 0.3, and 0.5 of the GPU.
-2. At each share, load the rest of the GPU with another model, and send the model its expected traffic.
-3. Record its time to first token (TTFT) and inter-token latency (ITL), and pick the smallest share that meets both targets.
+1. **Measure the forward-pass curves.** For each share on a grid, such as 0.10 to 0.75 of the GPU, load the rest of the GPU with another engine and measure:
+   - the time of one prefill pass at your input length;
+   - the time of one decode step at batch sizes 1 to 32;
+   - the memory the engine uses beyond its KV cache.
 
-[Try MPS on One GPU](try-mps-on-one-gpu.mdx) shows how to run a process at a chosen share without Kubernetes, which is the quickest way to run this sweep.
+   Measure once per model and GPU type, and reuse the curves for every packing decision. [Try MPS on One GPU](try-mps-on-one-gpu.mdx) shows how to run a process at a chosen share without Kubernetes.
+2. **Set the targets.** For each model, write down its expected request rate `R`, its TTFT ceiling `TTFT_max`, and its inter-token latency (ITL) ceiling `ITL_max`.
+3. **Admit the shares that pass three checks.** A share is admitted only when it passes all three:
+
+   | Check | Passes when |
+   |---|---|
+   | ITL | A decode step at the model's batch size is at most `ITL_max`. |
+   | Load | The engine's load `rho`, the fraction of time it is busy serving `R`, is below 1. |
+   | Violation | The expected time until the first request misses `TTFT_max`, `tau`, is at least one hour. |
+
+   The violation check is the one that usually decides. Every request queued ahead of a new one adds a full prefill to its TTFT, so a slower prefill both raises the load and lowers how many queued requests still fit within `TTFT_max`. `tau` is how long Poisson arrivals at rate `R` take, on average, to queue more than that.
+4. **Take the smallest admitted share.** Read the curves only at measured points: between two measured batch sizes, use the slower value. Look for plateaus, where a larger share is no faster. A share inside a plateau buys nothing.
 
 <Note>
 A share measured on an idle GPU is optimistic. When every model on the GPU is busy, the GPU can reach its power limit and lower its clocks, and every model's share runs slower. Memory bandwidth and the L2 cache are also shared. Always measure each share with the rest of the GPU loaded.
 </Note>
+
+The targets decide how many models fit. For Qwen3-4B on one RTX PRO 6000 with 2048-token inputs and 256-token outputs, at `ITL_max` = 100 ms, the procedure packs this many models per GPU:
+
+| Rate per model (req/s) | `TTFT_max` 10 s | `TTFT_max` 20 s | `TTFT_max` 30 s |
+|---:|---:|---:|---:|
+| 0.02 | 10 | 10 | 10 |
+| 0.05 | 5 | 10 | 10 |
+| 0.10 | 2 | **5** | 10 |
+| 0.20 | 1 | 2 | 4 |
+
+At 0.1 req/s and a 20-second ceiling, it admits a share of 0.20 and rejects 0.15, so five models fit where an even split fits two. [Benchmark Sized Shares](benchmark-sized-shares.mdx) measures that packing under load.
+
+For the rest of this page, the example models have these shares:
 
 | Model | Compute share | Memory request |
 |---|---:|---:|
@@ -102,4 +127,5 @@ Record the three values for each model, which the deployment guide uses:
 ## Next Steps
 
 - [Try MPS on One GPU](try-mps-on-one-gpu.mdx): run a process at a chosen share and memory cap, and measure it.
+- [Benchmark Sized Shares](benchmark-sized-shares.mdx): see shares sized this way compared with an even split.
 - [Deploy Models on GPU Fractions](deploy-models-on-gpu-fractions.mdx): request these shares from KAI-Scheduler.

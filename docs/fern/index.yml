@@ -894,8 +894,8 @@ navigation:
             path: pages/use-cases/gpu-sharing/deploy-models-on-gpu-fractions.mdx
           - page: Benchmark GPU Fractions
             path: pages/use-cases/gpu-sharing/benchmark-gpu-fractions.mdx
-          - page: Interpreting Optimal Model Packing Results
-            path: pages/use-cases/gpu-sharing/optimal-packing-results.mdx
+          - page: Benchmark Sized Shares
+            path: pages/use-cases/gpu-sharing/benchmark-sized-shares.mdx
           - page: Operate Shared GPUs
             slug: operate-shared-gpus
             path: pages/use-cases/gpu-sharing/operate-shared-gpus.md

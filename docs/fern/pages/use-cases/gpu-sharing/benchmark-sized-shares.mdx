@@ -1,11 +1,11 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Interpreting Optimal Model Packing Results
-subtitle: Sizing GPU fractions from measured forward-pass curves instead of splitting each GPU in half
+title: Benchmark Sized Shares
+subtitle: Compare shares sized from measured curves with an even split of the GPU
 ---
 
-The [GPU sharing results](gpu-sharing-results.mdx) pack two models onto each GPU by giving each model half of the GPU's SMs and memory. This page repeats that experiment on one GPU, but sizes each model's share from its latency targets instead of fixing it at one half. With the same model, prompt shape, and GPU fractioning stack, the sized packing fits five models on the GPU where the even split fits two, and every model still meets its targets.
+[Benchmark GPU Fractions](benchmark-gpu-fractions.mdx) packs two models onto each GPU by giving each model half of the GPU's SMs and memory. This page repeats that experiment on one GPU, but sizes each model's share from its latency targets with the procedure in [Size Each Model's Share](size-each-models-share.mdx). With the same model and prompt shape, the sized packing fits five models on the GPU where the even split fits two, every model still meets its targets, and serving each model's traffic costs 60% less.
 
 <Note>
 Any performance results on this page are purely illustrative and are not indicative of optimal performance. Your deployment or configuration may vary.
@@ -13,28 +13,22 @@ Any performance results on this page are purely illustrative and are not indicat
 
 ## Setup
 
-All runs use one NVIDIA RTX PRO 6000 Blackwell Workstation Edition (188 SMs, 96 GiB) under KAI-Scheduler with GPU fractions in `sm-sharing` mode, the same stack as the [KAI + GPU fractions experiment](deploy-kai-gpu-fractions.md). Each model is `Qwen/Qwen3-4B`, served by one Dynamo frontend and one aggregated vLLM worker, with a fixed input length of 2048 tokens and a fixed output length of 256 tokens.
+All runs use one NVIDIA RTX PRO 6000 Blackwell Workstation Edition (188 SMs, 96 GiB) under KAI-Scheduler with GPU fractions in `sm-sharing` mode, the stack from [Install GPU Fractions on Kubernetes](install-gpu-fractions.mdx). Each model is `Qwen/Qwen3-4B`, served by one Dynamo frontend and one aggregated vLLM worker, with a fixed input length of 2048 tokens and a fixed output length of 256 tokens.
 
-The results are pessimistic in the same way as the A100 study: prefix caching is off, so every request computes its full 2048-token input.
+The results are pessimistic in the same way as the A100 benchmark: prefix caching is off, so every request computes its full 2048-token input.
 
 | Configuration | Models on the GPU | SM share per model | How the share was chosen |
 |---|---:|---:|---|
 | Baseline | 1 | Whole GPU | Dedicated GPU, no MPS (`nvidia.com/gpu: 1`) |
-| Naive | 2 | 0.50 | Even split, as in the A100 study |
+| Naive | 2 | 0.50 | Even split, as in the A100 benchmark |
 | Optimal | 5 | 0.20 | Smallest share that meets the targets, from measured curves |
 | Overpack | 6 | 0.15 | One model more than the optimal packing; the sizing procedure rejects this share |
 
 Each model's memory request is its measured runtime overhead plus the KV cache its traffic needs, so memory is not the limit in any packed configuration.
 
-## How the Optimal Packing Is Chosen
+## How the Shares Were Chosen
 
-The packing follows the aggregated-engine procedure for Poisson arrivals from *Many-Model Inequalities*. It needs only measurements, taken once per model and GPU type and reused for every packing decision:
-
-1. **Measure forward-pass curves.** For each SM share on a grid from 0.10 to 0.75, measure the time of one prefill pass and of one decode step at batch sizes 1 to 32, with a neighbouring engine loading the rest of the GPU. Also measure the memory the engine uses beyond its KV cache.
-2. **Admit a share.** For a per-model request rate `R`, a time-to-first-token ceiling `TTFT_max`, and an inter-token latency ceiling `ITL_max`, the procedure computes the engine's load `rho`, the queue depth a request can wait behind and still meet `TTFT_max`, and the expected time until the first `TTFT_max` violation, `tau`. A share is admitted when `rho < 1`, decode steps meet `ITL_max`, and `tau` is at least one hour.
-3. **Pack.** Choose the smallest admitted share for each model, size its memory, and place models while the shares sum to at most 1 and the memory requests fit in HBM.
-
-Curves are only read at measured points. Between two measured batch sizes, the procedure uses the larger, so it never interpolates toward a faster value than was measured.
+The shares come from the procedure in [Size Each Model's Share](size-each-models-share.mdx): measure the forward-pass curves once, admit each share that passes the ITL, load, and violation checks, and take the smallest admitted share. The targets are `R` = 0.1 req/s per model, `TTFT_max` = 20 s, and `ITL_max` = 100 ms. At these targets the procedure admits share 0.20 and rejects 0.15, so it packs five models, and a sixth does not fit.
 
 ### Measured Curves
 
@@ -60,19 +54,6 @@ Curves are only read at measured points. Between two measured batch sizes, the p
 </details>
 
 Prefill time does not fall between shares 0.10 and 0.15, then drops by a third at 0.20. A share inside such a plateau buys no speed, which is why the optimal share lands on 0.20 rather than anywhere between 0.15 and 0.20.
-
-### Choosing the Targets
-
-How many models fit depends on the targets. The table below shows the models packed per GPU across request rates and `TTFT_max` ceilings, with `ITL_max` at 100 ms. Compute, not memory, is the binding limit in every cell.
-
-| Rate per model (req/s) | `TTFT_max` 10 s | `TTFT_max` 20 s | `TTFT_max` 30 s |
-|---:|---:|---:|---:|
-| 0.02 | 10 | 10 | 10 |
-| 0.05 | 5 | 10 | 10 |
-| 0.10 | 2 | **5** | 10 |
-| 0.20 | 1 | 2 | 4 |
-
-The experiments use `R` = 0.1 req/s, `TTFT_max` = 20 s, and `ITL_max` = 100 ms, the loosest of these targets at which the even split is no longer the answer: the procedure admits share 0.20 and rejects 0.15, so it packs five models, and a sixth would not fit.
 
 ## Results
 
@@ -131,11 +112,11 @@ Thirty models is the smallest fleet that every configuration packs into whole GP
 
 ### Throughput Across Concurrency
 
-The rest of this page repeats the A100 study's closed-loop measurement on each configuration: every model holds `c` requests in flight, for `c` from 1 to 32. Each point has 90 seconds of unmeasured load (240 seconds for the first point of a configuration), then a 120-second measured window with every model loaded throughout. Throughput counts each output token that arrived inside the window.
+The rest of this page repeats the A100 benchmark's closed-loop measurement on each configuration: every model holds `c` requests in flight, for `c` from 1 to 32. Each point has 90 seconds of unmeasured load (240 seconds for the first point of a configuration), then a 120-second measured window with every model loaded throughout. Throughput counts each output token that arrived inside the window.
 
 The packed configurations keep their SM shares from the table above, but their KV caches are enlarged to hold 32 full sequences per model, so concurrency, not KV capacity, sets the load. Overpack cannot fit that in memory and holds at most 22 sequences per model, so at `c` = 32 part of each model's requests queue in the engine.
 
-Rows are matched on concurrency per model, as in the A100 study's cost table. A packed GPU therefore carries several times the in-flight requests of the baseline GPU in the same row: at `c` = 4, the baseline GPU holds 4 requests and the optimal GPU holds 20.
+Rows are matched on concurrency per model, as in the A100 benchmark's cost table. A packed GPU therefore carries several times the in-flight requests of the baseline GPU in the same row: at `c` = 4, the baseline GPU holds 4 requests and the optimal GPU holds 20.
 
 ![Line chart of output tokens per second per GPU as a percentage of the baseline, against concurrency per model from 1 to 32 on a log scale, with a dashed line at 100%; the region above the line is tinted green and the region below it red. Optimal and overpack start near 136% at concurrency 1 and fall below 100% at 32, to 91% and 81%. Naive starts at 128% and stays above 100%, ending at 106%.](../../../assets/img/optimal-packing-sweep-throughput.svg)
 
@@ -231,3 +212,8 @@ Every model on a share of 0.20 decodes more slowly than a model on a whole GPU: 
 ## Summary
 
 Measure the forward-pass curves once for each model and GPU type, then let each model's targets choose its share. On this GPU, at 0.1 req/s per model with a 20-second TTFT target, that fits five models where an even split fits two. All five met their targets on every request, and the cost of serving each model's traffic fell by 60% compared with the even split and by 80% compared with one model per GPU. When models are instead driven to high concurrency, the configurations converge in cost, and the smaller shares begin to cost throughput.
+
+## Next Steps
+
+- [Size Each Model's Share](size-each-models-share.mdx): size your own models' shares with the same procedure.
+- [Operate Shared GPUs](operate-shared-gpus.md): run the shared GPUs in production.
