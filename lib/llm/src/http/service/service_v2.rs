@@ -32,9 +32,6 @@ use super::worker_metrics::register_worker_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{RoutingOverheadMetrics, register_router_queue_metrics};
-use crate::local_model::runtime_config::{
-    SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-};
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::{Context, Result};
@@ -1633,22 +1630,10 @@ impl HttpServiceConfigBuilder {
         let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
         let systemone_enabled = frontend_api_config.systemone_enabled();
         let generate_routes = configured_generate_routes(config.enable_engine_apis)?;
-        let mut generate_engine_capabilities = generate_routes
+        let generate_engine_capabilities = generate_routes
             .iter()
             .map(|(_, format)| format.capability())
             .collect::<Vec<_>>();
-        // Decision scoring needs native transports without mounting their public routes.
-        if systemone_enabled {
-            for capability in [
-                SGLANG_GENERATE_CAPABILITY,
-                VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-            ] {
-                if !generate_engine_capabilities.contains(&capability) {
-                    generate_engine_capabilities.push(capability);
-                }
-            }
-        }
-
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default().child_token();
         // Use the provided discovery client, or fall back to a no-op memory-backed one
@@ -4301,7 +4286,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn decisions_mount_both_routes_and_internal_scoring_capabilities() {
+    fn decisions_mount_both_routes_without_enabling_public_generate_capabilities() {
         temp_env::with_vars(
             [
                 (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
@@ -4317,13 +4302,7 @@ mod tests {
                     .build()
                     .unwrap();
 
-                assert_eq!(
-                    service.generate_engine_capabilities(),
-                    vec![
-                        SGLANG_GENERATE_CAPABILITY,
-                        VLLM_INFERENCE_V1_GENERATE_CAPABILITY
-                    ]
-                );
+                assert!(service.generate_engine_capabilities().is_empty());
                 assert!(service.model_endpoint_enabled(EndpointType::SystemOne));
                 assert!(!service.model_endpoint_enabled(EndpointType::Generate));
                 let routes = service
