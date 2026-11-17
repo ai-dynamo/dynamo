@@ -217,28 +217,14 @@ pub struct ReplayScope {
     /// Registry in which each offline KV-router placement registers its selector, so the host can
     /// change router policy parameters during the replay. `None` registers nothing.
     pub router_controls: Option<ReplayRouterControls>,
-    /// Registry that a worker-selection policy named in the router config resolves from, so a
-    /// host can offer the policies its live router links. `None` offers the policies Dynamo
-    /// ships.
+    /// Registry a worker-selection policy named in the router config resolves from. `None`
+    /// offers the policies Dynamo ships.
     pub router_plugins: Option<RouterPluginRegistry>,
     /// Request identity and KV-router selection semantics of offline replays that do not pass
     /// their own [`ReplayCaptureOptions`]. [`ReplayDeterminism::CanonicalV1`] assigns ordinal
-    /// request IDs and seeds every KV-router selector that runs Dynamo's default policy, so two
-    /// replays of the same input and configuration produce the same report. A configured
-    /// worker-selection policy is not seeded.
+    /// request IDs and seeds every KV-router selector, so two replays of the same input and
+    /// configuration produce the same report. A configured worker-selection policy is not seeded.
     pub determinism: ReplayDeterminism,
-}
-
-impl std::fmt::Debug for ReplayScope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReplayScope")
-            .field("conversation_affinity", &self.conversation_affinity)
-            .field("kv_event_lag_ms", &self.kv_event_lag_ms)
-            .field("router_controls", &self.router_controls)
-            .field("router_plugins", &self.router_plugins.is_some())
-            .field("determinism", &self.determinism)
-            .finish()
-    }
 }
 
 thread_local! {

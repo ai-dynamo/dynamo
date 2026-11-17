@@ -521,7 +521,7 @@ pub(crate) struct OfflineReplayRouter {
     affinity_staged: HashMap<Uuid, (Hold, AffinityTarget)>,
     affinity_active: HashMap<Uuid, AffinityLease>,
     needs_drain: bool,
-    /// Fixed at startup, like production's index; see `new_for_worker_type`.
+    /// Fixed at startup, like production's index; see `new_with_selector_seed`.
     kv_transfer_chain_supported: bool,
     kv_transfer_gate_warned: bool,
 }
@@ -531,28 +531,7 @@ pub(in crate::replay) struct KvRouterPlacement {
 }
 
 impl KvRouterPlacement {
-    #[cfg(test)]
     pub(in crate::replay) fn new_with_selector_seed(
-        args: &MockerConfig,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        topology: &[WorkerTopology],
-        selector_seed: Option<u64>,
-    ) -> Result<Self> {
-        Self::new_for_worker_type(
-            args,
-            router_config,
-            prefill_load_estimator,
-            topology,
-            selector_seed,
-            WorkerType::Aggregated,
-            None,
-        )
-    }
-
-    /// The placement of the `worker_type` pool: a worker-selection policy the router config
-    /// selects for that role resolves from `router_plugins`.
-    pub(in crate::replay) fn new_for_worker_type(
         args: &MockerConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
@@ -563,7 +542,7 @@ impl KvRouterPlacement {
     ) -> Result<Self> {
         // Composition checks that `topology[i]` is worker `i`.
         let router_hints: Vec<bool> = topology.iter().map(|worker| worker.router_hint).collect();
-        let router = OfflineReplayRouter::new_for_worker_type(
+        let router = OfflineReplayRouter::new_with_selector_seed(
             args,
             router_config,
             prefill_load_estimator,
@@ -839,32 +818,15 @@ impl OfflineReplayRouter {
             prefill_load_estimator,
             &vec![false; num_workers],
             None,
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_with_selector_seed(
-        args: &MockerConfig,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        router_hints: &[bool],
-        selector_seed: Option<u64>,
-    ) -> Result<Self> {
-        Self::new_for_worker_type(
-            args,
-            router_config,
-            prefill_load_estimator,
-            router_hints,
-            selector_seed,
             WorkerType::Aggregated,
             None,
         )
     }
 
-    /// The router of the `worker_type` pool. Worker `i` receives KV fetch hints and serves as
-    /// their source when `router_hints[i]` is set. A worker-selection policy the router config
-    /// selects for that role resolves from `router_plugins`.
-    pub(crate) fn new_for_worker_type(
+    /// Worker `i` receives KV fetch hints and serves as their source when
+    /// `router_hints[i]` is set. A worker-selection policy the router config selects for
+    /// `worker_type` resolves from `router_plugins`.
+    pub(crate) fn new_with_selector_seed(
         args: &MockerConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
@@ -1706,6 +1668,7 @@ mod tests {
     use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
     use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_kv_router::config::KvRouterConfig;
+    use dynamo_router_protocol::WorkerType;
     use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
     use dynamo_scheduler::host::{
         PrefillLoadEstimator, RouterPrefillLoadModel, TrackingHashAlgorithm,
@@ -1744,6 +1707,8 @@ mod tests {
             None,
             &topology(num_workers, dp_size, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         )
         .unwrap()
         .with_conversation_affinity(Some(crate::replay::ConversationAffinityConfig {
@@ -1842,6 +1807,8 @@ mod tests {
             None,
             &topology(1, 1, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         )
         .unwrap()
         .with_conversation_affinity(Some(Default::default()))
@@ -1901,6 +1868,8 @@ mod tests {
             None,
             &topology(1, 2, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         )
         .unwrap()
         .with_conversation_affinity(Some(Default::default()))
@@ -1976,6 +1945,8 @@ mod tests {
             None,
             &topology(1, 1, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         )
         .unwrap()
         .with_conversation_affinity(Some(Default::default()))
@@ -2063,6 +2034,8 @@ mod tests {
             Some(estimator(Duration::from_secs(10))),
             &topology(1, 1, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         )
         .unwrap()
         .with_conversation_affinity(affinity.then(Default::default))
@@ -2129,6 +2102,8 @@ mod tests {
             None,
             &topology(1, 1, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         )
         .unwrap();
         let mut config = SessionAffinityConfig::new(Duration::from_secs(60));
@@ -3777,8 +3752,16 @@ policy_classes:
         router_hint: bool,
     ) -> KvRouterPlacement {
         let topology = topology(workers, args.dp_size.max(1), router_hint);
-        KvRouterPlacement::new_with_selector_seed(args, Some(config), None, &topology, Some(0))
-            .unwrap()
+        KvRouterPlacement::new_with_selector_seed(
+            args,
+            Some(config),
+            None,
+            &topology,
+            Some(0),
+            WorkerType::Aggregated,
+            None,
+        )
+        .unwrap()
     }
 
     fn assert_fetches_from_a_peer(placement: &Placement) {
@@ -3891,6 +3874,8 @@ policy_classes:
                 None,
                 &topology,
                 Some(0),
+                WorkerType::Aggregated,
+                None,
             )
             .unwrap();
             occupy_worker_1(&mut placement, 0);

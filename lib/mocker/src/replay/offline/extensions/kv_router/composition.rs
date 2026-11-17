@@ -116,8 +116,7 @@ pub(in crate::replay) struct KvReplayComposition {
     /// Captured from [`crate::replay::ReplayScope`] at construction. Each placement registers its
     /// selector control here under its worker type.
     router_controls: Option<ReplayRouterControls>,
-    /// Captured from [`crate::replay::ReplayScope`] at construction. A worker-selection policy
-    /// the router config selects resolves from it.
+    /// Captured from [`crate::replay::ReplayScope`] at construction.
     router_plugins: Option<RouterPluginRegistry>,
 }
 
@@ -218,7 +217,7 @@ impl ReplayComposition for KvReplayComposition {
             bail!("disaggregated Router composition used for aggregated replay");
         };
         validate_runtime_topology("aggregated", args, *num_workers, dp_size, &topology)?;
-        let placement = KvRouterPlacement::new_for_worker_type(
+        let placement = KvRouterPlacement::new_with_selector_seed(
             args,
             self.router_config.take(),
             self.prefill_load_estimator.take(),
@@ -264,7 +263,7 @@ impl ReplayComposition for KvReplayComposition {
             &decode_topology,
         )?;
         let router_config = self.router_config.take();
-        let prefill = KvRouterPlacement::new_for_worker_type(
+        let prefill = KvRouterPlacement::new_with_selector_seed(
             prefill_args,
             Some(derive_prefill_router_config(
                 prefill_args,
@@ -279,7 +278,7 @@ impl ReplayComposition for KvReplayComposition {
         .context("constructing prefill KV Router placement")?
         .with_kv_event_lag_ms(self.kv_event_lag_ms)?
         .with_conversation_affinity(self.conversation_affinity)?;
-        let decode = KvRouterPlacement::new_for_worker_type(
+        let decode = KvRouterPlacement::new_with_selector_seed(
             decode_args,
             Some(derive_decode_router_config(decode_args, router_config)),
             None,

@@ -13,9 +13,6 @@ use std::sync::Arc;
 /// Synchronous adapter for direct callers and replay. Scheduler actors use `default_policy`
 /// directly and do not acquire this adapter's mutex.
 ///
-/// It runs Dynamo's default policy, or the configured worker-selection policy a registry
-/// factory builds ([`Self::with_policy_factory`]).
-///
 /// The policy accepts runtime parameter updates through a [`DefaultWorkerSelectorControl`] from
 /// [`Self::runtime_control`]. Updates apply between selections and keep the selector's random
 /// stream.

@@ -22,15 +22,11 @@ virtual-time runtime and its liveness contract.
 
 ## Worker-selection policies
 
-A router config that selects a worker-selection policy (`router_policy_config`, or
-`DYN_ROUTER_WORKER_SELECTION_POLICY`) runs that policy in replay. Each worker pool resolves the
-policy selected for its role (`aggregated`, `prefill` or `decode`) from the registry in
-`ReplayScope::router_plugins`. The Python bindings pass the registry their live router uses, so
-a linked catalog is available too; without one, replay offers the policies Dynamo ships.
-
-A configured policy is built by its registered factory, as for a live router. The replay seed
-does not reach it, and a policy that reads the clock reads wall time, not replay time.
-`request_classifier` plugins are not supported.
+Each worker pool runs the worker-selection policy the router config selects for its role,
+resolved from `ReplayScope::router_plugins` (the policies Dynamo ships when unset). The policy
+is built by its registered factory, so the replay seed does not reach it and a policy that
+reads the clock reads wall time. Conversation affinity pins a session's worker under every
+policy. `request_classifier` plugins are not supported.
 
 ## Reproducibility
 
