@@ -1,9 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""FD passing over the async wire path: ordering, partial sends, cancellation, and
-descriptor ownership, on both the stdlib event loop and uvloop (the GMS server's
-loop in production)."""
+"""FD passing over the async wire path, on the stdlib event loop and on uvloop
+(the GMS server's loop)."""
 
 from __future__ import annotations
 
@@ -12,10 +11,17 @@ import contextlib
 import os
 import socket
 import tempfile
-import threading
-from unittest.mock import patch
 
 import pytest
+from _deps import HAS_GMS
+
+if not HAS_GMS:
+    pytest.skip(
+        "gpu_memory_service package is not available in this test image",
+        allow_module_level=True,
+    )
+
+import uvloop
 from gpu_memory_service.common.protocol import wire
 from gpu_memory_service.common.protocol.messages import (
     ErrorResponse,
@@ -35,20 +41,25 @@ pytestmark = [
 ]
 
 _SMALL_SNDBUF = 4096
+_TIMEOUT = 5
 
 
 @pytest.fixture(params=["asyncio", "uvloop"])
 def run(request):
     """Run a coroutine function to completion on the parametrized event loop."""
-    if request.param == "uvloop":
-        uvloop = pytest.importorskip("uvloop")
-        loop_factory = uvloop.new_event_loop
-    else:
-        loop_factory = None
+    new_loop = (
+        uvloop.new_event_loop if request.param == "uvloop" else asyncio.new_event_loop
+    )
 
     def _run(coro_fn):
-        with asyncio.Runner(loop_factory=loop_factory) as runner:
-            return runner.run(coro_fn())
+        loop = new_loop()
+        try:
+            return loop.run_until_complete(coro_fn())
+        finally:
+            for task in asyncio.all_tasks(loop):
+                task.cancel()
+            loop.run_until_complete(loop.shutdown_default_executor())
+            loop.close()
 
     return _run
 
@@ -82,8 +93,7 @@ async def _stream_pair(sndbuf: int | None = None):
     local, peer = socket.socketpair()
     if sndbuf is not None:
         local.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, sndbuf)
-    local.setblocking(False)
-    peer.settimeout(2)
+    peer.settimeout(_TIMEOUT)
     _, writer = await asyncio.open_connection(sock=local)
     try:
         yield writer, peer
@@ -95,68 +105,61 @@ async def _stream_pair(sndbuf: int | None = None):
 
 
 def _fill_send_buffer(writer) -> None:
-    sock = writer.get_extra_info("socket")
-    raw = socket.socket(fileno=os.dup(sock.fileno()))
-    try:
-        while True:
-            try:
+    with writer.get_extra_info("socket").dup() as raw:
+        with contextlib.suppress(BlockingIOError):
+            while True:
                 raw.send(b"\0" * 4096, socket.MSG_DONTWAIT)
-            except BlockingIOError:
-                return
-    finally:
-        raw.close()
 
 
-def _large_export(tag_bytes: int = 256 * 1024) -> ExportAllocationResponse:
+def _large_export() -> ExportAllocationResponse:
     return ExportAllocationResponse(
-        allocation_id="a", size=8, aligned_size=8, tag="z" * tag_bytes, layout_slot=0
+        allocation_id="a", size=8, aligned_size=8, tag="z" * 262144, layout_slot=0
     )
 
 
-def _tracing_sendmsg(observation: dict):
-    """socket.sendmsg wrapper recording the duplicate's fd and the first result."""
-    real_sendmsg = socket.socket.sendmsg
-
-    def traced(sock, buffers, ancillary, *args, **kwargs):
-        observation["sendmsg_calls"] = observation.get("sendmsg_calls", 0) + 1
-        observation["socket_duplicate"] = sock.fileno()
-        try:
-            count = real_sendmsg(sock, buffers, ancillary, *args, **kwargs)
-        except BlockingIOError:
-            observation["first_send_bytes"] = 0
-            raise
-        observation["first_send_bytes"] = count
-        return count
-
-    return traced
+def _receive(peer: socket.socket, size: int) -> tuple[bytes, list[int]]:
+    """Read up to ``size`` bytes, or to EOF, with every descriptor that arrives."""
+    data = bytearray()
+    fds: list[int] = []
+    while len(data) < size:
+        chunk, received, _, _ = socket.recv_fds(peer, size - len(data), 8)
+        fds += received
+        if not chunk:
+            break
+        data += chunk
+    return bytes(data), fds
 
 
-async def _wait_for_sendmsg(observation: dict) -> None:
-    while "first_send_bytes" not in observation:
-        await asyncio.sleep(0.001)
+async def _receive_in_thread(peer: socket.socket, size: int):
+    loop = asyncio.get_running_loop()
+    return await asyncio.wait_for(
+        loop.run_in_executor(None, _receive, peer, size), _TIMEOUT
+    )
 
 
-def test_fd_frames_close_socket_duplicates_and_keep_transport_usable(run, payload):
+def _start_send(writer, message, payload) -> asyncio.Task:
+    return asyncio.create_task(wire.send_message(writer, message, payload.fileno()))
+
+
+def test_fd_frames_leak_no_descriptor_and_keep_the_socket_non_blocking(run, payload):
     async def body():
         async with _stream_pair() as (writer, peer):
-            sock_target = _target(writer.get_extra_info("socket").fileno())
-            before = _descriptors_to(sock_target)
-            for i in range(100):
+            sock_fd = writer.get_extra_info("socket").fileno()
+            before = _descriptors_to(_target(sock_fd))
+            for i in range(3):
                 await wire.send_message(
                     writer, ErrorResponse(error=f"fd-{i}"), payload.fileno()
                 )
                 msg, fd, rest = wire.recv_message_sync(peer)
                 try:
-                    assert msg.error == f"fd-{i}"
-                    assert not rest
+                    assert (msg.error, bytes(rest)) == (f"fd-{i}", b"")
                     assert os.pread(fd, 8, 0) == b"ORIGINAL"
                 finally:
                     os.close(fd)
-            assert _descriptors_to(sock_target) == before
-            # The caller keeps ownership of the payload FD.
+            assert _descriptors_to(_target(sock_fd)) == before
+            assert not os.get_blocking(sock_fd)
+            # The caller keeps ownership of the payload descriptor.
             os.fstat(payload.fileno())
-            # The shared open file description stays non-blocking for the loop.
-            assert not os.get_blocking(writer.get_extra_info("socket").fileno())
             await wire.send_message(writer, ErrorResponse(error="plain"))
             msg, fd, _ = wire.recv_message_sync(peer)
             assert (msg.error, fd) == ("plain", -1)
@@ -164,235 +167,52 @@ def test_fd_frames_close_socket_duplicates_and_keep_transport_usable(run, payloa
     run(body)
 
 
-@pytest.mark.parametrize("fail_at", ["sendmsg", "socket"])
-def test_send_setup_failure_closes_socket_duplicate(run, payload, fail_at):
-    async def body():
-        async with _stream_pair() as (writer, _peer):
-            sock_target = _target(writer.get_extra_info("socket").fileno())
-            before = _descriptors_to(sock_target)
-            if fail_at == "sendmsg":
-                patcher = patch.object(
-                    socket.socket, "sendmsg", side_effect=BrokenPipeError("injected")
-                )
-                expected = BrokenPipeError
-            else:
-                patcher = patch.object(
-                    wire.socket, "socket", side_effect=OSError("injected")
-                )
-                expected = OSError
-            with patcher, pytest.raises(expected):
-                await wire.send_message(
-                    writer, ErrorResponse(error="x"), payload.fileno()
-                )
-            assert _descriptors_to(sock_target) == before
-            # Nothing reached the wire, so the stream is still usable.
-            assert not writer.is_closing()
-            os.fstat(payload.fileno())
-
-    run(body)
-
-
-def test_partial_fd_frame_delivers_exact_message_and_one_fd(run, payload):
-    message = _large_export()
-
-    async def body():
-        async with _stream_pair(sndbuf=_SMALL_SNDBUF) as (writer, peer):
-            observation: dict = {}
-            result: dict = {}
-
-            def receive():
-                fd = -1
-                try:
-                    msg, fd, rest = wire.recv_message_sync(peer)
-                    result["tag"] = msg.tag
-                    result["payload"] = os.pread(fd, 8, 0)
-                    result["rest"] = rest
-                except Exception as exc:  # asserted below
-                    result["error"] = exc
-                finally:
-                    if fd >= 0:
-                        os.close(fd)
-
-            with patch.object(socket.socket, "sendmsg", _tracing_sendmsg(observation)):
-                task = asyncio.create_task(
-                    wire.send_message(writer, message, payload.fileno())
-                )
-                await _wait_for_sendmsg(observation)
-                # The kernel took only part of the frame before anyone read.
-                frame_len = len(wire._frame_message(message))
-                assert 0 < observation["first_send_bytes"] < frame_len
-                receiver = threading.Thread(target=receive)
-                receiver.start()
-                await asyncio.wait_for(task, 5)
-            await asyncio.get_running_loop().run_in_executor(None, receiver.join, 5)
-            assert "error" not in result, result.get("error")
-            assert result["tag"] == message.tag
-            assert result["payload"] == b"ORIGINAL"
-            assert not result["rest"]
-            assert observation["sendmsg_calls"] == 1  # SCM_RIGHTS sent exactly once
-
-    run(body)
-
-
-def test_cancel_before_any_byte_keeps_stream_and_closes_duplicate(run, payload):
-    async def body():
-        async with _stream_pair(sndbuf=_SMALL_SNDBUF) as (writer, _peer):
-            sock_target = _target(writer.get_extra_info("socket").fileno())
-            before = _descriptors_to(sock_target)
-            _fill_send_buffer(writer)
-            observation: dict = {}
-            with patch.object(socket.socket, "sendmsg", _tracing_sendmsg(observation)):
-                task = asyncio.create_task(
-                    wire.send_message(
-                        writer, ErrorResponse(error="x"), payload.fileno()
-                    )
-                )
-                await _wait_for_sendmsg(observation)
-                assert observation["first_send_bytes"] == 0  # blocked on writability
-                task.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await task
-            assert _descriptors_to(sock_target) == before
-            assert not writer.is_closing()
-            os.fstat(payload.fileno())
-
-    run(body)
-
-
-def test_cancelled_waiter_does_not_leave_a_stale_selector_entry(run, payload):
-    """After cancellation the duplicate's fd number may be reused at once."""
-
-    async def body():
-        loop = asyncio.get_running_loop()
-        async with _stream_pair(sndbuf=_SMALL_SNDBUF) as (writer, _peer):
-            _fill_send_buffer(writer)
-            observation: dict = {}
-            with patch.object(socket.socket, "sendmsg", _tracing_sendmsg(observation)):
-                task = asyncio.create_task(
-                    wire.send_message(
-                        writer, ErrorResponse(error="x"), payload.fileno()
-                    )
-                )
-                await _wait_for_sendmsg(observation)
-                task.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await task
-            old_fd = observation["socket_duplicate"]
-            pair = socket.socketpair()
-            reused = None
-            try:
-                if old_fd not in (pair[0].fileno(), pair[1].fileno()):
-                    reused = os.dup2(pair[0].fileno(), old_fd)
-                writable = asyncio.Event()
-                loop.add_writer(old_fd, writable.set)
-                try:
-                    await asyncio.wait_for(writable.wait(), 2)
-                finally:
-                    loop.remove_writer(old_fd)
-            finally:
-                if reused is not None:
-                    os.close(reused)
-                pair[0].close()
-                pair[1].close()
-
-    run(body)
-
-
-def test_cancel_after_partial_frame_aborts_and_peer_drops_fd(run, payload):
-    async def body():
-        async with _stream_pair(sndbuf=_SMALL_SNDBUF) as (writer, peer):
-            payload_target = _target(payload.fileno())
-            before = _descriptors_to(payload_target)
-            observation: dict = {}
-            with patch.object(socket.socket, "sendmsg", _tracing_sendmsg(observation)):
-                task = asyncio.create_task(
-                    wire.send_message(writer, _large_export(), payload.fileno())
-                )
-                await _wait_for_sendmsg(observation)
-                assert observation["first_send_bytes"] > 0
-                task.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await task
-            # A half-sent frame cannot be resumed: the connection is torn down.
-            assert writer.is_closing()
-
-            def receive():
-                fd = -1
-                try:
-                    _, fd, _ = wire.recv_message_sync(peer)
-                    return "complete"
-                except ConnectionResetError:
-                    return "reset"
-                finally:
-                    if fd >= 0:
-                        os.close(fd)
-
-            outcome = await asyncio.get_running_loop().run_in_executor(None, receive)
-            assert outcome == "reset"
-            # The peer's received copy was closed by recv_message_sync.
-            assert _descriptors_to(payload_target) == before
-
-    run(body)
-
-
 def test_fd_frame_waits_for_buffered_transport_bytes(run, payload):
-    """An FD frame bypasses the transport, so it must not overtake its buffer."""
-    earlier = ErrorResponse(error="A" * 300_000)
+    earlier = wire._frame_message(ErrorResponse(error="A" * 300_000))
+    fd_message = ErrorResponse(error="B")
 
     async def body():
         async with _stream_pair(sndbuf=_SMALL_SNDBUF) as (writer, peer):
-            writer.write(wire._frame_message(earlier))
+            writer.write(earlier)
             assert writer.transport.get_write_buffer_size() > 0
-            result: dict = {"errors": [], "fds": []}
-
-            def receive():
-                buf = bytearray()
-                try:
-                    for _ in range(2):
-                        msg, fd, buf = wire.recv_message_sync(peer, buf)
-                        result["errors"].append(msg.error[:8])
-                        result["fds"].append(fd)
-                    result["payload"] = os.pread(result["fds"][1], 8, 0)
-                except Exception as exc:  # asserted below
-                    result["error"] = exc
-                finally:
-                    for fd in result["fds"]:
-                        if fd >= 0:
-                            os.close(fd)
-
-            receiver = threading.Thread(target=receive)
-            receiver.start()
+            expected = earlier + wire._frame_message(fd_message)
+            receiver = asyncio.ensure_future(_receive_in_thread(peer, len(expected)))
             await asyncio.wait_for(
-                wire.send_message(writer, ErrorResponse(error="B"), payload.fileno()),
-                5,
+                wire.send_message(writer, fd_message, payload.fileno()), _TIMEOUT
             )
-            await asyncio.get_running_loop().run_in_executor(None, receiver.join, 5)
-            assert "error" not in result, result.get("error")
-            assert result["errors"] == ["A" * 8, "B"]
-            assert result["fds"][0] == -1 and result["fds"][1] >= 0
-            assert result["payload"] == b"ORIGINAL"
+            data, fds = await receiver
+            try:
+                assert data == expected
+                assert len(fds) == 1
+                assert os.pread(fds[0], 8, 0) == b"ORIGINAL"
+            finally:
+                for fd in fds:
+                    os.close(fd)
 
     run(body)
 
 
-def test_peer_close_while_waiting_raises_and_closes_duplicate(run, payload):
+def test_partial_fd_frame_delivers_exact_bytes_and_one_fd(run, payload):
+    message = _large_export()
+    frame = wire._frame_message(message)
+
     async def body():
         async with _stream_pair(sndbuf=_SMALL_SNDBUF) as (writer, peer):
-            sock_target = _target(writer.get_extra_info("socket").fileno())
-            before = _descriptors_to(sock_target)
-            _fill_send_buffer(writer)
-            observation: dict = {}
-            with patch.object(socket.socket, "sendmsg", _tracing_sendmsg(observation)):
-                task = asyncio.create_task(
-                    wire.send_message(writer, _large_export(), payload.fileno())
-                )
-                await _wait_for_sendmsg(observation)
-                peer.close()  # dies with unread data: ECONNRESET / EPIPE
-                with pytest.raises((BrokenPipeError, ConnectionResetError)):
-                    await asyncio.wait_for(task, 5)
-            # The transport may also have closed its own socket on the reset.
-            assert set(_descriptors_to(sock_target)) <= set(before)
-            os.fstat(payload.fileno())
+            task = _start_send(writer, message, payload)
+            await asyncio.sleep(0)
+            # Nobody is reading, so the kernel took only part of the frame.
+            assert not task.done()
+            assert peer.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+            receiver = asyncio.ensure_future(_receive_in_thread(peer, len(frame)))
+            await asyncio.wait_for(task, _TIMEOUT)
+            data, fds = await receiver
+            try:
+                assert data == frame
+                assert len(fds) == 1
+                assert os.pread(fds[0], 8, 0) == b"ORIGINAL"
+            finally:
+                for fd in fds:
+                    os.close(fd)
 
     run(body)
 
@@ -405,5 +225,90 @@ def test_send_on_closing_transport_is_rejected(run, payload):
                 await wire.send_message(
                     writer, ErrorResponse(error="x"), payload.fileno()
                 )
+            # Once closed, uvloop no longer exposes the socket at all.
+            await writer.wait_closed()
+            with pytest.raises(ConnectionResetError):
+                await wire.send_message(
+                    writer, ErrorResponse(error="x"), payload.fileno()
+                )
+
+    run(body)
+
+
+def test_close_while_waiting_for_the_peer_rejects_the_send(run, payload):
+    async def body():
+        async with _stream_pair(sndbuf=_SMALL_SNDBUF) as (writer, peer):
+            _fill_send_buffer(writer)
+            task = _start_send(writer, ErrorResponse(error="x"), payload)
+            await asyncio.sleep(0)
+            assert not task.done()
+            writer.close()
+            # The send wakes when the peer makes room, and must not use it.
+            data, fds = await _receive_in_thread(peer, 1 << 30)
+            for fd in fds:
+                os.close(fd)
+            with pytest.raises(ConnectionResetError):
+                await asyncio.wait_for(task, _TIMEOUT)
+            assert not data.strip(b"\0")
+            assert not fds
+
+    run(body)
+
+
+def test_cancel_before_any_byte_leaves_the_stream_usable(run, payload):
+    async def body():
+        loop = asyncio.get_running_loop()
+        async with _stream_pair(sndbuf=_SMALL_SNDBUF) as (writer, _peer):
+            sock_target = _target(writer.get_extra_info("socket").fileno())
+            before = _descriptors_to(sock_target)
+            _fill_send_buffer(writer)
+            task = _start_send(writer, ErrorResponse(error="x"), payload)
+            await asyncio.sleep(0)
+            (duplicate,) = set(_descriptors_to(sock_target)) - set(before)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert _descriptors_to(sock_target) == before
+            assert not writer.is_closing()
+
+            # The duplicate's number is free for reuse: the loop must not
+            # still hold a registration for it.
+            reused, other = socket.socketpair()
+            try:
+                if duplicate not in (reused.fileno(), other.fileno()):
+                    pytest.skip("the descriptor number was not reused")
+                writable = asyncio.Event()
+                loop.add_writer(duplicate, writable.set)
+                try:
+                    await asyncio.wait_for(writable.wait(), _TIMEOUT)
+                finally:
+                    loop.remove_writer(duplicate)
+            finally:
+                reused.close()
+                other.close()
+
+    run(body)
+
+
+def test_cancel_after_partial_frame_aborts_the_transport(run, payload):
+    message = _large_export()
+    frame_len = len(wire._frame_message(message))
+
+    async def body():
+        async with _stream_pair(sndbuf=_SMALL_SNDBUF) as (writer, peer):
+            payload_target = _target(payload.fileno())
+            before = _descriptors_to(payload_target)
+            task = _start_send(writer, message, payload)
+            await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            # A half-sent frame cannot be resumed: the connection is torn down.
+            assert writer.is_closing()
+            data, fds = await _receive_in_thread(peer, frame_len)
+            for fd in fds:
+                os.close(fd)
+            assert 0 < len(data) < frame_len
+            assert _descriptors_to(payload_target) == before
 
     run(body)

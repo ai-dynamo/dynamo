@@ -45,7 +45,9 @@ def _try_extract_message(
 # ==================== Async (for server) ====================
 
 
-async def _wait_writable(loop: asyncio.AbstractEventLoop, fd: int) -> None:
+async def _wait_writable(writer, fd: int) -> None:
+    """Wait until fd is writable; raise if the transport closed meanwhile."""
+    loop = asyncio.get_running_loop()
     writable = loop.create_future()
 
     def ready() -> None:
@@ -57,68 +59,60 @@ async def _wait_writable(loop: asyncio.AbstractEventLoop, fd: int) -> None:
         await writable
     finally:
         loop.remove_writer(fd)
+    if writer.transport.is_closing():
+        raise ConnectionResetError("Transport closed while sending an FD frame")
 
 
 async def send_message(writer, msg: Message, fd: int = -1) -> None:
-    """Send a length-prefixed message with optional FD via SCM_RIGHTS."""
+    """Send a length-prefixed message with optional FD via SCM_RIGHTS.
+
+    An FD frame bypasses the transport, so only one task may send on a writer
+    at a time.
+    """
     frame = _frame_message(msg)
 
     if fd >= 0:
+        transport = writer.transport
+        if transport.is_closing():
+            raise ConnectionResetError("Transport is closing")
         transport_sock = writer.get_extra_info("socket")
         if transport_sock is None:
             raise RuntimeError("Cannot get socket from transport for FD passing")
 
-        if writer.transport.is_closing():
-            raise ConnectionResetError("Transport is closing")
-
-        # Register writability on a private descriptor without changing the
-        # shared open-file-description flags of asyncio's transport socket.
-        loop = asyncio.get_running_loop()
-        dup_fd = os.dup(transport_sock.fileno())
-        sock = None
+        view = memoryview(frame)
         sent = 0
-        try:
-            sock = socket.socket(fileno=dup_fd)
-            # This frame bypasses the transport, so bytes the transport still
-            # buffers from an earlier frame must reach the socket first, or the
-            # two frames interleave on the wire.
-            while writer.transport.get_write_buffer_size():
-                await _wait_writable(loop, dup_fd)
-                if writer.transport.is_closing():
-                    raise ConnectionResetError("Transport closed while flushing")
-            view = memoryview(frame)
-            while sent < len(frame):
-                try:
-                    if sent == 0:
-                        # SCM_RIGHTS is attached once, to the initial bytes.
-                        count = sock.sendmsg(
-                            [view],
-                            [
-                                (
-                                    socket.SOL_SOCKET,
-                                    socket.SCM_RIGHTS,
-                                    array.array("i", [fd]),
-                                )
-                            ],
-                            socket.MSG_DONTWAIT,
-                        )
-                    else:
-                        count = sock.send(view[sent:], socket.MSG_DONTWAIT)
-                except (BlockingIOError, InterruptedError):
-                    await _wait_writable(loop, dup_fd)
-                    continue
-                if count <= 0:
-                    raise ConnectionResetError("FD frame send made no progress")
-                sent += count
-        except BaseException:
-            if sent:
-                # A partial frame cannot be rolled back or safely reused.
-                writer.transport.abort()
-            raise
-        finally:
-            if sock is not None:
-                sock.detach()
-            os.close(dup_fd)
+        # The loop cannot watch the transport's own descriptor for a second
+        # writer, so wait and send on a duplicate. MSG_DONTWAIT keeps every
+        # send non-blocking without touching the shared file status flags.
+        with transport_sock.dup() as sock:
+            try:
+                # Bytes the transport still buffers from an earlier frame must
+                # reach the socket first, or the two frames interleave.
+                while transport.get_write_buffer_size():
+                    await _wait_writable(writer, sock.fileno())
+                while sent < len(frame):
+                    try:
+                        if sent == 0:
+                            # SCM_RIGHTS rides the first bytes only.
+                            sent = sock.sendmsg(
+                                [view],
+                                [
+                                    (
+                                        socket.SOL_SOCKET,
+                                        socket.SCM_RIGHTS,
+                                        array.array("i", [fd]),
+                                    )
+                                ],
+                                socket.MSG_DONTWAIT,
+                            )
+                        else:
+                            sent += sock.send(view[sent:], socket.MSG_DONTWAIT)
+                    except BlockingIOError:
+                        await _wait_writable(writer, sock.fileno())
+            finally:
+                if 0 < sent < len(frame):
+                    # A partial frame cannot be rolled back.
+                    transport.abort()
     else:
         writer.write(frame)
         await writer.drain()
