@@ -26,9 +26,11 @@ use dynamo_kv_indexer::host::{
 use dynamo_kv_indexer::host::{KvTransferCandidateSource, KvTransferCandidates};
 pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::plugins::worker_selection::WorkerCapacity;
 use dynamo_kv_router::scheduling::BusyThresholdsExt;
 use dynamo_kv_router::tracking_hash::tracking_hash_context;
+use dynamo_router_protocol::WorkerType;
 use dynamo_router_protocol::identity::RoutingPartitionRef;
 use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
@@ -603,6 +605,8 @@ impl KvRouterPlacement {
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         topology: &[WorkerTopology],
         selector_seed: Option<u64>,
+        worker_type: WorkerType,
+        router_plugins: Option<&RouterPluginRegistry>,
     ) -> Result<Self> {
         // Composition checks that `topology[i]` is worker `i`.
         let router_hints: Vec<bool> = topology.iter().map(|worker| worker.router_hint).collect();
@@ -612,6 +616,8 @@ impl KvRouterPlacement {
             prefill_load_estimator,
             &router_hints,
             selector_seed,
+            worker_type,
+            router_plugins,
         )?;
         Ok(Self { router })
     }
@@ -880,17 +886,22 @@ impl OfflineReplayRouter {
             prefill_load_estimator,
             &vec![false; num_workers],
             None,
+            WorkerType::Aggregated,
+            None,
         )
     }
 
     /// Worker `i` receives KV fetch hints and serves as their source when
-    /// `router_hints[i]` is set.
+    /// `router_hints[i]` is set. A worker-selection policy the router config selects for
+    /// `worker_type` resolves from `router_plugins`.
     pub(crate) fn new_with_selector_seed(
         args: &MockerConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         router_hints: &[bool],
         selector_seed: Option<u64>,
+        worker_type: WorkerType,
+        router_plugins: Option<&RouterPluginRegistry>,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
         let mut indexer = SyncReplayIndexer::new(args.block_size as u32);
@@ -911,7 +922,8 @@ impl OfflineReplayRouter {
             })
             .collect();
         let slots = replay_slots(args, &workers_with_configs);
-        let selector = replay_selector_with_seed(&config, selector_seed)?;
+        let selector =
+            replay_selector_with_seed(&config, worker_type, router_plugins, selector_seed)?;
         // As in production: the KV index exists only when the startup policy reads
         // it (a later retune keeps the index it started with).
         let reads_kv_index =
@@ -1758,6 +1770,7 @@ mod tests {
     use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_kv_indexer::host::ApproximateCachePolicyKind;
     use dynamo_kv_router::config::KvRouterConfig;
+    use dynamo_router_protocol::WorkerType;
     use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
     use dynamo_scheduler::host::{
         PrefillLoadEstimator, RouterPrefillLoadModel, TrackingHashAlgorithm,
@@ -1796,6 +1809,8 @@ mod tests {
             None,
             &topology(num_workers, dp_size, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         )
         .unwrap()
         .with_conversation_affinity(Some(crate::replay::ConversationAffinityConfig {
@@ -1894,6 +1909,8 @@ mod tests {
             None,
             &topology(1, 1, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         )
         .unwrap()
         .with_conversation_affinity(Some(Default::default()))
@@ -1953,6 +1970,8 @@ mod tests {
             None,
             &topology(1, 2, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         )
         .unwrap()
         .with_conversation_affinity(Some(Default::default()))
@@ -2028,6 +2047,8 @@ mod tests {
             None,
             &topology(1, 1, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         )
         .unwrap()
         .with_conversation_affinity(Some(Default::default()))
@@ -2115,6 +2136,8 @@ mod tests {
             Some(estimator(Duration::from_secs(10))),
             &topology(1, 1, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         )
         .unwrap()
         .with_conversation_affinity(affinity.then(Default::default))
@@ -2181,6 +2204,8 @@ mod tests {
             None,
             &topology(1, 1, false),
             Some(0),
+            WorkerType::Aggregated,
+            None,
         )
         .unwrap();
         let mut config = SessionAffinityConfig::new(Duration::from_secs(60));
@@ -3829,8 +3854,16 @@ policy_classes:
         router_hint: bool,
     ) -> KvRouterPlacement {
         let topology = topology(workers, args.dp_size.max(1), router_hint);
-        KvRouterPlacement::new_with_selector_seed(args, Some(config), None, &topology, Some(0))
-            .unwrap()
+        KvRouterPlacement::new_with_selector_seed(
+            args,
+            Some(config),
+            None,
+            &topology,
+            Some(0),
+            WorkerType::Aggregated,
+            None,
+        )
+        .unwrap()
     }
 
     fn assert_fetches_from_a_peer(placement: &Placement) {
@@ -3943,6 +3976,8 @@ policy_classes:
                 None,
                 &topology,
                 Some(0),
+                WorkerType::Aggregated,
+                None,
             )
             .unwrap();
             occupy_worker_1(&mut placement, 0);

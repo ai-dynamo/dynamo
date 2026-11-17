@@ -273,6 +273,24 @@ def test_public_router_prediction_forwards_use_kv_events() -> None:
         )
 
 
+def test_public_router_policy_config_reaches_runtime_config() -> None:
+    context = PredictionAdapterContext(engine={}, traffic={}, evaluation={})
+    replay_spec = create_provider().compile_prediction(
+        {"policy": "kv_router", "policy_config": "two-tier.yaml"},
+        context,
+    )
+
+    assert replay_spec.config["policy_config"] == "two-tier.yaml"
+    router_config = replay_spec.runtime_hooks[0].config["router_config"]
+    assert router_config["router_policy_config"] == "two-tier.yaml"
+
+    with pytest.raises(ValueError, match="round_robin requires"):
+        create_provider().compile_prediction(
+            {"policy": "round_robin", "policy_config": "two-tier.yaml"},
+            context,
+        )
+
+
 def test_public_router_ais_load_model_reaches_runtime_config() -> None:
     replay_spec = create_provider().compile_prediction(
         {

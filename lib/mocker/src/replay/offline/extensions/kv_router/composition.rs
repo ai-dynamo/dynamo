@@ -10,6 +10,7 @@ use aisimulate_core::replay::{
 };
 use anyhow::{Context, Result, bail};
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_router_protocol::WorkerType;
 use dynamo_scheduler::host::RouterPrefillLoadModel;
 use std::collections::HashSet;
@@ -120,6 +121,8 @@ pub(in crate::replay) struct KvReplayComposition<O = RouterEventObservation> {
     /// Captured from [`crate::replay::ReplayScope`] at construction. Each placement registers its
     /// selector control here under its worker type.
     router_controls: Option<ReplayRouterControls>,
+    /// Captured from [`crate::replay::ReplayScope`] at construction.
+    router_plugins: Option<RouterPluginRegistry>,
     observation: PhantomData<O>,
 }
 
@@ -146,6 +149,7 @@ impl KvReplayComposition {
             determinism: ReplayDeterminism::Random,
             kv_event_lag_ms: scope.kv_event_lag_ms,
             router_controls: scope.router_controls,
+            router_plugins: scope.router_plugins,
             observation: PhantomData,
         }
     }
@@ -176,6 +180,7 @@ impl KvReplayComposition {
             determinism: ReplayDeterminism::Random,
             kv_event_lag_ms: scope.kv_event_lag_ms,
             router_controls: scope.router_controls,
+            router_plugins: scope.router_plugins,
             observation: PhantomData,
         }
     }
@@ -201,6 +206,7 @@ impl KvReplayComposition {
             determinism: self.determinism,
             kv_event_lag_ms: self.kv_event_lag_ms,
             router_controls: self.router_controls,
+            router_plugins: self.router_plugins,
             observation: PhantomData,
         }
     }
@@ -253,6 +259,8 @@ impl<O: ReplayEngineObservation<Batch = RouterEventBatch>> ReplayComposition
             self.prefill_load_estimator.take(),
             &topology,
             self.determinism.selector_seed(),
+            WorkerType::Aggregated,
+            self.router_plugins.as_ref(),
         )?
         .with_kv_event_lag_ms(self.kv_event_lag_ms)?
         .with_conversation_affinity(self.conversation_affinity)?;
@@ -300,6 +308,8 @@ impl<O: ReplayEngineObservation<Batch = RouterEventBatch>> ReplayComposition
             self.prefill_load_estimator.take(),
             &prefill_topology,
             self.determinism.selector_seed(),
+            WorkerType::Prefill,
+            self.router_plugins.as_ref(),
         )
         .context("constructing prefill KV Router placement")?
         .with_kv_event_lag_ms(self.kv_event_lag_ms)?
@@ -310,6 +320,8 @@ impl<O: ReplayEngineObservation<Batch = RouterEventBatch>> ReplayComposition
             None,
             &decode_topology,
             self.determinism.selector_seed(),
+            WorkerType::Decode,
+            self.router_plugins.as_ref(),
         )
         .context("constructing decode KV Router placement")?
         .with_kv_event_lag_ms(self.kv_event_lag_ms)?
