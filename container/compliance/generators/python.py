@@ -5,11 +5,13 @@
 Walks each search path's site-packages, reads `*.dist-info/METADATA` via
 `importlib.metadata`, and normalizes the license string to an SPDX expression.
 
-Resolution preference per package (PEP 639 ordering):
-  1. `License-Expression: <SPDX>` header (PEP 639, modern wheels)
-  2. `License: <free-form>` header (legacy, normalized via _FREE_FORM_MAP)
+Resolution preference per package:
+  1. Audited exact-version entry in license_overrides.yaml
+  2. `License-Expression: <SPDX>` header (PEP 639, modern wheels)
   3. `Classifier: License :: ...` headers (normalized via _CLASSIFIER_MAP)
-  4. UNKNOWN — surfaces in the policy gate; fix via license_overrides.yaml
+  4. `License: <free-form>` header (legacy, normalized via _FREE_FORM_MAP)
+  5. Version-agnostic fallback in license_overrides.yaml
+  6. UNKNOWN — surfaces in the policy gate
 
 Why importlib.metadata vs pip-licenses:
   - Zero extra installs in the runtime image (pip-licenses + transitively
@@ -368,21 +370,27 @@ def _resolve_spdx(
     """Resolve an SPDX ID for one Python package.
 
     Order (refined after real-image testing):
-      1. License-Expression (PEP 639 — modern, single-line by spec)
-      2. Classifiers (PyPI's structured tags — well-defined values, more
+      1. Exact-version license_overrides.yaml entry — audited correction
+         limited to the reviewed package version.
+      2. License-Expression (PEP 639 — modern, single-line by spec)
+      3. Classifiers (PyPI's structured tags — well-defined values, more
          reliable than the free-form License field for legacy packages
          where License often contains body text)
-      3. License free-form — only when it's plausibly a license NAME, not
+      4. License free-form — only when it's plausibly a license NAME, not
          body. Rejected if multi-line (>3 lines) or any single line >80
          chars; matplotlib's License field, for instance, is the entire
          PSF-style license body and would false-match patterns deep inside.
-      4. license_overrides.yaml — hand-curated overrides for packages
+      5. Version-agnostic license_overrides.yaml fallback for packages
          whose upstream metadata is empty or wrong (e.g. NVIDIA's older
          CUDA wheels: nvidia-cufft, nvidia-curand, etc.).
-      5. UNKNOWN
+      6. UNKNOWN
     """
+    audited = license_overrides.lookup_exact(ECOSYSTEM, name, version)
+    if audited:
+        return audited
+
     if license_expr:
-        return license_expr  # PEP 639 — authoritative
+        return license_expr  # PEP 639 — authoritative absent an exact audit
 
     for cls in classifiers:
         if cls.startswith("License :: "):

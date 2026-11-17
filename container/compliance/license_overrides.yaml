@@ -1051,7 +1051,12 @@ overrides:
   - { ecosystem: python, name: sigstore-models, license: "MIT", source: "https://github.com/astral-sh/sigstore-models/blob/v0.0.6/LICENSE" }
   - { ecosystem: rust, name: tsp-asn1, license: "Apache-2.0", source: "https://github.com/trailofbits/rfc3161-client/blob/v1.0.8/LICENSE" }
 
-  # --- Audited TokenSpeed stack (exact versions; no KDA override) ---
+  # --- Audited TokenSpeed stack (exact versions) ---
+  - ecosystem: python
+    name: tokenspeed-cutedsl-kda
+    version: "0.1.0.post20260923"
+    license: "MIT AND LicenseRef-NVIDIA-Proprietary"
+    source: "Exact wheel LICENSE and THIRD_PARTY_NOTICES.md: MIT covers LightSeek-authorized files; NVIDIA-derived host helpers, wrapper, and SM100/SM103 binaries retain NVIDIA proprietary terms. Source audit corroborates NVIDIA origin. Normalize the generic proprietary identifier to the existing NVIDIA-specific reference and preserve both supplied notices; do not apply the related public BSD license to these binaries. https://pypi.org/project/tokenspeed-cutedsl-kda/0.1.0.post20260923/"
   - ecosystem: python
     name: hf_transfer
     version: "0.1.9"

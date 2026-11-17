@@ -60,6 +60,13 @@ def lookup(ecosystem: Ecosystem, name: str, version: str = "") -> str | None:
     return entries.get((ecosystem, name, version), entries.get((ecosystem, name, "")))
 
 
+def lookup_exact(ecosystem: Ecosystem, name: str, version: str) -> str | None:
+    """Return only an audited version-specific entry, without a broad fallback."""
+    if not version:
+        return None
+    return _overrides().get((ecosystem, name, version))
+
+
 def reset_caches() -> None:
     """Clear memoization. Tests use this; production code shouldn't need it."""
     _overrides.cache_clear()
