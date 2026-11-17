@@ -66,7 +66,8 @@ from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
 from gpu_memory_service.common import utils as common_utils
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.vmm import _reset_vmm_singleton
-from gpu_memory_service.integrations.common.utils import publish_gms_write
+from gpu_memory_service.integrations.common import patches as common_patches
+from gpu_memory_service.integrations.common.utils import publish_gms_write, torch_device
 from gpu_memory_service.integrations.vllm import model_loader
 from gpu_memory_service.server.rpc import GMSRPCServer
 
@@ -473,7 +474,7 @@ def test_vllm_writer_publishes_from_a_released_pool(running_gms, monkeypatch):
         allocated_bytes = writer.total_bytes
 
         register_module_tensors(writer, model)
-        stats, copied_bytes, owners = model_loader._release_pool_and_copy_out(
+        stats, copied_bytes, owners = model_loader._copy_out_and_release_pool(
             writer, model
         )
 
@@ -524,6 +525,64 @@ def test_vllm_writer_publishes_from_a_released_pool(running_gms, monkeypatch):
         _assert_exact_tensor_equal(
             cast(torch.Tensor, baseline.linear.weight)[1:],
             cast(torch.Tensor, materialized.weight_rows),
+        )
+    finally:
+        materialized = None
+        reader.close()
+
+
+def test_vllm_writer_commits_no_allocation_a_reader_cannot_reference(
+    running_gms, monkeypatch
+):
+    """A workspace held outside the module tree, in an allocation of its own,
+    leaves GMS before publication. With that allocation still committed, a
+    reader would map fewer allocations than the layout has and fail to wake."""
+    if _allocator_ext is None:
+        pytest.skip("GMS allocator extension is not built")
+    socket_path = running_gms
+    monkeypatch.setattr(common_utils, "get_socket_path", lambda *_: socket_path)
+    # As in a GMS worker: empty_cache() does nothing while mappings are live.
+    device_module = torch_device()
+    monkeypatch.setattr(device_module, "empty_cache", device_module.empty_cache)
+    monkeypatch.setattr(common_patches, "_empty_cache_patched", False)
+    common_patches.patch_empty_cache()
+    torch.manual_seed(17)
+    baseline = _TinyModule().to(_DEVICE)
+
+    writer = gms_allocator.get_or_create_gms_client_memory_manager(
+        socket_path, 0, RequestedLockType.RW, tag="weights"
+    )
+    try:
+        with gms_allocator.gms_use_mem_pool("weights", torch.device(_DEVICE, 0)):
+            model = _TinyModule()
+            model.load_state_dict(baseline.state_dict())
+            workspace = torch.zeros(64 << 20, dtype=torch.uint8, device=_DEVICE)
+        assert len(writer.mappings) == 2
+        register_module_tensors(writer, model)
+        stats, _, owners = model_loader._copy_out_and_release_pool(writer, model)
+        assert not _in_gms(writer, workspace)
+        assert stats.pruned_count == 1 and stats.pruned_bytes >= 64 << 20
+        publish_gms_write(writer)
+        del owners
+        committed = len(writer.list_handles())
+        assert committed == len(writer.mappings) == 1
+    finally:
+        model = workspace = None
+        writer.close()
+
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    reader.connect(RequestedLockType.RO)
+    try:
+        materialized = _TinyModule().to(_DEVICE)
+        materialize_module_from_gms(reader, materialized, device_index=0)
+        assert len(reader.mappings) == committed
+        reader.unmap_all_vas()
+        reader.abort()
+        reader.connect(RequestedLockType.RO)
+        reader.remap_all_vas()
+        _assert_exact_tensor_equal(
+            cast(torch.Tensor, baseline.linear.weight),
+            cast(torch.Tensor, materialized.linear.weight),
         )
     finally:
         materialized = None

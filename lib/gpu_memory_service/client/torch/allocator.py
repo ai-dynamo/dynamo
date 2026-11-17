@@ -386,21 +386,27 @@ def gms_use_mem_pool(tag: str, device: "torch.device | int") -> Iterator[None]:
         _active_tag.reset(token)
 
 
-def release_gms_mem_pool(manager: "GMSClientMemoryManager") -> None:
+def release_gms_mem_pool(
+    manager: "GMSClientMemoryManager", *, collect_garbage: bool = True
+) -> None:
     """Release cached blocks through Torch's allocator, preserving live storage.
 
     Called outside the pool region after synchronizing. Dropping the pool
     frees the blocks it has cached; blocks that live StorageImpls own keep
     their backing. Module traversal cannot establish allocation liveness.
+
+    ``collect_garbage=False`` skips the full garbage collection for a caller
+    that has just run one.
     """
     state = _tag_states.get(manager.tag)
     if state is None or state.manager is not manager or state.mem_pool is None:
         raise RuntimeError("GMS memory pool is missing or already released")
     if _active_tag.get() == manager.tag:
         raise RuntimeError("Cannot release an active GMS memory pool")
-    # Tensors that only reference cycles keep alive must die while the pool
-    # still exists, so that dropping the pool releases their blocks too.
-    gc.collect()
+    if collect_garbage:
+        # Tensors that only reference cycles keep alive must die while the
+        # pool still exists, so that dropping the pool releases their blocks.
+        gc.collect()
     pool = state.mem_pool
     state.mem_pool = None
     try:

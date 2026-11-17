@@ -10,6 +10,7 @@ processes import from GMS metadata (RO).
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 from dataclasses import dataclass
@@ -372,7 +373,7 @@ def _prepare_write(
             torch_device().empty_cache()
 
     register_module_tensors(gms_client, model)
-    stats, rebound_bytes, retained_gms_tensors = _release_pool_and_copy_out(
+    stats, rebound_bytes, retained_gms_tensors = _copy_out_and_release_pool(
         gms_client, model
     )
     _store_pending_gms_write(gms_client, stats, rebound_bytes, retained_gms_tensors)
@@ -425,10 +426,10 @@ def _held_non_parameters(model: torch.nn.Module) -> Iterator[torch.Tensor]:
                     yield item
 
 
-def _release_pool_and_copy_out(
+def _copy_out_and_release_pool(
     gms_client: "GMSClientMemoryManager", model: torch.nn.Module
 ) -> tuple[GMSCommittedMemoryStats, int, list[torch.UntypedStorage]]:
-    """Drop the weight pool and move live non-Parameters to private memory.
+    """Move live non-Parameters to private memory, then drop the weight pool.
 
     Runs after registration. Returns the committed/pruned stats, the bytes
     copied out, and the GMS storages that back registered non-Parameter
@@ -437,11 +438,10 @@ def _release_pool_and_copy_out(
     before_bytes = gms_client.total_bytes
     before_count = len(gms_client.mappings)
     retained_gms_tensors, in_tree = _registered_non_parameters(gms_client, model)
-    # Dropping the pool lets Torch free only unused blocks; live StorageImpls
-    # stay owned while the copy runs on the default allocator.
     torch_device().synchronize(gms_client.device)
-    # Releasing the pool runs the full garbage collection the heap scan needs.
-    release_gms_mem_pool(gms_client)
+    # One full collection serves both steps: the heap scan must not find dead
+    # cyclic tensors, and their blocks must be free when the pool is dropped.
+    gc.collect()
     copied: list[tuple[int, tuple[torch.Tensor, ...]]] = []
     _, rebound_bytes = copy_non_parameter_tensors_to_default_allocator(
         (model,),
@@ -456,8 +456,12 @@ def _release_pool_and_copy_out(
         known_tensors=_held_non_parameters(model),
     )
     torch_device().synchronize(gms_client.device)
-    torch_device().empty_cache()
-    raise_if_gms_allocator_failed(gms_client)
+    # Dropping the pool after the copy makes Torch release the blocks the copy
+    # freed together with the ones that were never used, so every allocation
+    # left holds live storage. empty_cache() cannot do this: GMS workers patch
+    # it to do nothing while mappings are live. An allocation that stayed
+    # committed with no tensor referencing it would fail a reader's remap.
+    release_gms_mem_pool(gms_client, collect_garbage=False)
     stats = GMSCommittedMemoryStats(
         committed_bytes=gms_client.total_bytes,
         pruned_bytes=before_bytes - gms_client.total_bytes,
