@@ -172,12 +172,6 @@ docker exec -it <container_id> bash
   </Step>
 </Steps>
 
-## Decision API Workers
-
-**Experimental.** Use a dedicated aggregated SGLang CUDA worker to serve OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. Follow [Decision Models with SGLang](../../use-cases/decision-model/sglang.md) for the supported runtime profile, launch commands, readiness checks, and cleanup.
-
-The [Decision APIs guide](../../use-cases/decision-model/apis.md) explains the two contracts and provides curl, OpenAI SDK, and Jev/TypeSafe SDK examples. For admission limits and cache-sharing boundaries, see [Decision API Configuration](../../reference/components/frontend-configuration.mdx#decision-apis).
-
 ## Scaling and larger deployments
 
 The flow above is one worker on one node. To go bigger, you change **flags on the worker** — the frontend command never changes, and you still run just one frontend.
@@ -204,6 +198,7 @@ Once one copy fits, spare GPUs on the node can serve you in a few ways:
 
 ## Next steps
 
+- **Decision models** — classify and score text through OpenAI Decisions and Jev System One. Start with the [Decision APIs guide](../../use-cases/decision-model/apis.md).
 - **Size the deployment** — AIConfigurator can evaluate the same model, backend, GPU system, and SLA
   for local or Kubernetes deployments. Copy its recommended TP, PP, and replica counts into your
   worker commands. See the [AIConfigurator reference](../../developer-guide/additional-resources/aiconfigurator-reference.md).
