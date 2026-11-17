@@ -36,7 +36,7 @@ pub enum WorkerEligibilityError {
 }
 
 /// The ranks the request's load projection found past the host's reject thresholds, counted
-/// per worker; present only while at least one worker has a full rank.
+/// per worker and recorded per rank; present only while at least one worker has a full rank.
 #[derive(Clone, Copy)]
 struct RejectCheck<'a> {
     full_ranks: &'a FullRankCounts,
@@ -367,9 +367,17 @@ impl<'a> RoutingEligibility<'a> {
         }
         let ranks = config.data_parallel_start_rank()
             ..config.data_parallel_start_rank() + config.data_parallel_size();
-        target
-            .dp_rank
-            .map_or(!ranks.is_empty(), |rank| ranks.contains(&rank))
+        // A target that names a full rank stops restricting selection, even while another rank
+        // keeps the worker below the reject thresholds. Selection itself still skips only full
+        // workers (see the TODO on `is_worker_full`).
+        target.dp_rank.map_or(!ranks.is_empty(), |rank| {
+            ranks.contains(&rank)
+                && !self.reject.is_some_and(|check| {
+                    check
+                        .full_ranks
+                        .rank_counted_full(WorkerWithDpRank::new(target.worker_id, rank))
+                })
+        })
     }
 
     pub fn for_each_eligible_worker_rank<C, F>(&self, workers: &HashMap<WorkerId, C>, mut visit: F)
