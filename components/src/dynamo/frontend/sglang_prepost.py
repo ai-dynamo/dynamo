@@ -28,6 +28,7 @@ from xgrammar import StructuralTag, StructuralTagItem
 
 from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
+from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang._compat import template_always_reasons
 
@@ -376,15 +377,12 @@ def create_parsers(
             native_request_kwargs["request"] = ChatCompletionRequest(
                 model="",
                 messages=[],
-                chat_template_kwargs=request.get("chat_template_kwargs"),
+                chat_template_kwargs=request.get("chat_template_kwargs")
+                or request.get("chat_template_args"),
             )
         reasoning_parser = ReasoningParser(
             model_type=reasoning_parser_name,
-            stream_reasoning=(
-                request.get("stream_reasoning", True)
-                if reasoning_parser_name == "glm45"
-                else True
-            ),
+            stream_reasoning=True,
             force_reasoning=force_reasoning,
             **native_request_kwargs,
             **_parser_tokenizer_kwargs(ReasoningParser, tokenizer),
@@ -642,6 +640,7 @@ def build_tool_call_guided_decoding(
     if (
         full_assistant_ebnf_supported
         and _normalize_sglang_parser_name(tool_call_parser_name) == "glm47"
+        and resolve_thinking_token_budget(request) is None
     ):
         native_tools = (
             convert_tools(raw_tools, structural_tag_schema=structural_tag_schema)
@@ -653,14 +652,23 @@ def build_tool_call_guided_decoding(
             tool_call_parser="glm47",
             **_parser_tokenizer_kwargs(FunctionCallParser, tokenizer),
         )
+        template = getattr(tokenizer, "chat_template", None)
+        always_reasons = isinstance(template, str) and template_always_reasons(template)
+        template_kwargs = (
+            request.get("chat_template_kwargs")
+            or request.get("chat_template_args")
+            or {}
+        )
         constraint = _call_structure_constraint(
             parser.get_structure_constraint,
             sglang_tool_choice,
             parallel_tool_calls=parallel_tool_calls,
             thinking_mode=(
                 not any(tool.function.strict for tool in native_tools or [])
-                and (request.get("chat_template_kwargs") or {}).get("enable_thinking")
-                is not False
+                and (
+                    always_reasons
+                    or template_kwargs.get("enable_thinking") is not False
+                )
             ),
         )
         return _serialize_tool_constraint(
@@ -1632,14 +1640,17 @@ class SglangStreamingPostProcessor:
             )
         return reasoning_text or None, normal_text or ""
 
-    def process_output(self, engine_response: dict[str, Any]) -> dict[str, Any] | None:
+    def process_output(
+        self, engine_response: dict[str, Any]
+    ) -> dict[str, Any] | list[dict[str, Any]] | None:
         """Process a single engine response chunk into an OpenAI SSE choice dict.
 
         Args:
             engine_response: Dict with ``token_ids`` and optional ``finish_reason``.
 
         Returns:
-            OpenAI choice dict or ``None`` if nothing to emit yet.
+            OpenAI choice dict, ordered choices when a detector drains buffered
+            events, or ``None`` if nothing is ready.
         """
         if self._locally_finished:
             return None
@@ -1694,23 +1705,30 @@ class SglangStreamingPostProcessor:
             )
 
         if self._glm_output is not None:
-            glm_delta = self._glm_output.parse(delta_text, finish_reason)
-            for call in glm_delta.get("tool_calls", []):
-                function = call["function"]
-                if function.get("name"):
-                    call["id"] = self._tool_call_id(function["name"], call["index"])
-                    call["type"] = "function"
+            glm_deltas = self._glm_output.parse(delta_text, finish_reason)
             effective_finish = finish_reason
             if finish_reason == "stop" and self._glm_output.has_calls:
                 effective_finish = "tool_calls"
-            if glm_delta or effective_finish:
-                return {
-                    "index": 0,
-                    "delta": self._with_initial_role(glm_delta),
-                    "finish_reason": effective_finish,
-                    "logprobs": self._take_pending_logprobs(),
-                }
-            return None
+            if not glm_deltas and not effective_finish:
+                return None
+            glm_deltas = glm_deltas or [{}]
+            choices = []
+            for index, glm_delta in enumerate(glm_deltas):
+                for call in glm_delta.get("tool_calls", []):
+                    function = call["function"]
+                    if function.get("name"):
+                        call["id"] = self._tool_call_id(function["name"], call["index"])
+                        call["type"] = "function"
+                last = index == len(glm_deltas) - 1
+                choices.append(
+                    {
+                        "index": 0,
+                        "delta": self._with_initial_role(glm_delta),
+                        "finish_reason": effective_finish if last else None,
+                        "logprobs": self._take_pending_logprobs() if last else None,
+                    }
+                )
+            return choices[0] if len(choices) == 1 else choices
 
         if self._fast_plain_text:
             if delta_text:

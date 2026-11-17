@@ -46,16 +46,24 @@ class GlmOutputParser:
         self.has_calls |= bool(result)
         return result
 
-    def _recover_later_calls(self) -> list[dict[str, Any]]:
-        # Never rewrite arguments that have already reached the client.
-        malformed = False
-        for parts in self._arguments.values():
+    def _has_malformed_arguments(self, indices: set[int] | None = None) -> bool:
+        arguments = (
+            self._arguments.values()
+            if indices is None
+            else (
+                self._arguments[index] for index in indices if index in self._arguments
+            )
+        )
+        for parts in arguments:
             try:
                 json.loads("".join(parts))
             except json.JSONDecodeError:
-                malformed = True
-                break
-        if not malformed or not self.tool_parser:
+                return True
+        return False
+
+    def _recover_later_calls(self) -> list[dict[str, Any]]:
+        # Never rewrite arguments that have already reached the client.
+        if not self._has_malformed_arguments() or not self.tool_parser:
             return []
         text = "".join(self._tool_text)
         frames = list(re.finditer(r"<tool_call>(.*?)</tool_call>", text, re.DOTALL))
@@ -132,7 +140,7 @@ class GlmOutputParser:
                     and bool(arguments)
                     and validators[call.name].is_valid(arguments)
                 )
-            except (ValueError, SchemaError, Unresolvable):
+            except (ValueError, SchemaError, Unresolvable, RecursionError):
                 continue
             if valid:
                 # Batch indices refer to tool definitions, not call ordinals.
@@ -140,11 +148,11 @@ class GlmOutputParser:
                 recovered.append(call)
         return self._calls(recovered)
 
-    def parse(self, text: str, finish_reason: str | None) -> dict[str, Any]:
+    def parse(self, text: str, finish_reason: str | None) -> list[dict[str, Any]]:
         if not self.stream:
             self._text.append(text)
             if not finish_reason:
-                return {}
+                return []
             text = "".join(self._text)
             reasoning = ""
             if self.reasoning_parser:
@@ -161,7 +169,7 @@ class GlmOutputParser:
                 delta["content"] = text
             if projected := self._calls(calls):
                 delta["tool_calls"] = projected
-            return delta
+            return [delta] if delta else []
 
         reasoning = ""
         if self.reasoning_parser:
@@ -176,20 +184,42 @@ class GlmOutputParser:
         if self.tool_parser and (text or finish_reason):
             self._tool_text.append(text or "")
             text, calls = self.tool_parser.parse_stream_chunk(text or "")
-            if finish_reason and (
-                flush := getattr(self.tool_parser, "parse_stream_end", None)
-            ):
-                last_text, last_calls = flush()
-                text = (text or "") + (last_text or "")
-                calls = list(calls) + last_calls
         delta = {}
         if reasoning:
             delta["reasoning_content"] = reasoning
         if text:
             delta["content"] = text
-        projected = self._calls(calls)
-        if finish_reason:
-            projected.extend(self._recover_later_calls())
-        if projected:
+        if projected := self._calls(calls):
             delta["tool_calls"] = projected
-        return delta
+        deltas = [delta] if delta else []
+        if finish_reason and self.tool_parser:
+            malformed = self._has_malformed_arguments()
+            # Preserve each detector result's text-before-calls order.
+            for _ in range("".join(self._tool_text).count("</tool_call>") + 1):
+                if malformed:
+                    break
+                last_text, last_calls = self.tool_parser.parse_stream_chunk("")
+                if not last_text and not last_calls:
+                    break
+                delta = {}
+                if last_text:
+                    delta["content"] = last_text
+                if projected := self._calls(last_calls):
+                    delta["tool_calls"] = projected
+                if delta:
+                    deltas.append(delta)
+                malformed = self._has_malformed_arguments(
+                    {call.tool_index for call in last_calls}
+                )
+            if flush := getattr(self.tool_parser, "parse_stream_end", None):
+                last_text, last_calls = flush()
+                delta = {}
+                if last_text:
+                    delta["content"] = last_text
+                if projected := self._calls(last_calls):
+                    delta["tool_calls"] = projected
+                if delta:
+                    deltas.append(delta)
+        if finish_reason and (recovered := self._recover_later_calls()):
+            deltas.append({"tool_calls": recovered})
+        return deltas

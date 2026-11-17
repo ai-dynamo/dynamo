@@ -933,7 +933,7 @@ class SglangProcessor:
                 stop_reason: Any | None,
                 stop_terminated: bool,
                 engine_data: Any | None,
-            ) -> dict[str, Any]:
+            ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                 nonlocal pending_token_ids
                 nonlocal pending_log_probs
                 nonlocal pending_top_logprobs
@@ -958,7 +958,11 @@ class SglangProcessor:
                 if self.debug_perf:
                     t_pp0 = time.monotonic()
 
-                choice = post.process_output(mapped_response)
+                result = post.process_output(mapped_response)
+                choices = (
+                    result if isinstance(result, list) else [result] if result else []
+                )
+                choice = choices[-1] if choices else None
                 if include_completion_ids:
                     completion_ids.extend(pending_token_ids)
                     if post.locally_finished:
@@ -1044,11 +1048,25 @@ class SglangProcessor:
                     envelope["event"] = "llm_metrics"
                     envelope["comment"] = [json.dumps(metrics)]
 
+                prefixes = []
+                for earlier in choices[:-1]:
+                    prefixes.append(
+                        {
+                            "_dynamo_annotated": True,
+                            "data": {
+                                "id": request_id,
+                                "choices": [earlier],
+                                "created": created_ts,
+                                "model": request["model"],
+                                "object": "chat.completion.chunk",
+                            },
+                        }
+                    )
                 pending_token_ids = []
                 pending_log_probs = None
                 pending_top_logprobs = None
                 first_chunk = False
-                return envelope
+                return prefixes, envelope
 
             def finalize_terminal(terminal: dict[str, Any]) -> dict[str, Any]:
                 data = terminal["data"]
@@ -1142,12 +1160,14 @@ class SglangProcessor:
                         top_logprobs is not None,
                     )
                     if pending_logprob_shape != chunk_logprob_shape:
-                        envelope = flush_pending(
+                        prefixes, envelope = flush_pending(
                             finish_reason=None,
                             stop_reason=None,
                             stop_terminated=False,
                             engine_data=None,
                         )
+                        for prefix in prefixes:
+                            yield prefix
                         if (
                             post.locally_finished
                             and prompt_logprobs.needs_payload
@@ -1182,12 +1202,14 @@ class SglangProcessor:
                     1 if first_chunk or post.has_pending_stop_text else stream_interval
                 )
                 if finish_reason or len(pending_token_ids) >= flush_threshold:
-                    envelope = flush_pending(
+                    prefixes, envelope = flush_pending(
                         finish_reason=finish_reason,
                         stop_reason=stop_reason,
                         stop_terminated=stop_terminated,
                         engine_data=engine_data,
                     )
+                    for prefix in prefixes:
+                        yield prefix
                     if (
                         post.locally_finished
                         and prompt_logprobs.needs_payload
