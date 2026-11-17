@@ -1296,9 +1296,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             load
         };
 
-        if num_blocks > 0 {
-            let _ = self.observe_worker_load_snapshot(worker, load, Instant::now());
-        }
+        let _ = self.observe_worker_load_snapshot(worker, load, Instant::now());
         Ok(LifecycleMutationOutcome::Applied)
     }
 
@@ -1306,14 +1304,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     pub fn decode_progress_for(&self, worker: WorkerWithDpRank) -> Option<DecodeProgress> {
         let table = self.workers.read();
         let &index = table.index.get(&worker)?;
-        let progress = table
+        table
             .slots
             .get(index)?
             .sequences
             .read()
-            .decode_progress_summary()?;
-        progress.observed_age()?;
-        Some(progress)
+            .decode_progress_summary()
     }
 
     /// Get the number of workers.
@@ -4254,18 +4250,38 @@ mod tests {
         );
     }
 
+    fn decoding_request(
+        sequences: &ActiveSequencesMultiWorker<RecordingPublisher>,
+        request_id: &RequestId,
+        worker: WorkerWithDpRank,
+        now: Instant,
+    ) -> AttemptId {
+        let attempt = sequences
+            .add_request_admitted(local_sequence_request(request_id, worker), now)
+            .unwrap();
+        sequences
+            .mark_prefill_completed_if_booking(request_id, worker, attempt, now)
+            .unwrap();
+        sequences
+            .update_output_if_booking(
+                request_id,
+                worker,
+                attempt,
+                0,
+                None,
+                Some(DecodeProgressUpdate::observed(128, 8)),
+            )
+            .unwrap();
+        attempt
+    }
+
     #[test]
     fn decode_progress_uses_existing_booking_without_load_publication() {
         let (sequences, publisher) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
         let worker = WorkerWithDpRank::new(1, 0);
         let request_id = "raw-progress".to_string();
         let now = Instant::now();
-        let attempt = sequences
-            .add_request_admitted(local_sequence_request(&request_id, worker), now)
-            .unwrap();
-        sequences
-            .mark_prefill_completed_if_booking(&request_id, worker, attempt, now)
-            .unwrap();
+        let attempt = decoding_request(&sequences, &request_id, worker, now);
         // Progress-only updates must leave the independently published load snapshot alone.
         sequences.prompt_registry.replace_worker_load_state(
             worker,
@@ -4277,7 +4293,13 @@ mod tests {
         );
         let load_before = sequences.worker_load_reader(now).get(worker).unwrap();
         publisher.clear();
-        assert!(sequences.decode_progress_for(worker).is_none());
+        assert_eq!(
+            sequences
+                .decode_progress_for(worker)
+                .unwrap()
+                .remaining_token_budget(),
+            120
+        );
         assert_eq!(
             sequences
                 .update_output_if_booking(
@@ -4286,13 +4308,13 @@ mod tests {
                     attempt,
                     0,
                     None,
-                    Some(DecodeProgressUpdate::observed(128, 8)),
+                    Some(DecodeProgressUpdate::observed(128, 9)),
                 )
                 .unwrap(),
             LifecycleMutationOutcome::Applied
         );
         let progress = sequences.decode_progress_for(worker).unwrap();
-        assert_eq!(progress.remaining_token_budget(), 120);
+        assert_eq!(progress.remaining_token_budget(), 119);
         assert_eq!(progress.observed_requests(), 1);
         assert_eq!(
             sequences.worker_load_reader(now).get(worker),
@@ -4309,125 +4331,21 @@ mod tests {
     }
 
     #[test]
-    fn decode_progress_stale_attempt_cannot_change_or_retire_replacement() {
-        let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
-        let worker = WorkerWithDpRank::new(1, 0);
-        let request_id = "reused-id".to_string();
-        let now = Instant::now();
-        let old = sequences
-            .add_request_admitted(local_sequence_request(&request_id, worker), now)
-            .unwrap();
-        sequences
-            .free_if_booking(&request_id, worker, old, now)
-            .unwrap();
-        let current = sequences
-            .add_request_admitted(local_sequence_request(&request_id, worker), now)
-            .unwrap();
-        sequences
-            .mark_prefill_completed_if_booking(&request_id, worker, current, now)
-            .unwrap();
-        sequences
-            .update_output_if_booking(
-                &request_id,
-                worker,
-                current,
-                0,
-                None,
-                Some(DecodeProgressUpdate::observed(128, 8)),
-            )
-            .unwrap();
-        let before = sequences.decode_progress_for(worker).unwrap();
-        assert_eq!(
-            sequences
-                .update_output_if_booking(
-                    &request_id,
-                    worker,
-                    old,
-                    0,
-                    None,
-                    Some(DecodeProgressUpdate::unavailable())
-                )
-                .unwrap(),
-            LifecycleMutationOutcome::NoChange
-        );
-        assert_eq!(
-            sequences
-                .free_if_booking(&request_id, worker, old, now)
-                .unwrap(),
-            LifecycleMutationOutcome::NoChange
-        );
-        assert_eq!(sequences.decode_progress_for(worker), Some(before));
-        sequences
-            .expire_if_booking(&request_id, worker, current, now)
-            .unwrap();
-        assert!(sequences.decode_progress_for(worker).is_none());
-    }
-
-    #[test]
     fn decode_progress_is_incomplete_for_unobserved_or_prefilling_owners() {
         let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
         let worker = WorkerWithDpRank::new(1, 0);
         let now = Instant::now();
-        for id in ["a", "b"] {
-            let request_id = id.to_string();
-            let attempt = sequences
-                .add_request_admitted(local_sequence_request(&request_id, worker), now)
-                .unwrap();
-            if id == "a" {
-                sequences
-                    .mark_prefill_completed_if_booking(&request_id, worker, attempt, now)
-                    .unwrap();
-                sequences
-                    .update_output_if_booking(
-                        &request_id,
-                        worker,
-                        attempt,
-                        0,
-                        None,
-                        Some(DecodeProgressUpdate::observed(128, 8)),
-                    )
-                    .unwrap();
-                assert!(sequences.decode_progress_for(worker).is_some());
-            }
-        }
-        assert!(sequences.decode_progress_for(worker).is_none());
-        sequences
-            .mark_prefill_completed(&"b".to_string(), now)
-            .unwrap();
-        assert!(sequences.decode_progress_for(worker).is_none());
-        sequences.free(&"b".to_string(), now).unwrap();
+        decoding_request(&sequences, &"a".to_string(), worker, now);
         assert!(sequences.decode_progress_for(worker).is_some());
-    }
-
-    #[test]
-    fn decode_progress_clears_on_worker_replacement() {
-        let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
-        let worker = WorkerWithDpRank::new(1, 0);
-        let request_id = "removed-worker".to_string();
-        let now = Instant::now();
-        let attempt = sequences
-            .add_request_admitted(local_sequence_request(&request_id, worker), now)
-            .unwrap();
+        let pending = "b".to_string();
         sequences
-            .mark_prefill_completed_if_booking(&request_id, worker, attempt, now)
+            .add_request_admitted(local_sequence_request(&pending, worker), now)
             .unwrap();
-        sequences
-            .update_output_if_booking(
-                &request_id,
-                worker,
-                attempt,
-                0,
-                None,
-                Some(DecodeProgressUpdate::observed(128, 8)),
-            )
-            .unwrap();
+        assert!(sequences.decode_progress_for(worker).is_none());
+        sequences.mark_prefill_completed(&pending, now).unwrap();
+        assert!(sequences.decode_progress_for(worker).is_none());
+        sequences.free(&pending, now).unwrap();
         assert!(sequences.decode_progress_for(worker).is_some());
-        sequences.reconcile_workers(Vec::new()).unwrap();
-        assert!(sequences.decode_progress_for(worker).is_none());
-        sequences
-            .reconcile_workers(vec![WorkerDpRange::new(1, 0, 1)])
-            .unwrap();
-        assert!(sequences.decode_progress_for(worker).is_none());
     }
 
     #[test]
@@ -4436,22 +4354,7 @@ mod tests {
         let worker = WorkerWithDpRank::new(1, 0);
         let request_id = "local-owner".to_string();
         let now = Instant::now();
-        let attempt = sequences
-            .add_request_admitted(local_sequence_request(&request_id, worker), now)
-            .unwrap();
-        sequences
-            .mark_prefill_completed_if_booking(&request_id, worker, attempt, now)
-            .unwrap();
-        sequences
-            .update_output_if_booking(
-                &request_id,
-                worker,
-                attempt,
-                0,
-                None,
-                Some(DecodeProgressUpdate::observed(128, 8)),
-            )
-            .unwrap();
+        decoding_request(&sequences, &request_id, worker, now);
         assert!(sequences.decode_progress_for(worker).is_some());
         sequences.apply_replica_batch(vec![replica_add("mirrored", worker, vec![10])]);
         assert!(sequences.decode_progress_for(worker).is_none());

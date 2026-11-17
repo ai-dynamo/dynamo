@@ -1912,7 +1912,7 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn native_decode_progress_collection_follows_picker_declaration() {
+async fn decode_progress_collection_follows_picker_declaration() {
     use dynamo_kv_router::plugins::prelude::{
         WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
     };
@@ -1979,7 +1979,8 @@ async fn native_decode_progress_collection_follows_picker_declaration() {
         let mut input = request();
         input.token_ids = vec![1; 15].into();
         input.stop_conditions.max_tokens = Some(128);
-        input.stop_conditions.ignore_eos = Some(true);
+        input.stop_conditions.ignore_eos = Some(false);
+        input.stop_conditions.stop = Some(vec!["stop".to_string()]);
         let input = Context::new(input);
         let (mut selection, _) = router
             .select_with_affinity(
@@ -2015,7 +2016,7 @@ async fn native_decode_progress_collection_follows_picker_declaration() {
             ),
             (
                 LLMEngineOutput {
-                    finish_reason: Some(FinishReason::Length),
+                    finish_reason: Some(FinishReason::Stop),
                     ..Default::default()
                 },
                 None,

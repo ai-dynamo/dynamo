@@ -46,29 +46,8 @@ fn decode_progress_output_limit(request: &PreprocessedRequest, phase: RequestPha
         .filter(|limit| *limit > 0)?;
     (phase == RequestPhase::Aggregated
         && request.sampling_options.n.unwrap_or(1) == 1
-        && request.sampling_options.best_of.unwrap_or(1) == 1
-        && request.stop_conditions.ignore_eos == Some(true)
-        && request
-            .stop_conditions
-            .stop
-            .as_ref()
-            .is_none_or(Vec::is_empty)
-        && request
-            .stop_conditions
-            .stop_token_ids
-            .as_ref()
-            .is_none_or(Vec::is_empty)
-        && request
-            .stop_conditions
-            .stop_token_ids_visible
-            .as_ref()
-            .is_none_or(Vec::is_empty)
-        && request
-            .stop_conditions
-            .stop_token_ids_hidden
-            .as_ref()
-            .is_none_or(Vec::is_empty))
-    .then_some(limit)
+        && request.sampling_options.best_of.unwrap_or(1) == 1)
+        .then_some(limit)
 }
 
 #[derive(Clone)]
@@ -1362,11 +1341,11 @@ mod prefill_start_tests {
 }
 
 #[cfg(test)]
-mod native_decode_progress_producer_tests {
+mod decode_progress_tests {
     use super::*;
 
     #[test]
-    fn native_decode_progress_metadata_does_not_allocate_a_scheduler_block() {
+    fn decode_progress_metadata_does_not_allocate_a_scheduler_block() {
         let mut tracker = OutputBlockTracker::new(true, 15, 16, None);
         tracker.enable_decode_progress(128);
         let update = tracker.observe(1).unwrap();
@@ -1378,7 +1357,7 @@ mod native_decode_progress_producer_tests {
     }
 
     #[test]
-    fn native_decode_progress_invalidates_without_fabricating_output() {
+    fn decode_progress_invalidates_without_fabricating_output() {
         let mut tracker = OutputBlockTracker::new(true, 15, 16, None);
         tracker.enable_decode_progress(128);
         tracker.observe(1).unwrap();
@@ -1390,7 +1369,7 @@ mod native_decode_progress_producer_tests {
     }
 
     #[test]
-    fn native_decode_progress_is_independent_of_output_block_tracking() {
+    fn decode_progress_is_independent_of_output_block_tracking() {
         let mut tracker = OutputBlockTracker::new(false, 15, 16, Some(64));
         tracker.enable_decode_progress(128);
         for cumulative_osl in [8, 32] {
@@ -1404,7 +1383,7 @@ mod native_decode_progress_producer_tests {
     }
 
     #[test]
-    fn native_decode_progress_support_preserves_budget_and_stop_semantics() {
+    fn decode_progress_supports_limited_requests() {
         let mut request = PreprocessedRequest::builder()
             .model("test".to_string())
             .token_ids(vec![1])
@@ -1429,12 +1408,17 @@ mod native_decode_progress_producer_tests {
         assert_eq!(decode_progress_output_limit(&request, phase), None);
         request.stop_conditions.max_tokens = Some(128);
         request.stop_conditions.ignore_eos = Some(false);
-        assert_eq!(decode_progress_output_limit(&request, phase), None);
+        assert_eq!(decode_progress_output_limit(&request, phase), Some(128));
         request.stop_conditions.ignore_eos = Some(true);
         request.sampling_options.n = Some(2);
         assert_eq!(decode_progress_output_limit(&request, phase), None);
         request.sampling_options.n = Some(1);
         request.stop_conditions.stop = Some(vec!["stop".to_string()]);
+        request.stop_conditions.stop_token_ids = Some(vec![1]);
+        request.stop_conditions.stop_token_ids_visible = Some(vec![2]);
+        request.stop_conditions.stop_token_ids_hidden = Some(vec![3]);
+        assert_eq!(decode_progress_output_limit(&request, phase), Some(128));
+        request.sampling_options.best_of = Some(2);
         assert_eq!(decode_progress_output_limit(&request, phase), None);
     }
 }

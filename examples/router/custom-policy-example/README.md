@@ -29,8 +29,8 @@ Declare `plugins::worker_selection::experimental::resident_blocks::RESIDENT_BLOC
 ### Read Experimental Decode Progress
 
 A picker declaring `DECODE_PROGRESS` can query a candidate only when it needs that
-signal. Collection starts from the declaration; no output-block tracking flag or
-environment variable is required. Import the extension alongside the plugin API:
+signal. The declaration enables collection. Import the extension alongside the
+plugin API:
 
 ```rust
 use dynamo_kv_router::plugins::prelude::WorkerInputView;
@@ -42,15 +42,16 @@ use std::time::Duration;
 // Return DECODE_PROGRESS from the picker's required_worker_inputs().
 fn remaining_budget(input: WorkerInputView<'_>, row: usize, max_age: Duration) -> Option<usize> {
     let progress = input.decode_progress(row)?;
-    (progress.observed_age()? <= max_age).then_some(progress.remaining_token_budget())
+    (progress.observed_age() <= max_age).then_some(progress.remaining_token_budget())
 }
 ```
 
 `None` requires a fallback. This frontend-local signal covers supported aggregated,
-single-choice, explicit-limit, ignore-EOS streams only, and is unavailable while
-any active request on the rank lacks valid observations. A remaining budget is a
+single-choice requests with a positive explicit output limit, including EOS and
+stop conditions. It is unavailable while any active request is prefilling or lacks
+valid observations. A remaining budget is a
 token bound, not a time estimate. See the [API guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx#experimental-decode-progress)
-for lifetime, collection cost, and missing-data behavior.
+for fields and missing-data behavior.
 
 ## Pick a Starting Point
 

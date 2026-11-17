@@ -19,7 +19,7 @@ use super::queue::{
     BookingHandle, ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor,
     SchedulerQueue,
 };
-use super::selector::{WorkerInputs, WorkerSelector, log_selection};
+use super::selector::{WorkerSelector, log_selection};
 use super::types::{
     AdmissionAttempt, AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId,
     KvSchedulerError, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad,
@@ -33,12 +33,12 @@ use crate::types::RejectThresholdsProvider;
 use dynamo_admission::PolicyProfile;
 #[cfg(test)]
 use dynamo_admission::RouterQueuePolicy;
-use dynamo_admission::classifier::{ClassifyRequest, RequestClassifier};
-use dynamo_admission::classifier::{RequestClassifierRuntime, RequestLifecycle};
+use dynamo_admission::{ClassifyRequest, RequestClassifier};
+use dynamo_admission::{RequestClassifierRuntime, RequestLifecycle};
 use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_indexer::ResidentBlockCountsHandle;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
-use dynamo_slot_tracker::topology::WorkerDpRange;
+use dynamo_slot_tracker::WorkerDpRange;
 use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, PrefillCompletion, PrefillTokenDeltas,
     SequenceError, SequencePublisher, SequenceRequest,
@@ -46,6 +46,7 @@ use dynamo_slot_tracker::{
 use dynamo_tokens::SequenceHash;
 use dynamo_worker_selection::SelectionTraceSpec;
 use dynamo_worker_selection::WorkerCapacity;
+use dynamo_worker_selection::WorkerInputs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkerConfigReconcileOutcome {
@@ -890,21 +891,6 @@ where
             .add_output_block(&request_id.to_string(), decay_fraction)
     }
 
-    /// Apply output updates before returning, without waiting for admission.
-    ///
-    /// Zero counts and stale or missing bookings return `Ok(())`. A zero count
-    /// does not mutate state or emit load observations. Queue shutdown is checked
-    /// first, including for zero counts.
-    pub async fn add_output_blocks_if_booking(
-        &self,
-        booking: &SchedulerBookingDescriptor,
-        num_blocks: usize,
-        decay_fraction: Option<f64>,
-    ) -> Result<(), KvSchedulerError> {
-        self.update_output_if_booking(booking, num_blocks, decay_fraction, None)
-            .await
-    }
-
     /// Apply output updates directly without checking queue shutdown.
     ///
     /// Zero counts and stale or missing bookings return `NoChange`. A zero count
@@ -924,9 +910,8 @@ where
         )
     }
 
-    /// Extend the native output path with explicitly supported raw progress.
-    /// Metadata-only updates do not allocate output blocks or publish replica/shared load.
-    /// The native booking owns retirement on free, retry, expiry and worker removal.
+    /// Apply block and progress updates for a current booking without waiting for admission.
+    /// Progress-only updates leave output blocks and published load unchanged.
     pub async fn update_output_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
@@ -1012,11 +997,11 @@ mod tests {
     use crate::PrefillLoadEstimator;
     use crate::selector::DefaultWorkerSelector;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
-    use dynamo_admission::classifier::ClassifyFuture;
-    use dynamo_admission::classifier::WorkerView;
+    use dynamo_admission::ClassifyFuture;
+    use dynamo_admission::WorkerView;
+    use dynamo_slot_tracker::BusyThresholds;
     use dynamo_slot_tracker::SequenceSubscriber;
-    use dynamo_slot_tracker::busy::BusyThresholds;
-    use dynamo_slot_tracker::wire::{ActiveSequenceEvent, ActiveSequenceEventData};
+    use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
 
     struct TestSequenceSubscriber {
         rx: mpsc::UnboundedReceiver<ActiveSequenceEvent>,
@@ -1052,7 +1037,7 @@ mod tests {
                     token_sequence: None,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
-                    prefill_load_hint: Some(dynamo_slot_tracker::wire::PrefillLoadHint {
+                    prefill_load_hint: Some(dynamo_slot_tracker::PrefillLoadHint {
                         initial_effective_prefill_tokens: 64,
                         expected_prefill_duration: None,
                     }),
@@ -1064,7 +1049,7 @@ mod tests {
             let before = slots.active_blocks()[&worker];
             // A single poll on this current-thread runtime cannot run the actor.
             assert!(matches!(
-                poll_once(scheduler.add_output_blocks_if_booking(&booking, 3, None)),
+                poll_once(scheduler.update_output_if_booking(&booking, 3, None, None)),
                 std::task::Poll::Ready(Ok(()))
             ));
             assert_eq!(slots.active_blocks()[&worker], before + 3);
@@ -1082,7 +1067,7 @@ mod tests {
                 std::task::Poll::Ready(Ok(LifecycleMutationOutcome::Applied))
             ));
             assert!(matches!(
-                poll_once(scheduler.add_output_blocks_if_booking(&booking, 3, None)),
+                poll_once(scheduler.update_output_if_booking(&booking, 3, None, None)),
                 std::task::Poll::Ready(Ok(()))
             ));
             slots.assert_completely_drained(Instant::now());
@@ -1612,7 +1597,7 @@ mod tests {
                 token_sequence: None,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
-                prefill_load_hint: Some(dynamo_slot_tracker::wire::PrefillLoadHint {
+                prefill_load_hint: Some(dynamo_slot_tracker::PrefillLoadHint {
                     initial_effective_prefill_tokens: 64,
                     expected_prefill_duration: None,
                 }),

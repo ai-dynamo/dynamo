@@ -551,7 +551,7 @@ impl<'a> WorkerCacheInput<'a> {
     }
 }
 
-impl dynamo_slot_tracker::busy::RankLoad for WorkerLoadInput {
+impl dynamo_slot_tracker::RankLoad for WorkerLoadInput {
     #[inline]
     fn active_prefill_tokens(&self) -> usize {
         self.active_prefill_tokens

@@ -131,7 +131,7 @@ pub struct ActiveSequences {
     blocks: BlockTracker,
     last_expiry_check_time: Instant,
     expiry_duration: Option<Duration>,
-    decode_progress: Option<Box<DecodeProgressAggregate>>,
+    decode_progress: DecodeProgressAggregate,
 }
 
 impl ActiveSequences {
@@ -156,7 +156,7 @@ impl ActiveSequences {
             blocks: BlockTracker::default(),
             last_expiry_check_time: Instant::now(),
             expiry_duration,
-            decode_progress: None,
+            decode_progress: DecodeProgressAggregate::default(),
         }
     }
 
@@ -297,9 +297,7 @@ impl ActiveSequences {
         let _ = self.prefill.remove(request_id, decay_now);
 
         let request_state = self.requests.remove(request_id)?;
-        if let Some(progress) = &mut self.decode_progress {
-            progress.retire(request_state.decode_progress);
-        }
+        self.decode_progress.retire(request_state.decode_progress);
         if !request_state.prefill_completed {
             self.prefill_requests -= 1;
         }
@@ -356,7 +354,6 @@ impl ActiveSequences {
             return false;
         };
         self.decode_progress
-            .get_or_insert_with(|| Box::new(DecodeProgressAggregate::default()))
             .update(&mut request.decode_progress, update)
     }
 
@@ -403,7 +400,7 @@ impl ActiveSequences {
         if self.prefill_requests != 0 {
             return None;
         }
-        self.decode_progress.as_ref()?.summary(self.requests.len())
+        self.decode_progress.summary(self.requests.len())
     }
 
     pub(super) fn worker_load_snapshot(&self) -> WorkerLoadSnapshot {

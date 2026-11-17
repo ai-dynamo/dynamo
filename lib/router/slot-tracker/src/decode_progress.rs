@@ -7,8 +7,6 @@ use std::collections::{BTreeMap, btree_map::Entry};
 use std::time::Duration;
 use tokio::time::Instant;
 
-const MAX_OBSERVATIONS_PER_WORKER: usize = 4096;
-
 /// Host-only metadata accompanying the native attempt-fenced output update.
 /// A supported producer supplies its explicit output bound and original token count.
 #[derive(Clone, Copy, Debug)]
@@ -72,9 +70,9 @@ impl DecodeProgress {
         self.remaining_token_budget
     }
 
-    /// Age of the oldest observation at this call. A future timestamp reads as unavailable.
-    pub fn observed_age(&self) -> Option<Duration> {
-        Instant::now().checked_duration_since(self.oldest_observed_at)
+    /// Age of the oldest observation at this call.
+    pub fn observed_age(&self) -> Duration {
+        Instant::now().saturating_duration_since(self.oldest_observed_at)
     }
 }
 
@@ -83,15 +81,15 @@ impl DecodeProgress {
 pub(crate) struct DecodeProgressAggregate {
     tracked: usize,
     invalid: usize,
-    remaining: usize,
-    // A counted timestamp index keeps oldest-observation reads O(1) and updates O(log N).
+    remaining: u128,
+    // Index timestamps to find the oldest observation without scanning owners.
     times: BTreeMap<Instant, usize>,
 }
 
 impl DecodeProgressAggregate {
     fn remove_valid(&mut self, observation: Observation) {
         if observation.valid {
-            self.remaining -= observation.remaining();
+            self.remaining -= observation.remaining() as u128;
             if let Entry::Occupied(mut count) = self.times.entry(observation.at) {
                 if *count.get() == 1 {
                     count.remove();
@@ -116,9 +114,6 @@ impl DecodeProgressAggregate {
         owner: &mut Option<Box<Observation>>,
         update: DecodeProgressUpdate,
     ) -> bool {
-        if owner.is_none() && self.tracked == MAX_OBSERVATIONS_PER_WORKER {
-            return false;
-        }
         let mut observation = update.observation.unwrap_or_else(|| Observation {
             output_limit: 0,
             generated_tokens: 0,
@@ -143,12 +138,8 @@ impl DecodeProgressAggregate {
             self.tracked += 1;
         }
         if observation.valid {
-            if let Some(remaining) = self.remaining.checked_add(observation.remaining()) {
-                self.remaining = remaining;
-                *self.times.entry(observation.at).or_default() += 1;
-            } else {
-                observation.valid = false;
-            }
+            self.remaining += observation.remaining() as u128;
+            *self.times.entry(observation.at).or_default() += 1;
         }
         if !observation.valid {
             self.invalid += 1;
@@ -166,7 +157,7 @@ impl DecodeProgressAggregate {
         }
         Some(DecodeProgress {
             observed_requests: self.tracked,
-            remaining_token_budget: self.remaining,
+            remaining_token_budget: self.remaining.try_into().ok()?,
             oldest_observed_at: *self.times.first_key_value()?.0,
         })
     }
@@ -182,18 +173,13 @@ mod tests {
         let mut owner = None;
         aggregate.update(&mut owner, DecodeProgressUpdate::observed(128, 8));
         let value = aggregate.summary(1).unwrap();
-        assert_eq!(value.observed_age(), Some(Duration::ZERO));
+        assert_eq!(value.observed_age(), Duration::ZERO);
         tokio::time::advance(Duration::from_millis(5)).await;
-        assert_eq!(value.observed_age(), Some(Duration::from_millis(5)));
-        let future = DecodeProgress {
-            oldest_observed_at: Instant::now() + Duration::from_secs(1),
-            ..value
-        };
-        assert_eq!(future.observed_age(), None);
+        assert_eq!(value.observed_age(), Duration::from_millis(5));
     }
 
     #[test]
-    fn complete_owner_set_and_native_retirement_determine_availability() {
+    fn complete_owner_set_and_retirement_determine_availability() {
         let mut aggregate = DecodeProgressAggregate::default();
         let (mut a, mut b) = (None, None);
         aggregate.update(&mut a, DecodeProgressUpdate::observed(128, 8));
@@ -233,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_progress_stays_unavailable_until_native_owner_is_retired() {
+    fn invalid_progress_stays_unavailable_until_owner_is_retired() {
         for broken in [
             DecodeProgressUpdate::observed(128, 7),
             DecodeProgressUpdate::observed(128, 129),
@@ -250,27 +236,5 @@ mod tests {
             aggregate.update(&mut a, DecodeProgressUpdate::observed(128, 10));
             assert_eq!(aggregate.summary(1).unwrap().remaining_token_budget, 118);
         }
-    }
-
-    #[test]
-    fn capped_native_metadata_stays_unavailable_for_a_partial_worker() {
-        let mut aggregate = DecodeProgressAggregate::default();
-        let mut owners = vec![None; MAX_OBSERVATIONS_PER_WORKER];
-        let now = Instant::now();
-        for owner in &mut owners {
-            assert!(aggregate.update(owner, DecodeProgressUpdate::observed_at(128, 8, now)));
-        }
-        let mut extra = None;
-        assert!(!aggregate.update(&mut extra, DecodeProgressUpdate::observed(128, 8)));
-        assert!(aggregate.summary(MAX_OBSERVATIONS_PER_WORKER + 1).is_none());
-        aggregate.retire(owners[0].take());
-        assert!(aggregate.update(&mut extra, DecodeProgressUpdate::observed(128, 8)));
-        assert_eq!(
-            aggregate
-                .summary(MAX_OBSERVATIONS_PER_WORKER)
-                .unwrap()
-                .remaining_token_budget,
-            MAX_OBSERVATIONS_PER_WORKER * 120
-        );
     }
 }

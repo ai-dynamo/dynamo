@@ -1,22 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Frontend-local decode observations, read on demand by a worker picker.
+//! Frontend-local output budgets, read on demand by a worker picker.
 //!
-//! Declaring [`DECODE_PROGRESS`] enables collection for supported aggregated requests in
-//! the routing partition. Each read locks only the requested rank's native slot tracker;
-//! prepared rows retain no progress. Filters, scorers and request classifiers receive none.
+//! Declare [`DECODE_PROGRESS`] and import [`DecodeProgressByRow`] to read a candidate.
+//! Supported aggregated requests have one choice and a positive explicit output limit.
+//! A rank returns `None` while any active request is prefilling, unobserved or invalid,
+//! or when the input or host is unavailable. Filters and scorers receive none.
 //!
-//! A summary covers every active request on the rank. It is `None` for an undeclared input,
-//! an unavailable host, an idle rank, incomplete or invalid observations, or a rank with
-//! requests still prefilling. Supported streams have one choice, a positive explicit output
-//! limit, `ignore_eos=true`, and no other stop conditions. Counts are unweighted raw tokens
-//! observed by this frontend, and are not shared between frontend replicas. Collection is
-//! independent of output-block accounting.
-//!
-//! Remaining output budget is a bound, not a completion-time estimate. Use
-//! [`DecodeProgress::observed_age`] to reject old data; it includes time waiting for the
-//! lookup lock. Consecutive reads may observe different updates.
+//! Budgets are raw-token upper bounds, not completion-time estimates. Observations stay
+//! local to this frontend. Use [`DecodeProgress::observed_age`] for a freshness limit.
 
 use crate::{WorkerInputView, WorkerInputs};
 
