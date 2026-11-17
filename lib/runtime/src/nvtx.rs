@@ -626,16 +626,15 @@ pub fn request_key(rid: &str) -> Option<u64> {
     if enabled() { Some(rid_key(rid)) } else { None }
 }
 
-/// Render `<stage> rid=<rid>[ key=value]...`.
-///
-/// Used with [`IDENTITY_STAGE`] for the request identity mark. `trace`, `xrid` and
-/// `engine_rid` come first (in that order), then the remaining `attrs` sorted by key.
+/// Render the request identity mark, `dynamo.request rid=<rid>[ key=value]...` (always
+/// [`IDENTITY_STAGE`] first). `trace`, `xrid` and `engine_rid` come first (in that order),
+/// then the remaining `attrs` sorted by key.
 /// Values are sanitized and bounded (see [`MAX_VALUE_BYTES`]) and attributes whose value
 /// ends up empty are omitted. This allocates; callers must test [`enabled()`] first (the
 /// `dynamo_nvtx_request_*` macros do).
-pub fn format_request_message(stage: &str, rid: &str, attrs: &[(&str, &str)]) -> String {
-    let mut out = String::with_capacity(stage.len() + rid.len() + 32 + attrs.len() * 24);
-    push_sanitized(&mut out, stage);
+pub fn format_request_message(rid: &str, attrs: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(IDENTITY_STAGE.len() + rid.len() + 32 + attrs.len() * 24);
+    out.push_str(IDENTITY_STAGE);
     out.push_str(" rid=");
     push_sanitized(&mut out, rid);
 
@@ -655,12 +654,6 @@ pub fn format_request_message(stage: &str, rid: &str, attrs: &[(&str, &str)]) ->
     out
 }
 
-/// Message of the identity mark for `rid` with `attrs`.
-#[cfg(feature = "nvtx")]
-pub(crate) fn identity_message(rid: &str, attrs: &[(&str, &str)]) -> String {
-    format_request_message(IDENTITY_STAGE, rid, attrs)
-}
-
 /// Record a request-scoped marker. Prefer [`dynamo_nvtx_request_mark!`].
 #[doc(hidden)]
 #[inline(never)]
@@ -672,7 +665,7 @@ pub fn request_mark_impl(stage: &str, rid: &str, attrs: &[(&str, &str)]) {
         }
         let key = rid_key(rid);
         if !attrs.is_empty() {
-            ffi::mark_payload(identity_message(rid, attrs), key);
+            ffi::mark_payload(format_request_message(rid, attrs), key);
         }
         ffi::mark_payload(stage, key);
     }
@@ -687,7 +680,7 @@ pub fn request_range_impl(stage: &str, rid: &str, attrs: &[(&str, &str)]) -> Nvt
     let key = rid_key(rid);
     #[cfg(feature = "nvtx")]
     if enabled() && !attrs.is_empty() {
-        ffi::mark_payload(identity_message(rid, attrs), key);
+        ffi::mark_payload(format_request_message(rid, attrs), key);
     }
     #[cfg(not(feature = "nvtx"))]
     let _ = attrs;
@@ -1044,15 +1037,14 @@ mod tests {
     #[test]
     fn format_minimal_message() {
         assert_eq!(
-            super::format_request_message("http-request", "abc", &[]),
-            "http-request rid=abc"
+            super::format_request_message("abc", &[]),
+            "dynamo.request rid=abc"
         );
     }
 
     #[test]
     fn format_orders_leading_keys_then_sorted_rest() {
         let msg = super::format_request_message(
-            "stage",
             "r1",
             &[
                 ("zeta", "z"),
@@ -1064,53 +1056,55 @@ mod tests {
         );
         assert_eq!(
             msg,
-            "stage rid=r1 trace=t xrid=x engine_rid=e alpha=a zeta=z"
+            "dynamo.request rid=r1 trace=t xrid=x engine_rid=e alpha=a zeta=z"
         );
     }
 
     #[test]
     fn format_omits_empty_and_fully_dropped_values() {
         let msg = super::format_request_message(
-            "s",
             "r",
             &[("xrid", ""), ("a", "\u{1}\u{7f}"), ("b", "ok"), ("", "v")],
         );
-        assert_eq!(msg, "s rid=r b=ok");
+        assert_eq!(msg, "dynamo.request rid=r b=ok");
     }
 
     #[test]
     fn format_sanitizes_whitespace_and_control_chars() {
         let msg = super::format_request_message(
-            "s",
             "a b\tc\nd",
             &[("xrid", "x y\u{0}z\r\n"), ("k=ey v", "v")],
         );
-        assert_eq!(msg, "s rid=a_b_c_d xrid=x_yz__ k_ey_v=v");
+        assert_eq!(msg, "dynamo.request rid=a_b_c_d xrid=x_yz__ k_ey_v=v");
         assert_eq!(msg.matches(' ').count(), 3);
     }
 
     #[test]
     fn format_truncates_on_char_boundary() {
         let long = "a".repeat(500);
-        let msg = super::format_request_message("s", &long, &[]);
-        assert_eq!(msg, format!("s rid={}", "a".repeat(super::MAX_VALUE_BYTES)));
+        let msg = super::format_request_message(&long, &[]);
+        assert_eq!(
+            msg,
+            format!("dynamo.request rid={}", "a".repeat(super::MAX_VALUE_BYTES))
+        );
 
         // 3-byte chars: 128 / 3 = 42 whole chars (126 bytes); never split one.
         let wide = "\u{20ac}".repeat(100);
-        let msg = super::format_request_message("s", "r", &[("xrid", &wide)]);
-        let value = msg.strip_prefix("s rid=r xrid=").expect("prefix");
+        let msg = super::format_request_message("r", &[("xrid", &wide)]);
+        let value = msg
+            .strip_prefix("dynamo.request rid=r xrid=")
+            .expect("prefix");
         assert_eq!(value.chars().count(), 42);
         assert_eq!(value.len(), 126);
 
         // Exactly at the limit is kept whole.
         let exact = "b".repeat(super::MAX_VALUE_BYTES);
-        assert!(super::format_request_message("s", &exact, &[]).ends_with(&exact));
+        assert!(super::format_request_message(&exact, &[]).ends_with(&exact));
     }
 
     #[test]
     fn format_matches_the_parser_regex_shape() {
         let msg = super::format_request_message(
-            "kv_router.route_request:prefill",
             "123e4567-e89b-12d3-a456-426614174000",
             &[
                 ("trace", "0af7651916cd43dd8448eb211c80319c"),
@@ -1118,7 +1112,7 @@ mod tests {
             ],
         );
         let mut tokens = msg.split(' ');
-        assert_eq!(tokens.next(), Some("kv_router.route_request:prefill"));
+        assert_eq!(tokens.next(), Some(super::IDENTITY_STAGE));
         assert!(tokens.next().expect("rid").starts_with("rid="));
         for rest in tokens {
             assert!(rest.contains('='), "{rest}");
