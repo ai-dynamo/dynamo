@@ -84,6 +84,117 @@ async fn native_http_execution_projects_both_contracts_and_measured_usage() {
 }
 
 #[tokio::test]
+async fn native_preprocessing_capacity_uses_shared_error_contract() {
+    let service = super::super::service_v2::HttpService::builder()
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let admission = state.systemone_admission();
+    let initial = admission.available_permits();
+    let preflight = state.systemone_preflight_admission();
+    let _busy = preflight
+        .clone()
+        .acquire_many_owned(preflight.available_permits() as u32)
+        .await
+        .unwrap();
+    let engine = Arc::new(HeadFixture {
+        duplicate: false,
+        pending: false,
+        calls: AtomicUsize::new(0),
+    });
+    let response = super::super::head::handle(
+        state,
+        "capacity".into(),
+        request(dynamo_decisions::Dialect::OpenAi),
+        selected(engine.clone()),
+        tokio::time::Instant::now() + Duration::from_secs(2),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        crate::http::service::error::overload_status_code()
+    );
+    assert_eq!(response.headers()["retry-after"], "1");
+    let body = response_body(response).await;
+    assert_eq!(
+        body["error"]["message"],
+        "System One preprocessing capacity is exhausted"
+    );
+    assert_eq!(engine.calls.load(Ordering::Relaxed), 0);
+    assert_eq!(admission.available_permits(), initial);
+}
+
+#[tokio::test]
+async fn native_prepare_validation_preserves_dialect_and_releases_admission() {
+    for dialect in [
+        dynamo_decisions::Dialect::OpenAi,
+        dynamo_decisions::Dialect::Jev,
+    ] {
+        let service = super::super::service_v2::HttpService::builder()
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        let admission = state.systemone_admission();
+        let initial = admission.available_permits();
+        let engine = Arc::new(HeadFixture {
+            duplicate: false,
+            pending: false,
+            calls: AtomicUsize::new(0),
+        });
+        let mut request = request(dialect);
+        request.temperature = 0.5;
+        let response = super::super::head::handle(
+            state,
+            "invalid-temperature".into(),
+            request,
+            selected(engine.clone()),
+            tokio::time::Instant::now() + Duration::from_secs(2),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            if dialect == dynamo_decisions::Dialect::Jev {
+                StatusCode::UNPROCESSABLE_ENTITY
+            } else {
+                StatusCode::BAD_REQUEST
+            }
+        );
+        assert_eq!(engine.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(admission.available_permits(), initial);
+    }
+}
+
+#[tokio::test]
+async fn shared_preflight_panic_is_sanitized_and_releases_permits() {
+    let service = super::super::service_v2::HttpService::builder()
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let admission = state.systemone_admission();
+    let preflight = state.systemone_preflight_admission();
+    let before = (admission.available_permits(), preflight.available_permits());
+    let response = super::super::run_execution(
+        &state,
+        "prepare-panic".into(),
+        Arc::new(request(dynamo_decisions::Dialect::OpenAi)),
+        "native-model".into(),
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        || -> Result<(), (StatusCode, String)> { panic!("private preprocessing failure") },
+        |(), _, _| async { panic!("execution must not start after preflight failure") },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        response_body(response).await["error"]["message"],
+        "internal server error"
+    );
+    assert_eq!(
+        (admission.available_permits(), preflight.available_permits()),
+        before
+    );
+}
+
+#[tokio::test]
 async fn native_multiple_terminal_frames_fail_without_normal_answers() {
     let service = super::super::service_v2::HttpService::builder()
         .build()

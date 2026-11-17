@@ -24,25 +24,6 @@ pub(super) async fn handle(
     if let Err(cause) = request.validate_capabilities(&capabilities) {
         return decision_error(cause);
     }
-    let permit = match acquire_admission(
-        state.systemone_admission(),
-        request.questions.len() as u32,
-        state.systemone_max_inflight_branches(),
-        dialect,
-    ) {
-        Ok(permit) => permit,
-        Err(response) => return *response,
-    };
-    let preflight = match state.systemone_preflight_admission().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
-            return response::capacity_error(
-                dialect,
-                super::super::error::overload_status_code(),
-                "decision preprocessing capacity is exhausted",
-            );
-        }
-    };
     let request = Arc::new(request);
     let preparing = request.clone();
     let model = selection.canonical_model.clone();
@@ -50,98 +31,66 @@ pub(super) async fn handle(
     let mut salt = [0_u8; 16];
     rand::rng().fill(&mut salt);
     let cache_salt = URL_SAFE_NO_PAD.encode(salt);
-    let started = Instant::now();
-    let (wire, permit) = match tokio::time::timeout_at(
-        deadline,
-        spawn_blocking_with_permit(permit, move || {
-            let _preflight = preflight;
-            HeadRequest::new(&preparing, &model, cache_salt, max_input_tokens)
-        }),
-    )
-    .await
-    {
-        Ok(Ok(Ok(result))) => result,
-        Ok(Ok(Err(cause))) => {
-            return error(dialect, StatusCode::UNPROCESSABLE_ENTITY, cause.to_string());
-        }
-        Ok(Err(_)) => {
-            return error(
-                dialect,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "decision preprocessing failed",
-            );
-        }
-        Err(_) => {
-            return error(
-                dialect,
-                StatusCode::GATEWAY_TIMEOUT,
-                "decision request deadline exceeded",
-            );
-        }
-    };
-    let metrics = state.metrics_clone();
     let metric_model = state
         .manager()
         .metric_model_for(&selection.canonical_model)
         .to_owned();
-    metrics.observe_systemone_phase(
-        &metric_model,
-        SystemOnePhase::Preflight,
-        started.elapsed().as_secs_f64(),
-    );
-    let parent =
-        Context::with_id_and_metadata((), request_id.clone(), Default::default()).context();
-    let (mut connection, _stream_handle) = create_connection_monitor(
-        parent.clone(),
-        Some(metrics.clone()),
-        CancellationLabels {
-            model: metric_model.clone(),
-            endpoint: metric_endpoint(dialect).to_string(),
-            request_type: "unary".into(),
+    run_execution(
+        &state,
+        request_id,
+        request,
+        metric_model,
+        deadline,
+        move || {
+            HeadRequest::new(&preparing, &model, cache_salt, max_input_tokens)
+                .map_err(|cause| (StatusCode::UNPROCESSABLE_ENTITY, cause.to_string()))
         },
-    )
-    .await;
-    let task_parent = parent.clone();
-    let task = tokio::spawn(async move {
-        let _permit = permit;
-        let started = Instant::now();
-        let result = run(
-            &selection,
-            wire,
-            &request_id,
-            task_parent.clone(),
-            &request,
-            max_input_tokens,
-        )
-        .await;
-        metrics.observe_systemone_phase(
-            &metric_model,
-            SystemOnePhase::FirstBranch,
-            started.elapsed().as_secs_f64(),
-        );
-        match result {
-            Ok((answers, usage)) => {
-                metrics.observe_systemone_work(
-                    &metric_model,
-                    request.questions.len(),
-                    usage.input_tokens as usize,
-                    0,
-                );
-                metrics.observe_systemone_branch(
-                    &metric_model,
-                    usage.cached_tokens.unwrap_or_default() as usize,
-                );
-                match project_response(&request, &selection.canonical_model, &answers, &usage) {
-                    Ok(value) => Json(value).into_response(),
-                    Err(cause) => decision_error(cause),
+        move |wire, permit, execution| async move {
+            let _permit = permit;
+            let started = Instant::now();
+            let result = run(
+                &selection,
+                wire,
+                &execution.request_id,
+                execution.parent.clone(),
+                &execution.request,
+                max_input_tokens,
+            )
+            .await;
+            execution.metrics.observe_systemone_phase(
+                &execution.metric_model,
+                SystemOnePhase::FirstBranch,
+                started.elapsed().as_secs_f64(),
+            );
+            match result {
+                Ok((answers, usage)) => {
+                    execution.metrics.observe_systemone_work(
+                        &execution.metric_model,
+                        execution.request.questions.len(),
+                        usage.input_tokens as usize,
+                        0,
+                    );
+                    execution.metrics.observe_systemone_branch(
+                        &execution.metric_model,
+                        usage.cached_tokens.unwrap_or_default() as usize,
+                    );
+                    match project_response(
+                        &execution.request,
+                        &selection.canonical_model,
+                        &answers,
+                        &usage,
+                    ) {
+                        Ok(value) => Json(value).into_response(),
+                        Err(cause) => decision_error(cause),
+                    }
+                }
+                Err(cause) => {
+                    dispatch_error(&execution.request_id, &execution.parent, cause, dialect)
                 }
             }
-            Err(cause) => dispatch_error(&request_id, &task_parent, cause, dialect),
-        }
-    });
-    let response = response::dispatch_with_deadline(task, deadline, parent, dialect).await;
-    connection.disarm();
-    response
+        },
+    )
+    .await
 }
 
 fn invalid(detail: impl Into<String>) -> DispatchError {

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -92,6 +93,14 @@ struct StartedBranch {
     tracker: Arc<RequestTracker>,
     stream: ManyOut<Annotated<LLMEngineOutput>>,
     exchange: Box<dyn GenerateExchange>,
+}
+
+struct DecisionExecution {
+    request_id: String,
+    request: Arc<CanonicalRequest>,
+    parent: Arc<dyn AsyncEngineContext>,
+    metrics: Arc<Metrics>,
+    metric_model: String,
 }
 
 struct BranchResult {
@@ -278,6 +287,64 @@ async fn handle_request(
         return decision_error(cause);
     }
 
+    let max_input_tokens = state.systemone_max_input_tokens();
+    let selection_for_preflight = selection.clone();
+    let request = Arc::new(request);
+    let preflight_request = request.clone();
+    let metric_model = state
+        .manager()
+        .metric_model_for(&selection.canonical_model)
+        .to_owned();
+    run_execution(
+        &state,
+        request_id,
+        request,
+        metric_model,
+        deadline,
+        move || {
+            prepare_branches(
+                &preflight_request,
+                &selection_for_preflight,
+                max_input_tokens,
+            )
+        },
+        move |branches, permit, execution| {
+            execution.metrics.observe_systemone_work(
+                &execution.metric_model,
+                branches.len(),
+                branches.iter().map(|branch| branch.prompt_ids.len()).sum(),
+                branches.iter().map(|branch| branch.label_ids.len()).sum(),
+            );
+            dispatch(
+                selection,
+                branches,
+                execution.request_id,
+                execution.parent,
+                permit,
+                execution.metrics,
+                execution.request,
+            )
+        },
+    )
+    .await
+}
+
+async fn run_execution<T, Prepare, Execute, Execution>(
+    state: &service_v2::State,
+    request_id: String,
+    request: Arc<CanonicalRequest>,
+    metric_model: String,
+    deadline: tokio::time::Instant,
+    prepare: Prepare,
+    execute: Execute,
+) -> Response
+where
+    T: Send + 'static,
+    Prepare: FnOnce() -> Result<T, (StatusCode, String)> + Send + 'static,
+    Execute: FnOnce(T, OwnedSemaphorePermit, DecisionExecution) -> Execution,
+    Execution: Future<Output = Response> + Send + 'static,
+{
+    let dialect = request.dialect;
     let branch_count = u32::try_from(request.questions.len()).unwrap_or(u32::MAX);
     let admission_permit = match acquire_admission(
         state.systemone_admission(),
@@ -289,7 +356,6 @@ async fn handle_request(
         Err(response) => return *response,
     };
 
-    let max_input_tokens = state.systemone_max_input_tokens();
     let preflight_permit = match state.systemone_preflight_admission().try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
@@ -301,18 +367,11 @@ async fn handle_request(
         }
     };
     let preflight_started = Instant::now();
-    let selection_for_preflight = selection.clone();
-    let request = Arc::new(request);
-    let preflight_request = request.clone();
-    let (branches, admission_permit) = match tokio::time::timeout_at(
+    let (prepared, admission_permit) = match tokio::time::timeout_at(
         deadline,
         spawn_blocking_with_permit(admission_permit, move || {
             let _preflight_permit = preflight_permit;
-            prepare_branches(
-                &preflight_request,
-                &selection_for_preflight,
-                max_input_tokens,
-            )
+            prepare()
         }),
     )
     .await
@@ -337,43 +396,34 @@ async fn handle_request(
     };
 
     let metrics = state.metrics_clone();
-    let metric_model = state.manager().metric_model_for(&selection.canonical_model);
     metrics.observe_systemone_phase(
-        metric_model,
+        &metric_model,
         SystemOnePhase::Preflight,
         preflight_started.elapsed().as_secs_f64(),
     );
-    metrics.observe_systemone_work(
-        metric_model,
-        branches.len(),
-        branches.iter().map(|branch| branch.prompt_ids.len()).sum(),
-        branches.iter().map(|branch| branch.label_ids.len()).sum(),
-    );
-
     let parent = Context::with_id_and_metadata((), request_id.clone(), Default::default());
     let parent_context = parent.context();
     let cancellation_labels = CancellationLabels {
-        model: state
-            .manager()
-            .metric_model_for(&selection.canonical_model)
-            .to_string(),
+        model: metric_model.clone(),
         endpoint: metric_endpoint(dialect).to_string(),
         request_type: "unary".to_string(),
     };
     let (mut connection_handle, _stream_handle) = create_connection_monitor(
         parent_context.clone(),
-        Some(state.metrics_clone()),
+        Some(metrics.clone()),
         cancellation_labels,
     )
     .await;
-    let task = tokio::spawn(dispatch(
-        selection,
-        branches,
-        request_id.clone(),
-        parent_context.clone(),
+    let task = tokio::spawn(execute(
+        prepared,
         admission_permit,
-        metrics,
-        request,
+        DecisionExecution {
+            request_id,
+            request,
+            parent: parent_context.clone(),
+            metrics,
+            metric_model,
+        },
     ));
     let response = response::dispatch_with_deadline(task, deadline, parent_context, dialect).await;
     connection_handle.disarm();
