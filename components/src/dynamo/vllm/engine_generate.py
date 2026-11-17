@@ -56,21 +56,18 @@ class EngineGenerateInput:
     return_token_ids: bool = False
 
 
-def prompt_response_fields(prompt: Any) -> dict[str, Any]:
-    """The prompt the engine runs and its placeholder ranges, as vLLM's Generate API returns them."""
+def response_mm_placeholders(prompt: Any) -> dict[str, list[dict]] | None:
+    """A rendered prompt's placeholder ranges, as vLLM's Generate API returns them."""
     from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
         placeholder_ranges_from_engine_input,
     )
 
     placeholders = placeholder_ranges_from_engine_input(prompt)
+    if placeholders is None:
+        return None
     return {
-        "prompt_token_ids": list(prompt["prompt_token_ids"]),
-        "mm_placeholders": None
-        if placeholders is None
-        else {
-            modality: [r.model_dump() for r in ranges]
-            for modality, ranges in placeholders.items()
-        },
+        modality: [r.model_dump() for r in ranges]
+        for modality, ranges in placeholders.items()
     }
 
 
@@ -223,8 +220,10 @@ def adapt_engine_generate_request(
     if not isinstance(raw_sampling_params, dict):
         raise TypeError("extra_args.vllm_tito.sampling_params must be an object")
     features = envelope.get("features")
-    if features is not None and not allow_multimodal_features:
-        raise ValueError("TITO multimodal features require an aggregated vLLM worker")
+    if (
+        features is not None or request.get("multi_modal_data") is not None
+    ) and not allow_multimodal_features:
+        raise ValueError("TITO multimodal input requires an aggregated vLLM worker")
     if isinstance(features, dict):
         kwargs_data = features.get("kwargs_data")
         if not isinstance(kwargs_data, dict):

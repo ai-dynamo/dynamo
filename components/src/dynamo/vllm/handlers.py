@@ -107,8 +107,8 @@ from .constants import MX_LOAD_FORMATS, DisaggregationMode, EmbeddingTransferMod
 from .dp_topology import get_dp_range_for_worker
 from .engine_generate import (
     adapt_engine_generate_request,
-    prompt_response_fields,
     publish_engine_generate_capability,
+    response_mm_placeholders,
 )
 from .engine_monitor import VllmEngineMonitor
 from .lora_state import LoRAState
@@ -3999,34 +3999,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         logger.debug("Request %s: prepared external encoder prompt", request_id)
         return prompt
 
-    async def _render_engine_generate_media(
-        self,
-        request: Dict[str, Any],
-        request_id: str,
-        context: Any,
-        mode: DisaggregationMode,
-    ) -> Any:
-        """Render a native Generate prompt whose content_parts the frontend projected.
-
-        The media loads through the same multimodal path as chat requests, so URL
-        policy, size limits, image caches, and cache identities apply unchanged.
-        Rendering once, as vLLM's Generate API does, exposes the expanded prompt
-        and placeholder ranges to the response and lets the engine skip
-        reprocessing.
-        """
-        if mode != DisaggregationMode.AGGREGATED:
-            raise InvalidArgument(
-                "TITO content_parts require an aggregated vLLM worker"
-            )
-        prepared = await self._multimodal_request_processor.prepare_input(
-            request, request_id, context, mode
-        )
-        prompt = self._multimodal_request_processor.build_tokens_prompt(
-            prepared.request, prepared.multi_modal_data, prepared.mm_processor_kwargs
-        )
-        (rendered,) = await self.engine_client.renderer.render_cmpl_async([prompt])
-        return rendered
-
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
         # Firstly extract disaggregated params from prefill result if available
@@ -4084,16 +4056,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             multi_modal_data = None
             mm_processor_kwargs = None
             pre_rendered = None
-        elif engine_generate_input is not None:
+        elif engine_generate_input is not None and not has_mm_data:
             multi_modal_data = None
             mm_processor_kwargs = None
-            pre_rendered = (
-                await self._render_engine_generate_media(
-                    request, request_id, context, mode
-                )
-                if has_mm_data
-                else engine_generate_input.prompt
-            )
+            pre_rendered = engine_generate_input.prompt
         elif (
             mode == DisaggregationMode.AGGREGATED
             and self._custom_encoder is not None
@@ -4158,6 +4124,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     multi_modal_data,
                     mm_processor_kwargs=mm_processor_kwargs,
                 )
+
+        return_token_ids = (
+            engine_generate_input is not None and engine_generate_input.return_token_ids
+        )
+        if return_token_ids and prompt.get("multi_modal_data"):
+            # Render as vLLM's Generate API does, to report the placeholder ranges.
+            (prompt,) = await self.engine_client.renderer.render_cmpl_async([prompt])
 
         _apply_nvext_cache_salt(request, prompt)
 
@@ -4342,12 +4315,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         if want_engine_data
                         else None
                     )
-                    # vLLM's Generate API returns the prompt it ran once.
-                    prompt_fields = (
-                        prompt_response_fields(prompt)
-                        if engine_generate_input is not None
-                        and engine_generate_input.return_token_ids
-                        else None
+                    response_placeholders = (
+                        response_mm_placeholders(prompt) if return_token_ids else None
                     )
                     accumulated_token_ids: dict[int, list[int]] = {}
                     accumulated_log_probs: dict[int, list[float]] = {}
@@ -4366,7 +4335,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             # Transferred prefill KV counts as cached in vLLM, so a
                             # decode attempt's count would not be local reuse.
                             report_kv_cache_hit=kv_params is None,
-                            want_engine_data=want_engine_data,
+                            want_engine_data=want_engine_data or return_token_ids,
                             kv_hints=kv_hints,
                             artifact_session=artifact_session,
                             emit_routed_experts=(
@@ -4405,12 +4374,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                                     accumulated_token_ids,
                                     accumulated_log_probs,
                                 )
-                            if prompt_fields is not None:
-                                tok["engine_data"] = {
-                                    **(tok.get("engine_data") or {}),
-                                    **prompt_fields,
-                                }
-                                prompt_fields = None
+                            if response_placeholders is not None:
+                                tok.setdefault("engine_data", {})[
+                                    "mm_placeholders"
+                                ] = response_placeholders
+                                response_placeholders = None
                             yield tok
                     except EngineDeadError as e:
                         logger.error(f"vLLM EngineDeadError: {e}")

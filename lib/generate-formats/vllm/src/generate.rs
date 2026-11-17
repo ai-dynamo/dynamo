@@ -664,9 +664,11 @@ impl GenerateAggregator {
             self.prompt_token_ids = serde_json::from_value(prompt_token_ids).map_err(|error| {
                 anyhow::anyhow!("invalid generate prompt_token_ids payload: {error}")
             })?;
-            self.mm_placeholders = engine_data
-                .remove("mm_placeholders")
-                .filter(|placeholders| !placeholders.is_null());
+        }
+        if options.include_prompt_token_ids
+            && let Some(mm_placeholders) = engine_data.remove("mm_placeholders")
+        {
+            self.mm_placeholders = Some(mm_placeholders);
         }
         if !self.kv_transfer_params_from_engine_data
             && output.finish_reason.is_some()

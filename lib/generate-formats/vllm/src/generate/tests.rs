@@ -1010,7 +1010,6 @@ fn generate_response_returns_the_prompt_the_engine_ran() {
             LLMEngineOutput {
                 token_ids: vec![100],
                 engine_data: Some(Box::new(json!({
-                    "prompt_token_ids": [1, 7, 7, 7, 2],
                     "mm_placeholders": {"image": [{"offset": 1, "length": 3}]},
                 }))),
                 ..Default::default()
@@ -1018,6 +1017,7 @@ fn generate_response_returns_the_prompt_the_engine_ran() {
             LLMEngineOutput {
                 token_ids: vec![101],
                 finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Stop),
+                engine_data: Some(Box::new(json!({"prompt_token_ids": [1, 7, 7, 7, 2]}))),
                 ..Default::default()
             },
         ]

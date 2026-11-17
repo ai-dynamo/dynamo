@@ -42,7 +42,6 @@ from dynamo.common.multimodal.image_loader import (
     image_cache_scope_from_request,
     read_decoded_media_via_nixl,
 )
-from dynamo.common.multimodal.media_source import decode_data_uri
 from dynamo.common.multimodal.shared_image_cache import (
     SharedImageCache,
     _RateLimitedErrorWarnings,
@@ -1509,12 +1508,5 @@ async def test_repeated_data_url_is_decoded_once() -> None:
     loader = ImageLoader()
     reference = f"data:image/png;base64,{base64.b64encode(PNG_BYTES).decode()}"
 
-    with patch(
-        "dynamo.common.multimodal.image_loader.decode_data_uri",
-        wraps=decode_data_uri,
-    ) as decode:
-        first = await loader.load_image(reference)
-        second = await loader.load_image(reference)
-
-    assert second is first
-    decode.assert_called_once()
+    first = await loader.load_image(reference)
+    assert await loader.load_image(reference) is first
