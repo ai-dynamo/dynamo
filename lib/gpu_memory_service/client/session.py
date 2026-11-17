@@ -238,27 +238,20 @@ class _GMSClientSession:
         """Whether the server advertised ``capability`` in its handshake."""
         return capability in self._capabilities
 
-    def metadata_get_all(
-        self, prefix: str = "", exclude_prefix: str = ""
-    ) -> List[tuple[str, str, int, bytes]]:
-        """Every (key, allocation_id, offset_bytes, value) under ``prefix``,
-        minus keys under ``exclude_prefix``, in key order.
+    def metadata_get_all(self, prefix: str = "") -> List[tuple[str, str, int, bytes]]:
+        """Every (key, allocation_id, offset_bytes, value) under ``prefix``, in key order.
 
         Pages through MetadataGetAllRequest when the server supports it, and
         falls back to MetadataList + one MetadataGet per key otherwise.
         """
         if not self.supports(CAPABILITY_METADATA_GET_ALL):
-            return self._metadata_get_all_by_key(prefix, exclude_prefix)
+            return self._metadata_get_all_by_key(prefix)
 
         entries: List[tuple[str, str, int, bytes]] = []
         start_after: Optional[str] = None
         while True:
             response = self._transport.request(
-                MetadataGetAllRequest(
-                    prefix=prefix,
-                    exclude_prefix=exclude_prefix,
-                    start_after=start_after,
-                ),
+                MetadataGetAllRequest(prefix=prefix, start_after=start_after),
                 MetadataGetAllResponse,
             )
             entries.extend(
@@ -277,12 +270,10 @@ class _GMSClientSession:
             start_after = cursor
 
     def _metadata_get_all_by_key(
-        self, prefix: str, exclude_prefix: str
+        self, prefix: str
     ) -> List[tuple[str, str, int, bytes]]:
         entries = []
         for key in self.metadata_list(prefix):
-            if exclude_prefix and key.startswith(exclude_prefix):
-                continue
             got = self.metadata_get(key)
             if got is None:
                 raise RuntimeError(f"Metadata key disappeared: {key}")

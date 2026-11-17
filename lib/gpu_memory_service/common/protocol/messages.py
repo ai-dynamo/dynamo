@@ -26,7 +26,7 @@ class HandshakeResponse(msgspec.Struct, tag="handshake_response"):
     success: bool
     committed: bool
     granted_lock_type: Optional[GrantedLockType] = None
-    # Absent from (and ignored by) older peers, which decode it as empty.
+    # Older servers do not send it; older clients ignore it.
     capabilities: List[str] = []
 
 
@@ -183,18 +183,14 @@ class MetadataItem(msgspec.Struct):
 
 
 class MetadataGetAllRequest(msgspec.Struct, tag="metadata_get_all_request"):
-    """Entries (key, allocation, offset, value) under ``prefix``, minus any key
-    under ``exclude_prefix``, in key order, one bounded page per round trip.
+    """Entries under ``prefix`` in key order, one page per round trip.
 
-    A reader otherwise issues one MetadataGetRequest per tensor (thousands for a
-    large model). Pages keep each reply well under the wire frame limit; the
-    first page starts at ``start_after=None``, later pages pass the previous
-    response's ``next_start_after``. Only sent to a server that advertises
-    ``CAPABILITY_METADATA_GET_ALL``.
+    The first page starts at ``start_after=None``; later pages pass the
+    previous response's ``next_start_after``. Only sent to a server that
+    advertises ``CAPABILITY_METADATA_GET_ALL``.
     """
 
     prefix: str = ""
-    exclude_prefix: str = ""
     start_after: Optional[str] = None
 
 

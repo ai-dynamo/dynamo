@@ -187,27 +187,6 @@ class TensorMetadata:
 # =============================================================================
 
 
-def _metadata_entries(manager) -> List[tuple]:
-    """Tensor metadata entries.
-
-    ``metadata_get_all`` batches the reads only when the server advertised
-    MetadataGetAllRequest in its handshake, and falls back to per-key reads
-    otherwise, so it is safe against older servers.
-    """
-    get_all = getattr(manager, "metadata_get_all", None)
-    if get_all is not None:
-        return get_all(exclude_prefix="__gms__.")
-    entries = []
-    for key in manager.metadata_list():
-        if key.startswith("__gms__."):
-            continue
-        got = manager.metadata_get(key)
-        if got is None:
-            raise RuntimeError(f"Metadata key disappeared: {key}")
-        entries.append((key, *got))
-    return entries
-
-
 @dataclass(frozen=True)
 class GMSTensorSpec:
     """A tensor entry from the GMS metadata store."""
@@ -229,9 +208,8 @@ class GMSTensorSpec:
         """
         specs: Dict[str, GMSTensorSpec] = {}
 
-        for key, allocation_id, offset_bytes, value in _metadata_entries(
-            gms_client_memory_manager
-        ):
+        entries = gms_client_memory_manager.metadata_get_all()
+        for key, allocation_id, offset_bytes, value in entries:
             if key in specs:
                 raise RuntimeError(f"Duplicate tensor name: {key}")
 

@@ -64,9 +64,9 @@ class MetadataEntry:
     value: bytes
 
 
-# Encoded-size budget for one MetadataGetAllResponse page. Well under the 1 MiB
-# frame cap the v1 protocol applies (and ai-dynamo/dynamo#14259 brings to v0), so
-# a model with tens of thousands of tensors still pages instead of failing.
+# Target encoded size of one MetadataGetAllResponse page, so the reply for a
+# model with tens of thousands of tensors is split across several frames. An
+# entry larger than the target is sent alone.
 METADATA_GET_ALL_PAGE_BYTES = 256 * 1024
 # Upper bound on msgpack overhead per MetadataItem beyond its key, allocation id
 # and value bytes: map header, the four field names, string/bin headers, offset.
@@ -265,12 +265,7 @@ class GMS:
     def _metadata_get_all_page(
         self, msg: MetadataGetAllRequest
     ) -> MetadataGetAllResponse:
-        keys = sorted(
-            key
-            for key in self._metadata
-            if key.startswith(msg.prefix)
-            and not (msg.exclude_prefix and key.startswith(msg.exclude_prefix))
-        )
+        keys = sorted(key for key in self._metadata if key.startswith(msg.prefix))
         start = (
             0 if msg.start_after is None else bisect.bisect_right(keys, msg.start_after)
         )

@@ -423,11 +423,9 @@ class GMSClientMemoryManager:
     def metadata_list(self, prefix: str = "") -> List[str]:
         return self._client_rpc.metadata_list(prefix)
 
-    def metadata_get_all(
-        self, prefix: str = "", exclude_prefix: str = ""
-    ) -> List[tuple[str, str, int, bytes]]:
-        """All (key, allocation_id, offset_bytes, value) entries in one round trip."""
-        return self._client_rpc.metadata_get_all(prefix, exclude_prefix)
+    def metadata_get_all(self, prefix: str = "") -> List[tuple[str, str, int, bytes]]:
+        """Every (key, allocation_id, offset_bytes, value) under ``prefix``, in key order."""
+        return self._client_rpc.metadata_get_all(prefix)
 
     def metadata_delete(self, key: str) -> bool:
         return self._client_rpc.metadata_delete(key)
