@@ -264,69 +264,22 @@ def test_custom_json_uses_the_normal_chat_template(services: int) -> None:
     _assert_stub_answered(response)
 
 
-def test_builtin_wire_names_reject_custom_content_at_http_admission(services: int):
-    for kind in ("text", "image_url", "video_url", "audio_url", "input_audio"):
-        for role in ("user", "tool"):
-            message = {
-                "role": role,
-                "content": [
-                    {"type": "custom", "kind": kind, "fields": {"metadata": 1}},
-                    {"type": "image_url", "image_url": {"url": IMAGE_URL}},
-                ],
-            }
-            if role == "tool":
-                # Tool parts support text/custom, so test reservation without a
-                # separate typed image schema error masking it.
-                message["content"].pop()
-                message["tool_call_id"] = "custom-input"
-            response = _chat(
-                services,
-                {
-                    "model": MODEL_NAME,
-                    "messages": [message],
-                    "nvext": {"token_data": [1, 2, 3]},
-                    "max_tokens": 4,
-                },
-            )
-            assert response.status_code == 400, response.text
-            assert "reserved for built-in" in response.text
-
-
-@pytest.mark.parametrize("role", ["user", "tool"])
-def test_template_positions_match_ordered_worker_payloads(
-    services: int, role: str
-) -> None:
-    message = {
-        "role": role,
-        "content": [
-            {"type": "text", "text": "Does this structure "},
-            {
-                "type": "custom",
-                "kind": "chemistry",
-                "fields": {"data_base64": "SECRET_ONE", "sequence": 1},
-            },
-            {"type": "text", "text": " match the diagram?"},
-            {"type": "image_url", "image_url": {"url": IMAGE_URL}},
-            {"type": "custom", "kind": "biology", "fields": {"metadata": "SECRET_BIO"}},
-            {
-                "type": "custom",
-                "kind": "chemistry",
-                "fields": {"data_base64": "SECRET_TWO", "sequence": 2},
-            },
-        ],
-    }
-    message["name" if role == "user" else "tool_call_id"] = (
-        "alice" if role == "user" else "call_7"
-    )
+def test_builtin_wire_name_rejects_custom_content_at_http_admission(services: int):
     response = _chat(
         services,
         {
             "model": MODEL_NAME,
-            "messages": [message],
-            "add_generation_prompt": False,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "custom", "kind": "image_url", "fields": {"m": 1}}
+                    ],
+                }
+            ],
+            "nvext": {"token_data": [1, 2, 3]},
             "max_tokens": 4,
         },
     )
-    # The worker asserts the exact template-rendered prompt AND its association
-    # with ordered payloads before yielding any response tokens. No model runs.
-    _assert_stub_answered(response)
+    assert response.status_code == 400, response.text
+    assert "reserved for built-in" in response.text

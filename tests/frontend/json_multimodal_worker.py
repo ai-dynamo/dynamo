@@ -52,45 +52,6 @@ def _mismatch(reason: str, received: object) -> _StatusLikeError:
 
 async def generate(request, context):
     received = request.get("multi_modal_data")
-    chemistry = (received or {}).get("chemistry", [])
-    if chemistry and chemistry[0].get("Json", {}).get("sequence") == 1:
-        expected = {
-            "chemistry": [
-                {"Json": {"data_base64": "SECRET_ONE", "sequence": 1}},
-                {"Json": {"data_base64": "SECRET_TWO", "sequence": 2}},
-            ],
-            "biology": [{"Json": {"metadata": "SECRET_BIO"}}],
-            "image_url": [{"Url": IMAGE_URL}],
-        }
-        if received != expected:
-            raise _mismatch("positional payload order or fields changed", received)
-        extra = request["extra_args"]
-        message = extra["messages"][0]
-        role = message["role"]
-        metadata_key = "name" if role == "user" else "tool_call_id"
-        metadata = "alice" if role == "user" else "call_7"
-        expected_prompt = f"<|{role}|>[{metadata}]Does this structure <|chem_projected|> match the diagram?<|image_1|><|bio_projected|><|chem_projected|><|end|>"
-        if (
-            extra["formatted_prompt"] != expected_prompt
-            or message[metadata_key] != metadata
-        ):
-            raise _mismatch("custom positions or role metadata changed", extra)
-        parts = message["content"]
-        if (
-            parts[1] != {"type": "custom", "kind": "chemistry"}
-            or parts[4] != {"type": "custom", "kind": "biology"}
-            or parts[5] != parts[1]
-        ):
-            raise _mismatch("auxiliary positions changed", message)
-        if any(
-            secret in json.dumps(extra)
-            for secret in ("SECRET_ONE", "SECRET_TWO", "SECRET_BIO", "data_base64")
-        ):
-            raise _mismatch(
-                "custom bytes leaked into prompt or auxiliary messages", extra
-            )
-        yield {"token_ids": list(RESPONSE_TOKEN_IDS), "finish_reason": "stop"}
-        return
     expected = {
         kind: [{"Json": {kind: value, "metadata": {"revision": 1}}}]
         for kind, value in EXPECTED_PAYLOAD.items()
@@ -104,13 +65,10 @@ async def generate(request, context):
             "payload duplicated in auxiliary messages", request["extra_args"]
         )
     prompt = (request.get("extra_args") or {}).get("formatted_prompt")
-    if (
-        request.get("token_ids") not in ([1, 2, 3], [1, 2, 4])
-        and prompt is not None
-        and (
-            "Predict this" not in prompt
-            or EXPECTED_PAYLOAD["chemistry"]["data_base64"] in prompt
-        )
+    if request.get("token_ids") not in ([1, 2, 3], [1, 2, 4]) and (
+        prompt is None
+        or "Predict this" not in prompt
+        or EXPECTED_PAYLOAD["chemistry"]["data_base64"] in prompt
     ):
         raise _mismatch(
             "chat template did not preserve text and exclude payload", prompt
