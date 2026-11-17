@@ -40,6 +40,7 @@ class RecipeRequestError(ValueError):
 @dataclass
 class RenderedDeepSeekPrompt:
     token_ids: list[int]
+    # None keeps the request's image order and string objects.
     image_urls: list[str] | None = None
 
 
@@ -101,4 +102,6 @@ def render_recipe_prompt(
             raise ValueError("DeepSeek recipe images differ from request media")
     except ValueError as exc:
         raise RecipeRequestError(str(exc)) from exc
-    return RenderedDeepSeekPrompt(tokens, rendered_images)
+    return RenderedDeepSeekPrompt(
+        tokens, rendered_images if rendered_images != image_urls else None
+    )

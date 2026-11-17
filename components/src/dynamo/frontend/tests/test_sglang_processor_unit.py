@@ -3818,7 +3818,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
 
         def render_recipe(request, *, spec, **kwargs):
             assert spec == "dsv41"
-            return [1, 2, 3]
+            return sglang_prepost_module.RenderedDeepSeekPrompt([1, 2, 3])
 
         monkeypatch.setattr(
             sglang_processor_module,
@@ -5271,6 +5271,17 @@ def test_recipe_image_order_reaches_worker_payload(
         asyncio.run(collect())
         result = engine.requests[0]
     assert result["multi_modal_data"]["image_url"] == [{"Url": url} for url in expected]
+    wire_images = [
+        part["image_url"]["url"]
+        for message in request["messages"]
+        if message["role"] == "tool"
+        for part in message["content"]
+    ]
+    if wire_images == expected:
+        assert all(
+            media["Url"] is url
+            for media, url in zip(result["multi_modal_data"]["image_url"], wire_images)
+        )
     image_id = recipe_tokenizer.backend_tokenizer.token_to_id("<｜deepseek_image｜>")
     assert result["token_ids"].count(image_id) == len(expected)
     assert request == original

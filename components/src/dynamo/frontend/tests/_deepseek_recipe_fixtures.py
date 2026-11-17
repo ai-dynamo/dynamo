@@ -37,10 +37,14 @@ def recipe_tokenizer():
     return ServedTokenizer()
 
 
-@pytest.fixture(params=[1, 2], ids=["distinct-images", "repeated-image"])
+@pytest.fixture(
+    params=[(1, True), (2, True), (1, False)],
+    ids=["distinct-images", "repeated-image", "ordered-images"],
+)
 def tool_image_request(request):
+    copies, reverse_results = request.param
     first, second = "https://example.com/first.png", "https://example.com/second.png"
-    call_images = {"first": [first] * request.param, "second": [second]}
+    call_images = {"first": [first] * copies, "second": [second]}
     body = {
         "model": "deepseek-v41-prod",
         "messages": [
@@ -66,7 +70,7 @@ def tool_image_request(request):
                         for url in call_images[name]
                     ],
                 }
-                for name in reversed(call_images)
+                for name in (reversed(call_images) if reverse_results else call_images)
             ],
         ],
     }

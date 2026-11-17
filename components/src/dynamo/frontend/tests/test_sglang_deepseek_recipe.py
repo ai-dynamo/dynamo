@@ -202,7 +202,10 @@ def test_recipe_returns_tool_images_in_prompt_order(tokenizer, tool_image_reques
         spec="dsv41",
         image_urls=wire_images,
     )
-    assert rendered.image_urls == expected
+    if wire_images == expected:
+        assert rendered.image_urls is None
+    else:
+        assert rendered.image_urls == expected
     image_id = tokenizer.backend_tokenizer.token_to_id("<｜deepseek_image｜>")
     assert rendered.token_ids.count(image_id) == len(expected)
     assert request == original
