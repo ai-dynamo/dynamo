@@ -78,6 +78,7 @@ def test_multimodal_handler_loads_model_source_and_preserves_identity(
         load_format="auto",
         trust_remote_code=False,
         enable_prompt_embeds=True,
+        revision="v1.0",
     )
     config.custom_encoder_class = f"{__name__}._Backend"
     model_config = SimpleNamespace(
@@ -109,6 +110,9 @@ def test_multimodal_handler_loads_model_source_and_preserves_identity(
 
     expected_source = str(tmp_path) if model.startswith("ngc://") else model
     assert processor.call_args.kwargs["model"] == expected_source
+    # Only Hugging Face sources have revisions.
+    expected_revision = None if model.startswith("ngc://") else "v1.0"
+    assert processor.call_args.kwargs.get("revision") == expected_revision
     encoder.load.assert_called_once_with(expected_source)
     assert handler._served_model_name == model
     assert config.model == model

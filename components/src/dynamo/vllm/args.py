@@ -101,7 +101,7 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
         """
         if needs_local_model_path(self.model):
             return None
-        return getattr(self.engine_args, "revision", None)
+        return self.engine_args.revision
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)

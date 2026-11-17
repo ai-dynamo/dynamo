@@ -110,6 +110,27 @@ class TestLoadVisionModel:
 
         assert worker_module.kernel_warmup is original_kernel_warmup
 
+    def test_vllm_encoder_loads_the_requested_revision(self, monkeypatch):
+        fake_llm = MagicMock()
+        monkeypatch.setattr(model_module, "VLLM_ENCODER", 1)
+        monkeypatch.setattr(model_module, "LLM", fake_llm)
+        monkeypatch.setattr(model_module, "update_environment_variables", MagicMock())
+        monkeypatch.delenv("DYN_VLLM_SKIP_ENCODER_ONLY_KERNEL_WARMUP", raising=False)
+        monkeypatch.setenv("DYN_VLLM_ENCODER_KV_CACHE_MEMORY_BYTES", "4294967296")
+
+        model_module.load_vision_model("Qwen/Qwen3.5-9B", revision="v1.0")
+
+        assert fake_llm.call_args.kwargs["revision"] == "v1.0"
+
+    def test_transformers_fallback_loads_the_requested_revision(self, monkeypatch):
+        from_pretrained = MagicMock()
+        monkeypatch.setattr(model_module, "VLLM_ENCODER", 0)
+        monkeypatch.setattr(model_module.AutoModel, "from_pretrained", from_pretrained)
+
+        model_module.load_vision_model("Qwen/Qwen3.5-9B", revision="v1.0")
+
+        assert from_pretrained.call_args.kwargs["revision"] == "v1.0"
+
 
 class TestResolveModelFamily:
     """Cases where resolution is determined entirely by the input string
