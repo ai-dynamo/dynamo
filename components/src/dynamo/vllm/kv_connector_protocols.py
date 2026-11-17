@@ -17,9 +17,78 @@ entry.
 from __future__ import annotations
 
 import copy
+import math
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import Any, Dict, Optional, Tuple, Type
+
+
+def _has_remote_blocks(incoming: Optional[Mapping[str, Any]]) -> bool:
+    """Validate native block groups and detect retained decoder blocks."""
+    if incoming is None:
+        return False
+    if not isinstance(incoming, Mapping):
+        raise TypeError("Native kv_transfer_params must be an object.")
+    block_groups = incoming.get("remote_block_ids")
+    if block_groups is None:
+        return False
+    if not isinstance(block_groups, (list, tuple)):
+        raise TypeError("Native remote_block_ids must contain block-ID groups.")
+    for group in block_groups:
+        if not isinstance(group, (list, tuple)):
+            raise TypeError("Native remote_block_ids groups must be lists or tuples.")
+        if any(type(block_id) is not int or block_id < 0 for block_id in group):
+            raise ValueError(
+                "Native remote_block_ids must contain non-negative integer IDs."
+            )
+    return any(block_groups)
+
+
+def _validate_native_nixl_scalars(incoming: Mapping[str, Any]) -> None:
+    """Validate supplied native NIXL coordinate scalars."""
+    for field in ("_remote_blocks_processed", "_p_side_truncated"):
+        if field in incoming:
+            raise ValueError(f"Native {field} is reserved for vLLM.")
+    remote_num_tokens = incoming.get("remote_num_tokens")
+    if remote_num_tokens is not None and (
+        type(remote_num_tokens) is not int or remote_num_tokens < 0
+    ):
+        raise ValueError(
+            "Native remote_num_tokens must be a non-negative integer or null."
+        )
+    for field in ("remote_engine_id", "remote_request_id"):
+        value = incoming.get(field)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"Native {field} must be a string or null.")
+    host = incoming.get("remote_host")
+    if host is not None and (not isinstance(host, str) or not host):
+        raise ValueError("Native remote_host must be a non-empty string or null.")
+    port = incoming.get("remote_port")
+    if port is not None and (type(port) is not int or not 1 <= port <= 65535):
+        raise ValueError(
+            "Native remote_port must be an integer from 1 to 65535 or null."
+        )
+    for field in ("tp_size", "dcp_size", "pp_size"):
+        value = incoming.get(field, 1)
+        if type(value) is not int or value <= 0:
+            raise ValueError(f"Native {field} must be a positive integer.")
+    generation = incoming.get("remote_registration_generation", 0)
+    if type(generation) is not int or generation < 0:
+        raise ValueError(
+            "Native remote_registration_generation must be a non-negative integer."
+        )
+    expiry = incoming.get("remote_blocks_expiry_time")
+    try:
+        valid_expiry = expiry is None or (
+            (type(expiry) is int or type(expiry) is float) and math.isfinite(expiry)
+        )
+    except OverflowError:
+        valid_expiry = False
+    if not valid_expiry:
+        raise ValueError(
+            "Native remote_blocks_expiry_time must be a finite number or null."
+        )
 
 
 class KvConnectorProtocol(ABC):
@@ -33,7 +102,9 @@ class KvConnectorProtocol(ABC):
         self._vllm_config = vllm_config
 
     @abstractmethod
-    def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
+    def prefill_request_kv_transfer_params(
+        self, incoming: Optional[Mapping[str, Any]] = None
+    ) -> Dict[str, Any]:
         """``kv_transfer_params`` for the prefill request to vLLM."""
 
     @abstractmethod
@@ -48,8 +119,11 @@ class KvConnectorProtocol(ABC):
 class NixlConnectorProtocol(KvConnectorProtocol):
     """Pull-based: decode-side params come straight off the engine response."""
 
-    def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
-        return {
+    def prefill_request_kv_transfer_params(
+        self, incoming: Optional[Mapping[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Preserve decoder coordinates for partial pull and the next handoff."""
+        params = {
             "do_remote_decode": True,
             "do_remote_prefill": False,
             "remote_engine_id": None,
@@ -57,6 +131,25 @@ class NixlConnectorProtocol(KvConnectorProtocol):
             "remote_host": None,
             "remote_port": None,
         }
+        has_source = _has_remote_blocks(incoming)
+        if has_source:
+            config = self._vllm_config.kv_transfer_config
+            if config is None or not config.get_from_extra_config(
+                "bidirectional_kv_xfer", False
+            ):
+                raise ValueError(
+                    "Native decoder KV reuse requires NixlConnector with "
+                    "bidirectional_kv_xfer enabled."
+                )
+        if incoming is not None:
+            _validate_native_nixl_scalars(incoming)
+            # Only the native /generate adapter supplies these coordinates.
+            # vLLM owns TP mapping, expiry and transfer failure policy.
+            params.update(copy.deepcopy(incoming))
+            # P must pull a partial decoder prefix and then export its KV to D.
+            # do_remote_prefill=True instead requests a full-prompt remote load.
+            params.update(do_remote_decode=True, do_remote_prefill=False)
+        return params
 
     def decode_request_kv_transfer_params(
         self, prefill_response: Any
@@ -91,7 +184,12 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
         self._get_bootstrap_addr = get_mooncake_bootstrap_addr
         self._transfer_id: str = str(uuid.uuid4())
 
-    def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
+    def prefill_request_kv_transfer_params(
+        self, incoming: Optional[Mapping[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Create push coordinates, rejecting decoder-source reuse."""
+        if _has_remote_blocks(incoming):
+            raise ValueError("Native decoder KV reuse requires NixlConnector.")
         return {
             "do_remote_decode": True,
             "do_remote_prefill": False,
@@ -120,7 +218,12 @@ class LMCacheMPConnectorProtocol(KvConnectorProtocol):
 
     produces_kv_transfer_params = False
 
-    def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
+    def prefill_request_kv_transfer_params(
+        self, incoming: Optional[Mapping[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Keep cache-mediated handoff empty; reject decoder-source reuse."""
+        if _has_remote_blocks(incoming):
+            raise ValueError("Native decoder KV reuse requires NixlConnector.")
         return {}
 
     def decode_request_kv_transfer_params(
