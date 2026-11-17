@@ -5332,9 +5332,8 @@ pub fn validate_response_unsupported_fields(
 ) -> Option<impl IntoResponse> {
     let inner = &request.inner;
 
-    // The frontend stores no responses or conversations, so server-held history
-    // cannot be loaded. Refuse it with 400 rather than answering from the new
-    // `input` alone. Absent and `null` both deserialize to `None` and are accepted.
+    // No responses or conversations are stored, so refuse server-held history rather
+    // than answering from `input` alone. Absent and `null` both deserialize to `None`.
     if inner.conversation.is_some() {
         return Some(ErrorMessage::unsupported_content_error(
             VALIDATION_PREFIX.to_string()

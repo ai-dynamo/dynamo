@@ -93,9 +93,8 @@ async fn unsupported_hosted_tools_fail_before_dispatch_or_streaming() {
     .await;
 }
 
-/// Server-held conversation history returns HTTP 400 before dispatch for unary and
-/// streaming requests, so a continuation is never answered from its new `input`
-/// alone. Explicit `null` values are accepted like omitted fields.
+/// Server-held conversation history returns HTTP 400 before dispatch, unary and streaming.
+/// Explicit `null` values are accepted like omitted fields.
 #[tokio::test]
 #[serial]
 async fn conversation_history_fails_before_dispatch_or_streaming() {
