@@ -12,11 +12,11 @@ on:
         type: string
         default: ''
       test_suite_name:
-        description: 'Test suite name (vllm, sglang, trtllm)'
+        description: 'Test suite name (vllm, sglang, trtllm, tokenspeed)'
         required: true
         type: string
       framework:
-        description: 'Backend the test image was built with (dynamo, sglang, triton, trtllm, vllm); labels test metadata and coverage/Allure artifacts'
+        description: 'Backend the test image was built with (dynamo, sglang, tokenspeed, triton, trtllm, vllm); labels test metadata and coverage/Allure artifacts'
         required: true
         type: string
       test_type:

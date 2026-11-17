@@ -14,7 +14,7 @@
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
 #   triton   -> triton build and test
-#   tokenspeed -> runtime build with inline compliance and dynamo validation
+#   tokenspeed -> runtime build, inline compliance, one-GPU smoke and dynamo validation
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
@@ -457,6 +457,7 @@ tokenspeed:
   - 'components/src/dynamo/tokenspeed/**'
   - 'examples/backends/tokenspeed/**'
   - 'container/templates/tokenspeed_*'
+  - 'tests/serve/test_tokenspeed.py'
   - '!**/*.md'
   - '!**/*.rst'
 
