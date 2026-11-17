@@ -257,13 +257,6 @@ impl NativeHttp {
             None => return Ok(None),
             Some(port) => port.clone()?,
         };
-        if !discovery.incremental_streaming_output {
-            tracing::warn!(
-                port,
-                "SGLang native HTTP generation is disabled because incremental streaming output is not enabled"
-            );
-            return Ok(None);
-        }
         let endpoint = HttpEndpoint::from_grpc(grpc_endpoint, port).map_err(|error| {
             client::protocol_error(format!("invalid SGLang HTTP endpoint: {error}"))
         })?;

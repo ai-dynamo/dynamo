@@ -20,7 +20,6 @@ pub mod error;
 pub mod metrics;
 mod publisher;
 mod rl;
-pub mod router_args;
 pub mod run;
 pub mod snapshot_publisher;
 pub mod telemetry;

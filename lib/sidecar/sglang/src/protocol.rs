@@ -100,8 +100,9 @@ pub(crate) fn build_generate_request(
         stop: request
             .stop_conditions
             .stop
-            .clone()
+            .as_ref()
             .filter(|stop| !stop.is_empty())
+            .cloned()
             .map(|items| pb::StringOrList {
                 value: Some(pb::string_or_list::Value::Many(pb::StringList { items })),
             }),
@@ -243,6 +244,11 @@ fn media_data(request: &PreprocessedRequest) -> Result<[Option<pb::MediaInput>; 
 /// network and inline sources are forwarded.
 fn media_source(item: &MultimodalData) -> Result<String, DynamoError> {
     let source = match item {
+        MultimodalData::Json(_) => {
+            return Err(client::invalid_request(
+                "Custom JSON content requires a dynamo.vllm worker; the SGLang sidecar does not support it",
+            ));
+        }
         MultimodalData::Url(url) => url.as_str(),
         MultimodalData::RawUrl(source) => source,
         MultimodalData::Decoded(_) => {
@@ -478,9 +484,7 @@ fn kv_hint_to_proto(hint: &KvHint) -> pb::KvHintsEnvelope {
                 action_id: action.action_id.clone(),
                 action_type: action.action_type.clone(),
                 action_version: action.action_version.clone(),
-                payload: Some(
-                    Value::Object(action.payload.clone().into_iter().collect()).to_string(),
-                ),
+                payload: serde_json::to_string(&action.payload).ok(),
             })
             .collect(),
     }
@@ -690,8 +694,6 @@ impl ResponseConverter {
         // Rust incremental streams send input logprobs once, on the first
         // frame, and empty lists afterwards. Keep them for the terminal.
         self.prompt_logprobs.capture(&mut meta);
-        let token_ids = output_ids_to_u32(frame.output_ids.as_ref().map_or(&[], |ids| &ids.ids))?;
-        let (log_probs, top_logprobs) = extract_logprobs(&meta, self.return_tokens_as_ids)?;
         let is_terminal = meta.finish_reason.is_some();
 
         if self.is_prefill {
@@ -702,6 +704,9 @@ impl ResponseConverter {
                 Ok(FrameOutput::Skip)
             };
         }
+
+        let token_ids = output_ids_to_u32(frame.output_ids.as_ref().map_or(&[], |ids| &ids.ids))?;
+        let (log_probs, top_logprobs) = extract_logprobs(&meta, self.return_tokens_as_ids)?;
 
         self.generated = self.generated.saturating_add(token_ids.len() as u32);
         if is_terminal {

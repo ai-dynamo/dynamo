@@ -16,8 +16,8 @@ Dynamo SGLang integrates [SGLang](https://github.com/sgl-project/sglang) engines
 ## Experimental Sidecar
 
 The experimental sidecar path runs the Dynamo worker outside SGLang and
-connects through SGLang's native gRPC API. It keeps SGLang's Rust native server and
-argument surface while separating Dynamo and engine dependencies. See
+connects to SGLang's Rust server (`SGLANG_RUST_SERVER=1`) over native gRPC. It
+keeps SGLang's argument surface while separating Dynamo and engine dependencies. See
 [SGLang Sidecar](sidecar.md) for current readiness and launch examples.
 
 ## Prerequisites
