@@ -3,7 +3,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::protocols::EndpointId;
 
 use super::*;

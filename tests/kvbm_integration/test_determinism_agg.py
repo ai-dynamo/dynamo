@@ -30,7 +30,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TextIO
+from typing import Any, List, Optional, TextIO
 
 import pytest
 import requests
@@ -187,8 +187,6 @@ class LLMServerManager:
 
         if self.server_type == ServerType.vllm:
             self._set_up_vllm_config(gpu_cache_blocks, self.model_config)
-        elif self.server_type == ServerType.trtllm:
-            self._set_up_trtllm_config(gpu_cache_blocks)
         else:
             raise ValueError(
                 f"{self.server_type} is not supported yet in the KVBM test suite"
@@ -223,50 +221,6 @@ class LLMServerManager:
 
         if gpu_cache_blocks is not None:
             self.server_cmd.extend(["--num-gpu-blocks-override", str(gpu_cache_blocks)])
-
-    def _set_up_trtllm_config(self, gpu_cache_blocks):
-        config_path = os.environ.get(
-            "KVBM_TRTLLM_LLMAPI_CONFIG_PATH", "/tmp/kvbm_llm_api_config.yaml"
-        )
-        llm_api_config: Dict[str, Any] = {}
-        llm_api_config[
-            "cuda_graph_config"
-        ] = None  # explicitly disable CUDA graph since Connector API doesn't support CUDA graph yet in TRTLLM
-        llm_api_config["kv_cache_config"] = {
-            "enable_partial_reuse": False,
-            "free_gpu_memory_fraction": 0.10,  # Set a small GPU fraction so that we can evict/reset the on-device kv cache faster
-        }
-        llm_api_config["kv_connector_config"] = {
-            "connector_module": "kvbm.trtllm_integration.connector",
-            "connector_scheduler_class": "DynamoKVBMConnectorLeader",
-            "connector_worker_class": "DynamoKVBMConnectorWorker",
-        }
-
-        # GPU blocks override
-        if gpu_cache_blocks is not None:
-            del llm_api_config["kv_cache_config"]["free_gpu_memory_fraction"]
-            llm_api_config["kv_cache_config"]["max_tokens"] = (
-                int(gpu_cache_blocks) * 32
-            )  # TRTLLM defaults 32 tokens per block
-
-        # Construct serve command
-        self.server_cmd = [
-            "trtllm-serve",
-            os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
-            "--host",
-            "localhost",
-            "--port",
-            str(self.port),
-            "--backend",
-            "pytorch",
-            "--extra_llm_api_options",
-            config_path,
-        ]
-
-        import yaml
-
-        with open(config_path, "w") as f:
-            yaml.dump(llm_api_config, f, default_flow_style=False, sort_keys=False)
 
     def _tee_output(self, pipe: Any, log_file: TextIO, prefix: str) -> None:
         """Read from pipe and write to both log file and stdout (tee)."""
@@ -425,28 +379,11 @@ class AggDeterminismTester(DeterminismTester):
     def reset_prefix_cache(self):
         """Reset the prefix cache."""
         print("Resetting prefix cache...")
-        if self.server_type == ServerType.trtllm:
-            # TRTLLM doesn't support reset_prefix_cache endpoint API
-            # 300 shakespeare content could evict the 0.1 x 80G (~1700 blocks) on-device cache
-            shakespeare_count = 300
-            for seq_idx in range(1, shakespeare_count + 1):
-                start_word = (seq_idx - 1) * self.word_count
-                content = self.get_shakespeare_content(start_word)
-
-                if content:
-                    print(
-                        f"Resetting Shakespeare sequence {seq_idx} (words {start_word}-{start_word + self.word_count - 1})..."
-                    )
-                    try:
-                        self.make_request(content)
-                    except Exception as e:
-                        print(f"Resetting request failed: {e}")
-        else:
-            response = requests.post(
-                f"{self.base_url}/reset_prefix_cache",
-                timeout=int(os.environ.get("KVBM_HTTP_TIMEOUT", "30")),
-            )
-            response.raise_for_status()
+        response = requests.post(
+            f"{self.base_url}/reset_prefix_cache",
+            timeout=int(os.environ.get("KVBM_HTTP_TIMEOUT", "30")),
+        )
+        response.raise_for_status()
         print("Cache reset done")
 
 
@@ -470,12 +407,8 @@ def llm_server(request, runtime_services):
 
     if check_module_available("vllm"):
         server_type = ServerType.vllm
-    elif check_module_available("tensorrt_llm"):
-        server_type = ServerType.trtllm
     else:
-        raise Exception(
-            "Neither the vllm nor the tensorrt_llm module is available in the current environment."
-        )
+        raise Exception("The vllm module is not available in the current environment.")
 
     server_manager = LLMServerManager(
         port=port,

@@ -42,7 +42,7 @@ from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
-from dynamo.vllm.errors import vllm_client_error_to_http_error
+from dynamo.vllm.errors import vllm_client_error_to_public_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .structural_tag_policy import (
@@ -95,6 +95,21 @@ def _sampling_logprobs_count(logprobs: Any, top_logprobs: Any) -> int | None:
     ):
         return top_logprobs
     return None
+
+
+def _choice_top_logprobs(request: dict[str, Any]) -> int | None:
+    """How many alternatives each response logprob entry lists.
+
+    With explicit ``logprob_token_ids`` the worker scores the sampled token and
+    each named id, and vLLM's chat server lists them all, whatever
+    ``top_logprobs`` says.
+    """
+    count = _sampling_logprobs_count(
+        request.get("logprobs"), request.get("top_logprobs")
+    )
+    if count is not None and (token_ids := request.get("logprob_token_ids")):
+        return len(token_ids) + 1
+    return count
 
 
 def _reject_unsupported_chat_logprobs(logprobs: Any, top_logprobs: Any) -> None:
@@ -682,6 +697,18 @@ def _normalize_vllm_image_parts(messages: list[Any]) -> None:
                 image_url["detail"] = "auto"
 
 
+# Request fields the vLLM worker applies from extra_args.sampling_options, sent
+# as the client wrote them: the Rust preprocessor's `sampling_passthrough_args`
+# (lib/llm/src/preprocessor.rs) without `detokenize`, which the worker's token
+# path always turns off.
+_SAMPLING_PASSTHROUGH_FIELDS = (
+    "allowed_token_ids",
+    "bad_words_token_ids",
+    "logprob_token_ids",
+    "vllm_xargs",
+)
+
+
 def _disabled_as_unset(value: Any, requested: Any) -> Any:
     """Send a disabled top_k or min_p as unset unless the client disabled it.
 
@@ -931,8 +958,8 @@ class VllmProcessor:
         except VLLMClientError as exc:
             # vLLM 0.27 replaced many request-side ValueError/TypeError raises
             # with this hierarchy. Preserve vLLM's 400/404/422 distinction at
-            # Dynamo's HTTP boundary.
-            raise vllm_client_error_to_http_error(exc) from exc
+            # Dynamo's HTTP boundary. A 400 keeps its reason for the client.
+            raise vllm_client_error_to_public_error(exc) from exc
 
     async def _generator_inner(
         self, request: dict[str, Any], context: Any | None = None
@@ -1014,6 +1041,10 @@ class VllmProcessor:
             request_for_sampling.logprobs,
             getattr(request_for_sampling, "top_logprobs", None),
         )
+        # Explicit logprob_token_ids set the width, so vLLM's verify rejects a
+        # top-k count next to them; the worker nulls it the same way.
+        if getattr(sampling_params, "logprob_token_ids", None):
+            sampling_params.logprobs = None
         # Response metadata is opt-in, even if generation_config enables it.
         if request.get("prompt_logprobs") is None or (
             request.get("stream") is True
@@ -1098,6 +1129,13 @@ class VllmProcessor:
         }
         if guided_decoding is not None:
             dynamo_preproc["sampling_options"]["guided_decoding"] = guided_decoding
+        sampling_passthrough = {
+            key: request[key]
+            for key in _SAMPLING_PASSTHROUGH_FIELDS
+            if request.get(key) is not None
+        }
+        if sampling_passthrough:
+            dynamo_preproc["extra_args"] = {"sampling_options": sampling_passthrough}
         if reasoning_metadata.engine_reasoning_ended is not None:
             dynamo_preproc[
                 "reasoning_ended"
@@ -1269,10 +1307,7 @@ class VllmProcessor:
         audio_count = len(_mm_counts.get("audio_url", []))
         pending_choice_logprobs: dict[int, list[dict[str, Any]]] = {}
         emitted_choice_tokens: dict[int, list[int]] = {}
-        choice_top_logprobs = _sampling_logprobs_count(
-            request.get("logprobs"),
-            request.get("top_logprobs"),
-        )
+        choice_top_logprobs = _choice_top_logprobs(request)
         return_tokens_as_token_ids = request.get("return_tokens_as_token_ids") is True
         prompt_logprobs = PromptLogprobsAccumulator(request)
         pending_terminals: dict[int, dict[str, Any]] = {}
