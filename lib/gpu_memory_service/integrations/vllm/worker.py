@@ -16,7 +16,6 @@ import gc
 import logging
 import os
 import sys
-import time
 from contextlib import nullcontext
 from typing import List, Optional
 
@@ -79,10 +78,6 @@ logger.info("[GMS] Worker module loaded - model loader registered, all patches a
 _NON_TORCH_MEMORY_BYTES = 2 << 30  # 2 GiB
 # The CUDA context alone is about 1.1 GiB on A100; XPU has no CUDA context.
 _CUDA_CONTEXT_BYTES = 5 << 28  # 1.25 GiB
-
-
-# Per-step wake timings (seconds) of the last wake_up, for its timing log.
-_WAKE_STEPS: dict = {}
 
 
 def kv_reuse_enabled() -> bool:
@@ -198,15 +193,6 @@ class GMSWorker(_BaseWorker):
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
-        t0 = time.monotonic()
-        try:
-            return self._determine_available_memory_timed()
-        finally:
-            logger.info(
-                "[GMS] timing: determine_available_memory %.2f s", time.monotonic() - t0
-            )
-
-    def _determine_available_memory_timed(self) -> int:
         """
         Determine actual available memory for the engine.
 
@@ -309,16 +295,6 @@ class GMSWorker(_BaseWorker):
         """
         # EngineCore can skip determine_available_memory for models with no
         # KV cache. Publish before connector setup, allocation, or warm-up.
-        t0 = time.monotonic()
-        try:
-            self._initialize_from_config(kv_cache_config)
-        finally:
-            logger.info(
-                "[GMS] timing: initialize_from_config (KV) %.2f s",
-                time.monotonic() - t0,
-            )
-
-    def _initialize_from_config(self, kv_cache_config) -> None:
         publish_pending_gms_write()
 
         device = self.local_rank
@@ -412,7 +388,6 @@ class GMSWorker(_BaseWorker):
         reservations. Wake reconnects and rebuilds via the standard
         prepare_scratch_for_reallocation → reallocate → remap pipeline.
         """
-        t_sleep = time.monotonic()
         free_bytes_before = torch_device().mem_get_info()[0]
 
         # Pause MX serving before GMS unmap
@@ -434,27 +409,15 @@ class GMSWorker(_BaseWorker):
         freed_bytes = free_bytes_after - free_bytes_before
         used_bytes = total - free_bytes_after
         logger.info(
-            "Sleep freed %.2f GiB, %.2f GiB still in use (%.2f s).",
+            "Sleep freed %.2f GiB, %.2f GiB still in use.",
             freed_bytes / (1 << 30),
             used_bytes / (1 << 30),
-            time.monotonic() - t_sleep,
         )
 
     def wake_up(self, tags: Optional[List[str]] = None) -> None:
         """vLLM wake implementation with GMS integration."""
-        t0 = time.monotonic()
-        try:
-            self._wake_up(tags)
-        finally:
-            logger.info(
-                "[GMS] timing: wake_up %.2f s (%s)", time.monotonic() - t0, _WAKE_STEPS
-            )
-
-    def _wake_up(self, tags: Optional[List[str]] = None) -> None:
         if tags is None:
             tags = list(GMS_TAGS)
-        _WAKE_STEPS.clear()
-        t = time.monotonic()
 
         if "weights" in tags:
             weights_manager = get_gms_client_memory_manager("weights")
@@ -485,8 +448,6 @@ class GMSWorker(_BaseWorker):
                 logger.error("Fatal: cannot connect to GMS during remap: %s", e)
                 sys.exit(1)
 
-            _WAKE_STEPS["weights"] = round(time.monotonic() - t, 2)
-            t = time.monotonic()
             # Resume MX serving after GMS remap
             mx_ctx = get_mx_load_context()
             if mx_ctx is not None:
@@ -546,7 +507,6 @@ class GMSWorker(_BaseWorker):
                 )
             if was_scratch:
                 self._register_kv_caches_with_nixl()
-            _WAKE_STEPS["kv"] = round(time.monotonic() - t, 2)
 
     def _register_kv_caches_with_nixl(self) -> None:
         """Replay deferred NIXL registration after restoring real KV backing."""

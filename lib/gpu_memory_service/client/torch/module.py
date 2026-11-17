@@ -178,12 +178,9 @@ def materialize_module_from_gms(
         device_index: CUDA device index.
     """
     specs = GMSTensorSpec.load_all(gms_client_memory_manager)
-    # Map every referenced allocation up front in one bulk import (export a
-    # chunk, import it, map it, then set access) unless the manager opted out;
-    # spec.materialize below then hits the manager's mapping cache. Same VAs
-    # and access as one create_mapping per allocation. All or nothing: if it
-    # fails, nothing is mapped and the model is untouched.
-    if getattr(gms_client_memory_manager, "bulk_import", False):
+    # Importing before any tensor is bound leaves the model untouched if the
+    # import fails; spec.materialize then reuses the cached mappings.
+    if gms_client_memory_manager.bulk_import:
         gms_client_memory_manager.import_allocations(
             spec.allocation_id for spec in specs.values()
         )

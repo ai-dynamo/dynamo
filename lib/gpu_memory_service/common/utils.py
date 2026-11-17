@@ -17,12 +17,15 @@ logger = logging.getLogger(__name__)
 # constants in deploy/operator/internal/gms/gms.go.
 ENV_SCRATCH_KV_ENABLED = "DYN_GMS_SCRATCH_KV_ENABLED"
 ENV_VMM_GRANULARITY = "DYN_GMS_VMM_GRANULARITY"
+# Client-side only: the operator does not set it.
+ENV_BULK_IMPORT = "DYN_GMS_BULK_IMPORT"
 
 # Production GMS tags: the per-GPU server child and every engine integration
 # serve exactly these logical memory pools, one UDS socket per (device, tag).
 GMS_TAGS = ("weights", "kv_cache")
 
 _TRUTHY = ("true", "1", "yes")
+_FALSY = ("false", "0", "no", "off")
 
 
 def is_truthy_env(name: str) -> bool:
@@ -33,6 +36,11 @@ def is_truthy_env(name: str) -> bool:
 def is_scratch_kv_enabled() -> bool:
     """True when this engine should use two-phase (scratch → real) KV allocation."""
     return is_truthy_env(ENV_SCRATCH_KV_ENABLED)
+
+
+def is_bulk_import_enabled() -> bool:
+    """True unless DYN_GMS_BULK_IMPORT is set to a recognized falsy string."""
+    return os.environ.get(ENV_BULK_IMPORT, "").lower() not in _FALSY
 
 
 def fail(message: str, *args, exc_info=None) -> NoReturn:
