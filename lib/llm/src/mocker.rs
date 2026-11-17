@@ -1250,7 +1250,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         // final chunk repeats cumulative totals (OpenAI convention).
                         let output = LLMEngineOutput {
                             token_ids,
-                            disaggregated_params: is_prefill.then(|| serde_json::json!("dummy")),
+                            disaggregated_params: is_prefill.then(|| Box::new(serde_json::json!("dummy"))),
                             completion_usage: signal.cached_tokens.map(|cached| {
                                 usage_with_cached_tokens(prompt_tokens_count, token_count, cached)
                             }),

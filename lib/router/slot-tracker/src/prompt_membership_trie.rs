@@ -119,6 +119,26 @@ impl CleanableNode for PromptTrieNode {
     }
 }
 
+/// The nodes a query's path visits, each with how many of the query's blocks its edge
+/// matches, from [`PromptMembershipTrie::overlap_path`].
+pub(super) struct OverlapPath(Vec<(SharedNode, usize)>);
+
+impl OverlapPath {
+    /// `worker`'s entry in [`PromptMembershipTrie::compute_overlap_depths`].
+    pub(super) fn depth_for(&self, worker: WorkerWithDpRank) -> usize {
+        let mut depth = 0usize;
+        for (node, edge_match_len) in &self.0 {
+            let guard = node.read();
+            if !guard.full_edge_workers.contains(&worker) {
+                let cutoff = guard.worker_cutoffs.get(&worker).copied().unwrap_or(0);
+                return depth + cutoff.min(*edge_match_len);
+            }
+            depth += edge_match_len;
+        }
+        depth
+    }
+}
+
 #[derive(Default)]
 pub(super) struct PromptMembershipTrie {
     root: SharedNode,
@@ -552,6 +572,28 @@ impl PromptMembershipTrie {
         depth
     }
 
+    /// The nodes `query`'s path visits, for reading several workers' overlap depths while
+    /// matching each edge against the query once.
+    pub(super) fn overlap_path(&self, query: &[SequenceHash]) -> OverlapPath {
+        let mut nodes = Vec::new();
+        let Some(first) = query.first() else {
+            return OverlapPath(nodes);
+        };
+        let mut next_child = self.root.read().children.get(first).cloned();
+        let mut query_pos = 0usize;
+        while let Some(child) = next_child.take() {
+            let guard = child.read();
+            let edge_match_len = Self::matching_prefix_len(&guard.edge, &query[query_pos..]);
+            query_pos += edge_match_len;
+            if edge_match_len == guard.edge.len() && query_pos < query.len() {
+                next_child = guard.children.get(&query[query_pos]).cloned();
+            }
+            drop(guard);
+            nodes.push((child, edge_match_len));
+        }
+        OverlapPath(nodes)
+    }
+
     #[cfg(test)]
     pub(super) fn worker_hashes(&self) -> FxHashMap<WorkerWithDpRank, FxHashSet<SequenceHash>> {
         let mut worker_hashes = FxHashMap::default();
@@ -872,10 +914,15 @@ mod tests {
                     expected,
                     "step {step}, query {query:?}"
                 );
+                let path = trie.overlap_path(query);
                 for worker in workers {
+                    let expected = expected.get(&worker).copied().unwrap_or(0);
                     assert_eq!(
-                        trie.overlap_depth_for(query, worker),
-                        expected.get(&worker).copied().unwrap_or(0),
+                        (
+                            trie.overlap_depth_for(query, worker),
+                            path.depth_for(worker)
+                        ),
+                        (expected, expected),
                         "step {step}, query {query:?}, {worker:?}"
                     );
                 }
