@@ -69,7 +69,7 @@ def _iter_module_tensors(
         | set(module._buffers.keys())
         | set(module._modules.keys())
     )
-    for attr_name in dir(module):
+    for attr_name in vars(module):
         if attr_name in skip or attr_name.startswith("__"):
             continue
         try:
@@ -221,6 +221,8 @@ def materialize_module_from_gms(
     meta_tensors = [n for n, p in model.named_parameters() if p.is_meta]
     meta_tensors += [n for n, b in model.named_buffers() if b.is_meta]
     if meta_tensors:
+        # Not fatal: engines may still replace or drop them after attach
+        # (TRT-LLM post_load_weights runs after this call).
         logger.warning(
             "[GMS] %d meta tensors not in metadata: %s",
             len(meta_tensors),

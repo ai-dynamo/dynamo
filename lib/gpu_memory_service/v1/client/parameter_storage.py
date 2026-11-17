@@ -80,8 +80,13 @@ def _rebind(
 
 def _clone_storage_spans_and_rebind_tensors(
     tensors: Iterable[torch.Tensor],
+    copied: list[tuple[int, tuple[torch.Tensor, ...]]] | None = None,
 ) -> int:
-    """Copy overlapping storage spans while preserving TensorImpls and aliases."""
+    """Copy overlapping storage spans while preserving TensorImpls and aliases.
+
+    With ``copied``, appends ``(bytes, tensors)`` for every copy made
+    (zero-element tensors are rebound to an empty copy of 0 bytes).
+    """
     by_storage: dict[int, tuple[torch.UntypedStorage, dict[int, torch.Tensor]]] = {}
     for tensor in tensors:
         storage = tensor.untyped_storage()
@@ -99,6 +104,8 @@ def _clone_storage_spans_and_rebind_tensors(
                 device=storage.device,
             ).untyped_storage()
             _rebind(zero_elements, target, 0)
+            if copied is not None:
+                copied.append((0, tuple(zero_elements)))
 
         groups: list[tuple[int, int, list[torch.Tensor]]] = []
         spans = [
@@ -135,14 +142,33 @@ def _clone_storage_spans_and_rebind_tensors(
             target_storage = source.clone().untyped_storage()
             copied_bytes += int(target_storage.nbytes())
             _rebind(group_tensors, target_storage, source_start)
+            if copied is not None:
+                copied.append((int(target_storage.nbytes()), tuple(group_tensors)))
     return copied_bytes
+
+
+def _tensor_types() -> frozenset[type]:
+    """Return torch.Tensor and all of its live subclasses."""
+    types = {torch.Tensor}
+    pending = [torch.Tensor]
+    while pending:
+        for subclass in type.__subclasses__(pending.pop()):
+            if subclass not in types:
+                types.add(subclass)
+                pending.append(subclass)
+    return frozenset(types)
 
 
 def _iter_live_tensors(models: Iterable[object]):
     for model in models:
         yield from model.parameters()
+    # The heap holds about a million objects in an inference engine. A set
+    # lookup on the exact type selects the same objects as
+    # issubclass(type(value), torch.Tensor) without a __subclasscheck__ call
+    # per object (torch.Tensor has a metaclass).
+    tensor_types = _tensor_types()
     for value in gc.get_objects():
-        if issubclass(type(value), torch.Tensor) and value.layout is torch.strided:
+        if type(value) in tensor_types and value.layout is torch.strided:
             yield value
 
 
@@ -166,11 +192,16 @@ def _containing_mapping(
     mappings: tuple[LocalMapping, ...],
     mapping_bases: tuple[int, ...],
 ) -> LocalMapping | None:
-    storage = tensor.untyped_storage()
     try:
+        storage = tensor.untyped_storage()
+        if storage.device.type == "meta":
+            # Meta tensors, and FakeTensors left alive by torch.compile, have
+            # no device storage. Torch warns on a FakeTensor's data_ptr().
+            return None
         storage_start = int(storage.data_ptr())
-    except RuntimeError:
-        # FakeTensors left alive by torch.compile have no device storage.
+    except (RuntimeError, NotImplementedError):
+        # FakeTensors on Torch versions that raise, and wrapper subclasses
+        # without real storage (FunctionalTensor, functorch TensorWrapper).
         return None
     storage_end = storage_start + int(storage.nbytes())
     index = bisect_right(mapping_bases, storage_start) - 1
@@ -192,9 +223,17 @@ def _containing_mapping(
 def copy_non_parameter_tensors_to_default_allocator(
     models: Iterable[object],
     mappings: tuple[LocalMapping, ...],
+    *,
+    collect_garbage: bool = True,
+    copied: list[tuple[int, tuple[torch.Tensor, ...]]] | None = None,
 ) -> tuple[int, int]:
-    """Copy live non-Parameters out of GMS and return span/copy byte counts."""
-    gc.collect()
+    """Copy live non-Parameters out of GMS and return span/copy byte counts.
+
+    ``collect_garbage=False`` skips the full garbage collection for a caller
+    that has just run one. ``copied`` receives ``(bytes, tensors)`` per copy.
+    """
+    if collect_garbage:
+        gc.collect()
     mappings = tuple(sorted(mappings, key=lambda mapping: mapping.base))
     mapping_bases = tuple(mapping.base for mapping in mappings)
     retained_parameter_spans: list[tuple[int, int]] = []
@@ -217,5 +256,5 @@ def copy_non_parameter_tensors_to_default_allocator(
     for start, end in sorted(retained_parameter_spans):
         parameter_span_bytes += max(end - max(start, retained_end), 0)
         retained_end = max(retained_end, end)
-    copied_out_bytes = _clone_storage_spans_and_rebind_tensors(non_parameters)
+    copied_out_bytes = _clone_storage_spans_and_rebind_tensors(non_parameters, copied)
     return parameter_span_bytes, copied_out_bytes

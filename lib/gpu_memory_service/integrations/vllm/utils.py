@@ -15,6 +15,18 @@ logger = logging.getLogger(__name__)
 ENV_LOG_LEVEL = "DYN_GMS_VLLM_LOG_LEVEL"
 
 
+class _ForwardToVllmHandlers(logging.Handler):
+    """Hand each record to the "vllm" logger as it is configured at emit time.
+
+    The record reaches the same handlers a "vllm.*" record would: vLLM's own,
+    its ancestors' when "vllm" propagates (e.g. VLLM_CONFIGURE_LOGGING=0 with
+    application-configured root logging), else ``logging.lastResort``.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        logging.getLogger("vllm").callHandlers(record)
+
+
 def configure_gms_worker_logging() -> None:
     """Route gpu_memory_service logs through vLLM's handler in worker subprocesses.
 
@@ -29,8 +41,12 @@ def configure_gms_worker_logging() -> None:
     import vllm.logger  # noqa: F401 — ensure vLLM configured logging first
 
     vllm_logger = logging.getLogger("vllm")
-    for handler in vllm_logger.handlers:
-        gms_root.addHandler(handler)
+    # Forward at emit time rather than copying handlers now: when this runs in a
+    # process that imports the worker before vLLM sets up its handlers (a
+    # pre-importing zygote that forks engines), there is nothing to copy yet, and
+    # with propagation off INFO would be dropped (only WARNING+ reached stderr via
+    # logging.lastResort).
+    gms_root.addHandler(_ForwardToVllmHandlers())
     level_name = os.environ.get(ENV_LOG_LEVEL)
     # getLevelName maps a valid level name to its int; anything unknown comes
     # back as a "Level <x>" string, so only apply it when it resolved to an int.

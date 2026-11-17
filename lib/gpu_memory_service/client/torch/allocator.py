@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import gc
 import logging
+import weakref
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -29,6 +31,7 @@ class _TagState:
     socket_path: str
     device: int
     is_scratch: bool = False
+    callback_failure: Exception | None = None
 
 
 _tag_states: dict[str, _TagState] = {}
@@ -72,8 +75,23 @@ def _gms_free(ptr: int, size: int, device: int, stream: int) -> None:
     for tag, state in _tag_states.items():
         if va not in state.manager.mappings:
             continue
+        if (
+            state.mem_pool is None
+            and state.manager.granted_lock_type != GrantedLockType.RW
+        ):
+            # A block of a released weight pool, freed after publication. The
+            # allocation belongs to the committed layout: keep the mapping so
+            # remap_all_vas still matches it. close() releases it.
+            logger.debug("[GMS] free(tag=%s): keeping published va=0x%x", tag, va)
+            return
         logger.debug("[GMS] free(tag=%s): va=0x%x size=%d", tag, va, size)
-        state.manager.destroy_mapping(va)
+        try:
+            state.manager.destroy_mapping(va)
+        except Exception as exc:
+            # The native shim cannot propagate free callback exceptions.
+            # Preserve the failure for the publication barrier.
+            if state.callback_failure is None:
+                state.callback_failure = exc
         return
     logger.warning("[GMS] free: no manager owns va=0x%x, ignoring", va)
 
@@ -365,3 +383,49 @@ def gms_use_mem_pool(tag: str, device: "torch.device | int") -> Iterator[None]:
                 yield
     finally:
         _active_tag.reset(token)
+
+
+def release_gms_mem_pool(manager: "GMSClientMemoryManager") -> None:
+    """Release cached blocks through Torch's allocator, preserving live storage.
+
+    Called outside the pool region after synchronizing. Live StorageImpls keep
+    their backing while cached blocks are released. Module traversal cannot
+    establish allocation liveness.
+
+    Runs one full garbage collection: a full collection walks the whole
+    Python heap (about 0.3 s per million objects in a vLLM engine), so a
+    second one runs only if a reference cycle still holds the pool.
+    """
+    state = _tag_states.get(manager.tag)
+    if state is None or state.manager is not manager or state.mem_pool is None:
+        raise RuntimeError("GMS weight pool is missing or already finalized")
+    if _active_tag.get() == manager.tag:
+        raise RuntimeError("Cannot finalize an active GMS memory pool")
+    # Free tensors that only cyclic garbage references while the pool still
+    # exists: dropping the pool releases the blocks it has cached by then.
+    gc.collect()
+    pool = state.mem_pool
+    state.mem_pool = None
+    try:
+        pool_ref = weakref.ref(pool)
+    except TypeError:
+        pool_ref = None
+    del pool
+    if pool_ref is None or pool_ref() is not None:
+        gc.collect()
+    raise_if_gms_allocator_failed(manager)
+
+
+def raise_if_gms_allocator_failed(manager: "GMSClientMemoryManager") -> None:
+    """Surface native free-callback errors at synchronous ownership barriers.
+
+    Frees are only routed to managers registered here; an unregistered (or
+    closed and evicted) manager has no callback failures to report.
+    """
+    state = next(
+        (state for state in _tag_states.values() if state.manager is manager), None
+    )
+    if state is not None and state.callback_failure is not None:
+        raise RuntimeError(
+            "GMS allocator free callback failed"
+        ) from state.callback_failure
