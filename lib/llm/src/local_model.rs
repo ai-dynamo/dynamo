@@ -843,7 +843,6 @@ impl LocalModel {
             cf.move_to_url(url);
             rewritten += 1;
         }
-        self.card.advertise_tekken_for_older_frontends();
 
         tracing::debug!(
             model_slug,

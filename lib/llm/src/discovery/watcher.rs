@@ -2370,6 +2370,8 @@ mod tests {
 
     #[tokio::test]
     async fn native_transition_preserves_the_existing_hf_or_native_cohort() {
+        use crate::model_card::TokenizerKind;
+
         mod fixture {
             include!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -2382,9 +2384,14 @@ mod tests {
         native.model_input = ModelInput::Text;
         native.model_type = ModelType::Chat;
         native.worker_type = Some(WorkerType::Aggregated);
-        let mut old_wire = serde_json::to_value(&native).unwrap();
-        old_wire.as_object_mut().unwrap().remove("tekken_tokenizer");
-        let hf: ModelDeploymentCard = serde_json::from_value(old_wire).unwrap();
+        let Some(TokenizerKind::TekkenJsonWithHfFallback { hf: tokenizer, .. }) =
+            native.tokenizer.clone()
+        else {
+            panic!("the fixture must be dual-format");
+        };
+        // Clone before `native.mdcsum()` caches a checksum the clone would inherit.
+        let mut hf = native.clone();
+        hf.tokenizer = Some(TokenizerKind::HfTokenizerJson(tokenizer));
         assert_ne!(hf.mdcsum(), native.mdcsum());
         let runtime = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())

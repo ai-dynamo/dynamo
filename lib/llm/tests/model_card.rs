@@ -138,19 +138,7 @@ fn test_mistral_native_checkpoint_serves_on_the_rust_frontend() {
 }
 
 #[test]
-fn native_selection_preserves_dual_format_metadata_and_legacy_rendering() {
-    #[derive(serde::Deserialize)]
-    struct LegacyCard {
-        tokenizer: Option<LegacyTokenizer>,
-    }
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    #[allow(dead_code)]
-    enum LegacyTokenizer {
-        HfTokenizerJson(CheckedFile),
-        TikTokenModel(CheckedFile),
-    }
-
+fn native_selection_preserves_dual_format_metadata() {
     for version in ["v13", "v15"] {
         for with_hf_config in [false, true] {
             let dir = mistral_model::model_dir(with_hf_config, version, &["low", "medium", "high"]);
@@ -188,30 +176,16 @@ fn native_selection_preserves_dual_format_metadata_and_legacy_rendering() {
             let wire = serde_json::to_value(&card).unwrap();
             let roundtrip: ModelDeploymentCard = serde_json::from_value(wire.clone()).unwrap();
             assert_eq!(roundtrip.mdcsum(), card.mdcsum());
-            let legacy: LegacyCard = serde_json::from_value(wire.clone()).unwrap();
             if with_hf_config {
+                assert!(wire["tokenizer"]["tekken_json_with_hf_fallback"].is_object());
                 assert_eq!(card.architectural_max_context_length, Some(65536));
                 assert_eq!(
                     card.resolved_model_info().unwrap().unwrap().model_type(),
                     "mistral_large4"
                 );
                 assert!(card.gen_config.is_some());
-                let Some(LegacyTokenizer::HfTokenizerJson(hf)) = legacy.tokenizer else {
-                    panic!("lost legacy HF tokenizer")
-                };
-                assert!(hf.path().is_some());
-                let mut older_wire = wire;
-                older_wire
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("tekken_tokenizer");
-                let older: ModelDeploymentCard = serde_json::from_value(older_wire).unwrap();
-                let dynamo_renderer::PromptFormatter::OAI(formatter) =
-                    dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc(&older).unwrap();
-                assert_eq!(formatter.render(&request).unwrap(), "BUNDLED HF DEFAULT");
-                assert_ne!(older.mdcsum(), card.mdcsum());
             } else {
-                assert!(legacy.tokenizer.is_none());
+                assert!(wire["tokenizer"]["tekken_json"].is_object());
                 assert_eq!(card.architectural_max_context_length, Some(32768));
             }
         }
@@ -284,8 +258,9 @@ async fn dual_tokenizer_metadata_urls_download_and_relocate_both_artifacts() {
     card.move_to_url(url::Url::from_directory_path(dir.path()).unwrap().as_str())
         .unwrap();
     let wire = serde_json::to_value(&card).unwrap();
-    assert!(wire["tokenizer"]["hf_tokenizer_json"]["path"].is_string());
-    assert!(wire["tekken_tokenizer"]["path"].is_string());
+    let tokenizer = &wire["tokenizer"]["tekken_json_with_hf_fallback"];
+    assert!(tokenizer["tekken"]["path"].is_string());
+    assert!(tokenizer["hf"]["path"].is_string());
     card.download_config(None).await.unwrap();
     assert_eq!(card.mdcsum(), checksum);
     assert!(card.tokenizer.as_ref().unwrap().is_local());

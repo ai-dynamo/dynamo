@@ -418,7 +418,9 @@ pub enum TokenizerKind {
     TikTokenModel(CheckedFile),
     /// Mistral `tekken.json` (v13/v15), paired with the native Mistral renderer.
     TekkenJson(CheckedFile),
-    /// Native tokenizer with the HF artifact retained for older frontends.
+    /// Native tokenizer with the HF artifact retained for Python chat processors: stock
+    /// vLLM's `auto` tokenizer mode loads `tokenizer.json` when the directory has no
+    /// `consolidated*.safetensors`.
     TekkenJsonWithHfFallback {
         tekken: CheckedFile,
         hf: CheckedFile,
@@ -470,90 +472,6 @@ impl TokenizerKind {
         if let Self::TekkenJsonWithHfFallback { hf, .. } = self {
             hf.update_dir(dir);
         }
-    }
-}
-
-/// Wire form of [`ModelDeploymentCard::tokenizer`].
-///
-/// Compatibility with frontends that predate [`TokenizerKind::TekkenJson`] (v1.7 and
-/// older) during rolling upgrades: they reject an unknown `TokenizerKind` variant,
-/// and with it the whole card. A tekken tokenizer therefore travels in its own
-/// `tekken_tokenizer` field, which those frontends ignore. Dual-format cards retain
-/// their HF tokenizer and templates; native-only cards write `tokenizer` null. The in-memory card keeps
-/// `TekkenJson`; a `tokenizer` that names it directly is still read. Frontends of
-/// the `v1.7.0-mistral-large-4-dev.1` prerelease read tekken only from `tokenizer`,
-/// so in that deployment upgrade frontends before workers.
-/// TODO(v1.10): write `tokenizer` directly once v1.7 leaves the N-2 window.
-/// TODO(v1.12): drop the `tekken_tokenizer` reader once v1.9 leaves the N-2 window.
-mod tokenizer_wire {
-    use super::{CheckedFile, TokenizerKind};
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    #[derive(Serialize)]
-    #[serde(rename_all = "snake_case")]
-    enum LegacyTokenizer<'a> {
-        HfTokenizerJson(&'a CheckedFile),
-        TikTokenModel(&'a CheckedFile),
-    }
-
-    #[derive(Serialize)]
-    struct Written<'a> {
-        tokenizer: Option<LegacyTokenizer<'a>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tekken_tokenizer: Option<&'a CheckedFile>,
-    }
-
-    #[derive(Deserialize)]
-    struct Read {
-        #[serde(default)]
-        tokenizer: Option<TokenizerKind>,
-        #[serde(default)]
-        tekken_tokenizer: Option<CheckedFile>,
-    }
-
-    pub(super) fn serialize<S: Serializer>(
-        tokenizer: &Option<TokenizerKind>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        match tokenizer {
-            Some(TokenizerKind::TekkenJson(file)) => Written {
-                tokenizer: None,
-                tekken_tokenizer: Some(file),
-            },
-            Some(TokenizerKind::TekkenJsonWithHfFallback { tekken, hf }) => Written {
-                tokenizer: Some(LegacyTokenizer::HfTokenizerJson(hf)),
-                tekken_tokenizer: Some(tekken),
-            },
-            Some(TokenizerKind::HfTokenizerJson(file)) => Written {
-                tokenizer: Some(LegacyTokenizer::HfTokenizerJson(file)),
-                tekken_tokenizer: None,
-            },
-            Some(TokenizerKind::TikTokenModel(file)) => Written {
-                tokenizer: Some(LegacyTokenizer::TikTokenModel(file)),
-                tekken_tokenizer: None,
-            },
-            None => Written {
-                tokenizer: None,
-                tekken_tokenizer: None,
-            },
-        }
-        .serialize(serializer)
-    }
-
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Option<TokenizerKind>, D::Error> {
-        let Read {
-            tokenizer,
-            tekken_tokenizer,
-        } = Read::deserialize(deserializer)?;
-        Ok(match (tekken_tokenizer, tokenizer) {
-            (Some(tekken), Some(TokenizerKind::HfTokenizerJson(hf))) => {
-                Some(TokenizerKind::TekkenJsonWithHfFallback { tekken, hf })
-            }
-            (Some(tekken), _) => Some(TokenizerKind::TekkenJson(tekken)),
-            (None, tokenizer) => tokenizer,
-        })
     }
 }
 
@@ -1200,7 +1118,6 @@ pub struct ModelDeploymentCard {
     pub model_info: Option<ModelInfoType>,
 
     /// Tokenizer configuration
-    #[serde(flatten, with = "tokenizer_wire")]
     pub tokenizer: Option<TokenizerKind>,
 
     /// Prompt Formatter configuration
@@ -2081,28 +1998,6 @@ impl ModelDeploymentCard {
         matches!(self.model_input, ModelInput::Tokens)
     }
 
-    /// Advertise a tekken tokenizer as an extra metadata file too.
-    ///
-    /// Compatibility with frontends that predate [`TokenizerKind::TekkenJson`] (v1.7
-    /// and older) during rolling upgrades: they read a tekken card's `tokenizer` as
-    /// null (see `tokenizer_wire`) and fetch self-hosted files only through the typed
-    /// slots and `extra_files`, so without this their Python chat processors never
-    /// receive `tekken.json`. Call it after the typed slots point at their served
-    /// locations, so the copy shares the tokenizer's URL.
-    /// TODO(v1.10): Remove when v1.7 falls outside the N-2 compatibility window.
-    pub(crate) fn advertise_tekken_for_older_frontends(&mut self) {
-        if let Some(tekken) = self.tokenizer.as_ref().and_then(TokenizerKind::tekken_file) {
-            let tekken = tekken.clone();
-            if !self
-                .extra_files
-                .iter()
-                .any(|file| file.checksum() == tekken.checksum())
-            {
-                self.extra_files.push(tekken);
-            }
-        }
-    }
-
     /// Iterate populated metadata slots in deterministic order:
     /// model_info, tokenizer, prompt_formatter, chat_template_file,
     /// gen_config, then any `extra_files` siblings the worker harvested
@@ -2427,8 +2322,7 @@ impl ModelDeploymentCard {
             (Some(native), _) => Some(native),
             (None, hf) => hf,
         };
-        // Keep HF metadata on dual-format cards: older frontends still render
-        // through the fallback tokenizer and template advertised on the wire.
+        // Keep HF metadata on dual-format cards for the Python chat processors.
         let model_info = if native_only {
             None
         } else {
@@ -2459,8 +2353,8 @@ impl ModelDeploymentCard {
 
         // This gets replaced when we `set_name`
         let display_name = local_path.display().to_string();
-        // Python processors and older frontends can consume the HF fallback;
-        // include it in the existing extra-artifact identity as well.
+        // The tokenizer slot's checksum covers only `tekken.json`; listing the HF
+        // fallback here puts it into the card checksum too.
         let extra_files = match &tokenizer {
             Some(TokenizerKind::TekkenJsonWithHfFallback { hf, .. }) => vec![hf.clone()],
             _ => Vec::new(),
@@ -3039,7 +2933,7 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CheckedFile, HFConfig, ModelDeploymentCard, TokenizerKind};
+    use super::{CheckedFile, HFConfig, ModelDeploymentCard};
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
@@ -3130,64 +3024,6 @@ mod tests {
     }
 
     #[test]
-    fn tekken_card_stays_readable_by_older_frontends() {
-        let card = ModelDeploymentCard::load_from_disk(
-            "tests/data/sample-models/mock-mistral-tekken",
-            None,
-        )
-        .unwrap();
-        assert!(matches!(card.tokenizer, Some(TokenizerKind::TekkenJson(_))));
-
-        let wire = serde_json::to_value(&card).unwrap();
-        assert!(wire["tokenizer"].is_null(), "{}", wire["tokenizer"]);
-        assert!(wire["tekken_tokenizer"].is_object());
-        // An older frontend reads the card as it read a tekken-only checkpoint before.
-        let released: ReleasedTokenizerSlot = serde_json::from_value(wire.clone()).unwrap();
-        assert!(released.tokenizer.is_none());
-
-        let read: ModelDeploymentCard = serde_json::from_value(wire).unwrap();
-        assert_eq!(read.mdcsum(), card.mdcsum());
-        assert!(matches!(read.tokenizer, Some(TokenizerKind::TekkenJson(_))));
-    }
-
-    /// Older frontends fetch self-hosted files through `extra_files`, so a served tekken
-    /// card lists its tokenizer there too.
-    #[test]
-    fn self_hosted_tekken_card_lists_the_tokenizer_for_older_frontends() {
-        let mut card = ModelDeploymentCard::load_from_disk(
-            "tests/data/sample-models/mock-mistral-tekken",
-            None,
-        )
-        .unwrap();
-        let Some(TokenizerKind::TekkenJson(tekken)) = card.tokenizer.clone() else {
-            panic!("mock checkpoint must load its tekken tokenizer");
-        };
-        card.advertise_tekken_for_older_frontends();
-        card.advertise_tekken_for_older_frontends();
-        assert_eq!(
-            card.extra_files
-                .iter()
-                .filter(|file| file.checksum() == tekken.checksum())
-                .count(),
-            1
-        );
-
-        let wire = serde_json::to_value(&card).unwrap();
-        let read: ModelDeploymentCard = serde_json::from_value(wire).unwrap();
-        assert!(matches!(read.tokenizer, Some(TokenizerKind::TekkenJson(_))));
-        assert_eq!(read.mdcsum(), card.mdcsum());
-
-        let mut hf = ModelDeploymentCard::load_from_disk(
-            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
-            None,
-        )
-        .unwrap();
-        let before = hf.extra_files.len();
-        hf.advertise_tekken_for_older_frontends();
-        assert_eq!(hf.extra_files.len(), before);
-    }
-
-    #[test]
     fn other_tokenizers_keep_their_wire_form() {
         let card = ModelDeploymentCard::load_from_disk(
             "tests/data/sample-models/mock-llama-3.1-8b-instruct",
@@ -3196,34 +3032,11 @@ mod tests {
         .unwrap();
         let wire = serde_json::to_value(&card).unwrap();
         assert!(wire["tokenizer"]["hf_tokenizer_json"].is_object());
-        assert!(wire.get("tekken_tokenizer").is_none());
         let released: ReleasedTokenizerSlot = serde_json::from_value(wire.clone()).unwrap();
         assert!(matches!(
             released.tokenizer,
             Some(ReleasedTokenizerKind::HfTokenizerJson(_))
         ));
-        let read: ModelDeploymentCard = serde_json::from_value(wire).unwrap();
-        assert_eq!(read.mdcsum(), card.mdcsum());
-    }
-
-    /// Cards that name the tekken tokenizer in `tokenizer` itself still load.
-    #[test]
-    fn tekken_named_in_the_tokenizer_slot_is_read() {
-        let card = ModelDeploymentCard::load_from_disk(
-            "tests/data/sample-models/mock-mistral-tekken",
-            None,
-        )
-        .unwrap();
-        let Some(TokenizerKind::TekkenJson(file)) = &card.tokenizer else {
-            panic!("mock checkpoint must load its tekken tokenizer");
-        };
-        let mut wire = serde_json::to_value(&card).unwrap();
-        let object = wire.as_object_mut().unwrap();
-        object.remove("tekken_tokenizer");
-        object.insert(
-            "tokenizer".to_string(),
-            serde_json::json!({ "tekken_json": file }),
-        );
         let read: ModelDeploymentCard = serde_json::from_value(wire).unwrap();
         assert_eq!(read.mdcsum(), card.mdcsum());
     }
