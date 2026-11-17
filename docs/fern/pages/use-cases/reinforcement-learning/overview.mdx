@@ -44,9 +44,7 @@ Dynamo does not decide whether a trajectory is on-policy, accepted, or fresh eno
 
 ## Decision Model
 
-**Experimental.** Use a decision model to classify text, estimate a predicate probability, or score an input against ordered levels through Dynamo. For RL workloads, your framework can use these results as evaluation signals; it still owns reward design, calibration, and trajectory acceptance. These are inference APIs, not a training or weight-update interface.
-
-Start with [Decision APIs](decision-model/apis.md) for OpenAI `/v1/decisions` and Jev `/v1/systemone`, including curl and official SDK examples. Use the [SGLang guide](decision-model/sglang.md) to launch the initial text-only worker profile. API compatibility does not establish model quality or equivalence to a hosted provider.
+For experimental classification, predicate evaluation, and scoring, see the separate [Decision Model use case](../decision-model/apis.md). RL frameworks can consume these inference results as evaluation signals; they still own reward design, calibration, and trajectory acceptance.
 
 ## Framework Integrations
 

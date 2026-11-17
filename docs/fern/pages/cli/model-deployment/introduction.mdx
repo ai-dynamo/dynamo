@@ -174,9 +174,9 @@ docker exec -it <container_id> bash
 
 ## Decision API Workers
 
-**Experimental.** Use a dedicated aggregated SGLang CUDA worker to serve OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. Follow [Decision Models with SGLang](../../use-cases/reinforcement-learning/decision-model/sglang.md) for the supported runtime profile, launch commands, readiness checks, and cleanup.
+**Experimental.** Use a dedicated aggregated SGLang CUDA worker to serve OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. Follow [Decision Models with SGLang](../../use-cases/decision-model/sglang.md) for the supported runtime profile, launch commands, readiness checks, and cleanup.
 
-The [Decision APIs guide](../../use-cases/reinforcement-learning/decision-model/apis.md) explains the two contracts and provides curl, OpenAI SDK, and Jev/TypeSafe SDK examples. For admission limits and cache-sharing boundaries, see [Decision API Configuration](../../reference/components/frontend-configuration.mdx#decision-apis).
+The [Decision APIs guide](../../use-cases/decision-model/apis.md) explains the two contracts and provides curl, OpenAI SDK, and Jev/TypeSafe SDK examples. For admission limits and cache-sharing boundaries, see [Decision API Configuration](../../reference/components/frontend-configuration.mdx#decision-apis).
 
 ## Scaling and larger deployments
 

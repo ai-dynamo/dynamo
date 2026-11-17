@@ -732,14 +732,6 @@ navigation:
             path: pages/use-cases/reinforcement-learning/weight-updates.md
           - page: RL Profiling and Simulation
             path: pages/use-cases/reinforcement-learning/operations-and-simulation.md
-          - section: Decision Model
-            slug: decision-model
-            collapsed: true
-            contents:
-              - page: APIs
-                path: pages/use-cases/reinforcement-learning/decision-model/apis.md
-              - page: SGLang
-                path: pages/use-cases/reinforcement-learning/decision-model/sglang.md
           - section: RL Framework Integrations
             skip-slug: true
             collapsed: open-by-default
@@ -754,6 +746,19 @@ navigation:
                 path: pages/use-cases/reinforcement-learning/implementation-guide.md
               - page: RL Integration Reference
                 path: pages/use-cases/reinforcement-learning/integration-reference.md
+
+      # ==================== Decision Model ====================
+      - section: Decision Model
+        slug: decision-model
+        collapsed: true
+        icon: list-check
+        contents:
+          - page: APIs
+            slug: apis
+            path: pages/use-cases/decision-model/apis.md
+          - page: SGLang
+            slug: sglang
+            path: pages/use-cases/decision-model/sglang.md
 
       # ==================== Agents ====================
       - section: Agents

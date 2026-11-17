@@ -9,7 +9,7 @@ subtitle: Run a dedicated text-scoring worker for both Dynamo decision APIs
 
 ## Prerequisites
 
-Use a Dynamo environment built with SGLang and the etcd/NATS services described in [Local Installation](../../../cli/installation/install-dynamo.mdx). Use a supported GPU and ensure the checkpoint fits available memory. The example uses `Qwen/Qwen3-0.6B` as a small integration-test target, not a claim of decision-task quality or qualification of larger Qwen models.
+Use a Dynamo environment built with SGLang and the etcd/NATS services described in [Local Installation](../../cli/installation/install-dynamo.mdx). Use a supported GPU and ensure the checkpoint fits available memory. The example uses `Qwen/Qwen3-0.6B` as a small integration-test target, not a claim of decision-task quality or qualification of larger Qwen models.
 
 The worker capability gate accepts SGLang 0.5.19, 0.5.22, and 0.5.23, including their recognized CUDA package suffixes. The current CUDA container pins 0.5.23. Other versions require explicit qualification; they do not become supported by changing a version string. Model, tokenizer, chat template, runtime, and precision must be recorded independently when qualifying a deployment.
 
@@ -70,7 +70,7 @@ Run the [curl, OpenAI SDK, and Jev SDK examples](apis.md) against this frontend.
 | Worker placement | First question establishes placement; sibling questions stay on that worker and rank |
 | Cache isolation | Siblings share a request-local cache identity; independent requests do not share it |
 
-The protocol ceiling is not a promise that this tokenizer can represent 255 distinct labels. Unsupported candidate sets fail before inference. Input-token usage sums the rendered prompts for all questions; cache reads use measured backend counters. See [Decision API Configuration](../../../reference/components/frontend-configuration.mdx#decision-apis) for independent byte, token-work, admission, and deadline limits.
+The protocol ceiling is not a promise that this tokenizer can represent 255 distinct labels. Unsupported candidate sets fail before inference. Input-token usage sums the rendered prompts for all questions; cache reads use measured backend counters. See [Decision API Configuration](../../reference/components/frontend-configuration.mdx#decision-apis) for independent byte, token-work, admission, and deadline limits.
 
 The small-model [SGLang numerical qualification fixture](https://github.com/ai-dynamo/dynamo/blob/main/tests/serve/test_systemone_sglang.py) compares Dynamo with an independent native scorer. A passing endpoint smoke test does not replace that numerical check, task-specific accuracy evaluation, or distributed lifecycle testing. Engine-version acceptance alone is not evidence that a model was qualified.
 
