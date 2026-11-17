@@ -264,6 +264,10 @@ mutated request to the selected Frontend sidecar.
   Data-parallel rank selected for the prefill worker.
 </ParamField>
 
+<ParamField path="x-dynamo-elapsed-since-arrival-ms" type="HTTP header">
+  Milliseconds the EPP held the request, from receiving its headers to forwarding it. The Frontend sidecar starts the request's arrival age from this value, so a backend that orders admission by arrival counts the time the request waited in the EPP's router queue. The EPP overwrites any value the client sent.
+</ParamField>
+
 For supported body-bearing OpenAI requests, the EPP can inject precomputed token data into
 `nvext.token_data` so the Frontend sidecar does not repeat tokenization.
 
