@@ -18,6 +18,7 @@ from dynamo.planner.core.perf_model import engine_query
 from dynamo.planner.core.perf_model.engine_query import (
     AISCoreEnginePerfModel,
     EngineCapacityRequest,
+    EngineLoadStatus,
     EnginePerfLimits,
 )
 
@@ -85,6 +86,313 @@ def _sum_prefill_ms(metrics_by_rank: list[dict[str, Any]]) -> float:
             metrics["scheduled_requests"]["sum_prefill_tokens"]
             for metrics in metrics_by_rank
         )
+    )
+
+
+def _configured_spec_model(
+    monkeypatch,
+    *,
+    mode="op_level",
+    backend="vllm",
+    worker_type="aggregated",
+    ranks=1,
+    budget=16,
+    sequences=16,
+    width=4,
+):
+    config = {
+        "model": "fixture",
+        "backend": backend,
+        "worker_type": worker_type,
+        "estimation_mode": "auto",
+        "attention_dp": ranks,
+        "nextn": width - 1,
+    }
+    if mode == "op_level" and backend == "vllm":
+        config["nextn"] = 0
+        config["speculation"] = {
+            "kind": "ngram",
+            "params": {"num_speculative_tokens": width - 1},
+        }
+    native = _FakeForwardPassModel(lambda _metrics: 10.0)
+    native.diagnostics = lambda: {
+        "source": "aic",
+        "readiness": "ready",
+        "provenance": {"selected_estimation_mode": mode, "config": config},
+    }
+
+    class Facade:
+        @classmethod
+        def best_available(cls, _config):
+            return native
+
+    monkeypatch.setattr(engine_query, "AISForwardPassPerfModel", Facade)
+    model = AISCoreEnginePerfModel.best_available(
+        ais_config=config,
+        worker_type=worker_type,
+        limits=EnginePerfLimits(budget, sequences, 1_000_000),
+        attention_dp_size=ranks,
+        max_observations=16,
+    )
+    return model, native
+
+
+def _decode_fpm(count=1, *, rank=0, queued=0):
+    return ForwardPassMetrics(
+        dp_rank=rank,
+        wall_time=0.01,
+        scheduled_requests=ScheduledRequestMetrics(
+            num_decode_requests=count,
+            sum_decode_kv_tokens=count * 128,
+            var_decode_kv_tokens=9,
+        ),
+        queued_requests=QueuedRequestMetrics(
+            num_prefill_requests=int(queued > 0), sum_prefill_tokens=queued
+        ),
+    )
+
+
+def _prefill_fpm(tokens, *, requests=1):
+    return ForwardPassMetrics(
+        wall_time=0.01,
+        scheduled_requests=ScheduledRequestMetrics(
+            num_prefill_requests=requests, sum_prefill_tokens=tokens
+        ),
+    )
+
+
+@pytest.mark.parametrize("backend,width", [("vllm", 4), ("sglang", 4), ("vllm", 8)])
+def test_speculative_op_queries_pack_each_rank_without_changing_logical_kv(
+    monkeypatch, backend, width
+):
+    model, native = _configured_spec_model(
+        monkeypatch, backend=backend, width=width, ranks=2, budget=100
+    )
+    snapshots = [_decode_fpm(count, rank=rank) for rank, count in enumerate((2, 1))]
+    assert model.get_scheduled_decode_itl(snapshots) == pytest.approx(0.01)
+    scheduled = [x["scheduled_requests"] for x in native.estimate_calls[-1]]
+    assert [x["num_decode_requests"] for x in scheduled] == [2 * width, width]
+    assert [x["sum_decode_kv_tokens"] for x in scheduled] == [256 * width, 128 * width]
+    assert [x["var_decode_kv_tokens"] for x in scheduled] == [9, 9]
+    assert snapshots[0].scheduled_requests.num_decode_requests == 2
+    assert snapshots[0].scheduled_requests.sum_decode_kv_tokens == 256
+
+
+@pytest.mark.parametrize("mode", ["fpm_regression", "fpm_interpolation"])
+def test_selected_fpm_modes_keep_speculative_queries_and_training_logical(
+    monkeypatch, mode
+):
+    model, native = _configured_spec_model(monkeypatch, mode=mode)
+    fpm = _decode_fpm()
+    model.tune_with_fpms([[fpm]])
+    assert model.get_scheduled_decode_itl([fpm]) == pytest.approx(0.01)
+    assert (
+        native.tuned_iterations[0][0]["scheduled_requests"]["num_decode_requests"] == 1
+    )
+    assert (
+        native.estimate_calls[-1][0]["scheduled_requests"]["sum_decode_kv_tokens"]
+        == 128
+    )
+
+
+def test_speculative_op_withholds_decode_iterations_but_keeps_raw_load(monkeypatch):
+    model, native = _configured_spec_model(monkeypatch, ranks=2, budget=200)
+    pure = [
+        ForwardPassMetrics(
+            dp_rank=rank,
+            scheduled_requests=ScheduledRequestMetrics(
+                num_prefill_requests=1, sum_prefill_tokens=8
+            ),
+            queued_requests=QueuedRequestMetrics(num_decode_requests=1),
+            wall_time=0.01,
+        )
+        for rank in range(2)
+    ]
+    mixed = [
+        _prefill_fpm(100),
+        ForwardPassMetrics(
+            dp_rank=1,
+            scheduled_requests=ScheduledRequestMetrics(
+                num_prefill_requests=1,
+                sum_prefill_tokens=1,
+                num_decode_requests=1,
+                sum_decode_kv_tokens=30,
+            ),
+            wall_time=0.01,
+        ),
+    ]
+    model.tune_with_fpms([pure, mixed])
+    assert len(native.tuned_iterations) == 1
+    assert len(native.tuned_iterations[0]) == 2
+    assert all(
+        x["scheduled_requests"]["num_decode_requests"] == 0
+        for x in native.tuned_iterations[0]
+    )
+    model.get_scheduled_decode_itl([_decode_fpm(rank=rank) for rank in range(2)])
+    # The busiest-rank samples have 8 and 100 prefill tokens. Their mean,
+    # (8 + 100) / 2 = 54, is synthesized for each rank, not divided by DP.
+    assert [
+        x["scheduled_requests"]["sum_prefill_tokens"] for x in native.estimate_calls[-1]
+    ] == [54, 54]
+
+
+@pytest.mark.parametrize(
+    "loads,expected_chunks",
+    [([(3, 10), (1, 10)], [[4, 10], [4, 0], [2, 0]]), ([(4, 0), (1, 10)], [[0, 10]])],
+)
+def test_speculative_queue_drain_uses_rank_local_headroom(
+    monkeypatch, loads, expected_chunks
+):
+    model, native = _configured_spec_model(monkeypatch, ranks=2)
+    snapshots = [
+        _decode_fpm(decode, rank=rank, queued=queued)
+        for rank, (decode, queued) in enumerate(loads)
+    ]
+    assert model.get_queued_prefill_time(snapshots) == pytest.approx(
+        0.01 * len(expected_chunks)
+    )
+    assert [
+        [x["scheduled_requests"]["sum_prefill_tokens"] for x in call]
+        for call in native.estimate_calls
+    ] == expected_chunks
+
+
+def test_speculative_queue_reports_no_headroom_but_empty_queue_is_zero(monkeypatch):
+    model, native = _configured_spec_model(monkeypatch, budget=8)
+    assert model.get_queued_prefill_time([_decode_fpm(2)]) == 0
+    assert (
+        model.get_queued_prefill_time([_decode_fpm(2, queued=1)])
+        is EngineLoadStatus.SATURATED
+    )
+    assert not native.estimate_calls
+
+
+@pytest.mark.parametrize(
+    "role,engine_request,expected_rps",
+    [
+        ("decode", EngineCapacityRequest(isl=100, osl=10, accept_length=4), 160),
+        ("aggregated", EngineCapacityRequest(isl=1, osl=10), 20),
+    ],
+)
+def test_speculative_capacity_obeys_rank_budget_and_logical_request_count(
+    monkeypatch, role, engine_request, expected_rps
+):
+    model, native = _configured_spec_model(
+        monkeypatch, worker_type=role, ranks=2, budget=8, sequences=100
+    )
+    capacity = model.find_engine_capacity_rps(engine_request)
+    assert capacity is not None and capacity.rps == pytest.approx(expected_rps)
+    assert all(
+        x["scheduled_requests"]["sum_prefill_tokens"]
+        + x["scheduled_requests"]["num_decode_requests"]
+        <= 8
+        for call in native.estimate_calls
+        for x in call
+    )
+
+
+@pytest.mark.parametrize("field", ["num_decode_requests", "sum_decode_kv_tokens"])
+def test_speculative_packing_rejects_u32_overflow_before_native_call(
+    monkeypatch, field
+):
+    model, native = _configured_spec_model(monkeypatch, backend="sglang")
+    values = {"num_decode_requests": 1, "sum_decode_kv_tokens": 128}
+    values[field] = (1 << 32) - 1
+    fpm = ForwardPassMetrics(scheduled_requests=ScheduledRequestMetrics(**values))
+    with pytest.raises(ValueError, match="overflow"):
+        model.get_scheduled_decode_itl([fpm])
+    assert not native.estimate_calls
+
+
+@pytest.mark.parametrize(
+    "provenance", [{}, {"selected_estimation_mode": "op_level", "config": None}]
+)
+def test_speculation_requires_resolved_mode_and_identity(monkeypatch, provenance):
+    native = _FakeForwardPassModel(lambda _metrics: 10.0)
+    native.diagnostics = lambda: {"provenance": provenance}
+
+    class Facade:
+        @classmethod
+        def best_available(cls, _config):
+            return native
+
+    monkeypatch.setattr(engine_query, "AISForwardPassPerfModel", Facade)
+    with pytest.raises(ValueError, match="resolved estimator provenance"):
+        AISCoreEnginePerfModel.best_available(
+            ais_config={"worker_type": "decode", "nextn": 3},
+            worker_type="decode",
+            limits=EnginePerfLimits(16, 16, 1000),
+            max_observations=16,
+            attention_dp_size=1,
+        )
+
+
+@pytest.mark.parametrize(
+    "budget,decode,learned,expected_tokens,expected_requests",
+    [(16, 3, 16, 4, 2), (9, 2, 8, 1, 1)],
+)
+def test_speculative_itl_crops_only_the_learned_prefill_mix(
+    monkeypatch, budget, decode, learned, expected_tokens, expected_requests
+):
+    model, native = _configured_spec_model(monkeypatch, budget=budget)
+    model.tune_with_fpms([[_prefill_fpm(learned, requests=2)]])
+    assert model.get_scheduled_decode_itl([_decode_fpm(decode)]) == pytest.approx(0.01)
+    payload = native.estimate_calls[-1][0]["scheduled_requests"]
+    assert (payload["sum_prefill_tokens"], payload["num_prefill_requests"]) == (
+        expected_tokens,
+        expected_requests,
+    )
+    count = len(native.estimate_calls)
+    actual = ForwardPassMetrics(
+        scheduled_requests=ScheduledRequestMetrics(
+            num_prefill_requests=2,
+            sum_prefill_tokens=8,
+            num_decode_requests=decode,
+            sum_decode_kv_tokens=decode * 128,
+        )
+    )
+    assert model.get_scheduled_decode_itl([actual]) is EngineLoadStatus.SATURATED
+    assert len(native.estimate_calls) == count
+
+
+@pytest.mark.parametrize("role", ["decode", "aggregated", "prefill"])
+def test_speculative_width_must_fit_one_verification_round(monkeypatch, role):
+    if role != "prefill":
+        with pytest.raises(ValueError, match="width exceeds the per-rank token budget"):
+            _configured_spec_model(monkeypatch, budget=3, worker_type=role)
+    else:
+        # A prefill-only worker has no decode verification round to reserve.
+        model, _ = _configured_spec_model(monkeypatch, budget=3, worker_type=role)
+        assert model.get_queued_prefill_time(
+            [_decode_fpm(0, queued=8)]
+        ) == pytest.approx(0.03)
+
+
+def test_other_backends_do_not_inherit_vllm_verification_budget(monkeypatch):
+    model, native = _configured_spec_model(monkeypatch, backend="sglang")
+    assert model.get_queued_prefill_time([_decode_fpm(3, queued=10)]) == pytest.approx(
+        0.01
+    )
+    payload = native.estimate_calls[-1][0]["scheduled_requests"]
+    assert payload["sum_prefill_tokens"] == 10
+    assert payload["num_decode_requests"] == 12
+
+
+@pytest.mark.parametrize("decode, expected", [(0, 0.02), (3, 0.05)])
+def test_speculative_ttft_reserves_full_verification_work(
+    monkeypatch, decode, expected
+):
+    model, native = _configured_spec_model(monkeypatch)
+    # B16: no decode leaves chunks 16+4; three W4 decodes leave five chunks of 4.
+    assert model.get_queued_prefill_time(
+        [_decode_fpm(decode, queued=20)]
+    ) == pytest.approx(expected)
+    assert all(
+        x["scheduled_requests"]["sum_prefill_tokens"]
+        + x["scheduled_requests"]["num_decode_requests"]
+        <= 16
+        for call in native.estimate_calls
+        for x in call
     )
 
 

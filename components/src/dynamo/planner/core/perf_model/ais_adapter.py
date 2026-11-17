@@ -35,6 +35,7 @@ from dynamo.planner.core.perf_model.engine_query import (
     AISCoreEnginePerfModel,
     EngineCapacityRequest,
     EnginePerfLimits,
+    LoadEstimate,
     WorkerType,
 )
 from dynamo.planner.core.types import EngineCapabilities
@@ -113,6 +114,7 @@ class PlannerEnginePerfModel:
         # model has not successfully consumed the complete history.
         self._pending_iterations: list[list[ForwardPassMetrics]] = []
         self._retained_iterations: list[list[ForwardPassMetrics]] = []
+        self._history_decode_width: Optional[int] = None
         self._avg_isl = _MovingAverage(config.max_num_fpm_samples)
         self._avg_decode_length = _MovingAverage(config.max_num_fpm_samples)
 
@@ -150,6 +152,15 @@ class PlannerEnginePerfModel:
                 max_observations=self._config.max_num_fpm_samples,
                 attention_dp_size=self._attention_dp_size() or 1,
             )
+            width = self._engine_model.verify_width
+            if (
+                self._history_decode_width is not None
+                and self._history_decode_width != width
+            ):
+                # A different verification width describes different measured work.
+                self._retained_iterations.clear()
+                self._pending_iterations.clear()
+            self._history_decode_width = width
             diagnostics = self._engine_diagnostics()
             logger.info(
                 "Initialized AIS engine perf model for %s with source=%s readiness=%s",
@@ -521,13 +532,13 @@ class PlannerEnginePerfModel:
         decode_scale: float = 1.0,
         include_queued_decode: bool = False,
         add_next_request: bool = True,
-    ) -> Optional[float]:
+    ) -> LoadEstimate:
         """Estimate next-request TTFT in seconds from queued prefill work.
 
         FPM v1 queued prefill does not know KV reuse. The planner applies the
         router-provided prefix-cache discount before calling the engine model.
-        AIS query failures are treated as unavailable estimates so load
-        scaling can skip the current tick.
+        Budget saturation is distinct from an unavailable AIS estimate so
+        load scaling retains overloaded workers' votes.
         """
         if self._engine_model is None:
             return None
@@ -559,11 +570,11 @@ class PlannerEnginePerfModel:
         include_queued_decode: bool = True,
         include_queued_prefill_as_kv: bool = False,
         add_next_request: bool = True,
-    ) -> Optional[float]:
+    ) -> LoadEstimate:
         """Estimate next-request ITL in seconds from scheduled decode work.
 
-        AIS query failures are treated as unavailable estimates so load
-        scaling can skip the current tick.
+        Budget saturation is distinct from an unavailable AIS estimate so
+        load scaling retains overloaded workers' votes.
         """
         if self._engine_model is None:
             return None

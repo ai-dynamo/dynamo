@@ -113,6 +113,18 @@ Planner's sampling defaults. `fpm_sample_bucket_size: 16` corresponds to a
 `[4, 4]` grid; regression and correction may use separate grids. Unknown fields
 and conflicting worker identities are rejected.
 
+For speculative `op_level` estimates, configure speculation in the matching
+`ais_perf_model.roles` entry and publish the worker's token limit. With vLLM,
+three draft tokens reserve four verification positions per decode request on each
+attention-DP rank. Estimates use full configured rounds; partial rounds and extra
+drafting slots are not modeled.
+
+Keep each Planner role tied to a stable worker execution identity. Changing the
+verification width clears duration feedback in every estimator mode; regression
+must warm up again and interpolation loses learned correction. Same-width limit
+or estimator changes retain feedback. Speculative decode FPMs cannot calibrate OP
+estimates without actual-width telemetry; pure-prefill correction remains active.
+
 Configure model identity and estimator controls through `ais_perf_model.roles`.
 The retired `aic_perf_model` field and `hf_id` / parallel-pick shape are rejected.
 
