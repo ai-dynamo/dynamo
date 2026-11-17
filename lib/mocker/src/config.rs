@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use aisimulate_core::engine::{EngineLaunchConfig, TimingModelConfig};
 use anyhow::{Result, ensure};
-use dynamo_kv_router::config::RouterQueuePolicy;
+use dynamo_admission::host::RouterQueuePolicy;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use validator::Validate;

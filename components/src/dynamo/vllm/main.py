@@ -57,7 +57,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
+from dynamo.vllm.kv_hints import kvcr_host_capacity_blocks, publish_kv_hint_capabilities
 from dynamo.vllm.nixl_telemetry import allow_nixl_telemetry_capture
 from dynamo.vllm.worker_factory import WorkerFactory
 
@@ -84,7 +84,10 @@ from .embedding_worker_processes import (
     is_embedding_process_child,
     start_embedding_parent_watchdog,
 )
-from .engine_generate import publish_engine_generate_capability
+from .engine_generate import (
+    publish_engine_generate_capability,
+    publish_json_multimodal_capability,
+)
 from .handlers import apply_data_parallel_runtime_config
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
@@ -100,7 +103,7 @@ from .multimodal_utils.models.qwen_video_routing import (
     publish_vllm_qwen_video_processor_contract,
 )
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
-from .snapshot import prepare_snapshot_engine
+from .snapshot import apply_restore_served_model_name, prepare_snapshot_engine
 from .state_agent import (
     StateAgentLifecycle,
     start_attachment_owner,
@@ -272,6 +275,7 @@ async def worker(argv: list[str] | None = None) -> None:
             lambda: parse_snapshot_restore_runtime_config(argv),
         )
         config.gms_shadow_mode = env_bool("DYN_VLLM_GMS_SHADOW_MODE")
+        apply_restore_served_model_name(config)
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
@@ -949,6 +953,9 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
+    publish_json_multimodal_capability(
+        runtime_config, model_input, worker_type, config.enable_multimodal
+    )
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
     publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)
@@ -1000,6 +1007,11 @@ async def register_vllm_model(
         )
         num_gpu_blocks = 0
     runtime_config.total_kv_blocks = per_rank_kv_blocks(num_gpu_blocks, dp_range[1])
+    runtime_config.cache_owner_capacity_blocks = kvcr_host_capacity_blocks(
+        config.engine_args,
+        runtime_values["block_size"],
+        runtime_values["kv_event_block_size"],
+    )
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
     runtime_config.enable_local_indexer = config.enable_local_indexer

@@ -41,6 +41,7 @@ pub struct Fixture {
     server_info: Arc<Mutex<VecDeque<Value>>>,
     health: watch::Sender<Option<bool>>,
     health_calls: watch::Receiver<usize>,
+    engine_state: watch::Sender<Option<pb::EngineStateSnapshot>>,
     http: Option<http::Peer>,
 }
 
@@ -74,6 +75,21 @@ impl Fixture {
         *self.model_info.lock().unwrap() = model_info;
         *self.server_info.lock().unwrap() = server_info.into();
     }
+
+    /// Publishes a `WatchEngineState` snapshot with these flags.
+    pub fn set_engine_state(&self, healthy: bool, is_pause: bool) {
+        self.engine_state.send_modify(|state| {
+            let state = state.as_mut().expect("WatchEngineState has ended");
+            state.revision += 1;
+            state.healthy = healthy;
+            state.is_pause = is_pause;
+        });
+    }
+
+    /// Ends every `WatchEngineState` stream.
+    pub fn end_engine_state(&self) {
+        self.engine_state.send_replace(None);
+    }
 }
 
 impl SidecarFixture for Fixture {
@@ -103,6 +119,12 @@ impl SidecarFixture for Fixture {
         let server_info = Arc::new(Mutex::new(VecDeque::new()));
         let (health, health_rx) = watch::channel(Some(true));
         let (health_tx, health_calls) = watch::channel(0);
+        let (engine_state, engine_state_rx) = watch::channel(Some(pb::EngineStateSnapshot {
+            instance_id: std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos() as u64,
+            revision: 1,
+            healthy: true,
+            ..Default::default()
+        }));
         let controlled = ControlledService {
             inner: service.clone(),
             control,
@@ -111,6 +133,7 @@ impl SidecarFixture for Fixture {
             server_info: server_info.clone(),
             health: health_rx,
             health_calls: health_tx,
+            engine_state: engine_state_rx,
         };
         let server = TestServer::start(move |listener, shutdown| async move {
             tonic::transport::Server::builder()
@@ -132,6 +155,7 @@ impl SidecarFixture for Fixture {
             server_info,
             health,
             health_calls,
+            engine_state,
             http: None,
         }
     }
@@ -364,6 +388,7 @@ struct ControlledService {
     server_info: Arc<Mutex<VecDeque<Value>>>,
     health: watch::Receiver<Option<bool>>,
     health_calls: watch::Sender<usize>,
+    engine_state: watch::Receiver<Option<pb::EngineStateSnapshot>>,
 }
 
 fn patch_metadata(raw: &mut String, patch: &Value) {
@@ -383,7 +408,7 @@ macro_rules! delegate_service {
             type ChatCompleteStream = <SglangMockerService as SglangService>::ChatCompleteStream;
             type CompleteStream = <SglangMockerService as SglangService>::CompleteStream;
             type WatchEngineStateStream =
-                <SglangMockerService as SglangService>::WatchEngineStateStream;
+                BoxStream<'static, Result<pb::EngineStateSnapshot, Status>>;
 
             async fn generate(
                 &self,
@@ -406,9 +431,19 @@ macro_rules! delegate_service {
 
             async fn watch_engine_state(
                 &self,
-                request: Request<pb::WatchEngineStateRequest>,
+                _request: Request<pb::WatchEngineStateRequest>,
             ) -> Result<Response<Self::WatchEngineStateStream>, Status> {
-                self.inner.watch_engine_state(request).await
+                let states = futures::stream::unfold(
+                    (self.engine_state.clone(), true),
+                    |(mut states, first)| async move {
+                        if !first {
+                            states.changed().await.ok()?;
+                        }
+                        let state = states.borrow_and_update().clone()?;
+                        Some((Ok(state), (states, false)))
+                    },
+                );
+                Ok(Response::new(Box::pin(states)))
             }
 
             async fn health_check(
@@ -777,8 +812,9 @@ pub mod http {
         let mut body = vec![0; length];
         reader.read_exact(&mut body).await?;
         let request: Value = serde_json::from_slice(&body)?;
+        let native_id = request["rid"].as_str().unwrap();
         if is_abort {
-            let id = Adapter::request_id(&request);
+            let id = native_id;
             assert_eq!(request, json!({"rid": id, "abort_all": false}));
             aborted.send_modify(|ids| ids.push(id.to_string()));
             reader
@@ -794,22 +830,25 @@ pub mod http {
             received = reader.read(&mut eof) => {
                 assert_eq!(received?, 0, "unexpected bytes after /generate body");
                 assert!(
-                    has_terminal || aborted.borrow().iter().any(|id| id == Adapter::request_id(&request)),
+                    has_terminal || aborted.borrow().iter().any(|id| id == native_id),
                     "unfinished generation disconnected before its abort request"
                 );
             }
             result = async {
                 let opened = control.open(&request).await?;
                 writer.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await?;
-                let responses = if let Some(gate) = gate {
+                let mut responses = if let Some(gate) = gate {
                     let empty = json!({"output_ids": [], "text": "", "meta_info": {"finish_reason": null}});
                     writer.write_all(format!("data: {empty}\n\n").as_bytes()).await?;
                     gate.empty_sent.send_replace(true);
                     gate.release.notified().await;
                     gate.responses.clone()
                 } else {
-                    responses(Adapter::request_id(&request)).into()
+                    responses(native_id).into()
                 };
+                for response in &mut responses {
+                    response["meta_info"]["id"] = json!(native_id);
+                }
                 let source = futures::stream::iter(responses.into_iter().map(Ok));
                 let mut stream = opened.wrap(Box::pin(source));
                 while let Some(response) = stream.next().await {
@@ -830,6 +869,15 @@ pub mod http {
         ]
     }
 
+    pub fn logical_request_id(native_id: &str) -> &str {
+        let (id, attempt) = native_id
+            .rsplit_once('-')
+            .expect("dispatch-specific engine ID");
+        assert_eq!(attempt.len(), 8);
+        assert!(attempt.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        id
+    }
+
     pub struct Adapter;
 
     impl Protocol for Adapter {
@@ -838,7 +886,7 @@ pub mod http {
         type Error = io::Error;
 
         fn request_id(request: &Value) -> &str {
-            request["rid"].as_str().unwrap()
+            logical_request_id(request["rid"].as_str().unwrap())
         }
 
         fn record_tokens(response: &Value, tokens: &mut Vec<u32>) -> bool {

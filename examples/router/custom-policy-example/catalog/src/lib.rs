@@ -3,13 +3,11 @@
 
 //! Catalog for the custom worker-selection policy examples.
 
-use dynamo_kv_router::services::selection::{
-    WorkerSelectionPolicyRegistry, WorkerSelectionPolicyRegistryError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 /// Register every policy type supplied by this example catalog.
 pub fn register(
-    registry: &mut WorkerSelectionPolicyRegistry,
+    registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
     soft_pin_repin_policy::register(registry)?;
     simple_filter_score_pick_policy::register(registry)?;
@@ -23,7 +21,7 @@ mod tests {
 
     #[test]
     fn registers_all_policies() {
-        let mut registry = WorkerSelectionPolicyRegistry::default();
+        let mut registry = RouterPluginRegistry::default();
         register(&mut registry).unwrap();
 
         assert!(matches!(

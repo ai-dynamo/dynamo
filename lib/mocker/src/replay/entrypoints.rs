@@ -1797,6 +1797,7 @@ fn simulate_trace_workload_with_router_mode_and_options(
         trace,
         num_workers,
         router_mode,
+        /* accumulate_session_deltas */ false,
         record_per_request,
         max_sim_time_ms,
         sla,
@@ -1813,6 +1814,7 @@ pub fn simulate_trace_workload_with_router_mode_and_options_and_runtime_observer
     trace: Trace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    accumulate_session_deltas: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
@@ -1831,7 +1833,7 @@ pub fn simulate_trace_workload_with_router_mode_and_options_and_runtime_observer
         trace,
         num_workers,
         router_mode,
-        false,
+        accumulate_session_deltas,
         true,
         record_per_request,
         max_sim_time_ms,
@@ -1879,6 +1881,7 @@ fn simulate_trace_workload_disagg_with_router_mode_and_options(
         prefill_load_estimator,
         trace,
         router_mode,
+        /* accumulate_session_deltas */ false,
         record_per_request,
         max_sim_time_ms,
         sla,
@@ -1894,6 +1897,7 @@ pub fn simulate_trace_workload_disagg_with_router_mode_and_options_and_runtime_o
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     router_mode: ReplayRouterMode,
+    accumulate_session_deltas: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
@@ -1911,7 +1915,7 @@ pub fn simulate_trace_workload_disagg_with_router_mode_and_options_and_runtime_o
         prefill_load_estimator,
         trace,
         router_mode,
-        false,
+        accumulate_session_deltas,
         true,
         record_per_request,
         max_sim_time_ms,
@@ -2048,6 +2052,7 @@ pub fn simulate_concurrency_workload_with_router_mode_and_options(
         max_in_flight,
         num_workers,
         router_mode,
+        /* accumulate_session_deltas */ false,
         record_per_request,
         max_sim_time_ms,
         sla,
@@ -2065,6 +2070,7 @@ pub fn simulate_concurrency_workload_with_router_mode_and_options_and_runtime_ob
     max_in_flight: usize,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    accumulate_session_deltas: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
@@ -2084,7 +2090,7 @@ pub fn simulate_concurrency_workload_with_router_mode_and_options_and_runtime_ob
         max_in_flight,
         num_workers,
         router_mode,
-        false,
+        accumulate_session_deltas,
         record_per_request,
         max_sim_time_ms,
         sla,
@@ -2134,6 +2140,7 @@ pub fn simulate_concurrency_workload_disagg_with_router_mode_and_options(
         trace,
         max_in_flight,
         router_mode,
+        /* accumulate_session_deltas */ false,
         record_per_request,
         max_sim_time_ms,
         sla,
@@ -2150,6 +2157,7 @@ pub fn simulate_concurrency_workload_disagg_with_router_mode_and_options_and_run
     trace: Trace,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
+    accumulate_session_deltas: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
@@ -2168,7 +2176,7 @@ pub fn simulate_concurrency_workload_disagg_with_router_mode_and_options_and_run
         trace,
         max_in_flight,
         router_mode,
-        false,
+        accumulate_session_deltas,
         record_per_request,
         max_sim_time_ms,
         sla,
@@ -2672,6 +2680,80 @@ mod tests {
             report.per_request[0].session_id.as_deref(),
             Some("authored-session")
         );
+    }
+
+    /// A hybrid engine with an explicit `prefix_match_unit` cannot export engine KV events, so it
+    /// replays, aggregated and disaggregated, behind a KV router that does not read them.
+    #[test]
+    fn hybrid_prefix_match_unit_replays_behind_a_router_without_kv_events() {
+        let hybrid = |worker_type: WorkerType| {
+            MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "worker_type": worker_type,
+                    "block_size": 64,
+                    "num_gpu_blocks": 64,
+                    "kv_cache_bytes_per_token": 16,
+                    "state_cache": {"bytes_per_request": 1500},
+                    "prefix_match_unit": 64,
+                    "max_num_seqs": 4,
+                    "max_num_batched_tokens": 256,
+                },
+            }))
+            .unwrap()
+        };
+        let router = || {
+            Some(KvRouterConfig {
+                use_kv_events: false,
+                ..KvRouterConfig::default()
+            })
+        };
+        let requests = || {
+            (1..=2)
+                .map(|uuid| DirectRequest {
+                    tokens: (0..128).collect(),
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(uuid)),
+                    arrival_timestamp_ms: Some(0.0),
+                    ..DirectRequest::default()
+                })
+                .collect()
+        };
+        let aggregated = crate::replay::offline::simulate_trace_with_scaling_policy(
+            hybrid(WorkerType::Aggregated),
+            router(),
+            None,
+            requests(),
+            2,
+            1.0,
+            ReplayRouterMode::KvRouter,
+            true,
+            None,
+            SlaThresholds::default(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(aggregated.per_request.len(), 2);
+        let disaggregated = crate::replay::offline::simulate_trace_disagg_with_scaling_policy(
+            OfflineDisaggReplayConfig {
+                prefill_args: hybrid(WorkerType::Prefill),
+                decode_args: hybrid(WorkerType::Decode),
+                num_prefill_workers: 1,
+                num_decode_workers: 1,
+            },
+            router(),
+            None,
+            requests(),
+            1.0,
+            ReplayRouterMode::KvRouter,
+            true,
+            None,
+            SlaThresholds::default(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(disaggregated.per_request.len(), 2);
     }
 
     #[test]

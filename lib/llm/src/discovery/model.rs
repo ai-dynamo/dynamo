@@ -30,7 +30,8 @@ use crate::types::{
         classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
         embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
         images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
-        rerank::OpenAIRerankStreamingEngine, videos::OpenAIVideosStreamingEngine,
+        rerank::OpenAIRerankStreamingEngine, transcriptions::OpenAITranscriptionsStreamingEngine,
+        videos::OpenAIVideosStreamingEngine,
     },
 };
 
@@ -367,6 +368,14 @@ impl Model {
             .any(|worker_set| worker_set.has_audios_engine())
     }
 
+    /// Check if any WorkerSet has a transcriptions engine.
+    pub fn has_transcriptions_engine(&self) -> bool {
+        self.worker_sets
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_transcriptions_engine())
+    }
+
     /// Check if any WorkerSet has a realtime engine.
     pub fn has_realtime_engine(&self) -> bool {
         self.worker_sets
@@ -381,6 +390,13 @@ impl Model {
             .load()
             .values()
             .any(|worker_set| worker_set.has_generate_engine())
+    }
+
+    /// Check whether a chat worker also advertises `capability`.
+    pub fn has_chat_engine_for_capability(&self, capability: &str) -> bool {
+        self.worker_sets.load().values().any(|worker_set| {
+            worker_set.has_chat_engine() && worker_set.supports_runtime_capability(capability)
+        })
     }
 
     /// Check whether a Generate worker also advertises `capability`.
@@ -734,6 +750,13 @@ impl Model {
             .ok_or_else(|| self.engine_error(self.has_audios_engine()))
     }
 
+    pub fn get_transcriptions_engine(
+        &self,
+    ) -> Result<OpenAITranscriptionsStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.transcriptions_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_transcriptions_engine()))
+    }
+
     pub fn get_tensor_engine(&self) -> Result<TensorStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.tensor_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_tensor_engine()))
@@ -834,6 +857,29 @@ impl Model {
             .ok_or_else(|| self.engine_error(self.has_chat_engine()))
     }
 
+    /// Select a chat engine from a WorkerSet that advertises `capability`.
+    /// `Ok(None)` means chat WorkerSets exist but none advertises it.
+    pub fn get_chat_engine_with_parsing_for_capability(
+        &self,
+        capability: &str,
+    ) -> Result<Option<(OpenAIChatCompletionsStreamingEngine, ParsingOptions)>, ModelManagerError>
+    {
+        if !self.has_chat_engine_for_capability(capability) {
+            return if self.has_chat_engine() {
+                Ok(None)
+            } else {
+                Err(self.engine_error(false))
+            };
+        }
+        self.select_worker_set_with(|ws| {
+            ws.supports_runtime_capability(capability)
+                .then(|| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
+                .flatten()
+        })
+        .map(Some)
+        .ok_or_else(|| self.engine_error(true))
+    }
+
     pub fn get_completions_engine_with_parsing(
         &self,
     ) -> Result<(OpenAICompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
@@ -858,24 +904,36 @@ impl Model {
 
     // -- Worker monitoring (aggregated across WorkerSets) --
 
-    /// Get load threshold config from the first WorkerSet with a threshold handle.
-    /// When `config` is Some, updates every handle. WorkerSets may share a handle.
+    /// Get load threshold config from the first WorkerSet with a threshold handle,
+    /// preferring an enabled one. When `config` is Some, updates every handle.
+    /// WorkerSets may share a handle.
     pub fn load_threshold_config(
         &self,
         config: Option<&LoadThresholdConfig>,
     ) -> Option<LoadThresholdConfig> {
-        let mut result = None;
-        for worker_set in self.worker_sets.load().values() {
-            if let Some(ref thresholds) = worker_set.load_thresholds {
-                if let Some(cfg) = config {
-                    thresholds.update(cfg);
-                }
-                if result.is_none() {
-                    result = Some(thresholds.get());
-                }
-            }
+        let worker_sets = self.worker_sets.load();
+        let handles: Vec<_> = worker_sets
+            .values()
+            .filter_map(|worker_set| worker_set.load_thresholds.as_ref())
+            .collect();
+        if let Some(cfg) = config {
+            handles.iter().for_each(|handle| handle.update(cfg));
         }
-        result
+        handles
+            .iter()
+            .find(|handle| handle.is_enabled())
+            .or(handles.first())
+            .map(|handle| handle.get())
+    }
+
+    /// Whether any WorkerSet has an enabled threshold handle.
+    pub(crate) fn accepts_load_thresholds(&self) -> bool {
+        self.worker_sets.load().values().any(|worker_set| {
+            worker_set
+                .load_thresholds
+                .as_ref()
+                .is_some_and(|thresholds| thresholds.is_enabled())
+        })
     }
 
     /// Total worker count across all WorkerSets.
@@ -1326,6 +1384,61 @@ mod tests {
         assert_eq!(selection_b.kv_cache_block_size, 32);
         assert_eq!(selection_b.lora_name.as_deref(), Some("adapter-b"));
         assert!(selection_b.tower_connector_lora_enabled);
+    }
+
+    #[test]
+    fn chat_capability_selection_skips_worker_sets_without_the_flag() {
+        use crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY;
+        let chat_set = |namespace: &str, flagged: bool| {
+            let mut card = ModelDeploymentCard::default();
+            card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+            card.runtime_config
+                .runtime_data
+                .insert(JSON_MULTIMODAL_CAPABILITY.to_string(), flagged.into());
+            let mut ws = WorkerSet::new(namespace.to_string(), format!("{namespace}-sum"), card);
+            ws.chat_engine = Some(make_test_chat_engine());
+            Arc::new(ws)
+        };
+        let model = Model::new("custom".to_string());
+        assert!(matches!(
+            model.get_chat_engine_with_parsing_for_capability(JSON_MULTIMODAL_CAPABILITY),
+            Err(ModelManagerError::ModelNotFound(_))
+        ));
+
+        model.add_worker_set("text".to_string(), chat_set("text", false));
+        assert!(
+            model
+                .get_chat_engine_with_parsing_for_capability(JSON_MULTIMODAL_CAPABILITY)
+                .unwrap()
+                .is_none()
+        );
+
+        let mut idle = WorkerSet::new("idle".to_string(), "idle-sum".to_string(), {
+            let mut card = ModelDeploymentCard::default();
+            card.runtime_config
+                .runtime_data
+                .insert(JSON_MULTIMODAL_CAPABILITY.to_string(), true.into());
+            card
+        });
+        let (_idle_tx, idle_rx) = watch::channel::<Vec<u64>>(vec![]);
+        idle.set_instance_watcher(idle_rx);
+        idle.chat_engine = Some(make_test_chat_engine());
+        model.add_worker_set("idle".to_string(), Arc::new(idle));
+        assert!(matches!(
+            model.get_chat_engine_with_parsing_for_capability(JSON_MULTIMODAL_CAPABILITY),
+            Err(ModelManagerError::ModelUnavailable(_))
+        ));
+
+        let flagged = chat_set("vllm", true);
+        let flagged_engine = flagged.chat_engine.clone().unwrap();
+        model.add_worker_set("vllm".to_string(), flagged);
+        for _ in 0..32 {
+            let (engine, _) = model
+                .get_chat_engine_with_parsing_for_capability(JSON_MULTIMODAL_CAPABILITY)
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(&engine, &flagged_engine));
+        }
     }
 
     fn systemone_worker_set(

@@ -27,7 +27,7 @@ use crate::protocols::tensor::TensorModelConfig;
 use crate::utils::json::canonicalize_json_object_keys;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
-use dynamo_kv_router::identity::{ExplicitIdentityMap, IndexerIdentitySpec};
+use dynamo_kv_indexer::host::{ExplicitIdentityMap, IndexerIdentitySpec};
 use dynamo_runtime::{slug::Slug, storage::kv};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
@@ -1126,16 +1126,7 @@ pub struct ModelDeploymentCard {
     tokenizer_id_bound: OnceLock<Option<usize>>,
 }
 
-/// LoRA adapter information for routing decisions
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct LoraInfo {
-    /// LoRA adapter name (e.g., "customer-123-v2")
-    pub name: String,
-
-    /// Maximum number of LoRA adapters that can be loaded at once on a single GPU
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_gpu_lora_count: Option<u32>,
-}
+pub use crate::lora::LoraInfo;
 
 impl ModelDeploymentCard {
     /// Number of typed metadata slots (`model_info`, `tokenizer`,
@@ -1400,6 +1391,13 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend_from_slice(b"\0sglang_systemone_serial_v1\0true");
                 }
 
+                // Opaque JSON cannot be dispatched to older workers that ignore it.
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+                ) {
+                    bytes_to_hash.extend_from_slice(b"\0custom_json_v1\0true");
+                }
+
                 // The Qwen video contract is resolved per cohort, not per card.
                 // Nemotron contracts still partition WorkerSets by checksum.
                 append_runtime_contract_checksum(
@@ -1407,6 +1405,15 @@ impl ModelDeploymentCard {
                     &self.runtime_config,
                     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
                 );
+
+                // Keep workers with different cancellation semantics out of the same
+                // admitted cohort during rolling upgrades. Missing and false stay compatible.
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+                ) {
+                    bytes_to_hash
+                        .extend_from_slice(b"\0disagg_prefill_cancel_anytime_v1\0true");
+                }
 
                 // TODO: Do we want any other user_data or runtime_config?
 
@@ -3514,8 +3521,8 @@ mod ownership_tests {
     #[test]
     fn prefill_load_model_wire_aliases_preserve_card_and_mdcsum() {
         use crate::entrypoint::RouterConfig;
-        use dynamo_kv_router::scheduling::config::RouterPrefillLoadModel;
         use dynamo_runtime::pipeline::RouterMode;
+        use dynamo_scheduler::host::RouterPrefillLoadModel;
 
         for mode in [RouterMode::KV, RouterMode::RoundRobin] {
             let mut card = ModelDeploymentCard::with_name_only("wire-compat-model");
@@ -3653,6 +3660,25 @@ mod ownership_tests {
             true.into(),
         );
 
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn json_capability_isolates_opted_in_workers_only() {
+        use crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY;
+        let capability = JSON_MULTIMODAL_CAPABILITY;
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled
+            .runtime_config
+            .runtime_data
+            .insert(capability.into(), false.into());
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled
+            .runtime_config
+            .runtime_data
+            .insert(capability.into(), true.into());
         assert_eq!(missing.mdcsum(), disabled.mdcsum());
         assert_ne!(missing.mdcsum(), enabled.mdcsum());
     }
@@ -3893,6 +3919,26 @@ mod ownership_tests {
             nemotron.mdcsum(),
             "88381ff5b5f10389bacc63e1e2bac947a76ffc5b32c4864b7499f0d10928a96e"
         );
+    }
+
+    #[test]
+    fn disagg_prefill_cancel_capability_isolates_worker_sets() {
+        use crate::local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1;
+
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled
+            .runtime_config
+            .runtime_data
+            .insert(DISAGG_PREFILL_CANCEL_ANYTIME_V1.to_string(), false.into());
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled
+            .runtime_config
+            .runtime_data
+            .insert(DISAGG_PREFILL_CANCEL_ANYTIME_V1.to_string(), true.into());
+
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
     }
 }
 

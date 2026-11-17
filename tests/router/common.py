@@ -22,6 +22,7 @@ from tests.router.helper import (
     get_runtime,
     managed_runtime,
     poll_for_worker_instances,
+    read_routed_worker_from_stream,
     send_inflight_requests,
     send_request_via_python_kv_router,
     verify_response_timing,
@@ -30,6 +31,8 @@ from tests.router.helper import (
     wait_for_workers_ready,
 )
 from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
+from tests.utils.constants import DynamoPortRange
+from tests.utils.port_utils import reserved_ports
 from tests.utils.router_logs import (
     parse_kv_event_diagnostics,
     select_kv_event_diagnostics,
@@ -181,7 +184,7 @@ def _test_router_basic(
         frontend_timeout: Timeout for frontend readiness check (default: 120s)
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         request_plane: Request plane to use ("nats", "tcp"). Defaults to "nats".
-        router_mode: Router mode ("kv", "round-robin", "random", "power-of-two", "direct"). Defaults to "kv".
+        router_mode: Router mode ("kv", "round-robin", "random", "direct"). Defaults to "kv".
         min_initial_workers: Optional frontend startup worker gate. Defaults to None.
 
     Raises:
@@ -1715,7 +1718,7 @@ def _test_router_threshold_none_disables_rejection(
         frontend_port,
     )
 
-    with KVRouterProcess(
+    with reserved_ports(1, DynamoPortRange.FRONTEND) as (admin_port,), KVRouterProcess(
         request=request,
         block_size=block_size,
         frontend_port=frontend_port,
@@ -1723,10 +1726,14 @@ def _test_router_threshold_none_disables_rejection(
         blocks_threshold="None",
         tokens_threshold="None",
         tokens_threshold_frac="None",
+        extra_env={
+            "DYN_ENABLE_FRONTEND_ADMIN_API": "1",
+            "DYN_FRONTEND_ADMIN_PORT": str(admin_port),
+        },
     ):
         frontend_url = f"http://localhost:{frontend_port}"
         chat_url = f"{frontend_url}/v1/chat/completions"
-        busy_threshold_url = f"{frontend_url}/busy_threshold"
+        busy_threshold_url = f"http://127.0.0.1:{admin_port}/busy_threshold"
         model_name = test_payload.get("model", "test-model")
         load_payload = {
             **test_payload,
@@ -3214,7 +3221,8 @@ def _test_router_cache_salt_isolation(
         token_ids = list(range(1_000, 1_000 + block_size * 2))
         expected_blocks = len(token_ids) // block_size
 
-        async def generate(cache_salt: str, worker_id: Optional[int] = None) -> None:
+        async def generate(cache_salt: str, worker_id: Optional[int] = None) -> int:
+            """Run one request and return the worker it was routed to."""
             routing: dict[str, Any] = {"cache_salt": cache_salt}
             if worker_id is not None:
                 routing["backend_instance_id"] = worker_id
@@ -3229,14 +3237,7 @@ def _test_router_cache_salt_isolation(
                 "routing": routing,
             }
             stream = await kv_router.generate_from_request(request)
-            terminal = None
-            async for response in stream:
-                if (
-                    isinstance(response, dict)
-                    and response.get("finish_reason") is not None
-                ):
-                    terminal = response
-            assert terminal is not None, f"tenant {cache_salt} request did not finish"
+            return await read_routed_worker_from_stream(stream, f"tenant {cache_salt}")
 
         async def device_blocks(
             cache_salt: Optional[str],
@@ -3310,11 +3311,10 @@ def _test_router_cache_salt_isolation(
         await wait_for_worker("tenant-a", worker_a)
         await wait_for_worker("tenant-b", worker_b)
 
-        # Unpinned requests use the same selection path as production. Repeating
-        # each namespace must preserve its worker-local cache footprint; routing
-        # either request to the other worker would publish a second nonzero score.
-        await generate("tenant-a")
-        await generate("tenant-b")
+        # Unpinned repeats must reach their tenant's worker. Score checks alone
+        # miss a misroute: seeding already met them, and its events may arrive late.
+        assert await generate("tenant-a") == worker_a[0]
+        assert await generate("tenant-b") == worker_b[0]
         await wait_for_scores("tenant-a", {worker_a: expected_blocks})
         await wait_for_scores("tenant-b", {worker_b: expected_blocks})
 
@@ -3381,19 +3381,7 @@ def _test_router_lora_isolation(
                 "routing": routing,
             }
             stream = await kv_router.generate_from_request(request)
-            routed_worker = None
-            terminal = None
-            async for response in stream:
-                if not isinstance(response, dict):
-                    continue
-                worker_info = (response.get("routing_data") or {}).get("worker_id")
-                if worker_info and routed_worker is None:
-                    routed_worker = worker_info.get("decode_worker_id")
-                if response.get("finish_reason") is not None:
-                    terminal = response
-            assert terminal is not None, f"lora={lora!r} request did not finish"
-            assert routed_worker is not None, f"lora={lora!r}: no routed worker"
-            return routed_worker
+            return await read_routed_worker_from_stream(stream, f"lora={lora!r}")
 
         async def device_blocks(lora: Optional[str]) -> dict[tuple[int, int], int]:
             scores = await kv_router.get_overlap_scores(
@@ -3495,7 +3483,7 @@ def _test_busy_threshold_endpoint(
     initial_active_decode_blocks_threshold = 0.9
     initial_active_prefill_tokens_threshold = 1000  # Literal token count threshold
 
-    with KVRouterProcess(
+    with reserved_ports(1, DynamoPortRange.FRONTEND) as (admin_port,), KVRouterProcess(
         request,
         block_size,
         frontend_port,
@@ -3504,12 +3492,16 @@ def _test_busy_threshold_endpoint(
         blocks_threshold=initial_active_decode_blocks_threshold,
         tokens_threshold=initial_active_prefill_tokens_threshold,
         request_plane=request_plane,
+        extra_env={
+            "DYN_ENABLE_FRONTEND_ADMIN_API": "1",
+            "DYN_FRONTEND_ADMIN_PORT": str(admin_port),
+        },
     ):
         # Start KV router frontend with initial thresholds to create monitor
         logger.info(f"Starting KV router frontend on port {frontend_port}")
 
         frontend_url = f"http://localhost:{frontend_port}"
-        busy_threshold_url = f"{frontend_url}/busy_threshold"
+        busy_threshold_url = f"http://127.0.0.1:{admin_port}/busy_threshold"
 
         # Wait for workers to register with frontend
         logger.info("Waiting for workers to register with frontend...")

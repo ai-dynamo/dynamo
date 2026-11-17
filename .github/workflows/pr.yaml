@@ -33,6 +33,7 @@ jobs:
       snapshot_trtllm: ${{ steps.changes.outputs.snapshot_trtllm }}
       power_agent: ${{ steps.changes.outputs.power_agent }}
       sidecar: ${{ steps.changes.outputs.sidecar }}
+      sidecar_trtllm_image: ${{ steps.changes.outputs.sidecar_trtllm_image }}
       deploy: ${{ steps.changes.outputs.deploy }}
       dgdr: ${{ steps.changes.outputs.dgdr }}
       vllm: ${{ steps.changes.outputs.vllm }}
@@ -131,6 +132,7 @@ jobs:
       - helm-chart-tests
       - power-agent
       - sidecar-build
+      - sidecar-trtllm-nightly-config-test
       - vllm-build
       - vllm-local-dev-build
       - sglang-local-dev-build
@@ -165,6 +167,9 @@ jobs:
       - name: Check all dependent jobs
         run: |
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+          if [[ '${{ needs.changed-files.outputs.sidecar_trtllm_image }}' == 'true' ]]; then
+            test '${{ needs.sidecar-trtllm-nightly-config-test.result }}' = 'success'
+          fi
 
   deploy-status-check:
     runs-on: ubuntu-24.04
@@ -224,7 +229,7 @@ jobs:
       needs.changed-files.outputs.snapshot_sglang == 'true' ||
       needs.changed-files.outputs.snapshot_trtllm == 'true'
     name: Operator
-    runs-on: prod-default-v2
+    runs-on: dynamo-cpu-4gi-amd64
     # actions: read lets the compliance step download a prior run's baseline
     # operator compliance artifact to diff the OSRB CSV against. Missing -> the
     # diff soft-degrades, build stays green.
@@ -278,6 +283,11 @@ jobs:
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
         with:
           version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
+      - name: Set up Go for Helm upgrade-action tests
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+        with:
+          go-version-file: deploy/operator/go.mod
+          cache: false
       - name: Lint and test
         run: make -C deploy/helm/charts/platform lint test
 
@@ -289,7 +299,7 @@ jobs:
     needs: changed-files
     if: needs.changed-files.outputs.power_agent == 'true'
     name: Power Agent
-    runs-on: prod-default-v2
+    runs-on: dynamo-cpu-4gi-amd64
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -338,6 +348,19 @@ jobs:
 # ============================================================================
 # Sidecar
 # ============================================================================
+
+  sidecar-trtllm-nightly-config-test:
+    name: TRT-LLM nightly configuration (CPU)
+    needs: changed-files
+    if: needs.changed-files.outputs.sidecar_trtllm_image == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Test nightly selection
+        run: python3 -m unittest discover -s lib/sidecar/trtllm/ci/tests -v
 
   sidecar-build:
     name: dynamo-sidecar

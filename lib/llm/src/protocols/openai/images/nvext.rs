@@ -82,6 +82,11 @@ impl ImageAccounting {
 
 impl ImagesResponseNvExt {
     /// Fold a later chunk's extension into this one; see [`ImageAccounting::merge`].
+    ///
+    /// A missing `usage` on either side leaves the other as it is, because
+    /// this method cannot tell whether that chunk carried images. The images
+    /// aggregator clears `num_inference_steps` when a chunk with images
+    /// reports no accounting.
     pub fn merge(&mut self, next: Self) {
         match (self.usage.as_mut(), next.usage) {
             (Some(usage), Some(next)) => usage.merge(next),
