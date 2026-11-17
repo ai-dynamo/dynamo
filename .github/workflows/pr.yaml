@@ -1008,6 +1008,7 @@ jobs:
       test_suite_name: tokenspeed
       framework: tokenspeed
       test_type: Test
+      minio_service: false
       amd_runner: prod-tester-amd-gpu-v2
       amd_runner_labels: '["gpu-1","amd64","v2","us-east-1"]'
       target_tag_plain: ${{ needs.tokenspeed-build.outputs.target_tag_plain }}

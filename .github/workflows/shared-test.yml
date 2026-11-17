@@ -204,6 +204,7 @@ jobs:
         #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
         HOME: /__w/dynamo/dynamo
         USER: dynamo
+        MINIO_SERVICE_ENABLED: ${{ inputs.minio_service }}
         DYN_ARTIFACT_MINIO_ENDPOINT: ${{ inputs.framework == 'vllm' && inputs.minio_service && matrix.platform == 'amd64' && 'http://localhost:9000' || '' }}
         DYN_ARTIFACT_MINIO_ACCESS_KEY: ${{ inputs.framework == 'vllm' && inputs.minio_service && matrix.platform == 'amd64' && 'minioadmin' || '' }}
         DYN_ARTIFACT_MINIO_SECRET_KEY: ${{ inputs.framework == 'vllm' && inputs.minio_service && matrix.platform == 'amd64' && 'minioadmin' || '' }}
