@@ -126,7 +126,7 @@ impl RoutingHost {
         &self,
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
-    ) -> Result<BuiltinRoutePlan, Error> {
+    ) -> Result<RoutePlan, Error> {
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let explicit = explicit_target(request.content(), phase)?;
@@ -216,17 +216,19 @@ impl RoutingHost {
             .with_label_values(&[request.phase().as_str(), &request.model])
             .observe(request.token_ids.len() as f64);
         drop(route_guard);
-        Ok(BuiltinRoutePlan {
+        Ok(RoutePlan {
             phase,
-            direct: is_direct && !has_affinity_session,
-            explicit,
-            selection,
-            candidate_fallback,
-            soft_affinity_target,
-            uses_occupancy: self
-                .required_worker_inputs()
-                .contains(WorkerInputs::ACTIVE_REQUESTS),
-            guard,
+            booking: PlanBooking::Hosted(HostedBooking {
+                direct: is_direct && !has_affinity_session,
+                explicit,
+                selection,
+                candidate_fallback,
+                soft_affinity_target,
+                uses_occupancy: self
+                    .required_worker_inputs()
+                    .contains(WorkerInputs::ACTIVE_REQUESTS),
+                guard,
+            }),
             affinity,
             budget,
         })
@@ -238,14 +240,16 @@ impl RoutingHost {
     pub(super) async fn dispatch_builtin_plan<M, F>(
         &self,
         mut request: SingleIn<PreprocessedRequest>,
-        plan: BuiltinRoutePlan,
+        phase: RequestPhase,
+        booking: HostedBooking,
+        mut affinity: Option<Hold>,
+        budget: CleanupBudget,
         prepare: F,
     ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
-        let BuiltinRoutePlan {
-            phase,
+        let HostedBooking {
             direct,
             explicit,
             selection:
@@ -261,9 +265,7 @@ impl RoutingHost {
             soft_affinity_target,
             uses_occupancy,
             mut guard,
-            mut affinity,
-            budget,
-        } = plan;
+        } = booking;
         let phase_label = phase.to_string();
         let staged_kv = StagedKv::for_request(request.content());
         let target_for_worker = |worker_id| {
@@ -450,13 +452,17 @@ impl RoutingHost {
     }
 }
 
-/// A built-in route selected but not sent, from
-/// [`RoutingHost::plan_builtin_route`]. It holds the request guard (with any
-/// occupancy reservation and candidate-policy attempt lease) and the
-/// session-affinity hold until [`RoutingHost::dispatch_builtin_plan`] sends it
-/// or [`Self::abort`] gives it up. Dropping it also releases them.
-pub(crate) struct BuiltinRoutePlan {
-    phase: RequestPhase,
+/// What holds a built-in route's worker between
+/// [`RoutingHost::plan_builtin_route`] and [`RoutingHost::dispatch_builtin_plan`]:
+/// the selection and the request guard (with any occupancy reservation and
+/// candidate-policy attempt lease), plus what dispatch needs to send it. The
+/// [`RoutePlan`] that owns it holds the phase, affinity hold and budget.
+/// Dropping it releases the guard's reservations.
+// TODO(gluo): revisit after the rebase onto main: whether every field is still
+// needed at dispatch (e.g. `explicit` only feeds the candidate policy's check
+// of a fallback worker), and the name (`HostedRoute`/`HostedPlan`), to avoid
+// confusion with the EPP's `RouteBooking`.
+pub(super) struct HostedBooking {
     /// Direct mode with no affinity session: send to the explicit target.
     direct: bool,
     /// The request's explicit worker pin, for the candidate policy's check of
@@ -468,21 +474,25 @@ pub(crate) struct BuiltinRoutePlan {
     soft_affinity_target: Option<AffinityTarget>,
     uses_occupancy: bool,
     guard: RequestGuard,
-    affinity: Option<Hold>,
-    budget: CleanupBudget,
 }
 
-impl BuiltinRoutePlan {
+impl HostedBooking {
     /// The selected worker. The send can still move to another instance.
-    #[cfg(test)]
-    pub(crate) fn worker_id(&self) -> u64 {
-        self.selection.initial_worker
+    pub(super) fn target(&self) -> AffinityTarget {
+        self.selection.target_constraint.unwrap_or_else(|| {
+            let worker_id = self.selection.initial_worker;
+            AffinityTarget::new(
+                worker_id,
+                self.soft_affinity_target
+                    .filter(|target| target.worker_id == worker_id)
+                    .and_then(|target| target.dp_rank),
+            )
+        })
     }
 
-    /// Give the route up before dispatch: release the guard's reservations
-    /// and drop the affinity hold.
-    #[cfg(test)]
-    pub(crate) async fn abort(mut self, error: Option<&Error>) {
+    /// Give the route up before dispatch: release the guard's reservations.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) async fn abort(mut self, error: Option<&Error>) {
         self.guard.abort(error.map(|error| error.as_ref())).await;
     }
 }
