@@ -36,7 +36,11 @@ fn causal_scoring_request_survives_the_native_format_boundary() {
     )
     .unwrap();
     let body = serde_json::to_vec(&native).unwrap();
-    let headers = axum::http::HeaderMap::new();
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
     let opened = VllmFormat
         .open(ClientRequest {
             body: &body,
