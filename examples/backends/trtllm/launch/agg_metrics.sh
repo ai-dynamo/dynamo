@@ -41,6 +41,7 @@ python3 -m dynamo.trtllm \
   --extra-engine-args "$AGG_ENGINE_ARGS" \
   --publish-kv-events \
   --publish-metrics \
+  --publish-per-request-metrics \
   "${TRTLLM_OVERRIDE_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

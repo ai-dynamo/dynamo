@@ -317,11 +317,11 @@ async fn stream_field_is_parsed_strictly() {
 async fn upload_too_large_for_the_request_plane_returns_payload_too_large() {
     let service = TestService::start(false).await;
 
-    // Under the default HTTP body limit, but too large once base64-encoded for the
-    // request plane's default 32 MiB frame.
+    // Exceed the transcription cap by only 4 KiB so the upload finishes before
+    // the server's early 413 closes the connection and resets the response body.
     let form = reqwest::multipart::Form::new().part(
         "file",
-        reqwest::multipart::Part::bytes(vec![1u8; 24 * 1024 * 1024])
+        reqwest::multipart::Part::bytes(vec![1u8; 23 * 1024 * 1024 + 4096])
             .file_name("large.wav")
             .mime_str("audio/wav")
             .unwrap(),
@@ -334,7 +334,14 @@ async fn upload_too_large_for_the_request_plane_returns_payload_too_large() {
         .await
         .expect("transcription request failed");
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    let body: serde_json::Value = response.json().await.unwrap();
+    response
+        .content_length()
+        .expect("the fixed-size 413 JSON body must retain its length");
+    let bytes = response
+        .bytes()
+        .await
+        .expect("incomplete 413 response body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(
         body["message"]
             .as_str()

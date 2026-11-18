@@ -54,7 +54,7 @@ func ResolveWorkload(
 	}
 
 	// Preserve draft-before-target runtime identities independently of authored order.
-	if len(components) == 2 && components[0].ComponentRole(dynamov1beta1.ComponentRoleLPXConductor) != nil {
+	if len(components) == 2 && ServesEndpoint(components[0]) {
 		components[0], components[1] = components[1], components[0]
 	}
 
@@ -104,32 +104,26 @@ func ResolveWorkload(
 			return nil, err
 		}
 
-		// Project the component once into the resolver-owned aggregate destination.
-		hasConductor := stage.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor) != nil
-		modelNames := expandedModelNames(len(components), hasConductor, int(ptr.Deref(stage.Replicas, 1)))
+		// Project the component's models from its build once.
+		modelNames := expandedModelNames(len(components), ServesEndpoint(stage), int(ptr.Deref(stage.Replicas, 1)))
 		intent := ModelProjectionInput{
 			Pipeline:        pipeline,
 			Models:          modelNames,
+			Stage:           stage.ComponentName,
 			RuntimeBuildRef: model.BuildID,
 			Build:           snapshot,
 			LocalPartitions: model.LocalPartitions(),
 		}
-		projected, err := appendModelProjections(projections, intent)
+		projected, err := projectModels(intent)
 		if err != nil {
 			return nil, fmt.Errorf("project LPX model %q from build %q: %w", modelNames[0], model.BuildID, err)
 		}
 
 		// Component geometry fixes the Agent count independently of draft fanout.
-		componentProjections := projected[len(projections):]
-		if count := stage.ComponentRole(dynamov1beta1.ComponentRoleLPXAgent).Replicas; count != nil && int(*count) != componentProjections[0].agentReplicas {
-			return nil, fmt.Errorf("component %q agent replicas %d must match the compiled count %d", configuredModel, *count, componentProjections[0].agentReplicas)
+		if count := stage.ComponentRole(dynamov1beta1.ComponentRoleLPXAgent).Replicas; count != nil && int(*count) != projected[0].agentReplicas {
+			return nil, fmt.Errorf("component %q agent replicas %d must match the compiled count %d", configuredModel, *count, projected[0].agentReplicas)
 		}
-
-		// Retain the authored stage association before acquiring the next component.
-		for _, projection := range componentProjections {
-			projection.stage = stage.ComponentName
-		}
-		projections = projected
+		projections = append(projections, projected...)
 	}
 
 	// The conductor component owns explicit capacity or the initial native seed.
@@ -158,10 +152,10 @@ func validateWorkloadConductor(
 	pipeline Pipeline,
 	requiresGPU bool,
 ) error {
-	// Only an LPU-only single model's engine runs in the Agent Pods with its runtime sidecar.
-	if agentRuntimeSidecar(component) != nil && pipeline != PipelineSingle {
+	// An LPU-only engine runs in the Agent Pods with its runtime sidecar, alone or with its draft.
+	if agentRuntimeSidecar(component) != nil && pipeline == PipelineHybrid {
 		return fmt.Errorf(
-			"%w: component %q agent %q sidecar requires an LPU-only single-model build; declare the conductor role instead",
+			"%w: component %q agent %q sidecar requires an LPU-only build; declare the conductor role instead",
 			ErrUnsupportedRuntime, component.ComponentName, commonconsts.RuntimeContainerName,
 		)
 	}
@@ -182,6 +176,11 @@ func validateWorkloadConductor(
 			return fmt.Errorf("%w: the shared speculative runtime requires LPU-only builds", ErrUnsupportedRuntime)
 		}
 		template := conductor.PodTemplate
+		// The hybrid GPU engine serves only through the LPX sidecar.
+		if common.FindContainerByName(template.Spec.InitContainers, commonconsts.RuntimeContainerName) == nil {
+			return fmt.Errorf("%w: component %q conductor of a hybrid build requires the LPX sidecar; declare the %q init container",
+				ErrUnsupportedRuntime, component.ComponentName, commonconsts.RuntimeContainerName)
+		}
 		container := common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName)
 		count, err := dra.ResolveGPUCount(ctx, reader, namespace, &template.Spec, container.Resources)
 		if err != nil {
@@ -206,17 +205,17 @@ func validateWorkloadConductor(
 	return nil
 }
 
-func expandedModelNames(componentCount int, hasConductor bool, draftCount int) []string {
+func expandedModelNames(componentCount int, target bool, draftCount int) []string {
 	// Component membership retains Nova's existing default/draft/target identities.
 	if componentCount == 1 {
 		return []string{"default"}
 	}
-	if hasConductor {
+	if target {
 		return []string{runtimeModelTarget}
 	}
 	names := make([]string, draftCount)
 	for index := range names {
-		names[index] = fmt.Sprintf("draft%d", index)
+		names[index] = fmt.Sprintf("%s%d", runtimeModelDraft, index)
 	}
 	return names
 }

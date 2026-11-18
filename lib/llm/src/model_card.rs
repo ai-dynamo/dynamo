@@ -27,7 +27,7 @@ use crate::protocols::tensor::TensorModelConfig;
 use crate::utils::json::canonicalize_json_object_keys;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
-use dynamo_kv_router::identity::{ExplicitIdentityMap, IndexerIdentitySpec};
+use dynamo_kv_indexer::host::{ExplicitIdentityMap, IndexerIdentitySpec};
 use dynamo_runtime::{slug::Slug, storage::kv};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
@@ -1389,6 +1389,13 @@ impl ModelDeploymentCard {
                 // Preserve legacy checksums when serial scoring is unavailable.
                 if self.is_systemone_serial_eligible() {
                     bytes_to_hash.extend_from_slice(b"\0sglang_systemone_serial_v1\0true");
+                }
+
+                // Opaque JSON cannot be dispatched to older workers that ignore it.
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+                ) {
+                    bytes_to_hash.extend_from_slice(b"\0custom_json_v1\0true");
                 }
 
                 // The Qwen video contract is resolved per cohort, not per card.
@@ -3514,8 +3521,8 @@ mod ownership_tests {
     #[test]
     fn prefill_load_model_wire_aliases_preserve_card_and_mdcsum() {
         use crate::entrypoint::RouterConfig;
-        use dynamo_kv_router::scheduling::config::RouterPrefillLoadModel;
         use dynamo_runtime::pipeline::RouterMode;
+        use dynamo_scheduler::host::RouterPrefillLoadModel;
 
         for mode in [RouterMode::KV, RouterMode::RoundRobin] {
             let mut card = ModelDeploymentCard::with_name_only("wire-compat-model");
@@ -3653,6 +3660,25 @@ mod ownership_tests {
             true.into(),
         );
 
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn json_capability_isolates_opted_in_workers_only() {
+        use crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY;
+        let capability = JSON_MULTIMODAL_CAPABILITY;
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled
+            .runtime_config
+            .runtime_data
+            .insert(capability.into(), false.into());
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled
+            .runtime_config
+            .runtime_data
+            .insert(capability.into(), true.into());
         assert_eq!(missing.mdcsum(), disabled.mdcsum());
         assert_ne!(missing.mdcsum(), enabled.mdcsum());
     }
