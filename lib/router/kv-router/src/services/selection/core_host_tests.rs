@@ -99,6 +99,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         data_parallel_size: None,
         max_num_batched_tokens: Some(1024),
         total_kv_blocks: None,
+        cache_owner_capacity_blocks: None,
         stable_routing_id: None,
         is_eagle: None,
         taints: HashSet::new(),

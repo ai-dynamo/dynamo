@@ -697,7 +697,7 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 ## Tokenizer
 
 <ParamField path="--tokenizer" type="string" default="default">
-  Tokenizer implementation. `default` uses HuggingFace; `fastokens` uses the high-performance hybrid encoder; and `basetenkenizer` uses Baseten Tokenizer for native encoding and decoding. See [Tokenizer](../../developer-guide/knowledge-base/modular-components/frontend/tokenizer.md).
+  Tokenizer implementation. `default` uses HuggingFace; `fastokens` uses the high-performance hybrid encoder; and `basetenkenizer` uses Baseten Tokenizer for native encoding and decoding. With `--dyn-chat-processor sglang`, `fastokens` also applies to the SGLang chat processor (needs the `fastokens` Python package) and `basetenkenizer` uses HuggingFace there. See [Tokenizer](../../developer-guide/knowledge-base/modular-components/frontend/tokenizer.md).
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>default</Badge> <Badge intent="note" minimal>fastokens</Badge> <Badge intent="note" minimal>basetenkenizer</Badge></span>
 
@@ -1018,8 +1018,8 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
   When truthy, the frontend drops all request NvExt fields except `cache_salt` on
   `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, and `/v1/messages`; ignores the
   `x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`,
-  `x-dynamo-prefill-dp-rank`, `x-dynamo-request-priority`, and
-  `x-dynamo-request-strict-priority` routing headers and their compatibility aliases; and ignores
+  `x-dynamo-prefill-dp-rank`, `x-dynamo-request-priority`,
+  `x-dynamo-request-strict-priority`, and `x-dynamo-elapsed-since-arrival-ms` routing headers and their compatibility aliases; and ignores
   the response-side `nvext.extra_fields` opt-in. Cache isolation remains active. The frontend
   continues to use non-empty `nvext.cache_salt` and `x-tenant-id` values on these four endpoint
   groups. Top-level cache salts remain active on chat completions, completions, classify, and

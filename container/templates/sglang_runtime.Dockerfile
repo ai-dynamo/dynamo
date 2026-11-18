@@ -40,6 +40,8 @@ RUN apt-get update && \
         libturbojpeg \
         libjemalloc2 && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        apt \
+        apt-utils \
         dirmngr \
         gnupg \
         gnupg-utils \
@@ -50,9 +52,21 @@ RUN apt-get update && \
         gpgsm \
         gpgv \
         keyboxd \
+        libapt-pkg6.0t64 \
         libbrotli1 \
+        libglib2.0-0t64 \
+        libgnutls30t64 \
+        libperl5.38t64 \
         libssl3t64 \
-        openssl && \
+        openssh-client \
+        openssh-server \
+        openssh-sftp-server \
+        openssl \
+        perl \
+        perl-base \
+        perl-modules-5.38 \
+        zlib1g \
+        zlib1g-dev && \
     rm -rf /var/lib/apt/lists/* && \
     ldconfig && \
     ldconfig -p | grep -q 'libturbojpeg.so.0'
@@ -136,7 +150,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 RUN pip install --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-        /opt/dynamo/wheelhouse/aisimulate*.whl \
+        /opt/dynamo/wheelhouse/aisim-*.whl \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl \
         "distro==1.9.0"
 {% else %}
@@ -145,7 +159,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip install --break-system-packages --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-        /opt/dynamo/wheelhouse/aisimulate*.whl
+        /opt/dynamo/wheelhouse/aisim-*.whl
 
 # Install accelerate for diffusion/video worker pipelines (diffusers requires it
 # for enable_model_cpu_offload but the upstream SGLang runtime image omits it)
