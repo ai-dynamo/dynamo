@@ -25,6 +25,7 @@ use std::{
 
 use rustc_hash::FxHashMap;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use super::{
     KvRouterError,
@@ -177,6 +178,39 @@ impl ApproximateLruTask {
 
 pub(crate) trait ApproximateLruCommandSink: Send + Sync {
     fn send(&self, task: ApproximateLruTask) -> Result<(), KvRouterError>;
+
+    /// Cancelled when the lane that runs this sink's tasks exits. `None` for a sink whose queued
+    /// tasks drop with its lane, so a dropped reply already reports the exit.
+    fn lane_exited(&self) -> Option<&CancellationToken> {
+        None
+    }
+}
+
+/// Await a reply from an event lane, or fail with `IndexerOffline` once that lane exits.
+///
+/// A lane that exits with the task queued neither answers nor drops it while the indexer's own
+/// senders keep its queue alive. `biased` lets a reply that is already sent win over the exit.
+pub(crate) async fn await_lane_reply<T>(
+    reply: oneshot::Receiver<T>,
+    lane_exited: &CancellationToken,
+) -> Result<T, KvRouterError> {
+    tokio::select! {
+        biased;
+        reply = reply => reply.map_err(|_| KvRouterError::IndexerDroppedRequest),
+        _ = lane_exited.cancelled() => Err(KvRouterError::IndexerOffline),
+    }
+}
+
+async fn await_sink_reply<T>(
+    reply: oneshot::Receiver<T>,
+    lane_exited: Option<&CancellationToken>,
+) -> Result<T, KvRouterError> {
+    match lane_exited {
+        Some(lane_exited) => await_lane_reply(reply, lane_exited).await,
+        None => reply
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest),
+    }
 }
 
 #[derive(Clone)]
@@ -264,15 +298,12 @@ pub struct ApproximateLruLease {
 
 pub struct ApproximateLruReleaseAck {
     response: oneshot::Receiver<Result<ApproximateLruReply, KvRouterError>>,
+    lane_exited: Option<CancellationToken>,
 }
 
 impl ApproximateLruReleaseAck {
     pub async fn wait(self) -> Result<(), KvRouterError> {
-        expect_applied(
-            self.response
-                .await
-                .map_err(|_| KvRouterError::IndexerDroppedRequest)??,
-        )
+        expect_applied(await_sink_reply(self.response, self.lane_exited.as_ref()).await??)
     }
 }
 
@@ -354,7 +385,10 @@ impl ApproximateLruLease {
             attempt_id: self.inner.attempt_id,
         });
         self.inner.sink.send(task)?;
-        Ok(Some(ApproximateLruReleaseAck { response }))
+        Ok(Some(ApproximateLruReleaseAck {
+            response,
+            lane_exited: self.inner.sink.lane_exited().cloned(),
+        }))
     }
 
     pub async fn finish(&self) -> Result<(), KvRouterError> {
@@ -400,9 +434,7 @@ async fn send_acknowledged(
 ) -> Result<ApproximateLruReply, KvRouterError> {
     let (task, response) = ApproximateLruTask::acknowledged(command);
     sink.send(task)?;
-    response
-        .await
-        .map_err(|_| KvRouterError::IndexerDroppedRequest)?
+    await_sink_reply(response, sink.lane_exited()).await?
 }
 
 fn expect_applied(reply: ApproximateLruReply) -> Result<(), KvRouterError> {

@@ -16,7 +16,7 @@ use dashmap::DashMap;
 use rustc_hash::FxBuildHasher;
 use tokio::sync::oneshot;
 
-use super::approximate_lru::ApproximateLruCommandSink;
+use super::approximate_lru::{ApproximateLruCommandSink, await_lane_reply};
 use super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 use super::{
     ApproximateLruClient, ApproximateLruIncarnation, ApproximateLruLease, ApproximateLruStats,
@@ -147,6 +147,8 @@ impl MaintenanceThread {
 struct ThreadPoolLruSink {
     sender: flume::Sender<WorkerTask>,
     fallback_prune_manager: WorkerPruneManager,
+    /// The owning lane's `thread_exited` token.
+    lane_exited: tokio_util::sync::CancellationToken,
 }
 
 impl ApproximateLruCommandSink for ThreadPoolLruSink {
@@ -156,6 +158,10 @@ impl ApproximateLruCommandSink for ThreadPoolLruSink {
         self.sender
             .send(WorkerTask::ApproximateLru(task))
             .map_err(|_| KvRouterError::IndexerOffline)
+    }
+
+    fn lane_exited(&self) -> Option<&tokio_util::sync::CancellationToken> {
+        Some(&self.lane_exited)
     }
 }
 
@@ -410,6 +416,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                 .as_ref()
                 .expect("LRU fallback TTL requires a prune manager")
                 .clone(),
+            lane_exited: self.thread_exited[thread_idx].clone(),
         })))
     }
 
@@ -452,7 +459,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             return Ok(ApproximateLruStats::default());
         }
         let mut total = ApproximateLruStats::default();
-        for sender in &self.worker_event_channels {
+        for (sender, exited) in self.worker_event_channels.iter().zip(&self.thread_exited) {
             let client = ApproximateLruClient::new(Arc::new(ThreadPoolLruSink {
                 sender: sender.clone(),
                 fallback_prune_manager: self
@@ -460,6 +467,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                     .as_ref()
                     .expect("LRU fallback TTL requires a prune manager")
                     .clone(),
+                lane_exited: exited.clone(),
             }));
             let stats = client.stats().await?;
             total.ranks += stats.ranks;
@@ -808,7 +816,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                     resp: resp_tx,
                 })
                 .map_err(|_| KvRouterError::IndexerOffline)?;
-            Ok::<_, KvRouterError>(resp_rx)
+            Ok::<_, KvRouterError>((idx, resp_rx))
         };
         let receivers = if let Some(second_idx) = second_idx {
             vec![
@@ -818,10 +826,8 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         } else {
             vec![enqueue(thread_idx, event)?]
         };
-        for receiver in receivers {
-            let applied = receiver
-                .await
-                .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        for (idx, receiver) in receivers {
+            let applied = await_lane_reply(receiver, &self.thread_exited[idx]).await?;
             if !applied {
                 return Err(KvRouterError::IndexerDroppedRequest);
             }
@@ -835,17 +841,15 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     /// `WorkerTask::Event` application errors are logged by the worker and are not returned here.
     pub async fn flush_and_wait(&self) -> Result<(), KvRouterError> {
         let mut receivers = Vec::with_capacity(self.worker_event_channels.len());
-        for channel in &self.worker_event_channels {
+        for (channel, exited) in self.worker_event_channels.iter().zip(&self.thread_exited) {
             let (resp_tx, resp_rx) = oneshot::channel();
             channel
                 .send(WorkerTask::Flush(resp_tx))
                 .map_err(|_| KvRouterError::IndexerOffline)?;
-            receivers.push(resp_rx);
+            receivers.push((resp_rx, exited));
         }
-        for receiver in receivers {
-            receiver
-                .await
-                .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        for (receiver, exited) in receivers {
+            await_lane_reply(receiver, exited).await?;
         }
         Ok(())
     }
@@ -869,9 +873,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         self.worker_event_channels[thread_idx]
             .send(WorkerTask::Flush(resp_tx))
             .map_err(|_| KvRouterError::IndexerOffline)?;
-        resp_rx
-            .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)
+        await_lane_reply(resp_rx, &self.thread_exited[thread_idx]).await
     }
 
     /// Wait until all previously queued worker tasks have completed.
@@ -927,7 +929,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         worker_id: WorkerId,
     ) -> Result<(), KvRouterError> {
         let mut lane_receivers = Vec::with_capacity(self.worker_event_channels.len());
-        for channel in &self.worker_event_channels {
+        for (channel, exited) in self.worker_event_channels.iter().zip(&self.thread_exited) {
             let (resp_tx, resp_rx) = oneshot::channel();
             channel
                 .send(WorkerTask::RemoveWorker {
@@ -936,12 +938,10 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                     resp: resp_tx,
                 })
                 .map_err(|_| KvRouterError::IndexerOffline)?;
-            lane_receivers.push(resp_rx);
+            lane_receivers.push((resp_rx, exited));
         }
-        for receiver in lane_receivers {
-            receiver
-                .await
-                .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        for (receiver, exited) in lane_receivers {
+            await_lane_reply(receiver, exited).await?;
         }
 
         // NOTE: The lifecycle caller stops this worker's source before removal. Broadcasting
@@ -955,9 +955,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                 resp: resp_tx,
             })
             .map_err(|_| KvRouterError::IndexerOffline)?;
-        resp_rx
-            .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        await_lane_reply(resp_rx, &self.thread_exited[0]).await?;
         Ok(())
     }
 
@@ -1146,9 +1144,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             })
             .map_err(|_| KvRouterError::IndexerOffline)?;
 
-        let applied = resp_rx
-            .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        let applied = await_lane_reply(resp_rx, &self.thread_exited[thread_idx]).await?;
         if applied {
             prune_manager.insert_worker_block_entries(worker, prune_entries);
         }
@@ -1196,9 +1192,7 @@ impl ThreadPoolIndexer<ConcurrentRadixTreeCompressed> {
                 resp: resp_tx,
             })
             .map_err(|_| KvRouterError::IndexerOffline)?;
-        resp_rx
-            .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)
+        await_lane_reply(resp_rx, &self.thread_exited[thread_idx]).await
     }
 }
 
@@ -1482,23 +1476,22 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         // tree (if any) reflects every event that was enqueued before this call.
         let mut receivers = Vec::new();
 
-        for channel in &self.worker_event_channels {
+        for (channel, exited) in self.worker_event_channels.iter().zip(&self.thread_exited) {
             let (resp_tx, resp_rx) = oneshot::channel::<anyhow::Result<Vec<RouterEvent>>>();
             let dump_req = WorkerTask::DumpEvents(resp_tx);
 
             channel
                 .send(dump_req)
                 .map_err(|_| KvRouterError::IndexerOffline)?;
-            receivers.push(resp_rx);
+            receivers.push((resp_rx, exited));
         }
 
         let mut all_events = Vec::new();
         let mut event_id_counter = 0u64;
 
-        for resp_rx in receivers {
-            let mut events = resp_rx
-                .await
-                .map_err(|_| KvRouterError::IndexerDroppedRequest)?
+        for (resp_rx, exited) in receivers {
+            let mut events = await_lane_reply(resp_rx, exited)
+                .await?
                 .map_err(|_| KvRouterError::IndexerOffline)?;
             for event in &mut events {
                 event.event.event_id = event_id_counter;
@@ -1706,6 +1699,100 @@ mod tests {
             },
         );
         assert_eq!(read.expect("stats read hung").worker_count(), 0);
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum AckedWait {
+        ApplyEvent,
+        Flush,
+        FlushWorkerLane,
+        RemoveWorker,
+        DumpEvents,
+        TtlRoutingDecision,
+        LruStats,
+        LruRelease,
+    }
+
+    /// Queues one acknowledged wait behind `Terminate` on a single gated lane, then opens the
+    /// gate so the lane exits without answering or dropping it.
+    async fn acknowledged_wait_after_lane_exit(wait: AckedWait) -> Result<(), KvRouterError> {
+        let (open_gate, gate) = flume::bounded::<()>(1);
+        let fallback_ttl = PruneConfig {
+            ttl: std::time::Duration::from_secs(120),
+        };
+        let retention = match wait {
+            AckedWait::TtlRoutingDecision => Some(ApproximateRetentionConfig::Ttl(fallback_ttl)),
+            AckedWait::LruStats | AckedWait::LruRelease => {
+                Some(ApproximateRetentionConfig::Lru { fallback_ttl })
+            }
+            _ => None,
+        };
+        let indexer = ThreadPoolIndexer::new_with_metrics_and_approximate_retention(
+            GatedBackend(gate),
+            1,
+            16,
+            None,
+            retention,
+        );
+        indexer.worker_event_channels[0]
+            .send(WorkerTask::Terminate)
+            .unwrap();
+        let worker = WorkerWithDpRank::new(1, 0);
+        // Created before the wait so its drop-time release does not race the assertion.
+        let lease = indexer.begin_approximate_lru_request(worker, 1, AttemptId::for_testing(1));
+        let wait = async {
+            match wait {
+                AckedWait::ApplyEvent => {
+                    indexer
+                        .apply_event_and_wait(make_store_event(1, &[1]))
+                        .await
+                }
+                AckedWait::Flush => indexer.flush_and_wait().await,
+                AckedWait::FlushWorkerLane => indexer.flush_worker_lane_and_wait(worker).await,
+                AckedWait::RemoveWorker => indexer.remove_worker_across_lanes_and_wait(1).await,
+                AckedWait::DumpEvents => indexer.dump_events().await.map(drop),
+                AckedWait::TtlRoutingDecision => {
+                    indexer
+                        .record_ttl_fallback_hashes(worker, &[LocalBlockHash(1)], &[1])
+                        .await
+                }
+                AckedWait::LruStats => indexer.approximate_lru_stats().await.map(drop),
+                AckedWait::LruRelease => {
+                    let ack = lease
+                        .as_ref()
+                        .expect("LRU retention is enabled")
+                        .begin_finish()?
+                        .expect("lease is not yet released");
+                    ack.wait().await
+                }
+            }
+        };
+        let (result, ()) = tokio::join!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), wait),
+            async {
+                tokio::task::yield_now().await;
+                drop(open_gate);
+            },
+        );
+        result.expect("acknowledged wait hung after its lane exited")
+    }
+
+    #[rstest::rstest]
+    #[case::apply_event(AckedWait::ApplyEvent)]
+    #[case::flush(AckedWait::Flush)]
+    #[case::flush_worker_lane(AckedWait::FlushWorkerLane)]
+    #[case::remove_worker(AckedWait::RemoveWorker)]
+    #[case::dump_events(AckedWait::DumpEvents)]
+    #[case::ttl_routing_decision(AckedWait::TtlRoutingDecision)]
+    #[case::lru_stats(AckedWait::LruStats)]
+    #[case::lru_release(AckedWait::LruRelease)]
+    #[tokio::test]
+    async fn acknowledged_wait_fails_when_its_lane_exits_with_it_queued(#[case] wait: AckedWait) {
+        let result = acknowledged_wait_after_lane_exit(wait).await;
+        assert!(
+            matches!(result, Err(KvRouterError::IndexerOffline)),
+            "{wait:?} returned {result:?}"
+        );
     }
 
     #[tokio::test]
