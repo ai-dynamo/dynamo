@@ -9,9 +9,6 @@ use super::{AnchorRef, AnchorTask, KvIndexerMetrics, KvRouterError, WorkerTask};
 use crate::prelude::*;
 
 /// Per-shard size snapshot returned by [`KvIndexerInterface::shard_sizes`].
-///
-/// `worker_count` and `block_count` are always populated. `node_count` is
-/// reserved for backends that can expose a structural node count.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShardSizeSnapshot {
     /// Zero-based shard index.
@@ -20,8 +17,6 @@ pub struct ShardSizeSnapshot {
     pub worker_count: usize,
     /// Total cached blocks across all workers in this shard.
     pub block_count: usize,
-    /// Radix-tree node count, or zero when the backend does not expose one.
-    pub node_count: usize,
 }
 
 #[async_trait]
@@ -146,12 +141,6 @@ pub trait KvIndexerInterface {
     async fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
         vec![]
     }
-
-    /// Edge lengths (hashes per node) for every non-root node.
-    /// Returns an empty vec for backends that don't support this.
-    fn node_edge_lengths(&self) -> Vec<usize> {
-        vec![]
-    }
 }
 
 // ============================================================================
@@ -168,9 +157,6 @@ pub trait KvIndexerInterface {
 /// - Sticky event routing to N worker threads
 /// - Inline reads on the caller's thread (no channel dispatch for find_matches)
 pub trait SyncIndexer: Send + Sync + 'static {
-    /// Bind optional shared metrics before the backend is published to worker threads.
-    fn configure_metrics(&mut self, _metrics: Option<&KvIndexerMetrics>) {}
-
     fn worker(
         &self,
         event_receiver: flume::Receiver<WorkerTask>,
@@ -179,16 +165,6 @@ pub trait SyncIndexer: Send + Sync + 'static {
 
     /// Find matches for a sequence of block hashes.
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores;
-
-    /// Whether this backend can reconstruct its complete state as router events.
-    fn supports_event_dump(&self) -> bool {
-        true
-    }
-
-    /// Whether Boolean event acknowledgements are sufficient for pruning bookkeeping.
-    fn supports_routing_decision_pruning(&self) -> bool {
-        true
-    }
 
     /// Install a shared structural anchor for branch-sharded suffix routing.
     ///
@@ -235,17 +211,6 @@ pub trait SyncIndexer: Send + Sync + 'static {
     /// Return a human-readable backend-specific timing or instrumentation report.
     fn timing_report(&self) -> String {
         String::new()
-    }
-
-    /// Number of radix-tree nodes created since construction, when available.
-    fn node_count(&self) -> usize {
-        0
-    }
-
-    /// Edge lengths (hashes per node) for every non-root node in the tree.
-    /// Returns an empty vec for backends that don't support this.
-    fn node_edge_lengths(&self) -> Vec<usize> {
-        vec![]
     }
 }
 

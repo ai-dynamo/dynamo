@@ -801,12 +801,12 @@ fn sglang_0521_request_controls_are_forwarded() {
     });
     request.kv_hint = Some(KvHint::new(
         "message-1",
-        vec![KvHintAction::new(
-            "action-1",
-            "kv.fetch",
-            "1.0",
-            std::collections::BTreeMap::from([("source".to_string(), json!("worker-7"))]),
-        )],
+        vec![KvHintAction {
+            action_id: "action-1".to_string(),
+            action_type: "kv.fetch".to_string(),
+            action_version: "1.0".to_string(),
+            payload: std::collections::BTreeMap::from([("source".to_string(), json!("worker-7"))]),
+        }],
     ));
 
     let mapped = build_generate_request(
