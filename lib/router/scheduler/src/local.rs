@@ -19,7 +19,7 @@ use super::queue::{
     BookingHandle, ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor,
     SchedulerQueue,
 };
-use super::selector::{WorkerInputs, WorkerSelector, log_selection};
+use super::selector::{WorkerSelector, log_selection};
 use super::types::{
     AdmissionAttempt, AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId,
     KvSchedulerError, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PairedPoolRoom,
@@ -47,6 +47,7 @@ use dynamo_slot_tracker::{
 use dynamo_tokens::SequenceHash;
 use dynamo_worker_selection::SelectionTraceSpec;
 use dynamo_worker_selection::WorkerCapacity;
+use dynamo_worker_selection::WorkerInputs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkerConfigReconcileOutcome {
@@ -449,7 +450,7 @@ where
             return Ok(None);
         };
         // A tracked admission with no registered lifecycle (Python bindings
-        // `best_worker`, `RouterRequest::New`) never emits lifecycle events, so
+        // `best_worker`) never emits lifecycle events, so
         // classifying it would corrupt plugin bookkeeping. It uses the default
         // queue inputs, exactly as if no classifier were installed.
         let Some(overrides_cached) = classifier.cached_overrides(request_id) else {

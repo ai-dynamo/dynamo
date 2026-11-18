@@ -24,7 +24,7 @@ use dynamo_slot_tracker::BusyThresholds;
 use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::{SelectionTrace, SharedCacheHits};
 
-pub use dynamo_router_protocol::attempt::{AttemptId, AttemptIdMinter};
+pub use dynamo_router_protocol::attempt::AttemptId;
 pub use dynamo_router_protocol::session::{SessionContext, WorkerSelectionInputTrigger};
 
 pub type OverloadedWorkerProvider =

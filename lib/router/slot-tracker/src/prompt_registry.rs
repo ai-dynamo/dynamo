@@ -540,7 +540,7 @@ impl PromptRegistry {
         }
     }
 
-    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    /// Stage operation the router drives.
     pub fn worker_load_reader(&self, decay_now: Instant) -> WorkerLoadReader<'_> {
         WorkerLoadReader {
             loads: self.loads.read(),

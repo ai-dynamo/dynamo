@@ -21,14 +21,9 @@ pub use derive::{WorkerCapacityExt, WorkerInfoExt, WorkerLoadInputExt};
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 pub use reference::DefaultWorkerSelector;
 
-// TODO(v1.7): Remove these compatibility re-exports; use dynamo_worker_selection instead.
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 use dynamo_worker_selection::DefaultWorkerPicker;
-pub use dynamo_worker_selection::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
-    WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext,
-};
+use dynamo_worker_selection::{WorkerInputs, WorkerLoadInput, WorkerSelectionContext};
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 use reference::{DefaultWorkerScorer, pick_default_worker};
 
@@ -48,7 +43,7 @@ use dynamo_worker_selection::{RuntimePolicyConfig, RuntimePolicyError, RuntimePo
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest, SchedulingResponse};
 use crate::protocols::{SelectionLogFields, WorkerConfigLike, WorkerSelectionResult};
-use dynamo_kv_indexer::ResidentBlockCounts;
+use dynamo_kv_indexer::{CacheOwnerBlockCounts, ResidentBlockCounts};
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::{SelectionTrace, SelectionTraceSpec};
@@ -275,6 +270,9 @@ pub(super) struct SelectionRowSource<'a, C: WorkerConfigLike> {
     pub(super) block_size: u32,
     /// The partition's live resident block counts, when the host lent them for this selection.
     resident_blocks: Option<&'a ResidentBlockCounts>,
+    /// The cache-owner block counts, pinned from `resident_blocks` on the first read: a
+    /// selection that reads none pins nothing.
+    cache_owner_counts: OnceCell<Option<CacheOwnerBlockCounts>>,
     /// Only tracked requests report cache reuse, so only their rows carry raw cached tokens.
     tracked: bool,
     pub(super) kv_transfer_sources: OnceCell<KvTransferSourceSummary>,
@@ -296,6 +294,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
             eligibility,
             block_size,
             resident_blocks: None,
+            cache_owner_counts: OnceCell::new(),
             tracked: request.mode.is_tracked(),
             kv_transfer_sources: OnceCell::new(),
             #[cfg(any(test, feature = "testing", feature = "bench"))]
@@ -549,6 +548,13 @@ impl<C: WorkerConfigLike> ResidentBlockSource for SelectionRowSource<'_, C> {
     #[inline(always)]
     fn resident_blocks(&self, worker: WorkerWithDpRank) -> Option<u64> {
         self.resident_blocks.and_then(|counts| counts.get(worker))
+    }
+
+    fn cache_owner_blocks(&self, worker: WorkerWithDpRank) -> Option<u64> {
+        self.cache_owner_counts
+            .get_or_init(|| self.resident_blocks?.cache_owner_block_counts())
+            .as_ref()?
+            .get(worker)
     }
 }
 
