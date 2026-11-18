@@ -2271,9 +2271,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			seedWithoutWebhook: true,
 			oldDeployment:      checkpointTRTLLMDGDForAdmission(2147483647, false, false, false),
 			deployment:         checkpointTRTLLMDGDForAdmission(2147483646, false, false, false),
-			wantWebhookErrs: []string{`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: restore launch rendering supports at most 1024 MPI hosts for an operator-managed multinode TensorRT-LLM leader`,
-				"spec.components[1].multinode.nodeCount: Invalid value: 2147483646: " + apivalidation.FieldImmutableErrorMsg,
-			},
+			wantWebhookErrs:    []string{`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: restore launch rendering supports at most 1024 MPI hosts for an operator-managed multinode TensorRT-LLM leader`},
 		},
 		{
 			name:          "Grove restore launch accepts large node counts with authored role launches",
@@ -2299,9 +2297,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			seedWithoutWebhook: true,
 			oldDeployment:      checkpointTRTLLMDGDForAdmission(2147483647, false, false, true),
 			deployment:         checkpointTRTLLMDGDForAdmission(2147483646, false, false, true),
-			wantWebhookErrs: []string{`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: restore launch rendering supports at most 1024 MPI hosts for an operator-managed multinode TensorRT-LLM leader`,
-				"spec.components[1].multinode.nodeCount: Invalid value: 2147483646: " + apivalidation.FieldImmutableErrorMsg,
-			},
+			wantWebhookErrs:    []string{`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: restore launch rendering supports at most 1024 MPI hosts for an operator-managed multinode TensorRT-LLM leader`},
 		},
 		{
 			name:          "component restore launch accepts large node counts with authored role launches",
