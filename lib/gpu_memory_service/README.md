@@ -612,3 +612,43 @@ To bound how long a restored engine waits for the published weights layout befor
 ```
 
 The default is `null`, which waits indefinitely. Set an integer value to fail after that many milliseconds.
+
+#### vLLM: read-only attach from the writer's load diff (`gms_reconstruction_mode`)
+
+A read-only vLLM engine maps weights that the writer already post-processed, so it cannot run vLLM's
+`process_weights_after_loading` itself. By default it builds the model on the meta device and runs that step on meta
+tensors, which loses any state computed from tensor values: MoE kernel objects, scale floats, backend flags. Models
+that keep such state may then fail to attach, or attach without it.
+
+With `load_diff` mode, the writer records what loading changed and every reader applies it:
+
+```bash
+--model-loader-extra-config '{"gms_reconstruction_mode": "load_diff"}'
+```
+
+Set it on the writer and on every reader. Unset keeps the default path; any other value is an error.
+
+- **Writer:** snapshots each module, its `quant_method` and its attention `impl` after construction and again after
+  loading, and stores the difference with an identity fingerprint in GMS metadata before the layout is committed.
+  Keys under `__gms__.` are reserved for this and are not tensors.
+- **Reader:** checks that it runs the same model, configuration (including the attention backend and the vLLM
+  environment variables that select kernels, such as `VLLM_USE_DEEP_GEMM` or `VLLM_BATCH_INVARIANT`), package
+  versions, Python sources and parallel rank as the writer, builds the model on meta, attaches the tensors
+  (parameters share the read-only weights; buffers and tensor attributes are private copies), rebuilds kernel objects
+  with each quant method in vLLM's pre-processed-weights mode, and applies the difference.
+- **Failure is closed.** If the reader cannot reproduce something the writer's loading created, the load fails and
+  the engine does not start; the error names the attributes. Values (numbers, flags, enums, dtypes, flat containers,
+  small CPU tensors) are copied from the writer. Objects are not copied: the reader's rebuild must create an object
+  of the same class, or the load fails. A quant method that does not support pre-processed weights is refused.
+- **Limits.** Inside an object that a module or its owners hold, only the class is compared; the state below it is
+  the rebuild's (vLLM's pre-processed-weights path's) responsibility. GPU tensors that owners hold outside the GMS
+  layout are compared by shape and dtype, not contents. Attached parameters are plain `torch.nn.Parameter`s without
+  vLLM's parameter attributes, so reloading weights into a reader is not supported. A tensor that construction puts
+  on another device than the writer's is filled in place and stays there; that is logged, not refused. Round-robin
+  expert placement with the DeepEP low-latency backend is refused, because vLLM builds its routing tables on meta
+  in a reader.
+- On success each rank logs a summary, e.g.
+  `[GMS] load diff: applied 79 load-time values, restored 0 CPU tensors, linked 0 objects, deleted 0; nondeterministic 156; conflicts 0, unapplied tokens 0, missing objects 0, tensors 0, owners 0`.
+  "nondeterministic" counts values that differ from the writer's where loading did not change them; they are kept,
+  and the first ones are logged on a second line.
+- Writer and reader must run the same build: a rolling upgrade needs a new writer.
