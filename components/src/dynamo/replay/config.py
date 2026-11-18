@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Protocol
 
-from aisimulate.runner import canonical_performance_config
+from aisim.runner import canonical_performance_config
 
 from dynamo.mocker.args import resolve_planner_profile_data as _resolve_profile
 from dynamo.mocker.config import normalize_mocker_config

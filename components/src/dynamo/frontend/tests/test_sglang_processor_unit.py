@@ -37,7 +37,6 @@ from sglang.srt.constrained.xgrammar_backend import (
 )
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
-from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 import dynamo.frontend.sglang_prepost as sglang_prepost_module
 import dynamo.frontend.sglang_processor as sglang_processor_module
@@ -73,6 +72,7 @@ from dynamo.frontend.sglang_processor import (
     _preprocess_worker,
     _runtime_config_parser_name,
     _tokenizer_eos_token_ids,
+    get_tokenizer,
 )
 from dynamo.frontend.sglang_prompt_renderer import (
     _flatten_message_content,
@@ -85,7 +85,12 @@ from dynamo.frontend.utils import (
     random_call_id,
     random_uuid,
 )
-from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
+from dynamo.llm.exceptions import (
+    InvalidArgument,
+    RoutedEngineError,
+    Unknown,
+    WorkerUnavailable,
+)
 from dynamo.sglang.thinking_budget import apply_thinking_budget
 
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
@@ -1300,6 +1305,7 @@ def _qwen_guided_request_without_separation(tool_choice):
     ("routed_error", "expected"),
     [
         (WorkerUnavailable("prefill routing is still activating"), WorkerUnavailable),
+        (RoutedEngineError("worker pool at capacity"), RoutedEngineError),
         (RuntimeError("worker crashed"), Unknown),
     ],
 )
@@ -1328,7 +1334,7 @@ def test_routed_engine_rejection_keeps_worker_unavailable(
 
     with pytest.raises(expected) as caught:
         asyncio.run(collect())
-    if expected is WorkerUnavailable:
+    if expected is not Unknown:
         assert caught.value is routed_error
 
 

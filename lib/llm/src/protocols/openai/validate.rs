@@ -4,10 +4,8 @@
 use std::{borrow::Cow, collections::HashMap, fmt::Display, sync::LazyLock};
 
 use dynamo_protocols::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestToolMessageContent,
-    ChatCompletionRequestToolMessageContentPart, ChatCompletionRequestUserMessageContent,
-    ChatCompletionRequestUserMessageContentPart, ChatCompletionTool, ChatCompletionToolType,
-    CreateChatCompletionRequest, FunctionObject,
+    ChatCompletionRequestMessage, ChatCompletionTool, ChatCompletionToolChoiceOption,
+    ChatCompletionToolType, CreateChatCompletionRequest, FunctionObject,
 };
 use dynamo_protocols::validation;
 
@@ -481,22 +479,6 @@ pub fn validate_messages(messages: &[ChatCompletionRequestMessage]) -> Result<()
     // as a JSON object string; reject bad non-empty shapes before chat-template rendering.
     // This was caught in MiniMax-M3 multi-turn tool-call tests
     for (message_index, message) in messages.iter().enumerate() {
-        let has_custom_content = match message {
-            ChatCompletionRequestMessage::User(user) => matches!(
-                &user.content,
-                ChatCompletionRequestUserMessageContent::Array(parts)
-                    if parts.iter().any(|part| matches!(part, ChatCompletionRequestUserMessageContentPart::Custom(_)))
-            ),
-            ChatCompletionRequestMessage::Tool(tool) => matches!(
-                &tool.content,
-                ChatCompletionRequestToolMessageContent::Array(parts)
-                    if parts.iter().any(|part| matches!(part, ChatCompletionRequestToolMessageContentPart::Custom(_)))
-            ),
-            _ => false,
-        };
-        if has_custom_content {
-            anyhow::bail!("messages[{message_index}].content custom parts are not supported");
-        }
         if let ChatCompletionRequestMessage::Assistant(assistant) = message
             && let Some(tool_calls) = &assistant.tool_calls
         {
@@ -552,31 +534,45 @@ pub(crate) fn validated_effective_tools(
     };
 
     validate_tools(&Some(tools.as_ref()))?;
-    // Check only top-level declarations; dynamic system tools retain their
-    // existing behavior.
-    if let Some(request_tools) = request.tools.as_deref().filter(|tools| tools.len() > 1) {
-        let mut definitions: HashMap<&str, usize> = HashMap::new();
-        for (index, tool) in request_tools.iter().enumerate() {
-            let first_index = *definitions
-                .entry(tool.function.name.as_str())
-                .or_insert(index);
-            if first_index == index {
-                continue;
-            }
-            let first = &request_tools[first_index].function;
-            if first.parameters != tool.function.parameters || first.strict != tool.function.strict
-            {
-                anyhow::bail!(
-                    "Conflicting definitions for tool '{}' in tools[{}] and tools[{}]: \
-                     parameter schemas or strict settings differ",
-                    tool.function.name,
-                    first_index,
-                    index,
-                );
-            }
+    validate_tool_definition_conflicts(
+        request.tools.as_deref().unwrap_or_default(),
+        request.tool_choice.as_ref(),
+    )?;
+    Ok(tools)
+}
+
+pub(crate) fn validate_tool_definition_conflicts(
+    tools: &[ChatCompletionTool],
+    choice: Option<&ChatCompletionToolChoiceOption>,
+) -> anyhow::Result<()> {
+    if tools.len() < 2 {
+        return Ok(());
+    }
+
+    let selected_name = match choice {
+        Some(ChatCompletionToolChoiceOption::Named(named)) => Some(named.function.name.as_str()),
+        _ => None,
+    };
+    let mut definitions: HashMap<&str, usize> = HashMap::new();
+    for (index, tool) in tools.iter().enumerate() {
+        let name = tool.function.name.as_str();
+        if selected_name.is_some_and(|selected| selected != name) {
+            continue;
+        }
+
+        let first_index = *definitions.entry(name).or_insert(index);
+        if first_index == index {
+            continue;
+        }
+        let first = &tools[first_index].function;
+        if first.parameters != tool.function.parameters || first.strict != tool.function.strict {
+            anyhow::bail!(
+                "Conflicting definitions for tool '{name}' in tools[{first_index}] and \
+                 tools[{index}]: parameter schemas or strict settings differ"
+            );
         }
     }
-    Ok(tools)
+    Ok(())
 }
 
 fn normalize_dynamic_system_tool(
@@ -719,11 +715,9 @@ pub fn validate_tools(
 
 /// Validates that forced tool_choice requests refer to available tools.
 pub fn validate_tool_choice(
-    tool_choice: &Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
+    tool_choice: &Option<ChatCompletionToolChoiceOption>,
     tools: Option<&[dynamo_protocols::types::ChatCompletionTool]>,
 ) -> Result<(), anyhow::Error> {
-    use dynamo_protocols::types::ChatCompletionToolChoiceOption;
-
     match validate_openai_tool_choice(tool_choice.as_ref(), tools) {
         Ok(()) => Ok(()),
         Err(ToolChoiceError::EmptyTools) => {
@@ -1111,7 +1105,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_message_content_is_rejected_before_model_validation() {
+    fn custom_message_content_preserves_model_validation() {
         use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 
         let custom = json!({"type":"custom", "kind":"sensor", "fields":{"payload":"value"}});
@@ -1119,16 +1113,13 @@ mod tests {
             json!({"role":"user", "content":[custom.clone()]}),
             json!({"role":"tool", "tool_call_id":"call_1", "content":[custom]}),
         ] {
-            for model in ["test", ""] {
-                let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
-                    "model":model, "messages":[message.clone()]
-                }))
-                .unwrap();
-                assert_eq!(
-                    request.validate().unwrap_err().to_string(),
-                    "messages[0].content custom parts are not supported"
-                );
-            }
+            let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model":"test", "messages":[message]
+            }))
+            .unwrap();
+            request.validate().unwrap();
+            request.inner.model.clear();
+            assert!(request.validate().is_err());
         }
     }
 

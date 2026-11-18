@@ -31,7 +31,7 @@ use crate::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
-        timing::{RequestPhase, RequestTracker},
+        timing::RequestPhase,
     },
     protocols::response_merge::{
         PREFILL_OUTPUT_ANNOTATION, PREFILL_OUTPUT_FIRST_ANNOTATION, PrefillNeed,
@@ -507,9 +507,7 @@ impl
                     );
 
                     let mut conditional_request = conditional_request;
-                    if conditional_request.tracker.is_none() {
-                        conditional_request.tracker = Some(Arc::new(RequestTracker::new()));
-                    }
+                    conditional_request.ensure_tracker();
                     if let Some(ref tracker) = conditional_request.tracker {
                         let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
                     }
@@ -552,9 +550,7 @@ impl
 
         // Ensure tracker exists for routing decisions in disaggregated mode.
         // Create one if not provided by the upstream DeltaGenerator.
-        if req.tracker.is_none() {
-            req.tracker = Some(Arc::new(RequestTracker::new()));
-        }
+        req.ensure_tracker();
         let tracker = req.tracker.as_ref().unwrap();
         let prefill_phase_barrier = tracker.set_phase(RequestPhase::Prefill).await;
 
@@ -937,7 +933,7 @@ mod tests {
     use crate::protocols::common::{
         FinishReason,
         preprocessor::{PreprocessedRequest, RoutingHints},
-        timing::RoutingData,
+        timing::{RequestTracker, RoutingData},
     };
 
     const MAX_ROOM: u64 = i64::MAX as u64;

@@ -41,8 +41,13 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
-from dynamo.vllm.errors import vllm_client_error_to_http_error
+from dynamo.llm.exceptions import (
+    HttpError,
+    InvalidArgument,
+    RoutedEngineError,
+    WorkerUnavailable,
+)
+from dynamo.vllm.errors import vllm_client_error_to_public_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .structural_tag_policy import (
@@ -958,8 +963,8 @@ class VllmProcessor:
         except VLLMClientError as exc:
             # vLLM 0.27 replaced many request-side ValueError/TypeError raises
             # with this hierarchy. Preserve vLLM's 400/404/422 distinction at
-            # Dynamo's HTTP boundary.
-            raise vllm_client_error_to_http_error(exc) from exc
+            # Dynamo's HTTP boundary. A 400 keeps its reason for the client.
+            raise vllm_client_error_to_public_error(exc) from exc
 
     async def _generator_inner(
         self, request: dict[str, Any], context: Any | None = None
@@ -1582,6 +1587,10 @@ class VllmProcessor:
             # that 503 into a 500; let the binding restore the class instead.
             raise
         except InvalidArgument:
+            raise
+        except RoutedEngineError:
+            # Keep the worker's error class (for example CapacityExhausted, HTTP 529);
+            # an error envelope would turn it into a 500.
             raise
         except Exception as e:
             backend_error = backend_invalid_argument_to_http_error(e)
