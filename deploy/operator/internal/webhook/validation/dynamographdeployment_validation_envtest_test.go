@@ -2933,7 +2933,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				generatedNameErr("spec.components[0].name", digitLeadingDGDName+"-frontend", shortenDGDOrComponent, invalidDNS1035ServiceName),
-				generatedNameErr("spec.components[1].name", digitLeadingDGDName+"-worker", shortenDGDOrComponent, invalidDNS1035ServiceName),
+				generatedNameErr("spec.components[1].name", digitLeadingDGDName+"-worker-ray", shortenDGDOrComponent, invalidDNS1035ServiceName),
 			},
 		},
 		{
@@ -2952,7 +2952,24 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Args = elasticEPArgs
 			}),
 			wantWebhookErrs: []string{
-				generatedNameErr("spec.components[1].name", digitLeadingDGDName+"-worker", shortenDGDOrComponent, invalidDNS1035ServiceName),
+				generatedNameErr("spec.components[1].name", digitLeadingDGDName+"-worker-ray", shortenDGDOrComponent, invalidDNS1035ServiceName),
+			},
+		},
+		{
+			name:               "an existing component Service error does not hide a new elastic-EP leader Service error",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+				dgd.Spec.Components[1].Replicas = new(int32(1))
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+				dgd.Spec.Components[1].Replicas = new(int32(1))
+				dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+				dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Args = elasticEPArgs
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[1].name", digitLeadingDGDName+"-worker-ray", shortenDGDOrComponent, invalidDNS1035ServiceName),
 			},
 		},
 		{

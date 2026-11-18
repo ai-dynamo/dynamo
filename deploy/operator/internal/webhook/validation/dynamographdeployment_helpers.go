@@ -502,22 +502,34 @@ func generatedDynamoGraphDeploymentNameViolations(
 				violations = append(violations, violation)
 			}
 		}
+
+		// The leader Service is a different resource; an old component Service error cannot hide it.
+		if grovePathway && dynamo.IsSinglePodElasticEPLeader(component) {
+			serviceName := dynamo.ElasticEPLeaderServiceName(baseName)
+			if msgs := k8svalidation.IsDNS1035Label(serviceName); len(msgs) > 0 {
+				violations = append(violations, generatedNameViolation{
+					key: generatedNameViolationKey{component: component.ComponentName, generatedName: serviceName, rule: "Service name"},
+					err: field.Invalid(namePath, serviceName, fmt.Sprintf(
+						"generated name is invalid (Service name: %s); %s", strings.Join(msgs, "; "), names[0].action,
+					)),
+				})
+			}
+		}
 	}
 	return violations
 }
 
 // dynamoGraphDeploymentComponentHasService reports whether the controller renders a Service named
-// from component: a frontend always gets one, and on Grove so does a single-pod elastic-EP leader,
-// whose <dgd>-<component>-ray name starts like the base name. Other components get one only under
-// Kubernetes discovery. dgd and component must not be nil.
+// from component: a frontend always gets one, and other components get one only under
+// Kubernetes discovery. The elastic-EP leader Service is checked separately.
+// dgd and component must not be nil.
 func dynamoGraphDeploymentComponentHasService(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	grovePathway bool,
 	discoveryBackend configv1alpha1.DiscoveryBackend,
 ) bool {
-	if component.ComponentType == nvidiacomv1beta1.ComponentTypeFrontend ||
-		(grovePathway && dynamo.IsSinglePodElasticEPLeader(component)) {
+	if component.ComponentType == nvidiacomv1beta1.ComponentTypeFrontend {
 		return true
 	}
 	// Grove reads the DGD annotation; child DCDs inherit it unless the component overrides it.
