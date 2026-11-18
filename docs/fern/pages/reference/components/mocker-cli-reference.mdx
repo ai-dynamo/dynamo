@@ -174,7 +174,8 @@ file that changes only the scheduling of a default Mocker is:
 ## Timing
 
 <ParamField path="--speedup-ratio" type="float" default="1.0">
-  Timing speedup factor applied to simulated prefill and decode durations.
+  Timing speedup factor applied to simulated prefill and decode durations. A value of `0` runs at
+  unscaled `1.0x` timing; use a large value (for example `1000`) for near-zero simulation delays.
 </ParamField>
 
 <ParamField path="--decode-speedup-ratio" type="float" default="1.0">
