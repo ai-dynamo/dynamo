@@ -110,6 +110,7 @@ class _SyntheticReplayOptions(_CommonReplayOptions, total=False):
     shared_prefix_ratio: float
     num_prefix_groups: int
     inter_turn_delay_ms: float
+    accumulate_session_deltas: bool
 
 
 def _normalize_trace_files(trace_files):
@@ -661,6 +662,7 @@ def run_synthetic_trace_replay(
     shared_prefix_ratio=0.0,
     num_prefix_groups=0,
     inter_turn_delay_ms=0.0,
+    accumulate_session_deltas=False,
     model_name=None,
     sla_ttft_ms=None,
     sla_itl_ms=None,
@@ -675,6 +677,10 @@ def run_synthetic_trace_replay(
 ) -> ReplayReport | dict[str, Any]:
     """Run synthetic replay with the same optional ``TelemetryOptions`` and
     ``kv_event_lag_ms`` contracts as :func:`run_trace_replay`.
+
+    ``accumulate_session_deltas`` treats ``input_tokens`` as each turn's new
+    input: every later turn's prompt starts with the session's earlier prompts
+    and generated outputs. It requires ``replay_mode="offline"``.
 
     ``arrival_seed`` seeds request-arrival generation only, not KV-router worker
     selection. With ``router_mode="kv_router"``, equal-cost workers are selected
@@ -702,6 +708,7 @@ def run_synthetic_trace_replay(
         "shared_prefix_ratio": shared_prefix_ratio,
         "num_prefix_groups": num_prefix_groups,
         "inter_turn_delay_ms": inter_turn_delay_ms,
+        "accumulate_session_deltas": accumulate_session_deltas,
         "model_name": model_name,
         "sla_ttft_ms": sla_ttft_ms,
         "sla_itl_ms": sla_itl_ms,

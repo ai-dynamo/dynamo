@@ -1,6 +1,6 @@
 # lib/llm/src/kv_router
 
-This module is the router's host layer around the `lib/kv-router` selection core. Read
+This module is the router's host layer around the `lib/router/kv-router` selection core. Read
 [`README.md`](README.md) before changing selection inputs, booking ownership, cancellation,
 prefill activation, or the encode and prefill hops; it explains the layer map, per-stage roles,
 and the booking lifecycle these rules protect.
@@ -10,9 +10,11 @@ and the booking lifecycle these rules protect.
 - `kv_router.rs`: `KvRouter`. Estimates how much of a request each worker already has cached,
   then asks the scheduler to choose a worker. It selects and books, but never sends a request.
 - `embedded.rs`: connects discovered workers and their load to one `SelectionService` partition
-  from `lib/kv-router`, and runs each selection through `SelectionCore`.
-- `indexer/`: tracks which KV-cache blocks each worker holds; lookups run in `lib/kv-router`.
+  from `lib/router/kv-router`, and runs each selection through `SelectionCore`.
+- `indexer/`: tracks which KV-cache blocks each worker holds; lookups run in `lib/router/kv-router`.
 - `publisher/`: receives KV-cache events and worker metrics from inference engines.
+- `active_load.rs`: `ActiveLoad`, the load message workers publish on the event plane. Written
+  by `publisher/`, read by `metrics_subscriber.rs`, `discovery/worker_monitor.rs`, and `pool_relay/`.
 - `metrics.rs`, `metrics_subscriber.rs`: router Prometheus metrics, and the subscription to
   workers' KV load metrics.
 - `sequence.rs`, `sequence/`: runtime glue for active-sequence tracking and its replica sync.
@@ -61,6 +63,30 @@ and the booking lifecycle these rules protect.
   `prefill_router/mod.rs`, or the two hosts score decode differently.
 - Keep `README.md` in step with changes to the layer map, per-stage roles, booking lifecycle,
   cancellation, or prefill activation.
+
+## Performance
+
+PR numbers point to worked examples; open one only when you need to see how a rule was
+applied.
+
+The selection path's rules are in `lib/router/scheduler/AGENTS.md` and the index's in
+`lib/router/kv-indexer/AGENTS.md`. These cover the host's ingest and sync paths.
+
+- **Adding a stage to KV event ingest.** Keep per-publisher work off the shared reader. On the
+  brokered path, give each publisher a bounded lane and drop the newest batch from a full one,
+  as `indexer/recovery/broker_zmq.rs` does. On the direct path a full lane makes its socket's
+  reader wait instead of dropping, so a slow stage stalls every publisher on that socket, and
+  once the stall fills the ZMQ high-water marks the publishers drop. On neither path raise a
+  channel capacity or a ZMQ high-water mark to hide a slow stage (#14167, #16568).
+- **Adding state that every request or load event touches.** If they write it, shard it by
+  worker as `ACTIVE_LOAD_SHARDS` does. If they only read it, publish a copy-on-write snapshot.
+  One mutex there is contended by every task on the path (#16118).
+- **Reacting to a discovery change.** Do work for the workers that changed, not for all of
+  them. Work over the whole fleet on each change is quadratic at startup (#16568).
+- **Publishing per-request events to peer routers.** Enqueue synchronously into the bounded
+  queue in `sequence.rs`; don't spawn a task per event. Exclude your own publisher where the
+  events are received (`excluded_publisher_id`): the `router_id` check at apply still pays to
+  receive and decode each one (#11920, #11992, #17114).
 
 ## Testing
 

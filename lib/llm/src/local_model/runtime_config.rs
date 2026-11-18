@@ -11,15 +11,12 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::{Validate, ValidationError};
 
-use dynamo_kv_router::{
-    kv_hints::{
-        KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
-        KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
-    },
-    protocols::{KvHintTransferWorkerMetadata, KvTransferEnforcement},
-    sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER,
+use dynamo_kv_hints::{
+    KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, KvHintTransferWorkerMetadata, KvTransferEnforcement,
 };
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
+use dynamo_slot_tracker::host::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
 use crate::protocols::openai::chat_completions::tool_parser_v2::unified_family_names;
 use dynamo_parsers::tool_calling::parsers::get_available_tool_parsers;
@@ -150,6 +147,10 @@ pub const ENV_TOKENIZER_FALLBACK: &str = "DYN_TOKENIZER_FALLBACK";
 /// `ModelType::Chat` / `ModelType::Completions`: other backends expose those
 /// surfaces without implementing vLLM's Generate contract.
 pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
+
+/// An opted-in worker can consume opaque JSON through `multi_modal_data`.
+/// Absence means unsupported, including workers predating this transport.
+pub const JSON_MULTIMODAL_CAPABILITY: &str = "custom_json_v1";
 
 /// Worker-reported Qwen3 video prompt-expansion contract used by vLLM.
 ///
@@ -289,6 +290,11 @@ pub struct ModelRuntimeConfig {
     /// dual-write their minimum here for old readers; aggregate division stays an adapter-only
     /// estimate and must not silently become a hard-admission denominator.
     pub total_kv_blocks: Option<u64>,
+
+    /// Host-pinned capacity, in KV blocks, of the cache owner (KVCR instance) attached
+    /// to each router-visible data-parallel rank.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_owner_capacity_blocks: Option<u64>,
 
     pub max_num_seqs: Option<u64>,
 
@@ -454,6 +460,7 @@ impl Default for ModelRuntimeConfig {
         Self {
             context_length: None,
             total_kv_blocks: None,
+            cache_owner_capacity_blocks: None,
             max_num_seqs: None,
             max_num_batched_tokens: None,
             tool_call_parser: None,
@@ -548,7 +555,7 @@ impl ModelRuntimeConfig {
     }
 }
 
-impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
+impl dynamo_scheduler::host::WorkerConfigLike for ModelRuntimeConfig {
     fn data_parallel_start_rank(&self) -> u32 {
         self.data_parallel_start_rank
     }
@@ -592,6 +599,10 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
             .get("native_offloading_capacity")?
             .get("total_tokens")?
             .as_u64()
+    }
+
+    fn cache_owner_capacity_blocks(&self) -> Option<u64> {
+        self.cache_owner_capacity_blocks
     }
 
     fn taints(&self) -> &HashSet<String> {
@@ -1269,7 +1280,7 @@ mod tests {
 
     #[test]
     fn native_offloading_capacity_is_backend_neutral() {
-        use dynamo_kv_router::WorkerConfigLike;
+        use dynamo_scheduler::host::WorkerConfigLike;
 
         let mut config = ModelRuntimeConfig::default();
         config
@@ -1284,7 +1295,7 @@ mod tests {
 
     #[test]
     fn kv_hint_transfer_support_requires_explicit_true() {
-        use dynamo_kv_router::WorkerConfigLike;
+        use dynamo_scheduler::host::WorkerConfigLike;
 
         let mut config = ModelRuntimeConfig::default();
         assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());

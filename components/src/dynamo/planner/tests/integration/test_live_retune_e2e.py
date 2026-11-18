@@ -40,7 +40,7 @@ from typing import Any, Optional
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
+    "aisim.sweeper",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
@@ -572,6 +572,11 @@ class PlannerHost:
             self._engine.replace_retune(
                 inputs, generation=generation, now_s=self._clock.time()
             )
+
+    def retune_decision_persisted(self, decision):
+        # Router-only retune: no decision carries Planner fields.
+        if decision.planner_changes:
+            raise AssertionError(f"unexpected planner changes {decision}")
 
 
 class Planner:

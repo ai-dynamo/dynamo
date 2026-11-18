@@ -559,7 +559,7 @@ impl GenerateAggregator {
         options: GenerateResponseOptions,
     ) -> Result<()> {
         // Take the payloads out of the owned output instead of cloning them.
-        let mut engine_data = match output.engine_data.take() {
+        let mut engine_data = match output.engine_data.take().map(|data| *data) {
             Some(Value::Object(engine_data)) => engine_data,
             _ => Map::new(),
         };
@@ -573,7 +573,7 @@ impl GenerateAggregator {
             && output.finish_reason.is_some()
             && output.disaggregated_params.is_some()
         {
-            self.kv_transfer_params = output.disaggregated_params.take();
+            self.kv_transfer_params = output.disaggregated_params.take().map(|params| *params);
         }
         let index = output.index.unwrap_or(0);
         let choice = self.choices.entry(index).or_insert(GenerateChoiceAcc {

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Planner Live Retune
-subtitle: Let the Planner tune the KV router of a running DynamoGraphDeployment from its own recorded traffic, through DGDR v1beta2 search runs.
+subtitle: Let the Planner tune the KV router and its own scaling parameters on a running DynamoGraphDeployment from its recorded traffic, through DGDR v1beta2 search runs.
 ---
 
 > [!CAUTION]
@@ -14,36 +14,64 @@ subtitle: Let the Planner tune the KV router of a running DynamoGraphDeployment 
 Live retune is the Kubernetes form of [Periodic Retune](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md#periodic-retune-experimental).
 Every `retune.interval_seconds`, the Planner cuts the window of request traces that just ended,
 creates DynamoGraphDeploymentRequests (DGDR) v1beta2 that replay the window for a grid of KV
-router parameters, scores the candidates the Runs report on `retune.objective`, and keeps the
-current parameters unless a candidate beats them by more than `retune.min_improvement_percentage`.
-Outside advisory mode it then sets the winner on every frontend router with
-`PATCH /router_policy`.
+router and Planner parameters, scores the candidates the Runs report on `retune.objective`, and
+keeps the current parameters unless a candidate beats them by more than
+`retune.min_improvement_percentage`. Outside advisory mode it then sets the winning router
+parameters on every frontend router with `PATCH /router_policy` and applies the winning Planner
+parameters to itself.
 
-Live retune searches the three router knobs a DGDR Request can express:
-`overlap_score_credit`, `prefill_load_scale` and `temperature`. Replicas stay fixed: the Planner
-runs in retune-only mode and never scales.
+Live retune searches the three router knobs a DGDR Request can express,
+`overlap_score_credit`, `prefill_load_scale` and `temperature`, in one of two setups:
+
+- **Fixed replicas.** The Planner runs in retune-only mode (`enable_load_scaling` and
+  `enable_throughput_scaling` both `false`) and never scales. Each candidate replays with the
+  replica counts of the DGD spec.
+- **Scaling.** The Planner scales on load, throughput or both, and `retune.planner` may also
+  search its runtime parameters, the scaling policy included (see
+  [Search domains](../../reference/components/planner-configuration.mdx#search-domains)). Each
+  candidate replays the Planner's own configuration with the candidate's fields, starting from
+  the replica counts that were ready at the window start, as
+  [replay retune](../../developer-guide/knowledge-base/modular-components/planner/planner-design.md#candidates-and-the-sweep)
+  does. This needs an operator whose configured planner image includes this release: the Runs'
+  AISimulate Planner adapter must read the Requests' `planner.retune_sweep` section.
 
 ## How it works
 
 1. **Record.** Each frontend writes a `request_end` record per request to its own directory on a
    shared ReadWriteMany claim (`<segments_dir>/<dgd>/<pod>/`).
-2. **Cut a window.** At `L_k = window end + grace_seconds`, the Planner merges the records of the
+2. **Read the history** (scaling only). At `L_k`, before any Request is created, the Planner
+   reads the records of the `history_seconds` before the window and buckets them at each
+   throughput interval a candidate scales at. With throughput scaling it runs the load-predictor
+   pre-sweep on them and prepares every predictor a decision could swap in. This takes another
+   `cut_budget_seconds` at most.
+3. **Cut a window.** At `L_k = window end + grace_seconds`, the Planner merges the records of the
    window into one canonical trace file,
    `<windows_dir>/<dgd>/<window_end_ms>-<selection>.jsonl.gz`, in a subprocess bounded by
    `cut_budget_seconds`. `<selection>` is a digest of the window's start, end and cutoff
    (`window end + grace_seconds`), so a Planner restarted with another `interval_seconds` or
    `grace_seconds` cuts its own file and creates its own Requests instead of reusing those of a
    window with the same end.
-3. **Search.** The Planner splits the router grid into at most `run.max_shards` Cartesian shards of
-   at most 100 points and creates one DGDR v1beta2 Request per shard. Each Request replays the
-   window file on the pinned `retune.dgdr.engine` with the replica counts of the DGD spec. One more
-   single-point Request replays a grid point again as a common-random-numbers probe: its score
-   must match the grid's within a relative error of 1e-9.
-4. **Decide.** The Planner reads each Run's Candidates, scores them on `retune.objective`, and
+4. **Search.** The Planner splits the grid into at most `run.max_shards` Cartesian shards of at
+   most 100 points and creates one DGDR v1beta2 Request per shard. With scaling, the Planner
+   points are one more shard dimension. Each Request replays the window file on the pinned
+   `retune.dgdr.engine`, with the replica counts of the DGD spec (fixed replicas) or those ready
+   at the window start (scaling). With scaling, it also carries the Planner's scaling
+   configuration, the shard's Planner points and the history warm-up in
+   `spec.aisim.inputOverrides.planner.retune_sweep`. One more single-point Request replays a grid
+   point again as a common-random-numbers probe: its score must match the grid's within a
+   relative error of 1e-9.
+5. **Decide.** The Planner reads each Run's Candidates, scores them on `retune.objective`, and
    decides with the same rules as replay retune. A decision is persisted in a Lease before it
    reaches any router.
-5. **Apply.** The Planner sets all eight router policy parameters of every frontend router to
-   the decided values, and keeps them there: a manual change to them is reverted.
+6. **Apply.** The Planner sets all eight router policy parameters of every frontend router to
+   the decided values, and keeps them there: a manual change to them is reverted. Decided Planner
+   parameters take effect in the Planner itself once the decision is persisted, through its
+   [runtime reconfiguration](../../reference/components/planner-configuration.mdx#system-port-reconfiguration-api),
+   with a new load predictor warmed on the window's history when the decision needs one. They
+   share the control API's one-update-at-a-time rule: the decision's Planner parameters are
+   dropped when another update is still preparing, or activates while their predictor is warmed.
+   A Planner that restarts runs its configured values again: retune does not restore applied
+   Planner parameters, and logs the ones it lost.
 
 Windows are aligned to `retune.dgdr.phase_seconds + k × interval_seconds` in epoch time, so a
 restarted Planner continues the same windows. Leadership and state live in two Leases owned by
@@ -149,7 +177,7 @@ environment: kubernetes
 backend: vllm
 mode: agg
 advisory: true                     # start advisory; see Roll out
-enable_load_scaling: false         # retune-only: both flags false
+enable_load_scaling: false         # fixed replicas: both flags false
 enable_throughput_scaling: false
 retune:
   interval_seconds: 21600          # T: window length and decision cadence
@@ -217,6 +245,28 @@ retune:
 For the other `retune` fields and the limits that `executor: dgdr` adds to them, see the
 [Retune field reference](../../reference/components/planner-configuration.mdx#retune-experimental).
 
+To let the Planner scale and retune its own parameters, enable the scaling modes and add a
+`planner` domain. A `router` domain is still required, since every Request sets the three router
+knobs; pin them with scalars to the frontend's startup values to retune the Planner alone:
+
+```yaml
+optimization_target: sla
+ttft_ms: 500
+itl_ms: 30
+enable_load_scaling: true
+enable_throughput_scaling: true
+retune:
+  # interval_seconds, timeout_seconds, executor and dgdr as above
+  router:
+    overlap_score_credit: 1.0      # pinned to the frontend's startup values
+    prefill_load_scale: 1.0
+    temperature: 0.0
+  planner:
+    scaling_policy: {preset: [hybrid_180_5, hybrid_600_5]}
+    load_sensitivity: {preset: false}
+    load_scaling_down_sensitivity: {choices: [70, 90]}
+```
+
 Live retune takes its scoring SLA when it starts: `retune.sla_ttft_ms` and `retune.sla_itl_ms`,
 or the Planner's `ttft_ms` and `itl_ms` where they are unset. An update of `ttft_ms` or `itl_ms`
 through the
@@ -237,8 +287,9 @@ AISimulate searches by default, would make the Run search engine settings as wel
   `scheduler.max_sequences`.
 - The preset entry may also set `prefill_context`, but only to `1`, and must not set
   `decode_context`: the pinned AISimulate recommendation does not run context parallelism.
-- Do not set `replicas` anywhere: the Planner fills them in from the DGD spec at each launch and
-  sets `spec.hardware.gpu.budget` to their GPU total.
+- Do not set `replicas` anywhere: the Planner fills them in at each launch, from the DGD spec with
+  fixed replicas or from the ready counts at the window start with scaling, and sets
+  `spec.hardware.gpu.budget` to their GPU total.
 - Write roles the mode does not use as `null`, or leave them out.
 - Set the model and GPU with `retune.dgdr.model` and `retune.dgdr.sku`, not in the engine.
 - Leave `backend_version` out to let the pinned AISimulate pick its version for
@@ -255,7 +306,8 @@ need(n) = cut_budget_seconds + job_startup_seconds
           + (1 + ceil((n - 1) / run.parallelism)) x run.candidate_timeout_seconds
 ```
 
-AISimulate evaluates the first candidate alone, hence the `1 +`. The Planner rejects a
+AISimulate evaluates the first candidate alone, hence the `1 +`. With scaling, a shard also needs
+another `cut_budget_seconds` for the history read and the pre-sweep. The Planner rejects a
 configuration whose largest grid shard needs more than `timeout_seconds`, because the baseline
 can fall in any shard and a window without a baseline score fails. With the defaults, the 108-point
 grid splits into 3 shards of 36 points and needs 900 + 300 + 6 × 1800 = 12000 seconds. Measure
@@ -271,10 +323,10 @@ configuration error at startup.
 | Rule | Requirement |
 |---|---|
 | P1 | `environment: kubernetes`; `decision_latency_seconds` is `0`, or `measured` with `decision_latency_scale: 1`; `timeout_seconds` is set and at most `interval_seconds - 600` |
-| P2 | `enable_load_scaling` and `enable_throughput_scaling` are both `false`; `retune.planner` is not set |
+| P2 | `retune.router` is set; to retune only the Planner, pin its three knobs with scalars |
 | P3 | `retune.router` writes only `overlap_score_credit`, `prefill_load_scale`, `temperature`, `policy: kv_router` and `prefill_load_model: {type: none}` |
 | P5 | `retune.dgdr.engine` is all scalars, as in [Engine section](#engine-section) |
-| P13 | The largest grid shard has at most 100 points and fits the [time budget](#time-budget) |
+| P13 | The largest grid shard has at most 100 points and fits the [time budget](#time-budget). With scaling, the Planner points count as one more shard dimension, and the history before a window holds at most 1024 buckets of the shortest throughput interval |
 
 **Deployment**, checked at startup, when the DGD changes and before every router round. While one
 fails, the Planner launches no windows, resets the routers to their startup parameters, and
@@ -455,7 +507,9 @@ The Planner exports these on `metric_reporting_prometheus_port`:
 
 | Not supported | Reason |
 |---|---|
-| Retune with load or throughput scaling, or of Planner parameters | A DGDR Run has no base Planner configuration, warm-up or predictor pre-sweep |
+| Retune with scaling on an operator whose planner image predates this release | The Run's AISimulate Planner adapter rejects `planner.retune_sweep`, so every Run fails |
+| Restoring applied Planner parameters after a Planner restart | They live in the Planner process, and a load predictor needs a history warm-up; the next window starts from the configured values |
+| Load-predictor history beyond 1024 buckets of the shortest throughput interval | The warm-up travels inside every Request and Candidate |
 | Frontends with non-default routing fields beyond the three knobs, or `kv_event_lag_ms` other than 0 | The DGDR router section expresses only the three knobs, and the Run does not pass a lag |
 | Workers that set their own router mode (`--router-mode` or `DYN_ROUTER_MODE`) | A worker's advertised router configuration replaces the frontend's for its workers, and the Run replays only the frontend's |
 | Worker arguments that pass a ConfigMap, Secret, annotation or `envFrom` value where an option could stand, including an unquoted `$VAR` of one in a worker shell script or one that `eval` or a shell given `-c` parses again (P4 fails) | The Planner cannot read the value, so it cannot rule out a router mode the worker would advertise |
