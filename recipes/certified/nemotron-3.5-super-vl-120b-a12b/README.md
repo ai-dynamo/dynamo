@@ -21,8 +21,8 @@ The open-source recipes for this model, including other GPUs and TensorRT-LLM, a
 | [`vllm/disagg-b200-swebenchpro`](vllm/disagg-b200-swebenchpro/deploy.yaml) | 5 | 3 prefill and 2 decode workers | TP1 per worker | MTP, 5 draft tokens | 1M |
 
 Both targets use NVFP4 weights, an FP8 KV cache, Mamba prefix caching, 200 GB of CPU KV cache
-offload per worker, and the KV router with session affinity. The disaggregated target transfers KV
-cache between workers with NIXL over UCX on RDMA.
+offload on each aggregated and prefill worker, and the KV router with session affinity. The
+disaggregated target transfers KV cache between workers with NIXL over UCX on RDMA.
 
 ## Prerequisites
 
@@ -32,6 +32,7 @@ cache between workers with NIXL over UCX on RDMA.
 - 4 B200 GPUs for the aggregated target, or 5 for the disaggregated target.
 - Nodes with room for 16 CPUs and 328 GiB of memory per worker pod, plus 64 GiB (aggregated) or
   128 GiB (disaggregated) of ephemeral storage.
+- Room for 16 CPUs and 16 GiB of memory for the frontend pod.
 - For the disaggregated target, an RDMA device plugin that exposes `rdma/shared_hca`.
 - A Hugging Face token with access to the checkpoint.
 
@@ -89,6 +90,17 @@ curl http://localhost:8000/v1/chat/completions \
 The model reasons before it answers. The deployment parses reasoning with `nemotron_v3` and tool
 calls with `qwen3_coder`.
 
+## Multimodal Workloads
+
+The manifests are tuned for the SWE-bench Pro trace. To serve image or video requests,
+reserve GPU memory for passing multimodal inputs between vLLM processes: add these arguments to
+every worker, after `--gpu-memory-utilization`:
+
+```yaml
+- --mm-ipc-gpu-memory-gb
+- "10"
+```
+
 ## Benchmark
 
 Use the SWE-bench Pro trace-replay workflow in
@@ -107,6 +119,7 @@ accuracy and production traffic.
 
 - The disaggregated workers set `VLLM_SSM_CONV_STATE_LAYOUT=DS`. NIXL needs this layout to transfer
   the Mamba convolution state between prefill and decode.
-- In the disaggregated target, CPU offload capacity is set by `cpu_bytes_to_use` inside the
-  `MultiConnector` configuration in `KV_TRANSFER_CONFIG`. Don't add `--kv-offloading-size` to those
-  workers; it replaces the `MultiConnector` configuration.
+- In the disaggregated target, only the prefill workers offload KV cache to CPU. Their capacity is
+  set by `cpu_bytes_to_use` inside the `MultiConnector` configuration in `KV_TRANSFER_CONFIG`. Don't
+  add `--kv-offloading-size` to those workers; it replaces the `MultiConnector` configuration. The
+  decode workers use `NixlConnector` alone.

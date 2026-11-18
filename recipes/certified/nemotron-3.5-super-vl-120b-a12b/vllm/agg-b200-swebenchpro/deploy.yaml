@@ -73,7 +73,7 @@ spec:
           resources:
             requests:
               cpu: "16"
-              memory: 128Gi
+              memory: 16Gi
   - name: Worker
     type: worker
     replicas: 4
@@ -127,9 +127,7 @@ spec:
           - --compilation-config
           - '{"pass_config":{"fuse_attn_quant":true},"use_inductor_graph_partition":true,"cudagraph_mode":"FULL_AND_PIECEWISE"}'
           - --gpu-memory-utilization
-          - "0.925"
-          - --mm-ipc-gpu-memory-gb
-          - "10"
+          - "0.95"
           - --tensor-parallel-size
           - "1"
           - --max-model-len
