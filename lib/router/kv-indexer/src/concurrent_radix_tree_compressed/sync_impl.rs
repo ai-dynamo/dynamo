@@ -23,7 +23,6 @@ fn track(
 // ============================================================================
 
 impl SyncIndexer for ConcurrentRadixTreeCompressed {
-    #[cfg_attr(feature = "profile", inline(never))]
     fn worker(
         &self,
         event_receiver: flume::Receiver<WorkerTask>,

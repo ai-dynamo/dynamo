@@ -28,7 +28,7 @@ from typing import Any
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
+    "aisim.sweeper",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
@@ -2036,7 +2036,7 @@ def uncached_model_warning():
 
 @pytest.mark.usefixtures("uncached_model_warning")
 def test_p6_without_aisimulate_is_not_checked(monkeypatch):
-    monkeypatch.setitem(sys.modules, "aisimulate_core.sdk.common", None)
+    monkeypatch.setitem(sys.modules, "aisim_core.sdk.common", None)
     assert fc._model_warning("acme/private-model") is None
 
 
@@ -2045,9 +2045,9 @@ def test_p6_broken_aisimulate_warns(monkeypatch, caplog):
     def broken(name: str) -> Any:
         raise RuntimeError("broken install")
 
-    module = types.ModuleType("aisimulate_core.sdk.common")
+    module = types.ModuleType("aisim_core.sdk.common")
     module.__getattr__ = broken  # type: ignore[method-assign]
-    monkeypatch.setitem(sys.modules, "aisimulate_core.sdk.common", module)
+    monkeypatch.setitem(sys.modules, "aisim_core.sdk.common", module)
     warning = fc._model_warning(MODEL)
     assert warning is not None and warning.startswith("P6: cannot check")
     assert "RuntimeError: broken install" in warning

@@ -23,10 +23,11 @@ impl WorkerInputs {
     pub const LOAD: Self = Self(1 << 1);
     /// Request preferred-taint routing metadata.
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
-    /// Request per-rank counts of the blocks the router's indexer holds. Experimental: plugins
-    /// read it through the worker-selection stage's `experimental::resident_blocks` module, and
-    /// the host rejects a policy that declares it without [`Self::CACHE`], because the counts
-    /// come from the indexer that `CACHE` starts.
+    /// Request per-rank counts of the blocks the router's indexer holds, and the block count of
+    /// each rank's attached cache owner (KVCR instance). Experimental: plugins read them through
+    /// the worker-selection stage's `experimental::resident_blocks` module, and the host rejects
+    /// a policy that declares it without [`Self::CACHE`], because the counts come from the
+    /// indexer that `CACHE` starts.
     pub const RESIDENT_BLOCKS: Self = Self(1 << 3);
     /// Request each row's active request count, read through the worker-selection stage's
     /// `WorkerInputView::active_requests`. Picker only: filters and scorers that declare it
@@ -54,8 +55,6 @@ impl WorkerInputs {
     // TODO(v1.9): Remove this alias.
     #[deprecated(since = "1.7.0", note = "use `WorkerInputs::KV_COPY`")]
     pub const KV_TRANSFER: Self = Self::KV_COPY;
-    /// Every optional column but the copy column, which only scorers may declare.
-    pub const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
 
     #[inline]
     pub const fn contains(self, other: Self) -> bool {
