@@ -49,6 +49,7 @@ from tests.utils.payloads import (
     CompletionPayload,
     EmbeddingMultiWorkerDispatchPayload,
     EmbeddingPayload,
+    HttpErrorPayload,
     ToolCallingChatPayload,
 )
 
@@ -743,6 +744,20 @@ vllm_configs = {
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
+            # A grammar the structured-output backend cannot compile (regex
+            # lookahead) is a client error, not a 500. The valid-grammar
+            # payloads after it show the worker still serves.
+            HttpErrorPayload(
+                body={
+                    "messages": [{"role": "user", "content": "Say a."}],
+                    "max_tokens": 5,
+                    "guided_regex": "(?=a)a",
+                },
+                expected_response=[],
+                expected_log=[],
+                endpoint="/v1/chat/completions",
+                timeout=10,
+            ),
             chat_payload(
                 "Generate a person with name and age",
                 repeat_count=1,
