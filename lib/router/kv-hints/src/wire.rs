@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use dynamo_kv_hashing::ExternalSequenceBlockHash;
 
+use crate::copy::KvCopyLocations;
+
 /// The selected worker can consume a `TRANSFER` hint with the v1 payload.
 // TODO: Rename these constants and wire values with the matching KVCC names.
 pub const KV_HINT_TRANSFER_CAPABILITY_KEY: &str = "router_hint";
@@ -25,6 +27,11 @@ pub const KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
 const KV_HINT_PROTOCOL_VERSION: &str = "0.1";
 /// Upper bound on the actions one hint carries.
 pub const MAX_KV_HINT_ACTIONS: usize = 32;
+
+/// The action type of a point-to-point KV fetch, whose payload is [`KvSourceLocationsPayload`].
+pub const KV_FETCH_ACTION_TYPE: &str = "kv.fetch";
+/// The version of [`KV_FETCH_ACTION_TYPE`] this crate emits.
+pub const KV_FETCH_ACTION_VERSION: &str = "1.0";
 /// Typed payload for the `kv.fetch@1.0` point-to-point action.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KvSourceLocationsPayload {
@@ -36,6 +43,16 @@ pub struct KvSourceLocationsPayload {
     /// If that prefix has been evicted, the receiver must use actual fetch
     /// results and recompute from any remaining gap; the hint is not a pin.
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
+}
+
+impl KvSourceLocationsPayload {
+    /// The fetch of `locations`: its source, and the chain through the source's prefix.
+    pub fn of(locations: &KvCopyLocations<'_>) -> Self {
+        Self {
+            source_control_endpoint: locations.source_address().to_string(),
+            block_hashes: locations.fetchable_chain().to_vec(),
+        }
+    }
 }
 
 /// One versioned action in a [`KvHint`].
@@ -53,7 +70,7 @@ pub struct KvHintAction {
 
 impl KvHintAction {
     /// An action without an ID. The router numbers every action when it composes the hint
-    /// (see [`KvHint::append_numbered`]), so a hint policy never chooses one.
+    /// (see [`KvHint::append_numbered`]), so a hint emitter never chooses one.
     pub fn unnumbered(
         action_type: impl Into<String>,
         action_version: impl Into<String>,
@@ -65,6 +82,27 @@ impl KvHintAction {
             action_version: action_version.into(),
             payload,
         }
+    }
+
+    /// A `kv.fetch@1.0` action: the booked worker fetches the blocks of `payload` from its
+    /// source. The one action Dynamo's own policies emit; a custom policy that wants the same
+    /// fetch builds it here rather than spelling the wire format itself.
+    pub fn kv_fetch(payload: KvSourceLocationsPayload) -> Self {
+        let KvSourceLocationsPayload {
+            source_control_endpoint,
+            block_hashes,
+        } = payload;
+        Self::unnumbered(
+            KV_FETCH_ACTION_TYPE,
+            KV_FETCH_ACTION_VERSION,
+            BTreeMap::from([
+                (
+                    "source_control_endpoint".to_string(),
+                    serde_json::json!(source_control_endpoint),
+                ),
+                ("block_hashes".to_string(), serde_json::json!(block_hashes)),
+            ]),
+        )
     }
 }
 

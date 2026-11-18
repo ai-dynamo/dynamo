@@ -44,8 +44,6 @@ use dynamo_kv_router::plugins::prelude::*;
 /// than overriding it.
 pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginRegistryError> {
     default::register(registry)?;
-    // kv_fetch names kvcr as a host, where it is on by default, so it registers with it.
-    kv_fetch::register(registry)?;
     sticky_min_load::register(registry)?;
     two_tier_cost_fn::register(registry)?;
     thunderagent::register(registry)?;
@@ -159,60 +157,83 @@ worker_selection:
         );
     }
 
-    /// `kv_fetch` is on by default only under `kvcr`: a `kvcr` role runs it without listing it, a
-    /// role under another policy runs it only when it lists it, and other policies run no hints by
-    /// default.
+    /// `kvcr` sends `kv_fetch` unless its parameters say otherwise; the default cost sends no
+    /// hints unless its parameters enable one. Both read the hint's parameters from
+    /// `hint_parameters`, and reject names and values no default policy knows.
     #[test]
-    fn kv_fetch_is_on_by_default_only_under_kvcr() {
-        let policy_file = tempfile::NamedTempFile::new().unwrap();
-        let config = |yaml: &str| {
-            std::fs::write(policy_file.path(), yaml).unwrap();
-            KvRouterConfig {
-                router_policy_config: Some(policy_file.path().display().to_string()),
-                ..Default::default()
-            }
+    fn enable_hints_and_hint_parameters_configure_kv_fetch() {
+        let partition = RoutingPartitionRef::new("model", "default");
+        let policy = |yaml: &str, role: WorkerType| {
+            let (config, resolved) = resolve(yaml);
+            resolved
+                .unwrap()
+                .expect("a configured instance resolves to a factory")(
+                &SelectionConfig::from(&config),
+                role,
+                partition,
+            )
         };
-        let mut registry = default_registry();
-        register(&mut registry).unwrap();
-        let resolved = registry
-            .resolve_hint_policies(&config(
-                r#"
+        let sends_fetch = |policy: WorkerSelectionPolicy| {
+            policy.hint_emitter().is_some() && policy.hint_inputs().contains(WorkerInputs::KV_COPY)
+        };
+        let configured = r#"
 worker_selection:
   prefill:
     type: kvcr
-    hints:
-      - type: kv_fetch
-        parameters: {min_additional_blocks: 2}
+    parameters:
+      shared_cache_multiplier: 0.5
+      enable_hints: [kv_fetch]
+      hint_parameters:
+        kv_fetch: {min_additional_blocks: 2}
   decode: kvcr
   aggregated: dynamo-default-cost-fn
-"#,
-            ))
-            .unwrap();
-        assert_eq!(resolved.names(WorkerType::Prefill), [kv_fetch::POLICY_TYPE]);
-        assert!(!resolved.uses_defaults(WorkerType::Prefill));
-        assert_eq!(resolved.names(WorkerType::Decode), [kv_fetch::POLICY_TYPE]);
-        assert!(resolved.uses_defaults(WorkerType::Decode));
-        assert!(resolved.names(WorkerType::Aggregated).is_empty());
-        assert!(resolved.names(WorkerType::Encode).is_empty());
+  encode:
+    type: dynamo-default-cost-fn
+    parameters:
+      enable_hints: [kv_fetch]
+"#;
+        assert!(sends_fetch(policy(configured, WorkerType::Prefill)));
+        assert!(sends_fetch(policy(configured, WorkerType::Decode)));
+        assert!(!sends_fetch(policy(configured, WorkerType::Aggregated)));
+        assert!(sends_fetch(policy(configured, WorkerType::Encode)));
+        assert!(!sends_fetch(policy(
+            "worker_selection:\n  prefill:\n    type: kvcr\n    parameters: {enable_hints: []}\n",
+            WorkerType::Prefill,
+        )));
 
-        // Any other policy runs it only when its role lists it.
-        let listed = registry
-            .resolve_hint_policies(&config(
-                "worker_selection:\n  prefill:\n    type: dynamo-default-cost-fn\n    hints:\n      - type: kv_fetch\n",
-            ))
-            .unwrap();
-        assert_eq!(listed.names(WorkerType::Prefill), [kv_fetch::POLICY_TYPE]);
-        assert!(!listed.uses_defaults(WorkerType::Prefill));
-
-        for parameters in ["{min_additional_blocks: 0}", "{min_blocks: 2}"] {
+        for parameters in [
+            // The fetch's own parameters are validated.
+            "{enable_hints: [kv_fetch], hint_parameters: {kv_fetch: {min_additional_blocks: 0}}}",
+            "{enable_hints: [kv_fetch], hint_parameters: {kv_fetch: {min_blocks: 2}}}",
+            // Unknown, repeated, and unenabled hints are mistakes.
+            "{enable_hints: [kv_prefetch]}",
+            "{enable_hints: [kv_fetch, kv_fetch]}",
+            "{enable_hints: [], hint_parameters: {kv_fetch: {}}}",
+            "{hint_parameters: {kv_fetch: {}}}",
+            // Copy credit needs the fetch that sends the copies.
+            "{shared_cache_multiplier: 0.5, enable_hints: []}",
+        ] {
             let yaml = format!(
-                "worker_selection:\n  prefill:\n    type: kvcr\n    hints:\n      - type: kv_fetch\n        parameters: {parameters}\n"
+                "worker_selection:\n  prefill:\n    type: kvcr\n    parameters: {parameters}\n"
             );
+            let (_config, resolved) = resolve(&yaml);
             assert!(
-                registry.resolve_hint_policies(&config(&yaml)).is_err(),
-                "{parameters}"
+                matches!(
+                    resolved,
+                    Err(WorkerSelectionPolicyRegistryError::Provider { .. })
+                ),
+                "{parameters}: {:?}",
+                resolved.as_ref().err().map(ToString::to_string)
             );
         }
+        // The old per-role list is gone, and the error says where hints went.
+        let (_config, resolved) = resolve(
+            "worker_selection:\n  prefill:\n    type: kvcr\n    hints:\n      - type: kv_fetch\n",
+        );
+        let Err(error) = resolved else {
+            panic!("the removed hints key must fail resolution");
+        };
+        assert!(error.to_string().contains("enable_hints"), "{error}");
     }
 
     /// An unknown parameter key is a mistake, most often a misremembered threshold name. It must

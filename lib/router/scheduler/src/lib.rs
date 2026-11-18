@@ -11,7 +11,6 @@
 mod classifier_rows;
 mod config;
 mod filter;
-mod hint_policy;
 pub mod host;
 mod identity;
 mod kv_hints;
@@ -40,11 +39,6 @@ pub use config::{
     Validated,
 };
 pub use filter::{RoutingEligibility, WorkerEligibilityError};
-pub use hint_policy::{
-    Commitments, DuplicateHintPolicyName, HintContext, HintPolicy, HintPolicyConstructor,
-    HintPolicyError, HintPolicyFactory, NamedHintPolicy, PluginConfigError, RoleHintPolicies,
-    check_role,
-};
 pub use identity::default_routing_group;
 pub use kv_hints::{KvCopyLocations, KvCopySource};
 pub use local::LocalScheduler;
@@ -79,6 +73,7 @@ pub use replication::{
     ReplicaIngressObserver, ReplicaSyncConfig, SchedulerLoadSink, ScopedReplicaEvent,
     ScopedReplicaSync, ScopedSequencePublisher, setup_scoped_replica_sync,
 };
+pub use resolve::{PluginConfigError, check_role};
 pub use selection::core::LookupTimings;
 pub use selection::input::{
     MmRoutingInfoRequest, NormalizedPrompt, NormalizedReservation, TrackingHashInput,

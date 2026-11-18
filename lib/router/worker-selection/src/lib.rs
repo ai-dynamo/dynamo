@@ -18,6 +18,7 @@ mod conditional_disagg;
 mod context;
 mod error;
 pub mod experimental;
+mod hints;
 pub mod host;
 mod hosted;
 mod inputs;
@@ -42,6 +43,7 @@ pub use conditional_disagg::{
 };
 pub use context::WorkerSelectionContext;
 pub use error::WorkerSelectionPolicyError;
+pub use hints::{HintContext, HintEmitter, HintError};
 pub use hosted::{HostedSelectionRequest, HostedWorkerPicker};
 #[allow(deprecated)]
 pub use inputs::WorkerTransferInput;

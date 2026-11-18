@@ -335,8 +335,7 @@ impl SelectionCore {
         // every selection retains them so previews score like bookings.
         let responsibilities = &entry.responsibilities;
         let hint_capable_workers = allow_cache_credit
-            && (responsibilities.commit_kv_copy
-                || (book && responsibilities.compute_booked_copy_source))
+            && (responsibilities.scores_kv_copy || (book && responsibilities.books_kv_copy))
             && entry.hint_capable_workers.load(Ordering::Relaxed);
         let retain_kv_transfer_chain =
             hint_capable_workers && entry.indexer.supports_kv_transfer_chain_retention();
@@ -348,9 +347,9 @@ impl SelectionCore {
                 );
             });
         }
-        // Hint policies may read the session at booking, now or when a reservation replays this
-        // selection.
-        let hint_session_context = (!responsibilities.run_hint_policies.is_empty()
+        // The policy's hint emitter may read the session at booking, now or when a reservation
+        // replays this selection.
+        let hint_session_context = (responsibilities.emits_hints()
             && (book || replay_id.is_some())
             && entry.hint_capable_workers.load(Ordering::Relaxed))
         .then(|| session_context.clone())
@@ -579,10 +578,10 @@ impl SelectionCore {
                     routing_hashes,
                     session_id,
                     session_context,
-                    // The replayed booking must send the copy this selection committed to.
+                    // The replayed booking must send the copy this selection's score credited.
                     kv_copy: entry
                         .responsibilities
-                        .commit_kv_copy
+                        .scores_kv_copy
                         .then(|| {
                             response
                                 .kv_copy_source

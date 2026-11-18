@@ -29,12 +29,9 @@ pub use crate::plugins::request_classifier::{
 };
 
 // Experimental hint-policy contracts, their registration, and the KV copies they send.
-pub use crate::plugins::hint_policy::{
-    Commitments, HintContext, HintHost, HintPolicy, HintPolicyConstructor, HintPolicyError,
-    HintPolicyParameters, HintPolicyProvider, HintPolicyProviderError, HintPolicyRegistryError,
-    KvHintAction,
+pub use crate::plugins::worker_selection::{
+    HintContext, HintEmitter, HintError, KvCopyLocations, KvCopySource,
 };
-pub use crate::plugins::worker_selection::{KvCopyLocations, KvCopySource};
 
 // Registration and the configuration the registry resolves plugins from.
 pub use crate::config::{KvRouterConfig, SharedCacheType};
@@ -47,6 +44,7 @@ pub use crate::plugins::{
 // Wire vocabulary the signal views carry.
 pub use dynamo_kv_hashing::ExternalSequenceBlockHash;
 pub use dynamo_kv_hints::{
+    KV_FETCH_ACTION_TYPE, KV_FETCH_ACTION_VERSION, KvHint, KvHintAction,
     KvHintTransferWorkerMetadata, KvSourceLocationsPayload, KvTransferEnforcement,
     WorkerKvTransferKeys, WorkerKvTransferKeysCache,
 };

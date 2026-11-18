@@ -1,58 +1,48 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `kv_fetch` hint policy and KVCR's `kv.fetch` action format.
+//! `kv_fetch`: the hint the default policies can send with the worker they book. It tells the
+//! worker to fetch, as `kv.fetch@1.0`, the request's KV prefix from the peer the router found
+//! holding more of it than the worker does.
 //!
-//! When the worker-selection policy committed the booked worker to a KV copy, as `kvcr` does,
-//! this policy sends that copy. The router drops a committed copy whose source left before the
-//! booking, with a warning, so this policy never sees it. Otherwise it fetches best effort from
-//! the booked worker's copy source when the fetch adds at least `min_additional_blocks`, and
-//! skips a fetch whose source has become unreachable.
+//! `kvcr` enables it by default: with copy credit (`shared_cache_multiplier` above 0) its score
+//! assumed the copy, so the fetch always goes out; without, the fetch is best effort and goes out
+//! when it adds at least `min_additional_blocks`. `dynamo-default-cost-fn` can enable it too, as a
+//! best-effort fetch. Both configure it through their `parameters`:
+//!
+//! ```yaml
+//! worker_selection:
+//!   prefill:
+//!     type: kvcr
+//!     parameters:
+//!       shared_cache_multiplier: 0.5
+//!       enable_hints: [kv_fetch]        # the default under kvcr; [] sends none
+//!       hint_parameters:
+//!         kv_fetch:
+//!           min_additional_blocks: 2
+//! ```
+//!
+//! A custom policy that wants the same fetch attaches [`KvFetch`] with
+//! `WorkerSelectionPolicy::with_hints`, or builds the action itself with
+//! [`KvHintAction::kv_fetch`].
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use dynamo_kv_router::plugins::prelude::*;
 
-use crate::KVCR_POLICY_TYPE;
+/// The name `enable_hints` and `hint_parameters` know this hint by.
+pub const HINT_NAME: &str = "kv_fetch";
 
-/// Hint-policy type listed as `worker_selection.<role>.hints[].type`.
-pub const POLICY_TYPE: &str = "kv_fetch";
-
-/// KVCR's point-to-point fetch action.
-pub const KV_FETCH_ACTION_TYPE: &str = "kv.fetch";
-/// The `kv.fetch` payload version this policy sends.
-pub const KV_FETCH_ACTION_VERSION: &str = "1.0";
-
-/// The `kv.fetch@1.0` action that carries `payload`. The router numbers it when it composes the
-/// hint.
-fn fetch_action(payload: KvSourceLocationsPayload) -> KvHintAction {
-    let KvSourceLocationsPayload {
-        source_control_endpoint,
-        block_hashes,
-    } = payload;
-    KvHintAction::unnumbered(
-        KV_FETCH_ACTION_TYPE,
-        KV_FETCH_ACTION_VERSION,
-        BTreeMap::from([
-            (
-                "source_control_endpoint".to_string(),
-                serde_json::json!(source_control_endpoint),
-            ),
-            ("block_hashes".to_string(), serde_json::json!(block_hashes)),
-        ]),
-    )
-}
-
-#[derive(Clone, Copy, serde::Deserialize)]
+/// `hint_parameters.kv_fetch`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
-struct Parameters {
-    /// Blocks a best-effort fetch must add beyond the booked worker's device and host-pinned
-    /// prefix. Committed copies are always sent.
-    min_additional_blocks: usize,
+pub struct KvFetchParameters {
+    /// A fetch the policy's score did not credit goes out only when it adds at least this many
+    /// blocks beyond the booked worker's own prefix. At least 1.
+    pub min_additional_blocks: usize,
 }
 
-impl Default for Parameters {
+impl Default for KvFetchParameters {
     fn default() -> Self {
         Self {
             min_additional_blocks: 1,
@@ -60,85 +50,81 @@ impl Default for Parameters {
     }
 }
 
-struct KvFetch {
+/// Sends the booked worker's copy source as a `kv.fetch@1.0` action.
+pub struct KvFetch {
     min_additional_blocks: usize,
+    credited: bool,
 }
 
-impl HintPolicy for KvFetch {
-    // The booked worker's copy source, for copies the selection didn't commit.
+impl KvFetch {
+    /// `credited` is whether the policy's score assumed the copy, in which case the fetch always
+    /// goes out; otherwise `parameters.min_additional_blocks` gates it.
+    pub fn new(
+        parameters: KvFetchParameters,
+        credited: bool,
+    ) -> Result<Self, WorkerSelectionPolicyProviderError> {
+        if parameters.min_additional_blocks == 0 {
+            return Err(WorkerSelectionPolicyProviderError::new(
+                "hint_parameters.kv_fetch.min_additional_blocks must be at least 1",
+            ));
+        }
+        Ok(Self {
+            min_additional_blocks: parameters.min_additional_blocks,
+            credited,
+        })
+    }
+
+    /// [`Self::new`] as the emitter a policy attaches.
+    pub fn emitter(
+        parameters: KvFetchParameters,
+        credited: bool,
+    ) -> Result<Arc<dyn HintEmitter>, WorkerSelectionPolicyProviderError> {
+        Ok(Arc::new(Self::new(parameters, credited)?))
+    }
+}
+
+impl HintEmitter for KvFetch {
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::KV_COPY
     }
 
-    // The selection's committed copies, which this policy sends.
-    fn commitments(&self) -> Commitments {
-        Commitments::KV_COPY
-    }
-
-    fn build_hints(&self, context: &HintContext<'_>) -> Result<Vec<KvHintAction>, HintPolicyError> {
-        // The selection's cost assumed this copy: always send it.
-        if let Some(copy) = context.committed_kv_copy() {
-            return Ok(vec![kvcr_fetch(context, copy)?]);
+    fn emit(&self, context: &HintContext<'_>) -> Result<Vec<KvHintAction>, HintError> {
+        let Some(copy) = context.kv_copy() else {
+            return Ok(Vec::new());
+        };
+        // No locations: the source left between selection and booking. The router logged the
+        // dropped copy; the worker recomputes instead.
+        let Some(locations) = context.kv_copy_locations() else {
+            return Ok(Vec::new());
+        };
+        if !self.credited && copy.additional_blocks() < self.min_additional_blocks {
+            return Ok(Vec::new());
         }
-        // Otherwise send a fetch only when it adds enough blocks.
-        Ok(context
-            .kv_copy_source()
-            .filter(|source| source.additional_blocks() >= self.min_additional_blocks)
-            .and_then(|source| kvcr_fetch(context, source).ok())
-            .into_iter()
-            .collect())
+        Ok(vec![KvHintAction::kv_fetch(KvSourceLocationsPayload::of(
+            locations,
+        ))])
     }
-}
-
-/// Encode a copy as KVCR's `kv.fetch` action.
-fn kvcr_fetch(
-    context: &HintContext<'_>,
-    copy: &KvCopySource,
-) -> Result<KvHintAction, HintPolicyError> {
-    let locations = context
-        .kv_copy_locations(copy)
-        .ok_or_else(|| HintPolicyError::new("the copy source is no longer reachable"))?;
-    Ok(fetch_action(KvSourceLocationsPayload {
-        source_control_endpoint: locations.source_address().to_string(),
-        // kv.fetch@1.0 wants every hash from block 0 through the source's prefix; the target
-        // fetches what it lacks.
-        block_hashes: locations.chain()[..locations.source_prefix_blocks()].to_vec(),
-    }))
-}
-
-/// Register `kv_fetch` on by default under the `kvcr` worker-selection policy, so a `kvcr` role
-/// whose entry lists no `hints` sends every committed copy, and best-effort fetches of one block or
-/// more when `kvcr` commits none. Any other policy runs it only when its role lists it in `hints`,
-/// for example a custom policy whose scorer reads `KV_COPY`.
-pub(crate) fn register(registry: &mut RouterPluginRegistry) -> Result<(), HintPolicyRegistryError> {
-    registry.register_hint_policy(
-        POLICY_TYPE,
-        Arc::new(|parameters| {
-            let Parameters {
-                min_additional_blocks,
-            } = parameters.deserialize()?;
-            if min_additional_blocks == 0 {
-                return Err(HintPolicyProviderError::new(
-                    "min_additional_blocks must be at least 1",
-                ));
-            }
-            Ok(HintPolicyConstructor::shared(KvFetch {
-                min_additional_blocks,
-            }))
-        }),
-        [HintHost::worker_selection(KVCR_POLICY_TYPE)],
-    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_hints::KvHint;
+    use dynamo_kv_hints::KvTransferSourceChoice;
 
-    /// The wire shape engines and KVCR read: field names and values are N-2 compatible.
+    fn copy(local: usize, source: usize) -> KvCopySource {
+        KvCopySource::new(
+            WorkerWithDpRank::new(1, 0),
+            KvTransferSourceChoice {
+                source: WorkerWithDpRank::new(2, 0).into(),
+                prefix_blocks: source,
+            },
+            local,
+        )
+    }
+
     #[test]
     fn serializes_versioned_fetch_action() {
-        let mut action = fetch_action(KvSourceLocationsPayload {
+        let mut action = KvHintAction::kv_fetch(KvSourceLocationsPayload {
             source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
             block_hashes: vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(22)],
         });
@@ -160,6 +146,57 @@ mod tests {
                     },
                 }],
             })
+        );
+    }
+
+    #[test]
+    fn credited_fetches_always_go_out_and_others_meet_the_threshold() {
+        let chain: Vec<_> = (1..=8).map(ExternalSequenceBlockHash).collect();
+        let locations = KvCopyLocations::new("tcp://worker-2:9000".to_string(), &chain, 2, 8);
+        let copy = copy(2, 8);
+        let context = || HintContext::new("r", WorkerWithDpRank::new(1, 0), 32, 4, None);
+
+        let threshold = |min, credited| {
+            KvFetch::new(
+                KvFetchParameters {
+                    min_additional_blocks: min,
+                },
+                credited,
+            )
+            .unwrap()
+        };
+        let sent = |emitter: KvFetch| {
+            emitter
+                .emit(&context().with_kv_copy(Some(&copy), Some(&locations)))
+                .unwrap()
+        };
+        // The copy adds 8 - 2 = 6 blocks.
+        assert_eq!(sent(threshold(6, false)).len(), 1);
+        assert!(sent(threshold(7, false)).is_empty());
+        let credited = sent(threshold(7, true));
+        assert_eq!(credited.len(), 1);
+        assert_eq!(credited[0].action_type, KV_FETCH_ACTION_TYPE);
+        assert_eq!(
+            credited[0].payload["block_hashes"],
+            serde_json::json!(chain)
+        );
+
+        // Nothing to fetch, or a source that left, sends nothing.
+        assert!(threshold(1, true).emit(&context()).unwrap().is_empty());
+        assert!(
+            threshold(1, true)
+                .emit(&context().with_kv_copy(Some(&copy), None))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            KvFetch::new(
+                KvFetchParameters {
+                    min_additional_blocks: 0
+                },
+                false
+            )
+            .is_err()
         );
     }
 }

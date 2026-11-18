@@ -11,6 +11,7 @@ use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 use crate::DefaultWorkerPicker;
+use crate::hints::HintEmitter;
 use crate::{
     HostedWorkerPicker, SelectionConfig, SelectionTrace, SelectionTraceRow, SelectionTraceSpec,
     WorkerSelectionPolicyError,
@@ -142,6 +143,8 @@ pub struct WorkerSelectionPolicy {
     state: WorkerSelectionPolicyState,
     exclusive_affinity: bool,
     runtime: Option<Box<RuntimePolicyState>>,
+    /// The hints the policy sends with the worker it books; see [`Self::with_hints`].
+    hints: Option<Arc<dyn HintEmitter>>,
 }
 
 impl WorkerSelectionPolicy {
@@ -210,6 +213,7 @@ impl WorkerSelectionPolicy {
             worker_label,
             exclusive_affinity: false,
             runtime: None,
+            hints: None,
             state: WorkerSelectionPolicyState::Composed(RefCell::new(ComposedPolicyState {
                 filters,
                 scorers,
@@ -248,9 +252,34 @@ impl WorkerSelectionPolicy {
         self.runtime = Some(Box::new(RuntimePolicyState::new(
             parameters,
             builder,
-            self.required_worker_inputs(),
+            self.required_worker_inputs() | self.hint_inputs(),
         )));
         self
+    }
+
+    /// Send KV hints with the worker this policy books: after the router books the pick, it
+    /// calls `emitter` once and sends its actions to the worker as one `KvHint`, numbered in
+    /// order. Hints go only to workers that advertise `router_hint`, and only on the KV path,
+    /// which is the one that books. An emitter that declares [`WorkerInputs::KV_COPY`] reads
+    /// the booked worker's copy source from its context.
+    ///
+    /// Hints are fixed when a partition is set up: a runtime-config rebuild (see
+    /// [`Self::with_runtime_config`]) must attach an emitter with the same inputs.
+    pub fn with_hints(mut self, emitter: Arc<dyn HintEmitter>) -> Self {
+        self.hints = Some(emitter);
+        self
+    }
+
+    /// The emitter attached with [`Self::with_hints`], if any.
+    pub fn hint_emitter(&self) -> Option<&Arc<dyn HintEmitter>> {
+        self.hints.as_ref()
+    }
+
+    /// The optional worker inputs the policy's hint emitter reads at booking; `NONE` without one.
+    pub fn hint_inputs(&self) -> WorkerInputs {
+        self.hints.as_ref().map_or(WorkerInputs::NONE, |emitter| {
+            emitter.required_worker_inputs()
+        })
     }
 
     /// Return the current complete parameters for this policy instance.
@@ -274,7 +303,7 @@ impl WorkerSelectionPolicy {
         // Hosts freeze these requirements when constructing their routing pipeline.
         if !runtime
             .available_inputs
-            .contains(replacement.required_worker_inputs())
+            .contains(replacement.required_worker_inputs() | replacement.hint_inputs())
             || self.exclusive_affinity != replacement.exclusive_affinity
             || self.worker_label != replacement.worker_label
         {
@@ -444,7 +473,8 @@ impl WorkerSelectionPolicy {
     }
 
     fn can_run_hosted(&self) -> bool {
-        if self.runtime.is_some() {
+        // Hints are sent at booking, which only the KV path does.
+        if self.runtime.is_some() || self.hints.is_some() {
             return false;
         }
         match &self.state {
@@ -471,6 +501,7 @@ impl WorkerSelectionPolicy {
             worker_label,
             exclusive_affinity: false,
             runtime: None,
+            hints: None,
             state: WorkerSelectionPolicyState::Reference(Box::new(kv_router_config), picker),
         }
     }

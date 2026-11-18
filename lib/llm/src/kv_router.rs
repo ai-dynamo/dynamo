@@ -19,7 +19,6 @@ use dynamo_kv_indexer::host::{
 };
 use dynamo_kv_router::config::{KvRouterConfig, min_initial_workers_from_env};
 use dynamo_kv_router::plugins::check_role;
-use dynamo_kv_router::plugins::hint_policy::HintPolicyFactory;
 use dynamo_kv_router::plugins::request_classifier::{RequestClassifier, RequestClassifierContext};
 #[cfg(test)]
 use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
@@ -79,7 +78,6 @@ pub use encoder_router::EncoderRouter;
 pub use indexer::Indexer;
 pub use prefill_router::PrefillRouter;
 pub(crate) use request_lease::RequestAttemptRelease;
-pub(crate) use routing_host::{EVERY_ROLE, check_hint_policies_route_on_kv_path};
 pub use routing_host::{
     KvPushRouter, LlmDispatch, MultimodalCache, RoutingHost, RoutingHostBuilder,
 };
@@ -176,14 +174,13 @@ impl SelectionPolicySource {
 /// the wrapped factory. This keeps the one-call-per-partition contract while
 /// letting the router read the inputs of the instance that actually serves.
 ///
-/// Preparing also resolves the role's hint policies and checks, with [`check_role`], that they
-/// fit the policy, so a bad combination fails when the router is built.
+/// Preparing also checks, with [`check_role`], that the policy fits the router, so a bad policy
+/// fails when the router is built.
 #[derive(Clone)]
 pub struct PreparedSelectionPolicy {
     factory: WorkerSelectionPolicyFactory,
     inputs: WorkerInputs,
     prepare_inputs: WorkerInputs,
-    hint_policies: HintPolicyFactory,
 }
 
 impl PreparedSelectionPolicy {
@@ -199,13 +196,7 @@ impl PreparedSelectionPolicy {
             dynamo_scheduler::host::WorkerSelector::<ModelRuntimeConfig>::required_worker_inputs(
                 &policy,
             );
-        let hint_policies = plugins::router_plugin_registry().resolve_hint_policies(config)?;
-        let prepare_inputs = check_role(
-            worker_type,
-            &policy,
-            hint_policies.instances(&SelectionConfig::from(config), worker_type, key.as_ref()),
-            config,
-        )?;
+        let prepare_inputs = check_role(worker_type, &policy, config)?;
         let slot = Arc::new(parking_lot::Mutex::new(Some(policy)));
         let factory: WorkerSelectionPolicyFactory = Arc::new(
             move |config: &SelectionConfig, worker_type, partition: RoutingPartitionRef<'_>| {
@@ -221,7 +212,6 @@ impl PreparedSelectionPolicy {
             factory,
             inputs,
             prepare_inputs,
-            hint_policies,
         })
     }
 
@@ -230,15 +220,10 @@ impl PreparedSelectionPolicy {
         self.inputs
     }
 
-    /// The worker inputs whose resources the router starts: the policy's, plus those of the
-    /// role's configured hint policies. Default hint policies add none.
+    /// The worker inputs whose resources the router starts: the policy's own, plus what its
+    /// hint emitter reads at booking.
     pub fn prepare_inputs(&self) -> WorkerInputs {
         self.prepare_inputs
-    }
-
-    /// The resolved hint policies the router's partitions run.
-    pub fn hint_policies(&self) -> &HintPolicyFactory {
-        &self.hint_policies
     }
 }
 
@@ -784,11 +769,10 @@ impl KvRouter {
             metric_worker_type,
             model_name.as_deref(),
         )?;
-        // A configured hint policy that reads KV copy sources starts the KV index even when the
-        // worker-selection policy does not read it.
+        // A hint emitter that reads KV copy sources starts the KV index even when the policy's
+        // scorers do not read it.
         let required_worker_inputs = prepared.inputs();
         let index_inputs = prepared.prepare_inputs();
-        let hint_policies = prepared.hint_policies().clone();
         let policy_factory = prepared.factory;
         // ModelManager gates client construction as well, but preserve the capability boundary for
         // direct KvRouter callers.
@@ -923,7 +907,6 @@ impl KvRouter {
                 endpoint: endpoint.clone(),
                 router_id: endpoint.drt().discovery().instance_id(),
                 policy_factory,
-                hint_policies,
             },
             workers_with_configs.clone(),
             Some(request_leases.replica_observer()),

@@ -17,15 +17,13 @@ use dynamo_kv_hashing::ExternalSequenceBlockHash;
 use dynamo_kv_hashing::routing::{
     BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
+use dynamo_kv_hints::KvHintAction;
 use dynamo_kv_indexer::KvIndexerInterface;
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::plugins::hint_policy::{
-    HintContext, HintPolicy, HintPolicyConstructor, HintPolicyError, HintPolicyFactory,
-    KvHintAction,
-};
 use dynamo_kv_router::plugins::worker_selection::{
-    Commitments, WorkerCandidates, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+    HintContext, HintEmitter, HintError, WorkerCandidates, WorkerInputView, WorkerInputs,
+    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
+    WorkerSelectionPolicyError,
 };
 use dynamo_kv_router::services::indexer::backend::Indexer;
 use dynamo_kv_router::services::selection::local_selection_core_with_host;
@@ -33,8 +31,8 @@ use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_scheduler::RoutingConstraints;
 use dynamo_scheduler::host::{
-    HostHints, HostLoad, PromptRequest, SelectAndReserveRequest, SelectionCacheConfig,
-    SelectionCore, SelectionHost, WorkerRequest,
+    HostLoad, PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, SelectionCore,
+    SelectionHost, WorkerRequest,
 };
 use dynamo_scheduler::{RejectThresholdsProvider, WorkerSelectionPolicyFactory};
 use dynamo_slot_tracker::BusyThresholds;
@@ -46,14 +44,15 @@ fn prompt_tokens() -> Vec<u32> {
     (1..=256).collect()
 }
 
-/// `hints` makes worker 1 hold the whole prompt so every booking on another
-/// worker computes a fetch hint from it.
+/// The reference policy sending [`CopySender`]'s fetches. `hints` makes worker 1 hold the whole
+/// prompt so every booking on another worker computes a fetch hint from it.
 fn reference_policy_factory() -> WorkerSelectionPolicyFactory {
     Arc::new(|config, role, _| {
         dynamo_worker_selection::WorkerSelectionPolicy::reference(
             config.clone(),
             role.default_selector_label(),
         )
+        .with_hints(Arc::new(CopySender))
     })
 }
 
@@ -118,26 +117,18 @@ impl WorkerPicker for LowestCostPicker {
     }
 }
 
-/// Sends the committed copy, or else the booked worker's best-effort copy source, as a fetch of
-/// the source's prefix blocks. It stands in for the builtin `kv_fetch`, which this crate cannot
-/// depend on: the router sends no fetch of its own.
+/// Sends the booked worker's copy source as a fetch of the source's prefix blocks. It stands in
+/// for the builtin `kv_fetch`, which this crate cannot depend on: the router sends no fetch of
+/// its own.
 struct CopySender;
 
-impl HintPolicy for CopySender {
+impl HintEmitter for CopySender {
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::KV_COPY
     }
 
-    fn commitments(&self) -> Commitments {
-        Commitments::KV_COPY
-    }
-
-    fn build_hints(&self, context: &HintContext<'_>) -> Result<Vec<KvHintAction>, HintPolicyError> {
-        let Some(locations) = context
-            .committed_kv_copy()
-            .or_else(|| context.kv_copy_source())
-            .and_then(|copy| context.kv_copy_locations(copy))
-        else {
+    fn emit(&self, context: &HintContext<'_>) -> Result<Vec<KvHintAction>, HintError> {
+        let Some(locations) = context.kv_copy_locations() else {
             return Ok(Vec::new());
         };
         Ok(vec![KvHintAction::unnumbered(
@@ -150,7 +141,7 @@ impl HintPolicy for CopySender {
                 ),
                 (
                     "block_hashes".to_string(),
-                    serde_json::json!(&locations.chain()[..locations.source_prefix_blocks()]),
+                    serde_json::json!(locations.fetchable_chain()),
                 ),
             ]
             .into(),
@@ -158,7 +149,7 @@ impl HintPolicy for CopySender {
     }
 }
 
-/// A core whose policy is [`CopyCreditScorer`] and whose hint policy is [`CopySender`].
+/// A core whose policy is [`CopyCreditScorer`] sending [`CopySender`]'s fetches.
 fn core_with_copy_credit(
     runtime: &tokio::runtime::Runtime,
     workers: u64,
@@ -171,6 +162,7 @@ fn core_with_copy_credit(
             vec![Box::new(CopyCreditScorer { copy_credit })],
             Box::new(LowestCostPicker),
         )
+        .with_hints(Arc::new(CopySender))
     });
     let core = local_selection_core_with_host(
         KvRouterConfig {
@@ -182,26 +174,11 @@ fn core_with_copy_credit(
         CancellationToken::new(),
         SelectionCacheConfig::default(),
         policy,
-        copy_sender_host(),
+        SelectionHost::default(),
     )
     .expect("core");
     upsert_workers(runtime, &core, workers, true, true);
     core
-}
-
-/// A host whose only hint policy is [`CopySender`].
-fn copy_sender_host() -> SelectionHost {
-    let hints = HintPolicyFactory::for_all_roles([(
-        "copy".to_string(),
-        HintPolicyConstructor::shared(CopySender),
-    )])
-    .expect("hint policies");
-    SelectionHost {
-        hints: HostHints {
-            policies: Some(hints),
-        },
-        ..Default::default()
-    }
 }
 
 fn core_with_workers(
@@ -237,7 +214,7 @@ fn core_with_config(
         CancellationToken::new(),
         SelectionCacheConfig::default(),
         reference_policy_factory(),
-        copy_sender_host(),
+        SelectionHost::default(),
     )
     .expect("core");
     upsert_workers(runtime, &core, workers, hints, true);
