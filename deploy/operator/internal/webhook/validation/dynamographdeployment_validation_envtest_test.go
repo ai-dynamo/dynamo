@@ -2212,11 +2212,28 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: checkpointWorkerDGDForAdmission([]string{"/bin/sh", "-c"}, []string{"python3 -m dynamo.vllm"}, func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental.Checkpoint.TargetContainerName = "helper"
 				worker.PodTemplate.Spec.Containers = append(worker.PodTemplate.Spec.Containers, corev1.Container{
-					Name: "helper", Image: "registry.example/helper:1.0.0", Command: []string{"/bin/sh", "-c"}, Args: []string{"exec python3 -m my_worker"},
+					Name: "helper", Image: "registry.example/helper:1.0.0", Command: []string{"/bin/sh", "-c"}, Args: []string{"python3 -m dynamo.vllm"},
 				})
 			}),
 			wantWebhookErrs: []string{
 				unsupportedRestoreLaunchError("spec.components[1].podTemplate.spec.containers[1].command", "helper", "main", ""),
+			},
+		},
+		{
+			name:               "an unrenderable restore launch survives a replica update",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.sglang"}, nil, nil),
+			deployment: checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.sglang"}, nil, func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Replicas = new(int32(3))
+			}),
+		},
+		{
+			name:               "changing an unrenderable restore launch is rejected even when the old one failed the same way",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.sglang"}, nil, nil),
+			deployment:         checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.sglang"}, []string{"--model-path", "other"}, nil),
+			wantWebhookErrs: []string{
+				`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: failed to determine backend framework for component worker: backend framework mismatch: detected "sglang" from command but explicitly configured as "vllm"`,
 			},
 		},
 		{

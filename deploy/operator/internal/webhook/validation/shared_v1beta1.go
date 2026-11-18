@@ -146,6 +146,7 @@ type sharedValidation struct {
 	ctx                                context.Context
 	mgr                                ctrl.Manager
 	operatorConfig                     *configv1alpha1.OperatorConfiguration
+	restoreReader                      *memoReader
 	warnings                           admission.Warnings
 	runtimeVersionSource               runtimeVersionValidationSource
 	ratchetRuntimeVersion              bool
@@ -357,7 +358,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	// Reject a checkpoint-enabled DGD whose rendered restore launch is not a direct python -m.
 	// An update keeps an existing violation only when its rendered launch is unchanged.
 	if options.restoreLaunchDGD != nil && dynamo.GetCheckpoint(spec) != nil && !spec.IsLPX() {
-		reader := v.mgr.GetAPIReader()
+		reader := v.restoreLaunchReader()
 		launches, err := renderRestoreLaunches(v.ctx, reader, v.operatorConfig, options.restoreLaunchDGD, spec, options.grovePathway)
 		var oldLaunches []restoreLaunch
 		var oldErr error
@@ -365,22 +366,20 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		if hasOld {
 			oldLaunches, oldErr = renderRestoreLaunches(v.ctx, reader, v.operatorConfig, options.oldRestoreLaunchDGD, options.oldComponent, options.grovePathway)
 		}
-		if err != nil {
-			// An underivable launch never passes; report it unless an earlier error explains it
-			// or the old object failed the same way.
-			if len(allErrs) == 0 && (!hasOld || oldErr == nil || oldErr.Error() != err.Error()) {
-				allErrs = append(allErrs, field.Forbidden(
-					fldPath.Child("experimental", "checkpoint"),
-					fmt.Sprintf("cannot determine the rendered restore launch: %v", err),
-				))
+		// An underivable launch is rejected unless an earlier error already explains it, or the update
+		// leaves the component's render inputs unchanged and the old object failed the same way.
+		if err != nil && !renderErrorExplained(allErrs, err) && (!hasOld || oldErr == nil || oldErr.Error() != err.Error() ||
+			!restoreRenderInputsUnchanged(options.oldRestoreLaunchDGD, options.restoreLaunchDGD, options.oldComponent, spec)) {
+			allErrs = append(allErrs, field.Forbidden(
+				fldPath.Child("experimental", "checkpoint"),
+				fmt.Sprintf("cannot determine the rendered restore launch: %v", err),
+			))
+		}
+		for _, launch := range launches {
+			if checkpoint.HasSupportedRestoreEntrypoint(&launch.container) || hasUnchangedRestoreLaunch(oldLaunches, launch) {
+				continue
 			}
-		} else {
-			for _, launch := range launches {
-				if checkpoint.HasSupportedRestoreEntrypoint(&launch.container) || hasUnchangedRestoreLaunch(oldLaunches, launch) {
-					continue
-				}
-				allErrs = append(allErrs, field.Forbidden(restoreLaunchPath(spec, launch, fldPath), unsupportedRestoreLaunchDetail(launch)))
-			}
+			allErrs = append(allErrs, field.Forbidden(restoreLaunchPath(spec, launch, fldPath), unsupportedRestoreLaunchDetail(launch)))
 		}
 	}
 

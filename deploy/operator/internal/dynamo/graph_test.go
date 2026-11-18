@@ -4706,7 +4706,10 @@ func TestPrepareDGDComponentMainContainers_MatchesRendering(t *testing.T) {
 		specAnnotations map[string]string
 		nodeCount       int32
 		args            []string
-		wantShell       map[Role]bool
+		interPodGMS     bool
+		// mixedBackends omits spec.backendFramework and adds a vLLM worker next to the tested one.
+		mixedBackends bool
+		wantShell     map[Role]bool
 	}{
 		{
 			name:           "Grove multinode TP over DRA GPUs uses the Ray shell launch",
@@ -4756,6 +4759,23 @@ func TestPrepareDGDComponentMainContainers_MatchesRendering(t *testing.T) {
 			args:           []string{"-m", "dynamo.vllm", enableElasticEPFlag, dataParallelBackendFlag, dataParallelBackendRay},
 			wantShell:      map[Role]bool{RoleMain: true},
 		},
+		{
+			name:           "Grove multinode inter-pod GMS uses the rank-aware launch",
+			deploymentType: commonconsts.MultinodeDeploymentTypeGrove,
+			annotations:    map[string]string{commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp"},
+			nodeCount:      2,
+			args:           []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "2"},
+			interPodGMS:    true,
+			wantShell:      map[Role]bool{RoleLeader: false, RoleWorker: false},
+		},
+		{
+			name:           "LWS custom worker takes the graph-wide vLLM backend of its DCD",
+			deploymentType: commonconsts.MultinodeDeploymentTypeLWS,
+			nodeCount:      1,
+			args:           []string{"-m", "my_worker", enableElasticEPFlag, dataParallelBackendFlag, dataParallelBackendRay},
+			mixedBackends:  true,
+			wantShell:      map[Role]bool{RoleMain: true},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -4792,6 +4812,18 @@ func TestPrepareDGDComponentMainContainers_MatchesRendering(t *testing.T) {
 			if tt.nodeCount > 1 {
 				dgd.Spec.Components[0].Multinode = &v1beta1.MultinodeSpec{NodeCount: tt.nodeCount}
 			}
+			if tt.interPodGMS {
+				dgd.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{
+					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeInterPod},
+				}
+			}
+			if tt.mixedBackends {
+				dgd.Spec.BackendFramework = ""
+				vllmWorker := dgd.Spec.Components[0].DeepCopy()
+				vllmWorker.ComponentName = "vllm"
+				vllmWorker.PodTemplate.Spec.Containers[0].Args = []string{"-m", "dynamo.vllm"}
+				dgd.Spec.Components = append(dgd.Spec.Components, *vllmWorker)
+			}
 			operatorConfig := &configv1alpha1.OperatorConfiguration{}
 			component := &dgd.Spec.Components[0]
 			roles := expandRolesForComponent(component.ComponentName, component.Replicas, component.GetNumberOfNodes(), component)
@@ -4811,8 +4843,11 @@ func TestPrepareDGDComponentMainContainers_MatchesRendering(t *testing.T) {
 			} else {
 				children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
 				require.NoError(t, err)
-				require.Len(t, children, 1)
+				require.Len(t, children, len(dgd.Spec.Components))
 				for _, dcd := range children {
+					if dcd.Spec.ComponentName != component.ComponentName {
+						continue
+					}
 					backendFramework, err := GetBackendFrameworkFromDynamoComponent(dcd)
 					require.NoError(t, err)
 					containerGPUs := sync.OnceValues(func() (int64, error) {
@@ -4830,9 +4865,15 @@ func TestPrepareDGDComponentMainContainers_MatchesRendering(t *testing.T) {
 			prepared, err := PrepareDGDComponentMainContainers(context.Background(), kubeClient, dgd, component, operatorConfig, tt.deploymentType)
 			require.NoError(t, err)
 
-			t.Log("Verify each role's prepared launch equals the rendered Pod launch")
-			require.Len(t, prepared, len(roles))
-			for i, role := range roles {
+			t.Log("Verify each engine role's prepared launch equals the rendered Pod launch")
+			var engineRoles []ServiceRole
+			for _, role := range roles {
+				if role.Role != RoleGMS && !slices.ContainsFunc(engineRoles, func(r ServiceRole) bool { return r.Role == role.Role }) {
+					engineRoles = append(engineRoles, role)
+				}
+			}
+			require.Len(t, prepared, len(engineRoles))
+			for i, role := range engineRoles {
 				want, ok := rendered[role.Role]
 				require.True(t, ok, "role %s was not rendered", role.Role)
 				got := prepared[i]
@@ -12405,4 +12446,14 @@ func TestDetectBackendFrameworkDoesNotMutateCommand(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, BackendFrameworkVLLM, backend)
 	assert.Equal(t, []string{"python3", "unchanged"}, backing)
+}
+
+func TestUpdateDynDeploymentConfigBytes_NullEntry(t *testing.T) {
+	for _, tt := range []struct{ config, serviceName string }{
+		{config: `{"frontend":null}`, serviceName: "frontend"},
+		{config: `{"Frontend":null}`, serviceName: "frontend-svc"},
+	} {
+		_, err := updateDynDeploymentConfigBytes([]byte(tt.config), tt.serviceName, 8000)
+		assert.ErrorContains(t, err, "must be an object", "config %s", tt.config)
+	}
 }

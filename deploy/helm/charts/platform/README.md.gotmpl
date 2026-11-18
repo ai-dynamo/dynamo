@@ -124,11 +124,14 @@ checkpoint-enabled DGD is also rejected when admission cannot render the launch,
 GPU `ResourceClaimTemplate` does not exist yet.
 
 **Action:** Set `command` to a direct `python -m <module>` launch, or disable checkpointing for the
-component.
+component. If the operator wraps the launch in a shell for Ray, also change the Ray settings that
+cause the wrapper; changing `command` alone does not help. If the launch cannot be rendered because
+a GPU `ResourceClaimTemplate` is missing, create the template before you apply the DGD.
 
 **Existing deployments:** An update that leaves the rendered restore launch unchanged is still
-accepted, for example a `replicas` change. An update that enables checkpointing, changes an
-unsupported launch, or moves the restore to another unsupported container is rejected.
+accepted, for example a `replicas` change. An update is rejected when it enables checkpointing with
+an unsupported launch, changes an unsupported launch to another unsupported launch, or moves the
+restore to another unsupported container.
 
 #### Operator behavior breaking changes
 

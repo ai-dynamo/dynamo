@@ -20,7 +20,9 @@ package validation
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -36,6 +38,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/santhosh-tekuri/jsonschema/v6/kind"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
@@ -514,6 +517,7 @@ type restoreLaunch struct {
 }
 
 // renderRestoreLaunches returns each restore destination's launch, in role order, as the operator renders it.
+// A role whose destination cannot be rendered is reported in the error, and the other roles' launches are still returned.
 // ctx, reader, operatorConfig, dgd, and component must be non-nil.
 func renderRestoreLaunches(
 	ctx context.Context,
@@ -540,10 +544,12 @@ func renderRestoreLaunches(
 	}
 
 	launches := make([]restoreLaunch, 0, len(mains))
+	var errs []error
 	for _, main := range mains {
 		effective, err := dynamo.EffectiveComponentForRole(component, main.Role)
 		if err != nil {
-			return nil, err
+			errs = append(errs, err)
+			continue
 		}
 		var authored *corev1.Container
 		if effective.PodTemplate != nil {
@@ -556,7 +562,8 @@ func renderRestoreLaunches(
 		launch := main.Container
 		if target != consts.MainContainerName {
 			if authored == nil {
-				return nil, fmt.Errorf("restore destination container %q not found in role %s", target, main.Role)
+				errs = append(errs, fmt.Errorf("restore destination container %q not found in role %s", target, main.Role))
+				continue
 			}
 			launch = *authored
 		}
@@ -566,7 +573,7 @@ func renderRestoreLaunches(
 			authored:  authored,
 		})
 	}
-	return launches, nil
+	return launches, errors.Join(errs...)
 }
 
 // hasUnchangedRestoreLaunch reports whether old holds the same destination with
@@ -622,4 +629,74 @@ func unsupportedRestoreLaunchDetail(launch restoreLaunch) string {
 		detail += "; the operator rewrote the authored command into this form"
 	}
 	return detail
+}
+
+// restoreLaunchReader returns the request's API reader that memoizes Gets, creating it on first use.
+func (v *sharedValidation) restoreLaunchReader() *memoReader {
+	if v.restoreReader == nil {
+		v.restoreReader = newMemoReader(v.mgr.GetAPIReader())
+	}
+	return v.restoreReader
+}
+
+// renderErrorExplained reports whether an error already in allErrs states the cause of a render failure.
+func renderErrorExplained(allErrs field.ErrorList, renderErr error) bool {
+	return slices.ContainsFunc(allErrs, func(e *field.Error) bool {
+		return e.Detail != "" && strings.Contains(renderErr.Error(), e.Detail)
+	})
+}
+
+// restoreRenderInputsUnchanged reports whether an update leaves everything that renders the
+// component's restore launch unchanged: the component apart from replicas, and its DGD's
+// annotations and graph-wide spec. All arguments must be non-nil.
+func restoreRenderInputsUnchanged(
+	oldDGD, dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	oldComponent, component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) bool {
+	oldSpec, spec := oldDGD.Spec, dgd.Spec
+	oldSpec.Components, spec.Components = nil, nil
+	oldShared, shared := *oldComponent, *component
+	oldShared.Replicas, shared.Replicas = nil, nil
+	return apiequality.Semantic.DeepEqual(oldShared, shared) &&
+		apiequality.Semantic.DeepEqual(oldDGD.Annotations, dgd.Annotations) &&
+		apiequality.Semantic.DeepEqual(oldSpec, spec)
+}
+
+// memoReader serves repeated Gets of the same object from the first read, so
+// the old and new restore launches of one request see the same dependencies.
+type memoReader struct {
+	client.Reader
+	gets map[memoKey]memoResult
+}
+
+type memoKey struct {
+	kind string
+	key  client.ObjectKey
+}
+
+type memoResult struct {
+	obj client.Object
+	err error
+}
+
+func newMemoReader(reader client.Reader) *memoReader {
+	return &memoReader{Reader: reader, gets: map[memoKey]memoResult{}}
+}
+
+// Get implements client.Reader.
+func (r *memoReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	k := memoKey{kind: fmt.Sprintf("%T", obj), key: key}
+	if cached, ok := r.gets[k]; ok {
+		if cached.err == nil {
+			reflect.ValueOf(obj).Elem().Set(reflect.ValueOf(cached.obj.DeepCopyObject()).Elem())
+		}
+		return cached.err
+	}
+	err := r.Reader.Get(ctx, key, obj, opts...)
+	result := memoResult{err: err}
+	if err == nil {
+		result.obj = obj.DeepCopyObject().(client.Object)
+	}
+	r.gets[k] = result
+	return err
 }

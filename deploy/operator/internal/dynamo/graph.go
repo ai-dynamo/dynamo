@@ -710,10 +710,16 @@ func updateDynDeploymentConfigBytes(rawConfig []byte, serviceName string, newPor
 		return nil, err
 	}
 	if frontend, ok := config[serviceName]; ok {
+		if frontend == nil {
+			return nil, fmt.Errorf("deployment config entry %q must be an object", serviceName)
+		}
 		frontend["port"] = newPort
 	} else {
 		for name, frontend := range config {
 			if strings.EqualFold(name, commonconsts.ComponentTypeFrontend) {
+				if frontend == nil {
+					return nil, fmt.Errorf("deployment config entry %q must be an object", name)
+				}
 				frontend["port"] = newPort
 				break
 			}
@@ -1412,7 +1418,7 @@ func expandSingleNodeGMSRoles(componentName string, totalEnginePods int32) []Ser
 }
 
 func expandMultinodeGMSRoles(componentName string, numberOfNodes int32, totalEnginePods int32) []ServiceRole {
-	roles := make([]ServiceRole, 0, numberOfNodes*2)
+	roles := make([]ServiceRole, 0, int(numberOfNodes)*2)
 	for rank := range numberOfNodes {
 		gmsName := fmt.Sprintf("%s-%s-%d", componentName, commonconsts.GroveRoleSuffixGMS, rank)
 		roles = append(roles, ServiceRole{Name: gmsName, Role: RoleGMS, Replicas: 1, Rank: rank})
@@ -2436,12 +2442,23 @@ func PrepareDGDComponentMainContainers(
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 ) ([]RoleMainContainer, error) {
-	backendFramework, err := getBackendFrameworkFromComponent(component, dgd)
+	grove := multinodeDeploymentType == commonconsts.MultinodeDeploymentTypeGrove
+
+	// Grove resolves each component's backend; other providers render generated DCDs, which carry the graph-wide backend.
+	explicitBackend := dgd.Spec.BackendFramework
+	if !grove {
+		graphBackend, err := backendFrameworkForGeneratedDCDs(dgd)
+		if err != nil {
+			return nil, err
+		}
+		explicitBackend = graphBackend
+	}
+	backendFramework, err := determineBackendFrameworkForComponent(component, explicitBackend)
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine backend framework for component %s: %w", component.ComponentName, err)
 	}
 	numberOfNodes := component.GetNumberOfNodes()
-	grove := multinodeDeploymentType == commonconsts.MultinodeDeploymentTypeGrove
+	interPodGMSMultinode := grove && component.IsInterPodGMSEnabled() && numberOfNodes > 1
 
 	// Non-Grove providers apply DGD defaults once, before selecting a role.
 	source := component
@@ -2452,9 +2469,10 @@ func PrepareDGDComponentMainContainers(
 		}
 	}
 
+	// Two nodes already yield every role, so a large nodeCount does not expand one entry per rank.
 	// Engine roles only: inter-pod GMS weight servers have no engine launch.
 	var prepared []RoleMainContainer
-	for _, serviceRole := range expandRolesForComponent(component.ComponentName, component.Replicas, numberOfNodes, component) {
+	for _, serviceRole := range expandRolesForComponent(component.ComponentName, component.Replicas, min(numberOfNodes, 2), component) {
 		role := serviceRole.Role
 		if role == RoleGMS || slices.ContainsFunc(prepared, func(p RoleMainContainer) bool { return p.Role == role }) {
 			continue
@@ -2482,6 +2500,12 @@ func PrepareDGDComponentMainContainers(
 			applyDGDTemplateDefaults(effective, dgd, nil, nativeSidecar)
 		}
 
+		// Grove renders multinode inter-pod GMS engines with a rank-aware deployer.
+		var deployer MultinodeDeployer
+		if interPodGMSMultinode {
+			deployer = &GroveMultinodeDeployer{IsInterPodGMS: true, Rank: serviceRole.Rank}
+		}
+
 		main, err := prepareMainContainer(
 			effective,
 			backendFramework,
@@ -2492,7 +2516,7 @@ func PrepareDGDComponentMainContainers(
 			operatorConfig,
 			multinodeDeploymentType,
 			component.ComponentName,
-			nil,
+			deployer,
 			ComponentDefaultsFactory(string(effective.ComponentType)),
 			ownership,
 			nativeSidecar,
