@@ -1482,8 +1482,6 @@ pub mod scheduling {
         pub type WorkerSelectionPolicy = dynamo_worker_selection::WorkerSelectionPolicy;
         pub use dynamo_scheduler::WorkerSelector;
     }
-
-    pub use dynamo_scheduler::AccountingAttribution;
     pub use dynamo_scheduler::AdmissionAttempt;
     #[deprecated(
         since = "1.8.0",

@@ -56,9 +56,7 @@ pub use dynamo_router_protocol::identity::{RoutingPartitionId, RoutingPartitionR
 pub use dynamo_router_protocol::session::{SessionContext, WorkerSelectionInputTrigger};
 pub use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 pub use dynamo_scheduler::OverlapSignals;
-pub use dynamo_scheduler::{
-    AccountingAttribution, KvSchedulerError, ScheduleMode, SchedulingRequest, WorkerIdSet,
-};
+pub use dynamo_scheduler::{KvSchedulerError, ScheduleMode, SchedulingRequest, WorkerIdSet};
 pub use dynamo_scheduler::{RoutingConstraints, WorkerConfigLike, WorkerSelectionResult};
 pub use dynamo_session_affinity::{
     MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES, WorkerAffinityTarget,

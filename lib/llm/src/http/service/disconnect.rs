@@ -399,14 +399,15 @@ fn openai_semantic_stream_error(error: &DynamoError) -> (ErrorType, String) {
         ),
     };
     let message = error.public_message().unwrap_or(message);
-    let error_type = if status == crate::http::service::error::overload_status_code() {
+    let error_type = if error.class() == dynamo_runtime::error::ErrorClass::CapacityExhausted {
         "service_unavailable"
     } else {
         match status {
             StatusCode::BAD_REQUEST
             | StatusCode::CONFLICT
             | StatusCode::PAYLOAD_TOO_LARGE
-            | StatusCode::UNSUPPORTED_MEDIA_TYPE => "invalid_request_error",
+            | StatusCode::UNSUPPORTED_MEDIA_TYPE
+            | StatusCode::UNPROCESSABLE_ENTITY => "invalid_request_error",
             StatusCode::UNAUTHORIZED => "authentication_error",
             StatusCode::FORBIDDEN => "permission_error",
             StatusCode::NOT_FOUND => "not_found_error",
@@ -1316,6 +1317,66 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn invalid_request_stream_error_uses_class_status_and_validation_type() {
+        let error: DynamoError = serde_json::from_value(serde_json::json!({
+            "class": "InvalidRequest",
+            "error_type": "InvalidArgument",
+            "reason": "request.invalid_argument",
+            "diagnostic": "private token=secret",
+        }))
+        .unwrap();
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["error"]["code"], 400);
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert!(!body.to_string().contains("secret"));
+    }
+
+    fn single_test_succeeded(output: &std::process::Output) -> bool {
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .contains("test result: ok. 1 passed; 0 failed; 0 ignored;")
+    }
+
+    #[test]
+    fn invalid_request_stream_error_remains_validation_when_overload_status_is_400() {
+        const ISOLATED: &str = "DYNAMO_TEST_VALIDATION_STATUS_COLLISION";
+        if std::env::var_os(ISOLATED).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "http::service::disconnect::tests::invalid_request_stream_error_remains_validation_when_overload_status_is_400"])
+                .env(ISOLATED, "1")
+                .env("DYN_HTTP_OVERLOAD_STATUS_CODE", "400")
+                .output()
+                .unwrap();
+            assert!(
+                single_test_succeeded(&output),
+                "stdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        for (class, reason, expected) in [
+            (
+                dynamo_runtime::error::ErrorClass::InvalidRequest,
+                dynamo_runtime::error::ErrorReason::new("request.invalid_argument").unwrap(),
+                "invalid_request_error",
+            ),
+            (
+                dynamo_runtime::error::ErrorClass::CapacityExhausted,
+                dynamo_runtime::error::ErrorReason::new("capacity.exhausted").unwrap(),
+                "service_unavailable",
+            ),
+        ] {
+            let error = DynamoError::builder().class(class).reason(reason).build();
+            let (_, body) = openai_semantic_stream_error(&error);
+            let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(body["error"]["code"], 400);
+            assert_eq!(body["error"]["type"], expected);
+        }
     }
 
     #[test]

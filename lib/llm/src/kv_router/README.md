@@ -152,6 +152,7 @@ errors, which return to the client.
 | Tokens, multimodal block info | `PreprocessedRequest::block_mm_routing_info` |
 | Pins, DP ranks, priority, LoRA, cache namespace, constraints, allowed workers | `PreprocessedRequest::routing` (`RoutingHints`), from `nvext` and `x-dynamo-*` headers |
 | Scoring and accounting overrides | `PreprocessedRequest::router_config_override` |
+| Per-adapter demand label | Resolved by the LLM host independently of routing identity; runtime adapters use `None`, while legacy adapters retain their name. The Runtime EPP keeps the prompt-name default. |
 | Aggregated prompt-logprob cache credit | `output_options.prompt_logprobs`: when present, including zero, selection conservatively counts the full prompt without cache credit |
 | Excluded workers, parked classifier lifecycle | `PreprocessedRequest::migration_state` |
 | Staged KV that only this decode can release | `PreprocessedRequest::staged_kv_cleanup` |

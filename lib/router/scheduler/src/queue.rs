@@ -3073,9 +3073,7 @@ impl<
             expected_output_tokens: request.expected_output_tokens,
             prefill_load_hint,
             worker: selected.selection.worker,
-            lora_name: request
-                .accounting_attribution
-                .accounting_name(request.lora_name.take()),
+            lora_name: request.lora_name.take(),
         };
         self.book_and_respond(
             context,
@@ -4123,7 +4121,6 @@ mod tests {
     ) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = SchedulingRequest {
-            accounting_attribution: Default::default(),
             mode: ScheduleMode::Tracked {
                 request_id: request_id.to_string(),
             },
@@ -7172,6 +7169,38 @@ mod tests {
             pinned_rx.await.unwrap(),
             Err(KvSchedulerError::NoEndpoints)
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn disjoint_allowed_and_available_workers_reject_without_booking() {
+        let available_worker_provider: WorkerAvailabilityProvider =
+            Arc::new(|_| Some(Arc::new(HashSet::from([1]))));
+        let (queue, slots) =
+            make_queue_with_providers(2, 16, 256, None, Some(available_worker_provider));
+
+        for pinned in [false, true] {
+            let request_id = format!("disjoint-{pinned}");
+            let (mut request, response_rx) = make_request(&request_id, 256);
+            request.allowed_worker_ids = Some(HashSet::from([0]));
+            request.pinned_worker = pinned.then(|| WorkerWithDpRank::from_worker_id(0));
+            queue.enqueue(request).await;
+
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(5), response_rx)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                Err(KvSchedulerError::NoEndpoints)
+            ));
+            assert!(slots.request_booking(&request_id).is_none());
+            assert!(
+                slots
+                    .active_request_counts()
+                    .values()
+                    .all(|&count| count == 0)
+            );
+            assert_eq!(queue.pending_count(), 0);
+        }
     }
 
     #[tokio::test]

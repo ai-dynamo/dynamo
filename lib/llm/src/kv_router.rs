@@ -1322,7 +1322,7 @@ impl KvRouter {
             router_config_override,
             update_states,
             return_routing_hashes,
-            lora_name,
+            lora_name.as_deref(),
             cache_namespace,
             priority_jump,
             strict_priority,
@@ -1334,7 +1334,7 @@ impl KvRouter {
             allowed_worker_ids,
             routing_constraints,
             FindBestMatchAdmission::WithAdmission,
-            Default::default(),
+            lora_name.as_deref(),
             false,
         )
         .await
@@ -1349,7 +1349,7 @@ impl KvRouter {
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         return_routing_hashes: bool,
-        lora_name: Option<String>,
+        lora_name: Option<&str>,
         cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
@@ -1361,7 +1361,7 @@ impl KvRouter {
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
         admission: FindBestMatchAdmission,
-        accounting_attribution: dynamo_scheduler::host::AccountingAttribution,
+        accounting_lora_name: Option<&str>,
         needs_uncached_prefill: bool,
     ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         let start = Instant::now();
@@ -1395,7 +1395,6 @@ impl KvRouter {
             .selection
             .run_selection(
                 SelectionOperation {
-                    accounting_attribution,
                     key: self.selection.partition_key().clone(),
                     prompt: PromptView {
                         token_ids: Some(tokens),
@@ -1404,7 +1403,7 @@ impl KvRouter {
                         block_hashes: None,
                         sequence_hashes: None,
                         isl_tokens: None,
-                        lora_name: lora_name.as_deref(),
+                        lora_name,
                         cache_namespace: cache_namespace.as_deref(),
                         is_eagle: Some(self.is_eagle),
                     },
@@ -1426,6 +1425,7 @@ impl KvRouter {
                     replay_id: None,
                 },
                 !needs_uncached_prefill,
+                accounting_lora_name,
             )
             .await;
         if lookup.is_some_and(|lookup| lookup.shared_cache_error)

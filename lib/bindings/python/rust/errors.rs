@@ -341,7 +341,8 @@ pub fn _raise_routed_http_error(code: u16, message: String, routed_engine: bool)
 /// is preserved, but client renderers use the class catalog unless the message
 /// is allowlisted or the producer raised an explicitly public Dynamo exception.
 /// The allowlist is an exact match: a longer message that begins with an
-/// allowed sentence stays private.
+/// allowed sentence stays private. Exact registered runtime LoRA status/symbol
+/// pairs are also public.
 pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, String)> {
     let value = err.value(py);
     let code = value
@@ -396,6 +397,7 @@ pub(crate) fn http_like_error_to_dynamo(py: Python<'_>, err: &PyErr) -> Option<D
 const PUBLIC_HTTP_MESSAGES: &[&str] = &["Unsupported video media"];
 
 fn build_http_like_error(code: u16, message: String) -> DynamoError {
+    let public = dynamo_llm::lora::runtime::public_error_code(code, &message);
     let legacy_message = serde_json::json!({
         "message": &message,
         "code": code,
@@ -405,7 +407,9 @@ fn build_http_like_error(code: u16, message: String) -> DynamoError {
     let mut builder = DynamoError::builder()
         .class(error_class_for_http_status(code))
         .diagnostic(legacy_message);
-    if PUBLIC_HTTP_MESSAGES.contains(&message.as_str()) {
+    if let Some(public) = public {
+        builder = builder.public_message(public);
+    } else if PUBLIC_HTTP_MESSAGES.contains(&message.as_str()) {
         builder = builder.public_message(message);
     }
     builder.build()
@@ -554,9 +558,15 @@ mod tests {
     #[test]
     fn http_like_errors_support_semantic_and_legacy_readers() {
         for (code, expected_class) in [
+            (400, ErrorClass::InvalidRequest),
+            (404, ErrorClass::NotFound),
             (409, ErrorClass::Conflict),
             (415, ErrorClass::UnsupportedMedia),
+            (422, ErrorClass::InvalidRequest),
+            (429, ErrorClass::RateLimited),
             (503, ErrorClass::Unavailable),
+            (504, ErrorClass::DeadlineExceeded),
+            (500, ErrorClass::Internal),
         ] {
             let error = build_http_like_error(code, "private backend detail".to_string());
             assert_eq!(error.class(), expected_class);
@@ -588,5 +598,26 @@ mod tests {
         );
         assert_eq!(prefixed.class(), ErrorClass::UnsupportedMedia);
         assert_eq!(prefixed.public_message(), None);
+    }
+
+    #[test]
+    fn runtime_public_symbols_are_exact_and_preserve_legacy_status() {
+        for (status, symbol, public) in [
+            (404, "lora_not_found", Some("lora_not_found")),
+            (422, "invalid_lora_adapter", Some("invalid_lora_adapter")),
+            (500, "lora_plugin_error", Some("lora_plugin_error")),
+            (400, "lora_not_found", None),
+            (503, "lora_resolver_unavailable token=secret", None),
+        ] {
+            let error = build_http_like_error(status, symbol.to_string());
+            assert_eq!(error.public_message(), public);
+            let wire = serde_json::to_value(&error).unwrap();
+            let semantic: DynamoError = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(semantic.public_message(), public);
+            let legacy: LegacyDynamoError = serde_json::from_value(wire).unwrap();
+            let payload: LegacyHttpError = serde_json::from_str(&legacy.message).unwrap();
+            assert_eq!(payload.code, status);
+            assert_eq!(payload.message, symbol);
+        }
     }
 }

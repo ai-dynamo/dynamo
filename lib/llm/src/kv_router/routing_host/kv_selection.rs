@@ -90,7 +90,7 @@ pub(super) struct SelectionOptions {
 }
 
 struct BestMatchArgs<'a> {
-    accounting_attribution: dynamo_scheduler::host::AccountingAttribution,
+    accounting_lora_name: Option<&'a str>,
     context_id: &'a str,
     routing_parts: RoutingRequestParts<'a>,
     router_config_override: Option<&'a RouterConfigOverride>,
@@ -156,7 +156,7 @@ impl RoutingHost {
                 args.router_config_override,
                 args.update_states,
                 args.return_routing_hashes,
-                args.lora_name,
+                args.lora_name.as_deref(),
                 args.cache_namespace,
                 args.priority_jump,
                 args.strict_priority,
@@ -168,7 +168,7 @@ impl RoutingHost {
                 args.allowed_worker_ids,
                 args.routing_constraints,
                 args.admission,
-                args.accounting_attribution,
+                args.accounting_lora_name,
                 args.needs_uncached_prefill,
             )
             .await?;
@@ -217,6 +217,8 @@ impl RoutingHost {
         let routing = request.routing.as_ref();
         let explicit_pin = pinned_worker_hint(phase, routing);
         let lora_name = routing.and_then(|routing| routing.lora_name.clone());
+        let accounting_lora_name =
+            crate::routing_policy::execution_requirements(request).accounting_lora_name;
         let cache_namespace = routing.and_then(|routing| routing.cache_namespace.clone());
         let priority_jump = routing
             .and_then(|routing| routing.priority_jump)
@@ -344,8 +346,7 @@ impl RoutingHost {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let selection = self
                 .select_best_match(BestMatchArgs {
-                    accounting_attribution: crate::routing_policy::execution_requirements(request)
-                        .accounting_attribution,
+                    accounting_lora_name,
                     context_id,
                     routing_parts,
                     router_config_override: request.router_config_override.as_ref(),
@@ -415,8 +416,7 @@ impl RoutingHost {
         );
 
         self.select_best_match(BestMatchArgs {
-            accounting_attribution: crate::routing_policy::execution_requirements(request)
-                .accounting_attribution,
+            accounting_lora_name,
             context_id,
             routing_parts,
             router_config_override: request.router_config_override.as_ref(),
