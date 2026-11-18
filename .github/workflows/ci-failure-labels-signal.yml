@@ -46,22 +46,28 @@ jobs:
             echo "::notice::CI failure-labels webhook secrets are not set; skipping."
             exit 0
           fi
-          created_since=$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)
+          # Re-runs keep their original created_at, so look back 7 days for failed runs and
+          # 24 hours for startup_failure (not a valid status filter); keep the recently updated ones.
+          week=$(date -u -d '-7 days' +%Y-%m-%dT%H:%M:%SZ)
+          day=$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)
           updated_since=$(date -u -d '-3 hours' +%Y-%m-%dT%H:%M:%SZ)
           for wf in pr.yaml pre-merge.yml post-merge-ci.yml nightly-ci.yml; do
-            gh api --paginate \
-              "repos/${GITHUB_REPOSITORY}/actions/workflows/${wf}/runs?status=completed&per_page=100&created=>=${created_since}" \
-              --jq '.workflow_runs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "startup_failure")'
-          done | jq -sc --arg since "${updated_since}" --arg repo "${GITHUB_REPOSITORY}" '{
-              kind: "ci-failure-batch",
-              repo: $repo,
-              runs: ([.[] | select(.updated_at >= $since)
-                      | {id, run_attempt, name, path, event, head_branch, head_sha, conclusion, updated_at,
-                         pull_requests: [.pull_requests[].number]}]
-                     | unique_by(.id) | sort_by(.updated_at) | .[-50:])
-            }' > batch.json
-          echo "Sending $(jq '.runs | length' batch.json) failed run(s)"
-          curl -fsS --retry 3 --max-time 30 -X POST \
-            -H "Content-Type: application/json" \
-            -H "X-Webhook-Secret: ${WEBHOOK_SECRET}" \
-            --data @batch.json "${WEBHOOK_URL}" -o /dev/null
+            for q in "status=failure&created=>=${week}" "status=timed_out&created=>=${week}" "status=completed&created=>=${day}"; do
+              gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/workflows/${wf}/runs?per_page=100&${q}" \
+                --jq '.workflow_runs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "startup_failure")'
+            done
+          done | jq -sc --arg since "${updated_since}" \
+              '[.[] | select(.updated_at >= $since)
+                | {id, run_attempt, name, path, event, head_branch, head_sha, conclusion, updated_at,
+                   pull_requests: [(.pull_requests // [])[].number]}]
+               | unique_by(.id) | sort_by(.updated_at)' > runs.json
+          echo "Sending $(jq length runs.json) failed run(s)"
+          # Send in chunks of 50 so a burst of failures is never truncated.
+          jq -c --arg repo "${GITHUB_REPOSITORY}" \
+              '. as $r | range(0; length; 50) | {kind: "ci-failure-batch", repo: $repo, runs: $r[.:.+50]}' runs.json |
+            while read -r batch; do
+              curl -fsS --retry 3 --max-time 30 -X POST \
+                -H "Content-Type: application/json" \
+                -H "X-Webhook-Secret: ${WEBHOOK_SECRET}" \
+                --data "${batch}" "${WEBHOOK_URL}" -o /dev/null
+            done
