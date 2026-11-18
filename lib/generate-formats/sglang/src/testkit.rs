@@ -25,6 +25,7 @@ use dynamo_llm::generate_format::Worker;
 pub fn worker() -> Worker<'static> {
     Worker {
         model: "test-model",
+        engine_info: &serde_json::Value::Null,
         kv_cache_block_size: 16,
         lora_name: None,
         tower_connector_lora_enabled: false,

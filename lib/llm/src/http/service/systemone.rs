@@ -632,9 +632,11 @@ async fn run_branch(
         .ok_or_else(|| DispatchError::malformed("native request was already consumed"))?;
     native["cache_salt"] = serde_json::Value::String(cache_salt);
     let branch_id = format!("{request_id}-{}", prepared.index);
+    // Scoring generates no tokens, so a failed branch is retried whole, not migrated.
     let Bound {
         request: mut preprocessed,
         exchange,
+        migration: _,
     } = bind_native(
         &selection.canonical_model,
         selection.card.kv_cache_block_size,
@@ -714,6 +716,7 @@ fn bind_native(
         .map_err(|error| anyhow::anyhow!(error.message))?;
     (opened.bind)(&Worker {
         model,
+        engine_info: &serde_json::Value::Null,
         kv_cache_block_size,
         lora_name: None,
         tower_connector_lora_enabled: false,

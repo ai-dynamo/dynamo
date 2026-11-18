@@ -241,6 +241,7 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
                     .map_err(|error| ClientError::new(error.to_string()))?;
                 Ok(Bound {
                     request,
+                    migration: Err("SGLang generate requests do not migrate yet".to_string()),
                     exchange: Box::new(Exchange {
                         assembler: Assembler::with_codec(rules, codec.clone()),
                         codec,
@@ -328,6 +329,14 @@ impl<C: ClientCodec> GenerateExchange for Exchange<C> {
             }
             Ok(())
         })
+    }
+
+    fn migrate(
+        &mut self,
+        _delivered_tokens: usize,
+        _request: &mut PreprocessedRequest,
+    ) -> Result<Option<LLMEngineOutput>, String> {
+        Err("SGLang generate requests do not migrate yet".to_string())
     }
 
     fn finish(&mut self) -> Result<Option<Value>, DynamoError> {

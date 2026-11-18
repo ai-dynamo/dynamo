@@ -6,13 +6,14 @@
 //! The request stays opaque in `extra_args.vllm_tito` apart from the routing
 //! controls Dynamo projects, including multimodal KV routing hashes. Responses
 //! are built from the worker's typed outputs: one SSE event per delta when
-//! streaming, else one unary response. Migration is not supported yet.
+//! streaming, else one unary response.
 
 use axum::http::StatusCode;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_runtime::error::DynamoError;
 use serde_json::{Value, json};
 
+use crate::generate::migrate::Continuation;
 use crate::generate::{
     GenerateAggregator, GenerateRequest, GenerateResponseOptions, GenerateStreamer,
 };
@@ -499,10 +500,11 @@ impl GenerateFormat for VllmFormat {
             input_tokens: request.token_ids.len(),
             validation,
             bind: Box::new(move |worker| {
-                let exchange = if request.stream {
-                    VllmExchange::Stream(GenerateStreamer::new(&request, request_id.clone()))
+                let continuation = Continuation::new(&request);
+                let response = if request.stream {
+                    Response::Stream(GenerateStreamer::new(&request, request_id.clone()))
                 } else {
-                    VllmExchange::Unary {
+                    Response::Unary {
                         options: request.response_options(),
                         aggregator: GenerateAggregator::new(request_id.clone()),
                     }
@@ -517,7 +519,12 @@ impl GenerateFormat for VllmFormat {
                 .map_err(|error| ClientError::new(error.to_string()))?;
                 Ok(Bound {
                     request,
-                    exchange: Box::new(exchange),
+                    migration: continuation.as_ref().map(|_| ()).map_err(Clone::clone),
+                    exchange: Box::new(VllmExchange {
+                        response,
+                        continuation,
+                        delivered: 0,
+                    }),
                 })
             }),
         })
@@ -528,7 +535,14 @@ impl GenerateFormat for VllmFormat {
     }
 }
 
-enum VllmExchange {
+struct VllmExchange {
+    response: Response,
+    continuation: Result<Continuation, String>,
+    /// Generated tokens seen across attempts.
+    delivered: usize,
+}
+
+enum Response {
     Unary {
         aggregator: GenerateAggregator,
         options: GenerateResponseOptions,
@@ -547,13 +561,14 @@ impl GenerateExchange for VllmExchange {
         _prefill: bool,
         emit: &mut dyn FnMut(&Value),
     ) -> Result<(), DynamoError> {
+        self.delivered += output.token_ids.len();
         let error = |error: anyhow::Error| DynamoError::from(error.as_ref());
-        match self {
-            Self::Unary {
+        match &mut self.response {
+            Response::Unary {
                 aggregator,
                 options,
             } => aggregator.apply_output(output, *options).map_err(error),
-            Self::Stream(streamer) => {
+            Response::Stream(streamer) => {
                 if let Some(event) = streamer.chunk(output).map_err(error)? {
                     emit(&to_client(event)?);
                 }
@@ -562,9 +577,39 @@ impl GenerateExchange for VllmExchange {
         }
     }
 
+    fn migrate(
+        &mut self,
+        delivered_tokens: usize,
+        request: &mut PreprocessedRequest,
+    ) -> Result<Option<LLMEngineOutput>, String> {
+        let continuation = self.continuation.as_ref().map_err(Clone::clone)?;
+        if delivered_tokens != self.delivered {
+            return Err(format!(
+                "Dynamo delivered {delivered_tokens} tokens but vLLM reported {}",
+                self.delivered
+            ));
+        }
+        // Streamed prompt logprobs are rejected at admission, and each streamed
+        // sampling mask covers only its own event.
+        let prompt_delivered = match &mut self.response {
+            Response::Unary { aggregator, .. } => {
+                if aggregator.has_sampling_mask() {
+                    return Err("a sampling mask covers only the failed attempt".to_string());
+                }
+                let prompt_delivered = aggregator.prompt_logprobs_delivered();
+                if !prompt_delivered {
+                    aggregator.retry_after(delivered_tokens);
+                }
+                prompt_delivered
+            }
+            Response::Stream(_) => true,
+        };
+        Ok(continuation.retry(delivered_tokens, prompt_delivered, request))
+    }
+
     fn finish(&mut self) -> Result<Option<Value>, DynamoError> {
-        match self {
-            Self::Unary {
+        match &mut self.response {
+            Response::Unary {
                 aggregator,
                 options,
             } => {
@@ -575,7 +620,7 @@ impl GenerateExchange for VllmExchange {
                     .map_err(|error| DynamoError::from(error.as_ref()))?;
                 to_client(response).map(Some)
             }
-            Self::Stream(streamer) => streamer
+            Response::Stream(streamer) => streamer
                 .finish()
                 .map_err(|error| DynamoError::from(error.as_ref()))?
                 .map(to_client)
