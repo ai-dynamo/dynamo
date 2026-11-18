@@ -1753,8 +1753,6 @@ func generateBasePodSpec(
 	)
 }
 
-// preparedMainContainer is the launch-preparation result that Pod rendering
-// continues from.
 type preparedMainContainer struct {
 	container             corev1.Container
 	componentContext      ComponentContext

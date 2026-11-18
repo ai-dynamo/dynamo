@@ -576,8 +576,6 @@ func renderRestoreLaunches(
 	return launches, errors.Join(errs...)
 }
 
-// hasUnchangedRestoreLaunch reports whether old holds the same destination with
-// an identical rendered command and args.
 func hasUnchangedRestoreLaunch(old []restoreLaunch, launch restoreLaunch) bool {
 	return slices.ContainsFunc(old, func(o restoreLaunch) bool {
 		return o.role == launch.role &&
