@@ -744,9 +744,8 @@ vllm_configs = {
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
-            # A grammar the structured-output backend cannot compile (regex
-            # lookahead) is a client error, not a 500. The valid-grammar
-            # payloads after it show the worker still serves.
+            # An uncompilable grammar (regex lookahead) must return 400, not 500;
+            # the valid-grammar payloads after it show the worker still serves.
             HttpErrorPayload(
                 body={
                     "messages": [{"role": "user", "content": "Say a."}],
