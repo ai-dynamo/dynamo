@@ -29,6 +29,7 @@ from ..http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
     describe_media_source,
+    fast_url_scheme,
     validate_media_url,
 )
 from .media_source import decode_data_uri
@@ -465,15 +466,14 @@ class ImageLoader:
         if max_pixels is not None and max_pixels < 1:
             raise HttpStatusError(413, "Image exceeds the decoded pixel limit", "image")
 
-        parsed_url = urlsplit(image_url)
-        if parsed_url.scheme in ("", "file"):
+        if fast_url_scheme(image_url) in ("", "file"):
             raise ValueError(
                 "Invalid image source scheme: local file access is not allowed"
             )
         normalized_url = await validate_media_url(image_url, self._url_policy)
-        parsed_url = urlsplit(normalized_url)
+        scheme = fast_url_scheme(normalized_url)
 
-        if parsed_url.scheme in ("http", "https"):
+        if scheme in ("http", "https"):
             key = self._cache_key(normalized_url, cache_scope)
 
             if key is None:
@@ -503,7 +503,7 @@ class ImageLoader:
 
             return await asyncio.shield(self._inflight[key])
 
-        if parsed_url.scheme == "data":
+        if scheme == "data":
             # Inline images repeat across the turns of a conversation, so key
             # them by content and skip base64 and image decoding on a hit.
             key = scope_image_cache_key(
@@ -517,7 +517,7 @@ class ImageLoader:
                     return cached
             try:
                 with _nvtx.annotate("mm:img:base64_decode", color="lime"):
-                    if not parsed_url.path.startswith("image/"):
+                    if not normalized_url.partition(":")[2].startswith("image/"):
                         raise ValueError("Data URL must be an image type")
 
                     image_bytes = decode_data_uri(
@@ -558,7 +558,7 @@ class ImageLoader:
             return image
 
         # It's not file:, http:, https:, or data:
-        raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
+        raise ValueError(f"Invalid image source scheme: {scheme}")
 
     @overload
     async def load_image_batch(
