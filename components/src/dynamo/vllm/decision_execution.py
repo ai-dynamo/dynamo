@@ -116,6 +116,12 @@ def publish_vllm_decision_capability(
         raise ValueError("--systemone-serial requires qualified vLLM 0.33.0")
     try:
         if not _qualified_configuration(config, vllm_config):
+            architecture = vllm_config.model_config.architecture
+            if architecture not in _ARCHITECTURES:
+                raise ValueError(
+                    "--systemone-serial: unsupported model architecture "
+                    f"{architecture!r}"
+                )
             raise ValueError(
                 "--systemone-serial requires a qualified causal model and runtime: "
                 "raw_logprobs, max_num_seqs=1, data_parallel_size=1, standard "
