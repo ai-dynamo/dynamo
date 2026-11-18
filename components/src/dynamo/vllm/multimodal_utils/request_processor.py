@@ -563,13 +563,6 @@ class VllmMultimodalRequestProcessor:
         self._cached_supported_modalities = modalities
         return modalities
 
-    def _is_kimi_k3(self) -> bool:
-        model_config = getattr(
-            getattr(self.engine_client, "vllm_config", None), "model_config", None
-        )
-        hf_config = getattr(model_config, "hf_config", None)
-        return getattr(hf_config, "model_type", None) == "kimi_k3"
-
     def _mistral_image_placeholders(self) -> Optional[MistralImagePlaceholders]:
         """Return the image placeholders of a Mistral-format model.
 
@@ -600,7 +593,9 @@ class VllmMultimodalRequestProcessor:
         """
         if not multi_modal_data:
             return token_ids
-        if self._is_kimi_k3():
+        # Route on the expansion's own model-type check, so every Kimi K3
+        # variant it accepts skips the Mistral path.
+        if self._kimi_k3_pad_expansion() is not None:
             return self._expand_kimi_k3_pads(token_ids, multi_modal_data)
         mistral = self._mistral_image_placeholders()
         if mistral is None:

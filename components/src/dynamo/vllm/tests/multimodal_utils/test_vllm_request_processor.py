@@ -2528,8 +2528,9 @@ def test_text_only_requests_never_resolve_the_tokenizer():
     engine_client.get_tokenizer.assert_not_called()
 
 
-def test_k3_placeholders_skip_the_mistral_path():
-    processor, engine_client = _k3_processor()
+@pytest.mark.parametrize("model_type", ["kimi_k3", "kimi_k31"])
+def test_k3_placeholders_skip_the_mistral_path(model_type: str):
+    processor, engine_client = _k3_processor(model_type=model_type)
 
     result = processor._adapt_image_placeholders(
         [1, _K3_PAD_ID, 2], {"image": object()}
