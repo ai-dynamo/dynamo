@@ -658,14 +658,6 @@ where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
-    fn new(request_plane: Arc<AddressedPushRouter>, drt: crate::DistributedRuntime) -> Self {
-        Self {
-            request_plane,
-            drt,
-            _phantom: PhantomData,
-        }
-    }
-
     /// A missing registration is a process misconfiguration, not a worker
     /// fault: `Internal` fails the request without reporting the worker down.
     fn direct(&self, instance_id: u64) -> Result<Arc<dyn StreamingDispatch<T, U>>, Error> {
@@ -852,10 +844,11 @@ where
         // Type-erase to the seam so discovery-removal cleanup runs through it.
         let addressed: Arc<dyn StreamingDispatch<T, U>> = match dispatch {
             Some(dispatch) => dispatch,
-            None => Arc::new(TransportDispatch::new(
-                addressed_router(&client.endpoint).await?,
-                client.endpoint.drt().clone(),
-            )),
+            None => Arc::new(TransportDispatch {
+                request_plane: addressed_router(&client.endpoint).await?,
+                drt: client.endpoint.drt().clone(),
+                _phantom: PhantomData,
+            }),
         };
 
         // Start worker monitor if provided and in dynamic mode
