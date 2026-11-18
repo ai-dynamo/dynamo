@@ -5423,9 +5423,8 @@ class InstrumentedScheduler(AsyncScheduler):
                 return True
             self._bench_realseed_stage = "measure"
             return True
-        # Under attention-DP the group has already agreed in
-        # ``_bench_realseed_round`` whether every rank hits; every rank then
-        # admits, re-stages or skips together.
+        # Under attention-DP, ``_bench_realseed_round`` already agreed whether
+        # every rank hits, so all ranks admit, re-stage or skip together.
         group_hit = self._bench_realseed_group_hit
         self._bench_realseed_group_hit = None
         if getattr(self, "_bench_synchronizer", None) is not None and group_hit is None:
@@ -5821,8 +5820,7 @@ class InstrumentedScheduler(AsyncScheduler):
     _bench_realseed_staged: bool = False
     _bench_realseed_retried: bool = False
     # Attention-DP real-seed rounds (``_bench_realseed_round``): this rank's
-    # measured-shot hit once its warm shot drained, the group verdict once
-    # every rank is done, and the rounds this rank has run.
+    # measured-shot hit, the group verdict, and the round counter.
     _bench_realseed_local_hit: bool | None = None
     _bench_realseed_group_hit: bool | None = None
     _bench_realseed_round_seq: int = 0
