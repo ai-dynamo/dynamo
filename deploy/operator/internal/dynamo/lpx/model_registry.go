@@ -19,8 +19,6 @@ import (
 	"time"
 
 	modelpb "github.com/ai-dynamo/modelexpress/modelexpress_client/go/gen/modelexpress/model"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 var (
@@ -105,7 +103,7 @@ func (r *defaultModelRegistry) EnsureCheckpointDownloaded(
 	checkpoint *Checkpoint,
 ) (bool, error) {
 	if r.mxClient == nil {
-		return false, fmt.Errorf("checkpoint %q requires Model Express; configure infrastructure.modelExpressURL", CheckpointKey(checkpoint))
+		return false, fmt.Errorf("checkpoint %q requires Model Express; configure infrastructure.modelExpressURL", checkpoint.Key())
 	}
 
 	// Request the pinned revision; Model Express resolves it before claiming a download.
@@ -122,7 +120,7 @@ func (r *defaultModelRegistry) EnsureCheckpointDownloaded(
 	if update.ResolvedRevision == nil {
 		return false, fmt.Errorf(
 			"model express did not report a resolved revision for %q; checkpoint downloads require Model Express 0.6.0 or later",
-			CheckpointKey(checkpoint),
+			checkpoint.Key(),
 		)
 	}
 	if resolved := update.GetResolvedRevision(); resolved != checkpoint.Revision {
@@ -244,13 +242,15 @@ func parseBuildRef(ref string) (*url.URL, error) {
 
 // readBuildFileBounded reads one relative file. The receiver and buildURL must
 // be non-nil, and maxBytes must be non-negative.
-// A missing remote file wraps os.ErrNotExist only before any chunks arrive.
 func (r *defaultModelRegistry) readBuildFileBounded(
 	ctx context.Context,
 	buildURL *url.URL,
 	relativePath string,
 	maxBytes int,
 ) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	switch buildURL.Scheme {
 	case BuildSchemeFile:
 		// Open nonblocking so a FIFO cannot stall before file-type validation.
@@ -311,9 +311,6 @@ func (r *defaultModelRegistry) readBuildFileBounded(
 			},
 		})
 		if err != nil {
-			if status.Code(err) == codes.NotFound {
-				err = fmt.Errorf("%w: %w", os.ErrNotExist, err)
-			}
 			return nil, fmt.Errorf("streaming %s from %q with Model Express: %w", relativePath, modelName, err)
 		}
 
@@ -327,9 +324,6 @@ func (r *defaultModelRegistry) readBuildFileBounded(
 				break
 			}
 			if err != nil {
-				if !receivedChunk && status.Code(err) == codes.NotFound {
-					err = fmt.Errorf("%w: %w", os.ErrNotExist, err)
-				}
 				return nil, fmt.Errorf("receiving %s from %q with Model Express: %w", relativePath, modelName, err)
 			}
 			if completedFile {
@@ -396,33 +390,15 @@ func (r *defaultModelRegistry) AcquireBuild(ctx context.Context, id string) (*Bu
 		return nil, err
 	}
 
-	format, manifestData, err := r.readBuildContract(ctx, refURL)
+	manifestData, err := r.readBuildFileBounded(ctx, refURL, gbuildDeploymentV1CapnpFile, maxBuildSnapshotMetadataBytes)
 	if err != nil {
 		return nil, err
 	}
-	manifestPath, err := format.filename()
+	deployment, err := decodeGbuildDeploymentV1(manifestData)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w for %q: %w", errInvalidBuildManifest, refURL.String(), err)
 	}
-
-	// Validate the selected contract exactly once, without fallback on invalid split bytes.
-	var build *Build
-	switch format {
-	case buildContractManifestV2:
-		manifest, decodeErr := decodeGbuildManifestV2(manifestData)
-		if decodeErr != nil {
-			err = decodeErr
-		} else {
-			build, err = buildFromGbuildManifestV2(refURL.String(), manifest)
-		}
-	case buildContractDeploymentV1:
-		deployment, decodeErr := decodeGbuildDeploymentV1(manifestData)
-		if decodeErr != nil {
-			err = decodeErr
-		} else {
-			build, err = buildFromGbuildDeploymentV1(refURL.String(), deployment)
-		}
-	}
+	build, err := buildFromGbuildDeploymentV1(refURL.String(), deployment)
 	if err != nil {
 		return nil, fmt.Errorf("%w for %q: %w", errInvalidBuildManifest, refURL.String(), err)
 	}
@@ -430,58 +406,8 @@ func (r *defaultModelRegistry) AcquireBuild(ctx context.Context, id string) (*Bu
 	// Hash the exact manifest bytes in their own domain, bound to the schema filename and independent of the locator.
 	hash := sha256.New()
 	_, _ = hash.Write([]byte(buildSnapshotIdentityVersion + "\x00"))
-	_, _ = hash.Write([]byte(manifestPath + "\x00"))
+	_, _ = hash.Write([]byte(gbuildDeploymentV1CapnpFile + "\x00"))
 	_, _ = hash.Write(manifestData)
 	build.contentID = fmt.Sprintf("sha256:%x", hash.Sum(nil))
-	build.contractFormat = format
 	return build, nil
-}
-
-// readBuildContract selects one supported entry point and returns its bounded bytes.
-// The receiver and buildURL must be non-nil.
-func (r *defaultModelRegistry) readBuildContract(ctx context.Context, buildURL *url.URL) (buildContractFormat, []byte, error) {
-	candidates := []string{gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile}
-	paths := make([]string, 0, len(candidates))
-	var manifestData []byte
-	for _, name := range candidates {
-		if buildURL.Scheme == BuildSchemeFile {
-			// Inspect local entries first so broken symlinks still count as published contracts.
-			if err := ctx.Err(); err != nil {
-				return buildContractUnknown, nil, err
-			}
-			_, err := os.Lstat(buildURL.JoinPath(name).Path)
-			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
-				continue
-			}
-			if err != nil {
-				return buildContractUnknown, nil, err
-			}
-		} else {
-			// Read alternatives separately because Model Express requires every selected path to exist.
-			data, err := r.readBuildFileBounded(ctx, buildURL, name, maxBuildSnapshotMetadataBytes)
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			if err != nil {
-				return buildContractUnknown, nil, err
-			}
-			manifestData = data
-		}
-		paths = append(paths, name)
-	}
-
-	if len(paths) == 0 {
-		return buildContractUnknown, nil, fmt.Errorf("%w: missing build contract: require %s or %s", os.ErrNotExist, gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile)
-	}
-	format, err := selectBuildContract(paths)
-	if err != nil {
-		return buildContractUnknown, nil, fmt.Errorf("%w: %w", errInvalidBuildManifest, err)
-	}
-	if buildURL.Scheme == BuildSchemeFile {
-		manifestData, err = r.readBuildFileBounded(ctx, buildURL, paths[0], maxBuildSnapshotMetadataBytes)
-		if err != nil {
-			return buildContractUnknown, nil, err
-		}
-	}
-	return format, manifestData, nil
 }

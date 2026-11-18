@@ -114,7 +114,7 @@ pub(super) fn normalize_ais_perf_config(
         py.import("builtins")?.call_method1("dict", (config,))?
     };
     let canonical = py
-        .import("aisimulate_core.sdk")?
+        .import("aisim_core.sdk")?
         .getattr("ForwardPassPerfModelConfig")?
         .call((), Some(mapping.downcast::<pyo3::types::PyDict>()?))?;
     Ok(pythonize::depythonize(&canonical.call_method0("to_dict")?)?)
