@@ -55,8 +55,6 @@ impl WorkerInputs {
     // TODO(v1.9): Remove this alias.
     #[deprecated(since = "1.7.0", note = "use `WorkerInputs::KV_COPY`")]
     pub const KV_TRANSFER: Self = Self::KV_COPY;
-    /// Every optional column but the copy column, which only scorers may declare.
-    pub const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
 
     #[inline]
     pub const fn contains(self, other: Self) -> bool {

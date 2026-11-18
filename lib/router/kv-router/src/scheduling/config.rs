@@ -8,10 +8,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-pub use crate::plugins::worker_selection::selection_config::{
-    OVERLAP_SCORE_CREDIT_RANGE_ERROR, SelectionConfig, SharedCacheType,
-    overlap_score_credit_error_message,
-};
+pub use crate::plugins::worker_selection::selection_config::{SelectionConfig, SharedCacheType};
 use crate::plugins::worker_selection::selection_config::{
     default_decode_active_request_weight, default_disk_cache_hit_weight,
     default_host_cache_hit_weight, default_overlap_score_credit_decay, default_prefill_load_scale,
