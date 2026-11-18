@@ -453,7 +453,6 @@ type generatedNameViolation struct {
 	err *field.Error
 }
 
-// generatedComponentName is a name derived from a component and the fix its error suggests.
 type generatedComponentName struct {
 	value  string
 	action string
