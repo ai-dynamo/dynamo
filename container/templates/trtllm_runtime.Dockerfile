@@ -38,7 +38,9 @@ ARG TARGETARCH
 
 # Setup that must precede the ENV below:
 #
-# - Purge upstream's git-lfs package without pruning shared dependencies.
+# - Purge upstream's git-lfs package and the nasm assembler without pruning
+#   shared dependencies. Nothing installed depends on nasm; the build fails if
+#   its purge would remove anything else.
 #
 # - Link system libstdc++ to a stable path for LD_PRELOAD. This keeps
 #   PyInstaller-bundled tools (e.g. NVIDIA's `jet` CI runner) from shadowing it
@@ -85,13 +87,21 @@ ARG TARGETARCH
 # library mpi4py loads, a spawn, a two-rank ob1 launch, CPU affinity after
 # MPI_Init and the hook. container/dev/50-framework-paths.sh prefers the same link.
 RUN --mount=type=bind,source=./container/deps/trtllm/_dynamo_pmix_hostname.py,target=/tmp/_dynamo_pmix_hostname.py \
-    apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/* && \
+    purged=$(apt-get -s purge nasm | awk '/^(Remv|Purg) /{print $2}') && \
+    { [ "$purged" = nasm ] || { echo "ERROR: purging nasm would remove: ${purged:-nothing}" >&2; exit 1; }; } && \
+    apt-get purge -y git-lfs nasm && rm -rf /var/lib/apt/lists/* && \
     test ! -e /usr/bin/git-lfs && \
     test ! -e /usr/local/bin/git-lfs && \
     ! command -v git-lfs && \
     status=$(dpkg-query -W -f='${db:Status-Status}' git-lfs 2>/dev/null || true) && \
     test "$status" != installed && \
     set -- /var/lib/dpkg/info/git-lfs.* && test ! -e "$1" && \
+    test ! -e /usr/bin/nasm && \
+    test ! -e /usr/bin/ndisasm && \
+    ! command -v nasm && \
+    status=$(dpkg-query -W -f='${db:Status-Status}' nasm 2>/dev/null || true) && \
+    test "$status" != installed && \
+    set -- /var/lib/dpkg/info/nasm.* && test ! -e "$1" && \
     ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
     mkdir -p /opt/dynamo && \
     LIBSTDCPP=/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6 && \
@@ -160,6 +170,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         rdma-core \
         libjemalloc2; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        apt \
+        apt-utils \
         ca-certificates \
         dirmngr \
         gnupg \
@@ -171,9 +183,21 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         gpgsm \
         gpgv \
         keyboxd \
+        libapt-pkg6.0t64 \
         libbrotli1 \
+        libglib2.0-0t64 \
+        libgnutls30t64 \
+        libperl5.38t64 \
         libssl3t64 \
-        openssl; \
+        openssh-client \
+        openssh-server \
+        openssh-sftp-server \
+        openssl \
+        perl \
+        perl-base \
+        perl-modules-5.38 \
+        zlib1g \
+        zlib1g-dev; \
     ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64"); \
     printf '%s\n' \
         "/usr/local/tensorrt/lib" \
