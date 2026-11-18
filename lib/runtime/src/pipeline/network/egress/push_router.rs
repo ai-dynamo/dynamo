@@ -90,11 +90,7 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         ErrorType::WorkerUnavailable,
     ];
     // Pre-stream request rejections can carry an outer CannotConnect wrapper.
-    // A `Conflict` is a worker refusing a request id it is still serving. The
-    // other request-scoped classes are worker answers that carry a defined
-    // status: an engine's generate() rpc refusal (a guided-decoding/grammar or
-    // settings rejection answering before the response stream) proves the worker
-    // is reachable, so only that request may fail, never its routing health.
+    // A `Conflict` is a worker refusing a request id it is still serving.
     !is_worker_overloaded(err)
         && match_error_chain(
             err,
@@ -104,9 +100,6 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
                 ErrorType::InvalidArgument,
                 ErrorType::Backend(BackendError::InvalidArgument),
                 ErrorType::Conflict,
-                ErrorType::NotImplemented,
-                ErrorType::Internal,
-                ErrorType::Backend(BackendError::Unknown),
             ],
         )
 }
@@ -2514,37 +2507,18 @@ mod tests {
         assert!(is_inhibited(&err));
     }
 
-    #[tokio::test]
-    async fn tcp_dial_failure_quarantines_the_worker() {
-        use crate::pipeline::network::egress::{
-            tcp_client::{TcpRequestClient, TcpRequestConfig},
-            unified_client::{Headers, RequestPlaneClient},
-        };
+    #[test]
+    fn transport_failure_with_raw_cause_quarantines_the_worker() {
+        let error = DynamoError::builder()
+            .error_type(ErrorType::CannotConnect)
+            .message("NATS request failed")
+            .cause(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "connection refused",
+            ))
+            .build();
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-        let client = TcpRequestClient::with_config(TcpRequestConfig {
-            request_timeout: std::time::Duration::from_secs(1),
-            connect_timeout: std::time::Duration::from_secs(1),
-            pool_size: 1,
-            channel_buffer: 1,
-        })
-        .unwrap();
-        let error = client
-            .send_request(
-                format!("{addr}/generate"),
-                bytes::Bytes::from_static(b"ping"),
-                Headers::new(),
-            )
-            .await
-            .unwrap_err();
-
-        assert!(is_inhibited(error.as_ref()), "{error:#}");
-        assert_eq!(
-            route_span::error_type_from_chain(error.as_ref()),
-            ErrorType::CannotConnect
-        );
+        assert!(is_inhibited(&error), "{error:#}");
     }
 
     /// A worker's admission refusal as the gate raises it, in process: for
@@ -2724,26 +2698,33 @@ mod tests {
     }
 
     #[test]
-    fn pre_stream_invalid_request_does_not_quarantine_healthy_worker() {
+    fn pre_stream_failure_preserves_worker_health_classification() {
         use crate::pipeline::network::{
             StreamPrologueError, egress::addressed_router::pre_stream_failure_error,
         };
 
-        // A typed engine refusal answering before the response stream — the
-        // production case was a TRTLLM `Unimplemented` for
-        // guided-decoding mode `json_schema` — must stay request-scoped:
-        // its own status on the route span (not `cannot_connect`) and no
-        // quarantine. Genuine transport failures keep quarantining.
-        for (error_type, is_worker_fault) in [
-            (ErrorType::InvalidRequest, false),
-            (ErrorType::InvalidArgument, false),
-            (ErrorType::Backend(BackendError::InvalidArgument), false),
-            (ErrorType::Conflict, false),
-            (ErrorType::NotImplemented, false),
-            (ErrorType::Internal, false),
-            (ErrorType::Backend(BackendError::Unknown), false),
-            (ErrorType::CannotConnect, true),
-            (ErrorType::Unavailable, true),
+        for (error_type, expected_type, is_worker_fault) in [
+            (ErrorType::InvalidRequest, ErrorType::InvalidRequest, false),
+            (
+                ErrorType::InvalidArgument,
+                ErrorType::InvalidArgument,
+                false,
+            ),
+            (
+                ErrorType::Backend(BackendError::InvalidArgument),
+                ErrorType::Backend(BackendError::InvalidArgument),
+                false,
+            ),
+            (ErrorType::Conflict, ErrorType::CannotConnect, false),
+            (ErrorType::NotImplemented, ErrorType::NotImplemented, false),
+            (ErrorType::Internal, ErrorType::CannotConnect, true),
+            (
+                ErrorType::Backend(BackendError::Unknown),
+                ErrorType::CannotConnect,
+                true,
+            ),
+            (ErrorType::CannotConnect, ErrorType::CannotConnect, true),
+            (ErrorType::Unavailable, ErrorType::CannotConnect, true),
         ] {
             let rejection = DynamoError::builder()
                 .error_type(error_type)
@@ -2754,12 +2735,8 @@ mod tests {
             assert_eq!(is_inhibited(&error), is_worker_fault, "{error_type:?}");
             assert_eq!(
                 crate::pipeline::network::egress::route_span::error_type_from_chain(&error),
-                if is_worker_fault {
-                    ErrorType::CannotConnect
-                } else {
-                    error_type
-                },
-                "the route span must label a worker refusal by its own status, got: {error}"
+                expected_type,
+                "unexpected route classification for {error_type:?}: {error}"
             );
         }
     }

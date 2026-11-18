@@ -1000,14 +1000,9 @@ impl TcpConnection {
 }
 
 fn cannot_connect_error(addr: SocketAddr, error: anyhow::Error) -> anyhow::Error {
-    let cause = match error.downcast::<DynamoError>() {
-        Ok(typed) => typed,
-        // Raw transport diagnostics must not introduce a request-scoped Internal cause.
-        Err(error) => DynamoError::builder()
-            .error_type(ErrorType::CannotConnect)
-            .message(format!("{error:#}"))
-            .build(),
-    };
+    let cause = crate::error::DynamoError::from(
+        error.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>
+    );
     anyhow::anyhow!(
         crate::error::DynamoError::builder()
             .error_type(crate::error::ErrorType::CannotConnect)
@@ -2030,26 +2025,6 @@ mod tests {
             "cold connection failure must retain its cause"
         );
         assert_eq!(client.stats.errors.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn typed_request_rejection_keeps_its_class_through_transport_context() {
-        let rejection = DynamoError::builder()
-            .error_type(ErrorType::InvalidArgument)
-            .message("invalid request frame")
-            .build();
-        let error = cannot_connect_error("127.0.0.1:1".parse().unwrap(), rejection.into());
-
-        assert!(!match_error_chain(
-            error.as_ref(),
-            &[ErrorType::CannotConnect],
-            &[ErrorType::InvalidArgument],
-        ));
-        assert!(
-            error
-                .chain()
-                .any(|cause| cause.to_string().contains("invalid request frame"))
-        );
     }
 
     #[tokio::test]

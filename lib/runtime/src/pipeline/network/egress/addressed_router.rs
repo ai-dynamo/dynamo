@@ -80,17 +80,12 @@ fn is_migration_sensitive(err: &DynamoError) -> bool {
 
 /// Build the error returned when the worker fails before any response bytes.
 ///
-/// A typed [`ErrorClass::InvalidRequest`] refusal from the worker's prologue is
-/// returned as the worker's own error. The worker is reachable and refused the
-/// request itself, so a [`ErrorType::CannotConnect`] ancestor would make fault
-/// detection quarantine a healthy worker and make migration resend the request
-/// to every other worker, which would refuse it too.
-///
-/// The same holds for every worker answer that carries a defined status: see
-/// [`is_worker_request_rejection`]. A prologue proves the worker was reachable,
-/// so such a rejection is this request's business outcome, not a routing fact.
-/// A quarantine on one made a single healthy prefill worker unavailable to all
-/// traffic after an engine returned `Unimplemented` for one guided-decoding request.
+/// A typed [`ErrorClass::InvalidRequest`] or [`ErrorClass::NotImplemented`]
+/// refusal from the worker's prologue is returned as the worker's own error.
+/// The worker is reachable and refused the request itself, so a
+/// [`ErrorType::CannotConnect`] ancestor would make fault detection quarantine
+/// a healthy worker and make migration resend a request every worker would
+/// refuse.
 ///
 /// Every other failure keeps the outer [`ErrorType::CannotConnect`], so retry
 /// classification of the outer error is unchanged. A typed error from the
@@ -119,26 +114,12 @@ pub(crate) fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoErro
     }
 }
 
-/// A worker answer that rejects this one request while proving the worker is
-/// reachable: the transport completed and a defined status came back, so only
-/// the request fails.
-///
-/// The classes are the normalized ones from [`DynamoError::class`].
-/// [`ErrorClass::InvalidRequest`] also covers `InvalidArgument` and
-/// `Backend(BackendError::InvalidArgument)`, and [`ErrorClass::Internal`]
-/// also covers `Unknown` and `Backend(BackendError::Unknown)` — the sidecar's
-/// bucket for an engine's explicit rpc statuses, including the `Unimplemented`
-/// guided-decoding and grammar refusals. Keeping the
-/// [`ErrorType::CannotConnect`] pre-stream wrapper around them mislabels the
-/// request `connection_failed` and lets fault detection quarantine a healthy
-/// worker that answered correctly.
+/// Worker prologue statuses that reject only this request rather than indicate
+/// a worker or transport fault.
 fn is_worker_request_rejection(class: ErrorClass) -> bool {
     matches!(
         class,
-        ErrorClass::InvalidRequest
-            | ErrorClass::Conflict
-            | ErrorClass::NotImplemented
-            | ErrorClass::Internal
+        ErrorClass::InvalidRequest | ErrorClass::NotImplemented
     )
 }
 
