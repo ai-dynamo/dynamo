@@ -27,12 +27,14 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, Client, Discovery, KV_CONFIG_KEY, NodeMetadata, Pool, WORKER_GROUP_KEY};
+use crate::client::{
+    self, Client, Discovery, KV_CONFIG_KEY, MediaSupport, NodeMetadata, Pool, WORKER_GROUP_KEY,
+};
 use crate::native_http::{self, NativeHttp};
 use crate::proto as pb;
 use crate::protocol::{
     build_generate_request, disaggregated_params_to_json, engine_data_from_meta, extract_logprobs,
-    meta_u32, output_ids_to_u32, terminal_from_meta,
+    meta_u32, output_ids_to_u32, require_media_support, terminal_from_meta,
 };
 
 const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
@@ -47,6 +49,9 @@ pub struct SglangSidecarEngine {
     native_http_max_event_bytes: usize,
     state: OnceCell<StartedState>,
     cancel: CancellationToken,
+    /// Cancelled once SGLang is lost after `start`, with the reason set first.
+    lost: CancellationToken,
+    lost_reason: Arc<std::sync::OnceLock<String>>,
 }
 
 struct StartedState {
@@ -54,6 +59,7 @@ struct StartedState {
     native_http: Option<NativeHttp>,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
     combined_token_limit: Option<u32>,
+    media_support: MediaSupport,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -174,6 +180,13 @@ impl SglangSidecarEngine {
             model = %discovery.model_path,
             "sglang sidecar bootstrapped native gRPC discovery"
         );
+        if engine_sets_chat_template_defaults(&discovery.server_info) {
+            tracing::warn!(
+                "SGLang --default-chat-template-kwargs applies only to SGLang's own HTTP \
+                 server. The Dynamo frontend renders the chat template for Dynamo traffic, \
+                 so set --default-chat-template-kwargs on the Dynamo frontend."
+            );
+        }
 
         let native_http_max_event_bytes = args.native_http_max_event_bytes.get();
         let common = args.sidecar.common;
@@ -216,6 +229,8 @@ impl SglangSidecarEngine {
                 native_http_max_event_bytes,
                 state: OnceCell::new(),
                 cancel: CancellationToken::new(),
+                lost: CancellationToken::new(),
+                lost_reason: Arc::default(),
             },
             config,
         ))
@@ -323,17 +338,20 @@ impl LLMEngine for SglangSidecarEngine {
         let kv_event_sources =
             discover_kv_event_sources(&discovery, &mut config, &self.endpoint, deadline).await?;
         let connection_count = pool.len();
+        let state_client = pool.control_client();
         let kv_event_source_count = kv_event_sources.len();
         let combined_token_limit = combined_token_limit(&discovery);
         if combined_token_limit.is_none() {
             tracing::warn!("requests without max_tokens keep SGLang's 128-token default");
         }
+        let media_support = client::media_support(&discovery.server_info);
         self.state
             .set(StartedState {
                 pool,
                 native_http,
                 kv_event_sources,
                 combined_token_limit,
+                media_support,
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
         tracing::info!(
@@ -341,8 +359,23 @@ impl LLMEngine for SglangSidecarEngine {
             mode = ?self.disaggregation_mode,
             connections = connection_count,
             kv_event_sources = kv_event_source_count,
+            media_support = ?media_support,
             "sglang sidecar started"
         );
+        let (stop, lost) = (self.cancel.child_token(), self.lost.clone());
+        let reason = Arc::clone(&self.lost_reason);
+        let open_timeout = self.transport.connect_attempt_timeout;
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = stop.cancelled() => {}
+                why = client::watch_engine_state(state_client, open_timeout) => {
+                    if let Some(why) = why {
+                        let _ = reason.set(why);
+                        lost.cancel();
+                    }
+                }
+            }
+        });
         Ok(config)
     }
 
@@ -390,6 +423,7 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_host.as_deref(),
             self.bootstrap_port,
         )?;
+        require_media_support(&grpc_request, state.media_support)?;
         let mut prefill_handoff = if self.disaggregation_mode.is_prefill() {
             grpc_request
                 .disaggregated_params
@@ -425,7 +459,7 @@ impl LLMEngine for SglangSidecarEngine {
             let mut stream = match opened {
                 Ok(response) => response.into_inner(),
                 Err(status) => {
-                    yield Err(client::status_to_dynamo("Generate", status));
+                    yield Err(client::stream_status_to_dynamo("Generate", status));
                     return;
                 }
             };
@@ -439,7 +473,7 @@ impl LLMEngine for SglangSidecarEngine {
                 // Publish the handoff only after the gRPC transport opens the
                 // response stream so decode can rendezvous while prefill runs.
                 yield Ok(LLMEngineOutput {
-                    disaggregated_params: Some(handoff),
+                    disaggregated_params: Some(Box::new(handoff)),
                     ..Default::default()
                 });
             }
@@ -469,7 +503,7 @@ impl LLMEngine for SglangSidecarEngine {
                                 break;
                             }
                             Err(status) => {
-                                yield Err(client::status_to_dynamo("Generate", status));
+                                yield Err(client::stream_status_to_dynamo("Generate", status));
                                 break;
                             }
                         };
@@ -537,7 +571,7 @@ impl LLMEngine for SglangSidecarEngine {
                             terminal.token_ids = token_ids;
                             terminal.log_probs = log_probs;
                             terminal.top_logprobs = top_logprobs;
-                            terminal.engine_data = engine_data;
+                            terminal.engine_data = engine_data.map(Box::new);
                             yield Ok(terminal);
                             break;
                         }
@@ -554,7 +588,7 @@ impl LLMEngine for SglangSidecarEngine {
                                 token_ids,
                                 log_probs,
                                 top_logprobs,
-                                engine_data,
+                                engine_data: engine_data.map(Box::new),
                                 ..Default::default()
                             });
                         }
@@ -568,10 +602,15 @@ impl LLMEngine for SglangSidecarEngine {
         let Some(state) = self.state.get() else {
             return;
         };
+        let request_id = state
+            .native_http
+            .as_ref()
+            .and_then(|http| http.request_id(&ctx))
+            .unwrap_or_else(|| ctx.id().to_string());
         // HTTP queues scheduler cancellation without first closing the gRPC stream.
         if let Some(native_http) = &state.native_http {
             match native_http
-                .abort(ctx.id(), self.transport.connect_attempt_timeout)
+                .abort(&request_id, self.transport.connect_attempt_timeout)
                 .await
             {
                 Ok(()) => return,
@@ -584,7 +623,7 @@ impl LLMEngine for SglangSidecarEngine {
         }
         let mut grpc_client = state.pool.control_client();
         let request = pb::AbortRequest {
-            rid: ctx.id().to_string(),
+            rid: request_id,
             abort_all: false,
         };
         if let Err(error) = client::abort(
@@ -608,6 +647,12 @@ impl LLMEngine for SglangSidecarEngine {
         Ok(())
     }
 
+    async fn engine_lost(&self) -> DynamoError {
+        self.lost.cancelled().await;
+        let reason = self.lost_reason.get().map_or("unknown", String::as_str);
+        client::engine_shutdown(format!("SGLang engine lost: {reason}"))
+    }
+
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
         let state = self
             .state
@@ -622,6 +667,7 @@ impl LLMEngine for SglangSidecarEngine {
                 topic: source.topic.clone(),
                 dp_rank: source.dp_rank,
                 image_token_id: None,
+                idempotent_stores: true,
             })
             .collect())
     }
@@ -979,6 +1025,14 @@ fn combined_token_limit(discovery: &Discovery) -> Option<u32> {
             .max(field("speculative_num_draft_tokens")?)
     };
     discovery.max_model_len?.checked_sub(reserved)
+}
+
+/// The engine's template defaults never reach Dynamo traffic: the frontend renders the template.
+fn engine_sets_chat_template_defaults(server_info: &Value) -> bool {
+    server_info
+        .get("default_chat_template_kwargs")
+        .and_then(Value::as_object)
+        .is_some_and(|kwargs| !kwargs.is_empty())
 }
 
 /// SGLang holds a request's grammar until its reasoning parser sees the end of thinking.
@@ -1399,9 +1453,9 @@ mod tests {
     use super::{
         Args, DisaggregationMode, DiscoveredKvEventSource, Discovery, EngineConfig,
         SglangSidecarEngine, build_engine_config, combined_token_limit, discover_kv_event_sources,
-        discovery_bootstrap_port, hicache_native_offloading_capacity, kv_event_connect_host,
-        mooncake_runtime_data, omitted_max_tokens_default, resolve_bootstrap_host_with_local,
-        sglang_eagle_enabled,
+        discovery_bootstrap_port, engine_sets_chat_template_defaults,
+        hicache_native_offloading_capacity, kv_event_connect_host, mooncake_runtime_data,
+        omitted_max_tokens_default, resolve_bootstrap_host_with_local, sglang_eagle_enabled,
     };
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
@@ -1609,6 +1663,20 @@ mod tests {
             build_engine_config(&discovery(info), DisaggregationMode::Aggregated, None, None)
                 .unwrap();
         assert!(!config.runtime_data.contains_key("sglang_hicache_mooncake"));
+    }
+
+    #[test]
+    fn engine_template_defaults_are_detected() {
+        assert!(engine_sets_chat_template_defaults(
+            &json!({"default_chat_template_kwargs": {"enable_thinking": false}})
+        ));
+        for server_info in [
+            json!({}),
+            json!({"default_chat_template_kwargs": null}),
+            json!({"default_chat_template_kwargs": {}}),
+        ] {
+            assert!(!engine_sets_chat_template_defaults(&server_info));
+        }
     }
 
     #[test]

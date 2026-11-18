@@ -431,7 +431,8 @@ def test_engine_request_limit_flag_outranks_both_environment_names(admission_env
     assert _CANONICAL_LIMIT_ENV in help_text
     assert _LEGACY_LIMIT_ENV in help_text
     assert "per DP rank" in help_text
-    assert "max_num_seqs" in help_text
+    assert "default: unlimited" in help_text
+    assert "max_num_seqs" not in help_text
 
 
 @pytest.mark.parametrize(
@@ -461,3 +462,42 @@ def test_engine_request_limit_rejects_non_positive_values(admission_env, value):
         _parse_runtime_args(["--engine-request-limit", value])
 
     assert _admission_environment() == dict.fromkeys(_ADMISSION_ENV)
+
+
+def test_invalid_allow_remote_urls_fails_at_startup(monkeypatch):
+    monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", "disabled")
+
+    with pytest.raises(ValueError, match="DYN_MM_ALLOW_REMOTE_URLS"):
+        _parse_runtime_args([])
+
+
+def test_muse_parser_alias_warns_per_flag(monkeypatch, caplog):
+    _clear_structural_tag_env(monkeypatch)
+    # validate() exports DYN_RESPONSE_PLANE; track it so monkeypatch restores it.
+    monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
+    with caplog.at_level(logging.WARNING, logger=runtime_args.__name__):
+        config, _ = _parse_runtime_args(
+            ["--dyn-tool-call-parser", "muse", "--dyn-reasoning-parser", "muse"]
+        )
+    # The alias keeps working until the removal release.
+    assert config.dyn_tool_call_parser == "muse"
+    assert config.dyn_reasoning_parser == "muse"
+    assert caplog.text.count("deprecated alias of muse_glimmer") == 2
+    assert "--dyn-tool-call-parser=muse" in caplog.text
+    assert "--dyn-reasoning-parser=muse" in caplog.text
+    assert "muse_spark_open" in caplog.text
+
+
+def test_canonical_muse_parsers_do_not_warn(monkeypatch, caplog):
+    _clear_structural_tag_env(monkeypatch)
+    monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
+    with caplog.at_level(logging.WARNING, logger=runtime_args.__name__):
+        _parse_runtime_args(
+            [
+                "--dyn-tool-call-parser",
+                "muse_glimmer",
+                "--dyn-reasoning-parser",
+                "muse_spark_open",
+            ]
+        )
+    assert "deprecated alias" not in caplog.text

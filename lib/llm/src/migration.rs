@@ -3,11 +3,13 @@
 
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Poll, ready};
 use std::time::Instant;
 
 use anyhow::{Error, Result};
-use futures::{stream, stream::StreamExt};
+use futures::{Stream, stream::StreamExt};
 
 use crate::{
     http::service::metrics::Metrics,
@@ -24,7 +26,7 @@ use crate::{
     session_affinity::explicit_target,
 };
 
-use dynamo_kv_router::scheduling::AbortCause;
+use dynamo_admission::host::AbortCause;
 use dynamo_protocols::types::CompletionUsage;
 use dynamo_runtime::engine::Data;
 use dynamo_runtime::error::{self, DynamoError, ErrorReason, ErrorType};
@@ -35,6 +37,8 @@ use dynamo_runtime::pipeline::{
     network::egress::route_span::{RouteTraceContext, attach_route_trace_context, error_type_name},
 };
 use dynamo_runtime::protocols::annotated::Annotated;
+
+pub(crate) mod realtime;
 
 /// Accessors the migration RetryManager needs from a response chunk.
 /// `token_ids` lets it replay already-delivered tokens; `worker_trace_link`
@@ -55,7 +59,7 @@ impl HasTokenIds for BackendOutput {
         &self.token_ids
     }
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
-        self.worker_trace_link.as_ref()
+        self.worker_trace_link.as_deref()
     }
     fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint> {
         self.jailed_text.as_ref()
@@ -70,7 +74,7 @@ impl HasTokenIds for LLMEngineOutput {
         &self.token_ids
     }
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
-        self.worker_trace_link.as_ref()
+        self.worker_trace_link.as_deref()
     }
     fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint> {
         self.jailed_text.as_ref()
@@ -196,6 +200,46 @@ fn is_migratable_for_request(
     allows_phase(phase)
 }
 
+// Includes the initial dispatch; a migration limit of zero still permits one worker.
+struct AttemptBudget {
+    remaining: u64,
+    next: u64,
+}
+
+impl AttemptBudget {
+    fn new(migration_limit: u32) -> Self {
+        Self {
+            remaining: u64::from(migration_limit) + 1,
+            next: 0,
+        }
+    }
+
+    fn take(&mut self) -> Option<u32> {
+        let remaining = self.remaining.checked_sub(1)?;
+        let attempt = u32::try_from(self.next).ok()?;
+        self.remaining = remaining;
+        self.next += 1;
+        Some(attempt)
+    }
+
+    fn has_remaining(&self) -> bool {
+        self.remaining > 0
+    }
+
+    fn disable(&mut self) {
+        self.remaining = 0;
+    }
+
+    fn next(&self) -> u64 {
+        self.next
+    }
+
+    fn last(&self) -> u32 {
+        // A dispatched attempt always fits in u32, including at the maximum limit.
+        self.next.saturating_sub(1) as u32
+    }
+}
+
 pub struct Migration {
     migration_limit: u32,
     max_seq_len: Option<u32>,
@@ -296,14 +340,98 @@ where
             session_affinity,
         )
         .await?;
-        let response_stream = stream::unfold(retry_manager, move |mut retry_manager| async move {
-            retry_manager
-                .next()
-                .await
-                .map(|response| (response, retry_manager))
-        })
-        .fuse();
-        Ok(ResponseStream::new(Box::pin(response_stream), engine_ctx_))
+        Ok(ResponseStream::new(
+            Box::pin(Migrated::Streaming(retry_manager)),
+            engine_ctx_,
+        ))
+    }
+}
+
+/// Migration's response stream.
+///
+/// It reads each item of the active attempt where the attempt's stream returned it. Only a
+/// migration, which awaits the next attempt's dispatch, runs as a future, and that future owns
+/// the manager until it ends.
+// The large variant is the one every item is read through. Boxing the manager to shrink the
+// enum would cost an allocation per request and an indirection per item, for the sake of the
+// rare variants.
+#[allow(clippy::large_enum_variant)]
+enum Migrated<Resp>
+where
+    Resp: Data + HasTokenIds,
+{
+    /// Reading the active attempt.
+    Streaming(RetryManager<Resp>),
+    /// Migrating on a failure of the active attempt: [`RetryManager::migrate_on`] in a future.
+    /// Its output gives the manager back, with the failure when no next attempt started.
+    Migrating(MigrationFuture<Resp>),
+    /// Ended. The manager, and with it the attempt's stream, drops when the stream ends.
+    Ended,
+}
+
+/// The future of [`Migrated::Migrating`].
+type MigrationFuture<Resp> =
+    Pin<Box<dyn Future<Output = (RetryManager<Resp>, Option<Annotated<Resp>>)> + Send>>;
+
+impl<Resp> Stream for Migrated<Resp>
+where
+    Resp: Data + HasTokenIds,
+{
+    type Item = Annotated<Resp>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Annotated<Resp>>> {
+        let this = &mut *self;
+        loop {
+            match this {
+                Migrated::Streaming(manager) => {
+                    let Some(stream) = manager.next_stream.as_mut() else {
+                        // `RetryManager::build` starts an attempt, and nothing clears it.
+                        tracing::error!("Migration has no active attempt");
+                        *this = Migrated::Ended;
+                        return Poll::Ready(Some(Annotated::from_error("next_stream is None")));
+                    };
+                    // Edit the item inside the `Poll` the attempt's stream returned, and
+                    // return that same value: taking it out and wrapping it again would
+                    // move it twice more.
+                    let mut poll = stream.poll_next_unpin(cx);
+                    match &mut poll {
+                        Poll::Pending => return poll,
+                        Poll::Ready(None) => {
+                            *this = Migrated::Ended;
+                            return poll;
+                        }
+                        Poll::Ready(Some(response)) => {
+                            if manager.accept(response) {
+                                return poll;
+                            }
+                        }
+                    }
+                    let Poll::Ready(Some(response)) = poll else {
+                        unreachable!("only a failure to migrate on gets here");
+                    };
+                    let Migrated::Streaming(mut manager) = std::mem::replace(this, Migrated::Ended)
+                    else {
+                        unreachable!("matched above");
+                    };
+                    *this = Migrated::Migrating(Box::pin(async move {
+                        let failure = manager.migrate_on(response).await;
+                        (manager, failure)
+                    }));
+                }
+                Migrated::Migrating(future) => {
+                    let (manager, failure) = ready!(future.as_mut().poll(cx));
+                    *this = Migrated::Streaming(manager);
+                    if failure.is_some() {
+                        return Poll::Ready(failure);
+                    }
+                    // Read the next attempt's items in place, from the top.
+                }
+                Migrated::Ended => return Poll::Ready(None),
+            }
+        }
     }
 }
 
@@ -331,7 +459,7 @@ where
     session_affinity: Option<SessionAffinityId>,
     next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
     next_stream: Option<ManyOut<Annotated<Resp>>>,
-    retries_left: u64,
+    attempts: AttemptBudget,
     max_seq_len: Option<u32>,
     model_name: Arc<String>,
     metrics: Arc<Metrics>,
@@ -341,8 +469,6 @@ where
     /// Router-owned metadata for the active attempt. The router fills in its
     /// selected worker ID so a later migration can identify the failed worker.
     active_route_trace: Option<Arc<RouteTraceContext>>,
-    /// Zero-based physical dispatch attempt number.
-    next_attempt: u32,
     /// Number of generated tokens delivered before the next migration.
     completed_tokens: usize,
     /// Failure that caused the next physical dispatch to be a migration retry.
@@ -358,7 +484,7 @@ where
 struct MigrationCause {
     reason: ErrorType,
     from_worker_id: Option<u64>,
-    /// The attempt that *failed*, not the retry it may schedule. `next_attempt`
+    /// The attempt that *failed*, not the retry it may schedule. `attempts.next()`
     /// has already been incremented past this by the time a failure surfaces,
     /// so recording that instead would name an attempt with no route span.
     attempt: u32,
@@ -424,6 +550,10 @@ where
             }
             retries_left = 0;
         }
+        if !crate::routing_policy::execution_requirements(&preprocessed_request).allows_replay {
+            retries_left = 0;
+            preprocessed_request.migration_state = None;
+        }
         if retries_left > 0 {
             preprocessed_request.migration_state = Some(Default::default());
         }
@@ -435,13 +565,12 @@ where
             session_affinity,
             next_generate: next,
             next_stream: None,
-            retries_left: u64::from(retries_left) + 1, // +1 to account for the initial attempt
+            attempts: AttemptBudget::new(retries_left),
             max_seq_len,
             model_name,
             metrics,
             last_worker_link: None,
             active_route_trace: None,
-            next_attempt: 0,
             completed_tokens: 0,
             pending_migration: None,
             prompt_len,
@@ -453,7 +582,10 @@ where
         Ok(slf)
     }
 
-    pub async fn next(&mut self) -> Option<Annotated<Resp>> {
+    /// The next response, read as [`Migrated`] reads it: the tests drive the manager through
+    /// this.
+    #[cfg(test)]
+    async fn next(&mut self) -> Option<Annotated<Resp>> {
         loop {
             let response_stream = match self.next_stream.as_mut() {
                 Some(stream) => stream,
@@ -462,62 +594,86 @@ where
                     return Some(Annotated::from_error("next_stream is None"));
                 }
             };
-            if let Some(mut response) = response_stream.next().await {
-                // Check if this is a migratable error that should trigger stream recreation.
-                if let Some(err) = response.error.as_ref() {
-                    if is_migratable_for_request(&self.request, err) {
-                        let Some(migration_error) = migratable_error_in_chain(err) else {
-                            tracing::warn!(error = %err, "Migration eligibility had no semantic error");
-                            continue;
-                        };
-                        if self.retries_left == 0 {
-                            let route_trace = self.active_route_trace.clone();
-                            self.record_migration_exhausted(MigrationCause {
-                                reason: migration_error.error_type(),
-                                from_worker_id: route_trace
-                                    .as_deref()
-                                    .and_then(RouteTraceContext::selected_worker_id),
-                                attempt: self.failed_attempt(route_trace.as_deref()),
-                            });
-                            // The stream host parked the lifecycle on this
-                            // failure. The client receives this worker error
-                            // (below), so the classifier's abort cause must be
-                            // the same error, not the synthetic exhaustion
-                            // error `new_stream` would otherwise abort with.
-                            self.abort_request_lifecycle(err);
-                        } else {
-                            self.queue_migration(
-                                migration_error.error_type(),
-                                self.active_route_trace.clone(),
-                            );
-                        }
-                        tracing::warn!(error = %err, "Stream disconnected, recreating stream");
-                        self.metrics.inc_migration_ongoing_request(&self.model_name);
-                        let migration_event =
-                            MigrationEvent::new(frontend_service::migration_type::ONGOING_REQUEST);
-                        // NOTE: Delegate exhaustion to new_stream so retry accounting has one owner.
-                        // When no replacement is established, preserve the triggering stream error.
-                        if let Err(err) = self.new_stream(Some(migration_event)).await {
-                            tracing::warn!(error = ?err, "Cannot recreate stream");
-                        } else {
-                            self.release_replay_prompt_if_final();
-                            continue;
-                        }
-                    } else {
-                        // The stream host parks the classifier lifecycle on any
-                        // type-migratable failure, but an explicit worker pin can
-                        // veto the retry here. Nothing will claim the parked
-                        // lifecycle, so abort it with the cause now rather than
-                        // letting Drop emit a late, cause-less event.
-                        self.abort_request_lifecycle(err);
-                    }
-                }
-                self.track_response(&response);
-                self.rebase_usage(&mut response);
+            let mut response = response_stream.next().await?;
+            if self.accept(&mut response) {
                 return Some(response);
             }
+            if let Some(response) = self.migrate_on(response).await {
+                return Some(response);
+            }
+        }
+    }
+
+    /// Take `response` from the active attempt as it is, unless it is a failure to migrate
+    /// on: then return `false` and leave it to [`migrate_on`](Self::migrate_on).
+    ///
+    /// Edits `response` in place, so the response stream returns the item where the attempt's
+    /// stream put it.
+    fn accept(&mut self, response: &mut Annotated<Resp>) -> bool {
+        if let Some(err) = response.error.as_ref() {
+            if is_migratable_for_request(&self.request, err) {
+                return false;
+            }
+            // The stream host parks the classifier lifecycle on any
+            // type-migratable failure, but an explicit worker pin can
+            // veto the retry here. Nothing will claim the parked
+            // lifecycle, so abort it with the cause now rather than
+            // letting Drop emit a late, cause-less event.
+            self.abort_request_lifecycle(err);
+        }
+        self.track_response(response);
+        self.rebase_usage(response);
+        true
+    }
+
+    /// Migrate on `response`, a migratable failure of the active attempt: start the next
+    /// attempt and return `None`, so the caller reads on from it. When no attempt can start,
+    /// return `response` to the client.
+    async fn migrate_on(&mut self, mut response: Annotated<Resp>) -> Option<Annotated<Resp>> {
+        let Some(err) = response.error.as_ref() else {
+            return Some(response);
+        };
+        // Check if this is a migratable error that should trigger stream recreation.
+        let Some(migration_error) = migratable_error_in_chain(err) else {
+            tracing::warn!(error = %err, "Migration eligibility had no semantic error");
+            return None;
+        };
+        if !self.attempts.has_remaining() {
+            let route_trace = self.active_route_trace.clone();
+            self.record_migration_exhausted(MigrationCause {
+                reason: migration_error.error_type(),
+                from_worker_id: route_trace
+                    .as_deref()
+                    .and_then(RouteTraceContext::selected_worker_id),
+                attempt: self.failed_attempt(route_trace.as_deref()),
+            });
+            // The stream host parked the lifecycle on this
+            // failure. The client receives this worker error
+            // (below), so the classifier's abort cause must be
+            // the same error, not the synthetic exhaustion
+            // error `new_stream` would otherwise abort with.
+            self.abort_request_lifecycle(err);
+        } else {
+            self.queue_migration(
+                migration_error.error_type(),
+                self.active_route_trace.clone(),
+            );
+        }
+        tracing::warn!(error = %err, "Stream disconnected, recreating stream");
+        self.metrics.inc_migration_ongoing_request(&self.model_name);
+        let migration_event =
+            MigrationEvent::new(frontend_service::migration_type::ONGOING_REQUEST);
+        // NOTE: Delegate exhaustion to new_stream so retry accounting has one owner.
+        // When no replacement is established, preserve the triggering stream error.
+        if let Err(err) = self.new_stream(Some(migration_event)).await {
+            tracing::warn!(error = ?err, "Cannot recreate stream");
+        } else {
+            self.release_replay_prompt_if_final();
             return None;
         }
+        self.track_response(&response);
+        self.rebase_usage(&mut response);
+        Some(response)
     }
 
     /// Abort any classifier lifecycle parked for a retry this request will not
@@ -529,7 +685,7 @@ where
     }
 
     async fn new_stream(&mut self, mut migration_event: Option<MigrationEvent>) -> Result<()> {
-        if self.retries_left == 0 {
+        if !self.attempts.has_remaining() {
             if let Some(cause) = self.pending_migration.take() {
                 self.record_migration_exhausted(cause);
             }
@@ -541,8 +697,7 @@ where
             self.abort_request_lifecycle(error.as_ref());
             return Err(error);
         }
-        while self.retries_left > 0 {
-            self.retries_left -= 1;
+        while let Some(attempt) = self.attempts.take() {
             // Once any chunks have arrived from a previous attempt, stamp
             // that worker's span as `migration_link` so the next worker's
             // span renders an OTel Link back to it. Guarded so the initial
@@ -556,8 +711,6 @@ where
                 self.metadata.clone(),
             );
             let migration = self.pending_migration.take();
-            let attempt = self.next_attempt;
-            self.next_attempt += 1;
             let route_trace = attach_route_trace_context(
                 &mut request,
                 RouteTraceContext::new(
@@ -668,7 +821,7 @@ where
                     }
                     // Preserve the existing per-attempt metric contract.
                     self.metrics.inc_migration_new_request(&self.model_name);
-                    if self.retries_left == 0 {
+                    if !self.attempts.has_remaining() {
                         let cause = MigrationCause {
                             reason,
                             from_worker_id: route_trace.selected_worker_id(),
@@ -710,10 +863,7 @@ where
     /// The attempt a failure belongs to. Prefers the attempt's own trace
     /// context; falls back to the last dispatched attempt when there is none.
     fn failed_attempt(&self, route_trace: Option<&RouteTraceContext>) -> u32 {
-        route_trace.map_or_else(
-            || self.next_attempt.saturating_sub(1),
-            RouteTraceContext::attempt,
-        )
+        route_trace.map_or_else(|| self.attempts.last(), RouteTraceContext::attempt)
     }
 
     fn queue_migration(&mut self, reason: ErrorType, route_trace: Option<Arc<RouteTraceContext>>) {
@@ -728,7 +878,7 @@ where
         tracing::info!(
             target: "request_span",
             {
-                { "request.attempt" } = self.next_attempt,
+                { "request.attempt" } = self.attempts.next(),
                 { "migration.is_retry" } = true,
                 { "migration.reason" } = error_type_name(reason),
                 { "migration.from_worker_id" } = from_worker_id,
@@ -770,8 +920,8 @@ where
         };
         let token_ids = llm_engine_output.token_ids();
         // Pure telemetry for the migration lifecycle events, so it has to count
-        // the final allowed attempt as well. `new_stream` decrements
-        // `retries_left` *before* dispatching, so that attempt runs with the
+        // the final allowed attempt as well. `new_stream` consumes
+        // the attempt budget *before* dispatching, so that attempt runs with the
         // counter already at zero; keeping this behind the replay guard below
         // would drop its tokens from `migration retries exhausted`.
         self.completed_tokens += token_ids.len();
@@ -779,7 +929,7 @@ where
         // Everything past this point rebuilds replay state for a *future*
         // attempt. Once no retry can happen there is nothing to replay onto,
         // so leave the request untouched.
-        if self.retries_left == 0 {
+        if !self.attempts.has_remaining() {
             return;
         }
         // Capture the worker's engine.generate span pointer so a future
@@ -814,7 +964,7 @@ where
     /// dispatched attempt holds its own reference for as long as it needs one. Release it so a
     /// long prompt is not pinned for the rest of the response stream.
     fn release_replay_prompt_if_final(&mut self) {
-        if self.retries_left == 0 && !self.request.token_ids.is_empty() {
+        if !self.attempts.has_remaining() && !self.request.token_ids.is_empty() {
             self.request.token_ids = Arc::default();
         }
     }
@@ -872,7 +1022,7 @@ where
                 );
                 self.metrics
                     .inc_migration_max_seq_len_exceeded(&self.model_name);
-                self.retries_left = 0; // disable migration
+                self.attempts.disable();
                 self.release_replay_prompt_if_final();
                 return true;
             }
@@ -893,6 +1043,7 @@ mod tests {
     use dynamo_runtime::pipeline::AsyncEngine;
     use dynamo_runtime::pipeline::context::Controller;
     use dynamo_runtime::protocols::maybe_error::MaybeError;
+    use futures::stream;
     use std::sync::atomic::{AtomicU32, Ordering};
     use tokio::sync::mpsc;
 
@@ -1227,7 +1378,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(manager.retries_left, 0);
+        assert!(!manager.attempts.has_remaining());
         assert!(manager.request.migration_state.is_none());
 
         let mut legacy = create_mock_request(1);
@@ -1914,6 +2065,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_lora_request_does_not_retry_on_another_worker() {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::FailThenSuccess,
+            1,
+            100,
+            context_id.clone(),
+        ));
+        let calls = mock_engine.call_count.clone();
+        let mut request = create_mock_request(1);
+        request.routing = Some(RoutingHints {
+            lora_name: Some("dyn-lora-0123456789abcdef0123456789abcdef".to_string()),
+            lora_resolution_version: Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION),
+            ..Default::default()
+        });
+        let context = Arc::new(Controller::new(context_id));
+
+        let result = RetryManager::build(
+            context,
+            BTreeMap::new(),
+            request,
+            mock_engine,
+            3,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn test_migration_preserves_session_affinity_across_retry() {
         let context_id = uuid::Uuid::new_v4().to_string();
         let mock_engine = Arc::new(MockEngine::new(
@@ -1935,6 +2121,147 @@ mod tests {
         while stream.next().await.is_some() {}
 
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// The engine's stream, which records when it is dropped.
+    struct DropFlagStream {
+        inner: Pin<Box<dyn futures::Stream<Item = Annotated<BackendOutput>> + Send>>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl futures::Stream for DropFlagStream {
+        type Item = Annotated<BackendOutput>;
+
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            self.inner.as_mut().poll_next(cx)
+        }
+    }
+
+    impl Drop for DropFlagStream {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Sends two outputs, then ends, through a [`DropFlagStream`].
+    struct DropFlagEngine {
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for DropFlagEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+            let stream = DropFlagStream {
+                inner: Box::pin(futures::stream::iter([
+                    create_mock_output(101),
+                    create_mock_output(102),
+                ])),
+                dropped: self.dropped.clone(),
+            };
+            Ok(ResponseStream::new(Box::pin(stream), request.context()))
+        }
+    }
+
+    /// Migration lets go of the attempt's stream when its own stream ends, not when its caller
+    /// drops it, and it stays ended. A caller may hold an ended stream for a while; the stages
+    /// below must see their stream end at once.
+    #[tokio::test]
+    async fn migration_drops_the_attempt_stream_when_its_stream_ends() {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let engine = Arc::new(DropFlagEngine {
+            dropped: dropped.clone(),
+        });
+        let request =
+            Context::with_id_and_metadata(create_mock_request(2), context_id, BTreeMap::new());
+        let migration = Migration::new(1, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
+        let mut stream = migration.generate(request, engine).await.unwrap();
+
+        assert!(stream.next().await.is_some());
+        assert!(stream.next().await.is_some());
+        assert!(!dropped.load(Ordering::SeqCst));
+        assert!(stream.next().await.is_none());
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the attempt's stream must be dropped when Migration's stream ends"
+        );
+        assert!(stream.next().await.is_none(), "an ended stream stays ended");
+    }
+
+    /// `inner`, with each response stream returning `Pending` once before each item.
+    struct PendingEngine {
+        inner: Arc<MockEngine>,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for PendingEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+            let stream = self.inner.generate(request).await?;
+            let context = stream.context();
+            let stream = stream.then(|response| async move {
+                tokio::task::yield_now().await;
+                response
+            });
+            Ok(ResponseStream::new(Box::pin(stream), context))
+        }
+    }
+
+    /// A mid-stream migration gives the same responses when the attempts' streams are pending
+    /// before each item as when they are always ready.
+    #[tokio::test]
+    async fn migration_output_is_the_same_when_the_attempt_is_pending_between_items() {
+        async fn tokens(pending: bool) -> (Vec<Vec<u32>>, u32) {
+            let context_id = uuid::Uuid::new_v4().to_string();
+            let mock = Arc::new(MockEngine::new(
+                MockBehavior::MidStreamFail { fail_after: 5 },
+                10,
+                100,
+                context_id.clone(),
+            ));
+            let calls = mock.call_count.clone();
+            let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+                if pending {
+                    Arc::new(PendingEngine { inner: mock })
+                } else {
+                    mock
+                };
+            let request =
+                Context::with_id_and_metadata(create_mock_request(10), context_id, BTreeMap::new());
+            let migration =
+                Migration::new(3, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
+            let tokens = migration
+                .generate(request, engine)
+                .await
+                .unwrap()
+                .map(|response| {
+                    assert!(response.err().is_none(), "{response:?}");
+                    response.data.map(|data| data.token_ids).unwrap_or_default()
+                })
+                .collect()
+                .await;
+            (tokens, calls.load(Ordering::SeqCst))
+        }
+
+        let ready = tokens(false).await;
+        assert_eq!(
+            ready.0,
+            (101..=110).map(|token| vec![token]).collect::<Vec<_>>()
+        );
+        assert_eq!(ready.1, 2, "one migration");
+        assert_eq!(tokens(true).await, ready);
     }
 
     #[tokio::test]
@@ -2793,7 +3120,7 @@ mod tests {
             .expect("Last response should be Disconnected error");
         assert_eq!(err.error_type(), ErrorType::Disconnected);
 
-        // Migration was attempted but blocked because max_seq_len set retries_left to 0.
+        // Migration was attempted but blocked because max_seq_len disabled further attempts.
         // The ongoing metric is still incremented (it counts attempts, not successes).
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
@@ -2936,7 +3263,7 @@ mod tests {
             metrics.get_migration_max_seq_len_exceeded_count(TEST_MODEL),
             1
         );
-        // Migration was attempted but blocked (retries_left was already 0).
+        // Migration was attempted but blocked because no attempts remained.
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
     }
 
@@ -3366,7 +3693,7 @@ mod tests {
         assert_eq!(failure.error_type(), ErrorType::Disconnected);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(retry_manager.completed_tokens, 1);
-        assert_eq!(retry_manager.next_attempt, 2);
+        assert_eq!(retry_manager.attempts.next(), 2);
         assert!(retry_manager.pending_migration.is_none());
     }
 
@@ -3439,7 +3766,7 @@ mod tests {
                         if i == start
                             && let (Some(link), Some(data)) = (&link, out.data.as_mut())
                         {
-                            data.worker_trace_link = Some(link.clone());
+                            data.worker_trace_link = Some(Box::new(link.clone()));
                         }
                         if tx.send(out).await.is_err() {
                             return;
@@ -3552,7 +3879,7 @@ mod tests {
     /// The `migration retries exhausted` event must name the attempt that
     /// *failed*, not the retry that will never happen.
     ///
-    /// `next_attempt` is incremented at dispatch, so after attempt 0 is
+    /// `attempts.next()` is incremented at dispatch, so after attempt 0 is
     /// dispatched it already reads 1. Recording that would emit
     /// `request.attempt=1` for a run whose only route span is attempt 0,
     /// so consumers joining lifecycle events to `router.route_request` spans by
@@ -3696,7 +4023,7 @@ mod tests {
         });
 
         let captured = captured.lock().unwrap();
-        let last_dispatched = manager.next_attempt - 1;
+        let last_dispatched = manager.attempts.last();
         assert_eq!(
             captured.exhausted_attempt,
             Some(u64::from(last_dispatched)),
@@ -3705,7 +4032,7 @@ mod tests {
             captured.scheduled_attempts
         );
         // The tally must include the final allowed attempt. `new_stream`
-        // decrements `retries_left` before dispatching, so that attempt runs
+        // consumes the attempt budget before dispatching, so that attempt runs
         // with the counter already at zero; when the tally sat behind the
         // replay guard in `track_response`, the token it delivered was dropped
         // and this reported 1 instead of 2.

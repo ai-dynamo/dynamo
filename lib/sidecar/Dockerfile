@@ -82,6 +82,9 @@ FROM builder-base AS sidecar-builder
 
 ARG TARGETARCH
 ARG CARGO_CYCLONEDX_VERSION=0.5.9
+# PR checks set this to compile with codegen-units=16 and no LTO, in less than
+# half the time. Published images keep the shipping profile.
+ARG FAST_RELEASE_PROFILE=false
 
 # Build all four sidecars and their compliance inventory in one RUN. The target
 # directory exists only during this RUN. The final step removes it so the
@@ -111,6 +114,9 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
     CARGO_TARGET_DIR=/tmp/cargo-tools \
         cargo install cargo-cyclonedx --locked --version "${CARGO_CYCLONEDX_VERSION}"; \
     mkdir -p /out/bin /out/sidecar-sboms /out/rust-licenses; \
+    if [ "${FAST_RELEASE_PROFILE}" = "true" ]; then \
+        export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_RELEASE_LTO=off; \
+    fi; \
     cargo build --release --locked \
         -p dynamo-vllm-sidecar \
         -p dynamo-sglang-sidecar \
@@ -170,6 +176,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update -y \
     && apt-get install -y --no-install-recommends --only-upgrade \
+        apt \
+        apt-utils \
         dirmngr \
         gnupg \
         gnupg-utils \
@@ -180,8 +188,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         gpgsm \
         gpgv \
         keyboxd \
+        libapt-pkg6.0t64 \
+        libglib2.0-0t64 \
+        libgnutls30t64 \
+        libperl5.38t64 \
         libssl3t64 \
+        openssh-client \
+        openssh-server \
+        openssh-sftp-server \
         openssl \
+        perl \
+        perl-base \
+        perl-modules-5.38 \
+        zlib1g \
+        zlib1g-dev \
     && apt-get clean \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -239,6 +259,18 @@ COPY --from=licenses /legal/ /
 # daemon (see shared-build-sidecar.yml). Not used for any shipped image.
 FROM scratch AS sidecar-binaries
 COPY --from=sidecar-builder /out/bin/ /
+
+# ---- CI-only: live image integration test -----------------------------------
+# The live image test runs inside the upstream engine image, independently of
+# Dynamo's shared runtime. Keep test dependencies out of production artifacts.
+FROM builder-base AS trtllm-image-test-builder
+ARG TARGETARCH
+RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
+    bash lib/sidecar/trtllm/ci/build.sh
+
+FROM scratch AS sidecar-trtllm-image-tests
+COPY --from=trtllm-image-test-builder /out/tests/ /
 
 # ---- shipped runtime ---------------------------------------------------------
 FROM runtime-base AS runtime

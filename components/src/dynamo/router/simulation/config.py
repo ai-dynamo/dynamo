@@ -9,8 +9,15 @@ import math
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal, TypeAlias
 
-from aisimulate.config.common import Choices, NumericRange
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from aisim.config.common import Choices, NumericRange
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    field_validator,
+    model_validator,
+)
 
 from dynamo.aisimulate.domains import (
     CHOICE_FORM,
@@ -75,7 +82,8 @@ ROUTER_NOT_RETUNABLE: dict[str, str] = {
     "host_cache_hit_weight": _STARTUP_OVERLAP_ACCOUNTING,
     "disk_cache_hit_weight": _STARTUP_OVERLAP_ACCOUNTING,
     "shared_cache_multiplier": (
-        "replay reports no shared cache hits, so every value would score the same"
+        "a router started with it at 0 builds no KV fetch inputs and a runtime "
+        "update cannot add them, so retune keeps it at its startup value"
     ),
 }
 
@@ -94,6 +102,15 @@ class PrefillLoadRecommendationModel(BaseModel):
     )
 
 
+class ConversationAffinityConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["session", "sibling_group"] = "session"
+    ttl_seconds: float = Field(
+        default=300.0, ge=1.0, le=31_536_000, allow_inf_nan=False
+    )
+
+
 class RouterPredictionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -102,26 +119,36 @@ class RouterPredictionConfig(BaseModel):
     overlap_score_credit: StrictFiniteFloat | None = None
     prefill_load_scale: StrictFiniteFloat | None = None
     temperature: StrictFiniteFloat | None = None
+    # --no-router-kv-events: the router indexes its own routing decisions instead.
+    use_kv_events: StrictBool | None = None
+    conversation_affinity: ConversationAffinityConfig | None = None
+    # Router policy YAML, the file the live router takes as ``--router-policy-config``.
+    # A worker-selection policy it selects replaces the default cost function.
+    policy_config: str | None = None
 
     @field_validator(
         "overlap_score_credit",
         "prefill_load_scale",
         "temperature",
+        "use_kv_events",
         mode="before",
     )
     @classmethod
     def _reject_explicit_null(cls, value: Any) -> Any:
         if value is None:
-            raise ValueError("Router numeric knobs do not accept null")
+            raise ValueError("Router knobs do not accept null")
         return value
 
     @model_validator(mode="after")
     def _validate_policy(self) -> RouterPredictionConfig:
         if self.policy == "round_robin":
             conflicts = {
+                "conversation_affinity",
                 "overlap_score_credit",
+                "policy_config",
                 "prefill_load_scale",
                 "temperature",
+                "use_kv_events",
             }.intersection(self.model_fields_set)
             if self.prefill_load_model.type != "none" or conflicts:
                 raise ValueError(

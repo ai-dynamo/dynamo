@@ -210,14 +210,48 @@ def test_token_budget_matches_sglang_policy(
 
 
 @pytest.mark.parametrize(
-    "disaggregation_mode, runtime_supported, enable_multimodal, capability_expected",
+    "disaggregation_mode, runtime_supported, worker_flags, capability_expected, reasoning_gate_expected",
     [
-        (None, True, False, False),
-        ("null", True, False, False),
-        ("prefill", False, False, False),
-        ("prefill", True, True, False),
-        ("prefill", True, False, True),
-        ("decode", True, False, True),
+        (None, True, {}, False, True),
+        ("null", True, {}, False, True),
+        ("prefill", False, {}, False, False),
+        ("prefill", True, {}, True, True),
+        ("decode", True, {}, True, True),
+        *[
+            pytest.param(
+                mode,
+                True,
+                {"enable_multimodal": True, "frontend_decoding": True},
+                False,
+                True,
+                id=f"frontend-decoded-media-{mode}",
+            )
+            for mode in ("null", "prefill", "decode")
+        ],
+        pytest.param(
+            "prefill",
+            True,
+            {"enable_multimodal": True, "multimodal_worker": True},
+            False,
+            False,
+            id="dedicated-multimodal-prefill",
+        ),
+        pytest.param(
+            "decode",
+            True,
+            {"enable_multimodal": True, "multimodal_worker": True},
+            False,
+            False,
+            id="dedicated-multimodal-decode",
+        ),
+        pytest.param(
+            "encode",
+            False,
+            {"enable_multimodal": True, "multimodal_encode_worker": True},
+            False,
+            False,
+            id="multimodal-encoder",
+        ),
     ],
 )
 def test_runtime_config_publishes_supported_disagg_capabilities(
@@ -226,8 +260,9 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     caplog,
     disaggregation_mode,
     runtime_supported,
-    enable_multimodal,
+    worker_flags,
     capability_expected,
+    reasoning_gate_expected,
 ):
     server_args = SimpleNamespace(
         allow_auto_truncate=False,
@@ -242,7 +277,8 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     )
     dynamo_args = register.DynamoConfig()
     dynamo_args.enable_local_indexer = False
-    dynamo_args.enable_multimodal = enable_multimodal
+    for name, value in worker_flags.items():
+        setattr(dynamo_args, name, value)
     capacity = SimpleNamespace(
         max_num_seqs=None,
         max_num_batched_tokens=None,
@@ -293,9 +329,9 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     if capability_expected:
         assert json.loads(runtime_config.runtime_data[capability]) is True
     reasoning_gate = register.TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY
-    assert (reasoning_gate in runtime_config.runtime_data) is (
-        runtime_supported and not enable_multimodal
-    )
+    assert (reasoning_gate in runtime_config.runtime_data) is reasoning_gate_expected
+    if reasoning_gate in runtime_config.runtime_data:
+        assert json.loads(runtime_config.runtime_data[reasoning_gate]) is True
     assert "Failed to get runtime config" not in caplog.text
 
 
@@ -646,6 +682,7 @@ def test_registration_publishes_physical_mooncake_layout(
         "should_split_heads": False,
         "extra_backend_tag": "tag",
         "key_prefix": "tag_unused-model",
+        "key_layout": "hicache",
         "kv_events_endpoint": "ipc:///unused-mooncake-events",
         "hicache_object_layout": hicache_layout_envelope["hicache_object_layout"],
     }
@@ -752,6 +789,29 @@ def _disabled_envelope(**layout):
         "hicache_object_layout": {"pools": [], "pp_rank": 0, **layout},
         "reason": "private-reason",
     }
+
+
+def test_registration_keeps_linker_metadata_when_hicache_is_disabled(
+    mooncake_registration,
+):
+    # The linker bypasses HiCache, so the engine reports HiCache as disabled.
+    args = mooncake_registration.server_args
+    args.hicache_storage_backend = None
+    args.enable_unified_cache_external_linker = True
+    args.unified_cache_external_linker_backend = "mooncake"
+    args.unified_cache_external_linker_config = None
+    for info in mooncake_registration.engine._scheduler_init_result.scheduler_infos:
+        info["hicache_object_layout"] = {
+            "enabled": False,
+            "backend": None,
+            "page_size": 16,
+            "hicache_object_layout": {"pools": []},
+            "reason": "Hierarchical cache is disabled",
+        }
+    config = mooncake_registration.run()
+    metadata = json.loads(config.runtime_data["sglang_hicache_mooncake"])
+    assert metadata["key_layout"] == "linker"
+    assert "hicache_object_layout" not in metadata
 
 
 @pytest.mark.parametrize(
@@ -907,3 +967,64 @@ def test_mooncake_tenant_stays_default_without_upstream_support(register, monkey
         )
         == "default"
     )
+
+
+def test_mooncake_runtime_data_describes_the_direct_linker(register):
+    linker = SimpleNamespace(
+        enable_unified_cache_external_linker=True,
+        unified_cache_external_linker_backend="mooncake",
+        hicache_storage_backend=None,
+        hicache_storage_backend_extra_config=None,
+        model_path="Org/Model",
+        served_model_name="served",
+        page_size=256,
+        tp_size=4,
+    )
+    data = register._get_mooncake_runtime_data(linker)
+    assert data["key_layout"] == "linker"
+    # The linker names keys after model_path, HiCache after served_model_name.
+    assert data["key_prefix"] == "Org-Model"
+    assert data["page_size"] == 256
+
+    # The linker's own config flag wins over the deprecated HiCache extra config.
+    linker_with_config = SimpleNamespace(
+        enable_unified_cache_external_linker=True,
+        unified_cache_external_linker_backend="mooncake",
+        unified_cache_external_linker_config={
+            "master_server_address": "new",
+            "extra_backend_tag": "linker-tag",
+        },
+        hicache_storage_backend=None,
+        hicache_storage_backend_extra_config='{"extra_backend_tag": "old-tag"}',
+        model_path="Org/Model",
+        served_model_name="served",
+    )
+    data = register._get_mooncake_runtime_data(linker_with_config)
+    assert data["extra_backend_tag"] == "linker-tag"
+    assert data["key_prefix"] == "linker-tag_Org-Model"
+
+    # Without the new flag the linker still reads the deprecated extra config.
+    legacy_linker = SimpleNamespace(
+        enable_unified_cache_external_linker=True,
+        unified_cache_external_linker_backend="mooncake",
+        unified_cache_external_linker_config=None,
+        hicache_storage_backend=None,
+        hicache_storage_backend_extra_config='{"extra_backend_tag": "old-tag"}',
+        model_path="Org/Model",
+        served_model_name="served",
+    )
+    data = register._get_mooncake_runtime_data(legacy_linker)
+    assert data["extra_backend_tag"] == "old-tag"
+
+    hicache = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=None,
+        model_path="Org/Model",
+        served_model_name="served",
+    )
+    data = register._get_mooncake_runtime_data(hicache)
+    assert data["key_layout"] == "hicache"
+    assert data["key_prefix"] == "served"
+
+    neither = SimpleNamespace(hicache_storage_backend=None)
+    assert register._get_mooncake_runtime_data(neither) is None

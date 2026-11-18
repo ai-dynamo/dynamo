@@ -19,12 +19,6 @@ const (
 	// role's podTemplate as the root for compiled model artifacts.
 	ModelStorageVolumeName = "model-storage"
 
-	// AnnotationExtraResourcesHash records an opaque content hash of the role's
-	// generated immutable runtime ConfigMap on PodClique templates
-	// (PodCliqueSet.spec.template.cliques[].annotations). Grove propagates it to
-	// PodClique and Pod metadata.
-	AnnotationExtraResourcesHash = "nvidia.com/extra-resources-hash"
-
 	// LPXReadyCondition reports if LPXGraphDeployment object is ready.
 	// Note: This condition type is defined to ensure consistent naming of conditions across objects.
 	// Please use object specific variants of this condition which provides more details for each context where
@@ -46,6 +40,7 @@ type LPXGraphDeploymentSpec struct {
 	// inputRevision hashes only effective LPX inputs, including its selected
 	// restart token. Unrelated component edits do not create an LPX revision.
 	// +kubebuilder:validation:Pattern="^sha256:[a-f0-9]{64}$"
+	// +required
 	InputRevision string `json:"inputRevision"`
 }
 
@@ -119,12 +114,14 @@ type CheckpointDownloadStatus struct {
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // LPXGraphDeployment is generated and owned by the Dynamo operator, not authored
-// by users. It owns one LPX PCS and its build/placement resources.
+// by users. It owns one LPX PCS and its Services.
 // It serves only v1alpha1 and has no conversion contract.
 type LPXGraphDeployment struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
-	Spec              LPXGraphDeploymentSpec `json:"spec"`
+	// +required
+	Spec LPXGraphDeploymentSpec `json:"spec"`
 	// +optional
 	Status LPXGraphDeploymentStatus `json:"status,omitempty"`
 }

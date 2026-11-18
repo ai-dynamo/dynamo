@@ -25,11 +25,14 @@ from dynamo.sglang.kv_hints import kv_hint_kwargs
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import (
+    _apply_model_default_sampling_params,
     _kv_cache_hit_engine_data,
+    _model_default_sampling_params,
     _native_payload_is_batched,
     _ordered_cancellation_request_id,
     _raise_if_sglang_error,
     _sampling_option_params,
+    _validate_stop_token_ids,
 )
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     build_disagg_mm_kwargs,
@@ -73,6 +76,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(self.engine)
         super().__init__(engine, config, publisher, generate_endpoint, shutdown_event)
         self._consume_tasks: set[asyncio.Task[Any]] = set()
+        # Prefill samples the first output token, so it needs the same defaults
+        # as decode.
+        self._default_sampling_params = _model_default_sampling_params(self.engine)
         logging.info(
             f"Prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
         )
@@ -129,6 +135,12 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             sampling_params = {
                 k: v for k, v in sampling_params.items() if v is not None
             }
+            _apply_model_default_sampling_params(
+                sampling_params,
+                request,
+                self._default_sampling_params,
+                self.config.dynamo_args.enable_rl,
+            )
         native_payload = native_generate_payload(inner_request)
         has_thinking_budget = False
         if native_payload is None:
@@ -176,6 +188,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         }
 
         input_param = self._get_input_param(inner_request)
+        # Native requests forward client stop IDs to the prefill engine; rejecting here
+        # also avoids staging KV for a decode leg that would refuse the request.
+        _validate_stop_token_ids(self, inner_request)
 
         # Prefill encodes the media so the KV it transfers carries the vision
         # context; decode extracts the same URLs to match the token layout.

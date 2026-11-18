@@ -66,3 +66,8 @@ The following table contains BF16 rows for B200 and GB200 recipes.
 | BF16 | `trtllm/agg-b200-mtp-bf16/deploy.yaml` | TensorRT-LLM | agg | B200 | Single worker | MTP | 3 | 2.874 | 18 | 3541 | 3411 | 130 | 244.95 | 3295.50 | 183.08 |
 | BF16 | `trtllm/agg-gb200-bf16/deploy.yaml` | TensorRT-LLM | agg | GB200 | Single worker | None | 0 | 0.0 | 18 | 3541 | 3411 | 130 | 216.77 | 1985.84 | 110.32 |
 | BF16 | `trtllm/agg-gb200-mtp-bf16/deploy.yaml` | TensorRT-LLM | agg | GB200 | Single worker | MTP | 3 | 2.874 | 18 | 3541 | 3411 | 130 | 231.34 | 3556.40 | 197.58 |
+
+The `vllm/disagg-b200-dspark-bf16` row was measured on the
+`1.5.0-nemotron-3.5-lightning-dev.1` image with FlashInfer for the main
+attention layers, before the recipe set `--attention-backend FLASH_ATTN`. It
+has not been measured with `FLASH_ATTN`.

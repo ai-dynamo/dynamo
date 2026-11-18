@@ -55,6 +55,7 @@ const (
 type DynamoComponentDeploymentSpec struct {
 	// backendFramework specifies the backend framework.
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
+	// +optional
 	BackendFramework string `json:"backendFramework,omitempty"`
 
 	// DynamoComponentDeploymentSharedSpec embeds common deployment and runtime
@@ -107,7 +108,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// a hash during rolling updates) without losing the stable identity that
 	// downstream consumers (labels, status maps, DGDSA references, planner
 	// RBAC, EPP filters) depend on.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$`
@@ -132,10 +133,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// including for roles without a runtime init container.
 	// This field does not change container images.
 	//
-	// For non-LPX components, DGD admission requires this field when any runtime
-	// image tag lacks a parseable semantic version. Controller-generated DCDs may
-	// omit it. An override is also needed when the parsed tag differs from the
-	// Dynamo runtime version.
+	// For frontend, worker, prefill, decode, planner, and epp components, DGD
+	// admission requires this field when any runtime image tag lacks a parseable
+	// semantic version. Components without a type and controller-generated DCDs
+	// may omit it. An override is also needed when the parsed tag differs from
+	// the Dynamo runtime version.
 	//
 	// The value must use canonical MAJOR.MINOR.PATCH format, for example "1.4.0",
 	// and match the Dynamo version in every affected runtime container.
@@ -165,8 +167,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// include a non-empty image and restartPolicy: Always.
 	//
 	// Sidecar mode supports worker, prefill, and decode components.
-	// Multinode sidecars currently support backendFramework: sglang and vllm.
-	// Multinode support for TensorRT-LLM is planned.
+	// Multinode sidecars support backendFramework: sglang, vllm, and trtllm.
 	// Multinode sidecars require complete leader and worker roles[].podTemplate
 	// definitions instead of this shared template.
 	// The leader must declare a runtime init container. The worker may omit it.
@@ -223,9 +224,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// preserves the implicit multinode role layout.
 	//
 	// LPX components each require an agent role. A DGD may contain independent
-	// LPX components, each with its own conductor role, or a shared draft and
-	// target pair with a conductor role only on the target. Every LPX role
-	// requires its own podTemplate.
+	// LPX components, each serving through its own conductor role or agent
+	// runtime init container, or a draft and target pair in which only the
+	// target serves. Every LPX role requires its own podTemplate.
 	// +optional
 	// +kubebuilder:validation:MaxItems=2
 	// +listType=map
@@ -347,12 +348,15 @@ type DynamoComponentDeploymentStatus struct {
 // to and from the served v1alpha1 version through
 // operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 type DynamoComponentDeployment struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	// spec defines the desired state for this Dynamo component deployment.
+	// +optional
 	Spec DynamoComponentDeploymentSpec `json:"spec,omitempty"`
 	// status reflects the current observed state of the component deployment.
+	// +optional
 	Status DynamoComponentDeploymentStatus `json:"status,omitempty"`
 }
 

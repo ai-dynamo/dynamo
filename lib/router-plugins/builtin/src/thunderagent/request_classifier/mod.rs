@@ -11,13 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use async_trait::async_trait;
-use dynamo_kv_router::plugins::RouterPluginRegistry;
-use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
-    RequestClassifierContext, RequestClassifierFactory, RequestClassifierParameters,
-    RequestClassifierProviderError, RequestClassifierRegistryError, RequestProgress,
-};
-use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
+use dynamo_kv_router::plugins::prelude::*;
 use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::sync::Notify;
@@ -100,7 +94,7 @@ impl Inner {
         input_tokens: usize,
         progress: RequestProgress,
         session_final: bool,
-        pinned_worker: Option<dynamo_kv_router::protocols::WorkerWithDpRank>,
+        pinned_worker: Option<dynamo_kv_router::plugins::prelude::WorkerWithDpRank>,
     ) -> Result<Arc<Notify>, ThunderAgentError> {
         let capacities = self.capacity_provider.snapshot();
         self.state.lock().register(
@@ -231,7 +225,13 @@ impl Drop for PendingClassification {
 async fn await_release<T>(
     mut pending: PendingClassification,
     value: T,
-) -> Result<(T, Option<dynamo_kv_router::protocols::WorkerWithDpRank>), ThunderAgentError> {
+) -> Result<
+    (
+        T,
+        Option<dynamo_kv_router::plugins::prelude::WorkerWithDpRank>,
+    ),
+    ThunderAgentError,
+> {
     pending.inner.start_scheduler();
     let inner = Arc::clone(&pending.inner);
     let request_id = pending.request_id.clone();
@@ -284,11 +284,7 @@ impl ThunderAgentClassifier {
 
 #[async_trait]
 impl RequestClassifier for ThunderAgentClassifier {
-    fn classify(
-        &mut self,
-        request: ClassifyRequest,
-        _workers: WorkerCandidates<'_>,
-    ) -> ClassifyFuture {
+    fn classify(&mut self, request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
         let Some(session) = request.session_context() else {
             return Box::pin(async move { Ok(request) });
         };
@@ -340,8 +336,7 @@ impl RequestClassifier for ThunderAgentClassifier {
 mod tests {
     use std::time::Duration;
 
-    use dynamo_kv_router::plugins::worker_selection::{WorkerCapacity, WorkerInfo};
-    use dynamo_kv_router::protocols::WorkerWithDpRank;
+    use dynamo_kv_router::plugins::prelude::*;
 
     use super::scheduler::ProgramLifecycle;
     use super::*;
@@ -732,7 +727,7 @@ mod tests {
         );
     }
 
-    /// Run with `cargo test -p dynamo-custom-policy-builtin --release benchmark_ignored_events -- --ignored --nocapture`.
+    /// Run with `cargo test -p dynamo-router-policies --release benchmark_ignored_events -- --ignored --nocapture`.
     #[test]
     #[ignore = "manual CPU benchmark"]
     fn benchmark_ignored_events() {

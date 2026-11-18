@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "common/selector.rs"]
+mod selector;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,7 +20,9 @@ use tokio::sync::{Notify, watch};
 
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS;
 use dynamo_runtime::config::environment_names::response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS;
-use dynamo_runtime::pipeline::network::egress::push_router::{PushRouter, RouterMode};
+use dynamo_runtime::pipeline::network::egress::push_router::{
+    PushRouter, PushRouterOptions, RouterMode,
+};
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
     component::{Endpoint, Instance},
@@ -273,10 +278,13 @@ async fn assert_establish_timeout(
 
     let client = endpoint.client().await.unwrap();
     let instance_id = client.wait_for_instances().await.unwrap()[0].id();
-    let router =
-        PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
-            .await
-            .unwrap();
+    let router = PushRouter::<u64, TestResponse>::from_client_with_options(
+        client.clone(),
+        RouterMode::RoundRobin,
+        selector::options(),
+    )
+    .await
+    .unwrap();
 
     let request = tokio::spawn(async move { router.generate(SingleIn::new(42)).await });
     tokio::time::timeout(Duration::from_secs(5), request_received.notified())
@@ -323,10 +331,13 @@ async fn assert_first_response_uses_inactivity_timeout(distributed: &Distributed
         .unwrap();
     let client = endpoint.client().await.unwrap();
     client.wait_for_instances().await.unwrap();
-    let router =
-        PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
-            .await
-            .unwrap();
+    let router = PushRouter::<u64, TestResponse>::from_client_with_options(
+        client.clone(),
+        RouterMode::RoundRobin,
+        selector::options(),
+    )
+    .await
+    .unwrap();
 
     let mut stream =
         tokio::time::timeout(Duration::from_secs(10), router.generate(SingleIn::new(7)))
@@ -390,10 +401,14 @@ async fn assert_local_admission_wait_is_not_bounded(distributed: &DistributedRun
         proxy: proxy.addr,
     });
     let router = Arc::new(
-        PushRouter::<u64, TestResponse>::from_client_with_dispatch(
+        PushRouter::<u64, TestResponse>::from_client_with_options(
             client.clone(),
             RouterMode::RoundRobin,
-            dispatch,
+            PushRouterOptions {
+                dispatch: Some(dispatch),
+                selectors: Some(selector::selectors()),
+                ..PushRouterOptions::default()
+            },
         )
         .await
         .unwrap(),

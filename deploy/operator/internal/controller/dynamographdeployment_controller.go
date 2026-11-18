@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"strings"
 
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
+
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
@@ -61,10 +63,9 @@ const (
 	reasonFailedToReconcileResources          Reason = "failed_to_reconcile_the_resources"
 	reasonRollingUpdateFailed                 Reason = "rolling_update_failed"
 	reasonWaitingForCheckpoint                Reason = "waiting_for_checkpoint"
+	reasonComponentCrashLooping               Reason = "component_crash_looping"
 	reasonSelectedWorkloadProviderUnavailable Reason = "selected_workload_provider_unavailable"
 	reasonUnsupportedWorkloadProvider         Reason = "unsupported_workload_provider"
-
-	dgdComponentPodIndex = ".metadata.dgdComponent"
 )
 
 // DynamoGraphDeploymentReconciler reconciles a DynamoGraphDeployment object
@@ -267,13 +268,22 @@ func workloadRoutingAnnotationsChanged(update event.UpdateEvent) bool {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	controllerBuilder, err := r.controllerBuilder(mgr)
+	if err != nil {
+		return err
+	}
+	return controllerBuilder.Complete(r)
+}
+
+// controllerBuilder shares production watches and indexes with instrumented reconcilers.
+func (r *DynamoGraphDeploymentReconciler) controllerBuilder(mgr ctrl.Manager) (*builder.Builder, error) {
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),
 		&corev1.Pod{},
-		dgdComponentPodIndex,
-		dgdComponentPodIndexValues,
+		podcontroller.ComponentIndex,
+		podcontroller.ComponentIndexValues,
 	); err != nil {
-		return fmt.Errorf("register DGD component Pod index: %w", err)
+		return nil, fmt.Errorf("register DGD component Pod index: %w", err)
 	}
 
 	// Index native PodSnapshot references so dependency events can find affected DGDs.
@@ -284,7 +294,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			dgdPodSnapshotRefIndex,
 			dgdPodSnapshotRefIndexValues,
 		); err != nil {
-			return fmt.Errorf("register DGD PodSnapshot reference index: %w", err)
+			return nil, fmt.Errorf("register DGD PodSnapshot reference index: %w", err)
 		}
 	}
 
@@ -333,7 +343,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 	// Restore owned pools after deletion or spec drift without requiring GAIE on every cluster.
 	_, poolMappingErr := mgr.GetRESTMapper().RESTMapping(epp.InferencePoolGVK.GroupKind(), epp.InferencePoolGVK.Version)
 	if poolMappingErr != nil && !meta.IsNoMatchError(poolMappingErr) {
-		return fmt.Errorf("discover InferencePool API for DGD watch: %w", poolMappingErr)
+		return nil, fmt.Errorf("discover InferencePool API for DGD watch: %w", poolMappingErr)
 	}
 	if poolMappingErr == nil {
 		ctrlBuilder = ctrlBuilder.Owns(&gaiev1.InferencePool{}, builder.WithPredicates(
@@ -397,7 +407,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		ctrlBuilder = newGroveWatchSetup(r.Client).addTo(ctrlBuilder)
 	}
 
-	return ctrlBuilder.Complete(r)
+	return ctrlBuilder, nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) GetRecorder() events.EventRecorder {
@@ -416,26 +426,6 @@ func isDGDManagedWorkerPod(obj client.Object) bool {
 		labels[consts.KubeLabelDynamoComponent] != "" &&
 		(labels[consts.KubeLabelDynamoSelector] != "" || labels[consts.KubeLabelDynamoWorkerHash] != "") &&
 		dynamo.IsWorkerComponent(labels[consts.KubeLabelDynamoComponentType])
-}
-
-func dgdComponentPodIndexValues(obj client.Object) []string {
-	pod, ok := obj.(*corev1.Pod)
-	if !ok || pod == nil {
-		return nil
-	}
-	labels := pod.GetLabels()
-	dgdName := labels[consts.KubeLabelDynamoGraphDeploymentName]
-	componentName := labels[consts.KubeLabelDynamoComponent]
-	if dgdName == "" || componentName == "" {
-		return nil
-	}
-	return []string{dgdComponentPodIndexValue(dgdName, componentName)}
-}
-
-func dgdComponentPodIndexValue(dgdName, componentName string) string {
-	// Both inputs are label values, which cannot contain '/', so this encoding
-	// is collision-free.
-	return dgdName + "/" + componentName
 }
 
 // dgdWorkerPodEventPredicate admits only events that can change whether a

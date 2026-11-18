@@ -4,7 +4,8 @@
 use std::{borrow::Cow, fmt::Display, sync::LazyLock};
 
 use dynamo_protocols::types::{
-    ChatCompletionTool, ChatCompletionToolType, CreateChatCompletionRequest, FunctionObject,
+    ChatCompletionRequestMessage, ChatCompletionTool, ChatCompletionToolType,
+    CreateChatCompletionRequest, FunctionObject,
 };
 use dynamo_protocols::validation;
 
@@ -470,9 +471,7 @@ pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(),
 //
 
 /// Validates messages array
-pub fn validate_messages(
-    messages: &[dynamo_protocols::types::ChatCompletionRequestMessage],
-) -> Result<(), anyhow::Error> {
+pub fn validate_messages(messages: &[ChatCompletionRequestMessage]) -> Result<(), anyhow::Error> {
     if messages.is_empty() {
         anyhow::bail!("Messages array cannot be empty");
     }
@@ -480,7 +479,7 @@ pub fn validate_messages(
     // as a JSON object string; reject bad non-empty shapes before chat-template rendering.
     // This was caught in MiniMax-M3 multi-turn tool-call tests
     for (message_index, message) in messages.iter().enumerate() {
-        if let dynamo_protocols::types::ChatCompletionRequestMessage::Assistant(assistant) = message
+        if let ChatCompletionRequestMessage::Assistant(assistant) = message
             && let Some(tool_calls) = &assistant.tool_calls
         {
             for (tool_call_index, tool_call) in tool_calls.iter().enumerate() {
@@ -1001,6 +1000,39 @@ mod tests {
     use super::*;
     use crate::engines::ValidateRequest;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
+
+    #[test]
+    fn custom_message_content_preserves_model_validation() {
+        use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+
+        let custom = json!({"type":"custom", "kind":"sensor", "fields":{"payload":"value"}});
+        for message in [
+            json!({"role":"user", "content":[custom.clone()]}),
+            json!({"role":"tool", "tool_call_id":"call_1", "content":[custom]}),
+        ] {
+            let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model":"test", "messages":[message]
+            }))
+            .unwrap();
+            request.validate().unwrap();
+            request.inner.model.clear();
+            assert!(request.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn text_message_content_remains_valid() {
+        use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model":"test", "messages":[
+                {"role":"user", "content":[{"type":"text", "text":"question"}]},
+                {"role":"tool", "tool_call_id":"call_1", "content":[{"type":"text", "text":"result"}]}
+            ]
+        }))
+        .unwrap();
+        request.validate().unwrap();
+    }
 
     /// Echoing client-controlled keys can duplicate a whole request body while
     /// building HTTP errors, so oversized keys must also yield a fixed diagnostic.

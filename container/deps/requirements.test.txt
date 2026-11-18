@@ -21,6 +21,8 @@ datasets==4.4.1
 # letting Datadog's CI action pip-install it at run time: that installer needs
 # `pip` on PATH, and it pulls its own coverage version over the coverage pin.
 ddtrace==4.14.0
+# Execute Planner's production Redis Lua scripts in unit tests.
+fakeredis[lua]==2.39.0
 filelock==3.25.1
 # OTLP receiver in tests/metrics/test_otlp_prometheus_parity.py, which asserts
 # that /metrics and the OTLP export carry the same metrics. Present transitively

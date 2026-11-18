@@ -19,12 +19,18 @@ ignored = ["prost", "prost-types"]
 name = "dynamo-sglang-sidecar"
 path = "src/main.rs"
 
+[features]
+# On for the sidecar image's SBOM (its shared build links vLLM's mm-routing here).
+# The Python bindings turn them off so the default wheel stays lean.
+default = ["mm-routing", "jemalloc"]
+mm-routing = ["dynamo-llm/mm-routing"]
+# jemalloc as the binary's global allocator.
+jemalloc = ["dynamo-sidecar-common/jemalloc"]
+
 [dependencies]
+dynamo-sglang-generate = { workspace = true }
 dynamo-backend-common = { workspace = true }
-# The sidecar image builds all sidecars in one `cargo build`, which links the
-# vLLM sidecar's `mm-routing` here too. Enable it so this crate's SBOM lists
-# what the binary links; nothing in this sidecar calls it.
-dynamo-llm = { workspace = true, features = ["mm-routing"] }
+dynamo-llm = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
 
@@ -51,7 +57,7 @@ tonic-build = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
-dynamo-kv-router = { workspace = true }
+dynamo-kv-events = { workspace = true }
 rmp-serde = { workspace = true }
 tempfile = { workspace = true }
 tmq = { workspace = true }
