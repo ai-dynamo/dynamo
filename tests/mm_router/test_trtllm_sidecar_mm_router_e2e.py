@@ -201,7 +201,6 @@ def test_trtllm_sidecar_image_cache_selection_across_two_workers(
         worker_a, worker_b = _generate_instances(frontend_port, namespace)
         owners = {image_x: worker_a, image_y: worker_b}
 
-        # Cache each image on its own worker.
         for image, owner in owners.items():
             selected, _, _ = _send(frontend_port, image, "warm", owner)
             assert selected == owner, (selected, owner)
