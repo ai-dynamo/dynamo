@@ -186,10 +186,8 @@ pub(crate) trait ApproximateLruCommandSink: Send + Sync {
     }
 }
 
-/// Await a reply from an event lane, or fail with `IndexerOffline` once that lane exits.
-///
-/// A lane that exits with the task queued neither answers nor drops it while the indexer's own
-/// senders keep its queue alive. `biased` lets a reply that is already sent win over the exit.
+/// Await a lane's reply, or fail with `IndexerOffline` once the lane exits; the indexer's
+/// senders keep a queued task alive after exit. `biased` lets an already-sent reply win.
 pub(crate) async fn await_lane_reply<T>(
     reply: oneshot::Receiver<T>,
     lane_exited: &CancellationToken,
