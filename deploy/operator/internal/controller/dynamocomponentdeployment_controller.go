@@ -1102,7 +1102,7 @@ func (r *DynamoComponentDeploymentReconciler) controllerBuilder(mgr ctrl.Manager
 	}
 
 	m := ctrl.NewControllerManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(commonController.GenerationOrDeletionChangedPredicate())).
+		For(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(workloadPrimaryPredicate())).
 		Named(commonconsts.ResourceTypeDynamoComponentDeployment).
 		Owns(&appsv1.Deployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment

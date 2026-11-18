@@ -52,6 +52,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -808,6 +809,94 @@ func TestStandaloneDCDServiceMetadataConverges(t *testing.T) {
 	service = &corev1.Service{}
 	require.NoError(t, kubeClient.Get(ctx, key, service))
 	require.Equal(t, resourceVersion, service.ResourceVersion)
+}
+
+func TestComponentDGDServicePrunesLabelsRemovedFromParent(t *testing.T) {
+	t.Log("Reconcile a Component DGD with an authored label through the production child DCD path")
+	ctx := context.Background()
+	dgd := createTestDGD("metadata-graph", map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"frontend": {ComponentType: commonconsts.ComponentTypeFrontend},
+	})
+	dgd.UID = "metadata-graph-uid"
+	dgd.Spec.Labels = map[string]string{"example.com/team": "blue"}
+	parent := createTestDGDReconcilerWithStatus(dgd)
+	workloads := newComponentWorkloadsReconciler(parent.Client, parent.Recorder,
+		newDGDWorkerRolloutReconciler(parent.Client, parent.Recorder))
+	_, err := workloads.Reconcile(ctx, dgd, nil, nil)
+	require.NoError(t, err)
+	dcd := &v1beta1.DynamoComponentDeployment{}
+	key := client.ObjectKey{Namespace: dgd.Namespace, Name: dynamo.GetDCDResourceName(dgd, "frontend", "")}
+	require.NoError(t, parent.Client.Get(ctx, key, dcd))
+	require.Equal(t, "blue", dcd.Labels["example.com/team"])
+	r := &DynamoComponentDeploymentReconciler{
+		Client: parent.Client, Recorder: events.NewFakeRecorder(10), Config: &configv1alpha1.OperatorConfiguration{},
+	}
+	_, err = r.createOrUpdateOrDeleteServices(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+	require.NoError(t, err)
+	service := &corev1.Service{}
+	require.NoError(t, parent.Client.Get(ctx, key, service))
+	require.Equal(t, "blue", service.Labels["example.com/team"])
+
+	t.Log("Remove the parent label and let SyncResource update only the child's spec")
+	delete(dgd.Spec.Labels, "example.com/team")
+	dgd.Generation++
+	_, err = workloads.Reconcile(ctx, dgd, nil, nil)
+	require.NoError(t, err)
+	dcd = &v1beta1.DynamoComponentDeployment{}
+	require.NoError(t, parent.Client.Get(ctx, key, dcd))
+	require.Equal(t, "blue", dcd.Labels["example.com/team"], "the stale child object label must not become desired Service metadata")
+	require.NotContains(t, dcd.Spec.PodTemplate.Labels, "example.com/team")
+
+	t.Log("Reconcile the child Service and verify the removed label is pruned without changing its selector")
+	selector := service.Spec.Selector
+	_, err = r.createOrUpdateOrDeleteServices(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+	require.NoError(t, err)
+	service = &corev1.Service{}
+	require.NoError(t, parent.Client.Get(ctx, key, service))
+	require.NotContains(t, service.Labels, "example.com/team")
+	require.Equal(t, selector, service.Spec.Selector)
+	require.Equal(t, dgd.Name, service.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+}
+
+func TestServiceMetadataInventoryRespectsAnnotationSizeLimit(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		existing bool
+	}{
+		{"create", false}, {"existing", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Arrange valid annotations that leave no room for the managed-key inventory")
+			annotations := map[string]string{
+				"example.com/large":                             strings.Repeat("x", 256*1024-200),
+				controller_common.NvidiaAnnotationHashKey:       strings.Repeat("a", 64),
+				controller_common.NvidiaAnnotationGenerationKey: "1",
+			}
+			require.NoError(t, apivalidation.ValidateAnnotationsSize(annotations))
+			desired := &corev1.Service{Annotations: annotations, Labels: map[string]string{"example.com/team": "blue"}}
+			var existing *corev1.Service
+			if test.existing {
+				existing = desired.DeepCopy()
+			}
+
+			t.Log("Prepare metadata and verify the inventory cannot make the Service unwritable")
+			labels, got, err := managedServiceMetadataFor(existing, desired)
+			require.NoError(t, err)
+			require.NotContains(t, got, managedServiceMetadataAnnotation)
+			require.NoError(t, apivalidation.ValidateAnnotationsSize(got))
+			require.Equal(t, desired.Labels, labels)
+			require.Equal(t, annotations["example.com/large"], got["example.com/large"])
+
+			t.Log("Free annotation space and verify the inventory is recorded on the next reconcile")
+			delete(desired.Annotations, "example.com/large")
+			if existing != nil {
+				delete(existing.Annotations, "example.com/large")
+			}
+			_, got, err = managedServiceMetadataFor(existing, desired)
+			require.NoError(t, err)
+			require.Contains(t, got[managedServiceMetadataAnnotation], "example.com/team")
+		})
+	}
 }
 
 func TestStandaloneDCDServiceInventoryIsWrittenOnCreate(t *testing.T) {

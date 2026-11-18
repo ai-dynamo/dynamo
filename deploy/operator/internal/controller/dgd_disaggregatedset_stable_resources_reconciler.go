@@ -289,6 +289,7 @@ func reconcileDGDStableServiceMetadata(
 		return nil, nil, fmt.Errorf("encode managed Service metadata inventory: %w", err)
 	}
 	annotations[managedServiceMetadataAnnotation] = string(raw)
+	labels, annotations = serviceMetadataWithinAnnotationLimit(existing, labels, annotations, 0)
 	return labels, annotations, nil
 }
 
@@ -358,7 +359,40 @@ func managedServiceMetadataFor(existing, desired *corev1.Service) (map[string]st
 			annotations[key] = value
 		}
 	}
+
+	// A create request will also receive a SHA-256 hash and an int64 generation from SyncResource.
+	reservedBytes := 0
+	if existing == nil {
+		reservedBytes = len(commoncontroller.NvidiaAnnotationHashKey) + 64 +
+			len(commoncontroller.NvidiaAnnotationGenerationKey) + 20
+	}
+	labels, annotations = serviceMetadataWithinAnnotationLimit(existing, labels, annotations, reservedBytes)
 	return labels, annotations, nil
+}
+
+// serviceMetadataWithinAnnotationLimit defers existing metadata edits when the inventory
+// would exceed Kubernetes' annotation limit. Creates omit the inventory until space is available.
+// existing is nil when preparing a create request.
+func serviceMetadataWithinAnnotationLimit(
+	existing *corev1.Service,
+	labels, annotations map[string]string,
+	reservedBytes int,
+) (map[string]string, map[string]string) {
+	// Kubernetes counts the byte lengths of every annotation key and value.
+	size := reservedBytes
+	for key, value := range annotations {
+		size += len(key) + len(value)
+	}
+	if size <= 256*1024 {
+		return labels, annotations
+	}
+
+	// Keep the prior inventory and metadata intact so a later retry can still prune recorded keys.
+	if existing != nil {
+		return maps.Clone(existing.Labels), maps.Clone(existing.Annotations)
+	}
+	delete(annotations, managedServiceMetadataAnnotation)
+	return labels, annotations
 }
 
 func sortedMetadataKeys(metadata map[string]string) []string {
