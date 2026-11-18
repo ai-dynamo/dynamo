@@ -396,6 +396,10 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 # System interpreter for the reason given above: a venv-only install would
 # shadow the old version at import time while leaving it on disk.
 #
+# - mooncake-transfer-engine-cuda13: the specifier requirements.vllm.txt and
+#   requirements.sglang.txt use, kept equal by
+#   tests/dependencies/test_mooncake_floor_consistency.py. tensorrt-llm declares
+#   ==0.3.13, so pip check reports that pin.
 # - aiohttp: the floor requirements.common.txt sets for the other images.
 #   cp312 manylinux_2_28 wheels exist for both architectures.
 # - certifi (CA bundle) and Pillow: no required dependencies, so each moves
@@ -425,6 +429,13 @@ RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade pip==26.2.
     /usr/bin/python3 -c 'import json; d = json.load(open("/tmp/jupyter-upgrade.json")); changed = {p["metadata"]["name"].lower().replace("_", "-") for p in d["install"]}; print("upgraded system distributions:", sorted(changed)); assert changed <= {"jupyter-server", "jupyterlab", "notebook", "urllib3"}, "Unexpected transitive upgrade"' && \
     rm /tmp/jupyter-upgrade.json && \
     /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n.replace("-", "_") + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3' && \
+    /usr/bin/python3 -m pip install --break-system-packages --upgrade \
+        --report /tmp/mooncake-upgrade.json \
+        "mooncake-transfer-engine-cuda13>=0.3.14,<0.4" && \
+    /usr/bin/python3 -c 'import json; d = json.load(open("/tmp/mooncake-upgrade.json")); changed = {p["metadata"]["name"].lower().replace("_", "-") for p in d["install"]}; print("upgraded system distributions:", sorted(changed)); assert changed <= {"mooncake-transfer-engine-cuda13"}, "Unexpected transitive upgrade"' && \
+    rm /tmp/mooncake-upgrade.json && \
+    /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"mooncake-transfer-engine-cuda13": ("0.3.14", "0.4")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n.replace("-", "_") + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import mooncake'{% if target not in ("dev", "local-dev") %} && \
+    /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m; from packaging.version import Version; v = m.version("mooncake-transfer-engine-cuda13"); print("runtime interpreter version:", v); assert Version("0.3.14") <= Version(v) < Version("0.4"); import mooncake; print("runtime import path:", mooncake.__file__); assert mooncake.__file__ == "/usr/local/lib/python3.12/dist-packages/mooncake/__init__.py"'{% endif %} && \
     /usr/bin/python3 -m pip install --break-system-packages --upgrade \
         --report /tmp/system-site-refresh.json \
         "datasets==5.1.0" "fsspec[http]==2026.7.0" "filelock>=4.2.1,<5" "pyasn1>=0.6.5,<0.7" && \
