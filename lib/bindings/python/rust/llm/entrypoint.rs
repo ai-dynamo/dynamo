@@ -55,7 +55,7 @@ use crate::RouterMode;
 use crate::engine::PythonAsyncEngine;
 
 fn validate_kv_router_config(config: &RsKvRouterConfig) -> PyResult<()> {
-    config.validate_config().map_err(PyValueError::new_err)
+    config.validate().map_err(PyValueError::new_err)
 }
 
 fn warn_overlap_score_weight_deprecated() {
@@ -114,7 +114,7 @@ pub(super) fn normalize_ais_perf_config(
         py.import("builtins")?.call_method1("dict", (config,))?
     };
     let canonical = py
-        .import("aisimulate_core.sdk")?
+        .import("aisim_core.sdk")?
         .getattr("ForwardPassPerfModelConfig")?
         .call((), Some(mapping.downcast::<pyo3::types::PyDict>()?))?;
     Ok(pythonize::depythonize(&canonical.call_method0("to_dict")?)?)

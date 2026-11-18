@@ -17,7 +17,7 @@ if [[ "$role" == frontend ]]; then
         --discovery-backend etcd \
         --http-host 0.0.0.0 --http-port "${HTTP_PORT:-8000}" \
         --router-mode kv --router-kv-events \
-        --kv-cache-block-size 64 "$@"
+        --kv-cache-block-size "${KV_BLOCK_SIZE:-64}" "$@"
 fi
 if [[ "$role" != prefill && "$role" != decode ]]; then
     echo "Unknown role: $role" >&2
@@ -27,6 +27,9 @@ fi
 if [[ "$role" == prefill ]]; then
     : "${DYN_TOKENSPEED_BOOTSTRAP_HOST:?Set this to an address reachable by decode workers}"
 fi
+# KV events require attention DP=1; set KV_EVENTS_CONFIG='{"enable_kv_cache_events":false}' otherwise.
+default_kv_events='{"enable_kv_cache_events":true}'
+kv_events_config="${KV_EVENTS_CONFIG:-$default_kv_events}"
 extra=()
 if [[ -n "${DISAGG_IB_DEVICE:-}" ]]; then
     extra+=(--disaggregation-ib-device "$DISAGG_IB_DEVICE")
@@ -42,10 +45,10 @@ exec python3 -m dynamo.tokenspeed \
     --max-total-tokens "${MAX_TOTAL_TOKENS:-32768}" \
     --gpu-memory-utilization 0.85 --quantization fp8 \
     --moe-backend flashinfer_cutlass \
-    --prefix-granularity 64 \
+    --kv-block-size "${KV_BLOCK_SIZE:-64}" \
     --disaggregation-mode "$role" \
     --disaggregation-transfer-backend mooncake \
     --disaggregation-bootstrap-port "${BOOTSTRAP_PORT:-8998}" \
-    --kv-events-config '{"enable_kv_cache_events":true}' \
+    --kv-events-config "$kv_events_config" \
     --enable-log-request-stats \
     "${extra[@]}" "$@"
