@@ -21,7 +21,7 @@ from typing import (
     overload,
 )
 
-from aisimulate_core.sdk import ForwardPassPerfModelConfig
+from aisim_core.sdk import ForwardPassPerfModelConfig
 from typing_extensions import NotRequired
 
 # Import from specialized modules
@@ -1016,6 +1016,7 @@ class ModelRuntimeConfig:
 
     context_length: int | None
     total_kv_blocks: int | None
+    cache_owner_capacity_blocks: int | None
     max_num_seqs: int | None
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
@@ -1325,6 +1326,7 @@ class KvEventPublisher:
         kv_state_endpoint: Optional[str] = None,
         video_token_id: Optional[int] = None,
         engine_owned_mm_identity: bool = False,
+        idempotent_stores: bool = False,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
@@ -1352,6 +1354,7 @@ class KvEventPublisher:
                 format (after sgl-project/sglang#43043), including for caller hashes,
                 so every event token at or above 1,000,000 is excluded from the index.
                 Otherwise only values that do not fit in 32 bits are.
+            idempotent_stores: Do not refcount repeated stores. Set for SGLang.
         """
 
     def publish_stored(
@@ -2463,11 +2466,15 @@ class ReplaySchedulerMetricsSnapshot(TypedDict):
     waiting_requests: int
 
 class ReplaySchedulerIntervalMetrics(TypedDict):
+    g1_prefix_cache_lookup: Optional[dict[str, int]]
     cache_hit_tokens: int
     cache_total_tokens: int
     preemptions: int
 
 class ReplayTrafficMetricsSnapshot(TypedDict):
+    delivered_output_tokens: int
+    committed_prefill_tokens: int
+    first_admission: dict[str, int]
     duration_s: float
     arriving_requests: int
     completed_requests: int
@@ -2483,6 +2490,7 @@ class ReplayTrafficMetricsSnapshot(TypedDict):
     accept_length_forward_count: int
 
 class ReplayTelemetrySnapshot(TypedDict):
+    host_caches: list[dict[str, Any]]
     sample_ordinal: int
     kind: Literal["baseline", "periodic", "final"]
     interval_start_ms: float
