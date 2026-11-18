@@ -1743,9 +1743,8 @@ async def test_translate_vllm_client_errors_processor_rejection(
     from dynamo.llm.exceptions import InvalidArgument
     from dynamo.vllm.handlers import _translate_vllm_client_errors
 
-    # The chain vLLM raises: AsyncLLM.generate wraps the failure in
-    # EngineGenerateError, and call_hf_processor wraps processor exceptions in
-    # ValueError("Failed to apply ...") whose text embeds the request data.
+    # vLLM's chain: EngineGenerateError wraps ValueError("Failed to apply ..."),
+    # which wraps the processor error and embeds the request data in its text.
     if processor_error is None:
         cause: Exception = RuntimeError("engine step failed")
     else:
