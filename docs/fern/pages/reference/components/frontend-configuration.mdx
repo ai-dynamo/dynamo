@@ -15,9 +15,17 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
 
 ## Decision APIs
 
-**Experimental.** `--enable-systemone-api` (environment variable `DYN_ENABLE_SYSTEMONE_API`, default `false`) enables both OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. Supported causal backends are aggregated, single-rank SGLang and vLLM CUDA workers using their serialized scoring profiles. See [Decision Models with SGLang](../../use-cases/decision-model/sglang.md) for SGLang launch commands and [Decision API Reference](../api/decision-apis.md) for wire contracts, usage accounting, and errors.
+**Experimental.** `--enable-systemone-api` (environment variable `DYN_ENABLE_SYSTEMONE_API`, default `false`) enables both OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. Execution profiles include serialized SGLang scoring, serialized vLLM 0.33.0 causal scoring, and the vLLM 0.33.0 Clef Flash joint head. Existing public contracts do not change between backends. See [Decision Models with SGLang](../../use-cases/decision-model/sglang.md) for SGLang launch commands and [Decision API Reference](../api/decision-apis.md) for wire contracts, usage accounting, and errors.
 
 For a qualified vLLM 0.33.0 causal worker, enable `--systemone-serial` or set `DYN_VLLM_SYSTEMONE_SERIAL=true`, together with `--max-num-seqs=1` and `--logprobs-mode=raw_logprobs`. The worker opt-in defaults to `false`; `--no-systemone-serial` overrides an enabled environment setting. It does not change engine scheduling settings, and incompatible profiles fail worker startup. Without the opt-in, ordinary vLLM workers do not advertise decision capability or change model-discovery checksums for decision support. The frontend flag remains independently required to expose the APIs.
+
+For reproducible vLLM validation, pin both `--revision` and `--tokenizer-revision` to the same checkpoint revision below. Gemma uses the text-only `--language-model-only` profile; its inclusion does not establish image support. These pins identify reference artifacts, not qualification of every deployment configuration.
+
+| Model | `--revision` and `--tokenizer-revision` |
+| --- | --- |
+| `Qwen/Qwen3-0.6B` | `c1899de289a04d12100db370d81485cdf75e47ca` |
+| `google/gemma-4-E2B-it` | `3e22461f65e89153144f8adb70e3b8c2cc9845a7` |
+| `Cloudflare/clef-flash` | `f0b7d3cd65296abfe459e6c228b618f5d8b26d2f` |
 
 | Environment variable | Default | Maximum | Meaning |
 | --- | --- | --- | --- |
@@ -31,7 +39,7 @@ Decision capacity rejections carry `Retry-After: 1` and the `rate_limit_exceeded
 
 Raising the input-token limit does not raise every execution limit. Model context capacity, input bytes, tokenization work, and the fixed **16 MiB cumulative encoded-text budget** remain independent. Each question charges its rendered prompt bytes once for initial encoding, once for round-trip validation, and once per candidate label. For 26 labels, this budget permits approximately `16 MiB / 28` rendered bytes summed across questions, regardless of the configured token limit. Higher-byte-per-token text reaches this budget sooner. Rejections identify the encoded-text budget; they use HTTP 422 for Jev and HTTP 400 for OpenAI.
 
-The protocol ceiling of 255 candidates is not a guarantee that every tokenizer supports that many choices. Scoring requires distinct single-token labels at the answer position; the effective limit depends on the tokenizer and rendered prompt. Reduce the candidate count or select another model if label validation fails. Request shape and context checks run before scoring inference.
+The protocol ceiling of 255 candidates is not a guarantee that every tokenizer supports that many choices. Causal scoring requires distinct single-token labels at the answer position; the effective limit depends on the tokenizer and rendered prompt. The initial vLLM profiles cap each question at 26 candidates. Clef uses its own trained schema encoding, requires temperature 1, and does not provide vocabulary label mass. Its qualified profile requires disabled chunked prefill and `--long-prefill-token-threshold=0` so the engine does not split joint-head inputs. Reduce the candidate count or select another model if label validation fails. Request shape and context checks run before scoring inference.
 
 Question branches in one request share a cache namespace and are pinned to the first branch's worker. Separate API calls receive different random cache namespaces, so repeated inputs do not reuse another request's cached prefixes. Trusted tenant-scoped cross-request reuse is not supported by this profile.
 

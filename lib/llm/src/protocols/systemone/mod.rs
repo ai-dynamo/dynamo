@@ -3,6 +3,7 @@
 
 //! Backend-native scoring transports used by the reusable decision API core.
 
+pub(crate) mod head;
 mod native;
 pub mod vllm;
 
