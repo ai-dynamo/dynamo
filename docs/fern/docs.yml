@@ -55,7 +55,7 @@ redirects:
     destination: "/dynamo/dev/kubernetes/kv-aware-routing/deploy-the-pool-relay-experimental"
   - source: "/dynamo/dev/reference/components/dc-kv-relay-configuration"
     destination: "/dynamo/dev/reference/components/pool-relay-configuration"
-  # KVBM was removed in v1.7.0; its configuration reference stays in the v1.6.0 docs.
+  # KVBM was removed in v1.8.0; its configuration reference stays in the v1.6.0 docs.
   - source: "/dynamo/dev/reference/components/kvbm-configuration"
     destination: "/dynamo/v1.6.0/reference/components/kvbm-configuration"
   - source: "/dynamo/zh-CN/dev/reference/components/kvbm-configuration"
