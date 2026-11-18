@@ -68,6 +68,10 @@ KV cache pool = budget - weights. Activations and CUDA graph buffers are
 `--max-total-tokens` caps the KV token pool directly, regardless of fraction.
 When set, the token cap is the binding constraint.
 
+Hybrid Mamba models also allocate a state cache independently of the token
+pool. When a token override is set, `build_sglang_gpu_mem_args` adds
+`--max-mamba-cache-size 64` to keep that cache from growing with free VRAM.
+
 `--context-length` and `--max-running-requests` affect request scheduling
 only — they do **not** change KV cache allocation.
 

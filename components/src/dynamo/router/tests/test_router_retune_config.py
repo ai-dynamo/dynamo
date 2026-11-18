@@ -13,7 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 pytest.importorskip(
-    "aisimulate.sweeper",
+    "aisim.sweeper",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 

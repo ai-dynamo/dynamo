@@ -21,7 +21,7 @@ PERF_MODEL = {
 
 def main() -> None:
     # Keep this smoke offline: the selected model config and perf database are
-    # shipped in the AISimulate wheel's aisimulate_core package.
+    # shipped in the AISimulate wheel's aisim_core package.
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     # An old AIS input only warns; here it fails, so the smoke stays on the
@@ -51,7 +51,7 @@ def main() -> None:
     from dynamo.mocker.config import normalize_mocker_config
     from dynamo.replay import run_synthetic_trace_replay
 
-    config, _, _ = parse_args()
+    config, _, _, _ = parse_args()
     assert config.router_mode == "kv"
     assert config.router_prefill_load_model == "ais"
     perf = AisPerfConfig(**config.ais_perf_kwargs())

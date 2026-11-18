@@ -183,13 +183,53 @@ These flags control which role this worker plays in a disaggregated deployment. 
 </ParamField>
 
 <ParamField path="--embedding-worker" type="boolean" default="false">
-  Run as a text-embedding worker. The vLLM engine must be started with `--runner pooling`. KV-event publishing, KV router registration, and `InstrumentedScheduler` injection are all skipped, as they do not apply to pooling models.
+  Run as an embedding worker. The vLLM engine must be started with `--runner pooling`. KV-event publishing, KV router registration, and `InstrumentedScheduler` injection are all skipped, as they do not apply to pooling models.
+
+  Besides OpenAI text and token-ID `input`, the worker accepts chat-style input for multimodal embedding models, as `vllm serve` does. This is a vLLM extension of the OpenAI embeddings API, not part of the OpenAI spec.
+
+  - **Input forms:** `messages` holds one conversation, or a list of conversations. Each conversation yields one embedding, and response `data[i]` is the embedding of conversation `i`. You can also pass the conversations as `input`; the frontend treats it the same as `messages`.
+  - **Roles:** Roles are passed to the model's chat template unchanged; embedding models define their own (for example `query`, `document`).
+  - **Content parts:** `text`, `image_url`, `video_url`, `audio_url`, and `input_audio`, as far as the model supports them. vLLM renders each conversation with the model's chat template, or with [`--custom-jinja-template`](../components/runtime-configuration.mdx#parsing) for a model that ships none.
+  - **Limits and URL rules:** vLLM's `--limit-mm-per-prompt` caps the media items per conversation, and its `--allowed-media-domains` restricts the hosts media can come from (see [vLLM engine arguments](https://docs.vllm.ai/en/latest/configuration/engine_args/)). Media URLs also follow the same [`DYN_MM_*` URL rules](../components/runtime-configuration.mdx#multimodal-and-media-output) as chat media. The worker checks them, so set these variables on the worker. By default, `https://` URLs to public hosts are allowed, and `http://` URLs and private addresses are refused; set `DYN_MM_ALLOW_INTERNAL=1` to allow them. `DYN_MM_ALLOW_REMOTE_URLS` defaults to `1`; set it to `0` to refuse all remote media, and send `data:` URLs instead. `DYN_MM_MAX_FILE_SIZE_MB` caps each download (64 MiB by default), and `DYN_MM_MAX_DATA_URL_MB` caps each `data:` URL (16 MiB by default).
+  - **Not supported:** `add_generation_prompt: true`, `continue_final_message: true`, and a non-empty `chat_template_kwargs` are rejected with HTTP 400, because they would change the prompt that `vllm serve` embeds. Chat-style input is not available with `--embedding-frontend-tokenization`. Do not set `--enable-multimodal`; it can't be combined with `--embedding-worker`, and chat-style input doesn't need it.
+
+  For example, serve [Nemotron 3.5 Embed 1B](https://huggingface.co/nvidia/Nemotron-3.5-Embed-1B-BF16), which ships its own chat template:
+
+  ```bash
+  python3 -m dynamo.frontend &
+  python3 -m dynamo.vllm --embedding-worker --runner pooling \
+    --model nvidia/Nemotron-3.5-Embed-1B-BF16 --dtype bfloat16
+  ```
+
+  Then embed a document page from an image and its text. This model takes a `system` message holding `query:` or `passage:`, then one `user` message:
+
+  ```bash
+  curl localhost:8000/v1/embeddings -H 'Content-Type: application/json' -d '{
+    "model": "nvidia/Nemotron-3.5-Embed-1B-BF16",
+    "messages": [
+      {"role": "system", "content": "passage:"},
+      {"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "https://docs.nvidia.com/nemo-framework/user-guide/24.07/_images/nemo-llm-mm-stack.png"}},
+        {"type": "text", "text": "NeMo Framework overview"}
+      ]}
+    ]
+  }'
+  ```
+
+  To embed several conversations in one request, pass a list of conversations as `messages`, for example a query and a passage:
+
+  ```json
+  "messages": [
+    [{"role": "system", "content": "query:"}, {"role": "user", "content": "What is NeMo Framework?"}],
+    [{"role": "system", "content": "passage:"}, {"role": "user", "content": "NeMo Framework builds LLMs and multimodal models."}]
+  ]
+  ```
 
   Environment variable: `DYN_VLLM_EMBEDDING_WORKER`
 </ParamField>
 
 <ParamField path="--embedding-frontend-tokenization" type="boolean" default="false">
-  Use Dynamo frontend tokenization for raw-text inputs to a dedicated embedding worker. The default preserves existing behavior: vLLM tokenizes embedding text. This option requires `--embedding-worker` and cannot be combined with `--use-vllm-tokenizer`.
+  Use Dynamo frontend tokenization for raw-text inputs to a dedicated embedding worker. The default preserves existing behavior: vLLM tokenizes embedding text. This option requires `--embedding-worker` and cannot be combined with `--use-vllm-tokenizer`. With this option, the frontend rejects chat-style `messages` input with HTTP 400, because only the worker can render it.
 
   This temporary compatibility gate is planned for removal in a future release, when pooling workers will use `--use-vllm-tokenizer` consistently.
 

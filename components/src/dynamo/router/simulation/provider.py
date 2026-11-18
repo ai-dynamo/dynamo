@@ -8,12 +8,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 
-from aisimulate.config.common import Choices
-from aisimulate.config_adapter import (
-    PredictionAdapterContext,
-    RecommendationAdapterContext,
-)
-from aisimulate.sweeper.provider import (
+from aisim.config.common import Choices
+from aisim.config_adapter import PredictionAdapterContext, RecommendationAdapterContext
+from aisim.sweeper.provider import (
     AdapterReplaySpec,
     AdapterSearchPlan,
     CandidateContext,
@@ -148,8 +145,8 @@ def _ais_perf_config_from_candidate(
     # Fixed/polynomial worker timing does not create a worker estimator. The
     # Router may still select an AIS load estimate: use the same Core-owned
     # role request builder, retaining policies, roots and estimator controls.
-    from aisimulate.sweeper.config import SearchSpace
-    from aisimulate.sweeper.forward_pass_estimator import ForwardPassEstimatorResolver
+    from aisim.sweeper.config import SearchSpace
+    from aisim.sweeper.forward_pass_estimator import ForwardPassEstimatorResolver
 
     request_space = dict(core_search_space)
     request_space.setdefault("model_name", sample["model_name"])
@@ -172,7 +169,7 @@ def _ais_perf_config_from_prediction(
         return None
     from dataclasses import fields
 
-    from aisimulate_core.sdk import ForwardPassPerfModelConfig
+    from aisim_core.sdk import ForwardPassPerfModelConfig
 
     engine = context.engine
     role = (
@@ -264,6 +261,10 @@ class DynamoRouterSweepConfigProvider:
                 value if value is not None else default
             )
         router_config["router_prefill_load_model"] = public.prefill_load_model.type
+        if public.use_kv_events is not None:
+            router_config["use_kv_events"] = public.use_kv_events
+        if public.policy_config is not None:
+            router_config["router_policy_config"] = public.policy_config
         written = public.ais_perf_model
         old_form = written is None and public.prefill_load_model.type == "ais"
         perf_config: dict[str, JSONValue]

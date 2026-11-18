@@ -81,7 +81,9 @@ Each engine has its own switch. Dynamo converts the priority to the polarity the
     Start SGLang with `--enable-priority-scheduling`. Higher Dynamo values become higher SGLang scheduling priority. Dynamo rejects the inverted SGLang flag. See [Agents on SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/agents-on-sglang.md#priority-scheduling).
   </Tab>
   <Tab title="TensorRT-LLM">
-    Per-request engine scheduling priority is not exposed through Dynamo. Priority still affects router queueing before dispatch.
+    Start each TensorRT-LLM worker with `--trtllm.scheduler_config.waiting_queue_policy priority`. Dynamo maps `priority` linearly into 0.25 to 0.75 on TensorRT-LLM's 0.0 to 1.0 scale, with `0` at TensorRT-LLM's default of 0.5. Values from -4194304 to 4194304 keep a strict order; values outside that range saturate and are served first come, first served among themselves. Health checks keep 1.0. TensorRT-LLM uses the priority to choose which waiting request it admits next; it does not preempt running requests. With the default `fcfs` waiting queue, Dynamo submits every request at the default priority.
+
+    In disaggregated serving, Dynamo also sends each decode request's age since the frontend received it, as `DisaggregatedParams.orig_elapsed_s`. Behind the Gateway API endpoint picker, the age starts when the picker received the request. TensorRT-LLM 1.4.0rc3 reads it only when generation admission by original arrival is on, which you enable by setting `TLLM_GEN_ADMISSION_TTFT_PERCENTILE` above `0` on the decode worker. That admission replaces the waiting queue policy: with it on, TensorRT-LLM ignores request priorities, and logs a warning if `waiting_queue_policy` is `priority`. On one decode worker, use either `waiting_queue_policy priority` or `TLLM_GEN_ADMISSION_TTFT_PERCENTILE`, not both.
   </Tab>
 </Tabs>
 
@@ -94,8 +96,10 @@ Support by backend:
 | Feature | vLLM | SGLang | TensorRT-LLM |
 |---|:---:|:---:|:---:|
 | Priority-aware routing | Yes | Yes | Yes |
-| Engine priority scheduling | Yes | Yes | No |
+| Engine priority scheduling | Yes | Yes | Yes |
 | Priority-based cache eviction | Planned | Yes | Planned |
+
+On a TensorRT-LLM decode worker, engine priority scheduling and generation admission by original arrival are alternatives; see the TensorRT-LLM tab above.
 
 ## Check That It Works
 
@@ -155,6 +159,7 @@ Hints and session IDs are separate. A session ID is passive identity for traces 
 | Router priority queue and backend priority plumbing | Dynamo v1.0.0 and later |
 | Higher `priority` means higher priority across the API | Dynamo v1.1.0 and later |
 | EPP and Inference Gateway forwarding fixes for priority hints | Dynamo v1.2.0 and later |
+| TensorRT-LLM engine priority scheduling | Dynamo v1.8.0 and later |
 
 ## Related
 

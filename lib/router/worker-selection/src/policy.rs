@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use crossbeam_queue::ArrayQueue;
+use rustc_hash::FxHashSet;
 
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 
@@ -40,7 +41,8 @@ pub trait CandidateRowSource {
     /// after the walk.
     fn capacity(&self, worker: WorkerWithDpRank) -> WorkerCapacity;
 
-    /// A rank's load after the actor's bookings, for rows prepared before them.
+    /// A rank's load after the actor's bookings, for prepared rows whose load was not
+    /// filled or no longer holds.
     fn load(&self, worker: WorkerWithDpRank) -> WorkerLoadInput;
 }
 
@@ -118,6 +120,9 @@ struct ComposedPolicyState {
     candidates: Vec<ScoredWorkerCandidate>,
     cache_inputs: Vec<WorkerCacheData>,
     load_inputs: Vec<WorkerLoadInput>,
+    /// Each picker row's active request count, for adopted rows. Empty otherwise, and the
+    /// picker's counts come from the source.
+    active_request_inputs: Vec<u64>,
     /// Highest `raw_cached_tokens` over the rows pushed this selection.
     max_raw_cached_tokens: u32,
     /// Row buffers selection is done with, for callers to prepare into next.
@@ -170,7 +175,7 @@ impl WorkerSelectionPolicy {
     ) -> Self {
         let picker_declared_inputs = picker.required_worker_inputs();
         // Fetch inputs are filled once every row is built, so only scorers receive them.
-        let picker_inputs = picker_declared_inputs.without(WorkerInputs::KV_TRANSFER);
+        let picker_inputs = picker_declared_inputs.without(WorkerInputs::KV_COPY);
         // Freeze each declaration once; callbacks must not inherit another component's access.
         // Active-request counts are a picker lookup, so filters and scorers never receive them.
         let filters: Vec<_> = filters
@@ -179,7 +184,7 @@ impl WorkerSelectionPolicy {
                 (
                     filter
                         .required_worker_inputs()
-                        .without(WorkerInputs::KV_TRANSFER | WorkerInputs::ACTIVE_REQUESTS),
+                        .without(WorkerInputs::KV_COPY | WorkerInputs::ACTIVE_REQUESTS),
                     filter,
                 )
             })
@@ -220,6 +225,7 @@ impl WorkerSelectionPolicy {
                 candidates: Vec::new(),
                 cache_inputs: Vec::new(),
                 load_inputs: Vec::new(),
+                active_request_inputs: Vec::new(),
                 max_raw_cached_tokens: 0,
                 row_buffers: Arc::new(ArrayQueue::new(ROW_BUFFERS)),
             })),
@@ -352,9 +358,10 @@ impl WorkerSelectionPolicy {
     /// Filter, score, and pick over the rows `source` yields.
     ///
     /// `prepared` rows, which must satisfy [`Self::accepts_prepared`], stand in for the
-    /// source's rows; their load column is filled from `source` here, on the actor, so it
-    /// reflects bookings since preparation. When `trace` is set, the pick carries the
-    /// retained per-candidate costs.
+    /// source's rows. Their load column is filled from `source` here, on the actor, so it
+    /// reflects bookings since preparation; after [`PreparedRows::keep_filled_loads`]
+    /// only the ranks it named are read from `source`. When `trace` is set, the pick
+    /// carries the retained per-candidate costs.
     pub fn select_rows<S: CandidateRowSource>(
         &self,
         context: &WorkerSelectionContext<'_>,
@@ -516,6 +523,7 @@ impl ComposedPolicyState {
         self.candidates.clear();
         self.cache_inputs.clear();
         self.load_inputs.clear();
+        self.active_request_inputs.clear();
         self.max_raw_cached_tokens = 0;
     }
 
@@ -584,8 +592,8 @@ impl ComposedPolicyState {
         Ok(has_eligible_worker)
     }
 
-    /// Adopt prepared rows as the scorer rows, filling the load column that depends on
-    /// bookings, and score them.
+    /// Adopt prepared rows as the scorer rows, filling the loads that preparation left
+    /// to selection, and score them.
     fn adopt_prepared<S: CandidateRowSource>(
         &mut self,
         context: &WorkerSelectionContext<'_>,
@@ -598,7 +606,14 @@ impl ComposedPolicyState {
         // Adopt the prepared rows rather than copying them; the outgoing buffer goes back
         // to the pool when `prepared` drops.
         std::mem::swap(&mut self.unscored_candidates, &mut prepared.rows);
-        let fill_load = self.scorer_picker_inputs.contains(WorkerInputs::LOAD);
+        let picker_counts = self.picker_inputs.contains(WorkerInputs::ACTIVE_REQUESTS);
+        let needs_load = self.scorer_picker_inputs.contains(WorkerInputs::LOAD) || picker_counts;
+        // Kept loads need only the ranks whose load changed since; otherwise every row.
+        let fill_every_row = needs_load && prepared.stale_loads.is_none();
+        let stale = prepared
+            .stale_loads
+            .as_ref()
+            .filter(|stale| needs_load && !stale.is_empty());
         let Self {
             scorers,
             picker_inputs,
@@ -606,12 +621,13 @@ impl ComposedPolicyState {
             candidates,
             cache_inputs,
             load_inputs,
+            active_request_inputs,
             max_raw_cached_tokens,
             ..
         } = self;
         for row in unscored_candidates.iter_mut() {
             row.inputs = prepared.inputs;
-            if fill_load {
+            if fill_every_row || stale.is_some_and(|stale| stale.contains(&row.worker)) {
                 row.load = source.load(row.worker);
             }
             *max_raw_cached_tokens = (*max_raw_cached_tokens).max(row.raw_cached_tokens);
@@ -623,6 +639,9 @@ impl ComposedPolicyState {
                 cache_inputs,
                 load_inputs,
             );
+            if picker_counts {
+                active_request_inputs.push(row.load.active_requests() as u64);
+            }
         }
         if scorers.is_empty() {
             // Picker-only policies keep no scorer rows.
@@ -693,6 +712,7 @@ impl ComposedPolicyState {
             candidates,
             cache_inputs,
             load_inputs,
+            active_request_inputs,
             max_raw_cached_tokens,
             ..
         } = self;
@@ -714,9 +734,18 @@ impl ComposedPolicyState {
             let worker = candidates[row].worker;
             WorkerInfo::new(worker, source.capacity(worker))
         };
-        // The same projection and fallback as the row's LOAD input, so the two agree.
-        let active_requests =
-            |row: usize| source.load(candidates[row].worker).active_requests() as u64;
+        debug_assert!(
+            active_request_inputs.is_empty() || active_request_inputs.len() == candidates.len()
+        );
+        let active_request_inputs: &[u64] = active_request_inputs;
+        // Adopted rows hold each count; otherwise the same projection and fallback as the
+        // row's LOAD input, so the two agree.
+        let active_requests = |row: usize| {
+            active_request_inputs
+                .get(row)
+                .copied()
+                .unwrap_or_else(|| source.load(candidates[row].worker).active_requests() as u64)
+        };
         let picker_input = WorkerInputView::materialized(
             candidates,
             picker_inputs
@@ -732,6 +761,10 @@ impl ComposedPolicyState {
                 .contains(WorkerInputs::ACTIVE_REQUESTS)
                 .then_some(&active_requests),
             &info,
+            picker_inputs
+                .contains(WorkerInputs::RESIDENT_BLOCKS)
+                .then_some(cache_snapshot.resident_blocks)
+                .flatten(),
         );
         let row = picker.pick(context, picker_input)?;
         let Some(candidate) = candidates.get(row) else {
@@ -813,7 +846,8 @@ impl RankVisitor for FilterRows<'_, '_> {
 ///
 /// Rows hold every eligible rank's cache, preferred-taint, and fetch inputs, which
 /// depend only on the request and worker configuration. Load inputs depend on the
-/// actor's earlier bookings, so the actor fills them at selection.
+/// actor's earlier bookings: the caller may fill them from its own projection
+/// ([`PreparedRows::fill_loads`]), and selection fills every row that does not hold for.
 #[derive(Clone)]
 pub struct CandidatePreparer {
     inputs: WorkerInputs,
@@ -825,6 +859,9 @@ pub struct PreparedRows {
     inputs: WorkerInputs,
     rows: Vec<CandidateData>,
     row_buffers: Arc<ArrayQueue<Vec<CandidateData>>>,
+    /// The ranks whose filled load selection reads again. `None` until
+    /// [`Self::keep_filled_loads`], and selection fills every row.
+    stale_loads: Option<FxHashSet<WorkerWithDpRank>>,
 }
 
 impl Drop for PreparedRows {
@@ -837,7 +874,7 @@ impl Drop for PreparedRows {
 }
 
 impl CandidatePreparer {
-    /// The columns the policy reads. Rows are built without `LOAD`, which the actor fills.
+    /// The columns the policy reads. Rows are built without `LOAD`.
     pub fn inputs(&self) -> WorkerInputs {
         self.inputs
     }
@@ -864,19 +901,40 @@ impl CandidatePreparer {
             inputs: self.inputs,
             rows,
             row_buffers: Arc::clone(&self.row_buffers),
+            stale_loads: None,
         })
     }
 }
 
 impl PreparedRows {
-    /// The columns the rows will hold once the actor fills `LOAD`.
+    /// The columns the rows will hold once `LOAD` is filled.
     pub fn inputs(&self) -> WorkerInputs {
         self.inputs
     }
 
-    /// The rows, holding every declared column but `LOAD`.
+    /// The rows, holding every declared column; `LOAD` only after [`Self::fill_loads`].
     pub fn rows(&self) -> &[CandidateData] {
         &self.rows
+    }
+
+    /// Fill each row's load from `load` ahead of selection, for a policy that reads `LOAD`
+    /// rows or active request counts. Selection reads the fills only after
+    /// [`Self::keep_filled_loads`]; otherwise it fills every row from its source.
+    pub fn fill_loads(&mut self, mut load: impl FnMut(WorkerWithDpRank) -> WorkerLoadInput) {
+        if !self.inputs.contains(WorkerInputs::LOAD)
+            && !self.inputs.contains(WorkerInputs::ACTIVE_REQUESTS)
+        {
+            return;
+        }
+        for row in &mut self.rows {
+            row.load = load(row.worker);
+        }
+    }
+
+    /// The selection source's loads are those [`Self::fill_loads`] read, with the `stale`
+    /// ranks read again since: selection fills only their rows.
+    pub fn keep_filled_loads(&mut self, stale: &[WorkerWithDpRank]) {
+        self.stale_loads = Some(stale.iter().copied().collect());
     }
 
     /// Drop the rows `keep` refuses, keeping the rest in order: the kernel removes the rows of

@@ -249,7 +249,7 @@ def _ais_perf_model_config_keys() -> set[str]:
     try:
         # Operator schema generation imports this module without the optional
         # estimator runtime; without it no key can be told apart.
-        from aisimulate_core.sdk import ForwardPassPerfModelConfig
+        from aisim_core.sdk import ForwardPassPerfModelConfig
     except ImportError:
         return set()
     return {"from", *(field.name for field in fields(ForwardPassPerfModelConfig))}
@@ -2782,7 +2782,7 @@ class PlannerConfig(BaseModel):
         if "prefill_load_model" not in spec:
             return
         # Imported on use: the adapter schema imports this module.
-        from aisimulate.config.common import Choices
+        from aisim.config.common import Choices
 
         from dynamo.planner.retune.domains import parse_retune_section
 

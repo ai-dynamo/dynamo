@@ -300,7 +300,7 @@ pub enum ReplicaWorkerPolicy {
 }
 
 #[derive(Debug, Clone, Copy)]
-/// Stage operation the router drives; documented with the kernel contract in step 6.
+/// Stage operation the router drives.
 pub struct SequenceTrackerOptions {
     /// How this tracker treats replicated bookings.
     pub replica_worker_policy: ReplicaWorkerPolicy,
@@ -802,7 +802,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.add_request_admitted(req, decay_now).map(|_| ())
     }
 
-    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    /// Stage operation the router drives.
     pub fn add_request_admitted(
         &self,
         req: SequenceRequest,
@@ -857,7 +857,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(attempt_id)
     }
 
-    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    /// Stage operation the router drives.
     pub fn request_worker(&self, request_id: &str) -> Option<WorkerWithDpRank> {
         self.request_index.worker_for(request_id)
     }
@@ -873,7 +873,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         })
     }
 
-    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    /// Stage operation the router drives.
     pub fn has_booking(&self, booking: &SchedulerBookingDescriptor) -> bool {
         self.request_index.booking_for(&booking.request_id)
             == Some(RequestBooking {
@@ -1236,7 +1236,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(())
     }
 
-    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    /// Stage operation the router drives.
     pub fn add_output_blocks_if_booking(
         &self,
         request_id: &RequestId,
@@ -1323,19 +1323,57 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     /// Project every registered rank's load for one request into `projections`. With
     /// `full_ranks`, the pass also counts the ranks past its busy thresholds per worker.
+    /// Returns the load table's version, which changes whenever a rank is added or removed.
     pub fn project_worker_loads_into(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
         projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
         full_ranks: Option<&mut FullRankCounts>,
-    ) {
+    ) -> u64 {
         self.prompt_registry.project_worker_loads_into(
             token_sequence,
             decay_now,
             projections,
             full_ranks,
-        );
+        )
+    }
+
+    /// Overwrite each of `workers`' entries in `projections` with its entry in
+    /// [`Self::project_worker_loads_into`]. `version` is what that pass returned: false,
+    /// with nothing overwritten, when a rank was added or removed since.
+    pub fn reproject_worker_loads(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        workers: &[WorkerWithDpRank],
+        version: u64,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) -> bool {
+        self.prompt_registry.reproject_worker_loads(
+            token_sequence,
+            decay_now,
+            workers,
+            version,
+            projections,
+        )
+    }
+
+    /// Count full ranks from derived snapshots without materializing request load rows.
+    pub fn record_full_worker_ranks_at(&self, decay_now: Instant, full_ranks: &mut FullRankCounts) {
+        self.prompt_registry
+            .record_full_worker_ranks_at(decay_now, full_ranks);
+    }
+
+    /// `worker`'s `additional_active_blocks` in a projection of `token_sequence`, computed
+    /// for that rank alone.
+    pub fn additional_active_blocks(
+        &self,
+        token_sequence: &[SequenceHash],
+        worker: WorkerWithDpRank,
+    ) -> usize {
+        self.prompt_registry
+            .additional_active_blocks(token_sequence, worker)
     }
 
     /// Read ranks' loads one at a time at `decay_now`, without projecting every rank.
@@ -2743,6 +2781,41 @@ mod tests {
                 .copied(),
             Some(Ok(9_000))
         );
+    }
+
+    #[test]
+    fn reprojection_refuses_once_a_rank_is_added_or_removed() {
+        let sequences = make_multi_sequences();
+        let worker = WorkerWithDpRank::new(1, 0);
+        let now = Instant::now();
+        let mut projections = FxHashMap::default();
+        let version = sequences.project_worker_loads_into(None, now, &mut projections, None);
+
+        // A booking changes the rank's load, not the set of ranks.
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "req".to_string(),
+                    token_sequence: Some(vec![1, 2]),
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                now,
+            )
+            .unwrap();
+        assert!(sequences.reproject_worker_loads(None, now, &[worker], version, &mut projections));
+        assert_eq!(projections[&worker].active_requests, 1);
+
+        sequences
+            .register_worker(WorkerDpRange::new(3, 0, 1))
+            .unwrap();
+        assert!(!sequences.reproject_worker_loads(None, now, &[worker], version, &mut projections));
+        // Removing it again does not bring the projected set of ranks back.
+        sequences.unregister_worker(3).unwrap();
+        assert!(!sequences.reproject_worker_loads(None, now, &[worker], version, &mut projections));
     }
 
     #[test]

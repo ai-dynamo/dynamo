@@ -72,12 +72,16 @@ class ProfilerOperationalConfig:
 
 def picked_config_from_row(prefix: str, row: pd.Series) -> PickedParallelConfig:
     """Extract a PickedParallelConfig from a picked ColumnsDisagg DataFrame row."""
+    # The picker writes ``(p)cp`` only; decode rows have no CP column, and
+    # frames built from older column lists NaN-fill it.
+    cp = row.get(f"{prefix}cp")
     return PickedParallelConfig(
         tp=int(row.get(f"{prefix}tp", 1)),
         pp=int(row.get(f"{prefix}pp", 1)),
         dp=int(row.get(f"{prefix}dp", 1)),
         moe_tp=int(row.get(f"{prefix}moe_tp", 1)),
         moe_ep=int(row.get(f"{prefix}moe_ep", 1)),
+        cp=int(cp) if pd.notna(cp) else 1,
     )
 
 

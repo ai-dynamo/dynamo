@@ -356,7 +356,7 @@ def _add_mocker_arguments(parser: argparse.ArgumentParser, env: ArgEnv | None) -
         help="Use AISimulate's perf model for latency prediction. VALUE is a "
         "JSON/YAML file or inline JSON: one perf model config, or a list of "
         f"configs with one worker_type each (env: {ENV_VAR}). The config of "
-        "this worker's type is used. Requires aisimulate installed. Without "
+        "this worker's type is used. Requires aisim installed. Without "
         "VALUE (deprecated) the perf model is built from --model-path, "
         "--engine-type and the flat --ais-* flags.",
     )
