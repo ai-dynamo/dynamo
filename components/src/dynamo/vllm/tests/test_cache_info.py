@@ -88,6 +88,7 @@ def test_supported_geometry_publishes_fixed_common_unit_contract(
         "geometry_source": "validated_common_unit",
         "recurrent_groups": [0, 1],
         "alignment_blocks": 1,
+        "eagle_margin_blocks": 0,
         "indexer_block_size": unit,
         "hash_block_size": unit,
         "scheduler_block_size": unit,
@@ -157,18 +158,23 @@ def test_speculative_decoding_without_block_drop_is_supported(
     assert layout is not None
     assert layout.recurrent_groups == [0, 1]
     assert layout.alignment_blocks == 1
+    assert layout.eagle_margin_blocks == 0
+    assert layout.runtime_metadata()["eagle_margin_blocks"] == 0
 
 
-def test_speculative_trailing_block_drop_requires_separate_support():
+def test_speculative_trailing_block_drop_publishes_one_block_margin():
     # disable_lookahead_block_hashes=true (or a connector without lookahead
-    # support) makes vLLM drop the trailing block: resume positions move.
+    # support) makes vLLM drop the trailing block: the engine resumes at a
+    # checkpoint only when the attention match extends one block past it.
     config = _config()
     config.speculative_config = SimpleNamespace(
         method="mtp", use_eagle_block_drop=lambda: True
     )
     config.num_hash_lookahead_tokens = 0
-    with pytest.raises(ValueError, match="trailing-block drop"):
-        recurrent_kv_layout(config, enabled=True)
+    layout = recurrent_kv_layout(config, enabled=True)
+    assert layout is not None
+    assert layout.eagle_margin_blocks == 1
+    assert layout.runtime_metadata()["eagle_margin_blocks"] == 1
 
 
 @pytest.mark.parametrize(

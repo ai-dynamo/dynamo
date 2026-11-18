@@ -90,6 +90,7 @@ fn setup_kv_publishers(
                     idempotent_stores,
                     recurrent_groups: None,
                     recurrent_alignment_blocks: 1,
+                    recurrent_eagle_margin_blocks: 0,
                     recovery: None,
                 }),
                 None,

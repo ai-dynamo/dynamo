@@ -1275,6 +1275,7 @@ class KvEventPublisher:
         idempotent_stores: bool = False,
         recurrent_groups: Optional[List[int]] = None,
         recurrent_alignment_blocks: int = 1,
+        recurrent_eagle_margin_blocks: int = 0,
     ) -> None:
         """
         Create a `KvEventPublisher` object.

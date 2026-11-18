@@ -100,6 +100,11 @@ pub struct KvCacheGroupTag {
     pub expected_group_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alignment_blocks: Option<u32>,
+    /// Scheduler blocks the attention match must extend past a checkpoint
+    /// for the engine to resume there (EAGLE/MTP trailing-block drop).
+    /// `None` means zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eagle_margin_blocks: Option<u32>,
 }
 
 /// Tolerant wire representation for the additive `residency_domain` field.

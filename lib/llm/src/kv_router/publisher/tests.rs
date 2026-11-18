@@ -1409,6 +1409,7 @@ mod tests_startup_helpers {
                 false,
                 Some(vec![0, 1, 2]),
                 1,
+                0,
                 None,
             )
         });
@@ -1486,6 +1487,7 @@ mod tests_startup_helpers {
                 kind: dynamo_kv_events::residency::KvCacheGroupKind::Mamba,
                 expected_group_count: Some(3),
                 alignment_blocks: Some(1),
+                eagle_margin_blocks: Some(0),
             })
         );
         let KvCacheEventData::Stored(KvCacheStoreData { blocks, .. }) = &mamba.event.data else {
@@ -1638,6 +1640,7 @@ mod tests_startup_helpers {
                 false,
                 Some(vec![0, 1, 2]),
                 1,
+                0,
                 None,
             )
         });
@@ -1743,6 +1746,7 @@ mod tests_startup_helpers {
                 false,
                 Some(vec![0, 1, 2]),
                 1,
+                0,
                 None,
             )
         });
@@ -1843,6 +1847,7 @@ mod tests_startup_helpers {
                 false,
                 Some(vec![0, 1, 2]),
                 1,
+                0,
                 None,
             )
         });

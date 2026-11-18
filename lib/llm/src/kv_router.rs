@@ -388,6 +388,11 @@ fn reconcile_recurrent_layouts(indexer: &Indexer, workers: &HashMap<WorkerId, Mo
                     .and_then(serde_json::Value::as_u64)
                     .and_then(|value| u32::try_from(value).ok())
                     .unwrap_or(1),
+                layout
+                    .get("eagle_margin_blocks")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .unwrap_or(0),
             );
         }
     }

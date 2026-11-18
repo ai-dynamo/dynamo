@@ -17,11 +17,13 @@ This mode requires engine cache-group metadata and an enabled local indexer
 The supported resume contract is deliberately limited to full-attention and
 Mamba groups that all use the same positive block size as the indexer, with
 prefix caching in `align` mode, and no context parallelism. Speculative
-decoding is supported as long as vLLM keeps lookahead block hashes enabled
-(its default with prefix caching): the engine then drops no prefix-cache
-block and the recurrent checkpoint hash remains the resume position. The
-EAGLE/MTP trailing-block drop (`disable_lookahead_block_hashes`, or a KV
-connector without lookahead-hash support) fails at startup.
+decoding is supported. With vLLM's lookahead block hashes (its default with
+prefix caching) the engine drops no prefix-cache block and the recurrent
+checkpoint hash is the resume position. With the EAGLE/MTP trailing-block
+drop (`disable_lookahead_block_hashes`, or a KV connector without
+lookahead-hash support) the worker publishes `eagle_margin_blocks: 1` and the
+indexer credits a checkpoint only when the attention match extends one
+block past it, which is where the engine resumes.
 `prefix_match_unit` must be unset or equal that common block size.
 Sliding-window, chunked-local, mixed-size, and finer-than-indexer layouts fail
 at startup when recurrent publication is enabled. Dense workers and publication

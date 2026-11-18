@@ -442,6 +442,7 @@ impl Indexer {
         worker: WorkerWithDpRank,
         groups: &[u32],
         alignment_blocks: u32,
+        eagle_margin_blocks: u32,
     ) {
         let residency = match self {
             Self::Single { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
@@ -456,6 +457,7 @@ impl Indexer {
             crate::prelude::ResidencyOwner::worker(worker),
             groups,
             alignment_blocks,
+            eagle_margin_blocks,
         );
     }
 
@@ -1210,6 +1212,7 @@ mod tests {
                 kind: KvCacheGroupKind::Mamba,
                 expected_group_count: Some(2),
                 alignment_blocks: Some(1),
+                eagle_margin_blocks: None,
             })
         };
         let has_checkpoint = |indexer: &Indexer, hash: u64| {
@@ -1281,6 +1284,7 @@ mod tests {
             kind: KvCacheGroupKind::Mamba,
             expected_group_count: Some(1),
             alignment_blocks: Some(1),
+            eagle_margin_blocks: None,
         });
         indexer.try_apply_event(tagged).await.unwrap();
         if let Indexer::Single {
@@ -1380,6 +1384,7 @@ mod tests {
             kind: KvCacheGroupKind::Mamba,
             expected_group_count: Some(1),
             alignment_blocks: Some(1),
+            eagle_margin_blocks: None,
         });
         indexer.apply_event_routed(mamba).await.unwrap();
         if let Indexer::Single { primary, .. } = &indexer {
@@ -1979,7 +1984,7 @@ mod tests {
         let flat = indexer.find_matches(sequence).await.unwrap();
         assert_eq!(flat.scores.get(&confirmed).copied(), Some(2));
         assert_eq!(flat.scores.get(&predicted).copied(), Some(1));
-        indexer.declare_recurrent_layout(predicted, &[0], 1);
+        indexer.declare_recurrent_layout(predicted, &[0], 1, 0);
         let capped = indexer
             .find_tiered_matches(vec![
                 LocalBlockHash(11),

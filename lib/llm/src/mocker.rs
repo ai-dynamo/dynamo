@@ -701,6 +701,7 @@ impl MockerExecutionContext {
                                 idempotent_stores: false,
                                 recurrent_groups: None,
                                 recurrent_alignment_blocks: 1,
+                                recurrent_eagle_margin_blocks: 0,
                                 recovery: None,
                             });
                             match KvEventPublisher::new_with_local_indexer(

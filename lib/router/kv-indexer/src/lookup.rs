@@ -743,7 +743,7 @@ mod tests {
             let workers = [WorkerWithDpRank::new(1, 0), WorkerWithDpRank::new(2, 0)];
             // Declare every layout before storing the common checkpoint.
             for worker in workers {
-                indexer.declare_recurrent_layout(worker, &[0, 1], 1);
+                indexer.declare_recurrent_layout(worker, &[0, 1], 1, 0);
             }
             for worker in workers {
                 indexer
@@ -833,7 +833,7 @@ mod tests {
             let sequence: Vec<_> = [11, 12, 13].into_iter().map(LocalBlockHash).collect();
             let chain = compute_seq_hash_for_block(&sequence);
             for id in [1, 2] {
-                indexer.declare_recurrent_layout(WorkerWithDpRank::new(id, 0), &[0], 1);
+                indexer.declare_recurrent_layout(WorkerWithDpRank::new(id, 0), &[0], 1, 0);
             }
             for id in 1..=if with_dense_worker { 3 } else { 2 } {
                 indexer
@@ -927,7 +927,7 @@ mod tests {
                 } else {
                     make_test_indexer()
                 };
-                indexer.declare_recurrent_layout(worker, &[0], 1);
+                indexer.declare_recurrent_layout(worker, &[0], 1, 0);
                 indexer
                     .try_apply_event(store_event(
                         7,
@@ -1101,7 +1101,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        indexer.declare_recurrent_layout(worker, &[0, 1, 2], 1);
+        indexer.declare_recurrent_layout(worker, &[0, 1, 2], 1, 0);
         for group in [0, 1, 2] {
             for hash in [chain[1], chain[2]] {
                 indexer

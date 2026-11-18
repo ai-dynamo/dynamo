@@ -319,11 +319,13 @@ impl LocalKvIndexer {
         worker: WorkerWithDpRank,
         groups: &[u32],
         alignment_blocks: u32,
+        eagle_margin_blocks: u32,
     ) {
         self.group_residency.declare_layout(
             ResidencyOwner::worker(worker),
             groups,
             alignment_blocks,
+            eagle_margin_blocks,
         );
     }
 
@@ -833,13 +835,14 @@ mod tests {
             Arc::new(KvIndexerMetrics::new_unregistered()),
             16,
         );
-        local.declare_recurrent_layout(worker, &[0, 1], 1);
+        local.declare_recurrent_layout(worker, &[0, 1], 1, 0);
         let mut event = lower_tier_store_event(7, 0, 1, 0, 0, 333, StorageTier::HostPinned)
             .with_kv_cache_group(KvCacheGroupTag {
                 group_idx: 0,
                 kind: KvCacheGroupKind::Mamba,
                 expected_group_count: Some(2),
                 alignment_blocks: Some(1),
+                eagle_margin_blocks: None,
             });
         local.apply_event_with_buffer(event.clone()).await.unwrap();
         event.residency_domain =

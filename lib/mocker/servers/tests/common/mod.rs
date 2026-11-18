@@ -91,6 +91,7 @@ pub async fn check_kv_events(engine: &impl LLMEngine, block_size: u32) {
             idempotent_stores: false,
             recurrent_groups: None,
             recurrent_alignment_blocks: 1,
+            recurrent_eagle_margin_blocks: 0,
             recovery: None,
         }),
         false,

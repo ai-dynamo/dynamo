@@ -179,6 +179,16 @@ impl HybridPrefixEvaluator {
         self.view.layout(owner)
     }
 
+    /// The attention end a checkpoint must not exceed for this owner: the
+    /// matched blocks minus the owner's EAGLE/MTP margin. A cache owner has
+    /// no engine of its own, so its margin is zero.
+    fn resumable_end(&self, owner: ResidencyOwner, end: usize) -> usize {
+        let margin = self
+            .layout(owner)
+            .map_or(0, |layout| layout.eagle_margin_blocks as usize);
+        end.saturating_sub(margin)
+    }
+
     fn checkpoint(
         &self,
         owner: ResidencyOwner,
@@ -371,16 +381,22 @@ impl HybridPrefixEvaluator {
         self.device_prepared = true;
         let mut pending = Vec::with_capacity(raw.overlap_scores.scores.len());
         for (&worker, &blocks) in &raw.overlap_scores.scores {
-            let bound = (blocks as usize).min(self.max_blocks);
             // A worker the registry does not summarize is searched in full.
             let (count, bit) = self
                 .view
                 .device_summary(worker)
                 .unwrap_or((usize::MAX, u64::MAX));
+            let max_blocks = self.max_blocks;
             let state = self.worker_state(worker);
             if state.captured.is_none() {
                 continue;
             }
+            // EAGLE/MTP trailing-block drop: the engine resumes only at a
+            // checkpoint the attention match extends the margin past.
+            let margin = state
+                .captured
+                .map_or(0, |layout| layout.eagle_margin_blocks as usize);
+            let bound = (blocks as usize).saturating_sub(margin).min(max_blocks);
             state.checkpoint = Checkpoint::ZERO;
             state.resume_cap = Some(0);
             // A zero count is exact: no record credits the worker on Device.
@@ -483,7 +499,9 @@ impl HybridPrefixEvaluator {
                 }
                 queries.push(LowerQuery {
                     worker: *worker,
-                    end: next.start_pos.min(self.max_blocks),
+                    end: self
+                        .resumable_end(ResidencyOwner::worker(*worker), next.start_pos)
+                        .min(self.max_blocks),
                     floor: next.start_pos.saturating_sub(*hits),
                     point: Checkpoint::ZERO,
                     done: false,
@@ -508,7 +526,12 @@ impl HybridPrefixEvaluator {
             }
             state.resume_cap.get_or_insert(0);
             let mut point = state.checkpoint;
-            let reach = (*blocks as usize).min(self.max_blocks);
+            let margin = state
+                .captured
+                .map_or(0, |layout| layout.eagle_margin_blocks as usize);
+            let reach = (*blocks as usize)
+                .saturating_sub(margin)
+                .min(self.max_blocks);
             if reach > point.position
                 && let Some(request) = request
             {
@@ -611,6 +634,7 @@ impl HybridPrefixEvaluator {
         let (checkpoint, route_cap, device_prefix) = match source {
             KvTransferCandidateSource::Worker(worker) => {
                 let state = self.workers.get(&worker);
+                let end = self.resumable_end(ResidencyOwner::worker(worker), end);
                 let checkpoint = if tier == StorageTier::Device {
                     match state {
                         Some(state) => state.checkpoint(end.min(self.max_blocks), floor),
@@ -746,6 +770,67 @@ mod tests {
         ));
     }
 
+    /// EAGLE/MTP trailing-block drop: the engine matches the attention prefix
+    /// and then drops one block, so a checkpoint is the resume point only when
+    /// the attention match extends `eagle_margin_blocks` past it. The margin
+    /// arrives either with the layout declaration or on the event tags.
+    #[test]
+    fn eagle_margin_moves_the_resume_point_below_the_attention_match() {
+        let plain = WorkerWithDpRank::new(1, 0);
+        let declared = WorkerWithDpRank::new(2, 0);
+        let tagged = WorkerWithDpRank::new(3, 0);
+        let residency = KvCacheGroupResidency::new();
+        residency.declare_layout(ResidencyOwner::worker(plain), &[0], 1, 0);
+        residency.declare_layout(ResidencyOwner::worker(declared), &[0], 1, 1);
+        residency.declare_layout(ResidencyOwner::worker(tagged), &[0], 1, 0);
+        for position in [2, 4] {
+            store_device_checkpoint(&residency, plain, position);
+            store_device_checkpoint(&residency, declared, position);
+            let mut event =
+                crate::testing::recurrent_store(tagged, StorageTier::Device, position, 0, 1);
+            event.kv_cache_group.as_mut().unwrap().eagle_margin_blocks = Some(1);
+            residency.apply(&event);
+        }
+        for (matched, expected_plain, expected_eagle) in [(4u32, 4u32, 2u32), (5, 4, 4), (2, 2, 0)]
+        {
+            let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
+            let mut raw = MatchDetails::default();
+            for worker in [plain, declared, tagged] {
+                evaluator.observe_worker(worker);
+                raw.overlap_scores.scores.insert(worker, matched);
+                raw.last_matched_hashes
+                    .insert(worker, ExternalSequenceBlockHash(matched as u64));
+            }
+            for position in 1..=matched as usize {
+                evaluator.observe_block(position, ExternalSequenceBlockHash(position as u64));
+            }
+            evaluator.prepare_device(&raw);
+            evaluator.finish(&mut raw, &mut HashMap::new(), &Default::default());
+            assert_eq!(
+                raw.overlap_scores.scores.get(&plain).copied().unwrap_or(0),
+                expected_plain,
+                "plain {matched}"
+            );
+            assert_eq!(raw.hybrid_resume_caps.get(&plain), Some(&expected_plain));
+            for worker in [declared, tagged] {
+                assert_eq!(
+                    raw.overlap_scores.scores.get(&worker).copied().unwrap_or(0),
+                    expected_eagle,
+                    "eagle {matched}"
+                );
+                assert_eq!(raw.hybrid_resume_caps.get(&worker), Some(&expected_eagle));
+                if expected_eagle == 0 {
+                    assert!(!raw.last_matched_hashes.contains_key(&worker));
+                } else {
+                    assert_eq!(
+                        raw.last_matched_hashes[&worker],
+                        ExternalSequenceBlockHash(expected_eagle as u64)
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn device_candidates_preserve_raw_bounds_and_dp() {
         for case in [
@@ -759,7 +844,7 @@ mod tests {
             let others: Vec<_> = (1..=63).map(|id| WorkerWithDpRank::new(id, 0)).collect();
             let residency = KvCacheGroupResidency::new();
             for &worker in &others {
-                residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+                residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1, 0);
                 for position in 1..=8 {
                     store_device_checkpoint(&residency, worker, position);
                 }
@@ -769,7 +854,7 @@ mod tests {
             } else {
                 1
             };
-            residency.declare_layout(ResidencyOwner::worker(target), &[0], alignment);
+            residency.declare_layout(ResidencyOwner::worker(target), &[0], alignment, 0);
             let positions: &[u64] = match case {
                 "bound" => &[8, 3],
                 "bound_missing" => &[8, 7],
@@ -781,7 +866,7 @@ mod tests {
             }
             let wrong_dp = WorkerWithDpRank::new(64, 0);
             if case == "dp" {
-                residency.declare_layout(ResidencyOwner::worker(wrong_dp), &[0], 1);
+                residency.declare_layout(ResidencyOwner::worker(wrong_dp), &[0], 1, 0);
                 for position in 1..=8 {
                     store_device_checkpoint(&residency, wrong_dp, position);
                 }
@@ -890,7 +975,7 @@ mod tests {
         let hybrid = WorkerWithDpRank::new(7, 0);
         let dense = WorkerWithDpRank::new(8, 0);
         let residency = KvCacheGroupResidency::new();
-        residency.declare_layout(ResidencyOwner::worker(hybrid), &[0], 1);
+        residency.declare_layout(ResidencyOwner::worker(hybrid), &[0], 1, 0);
         let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
         evaluator.prepare_device(&MatchDetails::default());
 
@@ -922,7 +1007,7 @@ mod tests {
         let foreign = WorkerWithDpRank::new(10, 0);
         let residency = KvCacheGroupResidency::new();
         for worker in [hybrid, unmatched] {
-            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1, 0);
         }
         let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
         for worker in [hybrid, unmatched, dense] {
@@ -953,7 +1038,7 @@ mod tests {
         let owner = ResidencyOwner::worker(worker);
         for legacy_first in [false, true] {
             let residency = KvCacheGroupResidency::new();
-            residency.declare_layout(owner, &[0], 1);
+            residency.declare_layout(owner, &[0], 1, 0);
             let gpu = crate::testing::recurrent_store(worker, StorageTier::Device, 2, 0, 1);
             let host = crate::testing::recurrent_store(worker, StorageTier::HostPinned, 2, 0, 1);
             residency.apply(&gpu);
@@ -1009,7 +1094,7 @@ mod tests {
             [(&[3, 4][..], 2), (&[3][..], 1), (&[2][..], 0), (&[][..], 0)]
         {
             let residency = KvCacheGroupResidency::new();
-            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1, 0);
             store_device_checkpoint(&residency, worker, 2);
             for &position in host_checkpoints {
                 residency.apply(&crate::testing::recurrent_store(
@@ -1071,7 +1156,7 @@ mod tests {
         let walks = [(first, 21), (second, 22)];
         let residency = KvCacheGroupResidency::new();
         for (worker, at_two) in walks {
-            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1, 0);
             residency.apply(&crate::testing::recurrent_store(
                 worker,
                 StorageTier::HostPinned,
@@ -1120,7 +1205,7 @@ mod tests {
         let residency = KvCacheGroupResidency::new();
         let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
         evaluator.observe_worker(worker);
-        residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+        residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1, 0);
         residency.apply(&crate::testing::recurrent_store(
             worker,
             StorageTier::HostPinned,
@@ -1158,7 +1243,7 @@ mod tests {
         let other = WorkerWithDpRank::new(8, 0);
         for stale in [false, true] {
             let residency = KvCacheGroupResidency::new();
-            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1, 0);
             let source = if stale { worker } else { other };
             let event = crate::testing::recurrent_store(source, StorageTier::Device, 2, 0, 1);
             residency.apply(&event);
@@ -1230,7 +1315,7 @@ mod tests {
             for mutation in ["unchanged", "add_owner", "remove", "remove_readd"] {
                 let residency = KvCacheGroupResidency::new();
                 for worker in [first, second] {
-                    residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+                    residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1, 0);
                 }
                 let checkpoint = |worker, position: usize| {
                     crate::testing::recurrent_store(
@@ -1399,7 +1484,7 @@ mod tests {
         let residency = KvCacheGroupResidency::new();
         let hybrid = WorkerWithDpRank::new(7, 0);
         let dense = WorkerWithDpRank::new(8, 0);
-        residency.declare_layout(ResidencyOwner::worker(hybrid), &[0], 1);
+        residency.declare_layout(ResidencyOwner::worker(hybrid), &[0], 1, 0);
         let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
         evaluator.observe_worker(hybrid);
         let details = LowerTierMatchDetails {
@@ -1476,7 +1561,7 @@ mod tests {
                 .into_iter()
                 .map(ExternalSequenceBlockHash)
                 .collect();
-            indexer.declare_recurrent_layout(worker, &[0, 1, 2], 1);
+            indexer.declare_recurrent_layout(worker, &[0, 1, 2], 1, 0);
             let stored = RouterEvent::new(
                 27,
                 KvCacheEvent {
@@ -1531,6 +1616,7 @@ mod tests {
                     kind: KvCacheGroupKind::Mamba,
                     expected_group_count: Some(3),
                     alignment_blocks: Some(1),
+                    eagle_margin_blocks: None,
                 })
             };
             // A state outside the matched attention path never proves reuse.

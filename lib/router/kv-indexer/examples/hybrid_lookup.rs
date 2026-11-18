@@ -50,6 +50,7 @@ fn store(worker: u64, event_id: u64, positions: &[usize], group: Option<u32>) ->
             kind: KvCacheGroupKind::Mamba,
             expected_group_count: Some(3),
             alignment_blocks: Some(1),
+            eagle_margin_blocks: None,
         }),
     }
 }
@@ -101,6 +102,7 @@ fn main() {
                     WorkerWithDpRank::new(worker as u64, 0),
                     &[0, 1, 2],
                     1,
+                    0,
                 );
                 for group in 0..if case == "incomplete" { 2 } else { 3 } {
                     let checkpoints = if case == "populated_short" {
