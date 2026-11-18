@@ -549,9 +549,12 @@ jobs:
           sudo mv crane /usr/local/bin/
           crane version
 
+      # $/ loads the action from the workflow commit: older release branches ship a copy with different inputs.
       - name: Login to ECR
-        run: |
-          aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+        uses: $/.github/actions/docker-login
+        with:
+          aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ env.ECR_REGISTRY }}
 
       - name: Login to NGC
         env:
@@ -1653,10 +1656,16 @@ jobs:
           sparse-checkout: .github/scripts
           sparse-checkout-cone-mode: false
 
+      # $/ loads the action from the workflow commit: older release branches ship a copy with different inputs.
       - name: Login to ECR
+        uses: $/.github/actions/docker-login
+        with:
+          aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ env.ECR_REGISTRY }}
+
+      - name: Resolve crate build image
         run: |
           set -euo pipefail
-          aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
           # Nightly builds tag the toolchain image with the suffix BEFORE -test
           # (<sha>-dynamo-runtime-nightly-test, shared-build-image.yml); a missing
           # nightly build must not fall through to the post-merge image at the
@@ -1671,7 +1680,7 @@ jobs:
         run: |
           set -uo pipefail
           # Report-only: is the crate build image in ECR? Never fails (publish step errors if absent).
-          # Single source of truth: the tag the login step derived into ECR_IMAGE.
+          # Single source of truth: the tag the resolve step derived into ECR_IMAGE.
           TAG="${ECR_IMAGE##*:}"
           {
             echo "### Crate build image availability (ECR)"
