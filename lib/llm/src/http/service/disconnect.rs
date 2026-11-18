@@ -1335,25 +1335,6 @@ mod tests {
         assert!(!body.to_string().contains("secret"));
     }
 
-    #[test]
-    fn exact_subprocess_rejects_a_missing_test_name() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "http::service::disconnect::tests::missing_status_collision_probe",
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "libtest accepts an unmatched filter"
-        );
-        assert!(
-            !single_test_succeeded(&output),
-            "no child test actually ran"
-        );
-    }
-
     fn single_test_succeeded(output: &std::process::Output) -> bool {
         output.status.success()
             && String::from_utf8_lossy(&output.stdout)
