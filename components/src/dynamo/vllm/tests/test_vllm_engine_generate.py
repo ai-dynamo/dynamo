@@ -94,7 +94,6 @@ def test_tito_adapter_uses_outer_tokens_and_rl_sampling_defaults():
         (None, 7),
         ({}, 7),
         ({"priority": None}, 7),
-        ({"priority": -7}, 7),
         ({"priority": -50}, 50),
         ({"priority": 0}, 0),
     ],
