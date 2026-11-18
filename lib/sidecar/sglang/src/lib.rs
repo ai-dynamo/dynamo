@@ -10,6 +10,11 @@
 //! parallelism, KV block sizing, and context length are discovered from the
 //! engine's gRPC metadata RPCs.
 //!
+//! SGLang's Rust server runs one listener per data-parallel group leader. One
+//! sidecar serves every listener of its node as one worker that owns their DP
+//! ranks. A request runs on the listener of the rank it names, and requests
+//! that name none take the node's listeners in turn.
+//!
 //! The crate never depends on `sglang` or any engine crate. It uses
 //! `dynamo-backend-common`, `dynamo-llm`, `dynamo-runtime`, `tonic`/`prost`,
 //! `clap`, and tokio.
@@ -25,7 +30,9 @@ pub mod args;
 pub mod client;
 mod discovery;
 pub mod engine;
+mod listeners;
 mod native_http;
+mod node;
 
 /// Generated SGLang gRPC types, temporarily exposed for the Mocker server
 /// until SGLang publishes its upstream protocol package.
