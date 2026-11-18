@@ -37,7 +37,11 @@ from tests.utils.payload_builder import (
     sglang_generate_cancellation_payloads,
     stop_string_payloads,
 )
-from tests.utils.payloads import KvTransferPayload, OmittedMaxTokensChatPayload
+from tests.utils.payloads import (
+    KvTransferPayload,
+    OmittedMaxTokensChatPayload,
+    SGLangUnmatchedKvTransferCancellationPayload,
+)
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
 
 vllm_sidecar_dir = os.environ.get("VLLM_SIDECAR_DIR") or os.path.join(
@@ -472,11 +476,25 @@ sidecar_configs = {
             "DYN_REQUEST_PLANE": "tcp",
             "MAX_MODEL_LEN": "2048",
         },
-        request_payloads=_disaggregated_payloads(
-            prefill_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
-            decode_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT2"),
-            transfer_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
-        ),
+        request_payloads=[
+            *_disaggregated_payloads(
+                prefill_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+                decode_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT2"),
+                transfer_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+            ),
+            # Cancel a decode request stuck on an unmatched KV transfer, then
+            # require a fresh completed transfer through the frontend.
+            SGLangUnmatchedKvTransferCancellationPayload(
+                body=disaggregated_token_count_payload().body,
+                expected_response=[],
+                expected_log=[],
+                expected_finish_reason="length",
+                expected_completion_tokens=8,
+                prefill_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+                decode_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT2"),
+                transfer_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+            ),
+        ],
     ),
     "vllm_kv_router": SidecarConfig(
         name="vllm_kv_router",

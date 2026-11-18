@@ -185,7 +185,7 @@ clients. That makes peer-loss tests deterministic.
 | --- | --- | --- |
 | `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM, SGLang and TensorRT-LLM; native rejection, malformed responses and shutdown during pending SGLang health checks; vLLM engine loss from its health stream | CPU, ordinary pre-merge Cargo tests |
 | `router_sidecar_mocker_integration.rs` | All three backends: registration/error recovery, delayed/interrupted startup, cancellation, SIGTERM, frontend HTTP errors/recovery and real PrefillRouter handoff; all three plus LPX: request migration after engine failure (before or after the first token) and SIGTERM; vLLM/SGLang model alias publication and native-health readiness; SGLang tokenizer/parser discovery, native tracing and changed-role startup; vLLM withdrawal and process exit on engine loss | CPU, ordinary pre-merge Cargo tests |
-| `tests/serve/test_sidecar.py` | vLLM/SGLang: real engine logprobs, structured output, aggregated and disaggregated cancellation/recovery (decode stops early), KV transfer and routing, where the `*_kv_router` configs warm two caches and require cache-based selection, plus a completed transfer to decode when disaggregated; TensorRT-LLM: aggregated/disaggregated chat and cancellation/recovery; all three: request migration after a real engine is killed mid-stream, on the aggregated and disaggregated `*_kv_router` configs | GPU, existing sidecar E2E jobs in post-merge and nightly |
+| `tests/serve/test_sidecar.py` | vLLM/SGLang: real engine logprobs, structured output, aggregated and disaggregated cancellation/recovery (decode stops early), SGLang cancellation of a decode request waiting for an unmatched KV transfer, KV transfer and routing, where the `*_kv_router` configs warm two caches and require cache-based selection, plus a completed transfer to decode when disaggregated; TensorRT-LLM: aggregated/disaggregated chat and cancellation/recovery; all three: request migration after a real engine is killed mid-stream, on the aggregated and disaggregated `*_kv_router` configs | GPU, existing sidecar E2E jobs in post-merge and nightly |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
 vLLM, SGLang and TensorRT-LLM register the shared wire and process scenarios. TensorRT-LLM uses the existing OpenEngine Mocker through a controlled inference service. Its process tests supply a local model path and verify the context limit returned by OpenEngine.
@@ -216,10 +216,19 @@ cancelled-terminal delivery remain Rust CPU adapter assertions; frontend HTTP
 disconnection checks real-engine cleanup and recovery.
 
 SGLang disaggregation validates completed transfers through frontend requests.
-Cancellation of a real engine's unmatched KV-transfer wait remains deferred:
-the public frontend rejects caller-supplied bootstrap metadata, so creating that
-state requires dedicated fault injection. CPU handoff cancellation is not evidence
-that a real SGLang transfer-wait queue drains after cancellation.
+The public frontend rejects caller-supplied bootstrap metadata, so the
+`sglang_disaggregated` case creates an unmatched KV-transfer wait by sending the
+decode worker's request-plane endpoint a bootstrap room that no prefill request
+uses. It reads SGLang's `/v1/loads` to require the request in the decode
+prealloc or transfer queue with no tokens, cancels it through the sidecar, and
+requires both queues to drain well before SGLang's 300 s waiting timeout. The
+`/metrics` decode queue gauges are not republished while a request waits for KV
+and no batch runs, so they cannot show this state. It then requires idle
+schedulers and a fresh completed transfer through the frontend. This covers the
+chat decode path, where the sidecar ends its native gRPC call and SGLang aborts
+the request on disconnect. The native `/generate` decode path drains for up to
+300 s before its targeted abort, and is not exercised. CPU handoff cancellation is
+not evidence that a real SGLang transfer-wait queue drains after cancellation.
 
 The legacy Python backend suite is also distributed by behavior, including
 `tests/serve/test_vllm.py`, `tests/fault_tolerance/cancellation/test_vllm.py` and
@@ -234,7 +243,9 @@ tested after a prefill-worker failure or on the DEP configs.
    `router_sidecar_mocker_integration.rs`. Assertions requiring real inference or
    GPU state belong in `tests/serve/test_sidecar.py`, as frontend HTTP payloads or
    HTTP routing checks on an existing deployment, with engine-metric assertions.
-   Keep direct native-runtime clients in Rust CPU tests.
+   Keep direct native-runtime clients in Rust CPU tests. A GPU payload may call a
+   worker's Dynamo request-plane endpoint only to create state the frontend
+   rejects, as the SGLang unmatched KV-transfer check does.
 2. For shared behavior, write a scenario accepting only its fixture type. Use
    `SidecarFixture` for the common engine lifecycle, `WireFixture` when a test
    must observe active scheduler work, and `ProcessFixture` when it launches a
