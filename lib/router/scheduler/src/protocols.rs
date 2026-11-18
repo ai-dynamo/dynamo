@@ -4,7 +4,7 @@
 //! The router-local request vocabulary: what a host hands the scheduler kernel
 //! (`RouterRequest`, `RoutingConstraints`, the worker-config view `WorkerConfigLike`) and
 //! what comes back (`RouterResponse`, `PotentialLoad`, `WorkerSelectionResult`), plus the
-//! event sink hosts implement. Kernel-owned per SPLIT_V2 section 4 rows 40-41.
+//! event sink hosts implement. Owned by the kernel.
 
 use crate::kv_hints::{KvTransferSourceChoice, WorkerKvTransferKeys, WorkerKvTransferKeysExt};
 use dynamo_kv_events::event::RouterEvent;
@@ -37,6 +37,12 @@ pub trait WorkerConfigLike {
         &self,
         _dp_rank: DpRank,
     ) -> Option<KvHintTransferWorkerMetadata<'_>> {
+        None
+    }
+
+    /// Host-pinned capacity, in blocks, of the cache owner (KVCR instance) attached
+    /// to each data-parallel rank of this worker, if advertised.
+    fn cache_owner_capacity_blocks(&self) -> Option<u64> {
         None
     }
 

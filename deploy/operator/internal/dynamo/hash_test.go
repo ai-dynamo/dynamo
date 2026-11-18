@@ -692,3 +692,49 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesCompilationCacheMountPath(t 
 	normalized := workerHashSpec(dcd)
 	assert.Equal(t, commonconsts.DefaultVLLMCacheMountPoint, normalized.CompilationCache.MountPath)
 }
+
+// TestComputeBetaDGDWorkersSpecHash_NativeEngineKeepsLegacyHash pins the worker
+// hashes that release/1.6.0 (240b7d359f) computed for a native-sidecar worker
+// launching vllm-rs directly. Detecting that command would move the hash and roll
+// the workload on an operator-only upgrade (#17543).
+func TestComputeBetaDGDWorkersSpecHash_NativeEngineKeepsLegacyHash(t *testing.T) {
+	nativeEngine := func(withCache bool, explicitBackend string) *v1beta1.DynamoGraphDeployment {
+		always := corev1.ContainerRestartPolicyAlways
+		component := v1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName: "worker",
+			ComponentType: v1beta1.ComponentTypeWorker,
+			Replicas:      new(int32(1)),
+			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				InitContainers: []corev1.Container{{
+					Name:          commonconsts.RuntimeContainerName,
+					Image:         "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0",
+					RestartPolicy: &always,
+				}},
+				Containers: []corev1.Container{{
+					Name:    commonconsts.MainContainerName,
+					Image:   "vllm/vllm-rs:0.3.0",
+					Command: []string{"/usr/local/bin/vllm-rs"},
+					Args:    []string{"--model", "Qwen/Qwen3-0.6B", "--port", "8000"},
+				}},
+			}},
+		}
+		if withCache {
+			component.CompilationCache = &v1beta1.CompilationCacheConfig{PVCName: "compile-cache", MountPath: "/root/.cache/vllm"}
+		}
+		return &v1beta1.DynamoGraphDeployment{
+			Name: "qwen", Namespace: "demo",
+			Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: explicitBackend,
+				Components:       []v1beta1.DynamoComponentDeploymentSharedSpec{component},
+			},
+		}
+	}
+
+	t.Log("Match the hashes release/1.6.0 computed without and with a compilation cache")
+	assert.Equal(t, "8312f8aa", mustComputeBetaDGDWorkersSpecHash(t, nativeEngine(false, "")))
+	assert.Equal(t, "66eaf1eb", mustComputeBetaDGDWorkersSpecHash(t, nativeEngine(true, "")))
+
+	t.Log("Match the hash release/1.6.0 computed with an explicit vLLM backend")
+	assert.Equal(t, "4a915483", mustComputeBetaDGDWorkersSpecHash(t, nativeEngine(true, "vllm")))
+}
