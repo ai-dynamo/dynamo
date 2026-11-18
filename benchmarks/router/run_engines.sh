@@ -115,6 +115,26 @@ if [ ${#EXTRA_ARGS[@]} -eq 0 ]; then
     fi
 fi
 
+# Disaggregated vLLM needs a connector unless the caller supplied one.
+if [ "$USE_MOCKERS" = false ] && [ "$USE_TRTLLM" = false ] && [ "$MODE" != "agg" ]; then
+    HAS_KV_TRANSFER_CONFIG=false
+    for arg in "${EXTRA_ARGS[@]}"; do
+        case "$arg" in
+            --kv-transfer-config|--kv-transfer-config=*)
+                HAS_KV_TRANSFER_CONFIG=true
+                break
+                ;;
+        esac
+    done
+    if [ "$HAS_KV_TRANSFER_CONFIG" = false ]; then
+        if [ "$MODE" = "prefill" ]; then
+            EXTRA_ARGS+=("--kv-transfer-config" '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}')
+        else
+            EXTRA_ARGS+=("--kv-transfer-config" '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}')
+        fi
+    fi
+fi
+
 # Validate arguments
 if ! [[ "$NUM_WORKERS" =~ ^[0-9]+$ ]] || [ "$NUM_WORKERS" -lt 1 ]; then
     echo "Error: NUM_WORKERS must be a positive integer"
