@@ -122,6 +122,7 @@ link no catalog and reject a configured policy type at startup.
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [Schedule Agents with ThunderAgent](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
 | `dynamo-sticky-min-load` | Session-sticky least-loaded placement. A session's first request goes to the eligible worker with the fewest active requests; later requests carrying the same `X-Dynamo-Session-ID` return to that worker until it leaves the candidate set. Ignores cache overlap and load once a session is bound. Requests without a session ID go to the least-loaded worker. Inspired by SMG's `manual` policy with `assignment_mode: min_load`. |
+| `dynamo-power-of-two-cost-fn` | The default cost model with a power-of-d-choices pick: draws `choices` eligible workers uniformly at random and takes the lowest cost among them, instead of the lowest cost overall. Spreads the picks of router replicas that share one synced load view. |
 
 Name the policy type under each worker role in the same YAML file that `--router-policy-config`
 already points at:
@@ -265,6 +266,25 @@ largest device-KV overlap when that overlap covers more than 50% of the request'
 | `eviction_interval_secs` | `60` | Minimum seconds between sweeps for idle bindings. |
 
 Each worker pool keeps its own bindings, so prefill and decode stages bind sessions independently. The table holds at most 65,536 bindings and ignores session IDs longer than 256 bytes; requests that cannot be bound go to the least-loaded worker.
+
+`dynamo-power-of-two-cost-fn` scores workers with the default cost model, from the same tracked
+and replica-synced load, but picks differently: it draws `choices` distinct eligible workers
+uniformly at random (all of them when fewer are eligible) and routes to the lowest-cost one,
+breaking exact ties at random. The default takes the lowest cost overall, so many router replicas
+that hold the same synced load table and pick within one sync delay all send their requests to the
+same worker. Use this policy for a load-only stage served by many router replicas, typically the
+decode stage of a disaggregated deployment, and keep the default where cache overlap decides the
+cost: a random draw seldom contains the worker that holds a request's prefix. It accepts one
+parameter, `choices` (default `2`, at least `2`); the cost weights come from the router
+configuration, and `router_temperature` does not apply.
+
+```yaml
+worker_selection:
+  decode:
+    type: dynamo-power-of-two-cost-fn
+    parameters:
+      choices: 2
+```
 
 #### Override the Selection
 

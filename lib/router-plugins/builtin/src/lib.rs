@@ -17,8 +17,8 @@ mod sticky_min_load;
 mod thunderagent;
 mod two_tier_cost_fn;
 pub use default::{
-    KVCR_POLICY_TYPE, default_factory, default_policy, default_policy_with_rng, kvcr_policy,
-    startup_policy_parameters,
+    KVCR_POLICY_TYPE, POWER_OF_TWO_POLICY_TYPE, default_factory, default_policy,
+    default_policy_with_rng, kvcr_policy, power_of_two_policy_with_rng, startup_policy_parameters,
 };
 
 /// Registry every host links: the required default plus the routing modes
@@ -45,6 +45,7 @@ use dynamo_kv_router::plugins::prelude::*;
 /// than overriding it.
 pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginRegistryError> {
     default::register(registry)?;
+    default::register_power_of_two(registry)?;
     // kv_fetch names kvcr as a host, where it is on by default, so it registers with it.
     kv_fetch::register(registry)?;
     sticky_min_load::register(registry)?;
@@ -136,6 +137,45 @@ worker_selection:
             WorkerType::Decode,
         ] {
             factory(&SelectionConfig::from(&config), worker_type, partition);
+        }
+    }
+
+    /// The documented decode-only shape resolves, with and without `choices`. Fewer than two
+    /// choices, an unknown key, and the removed `power-of-two` type name fail startup.
+    #[test]
+    fn resolves_power_of_two_for_decode_and_validates_choices() {
+        for (decode, succeeds) in [
+            ("dynamo-power-of-two-cost-fn", true),
+            (
+                "{type: dynamo-power-of-two-cost-fn, parameters: {choices: 2}}",
+                true,
+            ),
+            (
+                "{type: dynamo-power-of-two-cost-fn, parameters: {choices: 3}}",
+                true,
+            ),
+            (
+                "{type: dynamo-power-of-two-cost-fn, parameters: {choices: 1}}",
+                false,
+            ),
+            (
+                "{type: dynamo-power-of-two-cost-fn, parameters: {choices: 0}}",
+                false,
+            ),
+            (
+                "{type: dynamo-power-of-two-cost-fn, parameters: {choice: 2}}",
+                false,
+            ),
+            ("power-of-two", false),
+        ] {
+            let (config, resolved) = resolve(&format!("worker_selection:\n  decode: {decode}\n"));
+            assert_eq!(resolved.is_ok(), succeeds, "{decode}");
+            let Ok(factory) = resolved else { continue };
+            let factory = factory.expect("a configured role resolves to a factory");
+            let partition = RoutingPartitionRef::new("model", "default");
+            for worker_type in [WorkerType::Prefill, WorkerType::Decode] {
+                factory(&SelectionConfig::from(&config), worker_type, partition);
+            }
         }
     }
 
