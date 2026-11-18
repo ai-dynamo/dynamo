@@ -38,6 +38,7 @@ def _make_prefill_handler():
     handler.config = SimpleNamespace(
         disaggregation_mode=DisaggregationMode.PREFILL,
         route_to_encoder=False,
+        enable_multimodal=False,
         model="/models/base",
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,

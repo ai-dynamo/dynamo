@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 /// Host-only metadata accompanying the native attempt-fenced output update.
-/// A supported producer supplies its explicit output bound and original token count.
+/// A supported producer supplies the effective output bound and original token count.
 #[derive(Clone, Copy, Debug)]
 pub struct DecodeProgressUpdate {
     observation: Option<Observation>,
@@ -51,7 +51,7 @@ impl Observation {
     }
 }
 
-/// Remaining declared output budgets for a complete worker-local set of decoding owners.
+/// Remaining effective output budgets for a complete worker-local set of decoding owners.
 /// A budget is a bound, not a prediction of output length or completion time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DecodeProgress {
@@ -65,7 +65,7 @@ impl DecodeProgress {
         self.observed_requests
     }
 
-    /// Sum of explicit output limits minus original output tokens observed for each owner.
+    /// Sum of effective output limits minus original output tokens observed for each owner.
     pub fn remaining_token_budget(&self) -> usize {
         self.remaining_token_budget
     }
@@ -81,6 +81,7 @@ impl DecodeProgress {
 pub(crate) struct DecodeProgressAggregate {
     tracked: usize,
     invalid: usize,
+    // An uncapped owner set can exceed usize even with u32 limits. Narrow at read time.
     remaining: u128,
     // Index timestamps to find the oldest observation without scanning owners.
     times: BTreeMap<Instant, usize>,

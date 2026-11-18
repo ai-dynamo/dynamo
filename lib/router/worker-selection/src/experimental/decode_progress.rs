@@ -4,7 +4,8 @@
 //! Frontend-local output budgets, read on demand by a worker picker.
 //!
 //! Declare [`DECODE_PROGRESS`] and import [`DecodeProgressByRow`] to read a candidate.
-//! Supported aggregated requests have one choice and a positive explicit output limit.
+//! Supported aggregated requests have one choice and a positive effective output limit.
+//! A limit derived by the frontend from the remaining context also counts.
 //! A rank returns `None` while any active request is prefilling, unobserved or invalid,
 //! or when the input or host is unavailable. Filters and scorers receive none.
 //!

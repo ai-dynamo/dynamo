@@ -76,6 +76,7 @@ fn setup_kv_publishers(
                 topic,
                 image_token_id,
                 heartbeat_timeout,
+                idempotent_stores,
                 ..
             } => (
                 Some(KvEventSourceConfig::Zmq {
@@ -86,6 +87,7 @@ fn setup_kv_publishers(
                     expected_rank: Some(dp_rank),
                     liveness: heartbeat_timeout.map(|timeout| (dp_rank, timeout)),
                     engine_owned_mm_identity: false,
+                    idempotent_stores,
                     recovery: None,
                 }),
                 None,

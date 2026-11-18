@@ -47,10 +47,10 @@ fn remaining_budget(input: WorkerInputView<'_>, row: usize, max_age: Duration) -
 ```
 
 `None` requires a fallback. This frontend-local signal covers supported aggregated,
-single-choice requests with a positive explicit output limit, including EOS and
-stop conditions. It is unavailable while any active request is prefilling or lacks
-valid observations. A remaining budget is a
-token bound, not a time estimate. See the [API guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx#experimental-decode-progress)
+single-choice requests with a positive effective output limit. That can come
+from the request or from the frontend's remaining-context default. A rank has
+no summary while any active request is prefilling or lacks a valid observation.
+Use the budget as a raw-token upper bound. See the [API guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx#experimental-decode-progress)
 for fields and missing-data behavior.
 
 ## Pick a Starting Point

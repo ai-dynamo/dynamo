@@ -23,10 +23,11 @@ impl WorkerInputs {
     pub const LOAD: Self = Self(1 << 1);
     /// Request preferred-taint routing metadata.
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
-    /// Request per-rank counts of the blocks the router's indexer holds. Experimental: plugins
-    /// read it through the worker-selection stage's `experimental::resident_blocks` module, and
-    /// the host rejects a policy that declares it without [`Self::CACHE`], because the counts
-    /// come from the indexer that `CACHE` starts.
+    /// Request per-rank counts of the blocks the router's indexer holds, and the block count of
+    /// each rank's attached cache owner (KVCR instance). Experimental: plugins read them through
+    /// the worker-selection stage's `experimental::resident_blocks` module, and the host rejects
+    /// a policy that declares it without [`Self::CACHE`], because the counts come from the
+    /// indexer that `CACHE` starts.
     pub const RESIDENT_BLOCKS: Self = Self(1 << 3);
     /// Request live frontend-local decode progress in a picker. Experimental: plugins read
     /// it through `experimental::decode_progress`; the host collects it when declared.
