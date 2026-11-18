@@ -48,18 +48,6 @@ class Substrate:
     extra_engine_args: dict = field(default_factory=dict)
 
     def engine_args(self) -> str:
-        perf_config = {
-            "model": self.model,
-            "system": self.system,
-            "backend": self.backend,
-            "backend_version": self.backend_version,
-            "tp": self.tp_size,
-            "moe_tp_size": self.moe_tp_size,
-            "moe_ep_size": self.moe_ep_size,
-            "attention_dp": self.attention_dp_size,
-            "estimation_mode": "auto",
-            "fallback_policy": "deny",
-        }
         rank = dict(self.extra_engine_args)
         timing = rank.get("timing_model")
         if timing is not None and (
@@ -69,6 +57,28 @@ class Substrate:
             raise ValueError(
                 "extra_engine_args.timing_model may override only fixed or polynomial timing; external model identity belongs in the substrate"
             )
+        # Same alias resolution as Match Config's EngineConfig: aic_nextn is
+        # canonical, ais_nextn is the legacy alias.
+        canonical = rank.get("aic_nextn")
+        legacy = rank.pop("ais_nextn", None)
+        if canonical is not None and legacy is not None and canonical != legacy:
+            raise ValueError("extra_engine_args.aic_nextn conflicts with ais_nextn")
+        nextn = canonical if canonical is not None else legacy
+        if nextn is not None:
+            rank["aic_nextn"] = nextn
+        perf_config = {
+            "model": self.model,
+            "system": self.system,
+            "backend": self.backend,
+            "backend_version": self.backend_version,
+            "tp": self.tp_size,
+            "moe_tp_size": self.moe_tp_size,
+            "moe_ep_size": self.moe_ep_size,
+            "attention_dp": self.attention_dp_size,
+            "nextn": nextn,
+            "estimation_mode": "auto",
+            "fallback_policy": "deny",
+        }
         launch = {}
         for key in (
             "gpu_memory_utilization",
