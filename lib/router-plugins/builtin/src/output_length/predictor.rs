@@ -591,7 +591,6 @@ mod tests {
         }
         assert_eq!(predictor.tree_rows.len(), TREES_MAX_ROWS);
         assert_eq!(predictor.tree_rows_seen, TREES_MAX_ROWS + 10);
-        // The ten oldest replies are the ones the last ten replaced.
         let kept = (new_reply as f64).ln_1p() as f32;
         assert!(predictor.tree_rows.iter().all(|row| row[FEATURES] == kept));
     }
