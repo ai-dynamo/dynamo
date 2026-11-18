@@ -11,7 +11,6 @@ const SPLITMIX_INCREMENT: u64 = 0x9E37_79B9_7F4A_7C15;
 #[derive(Debug)]
 pub(super) struct CuckooInsertionScratch {
     touched: Vec<(usize, PackedBucket)>,
-    dirty_buckets: Vec<usize>,
 }
 
 impl CuckooInsertionScratch {
@@ -20,26 +19,18 @@ impl CuckooInsertionScratch {
             .checked_add(1)
             .ok_or(KvCacheEventError::AllocationFailed)?;
         let mut touched = Vec::new();
-        let mut dirty_buckets = Vec::new();
         touched
             .try_reserve_exact(capacity)
             .map_err(|_| KvCacheEventError::AllocationFailed)?;
-        dirty_buckets
-            .try_reserve_exact(capacity)
-            .map_err(|_| KvCacheEventError::AllocationFailed)?;
-        Ok(Self {
-            touched,
-            dirty_buckets,
-        })
+        Ok(Self { touched })
     }
 
     fn clear(&mut self) {
         self.touched.clear();
-        self.dirty_buckets.clear();
     }
 
     pub(super) fn capacity(&self) -> usize {
-        self.touched.capacity() + self.dirty_buckets.capacity()
+        self.touched.capacity()
     }
 }
 
@@ -161,7 +152,6 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
         scratch: &mut CuckooInsertionScratch,
     ) {
         scratch.touched.push((bucket, before));
-        scratch.dirty_buckets.push(bucket);
         self.store.store_bucket(bucket, after);
     }
 

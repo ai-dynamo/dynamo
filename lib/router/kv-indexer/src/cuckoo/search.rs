@@ -95,7 +95,7 @@ pub(super) fn find_prefix_depths<const D: usize>(
     prefetch: impl FnMut(usize),
     probe: impl FnMut(usize) -> u16,
 ) -> [u32; D] {
-    find_prefix_depths_impl::<D, true, false>(
+    find_prefix_depths_impl::<D, false>(
         sequence_len,
         initial_mask,
         verification_window,
@@ -113,7 +113,7 @@ pub(super) fn find_prefix_depths_with_test_stats<const D: usize>(
     prefetch: impl FnMut(usize),
     probe: impl FnMut(usize) -> u16,
 ) -> PrefixSearchResult<D> {
-    find_prefix_depths_impl::<D, true, false>(
+    find_prefix_depths_impl::<D, false>(
         sequence_len,
         initial_mask,
         verification_window,
@@ -131,7 +131,7 @@ pub(super) fn find_prefix_depths_with_test_trace<const D: usize>(
     probe: impl FnMut(usize) -> u16,
 ) -> (PrefixSearchResult<D>, Vec<SearchTraceEvent>) {
     trace_search(|| {
-        find_prefix_depths_impl::<D, true, true>(
+        find_prefix_depths_impl::<D, true>(
             sequence_len,
             initial_mask,
             verification_window,
@@ -158,7 +158,7 @@ fn trace_search<const D: usize>(
     (result, trace)
 }
 
-fn find_prefix_depths_impl<const D: usize, const FALLBACK: bool, const TRACE: bool>(
+fn find_prefix_depths_impl<const D: usize, const TRACE: bool>(
     sequence_len: usize,
     initial_mask: u16,
     verification_window: usize,
@@ -180,7 +180,7 @@ fn find_prefix_depths_impl<const D: usize, const FALLBACK: bool, const TRACE: bo
     let active = state.active;
     while refine_binary_level::<D, TRACE>(&mut state, active, active, &mut prefetch, &mut probe) {}
 
-    finalize_lanes::<D, FALLBACK, TRACE>(
+    finalize_lanes::<D, TRACE>(
         &state,
         active,
         verification_window,
@@ -341,7 +341,7 @@ fn refine_binary_level<const D: usize, const TRACE: bool>(
     true
 }
 
-fn finalize_lanes<const D: usize, const FALLBACK: bool, const TRACE: bool>(
+fn finalize_lanes<const D: usize, const TRACE: bool>(
     state: &PrefixSearchState<D>,
     lanes: u16,
     verification_window: usize,
@@ -416,9 +416,6 @@ fn finalize_lanes<const D: usize, const FALLBACK: bool, const TRACE: bool>(
         verifying &= !misses;
     }
 
-    if !FALLBACK {
-        return PrefixSearchResult { depths, fallback };
-    }
     fallback.left_edge_lanes = u64::from(fallback_lanes.count_ones());
 
     // A miss at the window's left edge can expose a false terminal branch. Scan only

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
@@ -461,21 +461,17 @@ fn store_remove_churn_drains_every_physical_slot() {
     let addressing = CkfAddressing::new(64, TEST_SEED);
     let mut rng = TEST_SEED;
     let mut scratch = CuckooInsertionScratch::new(500).unwrap();
-    let mut resident = FxHashSet::default();
     let hashes: Vec<_> = (0..128).map(|hash| canonical(10_000 + hash)).collect();
     let mutator = CuckooMutator::new(&view, &addressing, 500);
     for &hash in &hashes {
         mutator
             .insert_with_originals(hash, &mut rng, &mut scratch, |_, _| {})
             .unwrap();
-        resident.insert(hash);
     }
     for &hash in hashes.iter().rev() {
         mutator.remove_with_original(hash, |_, _| {}).unwrap();
-        resident.remove(&hash);
     }
 
-    assert!(resident.is_empty());
     assert!(
         (0..view.bucket_count())
             .all(|bucket| { view.load_bucket(bucket) == PackedBucket::default() })
