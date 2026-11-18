@@ -14,7 +14,6 @@ from transformers import Qwen3Config
 from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.exceptions import VLLMValidationError
-from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import ModelInput, ModelRuntimeConfig, WorkerType
@@ -22,7 +21,7 @@ from dynamo.vllm import decision_cache_provenance as cache
 from dynamo.vllm import decision_execution as decisions
 from dynamo.vllm.args import _parse_cli_args
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
-from dynamo.vllm.handlers import build_sampling_params
+from dynamo.vllm.engine_generate import adapt_engine_generate_request
 
 pytestmark = [
     pytest.mark.unit,
@@ -263,30 +262,85 @@ def test_installed_configuration_qualifies_without_model_load(
     )
 
 
+@pytest.fixture
+def causal_sampling_params():
+    """Golden sampling controls from Rust's causal_scoring_request."""
+    return {
+        "max_tokens": 1,
+        "min_tokens": 0,
+        "n": 1,
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "top_k": -1,
+        "min_p": 0.0,
+        "frequency_penalty": 0.0,
+        "presence_penalty": 0.0,
+        "repetition_penalty": 1.0,
+        "prompt_logprobs": None,
+        "detokenize": False,
+        "stop": [],
+        "stop_token_ids": [],
+        "ignore_eos": False,
+        "bad_words": [],
+        "logit_bias": {},
+        "allowed_token_ids": None,
+        "structured_outputs": None,
+    }
+
+
 @pytest.mark.usefixtures("vllm_cpu_platform_when_no_accelerator")
-def test_explicit_candidate_logprobs_exceed_default_top_k_limit(installed_model_config):
-    assert decisions._released_runtime(), "Requalify Decisions when upgrading vLLM"
-    candidate_ids = list(range(26))
-    params = build_sampling_params(
-        {"sampling_options": {"logprob_token_ids": candidate_ids}}, {}
+@pytest.mark.parametrize(
+    ("candidate_count", "logprobs", "error"),
+    [(26, None, None), (0, 26, "20"), (129, None, "128")],
+)
+def test_causal_adapter_preserves_explicit_candidate_scoring(
+    installed_model_config, causal_sampling_params, candidate_count, logprobs, error
+):
+    candidate_ids = list(range(candidate_count)) if candidate_count else None
+    envelope = {
+        "token_ids": [1, 2, 3],
+        "request_id": "causal-scoring",
+        "stream": False,
+        "cache_salt": "request-cache-scope",
+        "sampling_params": {
+            **causal_sampling_params,
+            "logprob_token_ids": candidate_ids,
+            "logprobs": logprobs,
+        },
+    }
+    adapted = adapt_engine_generate_request(
+        {"token_ids": [1, 2, 3], "extra_args": {"vllm_tito": envelope}},
+        enable_multimodal=False,
+        decode_capable=True,
+        vllm_config=VllmConfig(
+            model_config=installed_model_config,
+            scheduler_config=SchedulerConfig.default_factory(
+                max_num_seqs=1, max_model_len=128, max_num_batched_tokens=128
+            ),
+        ),
+        default_sampling_params={"temperature": 0.6, "top_k": 20, "top_p": 0.95},
+    )
+    assert adapted is not None
+    params = adapted.sampling_params
+    assert params.logprobs == logprobs
+    assert params.logprob_token_ids == candidate_ids
+    assert params.detokenize is False
+    # vLLM canonicalizes greedy top-k to zero.
+    assert (params.max_tokens, params.temperature, params.top_k, params.top_p) == (
+        1,
+        0.0,
+        0,
+        1.0,
     )
     assert installed_model_config.max_logprobs == 20
-    assert params.logprobs is None
-    assert params.num_logprobs == len(candidate_ids)
-    params._validate_logprobs(installed_model_config)
-    with pytest.raises(VLLMValidationError, match="greater than max allowed: 20"):
-        build_sampling_params(
-            {"output_options": {"logprobs": len(candidate_ids)}}, {}
-        )._validate_logprobs(installed_model_config)
-    with pytest.raises(VLLMValidationError, match="greater than max allowed: 128"):
-        build_sampling_params(
-            {
-                "sampling_options": {
-                    "logprob_token_ids": [0] * (MAX_LOGPROB_TOKEN_IDS + 1)
-                }
-            },
-            {},
-        )._validate_logprobs(installed_model_config)
+    if error:
+        with pytest.raises(
+            VLLMValidationError, match=f"greater than max allowed: {error}"
+        ):
+            params._validate_logprobs(installed_model_config)
+    else:
+        assert params.logprobs is None
+        params._validate_logprobs(installed_model_config)
 
 
 def test_cache_source_verifier_reports_missing_module_file(monkeypatch, caplog):
