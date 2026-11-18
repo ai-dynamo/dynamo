@@ -29,3 +29,7 @@ cargo test --workspace
 ```
 
 These run pure-Rust against the fixtures (no vLLM/SGLang engine launch). The dynamo-side parser tests that consume the crate still live in dynamo at `lib/llm/tests/` (`test_jail.rs`, `test_reasoning_parser.rs`, `test_streaming_tool_parsers.rs`, etc.).
+
+## Exception: SGLang chat processor replay
+
+[`sglang_processor/`](sglang_processor/README.md) runs from Dynamo. It replays the frontend-crates Unified corpus through Dynamo's SGLang chat processor and compares the result with native SGLang. It needs a frontend-crates checkout.
