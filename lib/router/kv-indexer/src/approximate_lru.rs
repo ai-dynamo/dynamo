@@ -179,11 +179,8 @@ impl ApproximateLruTask {
 pub(crate) trait ApproximateLruCommandSink: Send + Sync {
     fn send(&self, task: ApproximateLruTask) -> Result<(), KvRouterError>;
 
-    /// Cancelled when the lane that runs this sink's tasks exits. `None` for a sink whose queued
-    /// tasks drop with its lane, so a dropped reply already reports the exit.
-    fn lane_exited(&self) -> Option<&CancellationToken> {
-        None
-    }
+    /// Cancelled when the lane that runs this sink's tasks exits.
+    fn lane_exited(&self) -> &CancellationToken;
 }
 
 /// Await a lane's reply, or fail with `IndexerOffline` once the lane exits; the indexer's
@@ -196,18 +193,6 @@ pub(crate) async fn await_lane_reply<T>(
         biased;
         reply = reply => reply.map_err(|_| KvRouterError::IndexerDroppedRequest),
         _ = lane_exited.cancelled() => Err(KvRouterError::IndexerOffline),
-    }
-}
-
-async fn await_sink_reply<T>(
-    reply: oneshot::Receiver<T>,
-    lane_exited: Option<&CancellationToken>,
-) -> Result<T, KvRouterError> {
-    match lane_exited {
-        Some(lane_exited) => await_lane_reply(reply, lane_exited).await,
-        None => reply
-            .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest),
     }
 }
 
@@ -296,12 +281,12 @@ pub struct ApproximateLruLease {
 
 pub struct ApproximateLruReleaseAck {
     response: oneshot::Receiver<Result<ApproximateLruReply, KvRouterError>>,
-    lane_exited: Option<CancellationToken>,
+    sink: Arc<dyn ApproximateLruCommandSink>,
 }
 
 impl ApproximateLruReleaseAck {
     pub async fn wait(self) -> Result<(), KvRouterError> {
-        expect_applied(await_sink_reply(self.response, self.lane_exited.as_ref()).await??)
+        expect_applied(await_lane_reply(self.response, self.sink.lane_exited()).await??)
     }
 }
 
@@ -385,7 +370,7 @@ impl ApproximateLruLease {
         self.inner.sink.send(task)?;
         Ok(Some(ApproximateLruReleaseAck {
             response,
-            lane_exited: self.inner.sink.lane_exited().cloned(),
+            sink: Arc::clone(&self.inner.sink),
         }))
     }
 
@@ -432,7 +417,7 @@ async fn send_acknowledged(
 ) -> Result<ApproximateLruReply, KvRouterError> {
     let (task, response) = ApproximateLruTask::acknowledged(command);
     sink.send(task)?;
-    await_sink_reply(response, sink.lane_exited()).await?
+    await_lane_reply(response, sink.lane_exited()).await?
 }
 
 fn expect_applied(reply: ApproximateLruReply) -> Result<(), KvRouterError> {

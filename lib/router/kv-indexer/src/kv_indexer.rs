@@ -188,8 +188,8 @@ impl ApproximateLruCommandSink for DirectLruSink {
             .map_err(|_| KvRouterError::IndexerOffline)
     }
 
-    fn lane_exited(&self) -> Option<&CancellationToken> {
-        Some(&self.lane_exited)
+    fn lane_exited(&self) -> &CancellationToken {
+        &self.lane_exited
     }
 }
 

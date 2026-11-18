@@ -160,8 +160,8 @@ impl ApproximateLruCommandSink for ThreadPoolLruSink {
             .map_err(|_| KvRouterError::IndexerOffline)
     }
 
-    fn lane_exited(&self) -> Option<&tokio_util::sync::CancellationToken> {
-        Some(&self.lane_exited)
+    fn lane_exited(&self) -> &tokio_util::sync::CancellationToken {
+        &self.lane_exited
     }
 }
 
