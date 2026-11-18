@@ -379,7 +379,6 @@ pub mod indexer {
     pub type ApproximateLruTask = dynamo_kv_indexer::ApproximateLruTask;
     pub use dynamo_kv_indexer::ApproximateRetentionConfig;
     pub use dynamo_kv_indexer::BranchShardedIndexer;
-    pub use dynamo_kv_indexer::CkfMutationKind;
     #[deprecated(
         since = "1.8.0",
         note = "moved to dynamo_kv_indexer::ContainsWorkerBlockRequest; removed in 1.10.0"
@@ -514,8 +513,6 @@ pub mod indexer {
         note = "moved to dynamo_kv_indexer::LowerTierQueryOptions; removed in 1.10.0"
     )]
     pub type LowerTierQueryOptions = dynamo_kv_indexer::LowerTierQueryOptions;
-    pub use dynamo_kv_indexer::METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED;
-    pub use dynamo_kv_indexer::METRIC_CKF_MUTATION_UNKNOWN_REMOVE;
     pub use dynamo_kv_indexer::METRIC_EVENT_CLEARED;
     pub use dynamo_kv_indexer::METRIC_EVENT_REMOVED;
     pub use dynamo_kv_indexer::METRIC_EVENT_STORED;
@@ -544,7 +541,6 @@ pub mod indexer {
         note = "moved to dynamo_kv_indexer::MatchRequest; removed in 1.10.0"
     )]
     pub type MatchRequest = dynamo_kv_indexer::MatchRequest;
-    pub use dynamo_kv_indexer::MaybeError;
     #[cfg(feature = "bench")]
     pub use dynamo_kv_indexer::ObservationError;
     #[cfg(feature = "bench")]
@@ -1168,7 +1164,6 @@ pub type LowerTierContinuation = dynamo_kv_indexer::LowerTierContinuation;
     note = "moved to dynamo_kv_indexer::LowerTierIndexer; removed in 1.10.0"
 )]
 pub type LowerTierIndexer = dynamo_kv_indexer::LowerTierIndexer;
-pub use dynamo_kv_indexer::MaybeError;
 pub use dynamo_kv_indexer::NodeId;
 pub use dynamo_slot_tracker::NoopSequencePublisher;
 #[deprecated(
