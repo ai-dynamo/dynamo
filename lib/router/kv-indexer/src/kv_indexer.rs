@@ -54,12 +54,38 @@ fn apply_routing_decision_with_prune_tracking(
         return;
     };
 
+    let Ok(block_entries) = apply_routing_decision(
+        trie,
+        routing_req.worker,
+        &routing_req.local_hashes,
+        &routing_req.sequence_hashes,
+        event_id_counter,
+    ) else {
+        return;
+    };
+
+    // NOTE: For the TTL approximate indexer, reinserting the same block in another routing
+    // decision makes PruneManager reset its expiry to now + TTL. This is TTL since the latest
+    // predicted insertion, not since first sighting. Output progress, request-liveness leases,
+    // and active request references do not refresh it; this lifecycle is also independent from
+    // approximate-LRU ref/deref tracking.
+    pm.insert_block_entries(block_entries);
+}
+
+/// Stores a routing decision's blocks on `worker` in `trie`, as the TTL approximate index
+/// predicts them, and returns the entries whose expiry timers the caller starts.
+/// `local_hashes` and `sequence_hashes` are parallel, one entry per block. The event id
+/// advances even when the store fails, and then no entries are returned.
+pub fn apply_routing_decision(
+    trie: &mut RadixTree,
+    worker: WorkerWithDpRank,
+    local_hashes: &[LocalBlockHash],
+    sequence_hashes: &[SequenceHash],
+    event_id_counter: &mut u64,
+) -> Result<Vec<BlockEntry>, KvCacheEventError> {
     *event_id_counter += 1;
 
-    let hashes = routing_req
-        .local_hashes
-        .iter()
-        .zip(routing_req.sequence_hashes.iter());
+    let hashes = local_hashes.iter().zip(sequence_hashes.iter());
     let stored_event = KvCacheEventData::Stored(KvCacheStoreData {
         parent_hash: None,
         start_position: None,
@@ -73,37 +99,33 @@ fn apply_routing_decision_with_prune_tracking(
     });
 
     let event = RouterEvent::new(
-        routing_req.worker.worker_id,
+        worker.worker_id,
         KvCacheEvent {
             event_id: *event_id_counter,
             data: stored_event,
-            dp_rank: routing_req.worker.dp_rank,
+            dp_rank: worker.dp_rank,
         },
     );
+    trie.apply_event(event)?;
 
-    if trie.apply_event(event).is_err() {
-        return;
-    }
-
-    // NOTE: For the TTL approximate indexer, reinserting the same block in another routing
-    // decision makes PruneManager reset its expiry to now + TTL. This is TTL since the latest
-    // predicted insertion, not since first sighting. Output progress, request-liveness leases,
-    // and active request references do not refresh it; this lifecycle is also independent from
-    // approximate-LRU ref/deref tracking.
-    let block_entries = routing_req
-        .sequence_hashes
+    Ok(sequence_hashes
         .iter()
         .enumerate()
         .map(|(idx, h)| BlockEntry {
             key: ExternalSequenceBlockHash(*h),
-            worker: routing_req.worker,
+            worker,
             seq_position: idx,
         })
-        .collect();
-    pm.insert_block_entries(block_entries);
+        .collect())
 }
 
-fn apply_prune_removes(trie: &mut RadixTree, entries: Vec<BlockEntry>, event_id_counter: &mut u64) {
+/// Removes expired approximate-index entries from `trie`: one remove event per worker rank,
+/// in prefix order.
+pub fn apply_prune_removes(
+    trie: &mut RadixTree,
+    entries: Vec<BlockEntry>,
+    event_id_counter: &mut u64,
+) {
     let mut entries_by_worker = BTreeMap::<WorkerWithDpRank, Vec<BlockEntry>>::new();
     for entry in entries {
         entries_by_worker

@@ -21,7 +21,7 @@ from typing import (
     overload,
 )
 
-from aisimulate_core.sdk import ForwardPassPerfModelConfig
+from aisim_core.sdk import ForwardPassPerfModelConfig
 from typing_extensions import NotRequired
 
 # Import from specialized modules
@@ -992,6 +992,7 @@ class ModelRuntimeConfig:
 
     context_length: int | None
     total_kv_blocks: int | None
+    cache_owner_capacity_blocks: int | None
     max_num_seqs: int | None
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
@@ -1301,6 +1302,7 @@ class KvEventPublisher:
         kv_state_endpoint: Optional[str] = None,
         video_token_id: Optional[int] = None,
         engine_owned_mm_identity: bool = False,
+        idempotent_stores: bool = False,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
@@ -1328,6 +1330,7 @@ class KvEventPublisher:
                 format (after sgl-project/sglang#43043), including for caller hashes,
                 so every event token at or above 1,000,000 is excluded from the index.
                 Otherwise only values that do not fit in 32 bits are.
+            idempotent_stores: Do not refcount repeated stores. Set for SGLang.
         """
 
     def publish_stored(
@@ -2329,12 +2332,32 @@ async def make_engine(distributed_runtime: DistributedRuntime, args: EntrypointA
     ...
 
 class FrontendExtensionContext:
-    """Read-only, live view of frontend state passed to extension route handlers.
+    """The request and a live view of frontend state, passed to route handlers.
 
-    Handlers receive this and answer from current state. The surface is
-    intentionally narrow (typed read-only accessors only); it does not expose
-    the internal service state.
+    The state accessors are read-only and do not expose the internal service
+    state. ``body``, ``headers`` and ``runtime`` describe the current request
+    and the frontend process.
     """
+
+    @property
+    def body(self) -> bytes:
+        """Raw request body; empty when the request has none."""
+        ...
+
+    @property
+    def headers(self) -> dict[str, str]:
+        """Request headers as a dict: lower-case names, repeated headers
+        joined with ``", "``."""
+        ...
+
+    @property
+    def runtime(self) -> DistributedRuntime:
+        """The frontend's own ``DistributedRuntime``, for request-plane calls.
+
+        Its async methods need the frontend's event loop, so call them from an
+        ``async def`` handler.
+        """
+        ...
 
     def is_ready(self) -> bool:
         """Whether the HTTP service has finished startup and is ready to serve."""
@@ -2363,18 +2386,22 @@ class FrontendExtensionContext:
 class FrontendRoute:
     """A trusted extension route served on the Dynamo HTTP frontend.
 
-    Currently restricted to static-path ``GET`` routes. ``handler`` is a
-    synchronous callable that receives a ``FrontendExtensionContext`` and
-    returns a JSON-serializable body (implies HTTP 200) or a ``FrontendResponse``
-    to set the status code. Async handlers and path parameters are rejected at
-    construction.
+    ``method`` is one of ``GET``, ``POST``, ``PUT``, ``PATCH`` or ``DELETE``;
+    ``path`` is static (no parameters or wildcards). ``handler`` receives a
+    ``FrontendExtensionContext`` and returns a JSON-serializable body (implies
+    HTTP 200) or a ``FrontendResponse`` to set the status code. An ``async def``
+    handler runs on the frontend's event loop. A call that takes longer than
+    ``timeout_s`` seconds returns HTTP 503, and a request body larger than
+    ``max_body_bytes`` returns HTTP 413.
     """
 
     def __init__(
         self,
         method: str,
         path: str,
-        handler: Callable[[FrontendExtensionContext], object],
+        handler: Callable[[FrontendExtensionContext], object | Awaitable[object]],
+        timeout_s: float = 30.0,
+        max_body_bytes: int = 65536,
     ) -> None: ...
     @property
     def method(self) -> str: ...
@@ -2415,11 +2442,15 @@ class ReplaySchedulerMetricsSnapshot(TypedDict):
     waiting_requests: int
 
 class ReplaySchedulerIntervalMetrics(TypedDict):
+    g1_prefix_cache_lookup: Optional[dict[str, int]]
     cache_hit_tokens: int
     cache_total_tokens: int
     preemptions: int
 
 class ReplayTrafficMetricsSnapshot(TypedDict):
+    delivered_output_tokens: int
+    committed_prefill_tokens: int
+    first_admission: dict[str, int]
     duration_s: float
     arriving_requests: int
     completed_requests: int
@@ -2435,6 +2466,7 @@ class ReplayTrafficMetricsSnapshot(TypedDict):
     accept_length_forward_count: int
 
 class ReplayTelemetrySnapshot(TypedDict):
+    host_caches: list[dict[str, Any]]
     sample_ordinal: int
     kind: Literal["baseline", "periodic", "final"]
     interval_start_ms: float
