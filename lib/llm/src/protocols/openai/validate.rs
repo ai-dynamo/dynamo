@@ -432,9 +432,14 @@ pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(),
                 }
             }
             dynamo_protocols::types::Stop::StringArray(sequences) => {
-                // The OpenAI API accepts `"stop": []` and treats it as "no stop
-                // sequences"; several SDKs and CLIs send an empty list by default.
-                // `get_stop()` maps it to `None`, so nothing empty reaches the engine.
+                // Treat `"stop": []` as no client-supplied stop strings, matching
+                // stock vLLM and stock SGLang. OpenAI's published schema specifies
+                // one to four items for the array form.
+                // `get_stop()` maps the empty list to `None`.
+                // OpenAI Chat Completions schema https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
+                // OpenAI Completions schema https://developers.openai.com/api/reference/resources/completions/methods/create
+                // Stock vLLM sampling parameters https://github.com/vllm-project/vllm/blob/62d4bc3c7e33b1b6c906e233e6af2d3506c482ca/vllm/sampling_params.py#L581-L584
+                // Stock SGLang sampling parameters https://github.com/sgl-project/sglang/blob/297e54fd105e974cdf401e5b4d20253a22c16f90/python/sglang/srt/sampling/sampling_params.py#L331-L352
                 if sequences.is_empty() {
                     return Ok(());
                 }
