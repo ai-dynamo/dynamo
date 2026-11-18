@@ -23,45 +23,50 @@ const MAX_VALUE_BINS: usize = 255;
 const MISSING_BIN: u8 = 255;
 const BINS: usize = 256;
 
+// Every tree's nodes share one array, which a prediction walks once per tree for each request.
+// Eight bytes a node keep a full model near 70 KB.
 #[derive(Clone, Copy)]
-enum Node {
-    Leaf(f64),
-    Split {
-        feature: usize,
-        threshold: f32,
-        missing_left: bool,
-        left: usize,
-        right: usize,
-    },
+struct Node {
+    // A split's threshold, or a leaf's value.
+    value: f32,
+    // A split's left child; its right child is the next node. Zero marks a leaf: node 0 is the
+    // first tree's root, never a child.
+    left: u16,
+    feature: u8,
+    missing_left: bool,
 }
 
-fn leaf_value(nodes: &[Node], features: &[f32]) -> f64 {
-    let mut at = 0;
-    loop {
-        match nodes[at] {
-            Node::Leaf(value) => return value,
-            Node::Split {
-                feature,
-                threshold,
-                missing_left,
-                left,
-                right,
-            } => {
-                let value = features[feature];
-                let go_left = if value.is_nan() {
-                    missing_left
-                } else {
-                    value <= threshold
-                };
-                at = if go_left { left } else { right };
-            }
+const _: () = assert!(MAX_TREES * (2 * MAX_LEAVES - 1) <= u16::MAX as usize);
+
+impl Node {
+    fn leaf(value: f32) -> Self {
+        Self {
+            value,
+            left: 0,
+            feature: 0,
+            missing_left: false,
         }
     }
 }
 
+fn leaf_value(nodes: &[Node], root: usize, features: &[f32]) -> f32 {
+    let mut node = nodes[root];
+    while node.left != 0 {
+        let value = features[usize::from(node.feature)];
+        let go_left = if value.is_nan() {
+            node.missing_left
+        } else {
+            value <= node.value
+        };
+        node = nodes[usize::from(node.left) + usize::from(!go_left)];
+    }
+    node.value
+}
+
 pub(super) struct Trees {
     baseline: f64,
-    trees: Vec<Vec<Node>>,
+    roots: Vec<u16>,
+    nodes: Vec<Node>,
 }
 
 impl Trees {
@@ -69,15 +74,15 @@ impl Trees {
         let features = features.map(|value| value as f32);
         self.baseline
             + self
-                .trees
+                .roots
                 .iter()
-                .map(|nodes| leaf_value(nodes, &features))
+                .map(|root| f64::from(leaf_value(&self.nodes, usize::from(*root), &features)))
                 .sum::<f64>()
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.trees.len()
+        self.roots.len()
     }
 }
 
@@ -220,11 +225,13 @@ impl Training<'_> {
         best
     }
 
-    /// Grows one tree on the current gradients, then moves each row's gradient by its leaf.
-    fn grow(&self, gradients: &mut [f64], samples: &mut [u32]) -> Vec<Node> {
-        let mut nodes = vec![Node::Leaf(0.0)];
-        let root = self.histogram(gradients, samples);
-        let mut leaves = vec![self.leaf(0, 0, samples.len(), root)];
+    /// Grows one tree on the current gradients, appends it to `nodes` and returns its root,
+    /// then moves each row's gradient by its leaf.
+    fn grow(&self, gradients: &mut [f64], samples: &mut [u32], nodes: &mut Vec<Node>) -> usize {
+        let root = nodes.len();
+        nodes.push(Node::leaf(0.0));
+        let histogram = self.histogram(gradients, samples);
+        let mut leaves = vec![self.leaf(root, 0, samples.len(), histogram)];
         while leaves.len() < MAX_LEAVES {
             let Some((at, split)) = leaves
                 .iter()
@@ -269,29 +276,30 @@ impl Training<'_> {
             } else {
                 (large, small)
             };
-            let (left, right) = (nodes.len(), nodes.len() + 1);
-            nodes.extend([Node::Leaf(0.0), Node::Leaf(0.0)]);
-            nodes[parent.node] = Node::Split {
-                feature: split.feature,
-                threshold: self.edges[split.feature]
+            let left = nodes.len();
+            nodes.extend([Node::leaf(0.0), Node::leaf(0.0)]);
+            nodes[parent.node] = Node {
+                value: self.edges[split.feature]
                     .get(split.bin as usize)
                     .copied()
                     .unwrap_or(f32::INFINITY),
+                left: left as u16,
+                feature: split.feature as u8,
                 missing_left: split.missing_left,
-                left,
-                right,
             };
             leaves.push(self.leaf(left, parent.start, middle, left_histogram));
-            leaves.push(self.leaf(right, middle, parent.end, right_histogram));
+            leaves.push(self.leaf(left + 1, middle, parent.end, right_histogram));
         }
         for leaf in leaves {
-            let value = -LEARNING_RATE * leaf.total.gradient / (f64::from(leaf.total.rows) + L2);
-            nodes[leaf.node] = Node::Leaf(value);
+            // Rounded as stored, so the gradients move by exactly what a prediction adds.
+            let value =
+                (-LEARNING_RATE * leaf.total.gradient / (f64::from(leaf.total.rows) + L2)) as f32;
+            nodes[leaf.node] = Node::leaf(value);
             for sample in &samples[leaf.start..leaf.end] {
-                gradients[*sample as usize] += value;
+                gradients[*sample as usize] += f64::from(value);
             }
         }
-        nodes
+        root
     }
 }
 
@@ -352,16 +360,21 @@ pub(super) fn fit(rows: &[Row]) -> Option<Trees> {
         .collect();
     let loss = |errors: &[f64]| errors.iter().map(|e| e * e).sum::<f64>() / errors.len() as f64;
     let mut losses = vec![loss(&held_out)];
-    let mut trees = Vec::new();
-    while trees.len() < MAX_TREES && !stalled(&losses) {
-        let nodes = training.grow(&mut gradients, &mut samples);
+    let mut roots = Vec::new();
+    let mut nodes = Vec::new();
+    while roots.len() < MAX_TREES && !stalled(&losses) {
+        let root = training.grow(&mut gradients, &mut samples, &mut nodes);
         for (error, row) in held_out.iter_mut().zip(validation) {
-            *error += leaf_value(&nodes, &rows[*row][..FEATURES]);
+            *error += f64::from(leaf_value(&nodes, root, &rows[*row][..FEATURES]));
         }
         losses.push(loss(&held_out));
-        trees.push(nodes);
+        roots.push(root as u16);
     }
-    Some(Trees { baseline, trees })
+    Some(Trees {
+        baseline,
+        roots,
+        nodes,
+    })
 }
 
 #[cfg(test)]
