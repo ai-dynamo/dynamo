@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! HTTP rendering of the error contract, for hosts that answer over HTTP: the total [`ErrorClass`](crate::ErrorClass) to status policy, the configured overload status, and the sanitized response vocabulary. Compiled with the `http` feature, which adds the `http` crate for [`StatusCode`] and nothing else.
+//! HTTP rendering of the error contract, for hosts that answer over HTTP: the total [`ErrorClass`](crate::ErrorClass) to status policy, the configured overload status, the sanitized response vocabulary, and [`HttpError`]. Compiled with the `http` feature, which adds the `http` crate for [`StatusCode`] and `thiserror` for [`HttpError`].
 
 use std::sync::LazyLock;
 
@@ -30,6 +30,16 @@ pub fn overload_status_code() -> StatusCode {
         parse_overload_status_code(value.as_deref())
     });
     *CODE
+}
+
+/// Implementation of the Completion Engines served by the HTTP service should
+/// map their custom errors to to this error type if they wish to return error
+/// codes besides 500.
+#[derive(Debug, thiserror::Error)]
+#[error("HTTP Error {code}: {message}")]
+pub struct HttpError {
+    pub code: u16,
+    pub message: String,
 }
 
 /// Frontend-owned HTTP disposition derived only from semantic error class.

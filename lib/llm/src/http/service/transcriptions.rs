@@ -14,6 +14,7 @@ use axum::{
     routing::post,
 };
 use base64::Engine as _;
+use dynamo_error::http::HttpError;
 use dynamo_runtime::{
     config::parse_bool,
     error::ErrorClass,
@@ -25,7 +26,6 @@ use tracing::Instrument;
 use super::{
     RouteDoc,
     disconnect::create_connection_monitor,
-    error::HttpError,
     metrics::{
         CancellationLabels, Endpoint, ErrorType, process_response_and_observe_metrics,
         request_was_rejected,

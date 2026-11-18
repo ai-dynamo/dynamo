@@ -11,13 +11,14 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-# HTTP rendering of the error contract (`dynamo_error::http`): the class-to-status policy and the sanitized response vocabulary. Adds the `http` crate for `StatusCode`.
-http = ["dep:http"]
+# HTTP rendering of the error contract (`dynamo_error::http`): the class-to-status policy, the sanitized response vocabulary and `HttpError`. Adds the `http` crate for `StatusCode` and `thiserror` for `HttpError`.
+http = ["dep:http", "dep:thiserror"]
 
 [dependencies]
 http = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }

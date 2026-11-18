@@ -4,6 +4,7 @@
 use anyhow::Error;
 use async_stream::stream;
 use base64::Engine as _;
+use dynamo_error::http::HttpError;
 use dynamo_llm::protocols::{
     Annotated,
     codec::SseLineCodec,
@@ -21,7 +22,6 @@ use dynamo_llm::{
     endpoint_type::EndpointType,
     http::service::{
         Metrics,
-        error::HttpError,
         metrics::{Endpoint, ErrorType, RequestType, Status},
         service_v2::{BackendErrorCheck, HttpService},
     },

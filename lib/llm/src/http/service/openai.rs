@@ -45,7 +45,7 @@ use super::{
         monitor_for_disconnects_with_activity_and_error_signal,
         monitor_for_disconnects_with_error_signal, monitor_for_responses_disconnects,
     },
-    error::{HttpError, invalid_argument},
+    error::invalid_argument,
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
@@ -129,8 +129,8 @@ static FORCE_INCLUDE_USAGE: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_FORCE_INCLUDE_USAGE));
 
 use dynamo_error::http::{
-    BackendStatusAction, ClientErrorAction, SanitizedError, find_canonical_error_in_chain,
-    http_action_for_error, overload_status_code,
+    BackendStatusAction, ClientErrorAction, HttpError, SanitizedError,
+    find_canonical_error_in_chain, http_action_for_error, overload_status_code,
 };
 
 pub(super) fn rl_router(
