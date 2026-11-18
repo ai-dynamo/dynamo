@@ -4,8 +4,6 @@
 //! The SGLang fixture for `sglang.api.v1`, the gRPC contract of SGLang's Rust
 //! server.
 
-use tonic_v14 as tonic;
-
 use std::collections::{HashMap, VecDeque};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -954,9 +952,9 @@ pub mod http {
     use tokio::net::TcpStream;
     use tokio::sync::{Notify, watch};
 
-    /// Abort RPCs the gRPC fixture recorded. The Rust server has no
-    /// `/abort_request`, so native requests are aborted by RPC and match no
-    /// Mocker request.
+    /// Abort RPCs the gRPC fixture recorded. The sidecar aborts native
+    /// requests by RPC too. This fixture serves them from a separate HTTP
+    /// peer, so their aborts match no Mocker request.
     #[derive(Clone)]
     struct Aborts(watch::Receiver<Vec<(String, bool)>>);
 

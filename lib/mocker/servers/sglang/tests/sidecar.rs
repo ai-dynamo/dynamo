@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use tonic_v14 as tonic;
-
 use std::sync::Arc;
 
 use dynamo_backend_common::{

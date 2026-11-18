@@ -512,7 +512,16 @@ fn media_maps_to_sglang_fields_in_request_order() {
 #[test]
 fn unsupported_media_is_refused() {
     let scheme = "media only as http://, https://, or data: URLs";
+    let decoded = serde_json::from_value(json!({"Decoded": {
+        "nixl_metadata": "",
+        "nixl_descriptor": {"addr": 0, "size": 3, "mem_type": "Dram", "device_id": 0},
+        "shape": [1, 1, 3],
+        "dtype": "UINT8",
+        "metadata": null,
+    }}))
+    .unwrap();
     for (key, item, message) in [
+        ("image_url", decoded, "frontend-decoded media"),
         (
             "image_url",
             MultimodalData::UuidOnly("id".into()),
@@ -533,8 +542,32 @@ fn unsupported_media_is_refused() {
         let mut request = request();
         request.multi_modal_data = Some(HashMap::from([(key.to_string(), vec![item])]));
         let error = build(&request, DisaggregationMode::Aggregated).unwrap_err();
+        assert!(
+            error
+                .public_message()
+                .is_some_and(|text| text.contains(message)),
+            "{error}"
+        );
         assert_invalid(error, message);
     }
+}
+
+#[test]
+fn media_io_kwargs_are_refused_only_with_media() {
+    let mut text = request();
+    text.media_io_kwargs = Some(json!({"video": {"fps": 1}}));
+    assert!(build(&text, DisaggregationMode::Aggregated).is_ok());
+
+    let mut video = text;
+    video.multi_modal_data = Some(HashMap::from([(
+        "video_url".to_string(),
+        vec![url("https://example.com/v.mp4")],
+    )]));
+    let error = build(&video, DisaggregationMode::Aggregated).unwrap_err();
+    assert_eq!(
+        error.public_message(),
+        Some("media_io_kwargs are not supported by SGLang's native Generate RPC")
+    );
 }
 
 #[test]
