@@ -6,7 +6,7 @@ The legacy 3-bucket label (``dep{moe_ep}`` / ``tep{moe_tp}`` / ``tp{tp}``)
 collapsed distinct 5-tuples to the same string — notably
 ``(tp=2, moe_ep=2)`` and ``(tp=1, dp=2, moe_ep=2)`` both mapped to
 ``"dep2"``. That broke ``thorough.py`` work_dir naming and
-``aisimulate.sdk.picking`` ``groupby("parallel")`` dedup. These tests
+``aisim.sdk.picking`` ``groupby("parallel")`` dedup. These tests
 pin the post-fix unique encoding.
 """
 from __future__ import annotations
@@ -82,6 +82,11 @@ def test_regression_dep2_collision() -> None:
     assert a.label() != b.label()
 
 
+def test_label_encodes_cp_only_above_one() -> None:
+    assert PickedParallelConfig(moe_tp=4, cp=4).label() == "tp1-moetp4-cp4"
+    assert PickedParallelConfig(moe_tp=4, cp=1).label() == "tp1-moetp4"
+
+
 # (tp, pp, dp, moe_tp, moe_ep, expected_label)
 _FORMAT_PINS: list[tuple[int, int, int, int, int, str]] = [
     # All-default baseline.
@@ -105,7 +110,7 @@ def test_label_format_pin(
     tp: int, pp: int, dp: int, moe_tp: int, moe_ep: int, expected: str
 ) -> None:
     """Pin the exact label string — downstream consumers (``thorough.py``
-    work_dir, ``aisimulate.sdk.picking``) depend on the format, so a
+    work_dir, ``aisim.sdk.picking``) depend on the format, so a
     separator / prefix change must be a deliberate, test-breaking edit."""
     cfg = PickedParallelConfig(tp=tp, pp=pp, dp=dp, moe_tp=moe_tp, moe_ep=moe_ep)
     assert cfg.label() == expected
