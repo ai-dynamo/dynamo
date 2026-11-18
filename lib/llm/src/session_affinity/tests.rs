@@ -775,3 +775,182 @@ fn session_affinity_max_entries_comes_from_the_environment() {
         );
     }
 }
+
+fn coordinator_with(settings: super::PlacementSettings) -> AffinityCoordinator {
+    let config = super::affinity_config(Duration::from_secs(10), Hard).unwrap();
+    AffinityCoordinator::with_placement(
+        dynamo_session_affinity::host::SessionAffinity::with_config(config).unwrap(),
+        settings,
+    )
+}
+
+fn balanced() -> AffinityCoordinator {
+    coordinator_with(super::PlacementSettings {
+        placement: super::SessionPlacement::Balanced,
+        active_within: Some(Duration::from_secs(super::DEFAULT_SESSION_ACTIVE_SECS)),
+    })
+}
+
+fn idle_workers(workers: &[u64]) -> super::WorkerLoads {
+    workers
+        .iter()
+        .map(|worker_id| (*worker_id, (0, 0)))
+        .collect()
+}
+
+async fn new_session(coordinator: &AffinityCoordinator, id: String) -> Hold {
+    let hold = coordinator
+        .acquire(&SessionAffinityId::new(id), None)
+        .await
+        .unwrap();
+    assert!(matches!(hold, Hold::Initialize(_)));
+    hold
+}
+
+#[test]
+fn placement_settings_come_from_the_environment() {
+    use super::{PlacementSettings, SessionPlacement};
+    use std::{collections::HashMap, env::VarError};
+
+    fn parse(vars: &[(&str, &str)]) -> Result<PlacementSettings, anyhow::Error> {
+        let vars: HashMap<String, String> = vars
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        super::placement_settings_from(|name| vars.get(name).cloned().ok_or(VarError::NotPresent))
+    }
+
+    // Unset: normal selection, a 60 s activity window.
+    assert_eq!(
+        parse(&[]).unwrap(),
+        PlacementSettings {
+            placement: SessionPlacement::Kv,
+            active_within: Some(Duration::from_secs(60)),
+        }
+    );
+    // What the Python frontend exports for its defaults.
+    assert_eq!(
+        parse(&[
+            ("DYN_ROUTER_SESSION_AFFINITY_PLACEMENT", "kv"),
+            ("DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS", "60"),
+        ])
+        .unwrap(),
+        parse(&[]).unwrap()
+    );
+    assert_eq!(
+        parse(&[
+            ("DYN_ROUTER_SESSION_AFFINITY_PLACEMENT", " balanced "),
+            ("DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS", "0"),
+        ])
+        .unwrap(),
+        PlacementSettings {
+            placement: SessionPlacement::Balanced,
+            active_within: None,
+        }
+    );
+    for (name, value) in [
+        ("DYN_ROUTER_SESSION_AFFINITY_PLACEMENT", "random"),
+        ("DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS", "1.5"),
+    ] {
+        let error = parse(&[(name, value)]).unwrap_err();
+        assert!(error.to_string().starts_with(name), "{error}");
+    }
+}
+
+/// Balanced placement counts planned, uncommitted sessions, so a burst spreads
+/// evenly before any of it commits; a tie on sessions goes to fewer active requests.
+#[tokio::test(start_paused = true)]
+async fn balanced_placement_counts_planned_sessions_before_they_commit() {
+    use std::collections::HashMap;
+
+    let coordinator = balanced();
+    let idle = idle_workers(&[1, 2, 3]);
+    let mut holds = Vec::new();
+    let mut placed: HashMap<u64, usize> = HashMap::new();
+    for i in 0..9 {
+        let hold = new_session(&coordinator, format!("s{i}")).await;
+        let target = coordinator.place_by_live_sessions(&hold, &idle).unwrap();
+        assert_eq!(target.dp_rank, None, "selection picks the rank");
+        *placed.entry(target.worker_id).or_default() += 1;
+        holds.push((hold, target));
+    }
+    assert_eq!(placed, HashMap::from([(1, 3), (2, 3), (3, 3)]));
+    assert_eq!(coordinator.live_sessions(), placed);
+
+    // Committing to a rank of the planned worker keeps the counts.
+    for (hold, target) in holds {
+        drop(
+            coordinator
+                .commit(hold, AffinityTarget::new(target.worker_id, Some(0)))
+                .unwrap(),
+        );
+    }
+    assert_eq!(coordinator.live_sessions(), placed);
+    let late = new_session(&coordinator, "late".into()).await;
+    let busy = HashMap::from([(1, (2, 10)), (2, (0, 50)), (3, (1, 0))]);
+    assert_eq!(
+        coordinator
+            .place_by_live_sessions(&late, &busy)
+            .unwrap()
+            .worker_id,
+        2
+    );
+
+    // A bound session is never re-placed.
+    let bound = coordinator
+        .acquire(&SessionAffinityId::new("s0"), None)
+        .await
+        .unwrap();
+    assert!(coordinator.place_by_live_sessions(&bound, &idle).is_none());
+}
+
+/// Concurrent new sessions see each other's planned workers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn balanced_placement_spreads_concurrent_new_sessions() {
+    use std::collections::HashMap;
+
+    let coordinator = balanced();
+    let idle = idle_workers(&[1, 2, 3]);
+    let tasks = (0..30).map(|i| {
+        let coordinator = coordinator.clone();
+        let idle = idle.clone();
+        tokio::spawn(async move {
+            let hold = new_session(&coordinator, format!("burst-{i}")).await;
+            let target = coordinator.place_by_live_sessions(&hold, &idle).unwrap();
+            (hold, target.worker_id)
+        })
+    });
+    let placed = futures::future::join_all(tasks).await;
+    let mut counts: HashMap<u64, usize> = HashMap::new();
+    for result in &placed {
+        *counts.entry(result.as_ref().unwrap().1).or_default() += 1;
+    }
+    assert_eq!(counts, HashMap::from([(1, 10), (2, 10), (3, 10)]));
+}
+
+/// Live sessions are bindings with a request in flight or released within the
+/// activity window; idle bindings past the window do not count.
+#[tokio::test(start_paused = true)]
+async fn live_sessions_follow_the_activity_window() {
+    use std::collections::HashMap;
+
+    let coordinator = coordinator_with(super::PlacementSettings {
+        placement: super::SessionPlacement::Balanced,
+        active_within: Some(Duration::from_secs(2)),
+    });
+    let idle = new_session(&coordinator, "idle".into()).await;
+    drop(coordinator.commit(idle, target(1, Some(0))).unwrap());
+    let busy = new_session(&coordinator, "busy".into()).await;
+    let _busy_lease = coordinator.commit(busy, target(2, Some(0))).unwrap();
+    assert_eq!(coordinator.live_sessions(), HashMap::from([(1, 1), (2, 1)]));
+
+    tokio::time::advance(Duration::from_secs(3)).await;
+    assert_eq!(coordinator.live_sessions(), HashMap::from([(2, 1)]));
+    // The idle binding still holds its worker for its own next turn.
+    assert_eq!(
+        coordinator
+            .query_target(&SessionAffinityId::new("idle"), None)
+            .unwrap(),
+        Some(target(1, Some(0)))
+    );
+}

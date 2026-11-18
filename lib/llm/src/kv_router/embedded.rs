@@ -402,10 +402,12 @@ impl EmbeddedSelection {
         let table = self
             .partition
             .session_affinity(crate::session_affinity::affinity_config(ttl, mode)?)?;
-        Ok(self
-            .affinity
-            .get_or_init(|| crate::session_affinity::AffinityCoordinator::wrap(table))
-            .clone())
+        if let Some(coordinator) = self.affinity.get() {
+            return Ok(coordinator.clone());
+        }
+        let coordinator =
+            crate::session_affinity::AffinityCoordinator::wrap_with_env_placement(table)?;
+        Ok(self.affinity.get_or_init(|| coordinator).clone())
     }
 
     pub(crate) fn partition_key(&self) -> &RoutingPartitionId {

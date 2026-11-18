@@ -1713,6 +1713,23 @@ impl KvRouter {
         self.selection.scheduler().pending_isl_tokens()
     }
 
+    /// This router's booked load per worker, summed over its DP ranks:
+    /// `(active requests, active decode blocks)`. Synchronous; reads the slot
+    /// tracker without adding a request.
+    pub(crate) fn active_load_by_worker(&self) -> HashMap<WorkerId, (usize, usize)> {
+        let mut loads: HashMap<WorkerId, (usize, usize)> = HashMap::new();
+        for load in
+            self.selection
+                .scheduler()
+                .get_potential_loads(None, 0, Default::default(), false)
+        {
+            let entry = loads.entry(load.worker_id).or_default();
+            entry.0 += load.active_requests;
+            entry.1 += load.potential_decode_blocks;
+        }
+        loads
+    }
+
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,

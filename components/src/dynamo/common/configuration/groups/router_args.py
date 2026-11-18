@@ -47,6 +47,9 @@ _ROUTER_FIELDS: tuple[str, ...] = (
 
 # Matches MAX_SESSION_AFFINITY_ENTRIES in lib/router/session-affinity.
 DEFAULT_SESSION_AFFINITY_MAX_ENTRIES = 65_536
+# Match the defaults in lib/llm/src/session_affinity.
+DEFAULT_SESSION_AFFINITY_PLACEMENT = "kv"
+DEFAULT_SESSION_AFFINITY_ACTIVE_SECS = 60
 
 # TODO(v1.7): Remove --active-prefill-tokens-threshold.
 _ABSOLUTE_PREFILL_THRESHOLD_DEPRECATION = (
@@ -101,6 +104,8 @@ class RouterConfigBase(ConfigBase):
     session_affinity_ttl_secs: Optional[int]
     session_affinity_mode: str
     session_affinity_max_entries: int
+    session_affinity_placement: str
+    session_affinity_active_secs: int
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
@@ -318,6 +323,41 @@ class RouterArgGroup(ArgGroup):
                 dest="session_affinity_max_entries",
                 env=self.env,
             )
+            add_argument(
+                g,
+                flag_name="--router-session-affinity-placement",
+                env_var="DYN_ROUTER_SESSION_AFFINITY_PLACEMENT",
+                default=DEFAULT_SESSION_AFFINITY_PLACEMENT,
+                help=(
+                    "How a session with no binding picks its first worker in KV "
+                    "routing. kv (default) uses the router's normal selection. "
+                    "balanced picks the eligible worker with the fewest live sessions, "
+                    "then the fewest active requests, then the fewest active blocks, so "
+                    "a burst of new sessions spreads evenly even though sessions "
+                    "between turns have no request in flight. Has no effect unless "
+                    "--router-session-affinity-ttl-secs is set. This is exported as "
+                    "DYN_ROUTER_SESSION_AFFINITY_PLACEMENT, where every affinity table "
+                    "reads it."
+                ),
+                choices=("kv", "balanced"),
+                dest="session_affinity_placement",
+                env=self.env,
+            )
+            add_argument(
+                g,
+                flag_name="--router-session-affinity-active-secs",
+                env_var="DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS",
+                default=DEFAULT_SESSION_AFFINITY_ACTIVE_SECS,
+                help=(
+                    "For balanced placement, a session binding counts as "
+                    "a live session while a request holds it or for this many seconds "
+                    "after its last request; 0 counts every unexpired binding. This is "
+                    "exported as DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS."
+                ),
+                arg_type=int,
+                dest="session_affinity_active_secs",
+                env=self.env,
+            )
         add_argument(
             g,
             flag_name="--router-session-affinity-mode",
@@ -400,6 +440,8 @@ class WorkerRouterConfig(RouterConfigBase, KvRouterConfigBase):
     min_initial_workers: int = 0
     enforce_disagg: bool = False
     session_affinity_max_entries: int = DEFAULT_SESSION_AFFINITY_MAX_ENTRIES
+    session_affinity_placement: str = DEFAULT_SESSION_AFFINITY_PLACEMENT
+    session_affinity_active_secs: int = DEFAULT_SESSION_AFFINITY_ACTIVE_SECS
 
 
 def add_worker_router_arguments(

@@ -1001,6 +1001,66 @@ def test_session_affinity_max_entries_cli_and_environment(
         config.validate()
 
 
+_PLACEMENT_ENV = (
+    "DYN_ROUTER_SESSION_AFFINITY_PLACEMENT",
+    "DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS",
+)
+
+
+def _parse_frontend(argv: list[str]) -> FrontendConfig:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    return FrontendConfig.from_cli_args(parser.parse_args(argv))
+
+
+def test_session_affinity_placement_cli_and_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in _PLACEMENT_ENV:
+        monkeypatch.delenv(name, raising=False)
+    config = _parse_frontend([])
+    config.validate()
+    # Defaults keep today's behavior: normal selection.
+    assert config.session_affinity_placement == "kv"
+    assert config.session_affinity_active_secs == 60
+
+    monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_PLACEMENT", "balanced")
+    monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS", "0")
+    config = _parse_frontend([])
+    assert config.session_affinity_placement == "balanced"
+    assert config.session_affinity_active_secs == 0
+
+    config = _parse_frontend(
+        [
+            "--router-session-affinity-placement",
+            "kv",
+            "--router-session-affinity-active-secs",
+            "30",
+        ]
+    )
+    config.validate()
+    assert config.session_affinity_placement == "kv"
+    assert config.session_affinity_active_secs == 30
+    # Exported to the environment by the frontend, not advertised on worker cards.
+    for field in (
+        "session_affinity_placement",
+        "session_affinity_active_secs",
+    ):
+        assert field not in config.router_kwargs()
+
+
+def test_session_affinity_placement_rejects_invalid_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in _PLACEMENT_ENV:
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(SystemExit):
+        _parse_frontend(["--router-session-affinity-placement", "random"])
+    config = _parse_frontend(["--router-session-affinity-active-secs", "-1"])
+    with pytest.raises(ValueError, match="router-session-affinity-active-secs"):
+        config.validate()
+
+
 @pytest.mark.parametrize("ttl", [0, 31_536_001])
 def test_session_affinity_ttl_rejects_out_of_range(ttl: int) -> None:
     parser = argparse.ArgumentParser()

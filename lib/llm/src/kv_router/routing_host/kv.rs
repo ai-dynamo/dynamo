@@ -266,22 +266,29 @@ impl RoutingHost {
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let select = || {
-            self.select_with_session_affinity(request, phase, false, &budget, |target| {
-                let budget = &budget;
-                async move {
-                    self.select_request_outcome(
-                        request,
-                        phase,
-                        false,
-                        target,
-                        planned_worker,
-                        FindBestMatchAdmission::WithAdmission,
-                        budget,
-                    )
-                    .await?
-                    .into_result()
-                }
-            })
+            self.select_with_session_affinity_placing(
+                request,
+                phase,
+                false,
+                planned_worker.is_none(),
+                &budget,
+                |target| {
+                    let budget = &budget;
+                    async move {
+                        self.select_request_outcome(
+                            request,
+                            phase,
+                            false,
+                            target,
+                            planned_worker,
+                            FindBestMatchAdmission::WithAdmission,
+                            budget,
+                        )
+                        .await?
+                        .into_result()
+                    }
+                },
+            )
         };
         let (mut selection, affinity) = self
             .select_with_request_lifecycle(request, phase, select)

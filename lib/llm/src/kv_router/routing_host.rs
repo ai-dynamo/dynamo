@@ -44,8 +44,9 @@ use crate::{
     },
     routing_policy::{HostedCandidatePolicy, check_candidate_policy},
     session_affinity::{
-        AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
-        explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
+        AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, SessionPlacement,
+        WorkerLoads, affinity_id, explicit_target, from_table, invalid_argument,
+        subagent_group_affinity_id,
     },
 };
 
@@ -562,6 +563,47 @@ impl RoutingHost {
         (start..end).contains(&dp_rank)
     }
 
+    /// The workers a placement decision may pick for `request`, with
+    /// this router's booked `(active requests, active blocks)` on each. `None` keeps
+    /// normal selection: the host has no KV load signal, or the request carries its
+    /// own worker policy (e.g. LoRA).
+    fn placement_loads(&self, request: &PreprocessedRequest) -> Option<WorkerLoads> {
+        let kv_router = self.kv_router_if_enabled()?;
+        if crate::routing_policy::execution_requirements(request).policy_required {
+            return None;
+        }
+        let routing = request.routing.as_ref();
+        let allowed = routing.and_then(|routing| routing.allowed_worker_ids.as_ref());
+        let constraints = routing
+            .and_then(|routing| routing.routing_constraints.clone())
+            .unwrap_or_default();
+        let excluded: HashSet<u64> = request
+            .migration_state
+            .as_ref()
+            .map(|state| state.excluded_worker_ids().into_iter().collect())
+            .unwrap_or_default();
+        let live: HashSet<u64> = self.inner.client.instance_ids_avail().into_iter().collect();
+        let loads = kv_router.active_load_by_worker();
+        let eligible = kv_router
+            .workers_with_configs
+            .borrow()
+            .iter()
+            .filter(|&(&worker_id, config)| {
+                live.contains(&worker_id)
+                    && allowed.is_none_or(|allowed| allowed.contains(&worker_id))
+                    && !excluded.contains(&worker_id)
+                    && constraints.is_compatible_with_worker_taints(&config.taints)
+            })
+            .map(|(&worker_id, _)| {
+                (
+                    worker_id,
+                    loads.get(&worker_id).copied().unwrap_or_default(),
+                )
+            })
+            .collect();
+        Some(eligible)
+    }
+
     /// Take a session-affinity slot under the same cleanup policy as every other
     /// routing stage.
     ///
@@ -606,6 +648,33 @@ impl RoutingHost {
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
         is_query_only: bool,
+        budget: &CleanupBudget,
+        select: Select,
+    ) -> Result<(T, Option<Hold>), Error>
+    where
+        Select: FnMut(Option<AffinityTarget>) -> SelectionFuture,
+        SelectionFuture: Future<Output = Result<T, Error>>,
+    {
+        self.select_with_session_affinity_placing(
+            request,
+            phase,
+            is_query_only,
+            true,
+            budget,
+            select,
+        )
+        .await
+    }
+
+    /// [`Self::select_with_session_affinity`]; `place_new_sessions` lets the
+    /// configured [`SessionPlacement`] choose a new session's worker. Routes that
+    /// already carry a previewed worker pass `false` so the preview stands.
+    async fn select_with_session_affinity_placing<T, Select, SelectionFuture>(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        phase: RequestPhase,
+        is_query_only: bool,
+        place_new_sessions: bool,
         budget: &CleanupBudget,
         mut select: Select,
     ) -> Result<(T, Option<Hold>), Error>
@@ -665,7 +734,15 @@ impl RoutingHost {
             operation.invalidate();
             operation = reacquire().await?;
         }
-        let target = operation.target().map(from_table);
+        let mut target = operation.target().map(from_table);
+        if place_new_sessions
+            && explicit.is_none()
+            && target.is_none()
+            && affinity.placement().placement == SessionPlacement::Balanced
+            && let Some(loads) = self.placement_loads(request.content())
+        {
+            target = affinity.place_by_live_sessions(&operation, &loads);
+        }
         match select(target).await {
             Ok(selection) => Ok((selection, Some(operation))),
             Err(error) if is_cancelled(&error) => Err(error),

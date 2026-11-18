@@ -570,6 +570,26 @@ Session affinity does not create a backend session or send lifecycle RPCs. There
 no explicit unbind; idle expiry removes only router-local state. The same session
 ID is available to tracing and other explicitly configured consumers.
 
+### Session Placement
+
+A session binds to the worker its first request is dispatched to, and by default the router's
+normal selection picks that worker. Normal selection sees only requests in flight, so it cannot
+see sessions that are between turns. When many sessions start together, one worker can receive
+a large share of them, for example a worker that is slow to finish its first requests, and the
+bindings keep that skew for the rest of each session. An opt-in KV-mode setting addresses this
+with router-local state only:
+
+| Option | Behavior |
+|---|---|
+| `--router-session-affinity-placement balanced` | A session with no binding starts on the eligible worker with the fewest live sessions, then the fewest active requests, then the fewest active blocks; ties are random. Sessions that are planned but not yet dispatched count, so a concurrent burst spreads evenly. Selection still picks the data-parallel rank. |
+
+A live session is a binding with a request in flight or one released within
+`--router-session-affinity-active-secs` (default `60`; `0` counts every unexpired binding).
+The default, `kv`, keeps the behavior described above. Requests with an explicit worker,
+routes that already carry a previewed worker, and requests with their own worker policy (LoRA)
+keep normal selection. Each frontend counts the bindings it holds, including replicated ones, and
+its own planned sessions.
+
 <a id="aic-prefill-load-model"></a>
 
 ### AIS Prefill Load Model

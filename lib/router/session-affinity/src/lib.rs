@@ -136,6 +136,9 @@ enum AffinityEntry {
     Initializing {
         revision: u64,
         notify: Arc<Notify>,
+        /// The target the initializer chose before dispatch, so placement
+        /// policies count this session before it commits.
+        planned: Option<AffinityTarget>,
     },
     Bound {
         target: AffinityTarget,
@@ -244,6 +247,16 @@ impl Hold {
     pub fn invalidate(self) {
         if let Self::Bound { mut lease, .. } = self {
             lease.invalidate();
+        }
+    }
+
+    /// Record the target an initializing session is about to be dispatched to,
+    /// so [`SessionAffinity::sessions_per_worker`] counts it before it commits.
+    /// Returns `false` for a bound session or a cancelled initialization.
+    pub fn plan(&self, target: AffinityTarget) -> bool {
+        match self {
+            Self::Initialize(initialization) => initialization.plan(target),
+            Self::Bound { .. } => false,
         }
     }
 }
@@ -446,6 +459,7 @@ impl SessionAffinity {
                 entry.insert(AffinityEntry::Initializing {
                     revision,
                     notify: notify.clone(),
+                    planned: None,
                 });
                 Ok(AcquireStep::Held(Hold::Initialize(
                     AffinityInitialization {
@@ -482,6 +496,7 @@ impl SessionAffinity {
                     *entry.get_mut() = AffinityEntry::Initializing {
                         revision,
                         notify: notify.clone(),
+                        planned: None,
                     };
                     Ok(AcquireStep::Held(Hold::Initialize(
                         AffinityInitialization {
@@ -550,7 +565,10 @@ impl SessionAffinity {
         target: AffinityTarget,
     ) -> Option<AffinityLease> {
         let mut entry = self.inner.entries.get_mut(session_id)?;
-        let AffinityEntry::Initializing { revision, notify } = entry.value() else {
+        let AffinityEntry::Initializing {
+            revision, notify, ..
+        } = entry.value()
+        else {
             return None;
         };
         let revision = *revision;
@@ -638,6 +656,46 @@ impl SessionAffinity {
             "Session affinity hit: reusing pinned worker"
         );
         Ok(Some(*target))
+    }
+
+    /// Live sessions per worker: bindings (any rank) with a request in flight or,
+    /// unexpired, last released within `active_within` (`None`: any unexpired
+    /// binding), plus initializations that recorded a planned target. Used by
+    /// placement policies; it scans the table, so callers invoke it once per
+    /// placement decision, not per token.
+    pub fn sessions_per_worker(
+        &self,
+        active_within: Option<Duration>,
+    ) -> std::collections::HashMap<WorkerId, usize> {
+        let now = self.inner.now();
+        // idle_deadline = last release + ttl, so "released within w" is
+        // idle_deadline + w > now + ttl.
+        let horizon = now.checked_add(self.inner.ttl);
+        let recent = |idle_deadline: Instant| match active_within {
+            None => idle_deadline > now,
+            Some(window) => match (idle_deadline.checked_add(window), horizon) {
+                (Some(until), Some(horizon)) => idle_deadline > now && until > horizon,
+                _ => idle_deadline > now,
+            },
+        };
+        let mut counts = std::collections::HashMap::new();
+        for entry in self.inner.entries.iter() {
+            let worker_id = match entry.value() {
+                AffinityEntry::Bound {
+                    target,
+                    active_leases,
+                    idle_deadline,
+                    ..
+                } if *active_leases > 0 || recent(*idle_deadline) => target.worker_id,
+                AffinityEntry::Initializing {
+                    planned: Some(target),
+                    ..
+                } => target.worker_id,
+                _ => continue,
+            };
+            *counts.entry(worker_id).or_insert(0) += 1;
+        }
+        counts
     }
 
     pub fn observe_replica_sequence(&self, sequence: u64) {
@@ -852,6 +910,26 @@ pub struct AffinityInitialization {
 }
 
 impl AffinityInitialization {
+    /// Record `target` as where this initialization will dispatch. It does not
+    /// bind the session; [`Self::commit`] still binds the dispatched worker.
+    pub fn plan(&self, target: AffinityTarget) -> bool {
+        let Some(inner) = self.coordinator.upgrade() else {
+            return false;
+        };
+        let Some(mut entry) = inner.entries.get_mut(&self.session_id) else {
+            return false;
+        };
+        match entry.value_mut() {
+            AffinityEntry::Initializing {
+                revision, planned, ..
+            } if *revision == self.revision => {
+                *planned = Some(target);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Bind the session to the worker the request was dispatched to.
     pub fn commit(mut self, target: AffinityTarget) -> Result<AffinityLease, AffinityError> {
         validate_bound_target(&self.session_id, target, self.requested_target)?;
@@ -1175,6 +1253,67 @@ mod tests {
             AcquireStep::Held(Hold::Bound { .. }) => panic!("session is already bound"),
             AcquireStep::Wait(_) => panic!("session is being initialized"),
         }
+    }
+
+    /// Planned initializations and live bindings count per worker; expired
+    /// bindings and cancelled initializations do not.
+    #[test]
+    fn sessions_per_worker_counts_planned_and_live_bindings() {
+        let epoch = Instant::now();
+        let table =
+            SessionAffinity::with_manual_clock(SessionAffinityConfig::new(TTL), epoch).unwrap();
+        let hold = |id: &str| match table.try_acquire(id, None).expect("acquire") {
+            AcquireStep::Held(hold @ Hold::Initialize(_)) => hold,
+            _ => panic!("expected a new session"),
+        };
+        let (a, b, c) = (hold("a"), hold("b"), hold("c"));
+        assert!(table.sessions_per_worker(None).is_empty());
+        assert!(a.plan(AffinityTarget::new(1, None)));
+        assert!(b.plan(AffinityTarget::new(1, None)));
+        assert!(c.plan(AffinityTarget::new(2, None)));
+        assert_eq!(
+            table.sessions_per_worker(None),
+            std::collections::HashMap::from([(1, 2), (2, 1)])
+        );
+        // Commit binds the dispatched rank; the worker count is unchanged.
+        let lease_a = table.commit(a, AffinityTarget::new(1, Some(0))).unwrap();
+        drop(b);
+        assert_eq!(
+            table.sessions_per_worker(None),
+            std::collections::HashMap::from([(1, 1), (2, 1)])
+        );
+        let lease_c = table.commit(c, AffinityTarget::new(2, Some(0))).unwrap();
+        assert!(
+            !table
+                .try_acquire("a", None)
+                .map(|step| match step {
+                    AcquireStep::Held(hold) => hold.plan(AffinityTarget::new(3, None)),
+                    AcquireStep::Wait(_) => true,
+                })
+                .unwrap()
+        );
+        drop(lease_a);
+        // Released at `epoch`: live for a 2 s activity window until epoch + 2 s.
+        let window = Some(Duration::from_secs(2));
+        assert_eq!(
+            table.sessions_per_worker(window),
+            std::collections::HashMap::from([(1, 1), (2, 1)])
+        );
+        table.advance_clock(epoch + Duration::from_secs(3)).unwrap();
+        // lease_c is still held, so session c stays live; a is idle past the window.
+        assert_eq!(
+            table.sessions_per_worker(window),
+            std::collections::HashMap::from([(2, 1)])
+        );
+        assert_eq!(
+            table.sessions_per_worker(None),
+            std::collections::HashMap::from([(1, 1), (2, 1)])
+        );
+        drop(lease_c);
+        table
+            .advance_clock(epoch + Duration::from_secs(3) + TTL)
+            .unwrap();
+        assert!(table.sessions_per_worker(None).is_empty());
     }
 
     /// A synchronous host owns TTL time; active work survives expiry and idle time starts at release.

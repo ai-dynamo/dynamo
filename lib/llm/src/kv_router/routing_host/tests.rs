@@ -6096,3 +6096,114 @@ worker_selection:
     )
     .unwrap();
 }
+
+/// A KV host over `workers` whose hard-affinity coordinator uses `settings`
+/// rather than the process environment.
+async fn router_with_placement(
+    workers: &[u64],
+    settings: crate::session_affinity::PlacementSettings,
+) -> (RoutingHost, Runtime) {
+    let ttl = Duration::from_secs(10);
+    let (mut router, runtime) = router_with_workers(Some(ttl), workers).await;
+    let config = crate::session_affinity::affinity_config(
+        ttl,
+        crate::session_affinity::SessionAffinityMode::Hard,
+    )
+    .unwrap();
+    router.affinity = Some(AffinityCoordinator::with_placement(
+        dynamo_session_affinity::host::SessionAffinity::with_config(config).unwrap(),
+        settings,
+    ));
+    (router, runtime)
+}
+
+async fn bind_sessions(router: &RoutingHost, sessions: &[(&str, u64)]) {
+    for (session, worker_id) in sessions {
+        bind_affinity_target(
+            router,
+            &SessionAffinityId::new(*session),
+            AffinityTarget::worker(*worker_id),
+        )
+        .await;
+    }
+}
+
+/// Select (and book) a worker for one turn of `session`; returns the worker and the hold.
+async fn select_turn(
+    router: &RoutingHost,
+    session: &str,
+    phase: RequestPhase,
+) -> (u64, Option<Hold>) {
+    let mut request = Context::new(request());
+    request.insert(
+        SESSION_AFFINITY_CONTEXT_KEY,
+        SessionAffinityId::new(session),
+    );
+    let (mut selection, hold) = router
+        .select_with_affinity(&request, phase, false, &CleanupBudget::default())
+        .await
+        .unwrap();
+    if let Some(booking) = selection.booking.take() {
+        booking.release().await.unwrap();
+    }
+    (selection.worker.worker_id, hold)
+}
+
+/// Balanced placement starts a new session on the worker with the fewest live
+/// sessions, counting sessions that are planned but not yet committed.
+#[tokio::test]
+#[serial_test::serial]
+async fn balanced_placement_starts_new_sessions_on_the_fewest_live_sessions() {
+    let settings = crate::session_affinity::PlacementSettings {
+        placement: SessionPlacement::Balanced,
+        active_within: Some(Duration::from_secs(60)),
+    };
+    let (router, runtime) = router_with_placement(&[1, 2, 3], settings).await;
+    // Idle between turns: invisible to load, but live sessions.
+    bind_sessions(&router, &[("a", 1), ("b", 1), ("c", 2)]).await;
+
+    let (first, first_hold) = select_turn(&router, "new-1", RequestPhase::Decode).await;
+    assert_eq!(first, 3);
+    assert!(matches!(first_hold, Some(Hold::Initialize(_))));
+    // new-1 is planned on worker 3 but not committed, so 3 now ties with 2.
+    let (second, second_hold) = select_turn(&router, "new-2", RequestPhase::Decode).await;
+    assert!([2, 3].contains(&second), "{second}");
+    let (third, _third_hold) = select_turn(&router, "new-3", RequestPhase::Decode).await;
+    assert_eq!(
+        HashSet::from([second, third]),
+        HashSet::from([2, 3]),
+        "workers 2 and 3 take one session each"
+    );
+    assert_eq!(
+        router.affinity.as_ref().unwrap().live_sessions(),
+        HashMap::from([(1, 2), (2, 2), (3, 2)])
+    );
+
+    drop((first_hold, second_hold));
+    drop(router);
+    runtime.shutdown();
+}
+
+/// The default placement leaves new sessions to normal selection and never
+/// writes a plan into the affinity table.
+#[tokio::test]
+#[serial_test::serial]
+async fn default_placement_leaves_new_sessions_to_normal_selection() {
+    let (router, runtime) = router_with_placement(
+        &[1, 2, 3],
+        crate::session_affinity::PlacementSettings::default(),
+    )
+    .await;
+    bind_sessions(&router, &[("a", 1), ("b", 1), ("c", 2)]).await;
+
+    let (_, hold) = select_turn(&router, "new", RequestPhase::Decode).await;
+    assert!(matches!(hold, Some(Hold::Initialize(_))));
+    assert_eq!(
+        router.affinity.as_ref().unwrap().live_sessions(),
+        HashMap::from([(1, 2), (2, 1)])
+    );
+
+    drop(hold);
+    drop(router);
+    runtime.shutdown();
+}

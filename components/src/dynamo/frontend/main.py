@@ -52,6 +52,8 @@ logger = logging.getLogger(__name__)
 
 MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
 SESSION_AFFINITY_MAX_ENTRIES_ENV = "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES"
+SESSION_AFFINITY_PLACEMENT_ENV = "DYN_ROUTER_SESSION_AFFINITY_PLACEMENT"
+SESSION_AFFINITY_ACTIVE_SECS_ENV = "DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS"
 FRONTEND_ROUTE_ENTRYPOINT_GROUP = "dynamo.frontend.routes"
 CHAT_PROCESSOR_ENTRYPOINT_GROUP = "dynamo.frontend.chat_processors"
 
@@ -476,6 +478,10 @@ async def async_main():
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
     os.environ[SESSION_AFFINITY_MAX_ENTRIES_ENV] = str(
         config.session_affinity_max_entries
+    )
+    os.environ[SESSION_AFFINITY_PLACEMENT_ENV] = config.session_affinity_placement
+    os.environ[SESSION_AFFINITY_ACTIVE_SECS_ENV] = str(
+        config.session_affinity_active_secs
     )
     # Shared with the backends so a worker's advertised config is built from the
     # same flags and semantics. --router-mode always has a default here, so this

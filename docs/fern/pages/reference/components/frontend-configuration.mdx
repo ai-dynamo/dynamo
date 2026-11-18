@@ -157,6 +157,22 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
   Environment variable: `DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES`
 </ParamField>
 
+<ParamField path="--router-session-affinity-placement" type="string" default="kv">
+  How a session with no binding picks its first worker in KV routing. `kv` uses the router's
+  normal selection. `balanced` picks the eligible worker with the fewest live sessions, then the
+  fewest active requests, then the fewest active blocks. Has no effect unless
+  `--router-session-affinity-ttl-secs` is set. See [Session placement](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#session-placement).
+
+  Environment variable: `DYN_ROUTER_SESSION_AFFINITY_PLACEMENT`
+</ParamField>
+
+<ParamField path="--router-session-affinity-active-secs" type="integer" default="60">
+  For balanced placement, count a binding as a live session while a request holds it or for
+  this many seconds after its last request. `0` counts every unexpired binding.
+
+  Environment variable: `DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS`
+</ParamField>
+
 <ParamField path="--decode-fallback / --no-decode-fallback" type="boolean" default="false">
   Fall back to aggregated mode when prefill workers are unavailable.
 

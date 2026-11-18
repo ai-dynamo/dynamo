@@ -904,6 +904,18 @@ pub mod router {
     pub const DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES: &str =
         "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES";
 
+    /// How a session with no binding picks its first worker: `kv` (default, the router's
+    /// normal selection) or `balanced` (fewest live sessions, then fewest active requests,
+    /// then fewest active blocks). The Python frontend exports
+    /// `--router-session-affinity-placement` here.
+    pub const DYN_ROUTER_SESSION_AFFINITY_PLACEMENT: &str = "DYN_ROUTER_SESSION_AFFINITY_PLACEMENT";
+
+    /// Session placement counts a binding as a live session while a request holds it or
+    /// for this many seconds after its last request (default 60; 0 = every unexpired
+    /// binding). The Python frontend exports `--router-session-affinity-active-secs` here.
+    pub const DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS: &str =
+        "DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS";
+
     /// Scale applied to adjusted prompt-side prefill load after overlap/cache-hit credits.
     pub const DYN_ROUTER_PREFILL_LOAD_SCALE: &str = "DYN_ROUTER_PREFILL_LOAD_SCALE";
 

@@ -67,6 +67,8 @@ def test_frontend_only_arguments_are_not_offered_to_workers():
     assert "--enforce-disagg" not in flags
     assert "--admission-control" not in flags
     assert "--router-session-affinity-max-entries" not in flags
+    assert "--router-session-affinity-placement" not in flags
+    assert "--router-session-affinity-active-secs" not in flags
     # ... while the ones a worker set genuinely advertises are present.
     assert "--router-mode" in flags
     assert "--router-session-affinity-ttl-secs" in flags

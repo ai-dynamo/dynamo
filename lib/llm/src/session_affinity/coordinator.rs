@@ -8,7 +8,7 @@
 //! stream), and the runtime event plane that replicates bindings between
 //! frontends.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 #[cfg(test)]
 use super::replica_sync::SessionAffinityUpdate;
@@ -46,9 +46,75 @@ pub(crate) fn from_table(target: TableTarget) -> AffinityTarget {
     AffinityTarget::new(target.worker_id, target.dp_rank)
 }
 
+/// The worker with the lowest `(live sessions, active requests, active blocks)`;
+/// ties are random so equal workers share a burst.
+fn least_loaded(loads: &WorkerLoads, live_sessions: impl Fn(u64) -> usize) -> Option<u64> {
+    let mut best_key = None;
+    let mut best = Vec::new();
+    for (&worker_id, &(active_requests, active_blocks)) in loads {
+        let key = (live_sessions(worker_id), active_requests, active_blocks);
+        match best_key {
+            Some(current) if key > current => {}
+            Some(current) if key == current => best.push(worker_id),
+            _ => {
+                best_key = Some(key);
+                best.clear();
+                best.push(worker_id);
+            }
+        }
+    }
+    match best.len() {
+        0 => None,
+        1 => Some(best[0]),
+        n => Some(best[rand::random_range(0..n)]),
+    }
+}
+
+/// How a session with no live binding picks its first worker.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SessionPlacement {
+    /// The router's normal selection (KV overlap and load) decides.
+    #[default]
+    Kv,
+    /// The eligible worker with the fewest live sessions, then the fewest active
+    /// requests, then the fewest active blocks; remaining ties are random. A session
+    /// between turns has no request in flight, so load alone cannot see it.
+    Balanced,
+}
+
+impl std::str::FromStr for SessionPlacement {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "kv" => Ok(Self::Kv),
+            "balanced" => Ok(Self::Balanced),
+            _ => Err(format!(
+                "invalid session affinity placement {value:?}; expected 'kv' or 'balanced'"
+            )),
+        }
+    }
+}
+
+/// Where new sessions start. The default changes nothing: normal selection
+/// places new sessions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlacementSettings {
+    pub placement: SessionPlacement,
+    /// A binding counts as a live session while a request holds it or for this
+    /// long after its last request; `None` counts every unexpired binding.
+    pub active_within: Option<Duration>,
+}
+
+/// `(active requests, active blocks)` per eligible worker.
+pub(crate) type WorkerLoads = HashMap<u64, (usize, usize)>;
+
 struct Inner {
     table: SessionAffinity,
     replica: tokio::sync::OnceCell<ReplicaSyncRuntime>,
+    placement: PlacementSettings,
+    /// Serializes count-then-plan so concurrent new sessions see each other.
+    placement_lock: parking_lot::Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -58,19 +124,78 @@ pub struct AffinityCoordinator {
 
 impl AffinityCoordinator {
     pub fn new(ttl: Duration, mode: SessionAffinityMode) -> Result<Self, Error> {
-        Ok(Self::wrap(
+        Self::wrap_with_env_placement(
             SessionAffinity::with_config(super::affinity_config(ttl, mode)?)
                 .map_err(affinity_error)?,
+        )
+    }
+
+    /// Wrap `table` with the placement settings from the environment. Every table
+    /// a router serves goes through here, including the KV router's partition table.
+    pub(crate) fn wrap_with_env_placement(table: SessionAffinity) -> Result<Self, Error> {
+        Ok(Self::with_placement(
+            table,
+            super::placement_settings_from_env()?,
         ))
     }
 
-    pub(crate) fn wrap(table: SessionAffinity) -> Self {
+    pub(crate) fn with_placement(table: SessionAffinity, placement: PlacementSettings) -> Self {
+        if placement != PlacementSettings::default() {
+            tracing::info!(?placement, "session affinity placement");
+        }
         Self {
             inner: Arc::new(Inner {
                 table,
                 replica: tokio::sync::OnceCell::new(),
+                placement,
+                placement_lock: parking_lot::Mutex::new(()),
             }),
         }
+    }
+
+    pub(crate) fn placement(&self) -> PlacementSettings {
+        self.inner.placement
+    }
+
+    /// Plan an initializing session on the eligible worker in `loads` with the fewest
+    /// live sessions, then active requests, then active blocks; ties are random.
+    ///
+    /// Counting and planning share one lock, so each placement sees every session
+    /// placed before it, committed or not. Returns a worker-only target (selection
+    /// still picks the rank), or `None` when the hold is bound, there is no
+    /// candidate, or the initialization was cancelled.
+    pub(crate) fn place_by_live_sessions(
+        &self,
+        hold: &Hold,
+        loads: &WorkerLoads,
+    ) -> Option<AffinityTarget> {
+        if !matches!(hold, Hold::Initialize(_)) {
+            return None;
+        }
+        let _placing = self.inner.placement_lock.lock();
+        let sessions = self.live_sessions();
+        let worker_id = least_loaded(loads, |worker_id| {
+            sessions.get(&worker_id).copied().unwrap_or(0)
+        })?;
+        let target = AffinityTarget::new(worker_id, None);
+        if !hold.plan(to_table(target)) {
+            return None;
+        }
+        tracing::debug!(
+            worker_id,
+            live_sessions = sessions.get(&worker_id).copied().unwrap_or(0),
+            candidates = loads.len(),
+            "session affinity: placed a session by live sessions"
+        );
+        Some(target)
+    }
+
+    /// Live sessions per worker: bindings with a request in flight or released
+    /// within the activity window, plus planned initializations.
+    pub(crate) fn live_sessions(&self) -> HashMap<u64, usize> {
+        self.inner
+            .table
+            .sessions_per_worker(self.inner.placement.active_within)
     }
 
     pub(crate) async fn enable_replica_sync(
@@ -202,13 +327,14 @@ impl AffinityCoordinator {
     pub(super) fn with_test_limits(max_entries: usize, max_session_id_bytes: usize) -> Self {
         use dynamo_session_affinity::host::SessionAffinityConfig;
 
-        Self::wrap(
+        Self::with_placement(
             SessionAffinity::with_config(SessionAffinityConfig {
                 max_entries,
                 max_session_id_bytes,
                 ..SessionAffinityConfig::new(Duration::from_secs(10))
             })
             .unwrap(),
+            PlacementSettings::default(),
         )
     }
 
