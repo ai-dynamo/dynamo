@@ -175,11 +175,15 @@ def test_explicit_opt_in_rejects_unqualified_runtime(profile, monkeypatch, relea
         decisions.publish_vllm_decision_capability(**profile)
 
 
-def test_explicit_opt_in_names_unsupported_architecture(profile):
-    profile["vllm_config"].model_config.architecture = "UnknownForCausalLM"
+@pytest.mark.parametrize(
+    "architecture",
+    ["UnknownForCausalLM", "Qwen3_5MoeForConditionalGeneration", "Gemma4ForCausalLM"],
+)
+def test_explicit_opt_in_names_unsupported_architecture(profile, architecture):
+    profile["vllm_config"].model_config.architecture = architecture
     original = dict(profile["runtime_config"].runtime_data)
     with pytest.raises(
-        ValueError, match="unsupported model architecture 'UnknownForCausalLM'"
+        ValueError, match=f"unsupported model architecture '{architecture}'"
     ):
         decisions.publish_vllm_decision_capability(**profile)
     assert profile["runtime_config"].runtime_data == original
