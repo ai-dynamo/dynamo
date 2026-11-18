@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::selector::HostedSelectionRequest;
+use dynamo_worker_selection::host::HostedSelectionRequest;
 
 /// The request metadata a hosted picker reads. The routing host tracks no KV block size, so
 /// [`request_blocks`](dynamo_kv_router::plugins::worker_selection::WorkerSelectionContext::request_blocks) reads 0.
@@ -74,7 +74,9 @@ impl RoutingHost {
                             if let Some(worker_id) = preferred_worker {
                                 Ok(worker_id)
                             } else {
-                                picker.select(ids, None, &hosted_request(request.content()))
+                                picker
+                                    .select(ids, None, &hosted_request(request.content()))
+                                    .map_err(KvSchedulerError::from)
                             }
                         })??,
                     };
@@ -237,6 +239,8 @@ impl RoutingHost {
             .observe(request.token_ids.len() as f64);
         drop(route_guard);
 
+        // Stamped after selection, so a session-affinity wait counts too.
+        request.stamp_elapsed_since_arrival();
         guard.begin_dispatch(&phase_label, request.content());
         let dispatch_result = if is_direct && !has_affinity_session {
             let target = target_constraint.expect("Direct routing requires an explicit target");
@@ -413,9 +417,9 @@ impl RoutingHost {
 #[cfg(test)]
 mod tests {
     use crate::local_model::runtime_config::ModelRuntimeConfig;
-    use dynamo_kv_router::protocols::RoutingConstraints;
-    use dynamo_kv_router::selector::HostedWorkerPicker;
     use dynamo_runtime::pipeline::RouterMode;
+    use dynamo_scheduler::host::RoutingConstraints;
+    use dynamo_worker_selection::host::HostedWorkerPicker;
     use std::collections::{HashMap, HashSet};
 
     use super::super::builder::hosted_picker;

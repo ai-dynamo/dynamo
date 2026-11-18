@@ -3,6 +3,9 @@
 
 use dynamo_lpx_sidecar::{Launch, LpxSidecarEngine};
 
+#[cfg(feature = "jemalloc")]
+dynamo_sidecar_common::jemalloc_global_allocator!();
+
 fn main() -> anyhow::Result<()> {
     match LpxSidecarEngine::from_cli()? {
         Launch::Serve(bootstrap) => dynamo_lpx_sidecar::serve(bootstrap),

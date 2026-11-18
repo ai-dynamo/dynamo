@@ -225,14 +225,13 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantCELErr: "spec.services[worker]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
 		},
 		{
-			name: "LPX admits nine hybrid replicas with lowered conductor volumes",
+			name: "LPX admits nine hybrid replicas with an authored conductor device mount",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]
 				component.Replicas = new(int32(9))
 				component.Roles[1].PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-					// LPX lowering supplies these volume definitions after admission.
+					// The shared renderer supplies the authored device volume after admission.
 					Containers: []corev1.Container{{Name: "main", Image: "gpu-runtime", VolumeMounts: []corev1.VolumeMount{
-						{Name: "config", MountPath: "/config"},
 						{Name: "infiniband", MountPath: "/dev/infiniband"},
 					}}},
 				}}

@@ -17,7 +17,7 @@ use super::RequestTraceRouterSelection;
 use super::RequestTraceSchema;
 use super::RequestTraceWorkerInfo;
 use super::publish;
-use dynamo_kv_router::protocols::SelectionTrace;
+use dynamo_worker_selection::host::SelectionTrace;
 
 fn unix_time_ms() -> u64 {
     SystemTime::now()

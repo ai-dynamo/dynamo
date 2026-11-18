@@ -550,7 +550,7 @@ service.
 
 <ParamField path="ais_perf_model" type="AISPerfModelSpec" default="null">
   Role-indexed AISimulate forward-pass configurations. Constructs each model through
-  `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
+  `aisim_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
   interpolation sweep. Configure model identity and estimator controls through
   `ais_perf_model.roles`; the retired `aic_perf_model` and `hf_id` / pick shape
   are rejected.

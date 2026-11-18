@@ -15,6 +15,9 @@ mod edit;
 pub mod media;
 #[cfg(feature = "mm-routing")]
 pub mod mm_routing;
+
+#[cfg(all(test, feature = "mm-routing"))]
+mod glm5_next_tests;
 pub mod prompt;
 pub mod speculative_prefill;
 pub(crate) mod structural_tag;
@@ -423,6 +426,14 @@ impl<'a> MultimodalContentPart<'a> {
         }
     }
 
+    fn custom_part(&self) -> Option<&dynamo_protocols::types::CustomModalityPart> {
+        match self {
+            Self::User(ChatCompletionRequestUserMessageContentPart::Custom(part))
+            | Self::Tool(ChatCompletionRequestToolMessageContentPart::Custom(part)) => Some(part),
+            _ => None,
+        }
+    }
+
     fn media_info(&self) -> Option<(&'static str, Option<url::Url>, Option<String>)> {
         match self {
             Self::User(part) => match *part {
@@ -642,7 +653,7 @@ fn drain_router_routing_data(
     let Some(tracker) = tracker else {
         return;
     };
-    tracker.ingest_routing_data(routing_data);
+    tracker.ingest_routing_data(*routing_data);
 }
 
 fn attach_metrics_annotation<Resp>(response: &mut Annotated<Resp>, metrics: &LLMMetricAnnotation) {
@@ -1220,7 +1231,7 @@ fn append_mm_routing_replacement(
     image: MmImageEntry,
     num_image_tokens: usize,
 ) -> Result<()> {
-    let fill_token = dynamo_kv_router::protocols::pad_value_for_mm_hash(image.mm_hash);
+    let fill_token = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(image.mm_hash);
 
     append_mm_routing_replacement_with_fill(
         expanded,
@@ -1288,10 +1299,10 @@ fn apply_tracked_mm_replacements(
 ) -> Result<(
     Vec<TokenIdType>,
     usize,
-    Vec<Option<dynamo_kv_router::protocols::BlockExtraInfo>>,
+    Vec<Option<dynamo_kv_hashing::multimodal::BlockExtraInfo>>,
 )> {
-    use dynamo_kv_router::protocols::{BlockExtraInfo, BlockMmObjectInfo};
-    use dynamo_kv_router::zmq_wire::{normalize_mm_placeholder_runs, normalize_mm_token_runs};
+    use dynamo_kv_events::zmq_wire::{normalize_mm_placeholder_runs, normalize_mm_token_runs};
+    use dynamo_kv_hashing::multimodal::{BlockExtraInfo, BlockMmObjectInfo};
 
     anyhow::ensure!(block_size > 0, "MM routing block size must be positive");
     anyhow::ensure!(
@@ -1763,12 +1774,61 @@ fn attach_image_cache_scope_from_context(
     }
 }
 
+/// Start the tracker's arrival age from the time a gateway reports it held the request, so a
+/// backend that orders admission by arrival counts the wait in front of this process too.
+fn apply_upstream_elapsed(context: &PipelineContext<()>, tracker: Option<&RequestTracker>) {
+    use crate::protocols::common::extensions::UPSTREAM_ELAPSED_CONTEXT_KEY;
+
+    if let Some(tracker) = tracker
+        && let Ok(upstream_elapsed) =
+            context.get::<std::time::Duration>(UPSTREAM_ELAPSED_CONTEXT_KEY)
+    {
+        tracker.set_upstream_elapsed(*upstream_elapsed);
+    }
+}
+
 fn attach_request_context_metadata(
     request: &mut PreprocessedRequest,
     context: &PipelineContext<()>,
 ) {
     attach_agent_context_from_context(request, context);
     attach_image_cache_scope_from_context(request, context);
+}
+
+fn validate_custom_kind(kind: &str) -> Result<()> {
+    if matches!(
+        kind,
+        "text" | "image_url" | "video_url" | "audio_url" | "input_audio"
+    ) {
+        return Err(custom_transport_error(
+            "Custom kind is reserved for built-in content",
+        ));
+    }
+    Ok(())
+}
+
+fn custom_transport_error(message: &'static str) -> anyhow::Error {
+    DynamoError::builder()
+        .error_type(ErrorType::InvalidArgument)
+        .message(message)
+        .public_details(PublicDetails::Message {
+            message: message.into(),
+        })
+        .build()
+        .into()
+}
+
+pub(crate) const CUSTOM_CONTENT_UNSUPPORTED: &str = "Selected workers do not support custom JSON multimodal content; use an aggregated Python vLLM worker with --enable-multimodal";
+
+pub(crate) fn has_custom_content(request: &impl OAIChatLikeRequest) -> bool {
+    request
+        .typed_messages()
+        .unwrap_or_default()
+        .iter()
+        .any(|message| {
+            multimodal_content_parts(message)
+                .is_some_and(|mut parts| parts.any(|part| part.custom_part().is_some()))
+        })
 }
 
 /// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
@@ -2017,8 +2077,7 @@ pub struct OpenAIPreprocessor {
     /// Tracks warmups and cancels them when this preprocessor is retired.
     speculative_prefill_tasks: speculative_prefill::PrefillTasks,
     /// Per-image token-count engine. `None` when the feature is disabled, the
-    /// model isn't covered by the registry, or `preprocessor_config.json` is
-    /// unreadable.
+    /// model isn't supported, or its processor configuration is invalid.
     #[cfg(feature = "mm-routing")]
     image_token_counter: Option<mm_routing::image::ImageRoutingProcessor>,
     /// Lightweight model-visible video expansion. Unlike the image counter,
@@ -4133,8 +4192,9 @@ impl OpenAIPreprocessor {
         }
     }
 
-    /// Replace inline `data:` URLs with empty strings in message content parts.
-    /// Preserves HTTP(S) URLs, text content, and overall message structure.
+    /// Replace inline `data:` URLs with empty strings and drop custom `fields` in
+    /// message content parts. Preserves HTTP(S) URLs, text content, and overall
+    /// message structure.
     fn strip_inline_data_urls(messages: &mut serde_json::Value) {
         let Some(arr) = messages.as_array_mut() else {
             return;
@@ -4147,6 +4207,11 @@ impl OpenAIPreprocessor {
                 continue;
             };
             for part in parts {
+                if part.get("type").and_then(serde_json::Value::as_str) == Some("custom")
+                    && let Some(part) = part.as_object_mut()
+                {
+                    part.remove("fields");
+                }
                 for key in ["image_url", "video_url", "audio_url"] {
                     if let Some(media) = part.get_mut(key)
                         && let Some(url) = media.get_mut("url")
@@ -4226,7 +4291,7 @@ impl OpenAIPreprocessor {
         #[cfg(not(feature = "mm-routing"))]
         let _ = token_ids;
 
-        let mut media_map: MultimodalDataMap = HashMap::new();
+        let mut media_map = MultimodalDataMap::new();
         let mut uuid_map: MultimodalUuidMap = HashMap::new();
         let mut media_order: Vec<MultimodalItemRef> = Vec::new();
         let mut has_user_uuid = false;
@@ -4283,6 +4348,23 @@ impl OpenAIPreprocessor {
             };
             for content_part in content_parts {
                 let Some((type_str, url, uuid)) = content_part.media_info() else {
+                    if let Some(part) = content_part.custom_part() {
+                        if !self.runtime_config.runtime_flag_enabled(
+                            crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+                        ) {
+                            return Err(custom_transport_error(CUSTOM_CONTENT_UNSUPPORTED));
+                        }
+                        validate_custom_kind(&part.kind)?;
+                        let payload = serde_json::Value::Object(part.fields.clone());
+                        media_map
+                            .entry(part.kind.clone())
+                            .or_default()
+                            .push(MultimodalData::Json(payload));
+                        #[cfg(feature = "mm-routing")]
+                        {
+                            exact_mm_routing_eligible = false;
+                        }
+                    }
                     continue;
                 };
 
@@ -4949,6 +5031,15 @@ impl OpenAIPreprocessor {
                     return None;
                 }
             };
+            if let Err(error) = counter.validate_image_prompt(token_ids, &dimensions) {
+                tracing::warn!(
+                    target: "mm_routing",
+                    model = counter.model_id(),
+                    %error,
+                    "image prompt layout is unsupported; skipping MM routing info"
+                );
+                return None;
+            }
             let (expanded, expanded_prompt_len) = try_expand_mm_routing_tokens(
                 self.tokenizer.as_ref(),
                 self.routing_image_prompt_layout
@@ -5064,7 +5155,7 @@ impl OpenAIPreprocessor {
                         replacement_tokens,
                     } => {
                         let fill_token =
-                            dynamo_kv_router::protocols::pad_value_for_mm_hash(*mm_hash);
+                            dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(*mm_hash);
                         TrackedMmRoutingReplacement {
                             mm_hash: *mm_hash,
                             target_tokens: target_tokens.clone(),
@@ -5594,6 +5685,15 @@ impl OpenAIPreprocessor {
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedEmbeddingRequest::builder();
 
+        // Chat-style input needs the model's chat template and multimodal
+        // processor, which only the worker runs.
+        if request.messages.is_some() {
+            return Err(invalid_argument_error(
+                "chat-style embedding input (`messages`) is not supported when the frontend \
+                 tokenizes embedding requests; serve the model without \
+                 --embedding-frontend-tokenization",
+            ));
+        }
         let embedding_tokenizers = self.embedding_tokenizers.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "embedding tokenization is unavailable; construct the preprocessor with \
@@ -8660,6 +8760,7 @@ impl
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
         let tracker = Some(response_generator.tracker());
+        apply_upstream_elapsed(&context, tracker.as_deref());
         let preprocess_options = PreprocessRequestOptions {
             preserve_omitted_max_tokens: context
                 .get::<bool>(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY)
@@ -8881,6 +8982,7 @@ impl
         let response_generator = request.response_generator(request_id.clone());
         let mut response_generator = Box::new(response_generator);
         let tracker = Some(response_generator.tracker());
+        apply_upstream_elapsed(&context, tracker.as_deref());
         // convert the chat completion request to a common completion request
         let mut builder = self.builder_with_lora(
             &request,
@@ -13740,7 +13842,7 @@ responses_tools: None,
             width: 320,
             height: 240,
         };
-        let fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(image.mm_hash);
+        let fill = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(image.mm_hash);
         let dimension_ids: Vec<TokenIdType> = "image 320x240"
             .bytes()
             .map(|byte| 1000 + u32::from(byte))
@@ -13769,7 +13871,7 @@ responses_tools: None,
             width: 320,
             height: 240,
         };
-        let fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(image.mm_hash);
+        let fill = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(image.mm_hash);
         let mut expanded = vec![7];
 
         append_mm_routing_replacement(
@@ -13804,7 +13906,7 @@ responses_tools: None,
             width: 224,
             height: 224,
         };
-        let fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(image.mm_hash);
+        let fill = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(image.mm_hash);
         let mut expanded = vec![7];
 
         append_mm_routing_replacement(&mut expanded, &tokenizer, layout, image, 3).unwrap();
@@ -13998,8 +14100,8 @@ responses_tools: None,
                 height: 480,
             },
         ];
-        let first_fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(images[0].mm_hash);
-        let second_fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(images[1].mm_hash);
+        let first_fill = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(images[0].mm_hash);
+        let second_fill = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(images[1].mm_hash);
 
         let (expanded, prompt_len) = expand_mm_routing_tokens(
             &tokenizer,
@@ -15993,6 +16095,23 @@ responses_tools: None,
             .output_options(crate::protocols::common::OutputOptions::default())
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn upstream_elapsed_in_the_context_starts_the_tracker_from_it() {
+        use crate::protocols::common::extensions::UPSTREAM_ELAPSED_CONTEXT_KEY;
+        use std::time::Duration;
+
+        let mut context = PipelineContext::new(());
+        let untouched = RequestTracker::new();
+        apply_upstream_elapsed(&context, Some(&untouched));
+        assert!(untouched.elapsed_since_arrival() < Duration::from_secs(1));
+
+        context.insert(UPSTREAM_ELAPSED_CONTEXT_KEY, Duration::from_secs(40));
+        let tracker = RequestTracker::new();
+        apply_upstream_elapsed(&context, Some(&tracker));
+        assert!(tracker.elapsed_since_arrival() >= Duration::from_secs(40));
+        apply_upstream_elapsed(&context, None);
     }
 
     #[test]
@@ -20337,7 +20456,7 @@ responses_tools: None,
     #[cfg(feature = "mm-routing")]
     #[test]
     fn tracked_video_boundary_uses_native_metadata_only_when_needed() {
-        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+        use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 
         let video_token_id = 100;
         let mm_hash = 41;
@@ -20370,7 +20489,7 @@ responses_tools: None,
     #[cfg(feature = "mm-routing")]
     #[test]
     fn tracked_video_boundary_matches_token_only_worker_contract() {
-        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+        use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 
         let video_token_id = 100;
         let mm_hash = 41;
@@ -20431,7 +20550,7 @@ responses_tools: None,
     #[cfg(feature = "mm-routing")]
     #[test]
     fn tracked_mixed_boundary_preserves_worker_hash_fallback() {
-        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+        use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 
         let image_token_id = 99;
         let video_token_id = 100;
@@ -20499,7 +20618,7 @@ responses_tools: None,
     #[cfg(feature = "mm-routing")]
     #[test]
     fn tracked_mixed_token_only_boundary_preserves_canonical_pads() {
-        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+        use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 
         let image_token_id = 99;
         let video_token_id = 100;
@@ -20543,7 +20662,7 @@ responses_tools: None,
     #[cfg(feature = "mm-routing")]
     #[test]
     fn tracked_replacements_preserve_image_video_image_order() {
-        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+        use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 
         let image_token_id = 99;
         let video_token_id = 100;
@@ -20623,7 +20742,7 @@ responses_tools: None,
     #[cfg(feature = "mm-routing")]
     #[test]
     fn shared_placeholder_video_matches_legacy_worker_normalization() {
-        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+        use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 
         let mm_hash = 41;
         let pad = pad_value_for_mm_hash(mm_hash);
@@ -21237,5 +21356,180 @@ mod beam_route_tests {
         let mut omitted = history_request(None);
         preprocessor.apply_preserve_thinking(&mut omitted).unwrap();
         assert!(omitted.chat_template_args.is_none());
+    }
+}
+
+#[cfg(test)]
+mod custom_content_template_tests {
+    use super::*;
+    use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+
+    // Consumer-owned template; these marker spellings are confined to tests.
+    const CUSTOM_TEMPLATE: &str = include_str!("../tests/data/custom_modality_chat_template.jinja");
+
+    fn custom_preprocessor(template: &str) -> OpenAIPreprocessor {
+        let mut card = crate::model_card::ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        card.runtime_config
+            .set_engine_specific(
+                crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+                true,
+            )
+            .unwrap();
+        let mut preprocessor = Arc::try_unwrap(OpenAIPreprocessor::new(card).unwrap())
+            .unwrap_or_else(|_| panic!("test preprocessor unexpectedly shared"));
+        let dynamo_renderer::PromptFormatter::OAI(formatter) =
+            dynamo_renderer::PromptFormatter::from_parts(
+                serde_json::from_value(serde_json::json!({"chat_template":template})).unwrap(),
+                dynamo_renderer::ContextMixins::default(),
+                true,
+            )
+            .unwrap();
+        preprocessor.formatter = formatter;
+        preprocessor
+    }
+
+    #[tokio::test]
+    async fn custom_positions_match_rendered_markers_and_ordered_worker_payloads() {
+        let preprocessor = custom_preprocessor(CUSTOM_TEMPLATE);
+        for role in ["user", "tool"] {
+            let image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+            let first =
+                serde_json::json!({"data_base64":"SECRET_ONE", "metadata":[null, false, 0]});
+            let second = serde_json::json!({"data_base64":"SECRET_TWO", "other":{"preserve":true}});
+            let biology = serde_json::json!({"metadata":"SECRET_BIO"});
+            let mut message = serde_json::json!({"role":role, "content":[
+                {"type":"text", "text":"Does this structure "},
+                {"type":"custom", "kind":"chemistry", "fields":first},
+                {"type":"text", "text":" match the diagram?"},
+                {"type":"image_url", "image_url":{"url":image}},
+                {"type":"custom", "kind":"biology", "fields":biology},
+                {"type":"custom", "kind":"chemistry", "fields":second},
+                {"type":"audio_url", "audio_url":{"url":"https://example.org/audio.wav"}},
+                {"type":"video_url", "video_url":{"url":"https://example.org/video.mp4"}}
+            ]});
+            let metadata_key = if role == "user" {
+                "name"
+            } else {
+                "tool_call_id"
+            };
+            let metadata = if role == "user" { "alice" } else { "call_7" };
+            message[metadata_key] = metadata.into();
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model":"test", "messages":[message], "add_generation_prompt":false
+                }))
+                .unwrap();
+            let expected = format!(
+                "<|{role}|>[{metadata}]Does this structure <|chem_projected|> match the diagram?<|image_1|><|bio_projected|><|chem_projected|><|audio|><|video|><|end|>"
+            );
+            assert_eq!(
+                preprocessor
+                    .apply_template(&request)
+                    .unwrap()
+                    .unwrap()
+                    .as_str(),
+                expected
+            );
+            let (result, _, _) = preprocessor
+                .preprocess_request(&request, None)
+                .await
+                .unwrap();
+            let media = result.multi_modal_data.unwrap();
+            let chemistry: Vec<_> = media["chemistry"]
+                .iter()
+                .map(|part| match part {
+                    MultimodalData::Json(value) => value.clone(),
+                    other => panic!("expected custom JSON, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(chemistry, [first, second]);
+            assert!(
+                matches!(&media["biology"][0], MultimodalData::Json(value) if value == &biology)
+            );
+            assert!(
+                matches!(&media["image_url"][0], MultimodalData::Url(url) if url.as_str() == image)
+            );
+            assert_eq!(
+                expected.matches("<|chem_projected|>").count(),
+                chemistry.len()
+            );
+            let extra = result.extra_args.unwrap();
+            assert_eq!(extra["formatted_prompt"], expected);
+            assert_eq!(extra["messages"][0][metadata_key], metadata);
+            let parts = extra["messages"][0]["content"].as_array().unwrap();
+            assert_eq!(parts.len(), 8);
+            assert_eq!(
+                parts[1],
+                serde_json::json!({"type":"custom", "kind":"chemistry"})
+            );
+            assert_eq!(
+                parts[4],
+                serde_json::json!({"type":"custom", "kind":"biology"})
+            );
+            assert_eq!(parts[5], parts[1]);
+            for secret in ["SECRET_ONE", "SECRET_TWO", "SECRET_BIO", "data_base64"] {
+                assert!(!extra.to_string().contains(secret));
+                assert!(!expected.contains(secret));
+            }
+            // Preprocessing must not mutate the original payload-bearing HTTP input.
+            let original = serde_json::to_value(&request).unwrap();
+            assert_eq!(
+                original["messages"][0]["content"][1]["fields"],
+                chemistry[0]
+            );
+            assert_eq!(
+                original["messages"][0]["content"][5]["fields"],
+                chemistry[1]
+            );
+        }
+    }
+
+    #[test]
+    fn custom_content_preserves_custom_tool_history_during_rendering() {
+        let template = concat!(
+            "{% for message in messages %}",
+            "{% for call in message.tool_calls or [] %}",
+            "{{ call.function.name }}={{ call.function.arguments.input }};{% endfor %}",
+            "{% if message.content is not string %}{% for part in message.content or [] %}",
+            "{% if part.type == 'custom' %}{% if part.fields is defined %}",
+            "{{ raise_exception('custom payload reached template') }}{% endif %}",
+            "<{{ part.kind }}>{% endif %}{% endfor %}{% endif %}{% endfor %}",
+        );
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model":"test", "messages":[
+                {"role":"assistant", "tool_calls":[{
+                    "id":"call_1", "type":"custom",
+                    "custom":{"name":"patch", "input":"change x"}
+                }]},
+                {"role":"user", "content":[{
+                    "type":"custom", "kind":"chemistry",
+                    "fields":{"data_base64":"SECRET"}
+                }]}
+            ],
+            "tools":[{"type":"custom", "custom":{"name":"patch"}}],
+            "add_generation_prompt":false
+        }))
+        .unwrap();
+        for normalize_tool_call_args in [false, true] {
+            let mut preprocessor = custom_preprocessor(template);
+            preprocessor.normalize_tool_call_args = normalize_tool_call_args;
+            let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert_eq!(rendered.as_str(), "patch=change x;<chemistry>");
+        }
+    }
+
+    #[test]
+    fn custom_kinds_reserve_builtin_wire_names() {
+        for kind in ["text", "image_url", "video_url", "audio_url", "input_audio"] {
+            assert!(validate_custom_kind(kind).is_err());
+        }
+        // Engine names are distinct from the wire tags and retain the existing
+        // downstream collision checks when mixed with built-in media.
+        assert!(validate_custom_kind("image").is_ok());
+        assert!(validate_custom_kind("chemistry").is_ok());
     }
 }

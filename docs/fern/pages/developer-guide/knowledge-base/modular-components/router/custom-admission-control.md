@@ -55,7 +55,7 @@ cargo init --lib --name acme-admission-catalog "$PLUGIN_DIR/catalog"
 Add the classifier's API, error, configuration, and time dependencies:
 
 ```bash
-cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" --path "$DYNAMO_DIR/lib/kv-router" dynamo-kv-router
+cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" --path "$DYNAMO_DIR/lib/router/kv-router" dynamo-kv-router
 cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" --path "$DYNAMO_DIR/lib/runtime" dynamo-runtime
 cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" serde --features derive
 cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" tokio --features time
@@ -65,7 +65,7 @@ Add the classifier and registry API to the catalog:
 
 ```bash
 cargo add --manifest-path "$PLUGIN_DIR/catalog/Cargo.toml" --path "$PLUGIN_DIR/classifier" acme-admission
-cargo add --manifest-path "$PLUGIN_DIR/catalog/Cargo.toml" --path "$DYNAMO_DIR/lib/kv-router" dynamo-kv-router
+cargo add --manifest-path "$PLUGIN_DIR/catalog/Cargo.toml" --path "$DYNAMO_DIR/lib/router/kv-router" dynamo-kv-router
 ```
 
 ### Classify Requests
@@ -205,8 +205,6 @@ The policy class enables queueing when every eligible worker's active prefill to
 | `isl_tokens()` | Input sequence length in tokens, the size the scheduler uses |
 | `scheduling_cost_tokens()` | Estimated uncached input tokens, or the classifier's override |
 | `policy_class()` | Requested policy class, or the classifier's override |
-| `queue_thresholds()` | Busy thresholds of the policy class the request resolves to now, including the classifier's override. The queue holds the request while every eligible worker is past them |
-| `queue_thresholds_for(name)` | Busy thresholds of the policy class with that name, or `None` if the router does not know it |
 | `reject_thresholds()` | Router-wide busy thresholds, read when classification started. Selection skips a worker past them and rejects the request when none remains |
 | `ingress_at()` | Original router ingress time |
 | `due_at()` | Queue deadline set by the classifier, if any |
@@ -271,7 +269,7 @@ Dynamo builds these rows with the same code that worker selection uses, so `CACH
 - `workers` is a snapshot taken for this `classify` call and is lent only for its duration. Dynamo frees the rows when `classify` returns, so a deferred classification holds none of them. Copy into the returned future whatever it needs, and do not treat that copy as current load when the request is admitted later.
 - Worker selection takes its own snapshot when it picks a worker, so it can pick a different worker than the classifier expected. Use `set_worker_selection_target` to state a preference.
 
-Every row also returns its `WorkerInfo` from `info()` without a declaration. To ask whether a rank has room, declare `WorkerInputs::LOAD` and call `has_room` on the thresholds with the row's `load()` and `info().capacity()`. Both are rank-level checks on one row, the same ones the router runs: `queue_thresholds().has_room(...)` says whether this rank is within the class's queue thresholds (the queue holds a request only when every eligible rank is past them), and `reject_thresholds().has_room(...)` whether this rank is within the reject thresholds (selection skips a worker only when all of its ranks are past them).
+Every row also returns its `WorkerInfo` from `info()` without a declaration. To ask whether a rank has room, declare `WorkerInputs::LOAD` and call `has_room` on the thresholds with the row's `load()` and `info().capacity()`. This is a rank-level check on one row, the same one the router runs: `reject_thresholds().has_room(...)` says whether this rank is within the reject thresholds (selection skips a worker only when all of its ranks are past them).
 
 ### Admission Decisions
 

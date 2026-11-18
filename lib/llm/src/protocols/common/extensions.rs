@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::http::HeaderMap;
 use derive_builder::Builder;
@@ -292,6 +293,8 @@ pub const HEADER_DP_RANK: &str = "x-dynamo-dp-rank";
 pub const HEADER_PREFILL_DP_RANK: &str = "x-dynamo-prefill-dp-rank";
 pub const HEADER_REQUEST_PRIORITY: &str = "x-dynamo-request-priority";
 pub const HEADER_REQUEST_STRICT_PRIORITY: &str = "x-dynamo-request-strict-priority";
+/// Milliseconds a gateway in front of this process held the request before forwarding it.
+pub const HEADER_ELAPSED_SINCE_ARRIVAL_MS: &str = "x-dynamo-elapsed-since-arrival-ms";
 pub const HEADER_TENANT_ID: &str = "x-tenant-id";
 // Compatibility aliases for the original unprefixed names. Future agents may remove these after
 // the deprecation window.
@@ -326,6 +329,7 @@ pub fn has_non_cache_salt_routing_headers(headers: &HeaderMap) -> bool {
         HEADER_PREFILL_DP_RANK_ALIAS,
         HEADER_REQUEST_PRIORITY,
         HEADER_REQUEST_STRICT_PRIORITY,
+        HEADER_ELAPSED_SINCE_ARRIVAL_MS,
     ]
     .iter()
     .any(|header| headers.contains_key(*header))
@@ -347,6 +351,9 @@ pub const AGENT_CONTEXT_CONTEXT_KEY: &str = "dynamo.llm.agent_context";
 
 pub const SESSION_AFFINITY_CONTEXT_KEY: &str = "dynamo.llm.session_affinity";
 
+/// Context key of the [`Duration`] from [`upstream_elapsed_from_headers`].
+pub const UPSTREAM_ELAPSED_CONTEXT_KEY: &str = "dynamo.llm.upstream_elapsed";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionAffinityId(String);
 
@@ -366,6 +373,21 @@ pub fn agent_context_from_headers(headers: &HeaderMap) -> Option<AgentContext> {
 
 pub fn session_affinity_from_headers(headers: &HeaderMap) -> Option<SessionAffinityId> {
     session_affinity_header_value(headers).map(SessionAffinityId::new)
+}
+
+/// How long a gateway had held the request when it forwarded it here, from
+/// `x-dynamo-elapsed-since-arrival-ms`. The Runtime EPP sets the header, overwriting any value
+/// the client sent, so that the request's arrival age covers the time it spent in the EPP's
+/// router queue. A value that is not a finite, non-negative number is ignored.
+pub fn upstream_elapsed_from_headers(headers: &HeaderMap) -> Option<Duration> {
+    let millis = headers
+        .get(HEADER_ELAPSED_SINCE_ARRIVAL_MS)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<f64>()
+        .ok()?;
+    Duration::try_from_secs_f64(millis / 1000.0).ok()
 }
 
 /// Apply HTTP routing header overrides to nvext.
@@ -576,8 +598,8 @@ pub fn request_cache_salt<R: NvExtProvider>(request: &R) -> Option<&str> {
 
 pub fn routing_constraints_to_kv(
     constraints: RoutingConstraints,
-) -> dynamo_kv_router::protocols::RoutingConstraints {
-    dynamo_kv_router::protocols::RoutingConstraints {
+) -> dynamo_scheduler::host::RoutingConstraints {
+    dynamo_scheduler::host::RoutingConstraints {
         required_taints: constraints.required_taints,
         preferred_taints: constraints.preferred_taints,
     }
@@ -1849,6 +1871,27 @@ mod tests {
             agent_context.parent_session_id.as_deref(),
             Some("dynamo-parent")
         );
+    }
+
+    #[test]
+    fn upstream_elapsed_header_accepts_only_a_finite_non_negative_age() {
+        let parse = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(HEADER_ELAPSED_SINCE_ARRIVAL_MS, value.parse().unwrap());
+            upstream_elapsed_from_headers(&headers)
+        };
+        assert_eq!(parse("1500"), Some(Duration::from_millis(1500)));
+        assert_eq!(parse(" 0.250 "), Some(Duration::from_micros(250)));
+        assert_eq!(parse("0"), Some(Duration::ZERO));
+        for invalid in ["-1", "nan", "inf", "soon", ""] {
+            assert_eq!(parse(invalid), None, "{invalid:?}");
+        }
+        assert_eq!(upstream_elapsed_from_headers(&HeaderMap::new()), None);
+
+        // It is a routing header, so the disabled-NvExt warning covers it.
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_ELAPSED_SINCE_ARRIVAL_MS, "1500".parse().unwrap());
+        assert!(has_non_cache_salt_routing_headers(&headers));
     }
 
     #[test]
