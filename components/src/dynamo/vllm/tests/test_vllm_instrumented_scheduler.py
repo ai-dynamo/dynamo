@@ -433,6 +433,54 @@ def test_raw_benchmark_sample_observes_dispatch_and_actual_timing_branch(
     monotonic.assert_called_once_with()
 
 
+def test_power_window_step_interval_ignores_an_empty_step_reset(monkeypatch):
+    """An empty step clears _last_update_time; a window repeat is still timed
+    from the previous non-empty output, not from its schedule() call."""
+    point = BenchmarkPoint("decode", benchmark_id=3, batch_size=1)
+    stub = _benchmark_save_stub(point, [{"wall_time": 0.5}])
+    stub._bench_active = True
+    stub._bench_forward_index = 0
+    stub._fpm_worker_id = "worker"
+    stub._schedule_times = deque([21.0])
+    stub._extract_scheduled = MagicMock(
+        return_value=instrumented_scheduler_module.ScheduledRequestMetrics(
+            num_decode_requests=1
+        )
+    )
+    stub._compute_queued = MagicMock(return_value=None)
+    stub._cleanup_finished = MagicMock()
+    # The latency sample's last output arrived at 20.0; the window opened on it.
+    stub._last_update_time = 20.0
+    stub._bench_last_output_arrival = 20.0
+    stub._bench_power_window = {
+        "completed": 0,
+        "step_wall_times_s": [],
+        "last_output": 20.0,
+    }
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "update_from_output",
+        lambda *_: None,
+    )
+    clock = {"now": 20.7}
+    monkeypatch.setattr(
+        instrumented_scheduler_module.time, "monotonic", lambda: clock["now"]
+    )
+
+    # An empty step between the latency output and the first repeat.
+    stub.update_from_output(SimpleNamespace(total_num_scheduled_tokens=0), object())
+    assert stub._last_update_time == 0.0
+    assert stub._bench_last_output_arrival == 20.0
+
+    clock["now"] = 21.5
+    stub.update_from_output(SimpleNamespace(total_num_scheduled_tokens=1), object())
+
+    # Output to output (1.5 s), not schedule to output (0.5 s).
+    assert stub._bench_power_window["step_wall_times_s"] == [1.5]
+    assert stub._bench_power_window["last_output"] == 21.5
+    assert stub._bench_last_output_arrival == 21.5
+
+
 def test_missing_schedule_timestamp_is_explicit_in_raw_sample(monkeypatch):
     stub = _benchmark_save_stub(BenchmarkPoint("prefill", benchmark_id=1), [])
     stub._bench_active = True
@@ -10025,7 +10073,7 @@ def test_power_block_measures_the_counter_delta_in_wms():
         [("GPU-a", 1_000), ("GPU-b", 5_000)],
         [("GPU-a", 701_000), ("GPU-b", 655_000)],
         window_s=1.25,
-        window_iterations=40,
+        window_iterations=2,
         kv_drift_tokens=320,
         step_wall_times_s=[0.03, 0.031],
         min_window_s=1.0,
@@ -10040,7 +10088,7 @@ def test_power_block_measures_the_counter_delta_in_wms():
             {"gpu_uuid": "GPU-b", "energy_wms": 650_000.0},
         ],
         "window_s": 1.25,
-        "window_iterations": 40,
+        "window_iterations": 2,
         "kv_drift_tokens": 320,
         "step_wall_times_s": [0.03, 0.031],
     }
@@ -10166,7 +10214,7 @@ def _run_power_window(stub, clock, *, iteration_s, max_passes=100):
             for request in stub.requests.values():
                 request.num_computed_tokens += 1
             clock.now += iteration_s
-            stub._bench_power_step_completed(iteration_s)
+            stub._bench_power_step_completed(clock.now)
     raise AssertionError("power window did not finish")
 
 
@@ -10216,9 +10264,26 @@ def test_decode_power_window_repeats_until_the_minimum_and_records_drift(
         "window_s": pytest.approx(1.2),
         "window_iterations": 4,
         "kv_drift_tokens": 8,
-        # One wall_time per completed repeat, in order.
-        "step_wall_times_s": [0.3, 0.3, 0.3, 0.3],
+        # One output-to-output interval per completed repeat, in order.
+        "step_wall_times_s": pytest.approx([0.3, 0.3, 0.3, 0.3]),
     }
+
+
+def test_power_window_first_interval_starts_at_the_latency_output(monkeypatch):
+    """The first repeat's interval runs from the latency sample's last output,
+    so it also covers the window's opening round and NVML start read."""
+    point = BenchmarkPoint(
+        point_type="decode", benchmark_id=6, total_kv_read_tokens=128, batch_size=2
+    )
+    stub, clock = _power_window_stub(monkeypatch, point)
+    stub._bench_last_output_arrival = clock.now - 0.5
+    _decode_steps(stub)
+
+    _run_power_window(stub, clock, iteration_s=0.3)
+
+    assert stub._bench_power_result["step_wall_times_s"] == pytest.approx(
+        [0.8, 0.3, 0.3, 0.3]
+    )
 
 
 def test_power_window_iteration_cap_reports_window_below_minimum(monkeypatch):
@@ -10246,15 +10311,23 @@ def test_power_window_stops_when_a_repeat_cannot_be_built(monkeypatch):
     assert stub._bench_power_result == _unavailable("kv_capacity_exhausted")
 
 
-def test_power_window_nvml_failure_keeps_the_group_iterating(monkeypatch):
+def test_nvml_permission_error_maps_to_its_reason():
     pynvml = pytest.importorskip("pynvml")
     error = pynvml.NVMLError(pynvml.NVML_ERROR_NO_PERMISSION)
-    reason = instrumented_scheduler_module._bench_nvml_reason(error)
+    assert instrumented_scheduler_module._bench_nvml_reason(error) == (
+        "nvml_permission"
+    )
+
+
+def test_power_window_nvml_failure_keeps_the_group_iterating(monkeypatch):
+    """Runs without pynvml: the start-read failure is injected directly."""
     point = BenchmarkPoint(point_type="decode", total_kv_read_tokens=128, batch_size=2)
     stub, clock = _power_window_stub(
         monkeypatch,
         point,
-        energy=[instrumented_scheduler_module._BenchPowerUnavailable(reason)],
+        energy=[
+            instrumented_scheduler_module._BenchPowerUnavailable("nvml_permission")
+        ],
     )
     _decode_steps(stub)
 
@@ -10620,7 +10693,7 @@ def test_prefill_power_window_prepares_the_next_repeat_while_one_runs(monkeypatc
         rounds = window["rounds"]
         clock.now += 0.4
         stub.requests.clear()
-        stub._bench_power_step_completed(0.4)
+        stub._bench_power_step_completed(clock.now)
         stub._bench_power_window_step()
         if stub._bench_power_window is None:
             break

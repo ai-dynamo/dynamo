@@ -629,10 +629,10 @@ def _bench_power_block(
     the window energy with no unit conversion. A window shorter than the
     minimum (iteration cap reached first), a counter that went backwards
     (wrap or driver reload) or did not advance is reported unavailable,
-    never as a short or zero measurement. ``step_wall_times_s`` holds the
-    ``wall_time`` of every forward step completed inside the window, in
-    order (one per decode repeat); the collector judges the window's
-    stability from it.
+    never as a short or zero measurement. ``step_wall_times_s`` holds, for
+    every forward step completed inside the window and in order (one per
+    decode repeat), the interval since the previous non-empty output; the
+    collector judges the window's stability from it.
     """
     if window_iterations < 1 or not math.isfinite(window_s) or window_s < min_window_s:
         return _bench_power_unavailable("window_below_minimum")
@@ -2490,6 +2490,7 @@ class InstrumentedScheduler(AsyncScheduler):
 
         self._schedule_times: deque[float] = deque()
         self._last_update_time: float = 0.0
+        self._bench_last_output_arrival: float = 0.0
         self._prompt_len_per_req: dict[str, int] = {}
         self._bench_active: bool = False
         self._bench_phase: _BenchPhase = _BenchPhase.IDLE
@@ -2721,6 +2722,9 @@ class InstrumentedScheduler(AsyncScheduler):
                     else None
                 )
             self._last_update_time = model_output_arrival
+            # Unlike _last_update_time, empty steps never clear it: the power
+            # window measures its repeats from the latency sample's last output.
+            self._bench_last_output_arrival = model_output_arrival
 
             metrics = self._extract_metrics(
                 scheduler_output,
@@ -2733,7 +2737,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 forward_index = self._bench_forward_index
                 self._bench_forward_index += 1
                 self._bench_observe_warmup(scheduled)
-                self._bench_power_step_completed(wall_time)
+                self._bench_power_step_completed(model_output_arrival)
                 if is_benchmark_point:
                     # Older vLLM versions may not expose this optional output
                     # field. Absence is unknown, never evidence of eager mode.
@@ -5199,6 +5203,7 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_power_result = None
         self._schedule_times.clear()
         self._last_update_time = 0.0
+        self._bench_last_output_arrival = 0.0
         self._kvwarm_release_heavy_state()
         if resume_publisher:
             self._publisher.resume()
@@ -7832,15 +7837,19 @@ class InstrumentedScheduler(AsyncScheduler):
             window["point"].benchmark_id, seq, want, ok
         )
 
-    def _bench_power_step_completed(self, wall_time: float) -> None:
-        """Count one finished forward step of an open window and keep its
-        ``wall_time``. Window steps are not benchmark samples, so this is the
-        output-to-output interval; the first one also covers the window's
-        opening barrier and NVML start read."""
+    def _bench_power_step_completed(self, arrival: float) -> None:
+        """Count one finished forward step of an open window and keep the
+        interval since the previous non-empty output (``arrival`` is this
+        step's output time). The window keeps its own anchor because an
+        empty step clears ``_last_update_time``, which would otherwise turn
+        an interval into a schedule-to-output span. The first interval
+        starts at the latency sample's last output, so it also covers the
+        window's opening barrier and NVML start read."""
         window = self._bench_power_window
         if window is not None:
             window["completed"] += 1
-            window["step_wall_times_s"].append(wall_time)
+            window["step_wall_times_s"].append(arrival - window["last_output"])
+            window["last_output"] = arrival
 
     def _bench_power_kv_tokens(self) -> int:
         return sum(
@@ -7979,6 +7988,10 @@ class InstrumentedScheduler(AsyncScheduler):
         assert isinstance(self._bench_power_gpus, list)
         window["gpus"] = self._bench_power_gpus
         window["t0"] = time.monotonic()
+        # The latency sample's last output; t0 only if none was recorded.
+        window["last_output"] = (
+            getattr(self, "_bench_last_output_arrival", 0.0) or window["t0"]
+        )
         try:
             window["start"] = _bench_read_gpu_energy(window["gpus"])
         except _BenchPowerUnavailable as error:
