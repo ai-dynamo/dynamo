@@ -39,6 +39,8 @@ pub(super) struct PrefillLoadSnapshot {
     pub(super) all_prefills_modeled: bool,
 }
 
+// Stored per worker rank in the load table that every projection walks, so growing it
+// widens every entry. Measure the projection before changing this size.
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 const _: () = assert!(std::mem::size_of::<PrefillLoadSnapshot>() == 56);
 
