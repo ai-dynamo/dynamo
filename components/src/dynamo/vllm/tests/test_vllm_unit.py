@@ -1725,6 +1725,57 @@ def test_vllm_validation_error_public_message_is_truncated():
     assert str(public_error).startswith("bad_words entry rejected: ")
 
 
+@pytest.mark.parametrize(
+    ("processor_error", "expect_client_error"),
+    [
+        (ValueError("absolute aspect ratio must be smaller than 200, got 400.0"), True),
+        (TypeError("'NoneType' object is not subscriptable"), False),
+        (None, False),
+    ],
+    ids=["processor_rejects_input", "processor_bug", "engine_fault"],
+)
+@pytest.mark.asyncio
+async def test_translate_vllm_client_errors_processor_rejection(
+    processor_error, expect_client_error
+):
+    from vllm.v1.engine.exceptions import EngineGenerateError
+
+    from dynamo.llm.exceptions import InvalidArgument
+    from dynamo.vllm.handlers import _translate_vllm_client_errors
+
+    # The chain vLLM raises: AsyncLLM.generate wraps the failure in
+    # EngineGenerateError, and call_hf_processor wraps processor exceptions in
+    # ValueError("Failed to apply ...") whose text embeds the request data.
+    if processor_error is None:
+        cause: Exception = RuntimeError("engine step failed")
+    else:
+        cause = ValueError(
+            "Failed to apply Qwen2VLProcessor on data={'text': 'secret prompt', "
+            "'images': [<PIL.Image.Image size=1x400>]} with kwargs={}"
+        )
+        cause.__cause__ = processor_error
+    error = EngineGenerateError()
+    error.__cause__ = cause
+
+    async def failing_generator():
+        yield "first"
+        raise error
+
+    chunks = []
+    with pytest.raises((InvalidArgument, EngineGenerateError)) as raised:
+        async for chunk in _translate_vllm_client_errors(failing_generator()):
+            chunks.append(chunk)
+
+    assert chunks == ["first"]
+    if expect_client_error:
+        assert isinstance(raised.value, InvalidArgument)
+        assert raised.value.__cause__ is error
+        assert "data=" not in str(raised.value)
+        assert "secret prompt" not in str(raised.value)
+    else:
+        assert raised.value is error
+
+
 def test_build_sampling_params_accepts_productive_recursive_guided_json():
     from dynamo.vllm.handlers import build_sampling_params
 

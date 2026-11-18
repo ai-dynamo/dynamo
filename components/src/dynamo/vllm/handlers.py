@@ -1241,14 +1241,20 @@ async def _translate_vllm_client_errors(
 ) -> AsyncIterator[ResponseT]:
     """Keep request-side vLLM errors client-visible on worker endpoints."""
     from vllm.exceptions import VLLMClientError
+    from vllm.v1.engine.exceptions import EngineGenerateError
 
-    from .errors import vllm_client_error_to_http_error
+    from .errors import processor_input_error, vllm_client_error_to_http_error
 
     try:
         async for chunk in generator:
             yield chunk
     except VLLMClientError as exc:
         raise vllm_client_error_to_http_error(exc) from exc
+    except EngineGenerateError as exc:
+        client_error = processor_input_error(exc)
+        if client_error is None:
+            raise
+        raise client_error from exc
 
 
 def _as_exact_int(value: object) -> Optional[int]:

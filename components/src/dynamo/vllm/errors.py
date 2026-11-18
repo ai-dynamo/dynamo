@@ -3,13 +3,24 @@
 
 """Translate vLLM request errors into Dynamo's HTTP error boundary."""
 
+import logging
+
 from vllm.exceptions import (
     VLLMClientError,
     VLLMNotFoundError,
     VLLMUnprocessableEntityError,
 )
+from vllm.v1.engine.exceptions import EngineGenerateError
 
 from dynamo.llm.exceptions import HttpError, InvalidArgument
+
+logger = logging.getLogger(__name__)
+
+# Prefix of the ValueError vLLM's InputProcessingContext.call_hf_processor
+# raises around any exception from the model's HF processor.
+_HF_PROCESSOR_WRAPPER_PREFIX = "Failed to apply "
+
+PROCESSOR_REJECTED_INPUT_MESSAGE = "The model's processor rejected the multimodal input"
 
 
 def vllm_client_error_to_http_error(exc: VLLMClientError) -> HttpError:
@@ -39,3 +50,26 @@ def vllm_client_error_to_public_error(
     if http_error.code == 400:
         return InvalidArgument(http_error.message)
     return http_error
+
+
+def processor_input_error(exc: EngineGenerateError) -> InvalidArgument | None:
+    """Return a 400 when the model's HF processor rejected the request input.
+
+    vLLM wraps the processor's exception in ``ValueError("Failed to apply ...")``
+    and ``AsyncLLM.generate`` wraps that in ``EngineGenerateError``, a server
+    error. Only a ``ValueError`` from the processor itself (an image with an
+    aspect ratio or size the processor refuses) is treated as client input;
+    a processor bug (``TypeError``, ``IndexError``, ...) stays a server error.
+    The wrapper text embeds the prompt and media, so the public message is
+    fixed and the processor's reason is only logged.
+    """
+    wrapper = exc.__cause__
+    if type(wrapper) is not ValueError or not str(wrapper).startswith(
+        _HF_PROCESSOR_WRAPPER_PREFIX
+    ):
+        return None
+    reason = wrapper.__cause__
+    if not isinstance(reason, ValueError):
+        return None
+    logger.warning("Model processor rejected request input: %s", reason)
+    return InvalidArgument(PROCESSOR_REJECTED_INPUT_MESSAGE)
