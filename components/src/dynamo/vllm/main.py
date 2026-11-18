@@ -21,6 +21,7 @@ from huggingface_hub.utils import HFValidationError
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
+from vllm.transformers_utils.repo_utils import any_pattern_in_repo_files
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -189,19 +190,47 @@ def configure_muse_structural_tag_reasoning(
         vllm_config.structured_outputs_config.enable_in_reasoning = True
 
 
+def pin_guidance_for_tekken_checkpoints(vllm_config: VllmConfig) -> None:
+    """Send every structured-output request of a Tekken checkpoint to llguidance.
+
+    dynamo.frontend constrains Mistral tool calls and replies with a lark grammar
+    that only llguidance accepts. Under `auto`, vLLM sends that grammar to
+    `guidance` but a regex to `xgrammar`, and an engine keeps the backend of its
+    first structured-output request, so the other kind is rejected. llguidance
+    serves every constraint kind for Tekken tokenizers. An explicit backend is
+    left as configured.
+    """
+    structured_outputs_config = vllm_config.structured_outputs_config
+    if structured_outputs_config.backend != "auto":
+        return
+    model_config = vllm_config.model_config
+    if not any_pattern_in_repo_files(
+        model_name_or_path=str(model_config.tokenizer),
+        allow_patterns=["tekken.json"],
+        revision=model_config.tokenizer_revision,
+    ):
+        return
+    structured_outputs_config.backend = "guidance"
+    logger.info(
+        "Using the guidance structured-output backend for this Tekken checkpoint, "
+        "so Mistral grammars and other constraints share one backend"
+    )
+
+
 def publish_vllm_llguidance_lark_grammar(
     runtime_config: ModelRuntimeConfig, vllm_config: VllmConfig
 ) -> None:
-    """Tell the frontend whether a lark `guided_decoding.grammar` reaches llguidance.
+    """Tell the frontend whether every lark `guided_decoding.grammar` reaches llguidance.
 
-    vLLM's `auto` backend sends a lark grammar that xgrammar rejects, such as one
-    with `<[id]>` special tokens or `%json`, to llguidance. An explicit backend
-    other than `guidance` gets no fallback.
+    Only an explicit `guidance` backend guarantees that: `auto` picks a backend
+    per request, and the engine rejects a request whose backend differs from the
+    first one. `pin_guidance_for_tekken_checkpoints` selects `guidance` for the
+    Tekken checkpoints whose grammars need it.
     """
     backend = vllm_config.structured_outputs_config.backend
     runtime_config.set_engine_specific(
         LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY,
-        json.dumps(backend in ("auto", "guidance")),
+        json.dumps(backend == "guidance"),
     )
 
 
@@ -781,6 +810,7 @@ def setup_vllm_engine(
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
     configure_muse_structural_tag_reasoning(config, vllm_config)
+    pin_guidance_for_tekken_checkpoints(vllm_config)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
