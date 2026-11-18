@@ -89,8 +89,10 @@ and Relay identity environment variables; leave those out of the template. Reser
 names are `DYN_NAMESPACE`, `DYN_DISCOVERY_BACKEND`, `DYN_KUBE_DISCOVERY_MODE`, `DYN_SYSTEM_PORT`,
 `DYN_TCP_RESPONSE_STREAM_HOST`, `DYN_TCP_RESPONSE_STREAM_PORT`, `DYN_CLUSTER_ID`, `DYN_RELAY_BIND`,
 `DYN_RELAY_CONNECTION_REVISION`, `DYN_RELAY_NAMESPACES`, `DYN_RELAY_WATCH_ALL`,
-`DYN_RELAY_ENDPOINT_PREFIXES`, `POD_NAME`, `POD_NAMESPACE`, and `POD_UID`. The main container
-cannot use `envFrom` because it could override those values.
+`DYN_RELAY_ENDPOINT_PREFIXES`, `POD_NAME`, `POD_NAMESPACE`, and `POD_UID`, plus four registration
+names when `globalDiscovery` is set (see
+[Register the Pool with Global Discovery](#register-the-pool-with-global-discovery)). The main
+container cannot use `envFrom` because it could override those values.
 
 The manual manifest below runs one Relay replica and is not an HA deployment. Use it when the
 operator does not manage your Relay.
@@ -117,12 +119,18 @@ spec:
 - `frontends` are the HTTP(S) URLs that Global Routers send the pool's requests to. Only a Global
   Discovery Service run with `--pool-discovery registrations` needs them; with MCS, it finds the
   frontends through the imported frontend Services.
-- If the URL or the region is missing, or a value is not valid, the relay's `Ready` condition is
-  `False` with reason `InvalidConfiguration`.
+- With `globalDiscovery` set, `clusterId` cannot contain `/` or control characters, because it
+  becomes the first part of the pool name.
+- If the URL or the region is missing, or a value is not valid, the operator removes the Relay's
+  Deployment and Service, and the relay's `Ready` condition is `False` with reason
+  `InvalidConfiguration`. Fixing the value brings them back.
 - With `globalDiscovery` set, `DYN_RELAY_GLOBAL_DISCOVERY_URL`, `DYN_RELAY_ROUTING_POOL`,
   `DYN_RELAY_ROUTING_POOL_REGION`, and `DYN_RELAY_ROUTING_POOL_FRONTENDS` are reserved. Without it,
-  the operator sets none of them, so a relay that sets them in its `podTemplate` keeps working.
-- Changing these settings restarts the Relay Pods with the new values.
+  the operator sets none of them, so a relay that sets them in its `podTemplate` keeps working. To
+  move such a relay to `globalDiscovery`, remove those entries from its `podTemplate` in the same
+  change, or the relay is invalid and its Deployment and Service are removed.
+- Changing these settings, or an operator default that a relay uses, restarts the Relay Pods with
+  the new values.
 
 ## Discovery Scope
 

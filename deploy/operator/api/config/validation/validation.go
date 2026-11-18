@@ -18,9 +18,12 @@
 package validation
 
 import (
+	"fmt"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
+	"unicode"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -51,16 +54,40 @@ func ValidateOperatorConfiguration(config *configv1alpha1.OperatorConfiguration)
 // they register their pools with a Global Discovery Service.
 func validateGlobalDiscovery(globalDiscovery *configv1alpha1.GlobalDiscoveryConfiguration, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
+
+	// Each default is optional, but must be one that the PoolRelay accepts.
 	if globalDiscovery.URL != "" {
-		parsed, err := url.Parse(globalDiscovery.URL)
-		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-			allErrs = append(allErrs, field.Invalid(fldPath.Child("url"), globalDiscovery.URL, "must be an absolute HTTP(S) URL"))
+		if err := CheckHTTPURL(globalDiscovery.URL); err != nil {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("url"), globalDiscovery.URL, err.Error()))
 		}
 	}
-	if globalDiscovery.Region != strings.TrimSpace(globalDiscovery.Region) {
+	if HasSurroundingSpace(globalDiscovery.Region) {
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("region"), globalDiscovery.Region, "must not have surrounding whitespace"))
 	}
 	return allErrs
+}
+
+// CheckHTTPURL returns an error unless value is an absolute HTTP(S) URL with a
+// host, and with a port that fits in 16 bits if it has one.
+func CheckHTTPURL(value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+		return fmt.Errorf("must be an absolute HTTP(S) URL, not %q", value)
+	}
+	if port := parsed.Port(); port != "" {
+		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+			return fmt.Errorf("must have a port of at most 65535, not %q", value)
+		}
+	}
+	return nil
+}
+
+// HasSurroundingSpace reports whether value starts or ends with a character
+// that the PoolRelay's Python CLI strips: Unicode white space or U+001C-U+001F.
+func HasSurroundingSpace(value string) bool {
+	return strings.TrimFunc(value, func(r rune) bool {
+		return unicode.IsSpace(r) || r >= '\x1c' && r <= '\x1f'
+	}) != value
 }
 
 func validateServer(server *configv1alpha1.ServerConfiguration, fldPath *field.Path) field.ErrorList {

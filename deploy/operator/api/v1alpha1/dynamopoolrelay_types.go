@@ -63,7 +63,7 @@ type DynamoPoolRelayGlobalDiscovery struct {
 	// requests to. Only a Global Discovery Service that takes pools from
 	// registrations, rather than from MCS, needs them.
 	// +optional
-	// +listType=atomic
+	// +listType=set
 	Frontends []string `json:"frontends,omitempty"`
 }
 

@@ -6,6 +6,7 @@
 package poolrelay
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -777,19 +778,23 @@ func TestRelayClusterIDRejectsSurroundingWhitespace(t *testing.T) {
 func TestRelayRegistersWithGlobalDiscovery(t *testing.T) {
 	defaults := configv1alpha1.GlobalDiscoveryConfiguration{URL: "http://discovery.default:8080/", Region: "us-west-2"}
 	for _, tc := range []struct {
-		name            string
+		name string
+		// clusterID defaults to east.
+		clusterID       string
 		globalDiscovery *v1alpha1.DynamoPoolRelayGlobalDiscovery
 		defaults        configv1alpha1.GlobalDiscoveryConfiguration
-		userEnv         []corev1.EnvVar
 		// want are the registration settings that the Relay gets.
 		want    map[string]string
 		wantErr bool
 	}{
 		{
-			name:     "without the block the operator sets nothing, and hand-set settings stay",
+			name:     "without the block the operator sets nothing",
 			defaults: defaults,
-			userEnv:  []corev1.EnvVar{{Name: "DYN_RELAY_ROUTING_POOL", Value: "east/inference/green"}},
-			want:     map[string]string{"DYN_RELAY_ROUTING_POOL": "east/inference/green"},
+		},
+		{
+			name:      "without the block, a cluster ID that cannot name a pool still deploys",
+			clusterID: "aws/east",
+			defaults:  defaults,
 		},
 		{
 			name: "the block's own settings, with the pool named after the relay",
@@ -816,10 +821,17 @@ func TestRelayRegistersWithGlobalDiscovery(t *testing.T) {
 			},
 		},
 		{
-			name:            "with the block, a hand-set registration setting is refused",
+			name:            "a cluster ID with a slash cannot name a pool",
+			clusterID:       "aws/east",
 			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{},
 			defaults:        defaults,
-			userEnv:         []corev1.EnvVar{{Name: "DYN_RELAY_ROUTING_POOL_FRONTENDS", Value: "http://green:8000"}},
+			wantErr:         true,
+		},
+		{
+			name:            "a cluster ID with a control character cannot name a pool",
+			clusterID:       "ea\x01st",
+			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{},
+			defaults:        defaults,
 			wantErr:         true,
 		},
 		{
@@ -839,8 +851,20 @@ func TestRelayRegistersWithGlobalDiscovery(t *testing.T) {
 			wantErr:         true,
 		},
 		{
+			name:            "a URL with a port above 65535",
+			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{URL: "http://discovery:99999/"},
+			defaults:        defaults,
+			wantErr:         true,
+		},
+		{
 			name:            "a region with surrounding whitespace",
 			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{Region: "us-east-1 "},
+			defaults:        defaults,
+			wantErr:         true,
+		},
+		{
+			name:            "a region that ends in a separator the Relay strips",
+			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{Region: "us-east-1\x1f"},
 			defaults:        defaults,
 			wantErr:         true,
 		},
@@ -851,20 +875,39 @@ func TestRelayRegistersWithGlobalDiscovery(t *testing.T) {
 			wantErr:         true,
 		},
 		{
+			name:            "a frontend with a port above 65535",
+			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{Frontends: []string{"http://green:99999"}},
+			defaults:        defaults,
+			wantErr:         true,
+		},
+		{
 			name:            "a frontend with a comma",
 			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{Frontends: []string{"http://green:8000/a,b"}},
 			defaults:        defaults,
 			wantErr:         true,
 		},
+		{
+			name:            "a frontend with trailing whitespace",
+			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{Frontends: []string{"http://green:8000/v1 "}},
+			defaults:        defaults,
+			wantErr:         true,
+		},
+		{
+			name: "a frontend listed twice",
+			globalDiscovery: &v1alpha1.DynamoPoolRelayGlobalDiscovery{
+				Frontends: []string{"http://green:8000", "http://green:8000"},
+			},
+			defaults: defaults,
+			wantErr:  true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Render the relay of DGD green in cluster east")
+			t.Log("Render the relay of DGD green")
 			relay := &v1alpha1.DynamoPoolRelay{
 				Name: "green", Namespace: "inference",
-				Spec: relaySpec("east"),
+				Spec: relaySpec(cmp.Or(tc.clusterID, "east")),
 			}
 			relay.Spec.GlobalDiscovery = tc.globalDiscovery
-			relay.Spec.PodTemplate.Spec.Containers[0].Env = tc.userEnv
 			_, deployment, err := render(relay, []string{"green-runtime"}, tc.defaults)
 			if tc.wantErr {
 				if err == nil {
@@ -891,6 +934,123 @@ func TestRelayRegistersWithGlobalDiscovery(t *testing.T) {
 				t.Fatalf("registration settings = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRegistrationNamesAreReservedOnlyWithTheBlock(t *testing.T) {
+	defaults := configv1alpha1.GlobalDiscoveryConfiguration{URL: "http://discovery:8080/", Region: "us-east-1"}
+	for _, name := range registrationEnvNames {
+		t.Run(name, func(t *testing.T) {
+			t.Log("Without the block, a hand-set value reaches the Relay")
+			relay := &v1alpha1.DynamoPoolRelay{
+				Name: "green", Namespace: "inference",
+				Spec: relaySpec("east"),
+			}
+			relay.Spec.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: name, Value: "hand-set"}}
+			_, deployment, err := render(relay, []string{"green-runtime"}, defaults)
+			if err != nil {
+				t.Fatalf("render: %v", err)
+			}
+			if !slices.ContainsFunc(deployment.Spec.Template.Spec.Containers[0].Env, func(item corev1.EnvVar) bool {
+				return item.Name == name && item.Value == "hand-set"
+			}) {
+				t.Fatalf("hand-set %s was not forwarded", name)
+			}
+
+			t.Log("With the block, the operator owns the name and refuses a hand-set value")
+			relay.Spec.GlobalDiscovery = &v1alpha1.DynamoPoolRelayGlobalDiscovery{}
+			if _, _, err := render(relay, []string{"green-runtime"}, defaults); err == nil || !strings.Contains(err.Error(), "env "+name+" is reserved") {
+				t.Fatalf("hand-set %s next to the block was not refused as reserved: %v", name, err)
+			}
+		})
+	}
+}
+
+func TestInvalidRegistrationSettingsWithdrawTheRelay(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{
+		v1alpha1.AddToScheme, v1beta1.AddToScheme, appsv1.AddToScheme, corev1.AddToScheme, rbacv1.AddToScheme,
+	} {
+		if err := add(scheme); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := types.NamespacedName{Namespace: "inference", Name: "green"}
+	relay := &v1alpha1.DynamoPoolRelay{
+		Name: key.Name, Namespace: key.Namespace, UID: "relay-uid",
+		Spec: relaySpec("east"),
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		Name: key.Name, Namespace: key.Namespace,
+		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
+		}},
+	}
+	childKey := types.NamespacedName{Namespace: key.Namespace, Name: serviceName(key.Name)}
+	apiClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(relay, dgd, &appsv1.Deployment{}).
+		WithObjects(relay, dgd).Build()
+	r := &reconciler{
+		Client:          apiClient,
+		scheme:          scheme,
+		defaultBackend:  configv1alpha1.DiscoveryBackendKubernetes,
+		globalDiscovery: configv1alpha1.GlobalDiscoveryConfiguration{URL: "http://discovery:8080/"},
+	}
+
+	t.Log("Publish the Relay without the block")
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	var deployment appsv1.Deployment
+	if err := apiClient.Get(ctx, childKey, &deployment); err != nil {
+		t.Fatalf("Relay Deployment was not published: %v", err)
+	}
+
+	t.Log("A block with no region here or in the operator's defaults withdraws the Relay")
+	if err := apiClient.Get(ctx, key, relay); err != nil {
+		t.Fatal(err)
+	}
+	relay.Spec.GlobalDiscovery = &v1alpha1.DynamoPoolRelayGlobalDiscovery{}
+	if err := apiClient.Update(ctx, relay); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if err := apiClient.Get(ctx, key, relay); err != nil {
+		t.Fatal(err)
+	}
+	condition := meta.FindStatusCondition(relay.Status.Conditions, "Ready")
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "InvalidConfiguration" ||
+		!strings.Contains(condition.Message, "globalDiscovery.region") {
+		t.Fatalf("Relay did not report the missing region: %+v", relay.Status)
+	}
+	if err := apiClient.Get(ctx, childKey, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("Relay Deployment survived an invalid block: %v", err)
+	}
+	if err := apiClient.Get(ctx, childKey, &corev1.Service{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("Relay Service survived an invalid block: %v", err)
+	}
+
+	t.Log("Setting the region publishes the Relay again, registered with the default URL")
+	relay.Spec.GlobalDiscovery.Region = "us-east-1"
+	if err := apiClient.Update(ctx, relay); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	deployment = appsv1.Deployment{}
+	if err := apiClient.Get(ctx, childKey, &deployment); err != nil {
+		t.Fatalf("Relay Deployment was not published again: %v", err)
+	}
+	got := map[string]string{}
+	for _, item := range deployment.Spec.Template.Spec.Containers[0].Env {
+		got[item.Name] = item.Value
+	}
+	if got["DYN_RELAY_ROUTING_POOL_REGION"] != "us-east-1" || got["DYN_RELAY_GLOBAL_DISCOVERY_URL"] != "http://discovery:8080/" {
+		t.Fatalf("published Relay registers with %v", got)
 	}
 }
 

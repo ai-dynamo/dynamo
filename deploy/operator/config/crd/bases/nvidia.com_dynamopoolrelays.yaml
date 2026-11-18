@@ -80,7 +80,7 @@ spec:
                       items:
                         type: string
                       type: array
-                      x-kubernetes-list-type: atomic
+                      x-kubernetes-list-type: set
                     region:
                       description: Region is the region that the pool registers in.
                       type: string

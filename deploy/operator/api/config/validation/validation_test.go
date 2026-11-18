@@ -183,7 +183,9 @@ func TestValidateOperatorConfiguration_GlobalDiscovery(t *testing.T) {
 		{name: "not HTTP", url: "grpc://discovery:8080", wantErrors: 1},
 		{name: "relative", url: "discovery:8080", wantErrors: 1},
 		{name: "no host", url: "http:///path", wantErrors: 1},
+		{name: "port above 65535", url: "http://discovery:99999/", wantErrors: 1},
 		{name: "region with whitespace", region: " us-east-1", wantErrors: 1},
+		{name: "region ending in a separator the PoolRelay strips", region: "us-east-1\x1f", wantErrors: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Validate the defaults for relays that register with Global Discovery")

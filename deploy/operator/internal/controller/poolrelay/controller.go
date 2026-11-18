@@ -13,13 +13,13 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net/url"
 	"slices"
 	"strings"
 	"time"
 	"unicode"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -475,9 +475,7 @@ func render(
 		return nil, nil, fmt.Errorf("DGD name %q cannot produce a valid <dgd>-pool-relay Service name %q: %s", relay.Name, name, strings.Join(problems, "; "))
 	}
 	clusterID := relay.Spec.ClusterID
-	if clusterID == "" || strings.TrimFunc(clusterID, func(r rune) bool {
-		return unicode.IsSpace(r) || r >= '\x1c' && r <= '\x1f'
-	}) != clusterID {
+	if clusterID == "" || configvalidation.HasSurroundingSpace(clusterID) {
 		return nil, nil, fmt.Errorf("clusterId must be non-empty and have no surrounding whitespace")
 	}
 	if relay.Spec.PodTemplate == nil {
@@ -623,43 +621,44 @@ func registrationEnv(
 ) ([]corev1.EnvVar, error) {
 	settings := relay.Spec.GlobalDiscovery
 
+	// The pool key's fields hold no slash or control character, as the Relay checks.
+	clusterID := relay.Spec.ClusterID
+	if strings.Contains(clusterID, "/") || strings.ContainsFunc(clusterID, unicode.IsControl) {
+		return nil, fmt.Errorf("clusterId %q cannot name a routing pool: it holds a slash or a control character", clusterID)
+	}
+
 	// The Relay needs a URL and a region to register at all.
 	discoveryURL := cmp.Or(settings.URL, defaults.URL)
-	if err := checkHTTPURL(discoveryURL); err != nil {
-		return nil, fmt.Errorf("globalDiscovery.url, or the operator's globalDiscovery.url default, %w", err)
+	if discoveryURL == "" {
+		return nil, errors.New("globalDiscovery.url, or the operator's globalDiscovery.url default, must be set")
+	}
+	if err := configvalidation.CheckHTTPURL(discoveryURL); err != nil {
+		return nil, fmt.Errorf("globalDiscovery.url %w", err)
 	}
 	region := cmp.Or(settings.Region, defaults.Region)
-	if region == "" || strings.TrimSpace(region) != region {
+	if region == "" || configvalidation.HasSurroundingSpace(region) {
 		return nil, errors.New("globalDiscovery.region, or the operator's globalDiscovery.region default, must be set without surrounding whitespace")
 	}
 	env := []corev1.EnvVar{
 		{Name: "DYN_RELAY_GLOBAL_DISCOVERY_URL", Value: discoveryURL},
-		{Name: "DYN_RELAY_ROUTING_POOL", Value: relay.Spec.ClusterID + "/" + relay.Namespace + "/" + relay.Name},
+		{Name: "DYN_RELAY_ROUTING_POOL", Value: clusterID + "/" + relay.Namespace + "/" + relay.Name},
 		{Name: "DYN_RELAY_ROUTING_POOL_REGION", Value: region},
 	}
 
-	// The Relay splits its frontends at commas.
-	for _, frontend := range settings.Frontends {
-		if err := checkHTTPURL(frontend); err != nil || strings.Contains(frontend, ",") {
-			return nil, fmt.Errorf("globalDiscovery.frontends entry %q must be an absolute HTTP(S) URL without commas", frontend)
+	// The Relay splits its frontends at commas, strips each, and refuses a repeated one.
+	for i, frontend := range settings.Frontends {
+		if err := configvalidation.CheckHTTPURL(frontend); err != nil ||
+			strings.Contains(frontend, ",") || configvalidation.HasSurroundingSpace(frontend) {
+			return nil, fmt.Errorf("globalDiscovery.frontends entry %q must be an absolute HTTP(S) URL without commas or surrounding whitespace", frontend)
+		}
+		if slices.Contains(settings.Frontends[:i], frontend) {
+			return nil, fmt.Errorf("globalDiscovery.frontends lists %q twice", frontend)
 		}
 	}
 	if len(settings.Frontends) > 0 {
 		env = append(env, corev1.EnvVar{Name: "DYN_RELAY_ROUTING_POOL_FRONTENDS", Value: strings.Join(settings.Frontends, ",")})
 	}
 	return env, nil
-}
-
-// checkHTTPURL returns an error unless value is an absolute HTTP(S) URL.
-func checkHTTPURL(value string) error {
-	if value == "" {
-		return errors.New("must be set")
-	}
-	parsed, err := url.Parse(value)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		return fmt.Errorf("must be an absolute HTTP(S) URL, not %q", value)
-	}
-	return nil
 }
 
 func validateRelayPodTemplate(podTemplate *corev1.PodTemplateSpec, reserved map[string]bool) (int, []corev1.EnvVar, error) {
