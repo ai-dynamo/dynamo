@@ -68,6 +68,9 @@ class EngineGenerateInput:
     prompt: Any
     sampling_params: SamplingParams
     priority: int
+    # Raw media for the worker to expand into ``prompt`` before generation.
+    content_parts: list[dict[str, Any]] | None = None
+    return_token_ids: bool = False
 
 
 @lru_cache(maxsize=1)
@@ -210,15 +213,21 @@ def adapt_engine_generate_request(
         raise TypeError("extra_args.vllm_tito must be an object")
     if not decode_capable:
         raise ValueError("TITO requests require an aggregated or decode vLLM worker")
-    if envelope.get("content_parts"):
-        raise ValueError("TITO raw multimodal content_parts are not supported")
-
     raw_sampling_params = envelope.get("sampling_params")
     if not isinstance(raw_sampling_params, dict):
         raise TypeError("extra_args.vllm_tito.sampling_params must be an object")
     features = envelope.get("features")
     if features is not None and not allow_multimodal_features:
         raise ValueError("TITO multimodal features require an aggregated vLLM worker")
+    if envelope.get("content_parts"):
+        if not allow_multimodal_features:
+            raise ValueError(
+                "TITO multimodal content_parts require an aggregated vLLM worker"
+            )
+        if not enable_multimodal:
+            raise ValueError(
+                "TITO multimodal content_parts require --enable-multimodal"
+            )
     if isinstance(features, dict):
         kwargs_data = features.get("kwargs_data")
         if not isinstance(kwargs_data, dict):
@@ -317,4 +326,129 @@ def adapt_engine_generate_request(
         prompt=prompt,
         sampling_params=sampling_params,
         priority=native_request.priority,
+        content_parts=native_request.content_parts or None,
+        return_token_ids=bool(native_request.return_token_ids),
     )
+
+
+_CONTENT_PART_PARSERS = {
+    "image_url": "parse_image",
+    "audio_url": "parse_audio",
+    "video_url": "parse_video",
+}
+
+
+def _create_dynamo_media_parser(tracker: Any) -> Any:
+    """Return a ``tracker`` parser that fetches media through Dynamo.
+
+    vLLM's default ``http`` connector ignores ``DYN_MM_ALLOW_REMOTE_URLS`` and
+    Dynamo's private-address and redirect protections. ``DynamoMediaConnector``
+    fetches images with Dynamo's ``ImageLoader`` and gates every other download
+    on the URL policy. It is set on this parser only, so the process-wide
+    ``VLLM_MEDIA_CONNECTOR`` and the worker's other paths are unchanged.
+    """
+    import functools
+    import inspect
+
+    from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY
+
+    # Importing the module registers the "dynamo" connector with vLLM.
+    import dynamo.common.multimodal.media_connector  # noqa: F401
+
+    parser = tracker.create_parser()
+    # vLLM builds the connector lazily in this cached_property. If a vLLM
+    # upgrade moves it, refuse the request rather than fall back to vLLM's
+    # unrestricted downloader.
+    hook = inspect.getattr_static(type(parser), "_connector", None)
+    if not isinstance(hook, functools.cached_property):
+        raise RuntimeError(
+            "TITO content_parts: the installed vLLM parser has no _connector "
+            "hook, so Dynamo cannot enforce its media URL policy"
+        )
+    # vLLM 0.33+ charges per-request media budgets through the connector.
+    # Older trackers have neither the budgets nor the connector parameters.
+    budgets = {
+        name: getattr(tracker, name)
+        for name in ("decoded_budget", "download_budget")
+        if hasattr(tracker, name)
+    }
+    parser.__dict__["_connector"] = MEDIA_CONNECTOR_REGISTRY.load(
+        "dynamo",
+        media_io_kwargs=tracker.media_io_kwargs,
+        allowed_local_media_path=tracker.allowed_local_media_path,
+        allowed_media_domains=tracker.allowed_media_domains,
+        **budgets,
+    )
+    return parser
+
+
+async def render_content_parts(
+    renderer: Any,
+    model_config: Any,
+    prompt: dict[str, Any],
+    content_parts: list[dict[str, Any]],
+) -> Any:
+    """Expand raw media into ``prompt`` as vLLM's own Generate API does.
+
+    Every URL is checked against ``UrlValidationPolicy.from_env()`` before
+    parsing, and media is fetched through ``DynamoMediaConnector``.
+    """
+    import aiohttp
+    from vllm.renderers.chat_utils import AsyncMultiModalItemTracker
+
+    from dynamo.common.http import HttpStatusError
+    from dynamo.common.http.url_validator import (
+        UrlValidationPolicy,
+        describe_media_source,
+        validate_media_url,
+    )
+
+    policy = UrlValidationPolicy.from_env()
+    parsed_parts = []
+    for part in content_parts:
+        method = _CONTENT_PART_PARSERS.get(part.get("type", ""))
+        if method is None:
+            raise ValueError(
+                f"TITO content_parts type {part.get('type')!r} is not supported"
+            )
+        url = part.get("url")
+        if url is not None:
+            # Raises UrlValidationError (a 400) before anything is fetched.
+            url = await validate_media_url(str(url), policy)
+        parsed_parts.append((method, url, part.get("uuid")))
+
+    tracker = AsyncMultiModalItemTracker(model_config)
+    parser = _create_dynamo_media_parser(tracker)
+    for method, url, uuid in parsed_parts:
+        getattr(parser, method)(url, uuid)
+    try:
+        mm_data, mm_uuids = await tracker.resolve_items()
+    except aiohttp.ClientConnectionError as e:
+        # An unreachable user-supplied URL is a client error, not a worker fault.
+        sources = ", ".join(
+            describe_media_source(str(part.get("url"))) for part in content_parts
+        )
+        raise HttpStatusError(
+            400, f"Connection error loading media: '{sources}': {e}", sources
+        ) from e
+    prompt = dict(prompt)
+    if mm_data:
+        prompt["multi_modal_data"] = mm_data
+    if mm_uuids:
+        prompt["multi_modal_uuids"] = mm_uuids
+    (engine_input,) = await renderer.render_cmpl_async([prompt])
+    return engine_input
+
+
+def prompt_response_fields(prompt: Any) -> dict[str, Any]:
+    """Return vLLM's ``prompt_token_ids`` and ``mm_placeholders`` response fields."""
+    mm_placeholders = None
+    if prompt.get("type") == "multimodal":
+        mm_placeholders = {
+            modality: [{"offset": p.offset, "length": p.length} for p in ranges]
+            for modality, ranges in prompt["mm_placeholders"].items()
+        }
+    return {
+        "prompt_token_ids": list(prompt["prompt_token_ids"]),
+        "mm_placeholders": mm_placeholders,
+    }

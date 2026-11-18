@@ -209,6 +209,39 @@ async def test_connector_downloads_remote_media_with_dynamo_fetcher(
 
 @pytest.mark.vllm
 @pytest.mark.asyncio
+async def test_connector_charges_request_download_budget(monkeypatch):
+    """Downloads through dynamo's fetcher count against vLLM's request-wide
+    VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB, as vLLM's own download does."""
+    connector_class = getattr(media_connector_module, "DynamoMediaConnector", None)
+    if connector_class is None:
+        pytest.skip("vLLM is not installed")
+    connections = pytest.importorskip("vllm.connections")
+    if not hasattr(connections, "MediaRequestDownloadBudget"):
+        pytest.skip("vLLM has no request media download budget")
+
+    monkeypatch.setenv("VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB", "1")
+    monkeypatch.setattr(media_connector_module, "validate_media_url", AsyncMock())
+    clip = b"x" * (600 * 1024)
+    monkeypatch.setattr(
+        media_connector_module, "fetch_bytes", AsyncMock(return_value=clip)
+    )
+    connector = object.__new__(connector_class)
+    connector.allowed_media_domains = None
+    connector.download_budget = connections.MediaRequestDownloadBudget()
+
+    media_io = _stub_media_io()
+    await connector.load_from_url_async("https://example.com/a.wav", media_io)
+    assert connector.download_budget.used == len(clip)
+
+    # A second clip pushes the request past 1 MiB and is never decoded.
+    media_io = _stub_media_io()
+    with pytest.raises(Exception, match="VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB"):
+        await connector.load_from_url_async("https://example.com/b.wav", media_io)
+    media_io.load_bytes.assert_not_called()
+
+
+@pytest.mark.vllm
+@pytest.mark.asyncio
 async def test_connector_applies_allowed_media_domains_to_remote_media(monkeypatch):
     """Skipping vLLM's download keeps its --allowed-media-domains check."""
     connector_class = getattr(media_connector_module, "DynamoMediaConnector", None)

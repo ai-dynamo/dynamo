@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from types import SimpleNamespace
 
@@ -299,6 +300,152 @@ def test_tito_adapter_rejects_unsupported_execution_paths(
             vllm_config=_vllm_config(),
             default_sampling_params={},
         )
+
+
+_IMAGE_PART = {"type": "image_url", "url": "data:image/png;base64,AA=="}
+
+
+def test_tito_adapter_carries_content_parts_for_worker_expansion():
+    from dynamo.vllm.engine_generate import adapt_engine_generate_request
+
+    adapted = adapt_engine_generate_request(
+        _request(content_parts=[_IMAGE_PART], return_token_ids=True),
+        enable_multimodal=True,
+        decode_capable=True,
+        vllm_config=_vllm_config(),
+        default_sampling_params={},
+    )
+
+    assert adapted is not None
+    assert adapted.prompt["prompt_token_ids"] == [11, 22, 33]
+    assert adapted.content_parts == [_IMAGE_PART]
+    assert adapted.return_token_ids is True
+
+
+@pytest.mark.parametrize(
+    ("enable_multimodal", "allow_multimodal_features", "match"),
+    [(False, True, "--enable-multimodal"), (True, False, "aggregated vLLM worker")],
+)
+def test_tito_adapter_rejects_content_parts_without_multimodal_worker(
+    enable_multimodal, allow_multimodal_features, match
+):
+    from dynamo.vllm.engine_generate import adapt_engine_generate_request
+
+    with pytest.raises(ValueError, match=match):
+        adapt_engine_generate_request(
+            _request(content_parts=[_IMAGE_PART]),
+            enable_multimodal=enable_multimodal,
+            decode_capable=True,
+            vllm_config=_vllm_config(),
+            default_sampling_params={},
+            allow_multimodal_features=allow_multimodal_features,
+        )
+
+
+def _async_content_parser_class():
+    # Newer vLLM no longer re-exports the parser from chat_utils.
+    try:
+        from vllm.renderers.chat_utils import AsyncMultiModalContentParser
+    except ImportError:
+        from vllm.renderers.chat_utils.content_parser import (
+            AsyncMultiModalContentParser,
+        )
+    return AsyncMultiModalContentParser
+
+
+def _tracker_stub():
+    return SimpleNamespace(
+        media_io_kwargs=None,
+        allowed_local_media_path="",
+        allowed_media_domains=None,
+    )
+
+
+def test_content_parts_fetch_through_dynamo_media_connector():
+    AsyncMultiModalContentParser = _async_content_parser_class()
+    from dynamo.common.multimodal.media_connector import DynamoMediaConnector
+    from dynamo.vllm.engine_generate import _create_dynamo_media_parser
+
+    tracker = _tracker_stub()
+    tracker.create_parser = lambda: AsyncMultiModalContentParser(tracker)
+
+    parser = _create_dynamo_media_parser(tracker)
+
+    assert isinstance(parser._connector, DynamoMediaConnector)
+
+
+def test_content_parts_connector_keeps_request_media_budgets():
+    """The replacement connector charges the tracker's per-request budgets,
+    as vLLM's own connector does (vLLM 0.33+)."""
+    AsyncMultiModalContentParser = _async_content_parser_class()
+    from dynamo.vllm.engine_generate import _create_dynamo_media_parser
+
+    tracker = _tracker_stub()
+    tracker.decoded_budget = object()
+    tracker.download_budget = object()
+    tracker.create_parser = lambda: AsyncMultiModalContentParser(tracker)
+
+    connector = _create_dynamo_media_parser(tracker)._connector
+
+    assert connector.decoded_budget is tracker.decoded_budget
+    assert connector.download_budget is tracker.download_budget
+
+
+def test_content_parts_refuse_vllm_parser_without_connector_hook():
+    from dynamo.vllm.engine_generate import _create_dynamo_media_parser
+
+    tracker = _tracker_stub()
+    tracker.create_parser = lambda: SimpleNamespace(_connector=object())
+
+    with pytest.raises(RuntimeError, match="media URL policy"):
+        _create_dynamo_media_parser(tracker)
+
+
+def test_render_content_parts_rejects_remote_url_when_disabled(monkeypatch):
+    from vllm.renderers import chat_utils
+
+    from dynamo.common.http.url_validator import UrlValidationError
+    from dynamo.vllm.engine_generate import render_content_parts
+
+    def tracker_must_not_be_built(_model_config):
+        raise AssertionError("media was handed to vLLM despite the URL policy")
+
+    monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", "0")
+    monkeypatch.setattr(
+        chat_utils, "AsyncMultiModalItemTracker", tracker_must_not_be_built
+    )
+    part = {"type": "image_url", "url": "https://example.com/cat.png"}
+    with pytest.raises(UrlValidationError):
+        asyncio.run(render_content_parts(None, None, {}, [part]))
+
+
+def test_render_content_parts_maps_unreachable_media_to_400(monkeypatch):
+    import aiohttp
+    from vllm.renderers import chat_utils
+
+    from dynamo.common.http import HttpStatusError
+    from dynamo.vllm import engine_generate
+
+    class Tracker:
+        def __init__(self, _model_config):
+            pass
+
+        async def resolve_items(self):
+            raise aiohttp.ClientConnectionError("unreachable")
+
+    monkeypatch.setattr(chat_utils, "AsyncMultiModalItemTracker", Tracker)
+    monkeypatch.setattr(
+        engine_generate,
+        "_create_dynamo_media_parser",
+        lambda _tracker: SimpleNamespace(parse_image=lambda url, uuid: None),
+    )
+    with pytest.raises(HttpStatusError) as excinfo:
+        # Call through the patched module: other tests re-import dynamo.vllm
+        # submodules, so a separate import could see an unpatched copy.
+        asyncio.run(engine_generate.render_content_parts(None, None, {}, [_IMAGE_PART]))
+
+    assert excinfo.value.status == 400
+    assert isinstance(excinfo.value.__cause__, aiohttp.ClientConnectionError)
 
 
 @pytest.mark.parametrize(

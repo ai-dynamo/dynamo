@@ -162,6 +162,11 @@ try:
                 policy=policy,
                 max_bytes=min(limits) if limits else None,
             )
+            # vLLM's downloader charges the request-wide download budget
+            # (vLLM 0.33+); this fetch bypasses it, so charge it here.
+            download_budget = getattr(self, "download_budget", None)
+            if download_budget is not None:
+                download_budget.charge(len(content))
             return await asyncio.to_thread(media_io.load_bytes, content)
 
     logger.debug("Registered 'dynamo' MediaConnector with vLLM")
