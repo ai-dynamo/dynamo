@@ -11,6 +11,10 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 Deployments for `thinkingmachines/Inkling-NVFP4` — the NVFP4-quantized checkpoint of Thinking Machines Lab's first open-weights model, a Mixture-of-Experts that reasons natively with controllable reasoning effort. Two stacks, aimed at different jobs. **GB300 with vLLM** targets an agentic workload (64K median ISL, 400 median OSL, 90% KV cache hit) at 1M context with MTP speculative decoding and KV-aware routing, aggregated or disaggregated. **B200 with SGLang** is the day-0 profile and the only one that serves image and audio input. Pick your target; every command on this page updates to match.
 
+<Warning>
+The standard SGLang CUDA runtime excludes `tml-renderers` and cannot serve Inkling, including text-only requests. The B200 SGLang profile requires its dedicated `1.4.0-inkling-dev.1` image; do not replace it with a standard runtime image.
+</Warning>
+
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
 <div className="dynamo-target-picker-row">

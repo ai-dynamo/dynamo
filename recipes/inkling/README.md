@@ -7,6 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 Recipes for **thinkingmachines/Inkling-NVFP4**.
 
+> [!WARNING]
+> The standard SGLang CUDA runtime excludes `tml-renderers` and cannot serve Inkling, including text-only requests. The SGLang profile below requires its dedicated `1.4.0-inkling-dev.1` image; do not replace it with a standard runtime image.
+
 ## Configurations
 
 Dynamo + SGLang deployment profile:
