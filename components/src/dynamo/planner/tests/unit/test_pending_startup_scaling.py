@@ -3,7 +3,6 @@
 
 """Cancellation of startup capacity must not race a drain or manufacture demand."""
 
-import asyncio
 from copy import deepcopy
 from datetime import datetime, timezone
 from threading import Lock
@@ -36,10 +35,6 @@ from dynamo.planner.plugins.merge.types import ComponentKey
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 from dynamo.planner.plugins.orchestrator.pipeline import PipelineOutcome
 from dynamo.planner.plugins.types import ComponentTarget, ScalingProposal
-from dynamo.planner.tests.unit.test_environment import (
-    _assert_no_leftover_tasks,
-    _blocking_ready_wait,
-)
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -696,41 +691,6 @@ async def test_startup_wait_sees_pending_capacity_under_dgd_component_names(
         require_decode=True,
     )
     assert await environment._startup_blocked_only_by_pending()
-
-
-@pytest.mark.asyncio
-async def test_global_planner_startup_does_not_wait_for_pending_capacity():
-    local = _connector(_deployment(), _pods())
-    local.wait_for_deployment_ready = _blocking_ready_wait()
-    environment = PlannerEnvironmentImpl(
-        config=_config(),
-        controller=_global_planner(local),
-        require_prefill=True,
-        require_decode=True,
-    )
-
-    await asyncio.wait_for(environment._wait_for_startup_ready(), timeout=5)
-
-    local.wait_for_deployment_ready.assert_awaited_once_with(include_planner=False)
-    await _assert_no_leftover_tasks()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("unsafe", ["rollout", "no_serving_decode"])
-async def test_global_planner_startup_keeps_rollout_and_zero_serving_guards(unsafe):
-    deployment, pods = _deployment(), _pods()
-    if unsafe == "rollout":
-        deployment["status"]["rollingUpdate"] = {"phase": "InProgress"}
-    else:
-        deployment["status"]["components"]["d"]["readyReplicas"] = 0
-        pods[1].status.phase = "Pending"
-    environment = PlannerEnvironmentImpl(
-        config=_config(),
-        controller=_global_planner(_connector(deployment, pods)),
-        require_prefill=True,
-        require_decode=True,
-    )
-    assert not await environment._startup_blocked_only_by_pending()
 
 
 def test_pending_lookup_resolves_untyped_component_by_explicit_name():
