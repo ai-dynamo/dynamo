@@ -41,7 +41,12 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
+from dynamo.llm.exceptions import (
+    HttpError,
+    InvalidArgument,
+    RoutedEngineError,
+    WorkerUnavailable,
+)
 from dynamo.vllm.errors import vllm_client_error_to_public_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
@@ -1591,6 +1596,10 @@ class VllmProcessor:
             # that 503 into a 500; let the binding restore the class instead.
             raise
         except InvalidArgument:
+            raise
+        except RoutedEngineError:
+            # Keep the worker's error class (for example CapacityExhausted, HTTP 529);
+            # an error envelope would turn it into a 500.
             raise
         except Exception as e:
             backend_error = backend_invalid_argument_to_http_error(e)
