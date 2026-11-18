@@ -167,7 +167,9 @@ def test_external_typesafe_sdk_evaluation(external_decision_server):
 
 @pytest.mark.timeout(600)  # Six sequential HTTP calls can each take 60 seconds.
 def test_external_native_sglang_numeric_parity(external_decision_server):
-    base_url, model, _ = external_decision_server
+    base_url, model, expected_output_tokens = external_decision_server
+    if expected_output_tokens:
+        pytest.skip("Native SGLang parity applies only to the sglang profile")
     native_url = os.environ.get("DYNAMO_DECISION_NATIVE_URL")
     if not native_url:
         pytest.skip(
