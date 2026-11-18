@@ -131,6 +131,6 @@ node holds the remaining TP ranks.
 
 ### Multi-Node DP
 
-Attention DP across two nodes, with one sidecar per node.
+Attention DP across two nodes, with one sidecar per node (shown with DP=4, two ranks per node).
 
 ![With attention DP across two nodes, each node runs one Dynamo Sidecar that registers that node's DP ranks and calls its own SGLang listeners.](../../../docs/fern/assets/img/sidecar-sglang-multinode-dp.svg)

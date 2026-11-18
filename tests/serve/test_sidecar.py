@@ -81,6 +81,22 @@ TRTLLM_OPENENGINE_SKIP_REASON = (
 )
 
 
+def _sglang_reports_node_listeners() -> bool:
+    """Does the installed SGLang report `DeploymentInfo.node_listeners`?
+
+    The SGLang sidecar needs that table to serve DP>1 (sgl-project/sglang#46637).
+    Like `_trtllm_serves_openengine`, this reads the package without importing
+    it, so the DP>1 case runs once the pinned image has the field.
+    """
+    spec = importlib.util.find_spec("sglang")
+    locations = getattr(spec, "submodule_search_locations", None) if spec else None
+    for root in locations or ():
+        api_types = pathlib.Path(root) / "api" / "v1" / "api_types.py"
+        if api_types.is_file() and "node_listeners" in api_types.read_text():
+            return True
+    return False
+
+
 CANCELLATION_MAX_TOKENS = 2048
 CANCELLATION_CONTEXT_LEN = 4096
 # Disaggregated configs run two engines on one GPU with a 2048-token context.
@@ -602,9 +618,10 @@ sidecar_configs = {
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
             pytest.mark.requested_sglang_kv_tokens(2048),
-            pytest.mark.skip(
-                reason="DP>1 needs SGLang at or after sgl-project/sglang#46637; "
-                "the v0.5.23 pin lacks it"
+            pytest.mark.skipif(
+                not _sglang_reports_node_listeners(),
+                reason="the installed SGLang does not report "
+                "DeploymentInfo.node_listeners, which the sidecar needs for DP>1",
             ),
         ],
         model="silence09/DeepSeek-R1-Small-2layers",
