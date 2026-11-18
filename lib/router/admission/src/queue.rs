@@ -34,12 +34,17 @@ pub enum QueueLane {
 }
 
 /// Why a lane head could not dispatch. A recheck skips the lanes the change that caused it
-/// cannot free: a capacity change re-asks capacity-blocked lanes, the gate's own wake or timer
-/// re-asks every lane, and a fallback head competes on every dispatch pass.
+/// cannot free: a capacity change re-asks capacity-blocked lanes, probing the shared group
+/// once; the gate's own wake or timer re-asks every lane; a fallback head competes on every
+/// dispatch pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockReason {
     /// Every eligible worker is past the class's busy thresholds.
     Capacity,
+    /// As `Capacity`, for a head whose eligible workers are the class's: every such head in a
+    /// class gets the same answer, so a capacity recheck asks one of them and, while it is
+    /// still refused, leaves the rest blocked without a visit.
+    SharedCapacity,
     /// The dispatch gate holds the head.
     Gate,
     /// The head's exclusive affinity target is no longer eligible, so it may fall back to any
@@ -207,6 +212,12 @@ impl RecheckPlan {
                     || self.workers.iter().any(|&changed| worker.waits_on(changed))
             }
         }
+    }
+
+    /// Whether the plan reaches the shared-capacity group: anything but a recheck aimed at
+    /// specific worker lanes alone, since session lanes wait on whichever worker frees.
+    fn covers_shared(&self) -> bool {
+        self.all || self.capacity || !self.workers.is_empty()
     }
 
     fn scope(&self) -> Option<RecheckScope> {
@@ -537,8 +548,12 @@ struct PolicyClassQueue<T> {
     stats: PolicyQueueStats,
     deficit: usize,
     ready_by_lane: FxHashMap<LaneKey, BinaryHeap<PolicyQueueEntry<T>>>,
-    /// Lanes whose head could not dispatch, with the reason the last check gave.
+    /// Lanes whose head could not dispatch, with the reason the last check gave, except the
+    /// shared-capacity group below.
     blocked_lanes: FxHashMap<LaneKey, BlockReason>,
+    /// Lanes blocked for [`BlockReason::SharedCapacity`]: one answer covers them all, so a
+    /// capacity recheck probes one and visits the rest only when that one may go.
+    shared_blocked: FxHashSet<LaneKey>,
     /// Lanes waiting on an exclusive affinity target, for the host's affinity timer.
     affinity_lanes: FxHashSet<LaneKey>,
     /// One head per unblocked lane.
@@ -643,7 +658,7 @@ impl<T> PolicyClassQueue<T> {
         if old_head == Some(new_head) {
             return;
         }
-        if self.blocked_lanes.contains_key(&key) {
+        if self.is_blocked(key) {
             // A blocked lane keeps its reason; only a fallback head is re-pointed at the
             // new root so it keeps competing.
             if let Some(old_head) = old_head
@@ -660,14 +675,60 @@ impl<T> PolicyClassQueue<T> {
         }
     }
 
+    fn is_blocked(&self, lane: LaneKey) -> bool {
+        self.blocked_lanes.contains_key(&lane) || self.shared_blocked.contains(&lane)
+    }
+
+    fn block_reason(&self, lane: LaneKey) -> Option<BlockReason> {
+        self.blocked_lanes.get(&lane).copied().or_else(|| {
+            self.shared_blocked
+                .contains(&lane)
+                .then_some(BlockReason::SharedCapacity)
+        })
+    }
+
+    /// Forgets a lane's block, whichever group held it; `true` when it was blocked.
+    fn unblock(&mut self, lane: LaneKey) -> bool {
+        self.blocked_lanes.remove(&lane).is_some() | self.shared_blocked.remove(&lane)
+    }
+
     /// Records a head's refusal: the lane leaves the candidate index with its reason, and a
     /// fallback head keeps competing.
     fn block_lane(&mut self, head: LaneHead, reason: BlockReason) {
+        if reason == BlockReason::SharedCapacity {
+            self.blocked_lanes.remove(&head.lane);
+            self.shared_blocked.insert(head.lane);
+            self.fallback_heads.remove(&head);
+            return;
+        }
+        self.shared_blocked.remove(&head.lane);
         self.blocked_lanes.insert(head.lane, reason);
         if reason == BlockReason::Fallback {
             self.fallback_heads.insert(head);
         } else {
             self.fallback_heads.remove(&head);
+        }
+    }
+
+    /// Re-asks one blocked lane's head and files it: a candidate again, or blocked anew.
+    fn reask<V: Into<LaneCheck>>(
+        &mut self,
+        lane: LaneKey,
+        class_index: usize,
+        is_dispatchable: &mut impl FnMut(usize, &PolicyClassConfig, &T) -> V,
+    ) {
+        let ready = self
+            .ready_by_lane
+            .get(&lane)
+            .expect("blocked lane vanished");
+        let head = LaneHead::new(lane, ready.peek().expect("blocked lane is empty"));
+        match is_dispatchable(class_index, &self.config, head_payload(ready)).into() {
+            LaneCheck::Dispatch => {
+                self.unblock(lane);
+                self.fallback_heads.remove(&head);
+                self.candidate_lane_heads.insert(head);
+            }
+            LaneCheck::Blocked(reason) => self.block_lane(head, reason),
         }
     }
 
@@ -679,7 +740,7 @@ impl<T> PolicyClassQueue<T> {
     ) -> Option<DispatchCandidate> {
         if self.ready_by_lane.is_empty() {
             debug_assert!(
-                self.blocked_lanes.is_empty(),
+                self.blocked_lanes.is_empty() && self.shared_blocked.is_empty(),
                 "blocked lanes must have a ready lane"
             );
             return self
@@ -708,10 +769,12 @@ impl<T> PolicyClassQueue<T> {
             // Defer the scan until dispatch, when `is_dispatchable` is meaningful.
             // Re-peeking here also observes head changes from intervening `push_ready` calls.
             let plan = std::mem::take(&mut self.recheck);
+            self.recheck_shared(&plan, class_index, is_dispatchable);
             let Self {
                 config,
                 ready_by_lane,
                 blocked_lanes,
+                shared_blocked,
                 candidate_lane_heads,
                 fallback_heads,
                 ..
@@ -726,6 +789,11 @@ impl<T> PolicyClassQueue<T> {
                     LaneCheck::Dispatch => {
                         fallback_heads.remove(&head);
                         candidate_lane_heads.insert(head);
+                        false
+                    }
+                    LaneCheck::Blocked(BlockReason::SharedCapacity) => {
+                        fallback_heads.remove(&head);
+                        shared_blocked.insert(*lane);
                         false
                     }
                     LaneCheck::Blocked(now) => {
@@ -750,14 +818,14 @@ impl<T> PolicyClassQueue<T> {
             match is_dispatchable(class_index, &self.config, head_payload(ready)).into() {
                 LaneCheck::Dispatch => {
                     self.fallback_heads.pop_last();
-                    self.blocked_lanes.remove(&head.lane);
+                    self.unblock(head.lane);
                     self.candidate_lane_heads.insert(head);
                     break;
                 }
                 LaneCheck::Blocked(BlockReason::Fallback) => break,
                 LaneCheck::Blocked(reason) => {
                     self.fallback_heads.pop_last();
-                    self.blocked_lanes.insert(head.lane, reason);
+                    self.block_lane(head, reason);
                 }
             }
         }
@@ -821,6 +889,39 @@ impl<T> PolicyClassQueue<T> {
         }
     }
 
+    /// Re-asks the shared-capacity group. Under a capacity recheck one probe answers for the
+    /// whole group: while it is still refused the others are not visited; once it may go, or
+    /// under a full recheck, every lane is asked on its own, since the gate answers per head.
+    fn recheck_shared<V: Into<LaneCheck>>(
+        &mut self,
+        plan: &RecheckPlan,
+        class_index: usize,
+        is_dispatchable: &mut impl FnMut(usize, &PolicyClassConfig, &T) -> V,
+    ) {
+        if self.shared_blocked.is_empty() || !plan.covers_shared() {
+            return;
+        }
+        if !plan.all {
+            let probe = *self
+                .shared_blocked
+                .iter()
+                .next()
+                .expect("shared group is not empty");
+            let ready = self
+                .ready_by_lane
+                .get(&probe)
+                .expect("blocked lane vanished");
+            if is_dispatchable(class_index, &self.config, head_payload(ready)).into()
+                == LaneCheck::Blocked(BlockReason::SharedCapacity)
+            {
+                return;
+            }
+        }
+        for lane in std::mem::take(&mut self.shared_blocked) {
+            self.reask(lane, class_index, is_dispatchable);
+        }
+    }
+
     fn pop_lane(&mut self, placement: QueueLane) -> PolicyQueueEntry<T> {
         if !self.head_expiry {
             return self.pop_lane_head(placement);
@@ -839,7 +940,7 @@ impl<T> PolicyClassQueue<T> {
         let entry = match lane {
             None => self.pending.pop().expect("expiring shared root vanished"),
             Some(key) => {
-                let blocked = self.blocked_lanes.remove(&key).is_some();
+                let blocked = self.unblock(key);
                 let ready = self
                     .ready_by_lane
                     .get_mut(&key)
@@ -873,7 +974,9 @@ impl<T> PolicyClassQueue<T> {
             .ready_by_lane
             .get_mut(&key)
             .expect("queue admission lane vanished");
-        debug_assert!(!self.blocked_lanes.contains_key(&key));
+        debug_assert!(
+            !self.blocked_lanes.contains_key(&key) && !self.shared_blocked.contains(&key)
+        );
         let head = LaneHead::new(key, ready.peek().expect("queue admission head vanished"));
         let removed = self.candidate_lane_heads.remove(&head);
         debug_assert!(removed);
@@ -895,7 +998,7 @@ impl<T> PolicyClassQueue<T> {
     }
 
     fn recheck_lane(&mut self, lane: LaneKey) {
-        if self.blocked_lanes.contains_key(&lane) {
+        if self.is_blocked(lane) {
             self.recheck.lanes.insert(lane);
         }
     }
@@ -920,6 +1023,8 @@ impl<T> PolicyClassQueue<T> {
         self.candidate_lane_heads.clear();
         self.blocked_lanes
             .retain(|lane, _| self.ready_by_lane.contains_key(lane));
+        self.shared_blocked
+            .retain(|lane| self.ready_by_lane.contains_key(lane));
         self.affinity_lanes
             .retain(|lane| self.ready_by_lane.contains_key(lane));
         for old_head in std::mem::take(&mut self.fallback_heads) {
@@ -932,7 +1037,7 @@ impl<T> PolicyClassQueue<T> {
             }
         }
         for (&lane, ready) in &self.ready_by_lane {
-            if !self.blocked_lanes.contains_key(&lane) {
+            if !self.blocked_lanes.contains_key(&lane) && !self.shared_blocked.contains(&lane) {
                 self.candidate_lane_heads
                     .insert(LaneHead::new(lane, ready.peek().expect("lane is empty")));
             }
@@ -995,6 +1100,7 @@ impl<T> PolicyQueue<T> {
                     pending: BinaryHeap::new(),
                     ready_by_lane: FxHashMap::default(),
                     blocked_lanes: FxHashMap::default(),
+                    shared_blocked: FxHashSet::default(),
                     affinity_lanes: FxHashSet::default(),
                     candidate_lane_heads: BTreeSet::new(),
                     fallback_heads: BTreeSet::new(),
@@ -1290,12 +1396,14 @@ impl<T> PolicyQueue<T> {
         // checked the lane's next head: unblock the lane, as head expiry does, so the next
         // dispatch checks it.
         let ready_by_lane = &class.ready_by_lane;
-        class.blocked_lanes.retain(|lane, _| {
-            !ready_by_lane
+        let root_leaves = |lane: &LaneKey| {
+            ready_by_lane
                 .get(lane)
                 .and_then(BinaryHeap::peek)
                 .is_some_and(|root| remove_sequences.contains(&root.enqueue_seq))
-        });
+        };
+        class.blocked_lanes.retain(|lane, _| !root_leaves(lane));
+        class.shared_blocked.retain(|lane| !root_leaves(lane));
 
         let mut removed = Vec::new();
         let mut retained = Vec::with_capacity(class.pending.len());
@@ -1623,9 +1731,7 @@ impl<T> PolicyQueue<T> {
     /// Whether a class currently holds entries blocked on a pin to `worker`, for tests of
     /// rechecks.
     pub fn class_blocks_worker(&self, class_index: usize, worker: WorkerWithDpRank) -> bool {
-        self.classes[class_index]
-            .blocked_lanes
-            .contains_key(&LaneKey::Worker(WorkerLane::exact(worker)))
+        self.classes[class_index].is_blocked(LaneKey::Worker(WorkerLane::exact(worker)))
     }
 
     /// Why a class's lane is blocked, or `None` while its head is a dispatch candidate.
@@ -1635,12 +1741,13 @@ impl<T> PolicyQueue<T> {
         lane: QueueLane,
     ) -> Option<BlockReason> {
         let key = lane.key()?;
-        self.classes[class_index].blocked_lanes.get(&key).copied()
+        self.classes[class_index].block_reason(key)
     }
 
     /// How many of the class's lanes are blocked.
     pub fn class_blocked_lane_count(&self, class_index: usize) -> usize {
-        self.classes[class_index].blocked_lanes.len()
+        let class = &self.classes[class_index];
+        class.blocked_lanes.len() + class.shared_blocked.len()
     }
 
     /// The scope the class's next dispatch rechecks its blocked lanes with, if one is pending.
@@ -1653,7 +1760,7 @@ impl<T> PolicyQueue<T> {
         let class = &self.classes[class_index];
         [
             class.ready_by_lane.len(),
-            class.blocked_lanes.len(),
+            class.blocked_lanes.len() + class.shared_blocked.len(),
             class.fallback_heads.len(),
             class.candidate_lane_heads.len(),
         ]

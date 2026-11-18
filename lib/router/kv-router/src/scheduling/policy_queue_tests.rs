@@ -361,9 +361,9 @@ fn enqueue_due(
         .unwrap();
 }
 
-fn drain_payloads(
+fn drain_payloads<V: Into<LaneCheck>>(
     queue: &mut PolicyQueue<&'static str>,
-    is_dispatchable: impl FnMut(usize, &PolicyClassConfig, &&'static str) -> bool + Copy,
+    is_dispatchable: impl FnMut(usize, &PolicyClassConfig, &&'static str) -> V + Copy,
 ) -> Vec<&'static str> {
     std::iter::from_fn(|| queue.pop_next(is_dispatchable))
         .map(PolicyQueueEntry::into_payload)
@@ -509,6 +509,61 @@ fn capacity_recheck_skips_gate_held_lanes() {
     queue.recheck_blocked_lanes(RecheckScope::All);
     queue.recheck_blocked_lanes(RecheckScope::Capacity);
     assert_eq!(queue.class_pending_recheck(0), Some(RecheckScope::All));
+}
+
+#[test]
+fn shared_capacity_lanes_are_probed_once_per_capacity_recheck() {
+    let mut queue = PolicyQueue::new(&edf_profile());
+    for id in 1..=3 {
+        enqueue_due(&mut queue, None, None, lane_of(id), "session");
+    }
+    enqueue_due(
+        &mut queue,
+        None,
+        None,
+        QueueLane::Exact(WorkerWithDpRank::new(9, 0)),
+        "pinned",
+    );
+    let asks = std::cell::Cell::new(0usize);
+    let room = std::cell::Cell::new(false);
+    let predicate = |_: usize, _: &PolicyClassConfig, payload: &&'static str| {
+        asks.set(asks.get() + 1);
+        match (*payload, room.get()) {
+            ("session", false) => LaneCheck::Blocked(BlockReason::SharedCapacity),
+            ("session", true) => LaneCheck::Dispatch,
+            _ => LaneCheck::Blocked(BlockReason::Capacity),
+        }
+    };
+
+    // Every lane is refused once; the three sessions join the shared group.
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(asks.get(), 4);
+    assert_eq!(
+        queue.class_lane_block_reason(0, lane_of(1)),
+        Some(BlockReason::SharedCapacity)
+    );
+    assert_eq!(queue.class_blocked_lane_count(0), 4);
+
+    // A capacity change probes one shared lane and the pinned lane: two asks, not four.
+    asks.set(0);
+    queue.recheck_blocked_lanes(RecheckScope::Capacity);
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(asks.get(), 2);
+    assert_eq!(queue.class_blocked_lane_count(0), 4);
+
+    // Once the probe may go, every shared lane is asked and dispatches in order.
+    room.set(true);
+    asks.set(0);
+    queue.recheck_blocked_lanes(RecheckScope::Capacity);
+    assert_eq!(
+        drain_payloads(&mut queue, predicate),
+        ["session", "session", "session"]
+    );
+    assert_eq!(queue.class_blocked_lane_count(0), 1);
+    assert_eq!(
+        queue.class_lane_block_reason(0, QueueLane::Exact(WorkerWithDpRank::new(9, 0))),
+        Some(BlockReason::Capacity)
+    );
 }
 
 #[test]

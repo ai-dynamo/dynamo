@@ -10,7 +10,8 @@ pub use crate::classifier::{AbortCause, RequestLifecycle, RequestProgress, Worke
 pub use crate::placement::SessionLane;
 pub use crate::profile::{PolicyClassConfig, PolicyProfile, RouterQueuePolicy};
 pub use crate::queue::{
-    PolicyQueue, QueueLane, QueueMetadata, QueueRejection, QueueSnapshot, RecheckScope,
+    BlockReason, LaneCheck, PolicyQueue, QueueLane, QueueMetadata, QueueRejection, QueueSnapshot,
+    RecheckScope,
 };
 
 // What the frontend host (lib/llm) names beyond the lists above.

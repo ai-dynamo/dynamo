@@ -125,6 +125,15 @@ impl QueuedRequest {
     }
 }
 
+/// Whether a head's eligible ranks are the class's: no pin, caller allow-list, LoRA, or, under
+/// an exclusive selector, affinity target. Such heads share one room answer per class.
+fn unconstrained(request: &SchedulingRequest, exclusive: bool) -> bool {
+    request.pinned_worker.is_none()
+        && request.allowed_worker_ids.is_none()
+        && request.lora_name.is_none()
+        && !(exclusive && request.affinity_target.is_some())
+}
+
 /// Asks the dispatch gate about one head inside a dispatch predicate: `false` holds the head
 /// and records the earliest requested recheck still in the future; `true` stores the gate's
 /// target on the head.
@@ -1047,6 +1056,11 @@ struct SchedulerQueueActor<
     /// counted per worker. Refilled by `with_projected_loads`; empty while nothing is full.
     full_ranks: FullRankCounts,
     gate_full_ranks: FullRankCounts,
+    /// Per class, within one dispatch pass: whether an unconstrained head, one with no pin,
+    /// allowed set, LoRA, or exclusive target, has an eligible rank with room. Every such head
+    /// in a class gets the same answer, so a capacity change walks the ranks once per class
+    /// rather than once per blocked lane.
+    class_room: Vec<Option<bool>>,
     write_log: ActorWriteLog,
     /// Scratch for the ranks re-read in a prepared load.
     reread_ranks: Vec<WorkerWithDpRank>,
@@ -1300,6 +1314,7 @@ impl<
             projected_loads: FxHashMap::default(),
             full_ranks: FullRankCounts::default(),
             gate_full_ranks: FullRankCounts::default(),
+            class_room: Vec::new(),
             write_log: ActorWriteLog::new(Arc::clone(&actor_writes)),
             reread_ranks: Vec::new(),
             block_size,
@@ -2588,7 +2603,10 @@ impl<
                     .flatten();
                 let mut gate_fresh = false;
                 let gate = gate.as_deref();
-                self.pending.extract_next(|_, class, queued| {
+                let class_room = &mut self.class_room;
+                class_room.clear();
+                class_room.resize(self.pending.class_count(), None);
+                self.pending.extract_next(|class_index, class, queued| {
                     if let Some(gate) = gate
                         && !gate_allows(gate, &class.name, queued, &gate_recheck_at)
                     {
@@ -2597,6 +2615,14 @@ impl<
                     if !class.queueing_enabled() {
                         return LaneCheck::Dispatch;
                     }
+                    let shared_answer = unconstrained(&queued.request, exclusive);
+                    if shared_answer && let Some(room) = class_room[class_index] {
+                        return if room {
+                            LaneCheck::Dispatch
+                        } else {
+                            LaneCheck::Blocked(BlockReason::SharedCapacity)
+                        };
+                    }
                     if !gate_fresh {
                         let rejecting = reset_full_ranks(full_ranks, reject);
                         if let Some(full_ranks) = rejecting {
@@ -2604,7 +2630,7 @@ impl<
                         }
                         gate_fresh = true;
                     }
-                    eligibility.with(
+                    let check = eligibility.with(
                         &queued.request,
                         workers,
                         full_ranks,
@@ -2630,7 +2656,16 @@ impl<
                                 LaneCheck::Blocked(BlockReason::Capacity)
                             }
                         },
-                    )
+                    );
+                    if shared_answer {
+                        class_room[class_index] = Some(check == LaneCheck::Dispatch);
+                        if check == LaneCheck::Blocked(BlockReason::Capacity) {
+                            // Every unconstrained head of the class shares this refusal, so
+                            // the queue probes one of them on the next capacity change.
+                            return LaneCheck::Blocked(BlockReason::SharedCapacity);
+                        }
+                    }
+                    check
                 })
             };
             self.gate_recheck_at = gate_recheck_at.get();
@@ -5436,6 +5471,7 @@ mod tests {
             projected_loads: FxHashMap::with_capacity_and_hasher(8, Default::default()),
             full_ranks: FullRankCounts::default(),
             gate_full_ranks: FullRankCounts::default(),
+            class_room: Vec::new(),
             write_log: ActorWriteLog::new(Arc::clone(&queue.actor_writes)),
             reread_ranks: Vec::new(),
             block_size: 16,
