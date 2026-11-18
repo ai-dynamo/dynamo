@@ -1050,13 +1050,15 @@ type oldWorkerReplicaPlan struct {
 	createdAt metav1.Time
 	spec      int32 // declared intent for this DCD
 	target    int32 // desired replica count for this DCD
+	serving   bool  // this hash has an available replica of every required old role
 }
 
 func allocateOldWorkerDCDReplicas(
 	dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
 	oldTarget int32,
+	servingOldHashes map[string]bool,
 ) map[string]int32 {
-	plans := buildOldWorkerReplicaPlans(dcds)
+	plans := buildOldWorkerReplicaPlans(dcds, servingOldHashes)
 	var servingTarget int32
 	for i := range plans {
 		servingTarget += plans[i].target
@@ -1076,6 +1078,7 @@ func allocateOldWorkerDCDReplicas(
 // initializes DCD replicas to available replicas
 func buildOldWorkerReplicaPlans(
 	dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
+	servingOldHashes map[string]bool,
 ) []oldWorkerReplicaPlan {
 	plans := make([]oldWorkerReplicaPlan, 0, len(dcds))
 
@@ -1087,6 +1090,7 @@ func buildOldWorkerReplicaPlans(
 			createdAt: dcd.CreationTimestamp,
 			spec:      state.Spec,
 			target:    target,
+			serving:   servingOldHashes[dynamo.GetDCDEffectiveWorkerHash(dcd)],
 		})
 	}
 
@@ -1094,7 +1098,11 @@ func buildOldWorkerReplicaPlans(
 }
 
 func removeAvailableReplicasOldestFirst(plans []oldWorkerReplicaPlan, replicasToRemove int32) {
+	// Retire incomplete hashes before taking available replicas from a serving hash.
 	sort.Slice(plans, func(i, j int) bool {
+		if plans[i].serving != plans[j].serving {
+			return !plans[i].serving
+		}
 		if plans[i].createdAt.Time.Equal(plans[j].createdAt.Time) {
 			return plans[i].name < plans[j].name
 		}
@@ -1434,7 +1442,8 @@ func resolveRollingUpdateParams(annotations map[string]string, desiredReplicas i
 }
 
 // buildRollingUpdateContext calculates replica targets, retaining old workers while
-// a complete old worker hash can serve and the new generation cannot. dgd must be non-nil.
+// a complete old worker hash remains deployed and the new generation cannot serve.
+// dgd must be non-nil.
 func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -1456,11 +1465,22 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 	oldWorkerDCDReplicas := make(map[string]int32)
 	newWorkerReplicas := make(map[string]int32)
 
+	// Without old workers there are no rollout targets to calculate.
+	if len(oldDCDsByComponent) == 0 {
+		return dynamo.RollingUpdateContext{
+			NewWorkerHash:                      newWorkerHash,
+			OldWorkerReplicaTargetsByComponent: oldWorkerComponentReplicas,
+			OldWorkerReplicaTargetsByDCD:       oldWorkerDCDReplicas,
+			NewWorkerReplicaTargetsByComponent: newWorkerReplicas,
+		}, nil
+	}
+
 	// Workers pair within one hash, so unmatched old roles must not hold up the rollout.
 	newStates := make(map[string]dcdComponentState)
 	newGenerationServes := true
-	oldAvailableComponentsByHash := make(map[string]map[string]bool)
-	requiredWorkerComponents := 0
+	oldDeployedRolesByHash := make(map[string]int)
+	oldAvailableRolesByHash := make(map[string]int)
+	requiredOldWorkerComponents := 0
 	for i := range dgd.Spec.Components {
 		spec := &dgd.Spec.Components[i]
 		if !dynamo.IsWorkerComponent(string(spec.ComponentType)) {
@@ -1483,32 +1503,44 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 		if spec.Replicas != nil && *spec.Replicas == 0 {
 			continue
 		}
-		requiredWorkerComponents++
 		if newState.Available == 0 {
 			newGenerationServes = false
 		}
 
-		for _, oldDCD := range oldDCDsByComponent[componentName] {
-			if dcdComponentStateFromDCD(oldDCD).Available == 0 {
-				continue
-			}
+		// Newly added roles were never required by the old generation.
+		oldDCDs := oldDCDsByComponent[componentName]
+		if len(oldDCDs) > 0 {
+			requiredOldWorkerComponents++
+		}
+
+		// Declared replicas survive temporary pod outages; availability chooses retirement order.
+		for _, oldDCD := range oldDCDs {
+			state := dcdComponentStateFromDCD(oldDCD)
 			hash := dynamo.GetDCDEffectiveWorkerHash(oldDCD)
-			if oldAvailableComponentsByHash[hash] == nil {
-				oldAvailableComponentsByHash[hash] = make(map[string]bool)
+			if state.Spec > 0 {
+				oldDeployedRolesByHash[hash]++
 			}
-			oldAvailableComponentsByHash[hash][componentName] = true
+			if state.Available > 0 {
+				oldAvailableRolesByHash[hash]++
+			}
 		}
 	}
 
-	// Hold old replicas only while at least one old hash has every required role.
-	oldGenerationServes := false
-	for _, components := range oldAvailableComponentsByHash {
-		if len(components) == requiredWorkerComponents {
-			oldGenerationServes = true
-			break
+	// Keep a complete old hash deployed until all new roles are available.
+	oldGenerationDeployed := false
+	servingOldHashes := make(map[string]bool)
+	for hash, roles := range oldDeployedRolesByHash {
+		if roles == requiredOldWorkerComponents {
+			oldGenerationDeployed = true
+		}
+		if oldAvailableRolesByHash[hash] == requiredOldWorkerComponents {
+			servingOldHashes[hash] = true
 		}
 	}
-	holdOldGeneration := oldGenerationServes && !newGenerationServes
+	holdOldGeneration := oldGenerationDeployed && !newGenerationServes
+	if !holdOldGeneration {
+		servingOldHashes = nil
+	}
 
 	for i := range dgd.Spec.Components {
 		spec := &dgd.Spec.Components[i]
@@ -1551,17 +1583,17 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			maxSurge, maxUnavailable = resolveRollingUpdateParams(annotations, desired)
 			minAvailable = desired - maxUnavailable
 
-			newAvailable := newState.Available
-			if holdOldGeneration {
-				newAvailable = 0
-			}
-			newUnavailable := max(int32(0), newState.Spec-newAvailable)
+			newUnavailable := max(int32(0), newState.Spec-newState.Available)
 			// maxScaledDown is the maximum number of old replicas that can be scaled down
 			maxScaledDown := max(int32(0), (oldState.Spec+newState.Spec)-minAvailable-newUnavailable)
 			oldUnhealthy := max(int32(0), oldState.Spec-oldState.Available)
 			// availableSurplus is how many extra available replicas we have above minAvailable (min 0)
-			availableSurplus := max(int32(0), (oldState.Available+newAvailable)-minAvailable)
+			availableSurplus := max(int32(0), (oldState.Available+newState.Available)-minAvailable)
 			oldTarget = max(int32(0), oldState.Spec-min(maxScaledDown, oldUnhealthy+availableSurplus))
+			if holdOldGeneration {
+				// Keep the old generation at the user's floor while the new one cannot serve.
+				oldTarget = max(int32(0), min(oldState.Spec, minAvailable))
+			}
 
 			// Surge budget uses Spec (declared intent) like K8s Deployment controller; scheduler enforces actual resource constraints.
 			scaleUpBudget := max(int32(0), desired+maxSurge-oldState.Spec-newState.Spec)
@@ -1571,7 +1603,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 		oldWorkerComponentReplicas[componentName] = oldTarget
 		newWorkerReplicas[componentName] = newTarget
 
-		maps.Copy(oldWorkerDCDReplicas, allocateOldWorkerDCDReplicas(oldDCDs, oldTarget))
+		maps.Copy(oldWorkerDCDReplicas, allocateOldWorkerDCDReplicas(oldDCDs, oldTarget, servingOldHashes))
 
 		logger.V(1).Info("Worker update replica calculation",
 			"component", componentName,
@@ -1593,7 +1625,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			continue
 		}
 		oldWorkerComponentReplicas[componentName] = 0
-		maps.Copy(oldWorkerDCDReplicas, allocateOldWorkerDCDReplicas(oldDCDs, 0))
+		maps.Copy(oldWorkerDCDReplicas, allocateOldWorkerDCDReplicas(oldDCDs, 0, nil))
 	}
 
 	return dynamo.RollingUpdateContext{

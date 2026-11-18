@@ -3513,7 +3513,7 @@ func TestAllocateOldWorkerDCDReplicas(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := allocateOldWorkerDCDReplicas(tt.dcds, tt.oldTarget)
+			got := allocateOldWorkerDCDReplicas(tt.dcds, tt.oldTarget, nil)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -5069,6 +5069,173 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 			expectedNew:        map[string]int32{"prefill": 1, "decode": 1},
 			expectedOldDCDSpec: map[string]int32{"prefill": 0, "decode": 0},
 		},
+		{
+			name: "disagg - retire stalled hash before the serving oldest hash",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": {ComponentType: consts.ComponentTypePrefill, Replicas: new(int32(1))},
+				"decode":  {ComponentType: consts.ComponentTypeDecode, Replicas: new(int32(1))},
+			},
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
+				prefillA := makeOldDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, "oldhash0", 1, 1, 1)
+				decodeA := makeOldDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, "oldhash0", 1, 1, 1)
+				prefillB := makeOldDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, "oldhash1", 1, 1, 1)
+				decodeB := makeOldDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, "oldhash1", 1, 1, 0)
+				prefillA.CreationTimestamp = metav1.NewTime(time.Unix(1, 0))
+				decodeA.CreationTimestamp = prefillA.CreationTimestamp
+				prefillB.CreationTimestamp = metav1.NewTime(time.Unix(2, 0))
+				decodeB.CreationTimestamp = prefillB.CreationTimestamp
+				return []runtime.Object{prefillA, decodeA, prefillB, decodeB}
+			},
+			expectedOld: map[string]int32{"prefill": 1, "decode": 1},
+			expectedNew: map[string]int32{"prefill": 0, "decode": 0},
+			expectedOldDCDTargets: map[string]int32{
+				"test-dgd-prefill-oldhash0": 1,
+				"test-dgd-decode-oldhash0":  1,
+				"test-dgd-prefill-oldhash1": 0,
+				"test-dgd-decode-oldhash1":  0,
+			},
+		},
+		{
+			name: "disagg - restarting old decode keeps old prefill",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": {ComponentType: consts.ComponentTypePrefill, Replicas: new(int32(1))},
+				"decode":  {ComponentType: consts.ComponentTypeDecode, Replicas: new(int32(1))},
+			},
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, "", 1, 1, 1),
+					makeOldDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, "", 1, 1, 0),
+				}
+			},
+			newDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, newHash string) []runtime.Object {
+				return []runtime.Object{
+					makeNewDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, newHash, 1, 1, 1),
+					makeNewDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, newHash, 1, 1, 0),
+				}
+			},
+			expectedOld:        map[string]int32{"prefill": 1, "decode": 1},
+			expectedNew:        map[string]int32{"prefill": 1, "decode": 1},
+			expectedOldDCDSpec: map[string]int32{"prefill": 1, "decode": 1},
+		},
+		{
+			name: "disagg - added worker does not change old required roles",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": {ComponentType: consts.ComponentTypePrefill, Replicas: new(int32(1))},
+				"decode":  {ComponentType: consts.ComponentTypeDecode, Replicas: new(int32(1))},
+				"encode":  {ComponentType: consts.ComponentTypeWorker, Replicas: new(int32(1))},
+			},
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, "", 1, 1, 1),
+					makeOldDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, "", 1, 1, 1),
+				}
+			},
+			newDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, newHash string) []runtime.Object {
+				return []runtime.Object{
+					makeNewDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, newHash, 1, 1, 1),
+					makeNewDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, newHash, 1, 1, 0),
+					makeNewDCD(dgd, "test-dgd", "encode", consts.ComponentTypeWorker, newHash, 1, 1, 1),
+				}
+			},
+			expectedOld:        map[string]int32{"prefill": 1, "decode": 1},
+			expectedNew:        map[string]int32{"prefill": 1, "decode": 1},
+			expectedOldDCDSpec: map[string]int32{"prefill": 1, "decode": 1},
+		},
+		{
+			name: "disagg - zero replica worker does not prevent hold",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill":  {ComponentType: consts.ComponentTypePrefill, Replicas: new(int32(1))},
+				"decode":   {ComponentType: consts.ComponentTypeDecode, Replicas: new(int32(1))},
+				"disabled": {ComponentType: consts.ComponentTypeWorker, Replicas: new(int32(0))},
+			},
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, "", 1, 1, 1),
+					makeOldDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, "", 1, 1, 1),
+					makeOldDCD(dgd, "test-dgd", "disabled", consts.ComponentTypeWorker, "", 0, 0, 0),
+				}
+			},
+			newDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, newHash string) []runtime.Object {
+				return []runtime.Object{
+					makeNewDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, newHash, 1, 1, 1),
+					makeNewDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, newHash, 1, 1, 0),
+					makeNewDCD(dgd, "test-dgd", "disabled", consts.ComponentTypeWorker, newHash, 0, 0, 0),
+				}
+			},
+			expectedOld:        map[string]int32{"prefill": 1, "decode": 1, "disabled": 0},
+			expectedNew:        map[string]int32{"prefill": 1, "decode": 1, "disabled": 0},
+			expectedOldDCDSpec: map[string]int32{"prefill": 1, "decode": 1, "disabled": 0},
+		},
+		{
+			name: "aggregated - two worker components hold the old generation",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"wa": {ComponentType: consts.ComponentTypeWorker, Replicas: new(int32(1))},
+				"wb": {ComponentType: consts.ComponentTypeWorker, Replicas: new(int32(1))},
+			},
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD(dgd, "test-dgd", "wa", consts.ComponentTypeWorker, "", 1, 1, 1),
+					makeOldDCD(dgd, "test-dgd", "wb", consts.ComponentTypeWorker, "", 1, 1, 1),
+				}
+			},
+			newDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, newHash string) []runtime.Object {
+				return []runtime.Object{
+					makeNewDCD(dgd, "test-dgd", "wa", consts.ComponentTypeWorker, newHash, 1, 1, 1),
+					makeNewDCD(dgd, "test-dgd", "wb", consts.ComponentTypeWorker, newHash, 1, 1, 0),
+				}
+			},
+			expectedOld:        map[string]int32{"wa": 1, "wb": 1},
+			expectedNew:        map[string]int32{"wa": 1, "wb": 1},
+			expectedOldDCDSpec: map[string]int32{"wa": 1, "wb": 1},
+		},
+		{
+			name: "disagg - hold eight old replicas at the default floor",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": {ComponentType: consts.ComponentTypePrefill, Replicas: new(int32(10))},
+				"decode":  {ComponentType: consts.ComponentTypeDecode, Replicas: new(int32(10))},
+			},
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, "", 8, 8, 8),
+					makeOldDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, "", 8, 8, 8),
+				}
+			},
+			newDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, newHash string) []runtime.Object {
+				return []runtime.Object{
+					makeNewDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, newHash, 3, 3, 3),
+					makeNewDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, newHash, 3, 3, 0),
+				}
+			},
+			expectedOld:        map[string]int32{"prefill": 8, "decode": 8},
+			expectedNew:        map[string]int32{"prefill": 5, "decode": 5},
+			expectedOldDCDSpec: map[string]int32{"prefill": 8, "decode": 8},
+		},
+		{
+			name: "disagg - hold respects prefill maxUnavailable one",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": {
+					ComponentType: consts.ComponentTypePrefill,
+					Replicas:      new(int32(1)),
+					Annotations:   map[string]string{KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "1"},
+				},
+				"decode": {ComponentType: consts.ComponentTypeDecode, Replicas: new(int32(1))},
+			},
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, "", 1, 1, 1),
+					makeOldDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, "", 1, 1, 1),
+				}
+			},
+			newDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, newHash string) []runtime.Object {
+				return []runtime.Object{
+					makeNewDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, newHash, 1, 1, 1),
+					makeNewDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, newHash, 1, 1, 0),
+				}
+			},
+			expectedOld:        map[string]int32{"prefill": 0, "decode": 1},
+			expectedNew:        map[string]int32{"prefill": 1, "decode": 1},
+			expectedOldDCDSpec: map[string]int32{"prefill": 0, "decode": 1},
+		},
 	}
 
 	for _, tt := range tests {
@@ -5129,7 +5296,7 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 			}
 
 			if tt.expectedOldDCDTargets != nil {
-				t.Log("Check that the unmatched old prefill releases its replicas")
+				t.Log("Check replica targets for each old DCD")
 				assert.Equal(t, tt.expectedOldDCDTargets, result.OldWorkerReplicaTargetsByDCD)
 			}
 
