@@ -1236,19 +1236,13 @@ RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
 
 
-async def _translate_vllm_client_errors(
+def _translate_vllm_client_errors(
     generator: AsyncIterator[ResponseT],
 ) -> AsyncIterator[ResponseT]:
-    """Keep request-side vLLM errors client-visible on worker endpoints."""
-    from vllm.exceptions import VLLMClientError
+    # Keep exception imports lazy for optional-SDK module discovery.
+    from .errors import _translate_vllm_client_errors as translate
 
-    from .errors import vllm_client_error_to_http_error
-
-    try:
-        async for chunk in generator:
-            yield chunk
-    except VLLMClientError as exc:
-        raise vllm_client_error_to_http_error(exc) from exc
+    return translate(generator)
 
 
 def _as_exact_int(value: object) -> Optional[int]:
