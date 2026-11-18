@@ -10,9 +10,11 @@ processes import from GMS metadata (RO).
 
 from __future__ import annotations
 
+import copy
 import gc
 import logging
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterator
 
@@ -283,6 +285,7 @@ def _load_read_mode(
     try:
         model = _create_meta_model(vllm_config, model_config)
         materialize_module_from_gms(gms_client, model, device_index=device_index)
+        _rebuild_kv_cache_scales(model)
 
         # MX: register materialized tensors (available for P2P transfer)
         mx_ctx = get_mx_load_context(vllm_config, model_config)
@@ -547,9 +550,98 @@ def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
         with meta_device:
             model = initialize_model(vllm_config=vllm_config, model_config=model_config)
 
-    try:
-        process_weights_after_loading(model, model_config, meta_device)
-    except Exception as e:
-        logger.debug("[GMS] Post-processing on meta tensors: %s", e)
+    # vLLM re-ties a checkpoint's redundant lm_head by comparing it with the
+    # input embeddings, which needs tensor values. The writer already decided:
+    # a re-tied lm_head is published at the embeddings' bytes.
+    meta_config = copy.copy(model_config)
+    meta_config.word_embeddings_untied_by_checkpoint = False
+    with _without_kv_cache_methods(model):
+        try:
+            process_weights_after_loading(model, meta_config, meta_device)
+        except Exception as e:
+            # Layers after the failing one, and the model-level hook, would
+            # keep their construction-time state next to the writer's
+            # post-processed weights, and could serve wrong output.
+            raise RuntimeError(
+                "[GMS] Read-only attach cannot rebuild this model's layer state: "
+                f"weight post-processing on meta tensors failed ({e!r}). A step "
+                "of this model's post-processing needs weight values, so the "
+                "model cannot attach read-only through GMS; the chained error "
+                "shows the step"
+            ) from e
 
     return model
+
+
+def _kv_cache_layers(model: torch.nn.Module) -> list[torch.nn.Module]:
+    # vLLM is imported in functions: this module is also imported without it.
+    from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+
+    return [
+        module
+        for module in model.modules()
+        if isinstance(getattr(module, "quant_method", None), BaseKVCacheMethod)
+    ]
+
+
+@contextmanager
+def _without_kv_cache_methods(model: torch.nn.Module) -> Iterator[None]:
+    """Hide KV-cache quant methods from post-processing on meta.
+
+    They read the checkpoint's scale values, which meta tensors do not have,
+    and would stop the post-processing of every later layer.
+    _rebuild_kv_cache_scales handles those layers after attach.
+    """
+    hidden = [(module, module.quant_method) for module in _kv_cache_layers(model)]
+    for module, _ in hidden:
+        del module.quant_method
+    try:
+        yield
+    finally:
+        for module, method in hidden:
+            module.quant_method = method
+
+
+# Checkpoint scale placeholders that the writer's post-processing consumes
+# (BaseKVCacheMethod and CompressedTensorsKVCacheMethod create_weights).
+_KV_SCALE_PLACEHOLDERS = (
+    "k_scale",
+    "v_scale",
+    "q_scale",
+    "prob_scale",
+    "k_zero_point",
+    "v_zero_point",
+    "q_zero_point",
+)
+
+
+def _rebuild_kv_cache_scales(model: torch.nn.Module) -> None:
+    """Rebuild host-side KV-cache scales from the attached scale tensors.
+
+    The writer folded the checkpoint scales into _k_scale, _v_scale and
+    _q_scale and published those; the attention backends also read host
+    copies (_k_scale_float, ...), which are not tensors in GMS. vLLM's
+    pre-processed-weights mode rebuilds them from the attached tensors.
+    """
+    from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+    from vllm.model_executor.utils import weights_already_processed
+
+    layers = _kv_cache_layers(model)
+    with weights_already_processed():
+        for layer in layers:
+            for name in _KV_SCALE_PLACEHOLDERS:
+                placeholder = layer._parameters.get(name)
+                if placeholder is not None and placeholder.is_meta:
+                    del layer._parameters[name]
+            if layer._k_scale.numel() != 1 or layer._v_scale.numel() != 1:
+                raise RuntimeError(
+                    "[GMS] Read-only attach cannot rebuild per-head KV-cache "
+                    "scales: vLLM's pre-processed weights path supports only "
+                    "per-tensor scales"
+                )
+            # The base implementation, not the layer's method: vLLM 0.33's
+            # compressed-tensors override has no pre-processed branch, and on
+            # vLLM main that branch is exactly this call.
+            BaseKVCacheMethod.process_weights_after_loading(layer.quant_method, layer)
+    if layers:
+        logger.info("[GMS] Rebuilt KV-cache scales for %d attached layers", len(layers))
