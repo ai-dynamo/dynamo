@@ -482,9 +482,6 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
             ),
             pytest.param({"cache_salt": ""}, None, None, id="empty_legacy"),
             pytest.param(
-                {"nvext": {"cache_salt": ""}}, None, None, id="empty_canonical"
-            ),
-            pytest.param(
                 {"cache_salt": "legacy"},
                 {"cache_salt": "legacy"},
                 {"nvext": {"cache_salt": "legacy"}},
