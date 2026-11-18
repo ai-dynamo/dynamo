@@ -36,9 +36,6 @@ use crate::types::{
 };
 
 const SYSTEMONE_MAX_QUESTIONS: usize = 128;
-const SYSTEMONE_MAX_CANDIDATES: usize = 255;
-// Causal vLLM scoring currently uses the single-letter A-Z label profile.
-const VLLM_SYSTEMONE_MAX_CANDIDATES: usize = 26;
 
 /// Emit a one-time deprecation warning when serving-readiness falls back to
 /// the legacy path because a namespace still contains a legacy card (a
@@ -139,11 +136,7 @@ impl SystemOneExecutionSelection {
         // Tokenizer-specific candidate limits are checked during preflight.
         dynamo_decisions::Capabilities {
             max_questions: SYSTEMONE_MAX_QUESTIONS,
-            max_candidates: if self.backend == crate::protocols::systemone::ScoringBackend::Vllm {
-                VLLM_SYSTEMONE_MAX_CANDIDATES
-            } else {
-                SYSTEMONE_MAX_CANDIDATES
-            },
+            max_candidates: self.backend.max_candidates(),
             supports_predicate: true,
             supports_choice: true,
             supports_score: true,

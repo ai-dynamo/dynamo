@@ -96,7 +96,6 @@ struct BranchResult {
     index: usize,
     answer: QuestionOutcome,
     input_tokens: usize,
-    output_tokens: usize,
     cached_tokens: Option<usize>,
     placement: Placement,
 }
@@ -540,12 +539,6 @@ async fn dispatch(
     results.push(first_result);
 
     let fanout_started = Instant::now();
-    // Unlike SGLang's zero-token reads, vLLM's one-token reads are qualified serially.
-    let siblings_limit = if selection.backend == ScoringBackend::Vllm {
-        1
-    } else {
-        MAX_CONCURRENT_SIBLINGS
-    };
     let mut siblings = stream::iter(branches.into_iter().map(|branch| {
         run_branch(
             selection.clone(),
@@ -557,7 +550,7 @@ async fn dispatch(
             metrics.clone(),
         )
     }))
-    .buffer_unordered(siblings_limit);
+    .buffer_unordered(MAX_CONCURRENT_SIBLINGS);
     let mut failure = None;
     while let Some(result) = siblings.next().await {
         if failure.is_some() {
@@ -592,12 +585,12 @@ async fn dispatch(
     results.sort_by_key(|result| result.index);
     let mut outcomes = Vec::with_capacity(results.len());
     let mut usage = Usage {
+        output_tokens: (results.len() * selection.backend.output_tokens()) as u64,
         cached_tokens: Some(0),
         ..Default::default()
     };
     for result in results {
         usage.input_tokens += result.input_tokens as u64;
-        usage.output_tokens += result.output_tokens as u64;
         usage.cached_tokens = usage
             .cached_tokens
             .zip(result.cached_tokens)
@@ -868,7 +861,6 @@ async fn read_sglang_branch(
         index: prepared.index,
         answer,
         input_tokens: prepared.prompt_ids.len(),
-        output_tokens: 0,
         cached_tokens: measured_cached_tokens(&terminal, prepared.prompt_ids.len())?,
         placement,
     })
@@ -917,7 +909,6 @@ async fn read_vllm_branch(
         index: prepared.index,
         answer,
         input_tokens: prepared.prompt_ids.len(),
-        output_tokens: 1,
         cached_tokens: Some(result.cached_tokens),
         placement: branch_placement(&tracker, data_parallel_start_rank, data_parallel_size)?,
     })

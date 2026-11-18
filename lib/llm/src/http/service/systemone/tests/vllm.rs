@@ -56,12 +56,7 @@ pub(super) fn terminal(
     output
 }
 
-async fn run_causal(
-    dialect: dynamo_decisions::Dialect,
-    outcome: Outcome,
-) -> (Response, Arc<TestEngine>) {
-    let engine = TestEngine::new(EngineBehavior::Vllm(outcome));
-    let mut selected = selection(engine.clone());
+pub(super) fn configure_selection(selected: &mut SystemOneExecutionSelection) {
     selected.backend = ScoringBackend::Vllm;
     selected.card.runtime_config.max_num_seqs = Some(1);
     selected.card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
@@ -77,23 +72,97 @@ async fn run_causal(
         .runtime_config
         .runtime_data
         .insert("vllm_causal_decision_v1".into(), true.into());
+}
+
+#[tokio::test]
+async fn candidate_limit_is_reported_and_rejected_before_admission() {
+    let service = super::super::super::service_v2::HttpService::builder()
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let engine = TestEngine::new(EngineBehavior::Vllm(Outcome::Success));
+    let mut selected = selection(engine.clone());
+    configure_selection(&mut selected);
+    let mut workers =
+        crate::discovery::WorkerSet::new("worker".into(), "worker".into(), selected.card);
+    workers.generate_engine = Some(selected.engine);
+    workers.systemone_preprocessor = Some(selected.preprocessor);
+    let (_members, receiver) = tokio::sync::watch::channel(vec![41]);
+    workers.set_instance_watcher(receiver);
+    assert!(
+        state
+            .manager()
+            .add_worker_set("test-model", "worker", workers)
+    );
+    let capabilities = state
+        .manager()
+        .get_systemone_execution_selection("test-model")
+        .unwrap()
+        .decision_capabilities();
+    assert_eq!(capabilities.max_candidates, 26);
+    let criteria: serde_json::Map<String, Value> = (0..27)
+        .map(|index| (format!("candidate-{index}"), json!("A candidate")))
+        .collect();
+    let admission = state.systemone_admission();
+    let preflight = state.systemone_preflight_admission();
+    let _admission_permit = admission
+        .clone()
+        .acquire_many_owned(admission.available_permits() as u32)
+        .await
+        .unwrap();
+    let _preflight_permit = preflight
+        .clone()
+        .acquire_many_owned(preflight.available_permits() as u32)
+        .await
+        .unwrap();
+    let before = (admission.available_permits(), preflight.available_permits());
+    for (dialect, status) in [
+        (dynamo_decisions::Dialect::Jev, 422),
+        (dynamo_decisions::Dialect::OpenAi, 400),
+    ] {
+        let mut request = dynamo_decisions::parse_request(
+            &serde_json::to_vec(&json!({"model":"test-model", "state":"test",
+                "questions":{"choice":{"type":"choice", "criteria":criteria}}}))
+            .unwrap(),
+            dynamo_decisions::Route::SystemOne,
+        )
+        .unwrap();
+        request.dialect = dialect;
+        let response =
+            super::super::handle_request(state.clone(), "candidate-limit".into(), request).await;
+        assert_eq!(response.status().as_u16(), status);
+        assert_eq!(
+            (admission.available_permits(), preflight.available_permits()),
+            before
+        );
+        assert!(engine.observations.lock().unwrap().is_empty());
+    }
+}
+
+pub(super) fn prepared_branch(index: usize) -> PreparedBranch {
+    let mut branch = prepared_noul_branch(index);
+    branch.prompt_ids.push(3);
+    branch.native = Some(
+        super::super::causal_scoring_request(
+            branch.prompt_ids.clone(),
+            &branch.label_ids,
+            "preflight",
+        )
+        .unwrap(),
+    );
+    branch
+}
+
+async fn run_causal(
+    dialect: dynamo_decisions::Dialect,
+    outcome: Outcome,
+) -> (Response, Arc<TestEngine>) {
+    let engine = TestEngine::new(EngineBehavior::Vllm(outcome));
+    let mut selected = selection(engine.clone());
+    configure_selection(&mut selected);
     let mut request = canonical_request(3).as_ref().clone();
     request.dialect = dialect;
-    let branches = (0..3)
-        .map(|index| {
-            let mut branch = prepared_noul_branch(index);
-            branch.prompt_ids.push(3);
-            branch.native = Some(
-                super::super::causal_scoring_request(
-                    branch.prompt_ids.clone(),
-                    &branch.label_ids,
-                    "preflight",
-                )
-                .unwrap(),
-            );
-            branch
-        })
-        .collect();
+    let branches = (0..3).map(prepared_branch).collect();
     let response = dispatch(
         selected,
         branches,

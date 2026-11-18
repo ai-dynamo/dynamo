@@ -28,6 +28,14 @@ impl ScoringBackend {
             Self::Vllm => 1,
         }
     }
+
+    pub(crate) fn max_candidates(self) -> usize {
+        match self {
+            Self::Sglang => 255,
+            // The qualified causal profile uses A-Z labels, not the engine's 128-ID limit.
+            Self::Vllm => 26,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]

@@ -533,18 +533,23 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let index: usize = request.id().rsplit('-').next().unwrap().parse().unwrap();
-        let (native, label_ids): (Value, Vec<u32>) =
-            if matches!(self.behavior, EngineBehavior::Vllm(_)) {
-                let native = request.extra_args.as_ref().unwrap()["vllm_tito"].clone();
-                let ids =
-                    serde_json::from_value(native["sampling_params"]["logprob_token_ids"].clone())
-                        .unwrap();
-                (native, ids)
-            } else {
-                let native = request.extra_args.as_ref().unwrap()["sglang_tito"].clone();
-                let ids = serde_json::from_value(native["token_ids_logprob"].clone()).unwrap();
-                (native, ids)
-            };
+        let is_vllm = request
+            .extra_args
+            .as_ref()
+            .unwrap()
+            .get("vllm_tito")
+            .is_some();
+        let (native, label_ids): (Value, Vec<u32>) = if is_vllm {
+            let native = request.extra_args.as_ref().unwrap()["vllm_tito"].clone();
+            let ids =
+                serde_json::from_value(native["sampling_params"]["logprob_token_ids"].clone())
+                    .unwrap();
+            (native, ids)
+        } else {
+            let native = request.extra_args.as_ref().unwrap()["sglang_tito"].clone();
+            let ids = serde_json::from_value(native["token_ids_logprob"].clone()).unwrap();
+            (native, ids)
+        };
         let stream_context = Context::new(()).context();
         self.observations.lock().unwrap().push(ObservedBranch {
             index,
@@ -565,7 +570,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .unwrap()
             .record_worker(worker_id, Some(3), "decode");
         self.started.notify_one();
-        if let EngineBehavior::Vllm(outcome) = self.behavior {
+        if matches!(self.behavior, EngineBehavior::PendingStream)
+            || (matches!(self.behavior, EngineBehavior::PendingSiblings) && index > 0)
+        {
+            return Ok(ResponseStream::new(
+                Box::pin(stream::pending()),
+                stream_context,
+            ));
+        }
+        if is_vllm {
+            let outcome = match self.behavior {
+                EngineBehavior::Vllm(outcome) => outcome,
+                _ => vllm::Outcome::Success,
+            };
             let output = vllm::terminal(&label_ids, request.token_ids.len(), index + 1, outcome);
             let outputs = stream::iter([Annotated::from_data(output)]);
             if matches!(outcome, vllm::Outcome::Cancelled | vllm::Outcome::Error) {
@@ -683,14 +700,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 ));
             }
         }
-        if matches!(self.behavior, EngineBehavior::PendingStream)
-            || (matches!(self.behavior, EngineBehavior::PendingSiblings) && index > 0)
-        {
-            return Ok(ResponseStream::new(
-                Box::pin(stream::pending()),
-                stream_context,
-            ));
-        }
         if matches!(self.behavior, EngineBehavior::MalformedWithPendingSibling) {
             if index == 2 {
                 self.sibling_started.notify_one();
@@ -790,13 +799,29 @@ async fn dispatch_request(
 
 #[tokio::test]
 async fn dispatch_limits_active_siblings_and_cancels_queued_work() {
+    for backend in [ScoringBackend::Sglang, ScoringBackend::Vllm] {
+        assert_bounded_fanout(backend).await;
+    }
+}
+
+async fn assert_bounded_fanout(backend: ScoringBackend) {
     let engine = TestEngine::new(EngineBehavior::PendingSiblings);
+    let mut selected = selection(engine.clone());
+    if backend == ScoringBackend::Vllm {
+        vllm::configure_selection(&mut selected);
+    }
+    let branches = (0..20)
+        .map(|index| match backend {
+            ScoringBackend::Sglang => prepared_noul_branch(index),
+            ScoringBackend::Vllm => vllm::prepared_branch(index),
+        })
+        .collect();
     let parent = Context::new(()).context();
     let admission = Arc::new(Semaphore::new(20));
     let permit = admission.clone().acquire_many_owned(20).await.unwrap();
     let task = tokio::spawn(dispatch(
-        selection(engine.clone()),
-        (0..20).map(prepared_noul_branch).collect(),
+        selected,
+        branches,
         "bounded-fanout".to_string(),
         parent.clone(),
         permit,
@@ -814,14 +839,26 @@ async fn dispatch_limits_active_siblings_and_cancels_queued_work() {
     .await
     .unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
-    assert_eq!(engine.observations.lock().unwrap().len(), 5);
+    {
+        let observations = engine.observations.lock().unwrap();
+        assert_eq!(observations.len(), 5);
+        for sibling in &observations[1..] {
+            assert_eq!(sibling.routing.backend_instance_id, Some(41));
+            assert_eq!(sibling.routing.dp_rank, Some(3));
+        }
+    }
     parent.kill();
     let response = tokio::time::timeout(Duration::from_secs(2), task)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(response.status().as_u16(), 499);
-    assert_eq!(engine.observations.lock().unwrap().len(), 5);
+    let observations = engine.observations.lock().unwrap();
+    assert_eq!(observations.len(), 5);
+    for sibling in &observations[1..] {
+        assert!(sibling.request_context.is_killed());
+        assert!(sibling.stream_context.is_killed());
+    }
     assert_eq!(admission.available_permits(), 20);
 }
 
