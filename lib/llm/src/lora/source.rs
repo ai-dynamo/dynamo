@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvider};
 use aws_types::service_config::ServiceConfigKey;
+use dynamo_runtime::config::environment_names::llm;
 use futures::StreamExt;
 use hf_hub::Cache;
 use object_store::{
@@ -368,6 +369,15 @@ impl S3LoRASource {
         let allow_http = Self::config_bool_from_env("AWS_ALLOW_HTTP")?.unwrap_or_default();
         let virtual_hosted_style =
             Self::config_bool_from_env("AWS_VIRTUAL_HOSTED_STYLE_REQUEST")?.unwrap_or_default();
+        let tls_insecure =
+            Self::config_bool_from_env(llm::DYN_LORA_S3_TLS_INSECURE)?.unwrap_or_default();
+        if tls_insecure {
+            tracing::warn!(
+                bucket,
+                "{} is set: S3 TLS certificate verification is disabled for LoRA downloads",
+                llm::DYN_LORA_S3_TLS_INSECURE
+            );
+        }
         let mut builder = AmazonS3Builder::new()
             .with_region(region)
             .with_bucket_name(bucket)
@@ -376,6 +386,12 @@ impl S3LoRASource {
             .with_config(
                 object_store::aws::AmazonS3ConfigKey::Client(ClientConfigKey::Timeout),
                 format!("{timeout_secs}s"),
+            )
+            .with_config(
+                object_store::aws::AmazonS3ConfigKey::Client(
+                    ClientConfigKey::AllowInvalidCertificates,
+                ),
+                tls_insecure.to_string(),
             )
             .with_credentials(credentials);
 
@@ -762,6 +778,61 @@ mod tests {
         assert_eq!(
             builder.get_config_value(&AmazonS3ConfigKey::VirtualHostedStyleRequest),
             Some("true".to_string())
+        );
+    }
+
+    fn s3_builder_with_tls_insecure(value: Option<&str>) -> Result<AmazonS3Builder> {
+        let credentials: AwsCredentialProvider =
+            Arc::new(StaticCredentialProvider::new(AwsCredential {
+                key_id: "test-access-key".to_string(),
+                secret_key: "test-secret-key".to_string(),
+                token: None,
+            }));
+        temp_env::with_var(llm::DYN_LORA_S3_TLS_INSECURE, value, || {
+            S3LoRASource::build_s3_builder(
+                "bucket",
+                "us-east-1",
+                credentials,
+                Some("https://s3.internal.example"),
+                60,
+            )
+        })
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn s3_builder_verifies_tls_by_default() {
+        let builder = s3_builder_with_tls_insecure(None).unwrap();
+
+        assert_eq!(
+            builder.get_config_value(&AmazonS3ConfigKey::Client(
+                ClientConfigKey::AllowInvalidCertificates
+            )),
+            Some("false".to_string())
+        );
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn s3_builder_skips_tls_verification_when_insecure_enabled() {
+        let builder = s3_builder_with_tls_insecure(Some("true")).unwrap();
+
+        assert_eq!(
+            builder.get_config_value(&AmazonS3ConfigKey::Client(
+                ClientConfigKey::AllowInvalidCertificates
+            )),
+            Some("true".to_string())
+        );
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn s3_builder_rejects_invalid_tls_insecure_value() {
+        let error = s3_builder_with_tls_insecure(Some("maybe")).unwrap_err();
+
+        assert!(
+            error.to_string().contains(llm::DYN_LORA_S3_TLS_INSECURE),
+            "unexpected error: {error}"
         );
     }
 
