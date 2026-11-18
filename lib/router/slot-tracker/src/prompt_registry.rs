@@ -607,7 +607,7 @@ mod tests {
     use rustc_hash::{FxHashMap, FxHashSet};
 
     use super::*;
-    use crate::prefill_tracker::{AnchoredPrefillSnapshot, PrefillSnapshotDecay};
+    use crate::prefill_tracker::AnchoredPrefillSnapshot;
     use crate::single::{PromptMembershipRemove, PromptMembershipStore};
     use crate::topology::RemovedWorkerState;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
@@ -653,13 +653,7 @@ mod tests {
                     expected_prefill_duration,
                     anchored_since,
                 }),
-                decay: if expected_prefill_duration.is_some() {
-                    PrefillSnapshotDecay::Modeled { token_carry: false }
-                } else {
-                    PrefillSnapshotDecay::Mixed {
-                        discarded_tokens: 0,
-                    }
-                },
+                all_prefills_modeled: expected_prefill_duration.is_some(),
             },
         }
     }
