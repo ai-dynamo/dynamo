@@ -18,7 +18,8 @@ The launcher stays alive while engines come and go: it forwards SIGTERM and
 SIGINT to the engine, adopts and reaps the engine's orphaned processes, and
 starts a replacement when an engine that ran for a while fails or hangs. An
 engine that exits early, with status 0, or after a shutdown signal ends the
-launcher with its exit status.
+launcher with its exit status. Shared-memory queues a dead engine left in
+``/dev/shm`` are removed.
 """
 
 import argparse
@@ -38,7 +39,7 @@ import urllib.parse
 from collections import Counter
 from collections.abc import Callable, Sequence
 
-from dynamo.vllm import fork_safety
+from dynamo.vllm import engine_shm, fork_safety
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,9 @@ SHUTDOWN_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 # How long killing a hung engine and starting its replacement may take before
 # the launcher stops counting as live.
 REPLACE_ALLOWANCE_SECONDS = 10.0
+# How often the launcher records the shared memory its engine maps, so that it
+# can remove what a killed engine leaves behind.
+SHM_SCAN_SECONDS = 1.0
 _PR_SET_CHILD_SUBREAPER = 36
 
 
@@ -405,6 +409,8 @@ class Supervisor:
         self.liveness = liveness
         self.engine_pid: int | None = None
         self.stop_signal: int | None = None
+        # Name and inode of the shared-memory segments the running engine maps.
+        self.engine_segments: dict[str, int] = {}
 
     def _forward(self, signum: int, _frame) -> None:
         self.stop_signal = signum
@@ -427,45 +433,58 @@ class Supervisor:
             _exec_engine(self.engine_args)
         return pid
 
+    def _record_segments(self, engine_pid: int) -> None:
+        found = engine_shm.mapped_segments(engine_shm.process_group_members(engine_pid))
+        if not found.keys() <= self.engine_segments.keys():
+            self.engine_segments.update(found)
+            logger.info(
+                "Launcher: engine (pid %d) maps %d shared-memory segment(s)",
+                engine_pid,
+                len(self.engine_segments),
+            )
+
     def _wait_for_engine(self, engine_pid: int) -> int | None:
         """Wait for the engine to exit, killing it if it hangs.
 
-        Returns its exit status, or None if it did not exit after the kill.
+        Records the shared memory its processes map meanwhile. Returns its exit
+        status, or None if it did not exit after the kill.
         """
         kill_deadline = None
         while True:
             pid, status = os.waitpid(-1, os.WNOHANG)
             if pid == engine_pid:
                 self.engine_pid = None
+                # Its other processes are usually still there to look at.
+                self._record_segments(engine_pid)
                 return _exit_code(status)
             if pid:
                 logger.debug("Launcher: reaped orphaned engine process %d", pid)
                 continue
+            self._record_segments(engine_pid)
+            wait = SHM_SCAN_SECONDS
             if kill_deadline is not None:
                 remaining = kill_deadline - time.monotonic()
                 if remaining <= 0:
                     return None
-                signal.sigtimedwait({signal.SIGCHLD}, remaining)
-                continue
+                wait = min(wait, remaining)
             # An engine shutting down may stop answering; it is not hung.
-            if self.liveness is None or self.stop_signal is not None:
-                signal.sigwaitinfo({signal.SIGCHLD})
-                continue
-            reason = self.liveness.hung()
-            # The check takes time: a shutdown signal may have arrived during it.
-            if reason is not None and self.stop_signal is None:
-                logger.error(
-                    "Launcher: engine (pid %d) is hung (%s); killing it",
-                    engine_pid,
-                    reason,
-                )
-                try:
-                    os.killpg(engine_pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                kill_deadline = time.monotonic() + REPLACE_ALLOWANCE_SECONDS
-                continue
-            signal.sigtimedwait({signal.SIGCHLD}, self.liveness.seconds_to_next_check())
+            elif self.liveness is not None and self.stop_signal is None:
+                reason = self.liveness.hung()
+                # The check takes time: a shutdown signal may have arrived during it.
+                if reason is not None and self.stop_signal is None:
+                    logger.error(
+                        "Launcher: engine (pid %d) is hung (%s); killing it",
+                        engine_pid,
+                        reason,
+                    )
+                    try:
+                        os.killpg(engine_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    kill_deadline = time.monotonic() + REPLACE_ALLOWANCE_SECONDS
+                    continue
+                wait = min(wait, self.liveness.seconds_to_next_check())
+            signal.sigtimedwait({signal.SIGCHLD}, wait)
 
     def run(self) -> int:
         libc = ctypes.CDLL(None, use_errno=True)
@@ -492,6 +511,7 @@ class Supervisor:
                 )
                 return 1
             started = time.monotonic()
+            self.engine_segments = {}
             pid = self._start_engine()
             self.engine_pid = pid
             signal.pthread_sigmask(signal.SIG_UNBLOCK, SHUTDOWN_SIGNALS)
@@ -510,6 +530,14 @@ class Supervisor:
                 return 1
             uptime = time.monotonic() - started
             _kill_leftovers(pid)
+            removed = engine_shm.remove_segments(self.engine_segments)
+            if removed:
+                logger.info(
+                    "Launcher: removed %d shared-memory segment(s) left by engine "
+                    "(pid %d)",
+                    len(removed),
+                    pid,
+                )
             # An engine that ends on its own (status 0) is done, not failed.
             if (
                 self.stop_signal is not None
