@@ -128,8 +128,8 @@ pub use api::{
     IndexerQueryRequest, IndexerQueryResponse, IndexerRecordRoutingDecisionRequest,
     IndexerRecordRoutingDecisionResponse, KV_INDEXER_QUERY_ENDPOINT,
     KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT, KvStateAgentIdentity, KvStateAgentStatus,
-    KvStateAttachmentStatus, KvStateProtocolVersion, KvStateRecoveryReceipt, MaybeError,
-    WorkerKvQueryKind, WorkerKvQueryRequest, WorkerKvQueryResponse,
+    KvStateAttachmentStatus, KvStateProtocolVersion, KvStateRecoveryReceipt, WorkerKvQueryKind,
+    WorkerKvQueryRequest, WorkerKvQueryResponse,
 };
 pub use approximate_lru::{
     ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruClient, ApproximateLruIncarnation,
@@ -169,10 +169,8 @@ pub use lower_tier_indexers::{
     query_lower_tiers_with_options_and_snapshot,
 };
 pub use metrics::{
-    CkfMutationKind, EventKind, EventWarningKind, KvIndexerMetrics,
-    METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED, METRIC_CKF_MUTATION_UNKNOWN_REMOVE,
-    METRIC_EVENT_CLEARED, METRIC_EVENT_REMOVED, METRIC_EVENT_STORED,
-    METRIC_STATUS_ALLOCATION_FAILED, METRIC_STATUS_BLOCK_NOT_FOUND,
+    EventKind, EventWarningKind, KvIndexerMetrics, METRIC_EVENT_CLEARED, METRIC_EVENT_REMOVED,
+    METRIC_EVENT_STORED, METRIC_STATUS_ALLOCATION_FAILED, METRIC_STATUS_BLOCK_NOT_FOUND,
     METRIC_STATUS_CAPACITY_EXHAUSTED, METRIC_STATUS_INDEXER_INVARIANT_VIOLATION,
     METRIC_STATUS_INVALID_BLOCK, METRIC_STATUS_OK, METRIC_STATUS_OWNERSHIP_DEGREE_OVERFLOW,
     METRIC_STATUS_PARENT_NOT_FOUND, METRIC_STATUS_UNSUPPORTED_RESIDENCY_DOMAIN,

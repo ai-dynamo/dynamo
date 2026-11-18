@@ -30,14 +30,14 @@ use super::block_tracker::{BlockTracker, RequestBlockChain};
 use super::prefill_tracker::{PrefillLoadState, PrefillLoadTracker};
 use super::prompt_registry::WorkerLoadSnapshot;
 use crate::decode_progress::{DecodeProgressAggregate, DecodeProgressUpdate, Observation};
-use crate::prelude::PrefillLoadHint;
+use crate::wire::PrefillLoadHint;
 
 /// Shared active-request liveness duration (5 minutes).
 ///
 /// Legacy selection services and standalone slot trackers use it as an absolute-age
 /// threshold. The embedded `KvRouter` uses it as the request-lease CLOCK scan interval;
 /// its second chance expires idle leases after approximately one to two scans.
-pub const DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION: Duration = Duration::from_secs(300);
+pub(crate) const DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION: Duration = Duration::from_secs(300);
 
 /// How often we *check* for stale requests (30 seconds). This is not
 /// the expiration time, that is DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION.
@@ -123,7 +123,7 @@ pub(super) struct SequenceMutationOutcome {
 
 /// A multi-request sequence manager that handles multiple active sequences with shared KV cache
 #[derive(Debug)]
-pub struct ActiveSequences {
+pub(crate) struct ActiveSequences {
     requests: HashMap<RequestId, RequestState>,
     prefill: PrefillLoadTracker,
     /// Requests not yet marked prefill-complete, whether or not they hold prompt load.

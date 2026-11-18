@@ -15,7 +15,6 @@ pub use crate::multi_worker::{
     SequencePublisher, SequenceRequest, SequenceSubscriber,
 };
 pub use crate::prompt_registry::WorkerLoadProjection;
-pub use crate::single::ActiveSequences;
 pub use crate::topology::WorkerDpRange;
 pub use crate::wire::{
     ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, SchedulerGroup, SchedulerLoad,

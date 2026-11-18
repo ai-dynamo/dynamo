@@ -16,15 +16,13 @@ use crate::{
     WorkerSelectionPolicyError,
 };
 
+use crate::runtime::RuntimePolicyState;
 use crate::{
     CacheSnapshot, CandidateData, ScoredWorkerCandidate, WorkerCacheData, WorkerCacheInputs,
     WorkerCandidate, WorkerCandidates, WorkerCapacity, WorkerFilter, WorkerInfo, WorkerInputView,
     WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext,
 };
-use crate::{
-    RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyState,
-    RuntimePolicyUpdate,
-};
+use crate::{RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate};
 
 /// What the kernel supplies for one selection: a walk over the eligible ranks, each
 /// yielding its input columns on request.
