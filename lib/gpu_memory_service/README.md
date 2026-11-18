@@ -516,6 +516,7 @@ class GMSClientMemoryManager:
     def metadata_get(key: str) -> Optional[Tuple[str, int, bytes]]
     def metadata_list(prefix: str = "") -> List[str]
     def metadata_delete(key: str) -> bool
+    # Keys under "__gms__." are reserved for GMS; tensor loading skips them.
 
     # --- Tier 2: Convenience ---
     def create_mapping(allocation_id=None, size=0, tag="default") -> int  # Allocate or import
