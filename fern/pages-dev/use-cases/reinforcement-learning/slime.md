@@ -7,6 +7,13 @@ subtitle: Run Slime external rollouts through Dynamo on Kubernetes
 
 **Experimental.** This integration connects Slime to a fixed set of SGLang engines that a DynamoGraphDeployment manages.
 
+<Warning>
+Use Dynamo 1.7.0 or earlier images with this example. Later Dynamo SGLang
+sidecars need SGLang's Rust server (`SGLANG_RUST_SERVER=1`), which does not
+serve the weight-update endpoints that Slime calls, so this example still
+runs SGLang's Python server.
+</Warning>
+
 Slime sends rollout generation through the Dynamo frontend. It sends control and weight-update requests to each SGLang engine.
 
 ## Integration Shape
