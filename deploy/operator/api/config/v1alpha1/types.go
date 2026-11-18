@@ -89,6 +89,11 @@ type OperatorConfiguration struct {
 	// LPX scheduler integration and model-registry configuration.
 	// +required
 	LPX LPXConfiguration `json:"lpx"`
+
+	// GlobalDiscovery holds the defaults for the DynamoPoolRelays that register
+	// their pools with a Global Discovery Service.
+	// +optional
+	GlobalDiscovery GlobalDiscoveryConfiguration `json:"globalDiscovery,omitempty"`
 }
 
 // ServerConfiguration holds server bind addresses and ports.

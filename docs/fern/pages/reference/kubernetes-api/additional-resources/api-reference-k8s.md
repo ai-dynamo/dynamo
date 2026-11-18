@@ -777,6 +777,25 @@ uses only lowercase letters, digits, and hyphens, and is at most 52 characters.
 | `status` _[DynamoPoolRelayStatus](#dynamopoolrelaystatus)_ |  |  | Optional: \{\} <br /> |
 
 
+#### DynamoPoolRelayGlobalDiscovery
+
+
+
+DynamoPoolRelayGlobalDiscovery says where a Relay registers its pool. An empty
+URL or region takes the operator's globalDiscovery default.
+
+
+
+_Appears in:_
+- [DynamoPoolRelaySpec](#dynamopoolrelayspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `url` _string_ | URL is the Global Discovery Service's root, such as<br />http://global-discovery.global-router.svc:8080/. |  | Optional: \{\} <br /> |
+| `region` _string_ | Region is the region that the pool registers in. |  | Optional: \{\} <br /> |
+| `frontends` _string array_ | Frontends are the HTTP(S) URLs that Global Routers send the pool's<br />requests to. Only a Global Discovery Service that takes pools from<br />registrations, rather than from MCS, needs them. |  | Optional: \{\} <br /> |
+
+
 #### DynamoPoolRelaySpec
 
 
@@ -793,6 +812,7 @@ _Appears in:_
 | `clusterId` _string_ | ClusterID is the Relay's stable logical cluster ID across restarts. |  | MaxLength: 128 <br />MinLength: 1 <br />Pattern: `^[^[:space:]\p\{Z\}\x85\x1c-\x1f](.*[^[:space:]\p\{Z\}\x85\x1c-\x1f])?$` <br />Required: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate configures Relay Pods. Its main container needs an image with<br />dynamo.pool_relay and --sources-file support from the operator's revision.<br />The controller sets the main command, listener probes, source volume,<br />service account, and Relay identity and discovery environment variables.<br />Reserved env names: DYN_NAMESPACE, DYN_DISCOVERY_BACKEND,<br />DYN_KUBE_DISCOVERY_MODE, DYN_SYSTEM_PORT, DYN_TCP_RESPONSE_STREAM_HOST,<br />DYN_TCP_RESPONSE_STREAM_PORT, DYN_CLUSTER_ID, DYN_RELAY_BIND,<br />DYN_RELAY_CONNECTION_REVISION, DYN_RELAY_NAMESPACES, DYN_RELAY_WATCH_ALL,<br />DYN_RELAY_ENDPOINT_PREFIXES, POD_NAME, POD_NAMESPACE, and POD_UID.<br />The main container cannot use envFrom because it could override those values. |  | Required: \{\} <br /> |
 | `replicas` _integer_ | Replicas sets the number of active Relay Pods. Each watches the DGD. | 2 | Minimum: 1 <br />Optional: \{\} <br /> |
+| `globalDiscovery` _[DynamoPoolRelayGlobalDiscovery](#dynamopoolrelayglobaldiscovery)_ | GlobalDiscovery registers the pool with a Global Discovery Service as<br /><clusterId>/<namespace>/<name>, so that Global Routers send it requests.<br />Unset, the Relay registers nothing. Set, it reserves the env names<br />DYN_RELAY_GLOBAL_DISCOVERY_URL, DYN_RELAY_ROUTING_POOL,<br />DYN_RELAY_ROUTING_POOL_REGION and DYN_RELAY_ROUTING_POOL_FRONTENDS. |  | Optional: \{\} <br /> |
 
 
 #### DynamoPoolRelayStatus
@@ -4195,6 +4215,24 @@ _Appears in:_
 | `discoveryEnabled` _boolean_ | DiscoveryEnabled indicates whether GPU discovery is enabled | true | Optional: \{\} <br /> |
 
 
+#### GlobalDiscoveryConfiguration
+
+
+
+GlobalDiscoveryConfiguration holds the defaults for the DynamoPoolRelays that
+register their pools with a Global Discovery Service.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `url` _string_ | URL is the Global Discovery Service's root, for relays that set none. |  | Optional: \{\} <br /> |
+| `region` _string_ | Region is this cluster's region, for relays that set none. |  | Optional: \{\} <br /> |
+
+
 #### GroveConfiguration
 
 
@@ -4465,6 +4503,7 @@ OperatorConfiguration is the Schema for the operator configuration.
 | `logging` _[LoggingConfiguration](#loggingconfiguration)_ | Logging configuration |  | Required: \{\} <br /> |
 | `security` _[SecurityConfiguration](#securityconfiguration)_ | HTTP/2 and TLS settings |  | Required: \{\} <br /> |
 | `lpx` _[LPXConfiguration](#lpxconfiguration)_ | LPX scheduler integration and model-registry configuration. |  | Required: \{\} <br /> |
+| `globalDiscovery` _[GlobalDiscoveryConfiguration](#globaldiscoveryconfiguration)_ | GlobalDiscovery holds the defaults for the DynamoPoolRelays that register<br />their pools with a Global Discovery Service. |  | Optional: \{\} <br /> |
 
 
 #### OrchestratorConfiguration

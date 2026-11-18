@@ -95,6 +95,35 @@ cannot use `envFrom` because it could override those values.
 The manual manifest below runs one Relay replica and is not an HA deployment. Use it when the
 operator does not manage your Relay.
 
+### Register the Pool with Global Discovery
+
+To let Global Routers send requests to the pool, set `globalDiscovery` on the `DynamoPoolRelay`.
+The Relay then registers the pool with the Global Discovery Service as
+`<clusterId>/<namespace>/<name>`.
+
+```yaml
+spec:
+  clusterId: example-cluster
+  globalDiscovery:
+    url: http://global-discovery.global-router.svc:8080/
+    region: us-east-1
+    frontends:
+      - http://green.example.com:8000
+```
+
+- `url` and `region` default to the operator's settings, which you set once at install with the Helm
+  values `dynamo-operator.globalDiscovery.url` and `dynamo-operator.globalDiscovery.region`. With
+  both set there, `globalDiscovery: {}` is enough.
+- `frontends` are the HTTP(S) URLs that Global Routers send the pool's requests to. Only a Global
+  Discovery Service run with `--pool-discovery registrations` needs them; with MCS, it finds the
+  frontends through the imported frontend Services.
+- If the URL or the region is missing, or a value is not valid, the relay's `Ready` condition is
+  `False` with reason `InvalidConfiguration`.
+- With `globalDiscovery` set, `DYN_RELAY_GLOBAL_DISCOVERY_URL`, `DYN_RELAY_ROUTING_POOL`,
+  `DYN_RELAY_ROUTING_POOL_REGION`, and `DYN_RELAY_ROUTING_POOL_FRONTENDS` are reserved. Without it,
+  the operator sets none of them, so a relay that sets them in its `podTemplate` keeps working.
+- Changing these settings restarts the Relay Pods with the new values.
+
 ## Discovery Scope
 
 The example assumes an existing Kubernetes namespace named `dynamo` and watches every Dynamo

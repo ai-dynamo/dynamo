@@ -6,12 +6,14 @@
 package poolrelay
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -57,11 +59,19 @@ type reconciler struct {
 	client.Client
 	scheme         *runtime.Scheme
 	defaultBackend configv1alpha1.DiscoveryBackend
+	// globalDiscovery holds the operator's defaults for relays that register
+	// their pools with a Global Discovery Service.
+	globalDiscovery configv1alpha1.GlobalDiscoveryConfiguration
 }
 
 // Setup registers the one-DGD Relay controller and its DGD dependency watch.
 func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runtimeConfig *commoncontroller.RuntimeConfig) error {
-	r := &reconciler{Client: mgr.GetClient(), scheme: mgr.GetScheme(), defaultBackend: config.Discovery.Backend}
+	r := &reconciler{
+		Client:          mgr.GetClient(),
+		scheme:          mgr.GetScheme(),
+		defaultBackend:  config.Discovery.Backend,
+		globalDiscovery: config.GlobalDiscovery,
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.DynamoPoolRelay{}).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(config, runtimeConfig)).
@@ -135,7 +145,7 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		return r.withdraw(ctx, &relay, "UnsupportedSourceScope", "The Relay source file cannot isolate a DGD in the shared global Dynamo namespace")
 	}
 
-	resources, desiredDeployment, err := render(&relay, namespaces)
+	resources, desiredDeployment, err := render(&relay, namespaces, r.globalDiscovery)
 	if err != nil {
 		return r.withdraw(ctx, &relay, "InvalidConfiguration", err.Error())
 	}
@@ -452,7 +462,14 @@ func sourceJSON(namespaces []string, connectionRevision string) string {
 
 func serviceName(dgdName string) string { return dgdName + "-pool-relay" }
 
-func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Object, *appsv1.Deployment, error) {
+// render returns the Relay's resources and Deployment. A relay with a
+// globalDiscovery block takes its empty fields from globalDiscovery, the
+// operator's defaults.
+func render(
+	relay *v1alpha1.DynamoPoolRelay,
+	namespaces []string,
+	globalDiscovery configv1alpha1.GlobalDiscoveryConfiguration,
+) ([]client.Object, *appsv1.Deployment, error) {
 	name := serviceName(relay.Name)
 	if problems := validation.IsDNS1035Label(name); len(problems) != 0 {
 		return nil, nil, fmt.Errorf("DGD name %q cannot produce a valid <dgd>-pool-relay Service name %q: %s", relay.Name, name, strings.Join(problems, "; "))
@@ -498,6 +515,19 @@ func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Obje
 		"DYN_RELAY_NAMESPACES", "DYN_RELAY_WATCH_ALL", "DYN_RELAY_ENDPOINT_PREFIXES",
 	} {
 		reserved[name] = true
+	}
+
+	// Registration names are reserved only with a globalDiscovery block, so a
+	// relay that sets them by hand keeps working.
+	if relay.Spec.GlobalDiscovery != nil {
+		registration, err := registrationEnv(relay, globalDiscovery)
+		if err != nil {
+			return nil, nil, err
+		}
+		env = append(env, registration...)
+		for _, name := range registrationEnvNames {
+			reserved[name] = true
+		}
 	}
 	mainIndex, userEnv, err := validateRelayPodTemplate(podTemplate, reserved)
 	if err != nil {
@@ -575,6 +605,61 @@ func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Obje
 		Template: *podTemplate,
 	}}
 	return []client.Object{serviceAccount, role, binding, configMap, service}, deployment, nil
+}
+
+// registrationEnvNames are the Relay's settings for registering its pool with a
+// Global Discovery Service.
+var registrationEnvNames = []string{
+	"DYN_RELAY_GLOBAL_DISCOVERY_URL", "DYN_RELAY_ROUTING_POOL",
+	"DYN_RELAY_ROUTING_POOL_REGION", "DYN_RELAY_ROUTING_POOL_FRONTENDS",
+}
+
+// registrationEnv returns the settings that register the relay's pool as
+// <clusterId>/<namespace>/<name>. relay.Spec.GlobalDiscovery must be set, and
+// its empty URL and region come from defaults.
+func registrationEnv(
+	relay *v1alpha1.DynamoPoolRelay,
+	defaults configv1alpha1.GlobalDiscoveryConfiguration,
+) ([]corev1.EnvVar, error) {
+	settings := relay.Spec.GlobalDiscovery
+
+	// The Relay needs a URL and a region to register at all.
+	discoveryURL := cmp.Or(settings.URL, defaults.URL)
+	if err := checkHTTPURL(discoveryURL); err != nil {
+		return nil, fmt.Errorf("globalDiscovery.url, or the operator's globalDiscovery.url default, %w", err)
+	}
+	region := cmp.Or(settings.Region, defaults.Region)
+	if region == "" || strings.TrimSpace(region) != region {
+		return nil, errors.New("globalDiscovery.region, or the operator's globalDiscovery.region default, must be set without surrounding whitespace")
+	}
+	env := []corev1.EnvVar{
+		{Name: "DYN_RELAY_GLOBAL_DISCOVERY_URL", Value: discoveryURL},
+		{Name: "DYN_RELAY_ROUTING_POOL", Value: relay.Spec.ClusterID + "/" + relay.Namespace + "/" + relay.Name},
+		{Name: "DYN_RELAY_ROUTING_POOL_REGION", Value: region},
+	}
+
+	// The Relay splits its frontends at commas.
+	for _, frontend := range settings.Frontends {
+		if err := checkHTTPURL(frontend); err != nil || strings.Contains(frontend, ",") {
+			return nil, fmt.Errorf("globalDiscovery.frontends entry %q must be an absolute HTTP(S) URL without commas", frontend)
+		}
+	}
+	if len(settings.Frontends) > 0 {
+		env = append(env, corev1.EnvVar{Name: "DYN_RELAY_ROUTING_POOL_FRONTENDS", Value: strings.Join(settings.Frontends, ",")})
+	}
+	return env, nil
+}
+
+// checkHTTPURL returns an error unless value is an absolute HTTP(S) URL.
+func checkHTTPURL(value string) error {
+	if value == "" {
+		return errors.New("must be set")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return fmt.Errorf("must be an absolute HTTP(S) URL, not %q", value)
+	}
+	return nil
 }
 
 func validateRelayPodTemplate(podTemplate *corev1.PodTemplateSpec, reserved map[string]bool) (int, []corev1.EnvVar, error) {

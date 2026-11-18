@@ -157,6 +157,14 @@ dynamo-operator:
     # -- Configure the LPU model registry used by the LPX integration.
     modelRegistryURL: ""
 
+  # Defaults for the DynamoPoolRelays that register their pools with a Global
+  # Discovery Service (spec.globalDiscovery). A relay's own values take precedence.
+  globalDiscovery:
+    # -- URL of the Global Discovery Service, for relays that set none. Format: `http://host:8080/`
+    url: ""
+    # -- Region of this cluster, for relays that set none.
+    region: ""
+
   # -- DEVELOPMENT AND TESTING ONLY: Namespace-restricted mode is not supported for production. Use cluster-wide mode for production deployments.
   namespaceRestriction:
     # -- DEVELOPMENT AND TESTING ONLY: Enable namespace-restricted reconciliation and admission. Not supported for production.

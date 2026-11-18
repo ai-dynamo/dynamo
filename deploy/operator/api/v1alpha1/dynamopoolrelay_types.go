@@ -37,6 +37,34 @@ type DynamoPoolRelaySpec struct {
 	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=1
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// GlobalDiscovery registers the pool with a Global Discovery Service as
+	// <clusterId>/<namespace>/<name>, so that Global Routers send it requests.
+	// Unset, the Relay registers nothing. Set, it reserves the env names
+	// DYN_RELAY_GLOBAL_DISCOVERY_URL, DYN_RELAY_ROUTING_POOL,
+	// DYN_RELAY_ROUTING_POOL_REGION and DYN_RELAY_ROUTING_POOL_FRONTENDS.
+	// +optional
+	GlobalDiscovery *DynamoPoolRelayGlobalDiscovery `json:"globalDiscovery,omitempty"`
+}
+
+// DynamoPoolRelayGlobalDiscovery says where a Relay registers its pool. An empty
+// URL or region takes the operator's globalDiscovery default.
+type DynamoPoolRelayGlobalDiscovery struct {
+	// URL is the Global Discovery Service's root, such as
+	// http://global-discovery.global-router.svc:8080/.
+	// +optional
+	URL string `json:"url,omitempty"`
+
+	// Region is the region that the pool registers in.
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// Frontends are the HTTP(S) URLs that Global Routers send the pool's
+	// requests to. Only a Global Discovery Service that takes pools from
+	// registrations, rather than from MCS, needs them.
+	// +optional
+	// +listType=atomic
+	Frontends []string `json:"frontends,omitempty"`
 }
 
 // DynamoPoolRelayStatus reports listener availability. It does not report KV or model readiness.

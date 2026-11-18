@@ -170,6 +170,32 @@ func TestValidateOperatorConfiguration_CheckpointDisabledSkipsValidation(t *test
 	}
 }
 
+func TestValidateOperatorConfiguration_GlobalDiscovery(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		url        string
+		region     string
+		wantErrors int
+	}{
+		{name: "unset", wantErrors: 0},
+		{name: "valid", url: "http://global-discovery.global-router.svc:8080/", region: "us-east-1", wantErrors: 0},
+		{name: "https", url: "https://discovery.example.com/", wantErrors: 0},
+		{name: "not HTTP", url: "grpc://discovery:8080", wantErrors: 1},
+		{name: "relative", url: "discovery:8080", wantErrors: 1},
+		{name: "no host", url: "http:///path", wantErrors: 1},
+		{name: "region with whitespace", region: " us-east-1", wantErrors: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Validate the defaults for relays that register with Global Discovery")
+			cfg := validConfig()
+			cfg.GlobalDiscovery = configv1alpha1.GlobalDiscoveryConfiguration{URL: tc.url, Region: tc.region}
+			if errs := ValidateOperatorConfiguration(cfg); len(errs) != tc.wantErrors {
+				t.Errorf("expected %d errors, got %d: %v", tc.wantErrors, len(errs), errs)
+			}
+		})
+	}
+}
+
 func TestValidateOperatorConfiguration_InvalidModelExpressURL(t *testing.T) {
 	cfg := validConfig()
 	cfg.Infrastructure.ModelExpressURL = "://bad-url"

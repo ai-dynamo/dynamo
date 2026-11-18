@@ -799,6 +799,8 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
 | dynamo-operator.lpx.enabled | bool | `false` | EXPERIMENTAL: Enable the Dynamo operator's LPX integration. Startup requires the externally installed scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API. |
 | dynamo-operator.lpx.modelRegistryURL | string | `""` | Configure the LPU model registry used by the LPX integration. |
+| dynamo-operator.globalDiscovery.url | string | `""` | URL of the Global Discovery Service, for relays that set none. Format: `http://host:8080/` |
+| dynamo-operator.globalDiscovery.region | string | `""` | Region of this cluster, for relays that set none. |
 | dynamo-operator.namespaceRestriction | object | `{"enabled":false,"lease":{"duration":"30s","renewInterval":"10s"},"targetNamespace":null}` | DEVELOPMENT AND TESTING ONLY: Namespace-restricted mode is not supported for production. Use cluster-wide mode for production deployments. |
 | dynamo-operator.namespaceRestriction.enabled | bool | `false` | DEVELOPMENT AND TESTING ONLY: Enable namespace-restricted reconciliation and admission. Not supported for production. |
 | dynamo-operator.namespaceRestriction.targetNamespace | string | `nil` | DEVELOPMENT AND TESTING ONLY: Target namespace. Defaults to the Helm release namespace. |

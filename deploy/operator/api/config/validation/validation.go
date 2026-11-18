@@ -43,7 +43,24 @@ func ValidateOperatorConfiguration(config *configv1alpha1.OperatorConfiguration)
 		validateOrchestrators(&config.Orchestrators, field.NewPath("orchestrators")),
 		validateIngress(&config.Ingress, field.NewPath("ingress")),
 		validateServiceMesh(&config.ServiceMesh, field.NewPath("serviceMesh")),
+		validateGlobalDiscovery(&config.GlobalDiscovery, field.NewPath("globalDiscovery")),
 	)
+}
+
+// validateGlobalDiscovery checks the defaults that DynamoPoolRelays take when
+// they register their pools with a Global Discovery Service.
+func validateGlobalDiscovery(globalDiscovery *configv1alpha1.GlobalDiscoveryConfiguration, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if globalDiscovery.URL != "" {
+		parsed, err := url.Parse(globalDiscovery.URL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("url"), globalDiscovery.URL, "must be an absolute HTTP(S) URL"))
+		}
+	}
+	if globalDiscovery.Region != strings.TrimSpace(globalDiscovery.Region) {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("region"), globalDiscovery.Region, "must not have surrounding whitespace"))
+	}
+	return allErrs
 }
 
 func validateServer(server *configv1alpha1.ServerConfiguration, fldPath *field.Path) field.ErrorList {
