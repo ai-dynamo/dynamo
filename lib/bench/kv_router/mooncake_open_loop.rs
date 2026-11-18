@@ -15,6 +15,7 @@ use dynamo_kv_indexer::host::{
     LowerTierQueryOptions, ObservationError, SyncIndexer, ThreadPoolIndexer,
     ThreadPoolObservationPlan, TieredMatchDetails, query_lower_tiers_with_options,
 };
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use serde::Serialize;
 use tokio::sync::oneshot;
 
@@ -26,6 +27,7 @@ use dynamo_bench::kv_router_common::issuer::{contiguous_worker_issuer, pin_curre
 use super::mooncake_lower_tier::{
     Allocator, Footprint, LowerTierRun, cache_owner, footprint, routing_snapshot,
 };
+use super::mooncake_recurrent::{RECURRENT_GROUPS, group_tag};
 use super::mooncake_shared::{
     HostTierTotals, MooncakeTraceTotals, PreparedMooncakeBenchmark, WorkerTraceEntry,
 };
@@ -50,7 +52,8 @@ enum OperationKind {
     #[default]
     Query,
     Event,
-    /// A host-tier event, enqueued as the router enqueues it, with no per-event completion.
+    /// A host-tier event, enqueued as the router enqueues it, or a checkpoint event, applied
+    /// as the router applies it. Neither has a per-event completion.
     LowerTierEvent,
 }
 
@@ -285,6 +288,18 @@ pub(crate) fn prepare_mooncake_corpus(
                         };
                         (MooncakeOperationPayload::Event(event), QuerySpec::default())
                     }
+                    // The router applies checkpoint events itself, so they are not observed.
+                    WorkerTraceEntry::Checkpoint {
+                        event,
+                        storage_tier,
+                        group,
+                    } => (
+                        MooncakeOperationPayload::Event(
+                            RouterEvent::with_storage_tier(worker_id, event.clone(), *storage_tier)
+                                .with_kv_cache_group(group_tag(*group)),
+                        ),
+                        QuerySpec::default(),
+                    ),
                 };
                 operations.push((
                     MooncakeLogicalOperation {
@@ -406,9 +421,24 @@ pub struct RouterRun {
     pub indexer: Indexer,
     /// Keep the KV transfer chain, as the router does for workers that advertise router hints.
     pub retain_kv_transfer_chain: bool,
+    /// Every worker is a hybrid worker: it declares its recurrent layout before the run and
+    /// publishes checkpoint events during it (`--recurrent-checkpoints`).
+    pub hybrid: bool,
 }
 
 impl RouterRun {
+    /// The lower tier of a hybrid run, which holds the router's checkpoint table.
+    fn checkpoint_table(&self) -> Option<&LowerTierIndexers> {
+        match &self.indexer {
+            Indexer::Single { lower_tier, .. } | Indexer::Concurrent { lower_tier, .. }
+                if self.hybrid =>
+            {
+                Some(lower_tier)
+            }
+            _ => None,
+        }
+    }
+
     async fn lookup(&self, hashes: &[LocalBlockHash]) -> Result<TieredMatchDetails, KvRouterError> {
         self.indexer
             .find_tiered_matches_ref_with_options(
@@ -692,6 +722,8 @@ struct QueryIssuerContext<'a> {
 struct EventIssuerContext<'a, T: SyncIndexer> {
     indexer: &'a ThreadPoolIndexer<T>,
     lower_tier: Option<&'a LowerTierIndexers>,
+    /// The lower tier of a hybrid run's router, which holds its checkpoint table.
+    checkpoints: Option<&'a LowerTierIndexers>,
     deadline_ready: &'a [AtomicBool],
     peer_failed: &'a AtomicBool,
     clock: &'a BenchmarkClock,
@@ -863,12 +895,23 @@ fn issue_events<T: SyncIndexer>(
 }
 
 /// Device events take the observed path; host events go to the lower tier as the router sends
-/// them (`Indexer::try_apply_event`), which routes a cache owner's events by its digest.
+/// them (`Indexer::try_apply_event`), which routes a cache owner's events by its digest. In a
+/// hybrid run the checkpoint table takes its events first and applies them on this thread, as
+/// the router's event subscriber does.
 fn enqueue_event<T: SyncIndexer>(
     context: &EventIssuerContext<'_, T>,
     event: RouterEvent,
     id: u32,
 ) -> Result<(usize, u64, OperationKind), ()> {
+    if let Some(table) = context.checkpoints.map(LowerTierIndexers::group_residency) {
+        if table.apply(&event) {
+            return Ok((0, context.clock.now_ns(), OperationKind::LowerTierEvent));
+        }
+        // An untagged clear resets the worker's checkpoints as well as its blocks.
+        if matches!(event.event.data, KvCacheEventData::Cleared) {
+            table.clear_event(&event);
+        }
+    }
     if !event.storage_tier.is_gpu() {
         let lower_tier = context.lower_tier.ok_or(())?;
         lower_tier
@@ -981,6 +1024,10 @@ pub struct RouterLookupResult {
     pub device_hit_queries: usize,
     /// Device blocks credited, summed over workers and lookups.
     pub device_blocks: u64,
+    /// A hybrid run's checkpoint stream: its events and blocks, one per recurrent group, and
+    /// the checkpoints live on device at its end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoints: Option<HostTierTotals>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1135,6 +1182,19 @@ pub async fn run_open_loop<T: SyncIndexer>(
         anyhow::bail!("the corpus has host-tier events but the run has no lower tier");
     }
     let router = router.map(Arc::new);
+    let hybrid = router.as_deref().filter(|router| router.hybrid);
+    if trial.totals.checkpoints.stored_events > 0 && hybrid.is_none() {
+        anyhow::bail!("the corpus has checkpoint events but the run has no hybrid router");
+    }
+    if let Some(router) = hybrid {
+        for &(worker, _) in &trial.expected_events_by_worker {
+            router.indexer.declare_recurrent_layout(
+                WorkerWithDpRank::new(worker, 0),
+                &RECURRENT_GROUPS,
+                1,
+            );
+        }
+    }
     if let Some(lower) = &lower_tier
         && trial.totals.kvcr.stored_events > 0
     {
@@ -1213,6 +1273,7 @@ pub async fn run_open_loop<T: SyncIndexer>(
         .await?;
     let peer_failed = AtomicBool::new(false);
     let lower_indexers = lower_tier.as_deref().map(|lower| &lower.indexers);
+    let checkpoints = router.as_deref().and_then(RouterRun::checkpoint_table);
     let start_signal = AtomicU64::new(0);
     let ready_barrier = Barrier::new(issuer_count + 2);
     let start_barrier = Barrier::new(issuer_count + 2);
@@ -1280,6 +1341,7 @@ pub async fn run_open_loop<T: SyncIndexer>(
                     EventIssuerContext {
                         indexer: issuer_indexer,
                         lower_tier: lower_indexers,
+                        checkpoints,
                         deadline_ready: issuer_deadline_ready,
                         peer_failed: issuer_peer_failed,
                         clock: issuer_clock,
@@ -1346,7 +1408,7 @@ pub async fn run_open_loop<T: SyncIndexer>(
         aggregate_issuer_outputs(issuer_outputs, operation_count, producer_stop_ns);
     let backend_timing_report = KvIndexerInterface::timing_report(indexer.as_ref());
     // The lower tier's footprint, measured with CRTC already dropped. The router shares both.
-    let routed = router.is_some();
+    let routed = router.as_deref().map(|router| router.hybrid);
     drop(router);
     drop(indexer);
     let lower_tier = match lower_tier.map(Arc::into_inner) {
@@ -1413,7 +1475,7 @@ fn analyze_result(
     snapshot: dynamo_kv_indexer::host::ThreadPoolObservationSnapshot,
     backend_timing_report: String,
     lower_tier: Option<(Footprint, u64)>,
-    routed: bool,
+    routed: Option<bool>,
 ) -> OpenLoopResult {
     let IssuerAnalysisInput {
         records,
@@ -1613,11 +1675,12 @@ fn analyze_result(
         }
     });
 
-    let router_lookup = routed.then(|| {
+    let router_lookup = routed.map(|hybrid| {
         let completions = query_completions.iter().flatten();
         RouterLookupResult {
             device_hit_queries: completions.clone().filter(|c| c.device_blocks > 0).count(),
             device_blocks: completions.map(|c| c.device_blocks).sum(),
+            checkpoints: hybrid.then_some(totals.checkpoints),
         }
     });
 

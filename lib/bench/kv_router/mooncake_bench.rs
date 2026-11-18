@@ -5,6 +5,8 @@
 mod mooncake_lower_tier;
 #[path = "mooncake_open_loop.rs"]
 mod mooncake_open_loop;
+#[path = "mooncake_recurrent.rs"]
+mod mooncake_recurrent;
 #[path = "mooncake_shared.rs"]
 mod mooncake_shared;
 
@@ -24,6 +26,7 @@ use mooncake_open_loop::{
     OpenLoopConfig, OpenLoopResult, RouterRun, RunProvenance, parse_cpu_list,
     prepare_mooncake_corpus, prepare_open_loop_trial, run_open_loop, validate_cpu_partition,
 };
+use mooncake_recurrent::CheckpointPolicy;
 use mooncake_shared::{
     MooncakeBenchmarkConfig, MooncakeIndexerConfig, MooncakeIndexerKind, PreparedMooncakeBenchmark,
     merge_worker_traces, prepare_scaled_benchmark,
@@ -182,6 +185,11 @@ struct Args {
     #[clap(long)]
     router_lookup: bool,
 
+    /// Make every worker a hybrid worker with three recurrent groups, which publishes a state
+    /// checkpoint on the blocks this policy picks. Implies `--router-lookup`.
+    #[clap(long, value_enum)]
+    recurrent_checkpoints: Option<CheckpointPolicy>,
+
     /// Indexer backend to benchmark. Defaults to concurrent-radix-tree-compressed
     /// with `--num-event-workers` event threads.
     #[clap(subcommand)]
@@ -259,8 +267,12 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
                 "the lower-tier mode needs concurrent-radix-tree-compressed for device matches; got {name}"
             );
         }
-        if args.router_lookup && config.kind != MooncakeIndexerKind::ConcurrentRadixTreeCompressed {
-            anyhow::bail!("--router-lookup needs concurrent-radix-tree-compressed; got {name}");
+        if (args.router_lookup || args.recurrent_checkpoints.is_some())
+            && config.kind != MooncakeIndexerKind::ConcurrentRadixTreeCompressed
+        {
+            anyhow::bail!(
+                "--router-lookup and --recurrent-checkpoints need concurrent-radix-tree-compressed; got {name}"
+            );
         }
     }
     Ok(())
@@ -372,7 +384,8 @@ async fn run_open_loop_for_config(
             });
             // As the router assembles `Indexer::Concurrent`: the primary, and a lower tier that
             // stays empty unless the run has host tiers.
-            let router = args.router_lookup.then(|| RouterRun {
+            let hybrid = args.recurrent_checkpoints.is_some();
+            let router = (args.router_lookup || hybrid).then(|| RouterRun {
                 indexer: Indexer::Concurrent {
                     primary: Arc::clone(&indexer),
                     lower_tier: match &lower_tier {
@@ -390,6 +403,7 @@ async fn run_open_loop_for_config(
                 retain_kv_transfer_chain: lower_tier
                     .as_ref()
                     .is_some_and(|lower| lower.options.retain_kv_transfer_chain),
+                hybrid,
             });
             let counts = track_resident_blocks.then(|| indexer.bench_track_resident_blocks());
             let stop = Arc::new(AtomicBool::new(false));
@@ -526,6 +540,12 @@ fn print_open_loop_result(result: &OpenLoopResult) {
             "Router lookup: {} of {} lookups credited device blocks | {} blocks credited",
             router.device_hit_queries, result.total_requests, router.device_blocks,
         );
+        if let Some(checkpoints) = &router.checkpoints {
+            println!(
+                "Checkpoints: {} stored and {} removed events | {} live on device at the end",
+                checkpoints.stored_events, checkpoints.removed_events, checkpoints.live_memberships,
+            );
+        }
     }
     if !result.backend_timing_report.is_empty() {
         println!("{}", result.backend_timing_report);
@@ -636,6 +656,9 @@ async fn prepare_benchmark(
     let mut merged = merge_worker_traces(artifacts, args.common.block_size)?;
     if args.lower_tier.num_host_blocks.is_some() && args.lower_tier.kvcr_blocks() > 0 {
         merged = merged.with_kvcr_layer(args.lower_tier.kvcr_blocks())?;
+    }
+    if let Some(policy) = args.recurrent_checkpoints {
+        merged = merged.with_checkpoint_layer(policy);
     }
     Ok(Some(prepare_scaled_benchmark(
         merged,
