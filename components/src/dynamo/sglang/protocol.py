@@ -162,6 +162,8 @@ class SglangMultimodalRequest(BaseModel):
         Union[Tuple[int, int], Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
     transfer_payload: Optional[TransferRequest] = None
+    # Set only for SGLang-native /generate: forwarded sampling and logprob fields.
+    native_generate: Optional[Dict[str, Any]] = None
 
 
 class DisaggSglangMultimodalRequest(BaseModel):
