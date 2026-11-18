@@ -250,6 +250,12 @@ These flags control which role this worker plays in a disaggregated deployment. 
   Environment variable: `DYN_VLLM_GMS_SHADOW_MODE`
 </ParamField>
 
+<ParamField path="--worker-start-method" type="string" default="spawn">
+  How vLLM starts its EngineCore and GPU worker processes: `spawn` (a fresh interpreter each) or `fork` (a copy of this process). Sets `VLLM_WORKER_MULTIPROC_METHOD`; the variable itself is overwritten. With `fork`, those processes skip their Python start-up, so the engine starts sooner. A forked process keeps only the forking thread and cannot use a CUDA context it inherited, so with `fork` Dynamo builds the engine before it starts its own runtime, downloads the model in a separate process, and refuses to start if CUDA is already initialized, another Python thread is running or the runtime's threads already exist. Other native threads are not checked. Some vLLM versions initialize CUDA while vLLM or one of its plugins is imported; on those, `fork` is refused. Until the engine has loaded, the worker has no health endpoint and does not handle `SIGTERM` gracefully. Supported for aggregated, prefill and decode workers.
+
+  Environment variable: `DYN_VLLM_WORKER_START_METHOD`
+</ParamField>
+
 ## Benchmarking
 
 These flags control the self-benchmark sweep that runs on startup before the worker begins accepting production requests.
@@ -369,6 +375,7 @@ With `--benchmark-mode` set and no points file, passing a legacy flag together w
 ## Validation rules
 
 - `--embedding-worker` is only valid with `--disaggregation-mode=agg` (or the default aggregated mode) and cannot be combined with `--enable-multimodal` or `--benchmark-mode`.
+- `--worker-start-method fork` cannot be combined with `--embedding-worker`, `--classify-worker`, `--transcription-worker`, `--endpoint-types realtime`, `--disaggregation-mode=encode` or `--headless`.
 - `--benchmark-mode` cannot be combined with `--data-parallel-size` greater than `1` unless the model is a mixture-of-experts (MoE) model. The attention-DP self-benchmark needs the data-parallel ranks to run as one coordinated group, which vLLM does only for MoE models; the worker rejects this combination at startup, before it loads the model.
 
 ## Related pages

@@ -63,6 +63,7 @@ def _patch_worker_startup(vllm_main, monkeypatch, tmp_path, *, factory_create):
             model=str(model_path), served_model_name="test-model"
         ),
         headless=False,
+        worker_start_method="spawn",
         discovery_backend=None,
         request_plane=None,
         event_plane=None,
@@ -112,6 +113,89 @@ async def test_invalid_router_profile_fails_before_model_load(
 
     fetch_model.assert_not_awaited()
     vllm_main.prepare_snapshot_engine.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method, snapshot, want_order",
+    [
+        ("spawn", False, ["runtime"]),
+        ("fork", False, ["engine", "runtime"]),
+        # A snapshot controller already holds the engine; it is not built again.
+        ("fork", True, ["runtime"]),
+    ],
+)
+async def test_fork_builds_the_engine_before_the_runtime(
+    monkeypatch, tmp_path, vllm_main, method, snapshot, want_order
+) -> None:
+    async def serve_noop(*_args, **_kwargs):
+        return None
+
+    _patch_worker_startup(vllm_main, monkeypatch, tmp_path, factory_create=serve_noop)
+    config = vllm_main.parse_args_with_model_fetch.return_value
+    config.worker_start_method = method
+    order: list[str] = []
+    engine_setup = Mock()
+    monkeypatch.delenv("DYNAMO_ARTIFACT_CONFIG", raising=False)
+    monkeypatch.setattr(
+        vllm_main,
+        "setup_vllm_engine",
+        Mock(side_effect=lambda *_a, **_k: order.append("engine") or engine_setup),
+    )
+    vllm_main.create_runtime.side_effect = lambda **_k: order.append("runtime") or (
+        Mock(),
+        Mock(),
+    )
+    if snapshot:
+        controller = SimpleNamespace(engine=Mock(), pause_controller=Mock())
+        vllm_main.prepare_snapshot_engine.return_value = controller
+        monkeypatch.setattr(vllm_main, "elect_and_wake", AsyncMock())
+        monkeypatch.setattr(
+            vllm_main, "refresh_snapshot_restore_config", AsyncMock(return_value=config)
+        )
+        monkeypatch.setattr(vllm_main, "apply_restore_served_model_name", Mock())
+        monkeypatch.setattr(vllm_main, "env_bool", Mock(return_value=False))
+
+    await vllm_main.worker([])
+
+    assert order == want_order
+    prebuilt = vllm_main.WorkerFactory.return_value.create.await_args.kwargs[
+        "prebuilt_engine"
+    ]
+    if want_order[0] == "engine":
+        assert prebuilt[0] is engine_setup
+        assert isinstance(prebuilt[1], vllm_main.StatLoggerFactory)
+    else:
+        assert prebuilt is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method, in_subprocess", [("spawn", False), ("fork", True)])
+async def test_fork_fetches_the_model_outside_the_forking_process(
+    monkeypatch, tmp_path, vllm_main, method, in_subprocess
+) -> None:
+    async def serve_noop(*_args, **_kwargs):
+        return None
+
+    _patch_worker_startup(vllm_main, monkeypatch, tmp_path, factory_create=serve_noop)
+    config = vllm_main.parse_args_with_model_fetch.return_value
+    config.worker_start_method = method
+    config.model = "org/model"
+    fetch_here = AsyncMock(return_value="/models/here")
+    fetch_in_subprocess = AsyncMock(return_value="/models/subprocess")
+    monkeypatch.delenv("DYNAMO_ARTIFACT_CONFIG", raising=False)
+    monkeypatch.setattr(vllm_main, "needs_local_model_path", Mock(return_value=True))
+    monkeypatch.setattr(vllm_main, "fetch_model", fetch_here)
+    monkeypatch.setattr(vllm_main, "fetch_model_in_subprocess", fetch_in_subprocess)
+    monkeypatch.setattr(vllm_main, "setup_vllm_engine", Mock())
+
+    await vllm_main.worker([])
+
+    assert fetch_in_subprocess.await_count == int(in_subprocess)
+    assert fetch_here.await_count == int(not in_subprocess)
+    assert config.engine_args.model == (
+        "/models/subprocess" if in_subprocess else "/models/here"
+    )
 
 
 @pytest.mark.asyncio

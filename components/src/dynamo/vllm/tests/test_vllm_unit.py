@@ -700,8 +700,14 @@ def test_should_register_model_fetch_weights_for_default_load_format():
     assert should_register_model_ignore_weights(config) is False
 
 
-def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
+@pytest.mark.parametrize("start_method", ["spawn", "fork"])
+def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch, start_method):
     from dynamo.vllm import main as vllm_main
+
+    # setup_vllm_engine writes the start method into the environment.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "unset")
+    fork_checks = Mock()
+    monkeypatch.setattr(vllm_main, "check_fork_safe", fork_checks)
 
     # Isolate NIXL env so allow_nixl_telemetry_capture() cannot leak into later tests.
     for var in (
@@ -770,11 +776,30 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
         multimodal_embedding_cache_capacity_gb=0,
         route_to_encoder=False,
         served_model_name="Qwen/Qwen3-0.6B",
+        worker_start_method=start_method,
     )
 
     _, _, default_sampling_params, _, _ = vllm_main.setup_vllm_engine(config)
 
     assert default_sampling_params == {"temperature": 0.7}
+    # vLLM's processes start the configured way, and fork is checked first.
+    assert os.environ["VLLM_WORKER_MULTIPROC_METHOD"] == start_method
+    assert fork_checks.call_count == (1 if start_method == "fork" else 0)
+
+
+def test_worker_start_method_fork_is_validated_when_arguments_are_parsed(
+    mock_vllm_cli,
+):
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--worker-start-method",
+        "fork",
+        "--disaggregation-mode",
+        "encode",
+    )
+    with pytest.raises(ValueError, match="--worker-start-method fork cannot be"):
+        parse_args()
 
 
 # --disaggregation-mode tests

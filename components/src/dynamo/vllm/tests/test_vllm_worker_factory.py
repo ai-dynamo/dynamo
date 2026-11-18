@@ -1038,6 +1038,43 @@ class TestCreate:
             shutdown_event,
             shutdown_endpoints,
             snapshot_engine=snapshot_engine,
+            prebuilt_engine=None,
+        )
+
+    @pytest.mark.parametrize(
+        "mode, method",
+        [
+            (DisaggregationMode.DECODE, "_create_decode_worker"),
+            (DisaggregationMode.PREFILL, "_create_prefill_worker"),
+        ],
+    )
+    async def test_passes_prebuilt_engine(
+        self, factory: WorkerFactory, mode: DisaggregationMode, method: str
+    ) -> None:
+        config = _make_config(disaggregation_mode=mode)
+        runtime = Mock()
+        shutdown_event = asyncio.Event()
+        shutdown_endpoints: list = []
+        prebuilt_engine: SnapshotEngineSetupResult = (
+            (Mock(), Mock(), Mock(), "/tmp/prometheus", Mock()),
+            Mock(),
+        )
+
+        await factory.create(
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            prebuilt_engine=prebuilt_engine,
+        )
+
+        getattr(factory, method).assert_called_once_with(
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            snapshot_engine=None,
+            prebuilt_engine=prebuilt_engine,
         )
 
 
@@ -1576,6 +1613,7 @@ async def _enter_restore_path(
     setup_vllm_engine: Mock | None = None,
     factory: WorkerFactory | None = None,
     gms_shadow_mode: bool = False,
+    prebuilt_engine: SnapshotEngineSetupResult | None = None,
 ) -> None:
     """Run one worker-creation path; it ends in ``register`` or the error under test."""
     method_name, mode = _RESTORE_PATHS[path]
@@ -1601,12 +1639,11 @@ async def _enter_restore_path(
         endpoint_types="chat,completions",
         gms_shadow_mode=gms_shadow_mode,
     )
+    engine_kwargs = {"snapshot_engine": snapshot_engine}
+    if prebuilt_engine is not None:
+        engine_kwargs["prebuilt_engine"] = prebuilt_engine
     await getattr(factory, method_name)(
-        runtime,
-        config,
-        asyncio.Event(),
-        [],
-        snapshot_engine=snapshot_engine,
+        runtime, config, asyncio.Event(), [], **engine_kwargs
     )
 
 
@@ -1869,6 +1906,40 @@ async def test_cold_start_registers_without_syncing_the_fpm_worker_id(
 
     engine_client.engine_core.call_utility_async.assert_not_awaited()
     register.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["decode", "prefill"])
+async def test_prebuilt_engine_is_used_and_still_goes_through_election(
+    path: str, restore_path_stubs, monkeypatch
+):
+    """An engine built before the runtime is served as is, but unlike a restored
+    snapshot it has not been elected yet, so shadow mode still waits for the lock."""
+    prebuilt, engine_client = _restore_snapshot_engine()
+    setup_vllm_engine = Mock()
+    factory = _make_factory(
+        register_vllm_model_fn=AsyncMock(side_effect=_ReachedRegistration),
+        setup_vllm_engine_fn=setup_vllm_engine,
+    )
+    factory._maybe_wait_for_failover_lock = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+    with pytest.raises(_ReachedRegistration):
+        await _enter_restore_path(
+            path,
+            None,
+            factory.register_vllm_model,
+            _restored_endpoint(),
+            factory=factory,
+            gms_shadow_mode=True,
+            prebuilt_engine=prebuilt,
+        )
+
+    setup_vllm_engine.assert_not_called()
+    prebuilt[1].bind_endpoint.assert_called_once()
+    engine_client.engine_core.call_utility_async.assert_awaited_once_with(
+        FPM_SET_WORKER_ID_METHOD_NAME, _RESTORED_ENDPOINT_ID
+    )
+    factory._maybe_wait_for_failover_lock.assert_awaited_once()
 
 
 async def _never_answers(*_args, **_kwargs) -> None:

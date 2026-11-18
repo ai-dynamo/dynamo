@@ -1829,8 +1829,13 @@ class WorkerFactory:
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,
         snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
+        prebuilt_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
-        """Create the appropriate worker based on config flags."""
+        """Create the appropriate worker based on config flags.
+
+        ``prebuilt_engine`` is an engine built before the runtime existed; unlike
+        ``snapshot_engine`` it has not been through failover election.
+        """
 
         if config.realtime:
             await self._create_realtime_worker(
@@ -1882,6 +1887,7 @@ class WorkerFactory:
                 shutdown_event,
                 shutdown_endpoints,
                 snapshot_engine=snapshot_engine,
+                prebuilt_engine=prebuilt_engine,
             )
         else:
             # AGGREGATED or DECODE
@@ -1891,6 +1897,7 @@ class WorkerFactory:
                 shutdown_event,
                 shutdown_endpoints,
                 snapshot_engine=snapshot_engine,
+                prebuilt_engine=prebuilt_engine,
             )
         return
 
@@ -2494,6 +2501,7 @@ class WorkerFactory:
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
         snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
+        prebuilt_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """
         Instantiate and serve
@@ -2506,6 +2514,7 @@ class WorkerFactory:
                     shutdown_event,
                     shutdown_endpoints,
                     snapshot_engine=snapshot_engine,
+                    prebuilt_engine=prebuilt_engine,
                     lifecycle=lifecycle,
                 )
             finally:
@@ -2519,6 +2528,7 @@ class WorkerFactory:
         shutdown_endpoints: list,  # mutated in place
         snapshot_engine: Optional[SnapshotEngineSetupResult],
         lifecycle: _WorkerLifecycle,
+        prebuilt_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """Initialize and serve a decode worker."""
 
@@ -2561,15 +2571,18 @@ class WorkerFactory:
                 ]
             )
 
-        # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it.
+        # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it
+        # (an engine built before the runtime is already loaded by now).
         failover_metrics = self._maybe_create_failover_metrics(
             config, generate_endpoint
         )
 
-        # Use pre-created engine if provided (checkpoint mode), otherwise create new
+        # Use the engine built before the runtime if there is one (checkpoint
+        # mode, or the fork start method), otherwise create it now.
         fpm_worker_id = str(generate_endpoint.connection_id())
-        if snapshot_engine is not None:
-            engine_setup, factory = snapshot_engine
+        ready_engine = snapshot_engine or prebuilt_engine
+        if ready_engine is not None:
+            engine_setup, factory = ready_engine
             (
                 engine_client,
                 vllm_config,
@@ -2596,7 +2609,7 @@ class WorkerFactory:
         # Sync after the lifecycle owns the engine, so a failure shuts it down.
         lifecycle.engine_client = engine_client
         lifecycle.vllm_config = vllm_config
-        if snapshot_engine is not None:
+        if ready_engine is not None:
             await _sync_fpm_worker_id(engine_client, vllm_config, fpm_worker_id)
         await configure_kv_event_block_size(engine_client, vllm_config)
 
@@ -2821,6 +2834,7 @@ class WorkerFactory:
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,
         snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
+        prebuilt_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         with _WorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
             try:
@@ -2830,6 +2844,7 @@ class WorkerFactory:
                     shutdown_event,
                     shutdown_endpoints,
                     snapshot_engine=snapshot_engine,
+                    prebuilt_engine=prebuilt_engine,
                     lifecycle=lifecycle,
                 )
             finally:
@@ -2843,6 +2858,7 @@ class WorkerFactory:
         shutdown_endpoints: list,  # mutated in place
         snapshot_engine: Optional[SnapshotEngineSetupResult],
         lifecycle: _WorkerLifecycle,
+        prebuilt_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
@@ -2867,15 +2883,18 @@ class WorkerFactory:
                 f"{config.namespace}.{config.component}.list_loras"
             )
 
-        # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it.
+        # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it
+        # (an engine built before the runtime is already loaded by now).
         failover_metrics = self._maybe_create_failover_metrics(
             config, generate_endpoint
         )
 
-        # Use pre-created engine if provided (checkpoint mode), otherwise create new
+        # Use the engine built before the runtime if there is one (checkpoint
+        # mode, or the fork start method), otherwise create it now.
         fpm_worker_id = str(generate_endpoint.connection_id())
-        if snapshot_engine is not None:
-            engine_setup, factory = snapshot_engine
+        ready_engine = snapshot_engine or prebuilt_engine
+        if ready_engine is not None:
+            engine_setup, factory = ready_engine
             (
                 engine_client,
                 vllm_config,

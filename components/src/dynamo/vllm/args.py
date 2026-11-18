@@ -32,7 +32,11 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeConfig,
 )
 from dynamo.common.configuration.utils import split_served_model_names
-from dynamo.common.model_fetch import fetch_model, needs_local_model_path
+from dynamo.common.model_fetch import (
+    fetch_model,
+    fetch_model_in_subprocess,
+    needs_local_model_path,
+)
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import (
@@ -147,7 +151,14 @@ async def parse_args_with_model_fetch(argv: list[str] | None = None) -> Config:
     if dynamo_config.artifact_router_profile is not None:
         _configured_artifact_router_profile(dynamo_config.artifact_router_profile)
     if needs_local_model_path(dynamo_config.model):
-        vllm_args.model = await fetch_model(dynamo_config.model, ignore_weights=True)
+        # With fork, fetch in a subprocess: fetching here starts Dynamo's runtime
+        # threads in the process vLLM is about to fork.
+        fetch = (
+            fetch_model_in_subprocess
+            if dynamo_config.worker_start_method == "fork"
+            else fetch_model
+        )
+        vllm_args.model = await fetch(dynamo_config.model, ignore_weights=True)
         if not vllm_args.served_model_name:
             vllm_args.served_model_name = [dynamo_config.model]
     return _build_config(dynamo_config, vllm_args)
