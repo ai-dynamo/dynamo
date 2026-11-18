@@ -496,7 +496,13 @@ The API is organized in two tiers. **Tier 2 (convenience)** is what integrations
 
 ```python
 class GMSClientMemoryManager:
-    def __init__(socket_path: str, *, device: int = 0, bulk_import: Optional[bool] = None): ...
+    def __init__(
+        socket_path: str,
+        *,
+        device: int = 0,
+        bulk_import: Optional[bool] = None,
+        fixed_va_window: Optional[Tuple[int, int]] = None,  # (base, size); see "Fixed-VA windows"
+    ): ...
 
     # Properties
     @property granted_lock_type: Optional[GrantedLockType]
@@ -545,6 +551,17 @@ class GMSClientMemoryManager:
 By default, the read-only attach (`materialize_module_from_gms`) and `remap_all_vas()` map allocations in bulk: they export a chunk of up to 256 allocations, import the chunk, map it, and set access once every chunk is mapped. This makes the same driver calls as importing one allocation at a time, without alternating between client and server for each allocation. A bulk import holds up to 256 exported file descriptors at once, fewer when the process is close to its `RLIMIT_NOFILE`, and a failed one leaves nothing mapped.
 
 To import one allocation at a time instead, pass `bulk_import=False` to the constructor or set `DYN_GMS_BULK_IMPORT` to `0`, `false`, `no` or `off` in the engine's environment. The constructor argument takes precedence.
+
+#### Fixed-VA windows
+
+By default the driver picks the address of every mapping, so the same allocation sits at a different address in each process. Pass `fixed_va_window=(base, size)` to put every mapping of a manager inside one address window instead. Off by default; there is no default window, so the caller chooses `base` and `size`.
+
+- The constructor reserves the whole window.
+- An imported allocation is mapped at `base` plus the offset of its layout slot, which is the sum of the aligned sizes of the slots before it. Every process that imports the same committed layout maps it at the same addresses, whatever the import order and with bulk import on or off.
+- Ranges the manager creates itself (`reserve_va`, a writer's `create_mapping(size=...)`, scratch mappings) are taken from the top of the window down, and released ranges are reused. The two regions never overlap; a range that does not fit raises `RuntimeError`.
+- `close()` releases the window, and so does a failed `connect()` while nothing is mapped in it. `close(best_effort=True)` does not.
+
+`base` and `size` must be multiples of the allocation granularity (2 MiB on current NVIDIA GPUs); otherwise the constructor raises `ValueError`. The driver treats `base` as a hint: when any part of the window is already reserved in the process, for example by another manager with the same window, it reserves elsewhere, and the constructor frees that reservation and raises `RuntimeError`. Create these managers before the process launches its first kernel: with HMM addressing (seen with driver 615 on x86), once a process has loaded CUDA modules the driver honors hints only for ranges it has handed out before. `get_or_create_gms_client_memory_manager` and `get_or_create_scratch_manager` take the same argument. Fixed-VA windows are CUDA only; on XPU the constructor raises `NotImplementedError`.
 
 ---
 

@@ -124,6 +124,39 @@ def _create_mem_pool() -> "MemPool":
     return MemPool(allocator=_pluggable_alloc.allocator())
 
 
+def _create_mem_pool_for(manager: "GMSClientMemoryManager") -> "MemPool":
+    """Create the torch mempool of a manager that is not registered yet."""
+    try:
+        _ensure_callbacks_initialized()
+        return _create_mem_pool()
+    except BaseException:
+        # Nothing else refers to the manager, so its fixed-VA window would stay
+        # reserved and no later manager could take the same addresses.
+        if manager.fixed_va_window is not None:
+            manager.close()
+        raise
+
+
+def _check_tag_state(
+    state: _TagState,
+    tag: str,
+    socket_path: str,
+    device: int,
+    fixed_va_window: Optional[tuple[int, int]],
+) -> None:
+    if state.socket_path != socket_path or state.device != device:
+        raise RuntimeError(
+            f"GMS allocator tag={tag} was initialized for "
+            f"{state.socket_path} on device {state.device}, not {socket_path} "
+            f"on device {device}"
+        )
+    if state.manager.fixed_va_window != fixed_va_window:
+        raise RuntimeError(
+            f"GMS allocator tag={tag} was initialized with fixed_va_window="
+            f"{state.manager.fixed_va_window}, not {fixed_va_window}"
+        )
+
+
 def get_or_create_gms_client_memory_manager(
     socket_path: str,
     device: int,
@@ -131,17 +164,18 @@ def get_or_create_gms_client_memory_manager(
     *,
     tag: str = "weights",
     timeout_ms: Optional[int] = None,
+    fixed_va_window: Optional[tuple[int, int]] = None,
 ) -> "GMSClientMemoryManager":
+    """Return the manager registered for ``tag``, or create and connect one.
+
+    ``fixed_va_window`` is passed to ``GMSClientMemoryManager``; a tag that is
+    already registered must have been created with the same window.
+    """
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
     state = _tag_states.get(tag)
     if state is not None:
-        if state.socket_path != socket_path or state.device != device:
-            raise RuntimeError(
-                f"GMS allocator tag={tag} was initialized for "
-                f"{state.socket_path} on device {state.device}, not {socket_path} "
-                f"on device {device}"
-            )
+        _check_tag_state(state, tag, socket_path, device, fixed_va_window)
 
         manager = state.manager
         if not manager.is_connected:
@@ -150,9 +184,13 @@ def get_or_create_gms_client_memory_manager(
                     f"GMS allocator tag={tag} is disconnected but still owns "
                     "preserved state; recreate the process instead of reusing it"
                 )
-            manager._client = None
-            manager._granted_lock_type = None
-            _tag_states.pop(tag, None)
+            if manager.fixed_va_window is None:
+                manager._client = None
+                manager._granted_lock_type = None
+                _tag_states.pop(tag, None)
+            else:
+                # The replacement below needs the window at the same base.
+                manager.close()
             state = None
 
     if state is not None:
@@ -167,7 +205,9 @@ def get_or_create_gms_client_memory_manager(
             )
         return state.manager
 
-    manager = GMSClientMemoryManager(socket_path, device=device, tag=tag)
+    manager = GMSClientMemoryManager(
+        socket_path, device=device, tag=tag, fixed_va_window=fixed_va_window
+    )
     manager.connect(mode, timeout_ms=timeout_ms)
 
     # Mempool only when we have RW: the pluggable allocator routes torch
@@ -175,8 +215,7 @@ def get_or_create_gms_client_memory_manager(
     # RO clients consume preserved imports and don't use the mempool.
     mem_pool = None
     if manager.granted_lock_type == GrantedLockType.RW:
-        _ensure_callbacks_initialized()
-        mem_pool = _create_mem_pool()
+        mem_pool = _create_mem_pool_for(manager)
 
     _tag_states[tag] = _TagState(
         manager=manager,
@@ -199,6 +238,7 @@ def get_or_create_scratch_manager(
     *,
     tag: str = "kv_cache",
     scratch_size: int = 512 * 1024 * 1024,
+    fixed_va_window: Optional[tuple[int, int]] = None,
 ) -> "GMSClientMemoryManager":
     """Register an unconnected manager for client-local scratch allocation.
 
@@ -207,17 +247,13 @@ def get_or_create_scratch_manager(
     .connect(...) before any server-backed operation, then call
     manager.prepare_scratch_for_reallocation() to move preserved-VA bookkeeping
     and flip routing to the standard create_mapping path.
+    ``fixed_va_window`` is passed to ``GMSClientMemoryManager``.
     """
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
     state = _tag_states.get(tag)
     if state is not None:
-        if state.socket_path != socket_path or state.device != device:
-            raise RuntimeError(
-                f"GMS allocator tag={tag} was initialized for "
-                f"{state.socket_path} on device {state.device}, not {socket_path} "
-                f"on device {device}"
-            )
+        _check_tag_state(state, tag, socket_path, device, fixed_va_window)
         if not state.is_scratch:
             raise RuntimeError(
                 f"GMS allocator tag={tag} already registered as non-scratch; "
@@ -235,9 +271,9 @@ def get_or_create_scratch_manager(
         device=device,
         tag=tag,
         scratch_size=scratch_size,
+        fixed_va_window=fixed_va_window,
     )
-    _ensure_callbacks_initialized()
-    mem_pool = _create_mem_pool()
+    mem_pool = _create_mem_pool_for(manager)
 
     _tag_states[tag] = _TagState(
         manager=manager,

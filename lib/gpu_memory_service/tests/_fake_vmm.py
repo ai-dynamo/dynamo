@@ -84,9 +84,14 @@ class FakeVMM(VMMDevice):
     def _overlaps(ranges, va, size):
         return any(start < va + size and va < start + n for start, n in ranges)
 
-    def address_reserve(self, size, granularity):
-        va = -(-self._next_va // granularity) * granularity
-        self._next_va = va + size + 0x10000
+    def address_reserve(self, size, granularity, addr=0):
+        # cuMemAddressReserve honors a hint only when the whole range is free
+        # and otherwise succeeds somewhere else.
+        if addr and not self._overlaps(self.reservations.items(), addr, size):
+            va = addr
+        else:
+            va = -(-self._next_va // granularity) * granularity
+            self._next_va = va + size + 0x10000
         self.reservations[va] = size
         return va
 

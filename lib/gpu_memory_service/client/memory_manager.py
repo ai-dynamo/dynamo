@@ -31,6 +31,7 @@ This module uses cuda-python bindings for CUDA driver API calls:
 
 from __future__ import annotations
 
+import bisect
 import logging
 import os
 import resource
@@ -154,6 +155,114 @@ class LocalMapping:
         )
 
 
+class _FixedVAWindow:
+    """Bookkeeping for one fixed-VA window; makes no driver calls.
+
+    Imports sit at ``base + offset(layout slot)`` and grow up from ``base``.
+    Client-created ranges grow down from the end and reuse released ranges
+    first, so neither placement depends on the order the two kinds are created
+    in. Overlap is refused here because cuMemMap onto a mapped range is fatal
+    on CUDA.
+    """
+
+    def __init__(self, base: int, size: int) -> None:
+        self.base = base
+        self.size = size
+        self.reserved = False
+        self.imports = 0  # slot-placed ranges, all below _floor
+        self._starts: List[int] = []  # sorted starts of carved ranges
+        self._sizes: Dict[int, int] = {}
+        # Client ranges live in [_floor, end), either carved or free in _holes.
+        self._floor = self.end
+        self._holes: Dict[int, int] = {}
+
+    @property
+    def end(self) -> int:
+        return self.base + self.size
+
+    @property
+    def is_empty(self) -> bool:
+        return not self._starts
+
+    def _describe(self) -> str:
+        return f"fixed VA window [0x{self.base:x}, 0x{self.end:x})"
+
+    def _overlaps(self, va: int, size: int) -> bool:
+        i = bisect.bisect_right(self._starts, va)
+        if i and self._starts[i - 1] + self._sizes[self._starts[i - 1]] > va:
+            return True
+        return i < len(self._starts) and self._starts[i] < va + size
+
+    def _insert(self, va: int, size: int) -> int:
+        bisect.insort(self._starts, va)
+        self._sizes[va] = size
+        return va
+
+    def carve(self, va: int, size: int, alignment: int) -> int:
+        """Carve the range of a slot-placed import; it must stay below the
+        client ranges."""
+        if (
+            va % alignment
+            or va < self.base
+            or va + size > self._floor
+            or self._overlaps(va, size)
+        ):
+            raise RuntimeError(
+                f"[GMS] 0x{size:x} bytes at 0x{va:x} do not fit the "
+                f"{self._describe()} (client ranges from 0x{self._floor:x})"
+            )
+        self.imports += 1
+        return self._insert(va, size)
+
+    def carve_top_down(self, size: int, alignment: int) -> int:
+        """Carve a client range: the highest fitting released range, else below
+        the lowest client range."""
+        for start, n in sorted(self._holes.items(), reverse=True):
+            va = (start + n - size) // alignment * alignment
+            if va >= start:
+                del self._holes[start]
+                if va > start:
+                    self._holes[start] = va - start
+                if va + size < start + n:
+                    self._holes[va + size] = start + n - va - size
+                return self._insert(va, size)
+        va = (self._floor - size) // alignment * alignment
+        # [va, _floor) becomes client space, alignment gap included.
+        if va < self.base or self._overlaps(va, self._floor - va):
+            raise RuntimeError(
+                f"[GMS] the {self._describe()} has no free 0x{size:x}-byte range"
+            )
+        if va + size < self._floor:
+            self._holes[va + size] = self._floor - va - size
+        self._floor = va
+        return self._insert(va, size)
+
+    def release(self, va: int) -> None:
+        size = self._sizes.pop(va)
+        del self._starts[bisect.bisect_left(self._starts, va)]
+        if va < self._floor:
+            self.imports -= 1
+            return
+        for start, n in list(self._holes.items()):
+            if start + n == va:
+                del self._holes[start]
+                va, size = start, n + size
+            elif va + size == start:
+                del self._holes[start]
+                size += n
+        if va == self._floor:
+            self._floor = va + size
+        else:
+            self._holes[va] = size
+
+    def clear(self) -> None:
+        self.imports = 0
+        self._starts.clear()
+        self._sizes.clear()
+        self._holes.clear()
+        self._floor = self.end
+
+
 @dataclass(frozen=True)
 class LayoutCommit:
     """What :meth:`GMSClientMemoryManager.commit_layout` did to this session.
@@ -186,10 +295,18 @@ class GMSClientMemoryManager:
         tag: Optional[str] = None,
         scratch_size: int = 512 * 1024 * 1024,
         bulk_import: Optional[bool] = None,
+        fixed_va_window: Optional[tuple[int, int]] = None,
     ) -> None:
         """``bulk_import``: whether ``remap_all_vas`` and the read-only attach
         map allocations in bulk (see ``import_allocations``) instead of one at
         a time. ``None`` follows ``DYN_GMS_BULK_IMPORT``, which defaults to on.
+
+        ``fixed_va_window``: ``(base, size)`` of an address window reserved
+        here and holding every mapping of this manager. An import lands at
+        ``base`` plus the offset of its layout slot, so every process that
+        imports the same committed layout maps it at the same addresses.
+        Client-created ranges are carved down from the end of the window.
+        ``None`` (default): the driver picks every address. CUDA only.
         """
         self.socket_path = socket_path
         self.device = device
@@ -219,6 +336,13 @@ class GMSClientMemoryManager:
             is_bulk_import_enabled() if bulk_import is None else bulk_import
         )
 
+        self._fixed = (
+            None if fixed_va_window is None else _FixedVAWindow(*fixed_va_window)
+        )
+        # Slot offsets of the layout the live imports were placed by; re-read
+        # once no import is left, so a new layout is not placed by an old one.
+        self._fixed_slot_offsets: Optional[Dict[int, int]] = None
+
         # VA-stable unmap/remap state
         self._va_preserved = False
         self._last_memory_layout_hash: str = ""
@@ -226,6 +350,10 @@ class GMSClientMemoryManager:
         self._vmm.ensure_initialized()
         self._vmm.runtime_set_device(device)
         self.granularity = self._vmm.get_allocation_granularity(device)
+        if self._fixed is not None:
+            # The driver honors the base only while the range is free, so take
+            # the whole window before anything else in the process can.
+            self._reserve_fixed_window(self._fixed)
 
     # ==================== Properties ====================
 
@@ -252,6 +380,12 @@ class GMSClientMemoryManager:
     @property
     def total_bytes(self) -> int:
         return sum(m.aligned_size for m in self._mappings.values())
+
+    @property
+    def fixed_va_window(self) -> Optional[tuple[int, int]]:
+        if self._fixed is None:
+            return None
+        return self._fixed.base, self._fixed.size
 
     # ==================== Tier 1: Connection ====================
 
@@ -290,11 +424,19 @@ class GMSClientMemoryManager:
                 self.socket_path = new_path
             self._aborted = False
 
-        self._client = _GMSClientSession(
-            self.socket_path,
-            lock_type=lock_type,
-            timeout_ms=timeout_ms,
-        )
+        try:
+            self._client = _GMSClientSession(
+                self.socket_path,
+                lock_type=lock_type,
+                timeout_ms=timeout_ms,
+            )
+        except BaseException:
+            # Callers drop a manager whose connect failed without closing it.
+            # An empty window left reserved would make every later manager for
+            # the same window fail; it is reserved again on first use.
+            if self._fixed is not None and self._fixed.is_empty:
+                self._release_fixed_window(self._fixed)
+            raise
         self._granted_lock_type = self._client.lock_type
         if self._granted_lock_type == GrantedLockType.RW:
             self._last_memory_layout_hash = ""
@@ -441,9 +583,12 @@ class GMSClientMemoryManager:
     # ==================== Tier 1: VA Operations (local) ====================
 
     def reserve_va(self, size: int) -> int:
-        """Reserve virtual address space (cuMemAddressReserve). No tracking."""
+        """Reserve virtual address space (cuMemAddressReserve). No tracking.
+
+        With a fixed-VA window, carves a client range from it instead.
+        """
         aligned_size = align_to_granularity(size, self.granularity)
-        return self._vmm.address_reserve(aligned_size, self.granularity)
+        return self._reserve_client_va(aligned_size, self.granularity)
 
     def map_va(
         self,
@@ -463,8 +608,19 @@ class GMSClientMemoryManager:
         handle = self._vmm.import_shareable_handle_close_fd(
             fd, import_size=aligned_size
         )
-        self._vmm.map(va, aligned_size, handle)
-        self._vmm.set_access(va, aligned_size, self.device, self._granted_lock_type)
+        # All or nothing, so the caller can return the VA and retry.
+        try:
+            self._vmm.map(va, aligned_size, handle)
+            try:
+                self._vmm.set_access(
+                    va, aligned_size, self.device, self._granted_lock_type
+                )
+            except BaseException:
+                self._vmm.unmap(va, aligned_size)
+                raise
+        except BaseException:
+            self._vmm.release(handle)
+            raise
         self._track_mapping(
             LocalMapping(
                 allocation_id=allocation_id,
@@ -504,9 +660,80 @@ class GMSClientMemoryManager:
             mapping = self._mappings.get(va)
             if mapping is None:
                 return
-        self._vmm.address_free(va, mapping.va_reserved_size)
+        self._release_va(va, mapping.va_reserved_size)
         self._mappings.pop(va, None)
         self._inverse_mapping.pop(mapping.allocation_id, None)
+
+    # ==================== Fixed-VA window ====================
+
+    def _reserve_fixed_window(self, window: _FixedVAWindow) -> None:
+        if window.reserved:
+            return
+        g = self.granularity
+        if window.base <= 0 or window.size <= 0 or window.base % g or window.size % g:
+            # An unaligned placement hint is a fatal driver error, not a miss.
+            raise ValueError(
+                f"[GMS] fixed VA window 0x{window.base:x} (+0x{window.size:x}) for "
+                f"tag {self.tag!r} must be non-empty and aligned to 0x{g:x}"
+            )
+        va = int(self._vmm.address_reserve(window.size, g, addr=window.base))
+        if va != window.base:
+            # A hint that overlaps anything already reserved succeeds elsewhere.
+            self._vmm.address_free(va, window.size)
+            raise RuntimeError(
+                f"[GMS] fixed VA window 0x{window.base:x} (+0x{window.size:x}) for "
+                f"tag {self.tag!r} is not available; the driver returned 0x{va:x}"
+            )
+        window.reserved = True
+        logger.info(
+            "[GMS] Reserved fixed VA window 0x%x (+0x%x) for tag %r",
+            window.base,
+            window.size,
+            self.tag,
+        )
+
+    def _release_fixed_window(self, window: _FixedVAWindow) -> None:
+        if window.reserved:
+            self._vmm.address_free(window.base, window.size)
+            window.reserved = False
+        window.clear()
+        self._fixed_slot_offsets = None
+
+    def _reserve_client_va(self, size: int, alignment: int) -> int:
+        if self._fixed is None:
+            return self._vmm.address_reserve(size, alignment)
+        self._reserve_fixed_window(self._fixed)
+        return self._fixed.carve_top_down(size, alignment)
+
+    def _reserve_import_va(self, layout_slot: int, aligned_size: int) -> int:
+        """Reserve the VA of an imported allocation.
+
+        In a fixed-VA window it depends only on the committed layout, not on
+        import order or on what else this process has mapped.
+        """
+        window = self._fixed
+        if window is None:
+            return self.reserve_va(aligned_size)
+        self._reserve_fixed_window(window)
+        if self._fixed_slot_offsets is None or not window.imports:
+            offsets, cursor = {}, 0
+            for info in sorted(self.list_handles(), key=lambda h: int(h.layout_slot)):
+                offsets[int(info.layout_slot)] = cursor
+                cursor += align_to_granularity(int(info.aligned_size), self.granularity)
+            self._fixed_slot_offsets = offsets
+        offset = self._fixed_slot_offsets.get(layout_slot)
+        if offset is None:
+            raise RuntimeError(
+                f"[GMS] layout slot {layout_slot} is not in the committed layout"
+            )
+        return window.carve(window.base + offset, aligned_size, self.granularity)
+
+    def _release_va(self, va: int, size: int) -> None:
+        """Return a VA from _reserve_client_va or _reserve_import_va."""
+        if self._fixed is None:
+            self._vmm.address_free(va, size)
+        else:
+            self._fixed.release(va)
 
     # ==================== Tier 2: Convenience ====================
 
@@ -584,7 +811,7 @@ class GMSClientMemoryManager:
         """Import and map, in bulk, every listed allocation not tracked yet.
 
         Later ``create_mapping(allocation_id=...)`` calls return the cached VA.
-        Each allocation gets its own reservation, as with per-allocation import.
+        Each allocation gets the VA a per-allocation import would give it.
         All or nothing: on failure no reservation or mapping is left behind.
         """
         wanted = [
@@ -602,14 +829,14 @@ class GMSClientMemoryManager:
                         f"Allocation {allocation_id} is not in the layout"
                     )
                 aligned_size = int(info.aligned_size)
-                va = self.reserve_va(aligned_size)
+                va = self._reserve_import_va(int(info.layout_slot), aligned_size)
                 entries.append((va, aligned_size, allocation_id))
             handles = self._bulk_map(entries)
         except BaseException:
             # As in _bulk_map: a failed release must not hide the first error.
             for va, aligned_size, _ in entries:
                 try:
-                    self._vmm.address_free(va, aligned_size)
+                    self._release_va(va, aligned_size)
                 except Exception:
                     logger.exception("[GMS] unwinding bulk import: free 0x%x", va)
             raise
@@ -660,18 +887,40 @@ class GMSClientMemoryManager:
             layout_slot = int(info.layout_slot)
 
             fd = self.export_handle(allocation_id)
-            va = self.reserve_va(aligned_size)
-            self.map_va(fd, va, alloc_size, allocation_id, alloc_tag, layout_slot)
+            try:
+                va = self._reserve_import_va(layout_slot, aligned_size)
+            except BaseException:
+                os.close(fd)
+                raise
+            try:
+                self.map_va(fd, va, alloc_size, allocation_id, alloc_tag, layout_slot)
+            except BaseException:
+                self._release_va(va, aligned_size)
+                raise
             return va
 
         # Allocate path
         if size <= 0:
             raise ValueError("size must be > 0 when allocation_id is None")
         alloc_id, layout_slot = self.allocate_handle(size, tag)
-        fd = self.export_handle(alloc_id)
         aligned_size = align_to_granularity(size, self.granularity)
-        va = self.reserve_va(aligned_size)
-        self.map_va(fd, va, size, alloc_id, tag, layout_slot)
+        try:
+            fd = self.export_handle(alloc_id)
+            try:
+                va = self.reserve_va(aligned_size)
+            except BaseException:
+                os.close(fd)
+                raise
+            try:
+                self.map_va(fd, va, size, alloc_id, tag, layout_slot)
+            except BaseException:
+                self._release_va(va, aligned_size)
+                raise
+        except BaseException:
+            # A full window makes this reachable; an allocation left on the
+            # server with no mapping here would be committed with the layout.
+            self.free_handle(alloc_id)
+            raise
         return va
 
     def destroy_mapping(self, va: int) -> None:
@@ -917,7 +1166,14 @@ class GMSClientMemoryManager:
                 )
             self._shared_scratch_handle = scratch_handle
 
-        va = self._vmm.address_reserve(va_reserved_size, self.scratch_size)
+        try:
+            va = self._reserve_client_va(va_reserved_size, self.scratch_size)
+        except BaseException:
+            # The block is otherwise released with the last scratch mapping.
+            if not self._scratch_mappings:
+                self._vmm.release(self._shared_scratch_handle)
+                self._shared_scratch_handle = 0
+            raise
         for offset in range(0, va_reserved_size, self.scratch_size):
             self._vmm.map(va + offset, self.scratch_size, scratch_handle)
         self._vmm.set_access(va, va_reserved_size, self.device, GrantedLockType.RW)
@@ -1031,7 +1287,7 @@ class GMSClientMemoryManager:
             if self._shared_scratch_handle != 0 and not self._scratch_mappings:
                 self._vmm.release(self._shared_scratch_handle)
                 self._shared_scratch_handle = 0
-        self._vmm.address_free(base_va, scratch.va_reserved_size)
+        self._release_va(base_va, scratch.va_reserved_size)
         return True
 
     # ==================== Lifecycle ====================
@@ -1063,6 +1319,8 @@ class GMSClientMemoryManager:
             for va in list(self._mappings.keys()):
                 self.unmap_va(va)
                 self.free_va(va)
+            if self._fixed is not None:
+                self._release_fixed_window(self._fixed)
             self.abort()
         self._unmapped = False
         self._va_preserved = False

@@ -90,8 +90,12 @@ class VMMDevice(ABC):
     # ----- virtual address space + mapping ----------------------------------
 
     @abstractmethod
-    def address_reserve(self, size: int, granularity: int) -> int:
-        """Reserve a contiguous VA range. Returns the base VA."""
+    def address_reserve(self, size: int, granularity: int, addr: int = 0) -> int:
+        """Reserve a contiguous VA range. Returns the base VA.
+
+        ``addr`` is only a placement hint: the driver reserves elsewhere when
+        any part of that range is taken, so callers that need it must check.
+        """
 
     @abstractmethod
     def address_free(self, va: int, size: int) -> None:
