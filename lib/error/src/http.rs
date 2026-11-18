@@ -265,11 +265,12 @@ pub enum BackendStatusAction {
 }
 
 impl BackendStatusAction {
-    /// Triage a worker-asserted status, applying [`keeps_retry_semantics`] on
-    /// top of [`SanitizedError::for_backend_status`].
+    /// Triage a worker-asserted status on top of
+    /// [`SanitizedError::for_backend_status`]. A 5xx keeps its status only when
+    /// it is 503 or the configured overload status; any other 5xx is coerced
+    /// to 500.
     ///
-    /// `DYN_HTTP_OVERLOAD_STATUS_CODE` is not restricted to 5xx (see
-    /// [`parse_overload_status_code`]), so a configured non-5xx overload code
+    /// `DYN_HTTP_OVERLOAD_STATUS_CODE` is not restricted to 5xx, so a configured non-5xx overload code
     /// (e.g. 429) would otherwise fall through
     /// [`SanitizedError::for_backend_status`]'s 4xx branch and be forwarded
     /// as a plain client error instead of sanitized and preserved as the
