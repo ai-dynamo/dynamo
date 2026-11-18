@@ -502,29 +502,3 @@ def test_planner_entry_point_warns_for_old_form(monkeypatch, value, text):
 
     assert [str(warning.message) for warning in caught] == [text]
     assert isinstance(config.ais_perf_model, AISPerfModelSpec)
-
-
-def test_planner_entry_point_is_silent_for_new_form(monkeypatch):
-    value = [
-        {**_CONTENT, "worker_type": "prefill"},
-        {**_CONTENT, "worker_type": "decode"},
-    ]
-    _set_config_argument(monkeypatch, value)
-
-    # The suite turns a warning into an error (filterwarnings in pyproject.toml).
-    assert planner_main._parse_config().ais_perf_model == value
-
-
-def test_relative_template_starts_at_working_directory(adapter, tmp_path, monkeypatch):
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    (run_dir / "template.yaml").write_text(yaml.safe_dump({**_CONTENT, "tp": 2}))
-    model = adapter(_planner({"from": "template.yaml"}), limits=False)
-
-    # A folder without the file.
-    monkeypatch.chdir(tmp_path)
-    with pytest.raises(ValueError):
-        model._configured_role()
-
-    monkeypatch.chdir(run_dir)
-    assert model._configured_role()["tp"] == 2

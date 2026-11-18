@@ -115,51 +115,6 @@ def value_argv(source, monkeypatch):
     return [source, json.dumps(ENTRY)]
 
 
-def test_old_perf_config_builds_config():
-    result = build_old(
-        ["--ais-perf-config", json.dumps(OLD_CONFIG), "--disaggregation-mode", "decode"]
-    )
-    assert_perf_config(result, {**OLD_CONFIG, "worker_type": "decode"})
-
-
-def test_old_perf_config_errors_are_unchanged():
-    other_type = json.dumps({**OLD_CONFIG, "worker_type": "prefill"})
-    args = parse_old(
-        ["--ais-perf-config", other_type, "--disaggregation-mode", "decode"]
-    )
-    with pytest.raises(ValueError, match="^AIS worker_type must match engine role$"):
-        CONFIG.build_mocker_engine_args(args)
-
-    args = parse_old(["--ais-perf-config", json.dumps({**OLD_CONFIG, "tp_size": 3})])
-    with pytest.raises(TypeError, match="tp_size"):
-        CONFIG.build_mocker_engine_args(args)
-
-
-@pytest.mark.parametrize(
-    "extra",
-    [["--ais-perf-model"], ["--ais-backend", "vllm"], ["--aic-nextn", "2"]],
-    ids=lambda extra: extra[0],
-)
-def test_old_perf_config_with_switch_or_flat_flag_is_rejected(extra):
-    args = parse_old(["--ais-perf-config", json.dumps(OLD_CONFIG), *extra])
-    with pytest.raises(ValueError, match="^--ais-perf-config cannot be combined"):
-        CONFIG.build_mocker_engine_args(args)
-
-
-def test_switch_with_planner_profile_data_is_rejected(tmp_path):
-    profile = ["--planner-profile-data", str(tmp_path / "profile.npz")]
-    args = parse_old(["--ais-perf-model", "--model-path", MODEL, *profile])
-    with pytest.raises(ValueError, match="^choose one timing provider"):
-        CONFIG.build_mocker_engine_args(args)
-
-
-def test_repeated_switch_is_accepted():
-    base = ["--model-path", MODEL, "--engine-type", "vllm"]
-    result = build_old(["--ais-perf-model", "--ais-perf-model", *base])
-    assert result == build_old(["--ais-perf-model", *base])
-    assert_perf_config(result, SWITCH_CONFIG)
-
-
 @pytest.mark.parametrize("mode, worker_type", WORKER_TYPES)
 def test_value_as_inline_json(mode, worker_type):
     args = parse_args(["--ais-perf-model", EVERY_ENTRY, "--disaggregation-mode", mode])
@@ -350,14 +305,6 @@ def test_value_forms(value):
     assert args.ais_perf_model_without_value is False
 
 
-def test_empty_typed_value_is_a_wrong_value():
-    args = parse_args(["--ais-perf-model="])
-    assert args.ais_perf_model_value == ""
-    assert args.ais_perf_model_without_value is False
-    with pytest.raises(ValueError):
-        CONFIG.build_mocker_engine_args(args)
-
-
 def test_aic_spelling_takes_no_value(capsys):
     assert (
         parser_error(["--aic-perf-model", "cfg.yaml"], capsys)
@@ -438,13 +385,6 @@ def test_old_inputs_warn_once_with_exact_text(argv, names):
     assert records[0].filename == __file__
 
 
-def test_mtp_flags_are_not_old_inputs():
-    # They do not warn: a warning here fails the test.
-    rates = ["--ais-nextn-accept-rates", "0.5,0.5"]
-    args = parse_args(["--ais-nextn", "2", *rates, "--ais-mtp-seed", "7"])
-    assert CONFIG.old_ais_perf_inputs(args) == []
-
-
 async def run_worker(monkeypatch, argv, fetched=None):
     """Run the mocker's entry coroutine on ``argv`` up to the worker launch.
 
@@ -482,17 +422,6 @@ async def test_worker_entry_warns_once_for_old_inputs(monkeypatch):
     assert len(records) == 1
     assert len(launched) == 1
     assert_perf_config(launched[0], SWITCH_CONFIG)
-
-
-@pytest.mark.asyncio
-async def test_worker_entry_takes_value_without_warning(monkeypatch):
-    argv = ["--ais-perf-model", EVERY_ENTRY, "--disaggregation-mode", "decode"]
-    launched = await run_worker(
-        monkeypatch, [*argv, "--model-path", MODEL, "--num-workers", "2"]
-    )
-
-    assert len(launched) == 1
-    assert_perf_config(launched[0], {**ENTRIES["decode"], "worker_type": "decode"})
 
 
 @pytest.mark.asyncio

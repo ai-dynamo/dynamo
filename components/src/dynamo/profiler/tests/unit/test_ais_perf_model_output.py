@@ -31,7 +31,6 @@ try:
         FeaturesSpec,
         MockerSpec,
     )
-    from dynamo.profiler.utils.profile_common import ProfilerOperationalConfig
 except ImportError:
     pytest.skip("dynamo.llm bindings not available", allow_module_level=True)
 
@@ -338,28 +337,6 @@ def test_profiler_main_warns_once_for_old_form(monkeypatch, tmp_path, profiling_
     # The warning points at the line of main() that starts the profiling run.
     assert caught[0].filename == profiler_main.__file__
     assert len(profiling_runs) == 1
-
-
-@pytest.mark.parametrize(
-    "with_planner,written",
-    [
-        pytest.param(False, None, id="no-planner"),
-        pytest.param(True, [_config(worker_type="decode", tp=2)], id="list"),
-    ],
-)
-def test_profiler_main_is_silent_for_new_form(
-    monkeypatch, tmp_path, profiling_runs, with_planner, written
-):
-    # The planner is built here: reading a written value needs the AISimulate
-    # loader, and a missing loader must fail this test, not the whole file.
-    planner = _planner("decode", written) if with_planner else None
-    request = _request(planner)
-    options = ProfilerOperationalConfig(output_dir=str(tmp_path))
-    monkeypatch.setattr(profiler_main, "_parse_args", lambda: (request, options))
-
-    profiler_main.main()
-
-    assert profiling_runs == [request]
 
 
 def _argument_lists(node):

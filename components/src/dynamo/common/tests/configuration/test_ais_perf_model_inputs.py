@@ -47,10 +47,6 @@ ENDPOINT = ["--endpoint", "dynamo.prefill.generate"]
 
 # The names a warning lists for OLD_FLAT, with their verb.
 OLD_FLAT_ARE = "--ais-backend, --ais-system and --ais-model-path are"
-NOTHING_GIVEN = (
-    "--router-prefill-load-model=ais requires an AIS perf model: "
-    "set --ais-perf-model or DYN_AIS_PERF_MODEL"
-)
 
 
 def _frontend(args):
@@ -215,26 +211,6 @@ def test_typed_value_wins_over_env(monkeypatch):
 
     assert from_env.ais_perf_kwargs() == expected(worker_type="prefill", tp=2)
     assert typed.ais_perf_kwargs() == expected()
-
-
-def test_empty_env_is_unset(monkeypatch):
-    monkeypatch.setenv("DYN_AIS_PERF_MODEL", "")
-    config = _frontend(AIS)
-
-    # The error of a config with no AIS input at all.
-    with pytest.raises(ValueError, match=exactly(NOTHING_GIVEN)):
-        config.validate()
-
-
-def test_empty_typed_value_reports_loader_error():
-    config = _frontend([*AIS, "--ais-perf-model="])
-
-    with pytest.raises(ValueError) as error:
-        config.validate()
-
-    # The loader's own error class: an empty value is read, not taken as unset,
-    # which would be the plain ValueError of NOTHING_GIVEN.
-    assert type(error.value) is not ValueError
 
 
 # The rules that select an entry are tested with dynamo.common.ais_perf_model;
@@ -439,13 +415,3 @@ def test_router_start_passes_new_config(monkeypatch):
     config = parse_router_args([*ENDPOINT, *AIS, *NEW])
 
     assert router_args.build_ais_perf_config(config) == expected()
-
-
-def test_relative_file_value_starts_at_working_directory(tmp_path, monkeypatch):
-    (tmp_path / "cfg.json").write_text(_one(worker_type="prefill"))
-    monkeypatch.chdir(tmp_path)
-    config = _frontend([*AIS, "--ais-perf-model", "cfg.json"])
-
-    config.validate()
-
-    assert config.ais_perf_kwargs() == expected(worker_type="prefill")

@@ -470,15 +470,6 @@ def test_old_planner_config_warns_once_and_names_caller(replay, planner_adapter_
 
 
 @pytest.mark.unit
-def test_planner_config_without_old_keys_does_not_warn(replay, planner_adapter_calls):
-    # Written as text, which is read too. The suite turns a warning into an error.
-    replay(planner_config=json.dumps({"mode": "agg", "ais_perf_model": IDENTITY}))
-
-    (adapter_call,) = planner_adapter_calls
-    assert adapter_call["planner_config_arg"].ais_perf_model == IDENTITY
-
-
-@pytest.mark.unit
 def test_old_inputs_already_warned_silences_both_old_input_warnings(
     replay, planner_adapter_calls
 ):

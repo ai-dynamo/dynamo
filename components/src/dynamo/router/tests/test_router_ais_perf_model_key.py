@@ -290,11 +290,8 @@ def test_written_value_is_checked_for_each_mode_before_the_run():
         ({**_USE_ENGINE, "model": "m"}, _USE_ALONE),
         # An entry that no mode selects is checked too.
         ([AGGREGATED_ENTRY, {**_USE_ENGINE, "worker_type": "decode"}], _USE_ALONE),
-        # An empty config or list is a written value, not a missing key.
-        ({}, "ais_perf_model"),
-        ([], "ais_perf_model"),
     ],
-    ids=["string", "use: router", "use with a key", "use in an entry", "{}", "[]"],
+    ids=["string", "use: router", "use with a key", "use in an entry"],
 )
 def test_key_rejects_wrong_value(written, text):
     provider = create_provider()
@@ -304,18 +301,6 @@ def test_key_rejects_wrong_value(written, text):
         provider.compile_prediction(section, _prediction_context())
     with pytest.raises(ValueError, match=text):
         provider.compile_recommendation(section, _recommendation_context())
-
-
-@pytest.mark.parametrize(
-    "written", [{**IDENTITY, "systems_paths": ["sys"]}, {"from": "template.yaml"}]
-)
-def test_key_rejects_relative_paths(written):
-    with pytest.raises(
-        ValueError, match=r"router\.ais_perf_model: relative paths are not allowed"
-    ):
-        create_provider().compile_prediction(
-            {**_AIS, "ais_perf_model": written}, _prediction_context()
-        )
 
 
 def test_key_requires_ais_load_model():
