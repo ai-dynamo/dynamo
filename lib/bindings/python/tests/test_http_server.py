@@ -653,7 +653,7 @@ def test_set_response_header_without_an_http_response():
             False,
         ),
         (413, "private https://example.com/?secret=private", False),
-        (400, "Image exceeds the decoded pixel limit", False),
+        (400, "Image exceeds the decoded pixel limit", True),
     ],
 )
 @pytest.mark.timeout(60)
@@ -683,10 +683,11 @@ async def test_image_pixel_limit_public_response(
     error = _sse_error(raw) if stream else json.loads(raw)
     assert error["code"] == status
     if public:
+        error_type = {400: "Bad Request", 413: "Payload Too Large"}[status]
         assert error == {
             "message": "Image exceeds the decoded pixel limit",
-            "type": "invalid_request_error" if stream else "Payload Too Large",
-            "code": 413,
+            "type": "invalid_request_error" if stream else error_type,
+            "code": status,
         }
     else:
         assert error["message"] != "Image exceeds the decoded pixel limit"

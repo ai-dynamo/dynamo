@@ -408,9 +408,7 @@ fn build_http_like_error(code: u16, message: String) -> DynamoError {
     let mut builder = DynamoError::builder()
         .class(error_class_for_http_status(code))
         .diagnostic(legacy_message);
-    if PUBLIC_HTTP_MESSAGES.contains(&message.as_str())
-        && (message != "Image exceeds the decoded pixel limit" || code == 413)
-    {
+    if PUBLIC_HTTP_MESSAGES.contains(&message.as_str()) {
         builder = builder.public_message(message);
     }
     builder.build()
@@ -596,21 +594,19 @@ mod tests {
     }
 
     #[test]
-    fn image_pixel_limit_message_requires_exact_status_and_text() {
+    fn image_pixel_limit_message_requires_exact_text() {
         let message = "Image exceeds the decoded pixel limit";
-        assert_eq!(
-            build_http_like_error(413, message.into()).public_message(),
-            Some(message)
-        );
-        for (status, text) in [
-            (400, message.to_string()),
-            (
-                413,
-                format!("{message} https://example.com/?secret=private"),
-            ),
-            (413, "private decoder detail".to_string()),
+        for status in [400, 413] {
+            assert_eq!(
+                build_http_like_error(status, message.into()).public_message(),
+                Some(message)
+            );
+        }
+        for text in [
+            format!("{message} https://example.com/?secret=private"),
+            "private decoder detail".to_string(),
         ] {
-            assert_eq!(build_http_like_error(status, text).public_message(), None);
+            assert_eq!(build_http_like_error(413, text).public_message(), None);
         }
     }
 }
