@@ -53,7 +53,7 @@ const (
 
 // LPXLocalPartitions selects the runtime partitions that run on the Cyborg GPU.
 // Partition IDs are the compiler partition IDs of the build's runtime
-// partitions. A selected prop-sync chain is identified by its first partition.
+// partitions. A selected unit is identified by its first partition.
 // +kubebuilder:validation:XValidation:rule="self.mode == 'IDs' ? has(self.ids) : !has(self.ids)",message="ids is required when mode is IDs and forbidden otherwise"
 type LPXLocalPartitions struct {
 	// mode selects the partitions that run on the Cyborg GPU. `All` runs every
