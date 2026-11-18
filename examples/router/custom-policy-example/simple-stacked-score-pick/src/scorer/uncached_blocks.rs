@@ -3,10 +3,7 @@
 
 //! Uncached-block cost for the stacked scorer stage.
 
-use dynamo_kv_router::{
-    WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicyError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 pub(crate) struct UncachedBlocksScorer;
 
@@ -16,7 +13,7 @@ impl WorkerScorer for UncachedBlocksScorer {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],

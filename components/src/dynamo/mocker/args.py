@@ -297,7 +297,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Use AISimulate's perf model directly for latency prediction. "
-        "Requires aisimulate installed.",
+        "Requires aisim installed.",
     )
     parser.add_argument(
         "--gpu-memory-utilization",
@@ -501,6 +501,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=False,
         help="Serve native streaming SGLang /generate requests (default: disabled).",
     )
+    parser.add_argument(
+        "--systemone-serial",
+        action="store_true",
+        help="Enable the serial SystemOne profile: native SGLang, aggregated, DP1, "
+        "with scheduler max_num_seqs=1 (default: disabled).",
+    )
 
     # TensorRT-LLM-specific configuration
     parser.add_argument(
@@ -699,6 +705,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args.router_advertisement = WorkerRouterConfig.from_cli_args(args)
 
     validate_worker_type_args(args)
+    if args.systemone_serial:
+        explicit_max_num_seqs = any(
+            token.startswith("--")
+            and token != "--"
+            and "--max-num-seqs".startswith(token.split("=", 1)[0])
+            for token in argv
+        )
+        if explicit_max_num_seqs and args.max_num_seqs != 1:
+            parser.error("--systemone-serial requires --max-num-seqs=1")
+        args.max_num_seqs = 1
 
     # Validate num_workers
     if args.num_workers < 1:

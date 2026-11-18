@@ -6,11 +6,14 @@
 import asyncio
 import logging
 import time
+import zlib
 from random import Random, randint
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import torch
 
+from dynamo import nixl_connect
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
     LocalEmbeddingSender,
@@ -19,6 +22,7 @@ from dynamo.common.multimodal.embedding_transfer import (
     NixlWriteEmbeddingReceiver,
     NixlWriteEmbeddingSender,
     RingBuffer,
+    TransferRequest,
 )
 
 # GPU tier is set per-class/per-test below (gpu_0 for local/ring buffer, gpu_1
@@ -151,6 +155,132 @@ class TestNixlReadEmbeddingTransfer:
         sender = NixlReadEmbeddingSender()
         receiver = NixlReadEmbeddingReceiver(embedding_hidden_size=EMBEDDING_SIZE)
         await benchmark(sender, receiver, from_cuda=True)
+
+
+@pytest.mark.gpu_0  # Native NIXL agent is mocked; buffers are CPU tensors
+class TestNixlReadEmbeddingReceiverPreparation:
+    @pytest.fixture
+    def receiver(self, monkeypatch):
+        # Real receiver with a one-descriptor pool of registered CPU buffers.
+        # Only native NIXL agent calls are mocked.
+        native = MagicMock()
+        native.register_memory.side_effect = lambda *_: object()
+        # A read that slips past validation fails instead of polling forever.
+        native.check_xfer_state.return_value = "ERR"
+        api = MagicMock()
+        api.nixl_agent.return_value = native
+        monkeypatch.setattr(nixl_connect, "nixl_api", api)
+        receiver = NixlReadEmbeddingReceiver(
+            embedding_hidden_size=16, max_item_mm_token=1, max_items=1
+        )
+        descriptor = receiver.warmedup_descriptors.get_nowait()
+        receiver.warmedup_descriptors.put(descriptor)
+        receiver.connector.begin_read = AsyncMock(wraps=receiver.connector.begin_read)
+        try:
+            yield receiver, descriptor, native
+        finally:
+            if descriptor._connection is not None:
+                descriptor.deregister_with_connector(descriptor._connection)
+
+    @staticmethod
+    def request(shape=(2, 2), size=16):
+        return TransferRequest(
+            embeddings_shape=list(shape),
+            embedding_dtype_str="torch.float32",
+            serialized_request={
+                "descriptors": [{"ptr": 1, "size": size, "device": "cpu"}],
+                "operation_kind": nixl_connect.OperationKind.READ.value,
+                "notification_key": "embedding-0",
+                "nixl_metadata": zlib.compress(b"mock-agent").hex(),
+            },
+        )
+
+    @staticmethod
+    def assert_pool_preserved(receiver, descriptor, native, original_size):
+        assert receiver.warmedup_descriptors.qsize() == 1
+        pooled = receiver.warmedup_descriptors.get_nowait()
+        receiver.warmedup_descriptors.put(pooled)
+        assert pooled is descriptor
+        assert descriptor._data_size == original_size
+        assert receiver.inuse_descriptors == {}
+        receiver.connector.begin_read.assert_not_called()
+        native.initialize_xfer.assert_not_called()
+        native.add_remote_agent.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "invalid_field, invalid_value, error",
+        [
+            ("operation_kind", nixl_connect.OperationKind.WRITE.value, "kind READ"),
+            ("operation_kind", None, "kind READ"),
+            ("descriptors", [], "at least one"),
+            (
+                "descriptors",
+                [{"ptr": 1, "size": 8}, {"ptr": 2, "size": 8}],
+                "exactly one",
+            ),
+            ("descriptors", [{"ptr": 1, "size": 32}], "same size"),
+            ("descriptors", [{"size": 16}], "cannot be zero"),
+            ("notification_key", "", "notification_key"),
+            ("nixl_metadata", "", "cannot be empty"),
+            ("nixl_metadata", "not-hex", "fromhex"),
+            ("nixl_metadata", "00", "decompress"),
+            ("nixl_metadata", zlib.compress(b"").hex(), "Decoded NIXL agent"),
+        ],
+        ids=[
+            "write",
+            "missing-kind",
+            "empty-descriptors",
+            "multiple-descriptors",
+            "size-mismatch",
+            "missing-pointer",
+            "empty-notification",
+            "empty-agent",
+            "invalid-hex",
+            "invalid-compression",
+            "empty-decoded-agent",
+        ],
+    )
+    async def test_invalid_read_metadata_does_not_borrow_buffer(
+        self, receiver, invalid_field, invalid_value, error
+    ):
+        receiver, descriptor, native = receiver
+        original_size = descriptor._data_size
+        request = self.request()
+        if invalid_value is None:
+            request.serialized_request.pop(invalid_field)
+        else:
+            request.serialized_request[invalid_field] = invalid_value
+        # These all pass schema validation but cannot start a matching READ.
+        nixl_connect.RdmaMetadata.model_validate(request.serialized_request)
+        with pytest.raises((ValueError, zlib.error), match=error):
+            await receiver.receive_embeddings(request)
+        self.assert_pool_preserved(receiver, descriptor, native, original_size)
+
+    @pytest.mark.asyncio
+    async def test_oversized_request_returns_borrowed_buffer(self, receiver):
+        receiver, descriptor, native = receiver
+        original_size = descriptor._data_size
+        # Valid READ metadata, but larger than the 16-byte pooled buffer, so
+        # building the view fails after the descriptor has been borrowed.
+        with pytest.raises(RuntimeError):
+            await receiver.receive_embeddings(self.request(shape=(4, 2), size=32))
+        self.assert_pool_preserved(receiver, descriptor, native, original_size)
+
+    @pytest.mark.asyncio
+    async def test_failed_read_keeps_buffer_out_of_pool(self, receiver):
+        receiver, descriptor, _ = receiver
+        # Once a read has been created, NIXL may still write into the buffer,
+        # so it must not be recycled even if the read fails.
+        read_op = MagicMock()
+        read_op.wait_for_completion = AsyncMock(side_effect=RuntimeError("failed"))
+        receiver.connector.begin_read = AsyncMock(return_value=read_op)
+        with pytest.raises(RuntimeError, match="failed"):
+            await receiver.receive_embeddings(self.request())
+        receiver.connector.begin_read.assert_awaited_once()
+        assert receiver.connector.begin_read.await_args.args[1] is descriptor
+        assert receiver.warmedup_descriptors.qsize() == 0
+        assert receiver.inuse_descriptors == {}
 
 
 @pytest.mark.gpu_0  # Echo tensor worker is CPU-only (no GPU required)

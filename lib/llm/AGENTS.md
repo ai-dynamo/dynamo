@@ -92,3 +92,7 @@ registers, never from the publish path, which only reads. Before adding or
 changing a frontend metric, name its reader, check it is not a query over
 existing metrics or a sibling that should be a label, write its series count in
 the pull request, and add it to the Metrics Catalog.
+
+## Decision Cleanup Diagnostics
+
+Report decision cleanup overruns through the request-correlated warning, not a separate metric until a continuous consumer is identified. Preserve the current tracing span when spawning cleanup, and retain admission until local work finishes. Use the warning to investigate overdue cleanup; it does not prove physical GPU settlement. This diagnostic adds no Prometheus series.

@@ -8,6 +8,9 @@ use url::Url;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pool {
     pub id: PoolId,
+    /// `<cluster>/<namespace>/<DGD name>`, the pool's name for people.
+    /// Metrics label the pool with it.
+    pub name: String,
     /// The model the pool serves, as clients name it in requests.
     pub model: String,
     pub location: PoolLocation,
@@ -26,6 +29,12 @@ impl Pool {
     pub fn new(key: &PoolKey, model: &str, region: &str, frontends: Vec<Url>) -> Self {
         Self {
             id: V1PoolIdDeriver.derive(key),
+            name: format!(
+                "{}/{}/{}",
+                key.cluster_id(),
+                key.namespace(),
+                key.dgd_name()
+            ),
             model: model.to_owned(),
             location: PoolLocation {
                 region: region.to_owned(),

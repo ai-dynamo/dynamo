@@ -38,7 +38,6 @@ HF_MODEL_NAME = "Qwen/Qwen3-0.6B"
 _ROUTER_MODE_MAP = {
     "round-robin": "RoundRobin",
     "random": "Random",
-    "power-of-two": "PowerOfTwoChoices",
     "kv": "KV",
     "direct": "Direct",
     "least-loaded": "LeastLoaded",

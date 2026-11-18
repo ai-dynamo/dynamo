@@ -73,15 +73,21 @@ print_curl_footer <<CURL
       "max_tokens": 50
     }'
 
-  # For video-capable models such as Qwen/Qwen3-VL-2B-Instruct:
+  # For Qwen3-VL video-capable models: sample four frames and bound their
+  # total pixel budget (about 262144 pixels/frame) to fit the 4096-token default.
+  # These request overrides bound inference cost; they disable exact video routing.
   curl http://localhost:${HTTP_PORT}/v1/chat/completions \\
     -H 'Content-Type: application/json' \\
     -d '{
-      "model": "Qwen/Qwen3-VL-2B-Instruct",
+      "model": "${MODEL_NAME}",
       "messages": [{"role": "user", "content": [
         {"type": "text", "text": "Describe the video in detail"},
         {"type": "video_url", "video_url": {"url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"}}
       ]}],
+      "media_io_kwargs": {"video": {"num_frames": 4}},
+      "mm_processor_kwargs": {
+        "videos_kwargs": {"size": {"shortest_edge": 4096, "longest_edge": 1048576}}
+      },
       "max_tokens": 128
     }'
 CURL

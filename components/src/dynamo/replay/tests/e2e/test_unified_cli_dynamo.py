@@ -13,8 +13,8 @@ from typing import Any
 
 import pytest
 import yaml
-from aisimulate.config.cli import CorePredictionConfig
-from aisimulate.config.common import split_config_sections
+from aisim.config.cli import CorePredictionConfig
+from aisim.config.common import split_config_sections
 
 pytestmark = [
     # Release-gating CPU smoke for plugin discovery, replay composition, and
@@ -48,7 +48,7 @@ _SUPERVISOR_BUDGETS = (
 def _run_cli(*args: str, timeout: float = 180.0) -> subprocess.CompletedProcess[str]:
     """Run AISimulate with CI supervisor budgets and assert a successful exit."""
     result = subprocess.run(
-        [sys.executable, "-m", "aisimulate", *args, *_SUPERVISOR_BUDGETS],
+        [sys.executable, "-m", "aisim", *args, *_SUPERVISOR_BUDGETS],
         cwd=_REPO_ROOT,
         text=True,
         capture_output=True,
@@ -56,7 +56,7 @@ def _run_cli(*args: str, timeout: float = 180.0) -> subprocess.CompletedProcess[
         check=False,
     )
     assert result.returncode == 0, (
-        f"aisimulate {' '.join(args)} failed with {result.returncode}\n"
+        f"aisim {' '.join(args)} failed with {result.returncode}\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
     return result
@@ -101,11 +101,15 @@ def test_dynamo_predict_cli_cases(config_path: Path, tmp_path: Path) -> None:
         "11-trace-agentic-mooncake.yaml": 3,
         "12-trace-applied-compute-agentic.yaml": 3,
         "13-trace-dynamo-agentic.yaml": 4,
+        "14-trace-dynamo-kvcr.yaml": 2,
     }
     if config_path.name in expected_trace_requests:
         assert (
             summary["completed_requests"] == expected_trace_requests[config_path.name]
         )
+
+    if config_path.name == "14-trace-dynamo-kvcr.yaml":
+        assert "kvcr" in report["summary"]
 
     if config_path.name == "08-synthetic-throughput-planner.yaml":
         assert report["planner"]["metadata"]["bootstrap"]["status"] == "installed"

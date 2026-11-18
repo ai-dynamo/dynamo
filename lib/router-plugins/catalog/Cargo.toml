@@ -12,4 +12,4 @@ repository.workspace = true
 description = "Default build-time worker-selection policy catalog for Dynamo"
 
 [dependencies]
-dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }
+dynamo-kv-router = { workspace = true }

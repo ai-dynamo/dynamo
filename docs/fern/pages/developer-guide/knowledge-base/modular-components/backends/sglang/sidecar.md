@@ -26,7 +26,19 @@ for the architecture.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
-| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (attention-DP) | Experimental |
+| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (attention-DP) | Yes |
+| Image, video, and audio input | Yes; disaggregated serving is untested |
+
+The sidecar sends a media kind only when the SGLang gRPC server lists it in
+`grpc_features` (`image_inputs`, `video_inputs`, or `audio_inputs`), and returns
+400 for other media requests.
+
+> [!WARNING]
+> SGLang downloads `http://` and `https://` media URLs itself, from any host by
+> default, including `127.0.0.1` and its own HTTP API. Start SGLang with
+> `--allowed-media-domains` to limit the hosts it fetches.
+
+Media-aware KV routing on wide-token SGLang builds is not supported by the sidecar; see the [multimodal compatibility limits](multimodal.md#wide-token-sglang-builds).
 
 ## Launch Locally
 
@@ -62,8 +74,9 @@ kubectl apply -f lib/sidecar/sglang/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 ```
 
-Multinode deployments require `backendFramework: sglang` and complete `leader` and
-`worker` role PodTemplates. The templates own the native engine commands and
+Multinode deployments require complete `leader` and `worker` role PodTemplates. Set
+`backendFramework: sglang` as the examples do; the operator does not infer a backend from
+a native engine launch. The templates own the native engine commands and
 sidecar placement. See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and
 [attention-DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml). Attention-DP requires SGLang 0.5.22 or later and a Dynamo sidecar
 with matching attention-DP metadata support. Engine-failure KV recovery remains

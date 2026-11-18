@@ -162,13 +162,10 @@ async fn collect(
         .await
 }
 
-/// A model-name mismatch is not detectable over this contract: a real
-/// TensorRT-LLM server loads one model and answers `GetModelInfo` for whatever
-/// name it is asked about, so the sidecar registers under its own
-/// `--model-path` either way. Pinning that here stops a future change from
-/// inventing a check the engine cannot back.
+/// A real TensorRT-LLM server answers `GetModelInfo` for any nonempty model
+/// path; the sidecar must register the reported name while keeping its source.
 #[tokio::test]
-async fn sidecar_start_does_not_check_the_served_model_name() {
+async fn sidecar_registers_the_engine_reported_name() {
     let server = RunningServer::start_with(
         MockerServerConfig {
             model: "some-other-model".to_string(),
@@ -181,6 +178,11 @@ async fn sidecar_start_does_not_check_the_served_model_name() {
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
 
     let config = engine.start(0).await.expect("start is not a name check");
+    assert_eq!(config.model, MODEL);
+    assert_eq!(
+        config.served_model_name.as_deref(),
+        Some("some-other-model")
+    );
     assert_eq!(
         config.llm.expect("llm registration").context_length,
         Some(4_096),
@@ -241,7 +243,11 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
             .is_none()
     );
 
-    let mut handoff = prefill_output.disaggregated_params.clone().unwrap();
+    let mut handoff = prefill_output
+        .disaggregated_params
+        .as_deref()
+        .cloned()
+        .unwrap();
     assert!(
         handoff["session_id"]
             .as_str()
@@ -344,7 +350,7 @@ async fn decode_rejects_a_handoff_with_a_dropped_opaque_field() {
     decode.start(1).await.unwrap();
 
     let outputs = collect(&prefill, request(8)).await;
-    let mut handoff = outputs[0].disaggregated_params.clone().unwrap();
+    let mut handoff = outputs[0].disaggregated_params.as_deref().cloned().unwrap();
     handoff["attributes"]
         .as_object_mut()
         .unwrap()
