@@ -19,7 +19,6 @@ default = []
 export = ["dep:prometheus"]
 bench = ["dynamo-router-protocol/bench"]
 testing = ["dynamo-router-protocol/testing"]
-profile = []
 
 [dependencies]
 dynamo-kv-events = { workspace = true }
