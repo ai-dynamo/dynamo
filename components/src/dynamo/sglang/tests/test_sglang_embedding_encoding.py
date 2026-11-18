@@ -14,6 +14,7 @@ import struct
 
 import pytest
 
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.request_handlers.embedding import embedding_handler as eh
 
 pytestmark = [
@@ -113,6 +114,26 @@ def test_transform_response_base64_applies_dimensions_truncation_first(monkeypat
     assert isinstance(payload, str)
     decoded = _decode_base64_floats(payload, 3)
     assert decoded == pytest.approx(full[:3])
+
+
+def test_transform_response_rejects_dimensions_above_embedding_length(monkeypatch):
+    """The upper-bound ``dimensions`` check raises ``InvalidArgument`` so its
+    message reaches the client as a public HTTP 400 instead of the generic
+    ``Invalid request``."""
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.handler_base.BaseWorkerHandler.__init__",
+        lambda self, *a, **kw: None,
+    )
+    monkeypatch.setattr(eh, "observe_embedding_batch_size", lambda *a, **kw: None)
+    monkeypatch.setattr(eh, "observe_embedding_input_tokens", lambda *a, **kw: None)
+
+    handler = eh.EmbeddingWorkerHandler.__new__(eh.EmbeddingWorkerHandler)
+    ret = [{"embedding": [0.1, 0.2, 0.3, 0.4], "meta_info": {"prompt_tokens": 1}}]
+
+    with pytest.raises(
+        InvalidArgument, match="dimensions=5 exceeds model embedding dimension 4"
+    ):
+        handler._transform_response(ret, "model-A", dimensions=5)
 
 
 def test_transform_response_always_emits_base64(monkeypatch):

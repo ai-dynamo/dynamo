@@ -142,7 +142,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         # compare against the actual embedding length returned by SGLang.
         dimensions = embedding_request.dimensions
         if dimensions is not None and dimensions < 1:
-            raise ValueError(f"dimensions must be >= 1, got {dimensions}")
+            raise InvalidArgument(f"dimensions must be >= 1, got {dimensions}")
 
         encoding_format = embedding_request.encoding_format
 
@@ -197,7 +197,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
                 # Lower-bound (dimensions >= 1) is checked upfront in
                 # ``generate`` before async_encode runs.
                 if dimensions > len(embedding):
-                    raise ValueError(
+                    raise InvalidArgument(
                         f"dimensions={dimensions} exceeds model embedding "
                         f"dimension {len(embedding)}"
                     )
