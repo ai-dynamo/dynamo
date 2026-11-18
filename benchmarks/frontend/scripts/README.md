@@ -228,7 +228,7 @@ python3 sweep_runner.py \
 | Req/s and Tok/s | `summary.md` | Whether the frontend can sustain the target load |
 | TTFT p50/p99 | `summary.md` | End-to-end first-token latency (includes preprocess + routing + transport) |
 | `transport_roundtrip` p50 | `report.md` section 4 | Time spent in the TCP request plane; grows when workers are saturated |
-| Tokio worker busy ratio | `report.md` section 7 | Fraction of time each async worker is busy; values above 0.95 indicate saturation |
+| Tokio worker mean poll time | `report.md` section 7 | Mean time, in ns, that each Tokio runtime thread spends in one task poll; long polls suggest blocking work on the async executor |
 | Event loop stalls | `report.md` section 7 | How often the Tokio runtime stalled; high counts suggest blocking work on the async executor |
 | `preprocess.tokenize` | `report.md` section 5 (NVTX) | Per-request tokenization cost; varies by tokenizer backend |
 

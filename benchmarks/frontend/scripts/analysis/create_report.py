@@ -297,7 +297,7 @@ def _worker_distribution(values: list, unit: str, warn_threshold: float) -> list
 def section_tokio(prom: Optional[PrometheusSnapshot]) -> Optional[str]:
     if not prom:
         return None
-    if not prom.tokio_worker_mean_poll_time_ns and not prom.tokio_worker_busy_ratio:
+    if not prom.tokio_worker_mean_poll_time_ns:
         return None
 
     lines = [_section("7. Tokio Runtime Health")]
@@ -311,33 +311,13 @@ def section_tokio(prom: Optional[PrometheusSnapshot]) -> Optional[str]:
             _worker_distribution(prom.tokio_worker_mean_poll_time_ns, "ns", 100_000)
         )
 
-    # --- Busy Ratio Summary ---
-    if prom.tokio_worker_busy_ratio:
-        n = len(prom.tokio_worker_busy_ratio)
-        sorted_br = sorted(prom.tokio_worker_busy_ratio)
-        avg_br = sum(prom.tokio_worker_busy_ratio) / n
-        p50_br = sorted_br[n // 2]
-        p99_br = sorted_br[min(int(n * 0.99), n - 1)]
-        n_saturated = sum(1 for v in prom.tokio_worker_busy_ratio if v >= 0.95)
-        n_hot = sum(1 for v in prom.tokio_worker_busy_ratio if 0.5 <= v < 0.95)
-        n_idle = sum(1 for v in prom.tokio_worker_busy_ratio if v < 0.5)
-
-        lines.append(_subsection("Worker Busy Ratio"))
-        lines.append("| Metric | Value |")
-        lines.append("|---|---|")
-        lines.append(f"| Workers | {n} |")
-        lines.append(f"| Avg | {avg_br:.3f} |")
-        lines.append(f"| p50 / p99 | {p50_br:.3f} / {p99_br:.3f} |")
-        lines.append(f"| Min / Max | {sorted_br[0]:.3f} / {sorted_br[-1]:.3f} |")
-        lines.append(
-            f"| Distribution | {n_idle} idle (<0.5), {n_hot} hot (0.5-0.95), {n_saturated} saturated (>=0.95) |"
-        )
-
     # --- Event Loop ---
     lines.append(_subsection("Event Loop"))
     lines.append("| Metric | Value |")
     lines.append("|---|---:|")
-    lines.append(f"| Stall count | {prom.tokio_event_loop_stall_total:.0f} |")
+    lines.append(
+        f"| Event loop stalls (timer delay > 5 ms) | {prom.tokio_event_loop_stall_total:.0f} |"
+    )
     lines.append(f"| Global queue depth | {prom.tokio_global_queue_depth:.0f} |")
     lines.append(
         f"| Budget forced yields | {prom.tokio_budget_forced_yield_total:.0f} |"
@@ -352,13 +332,6 @@ def section_tokio(prom: Optional[PrometheusSnapshot]) -> Optional[str]:
         )
         if avg_pt > 100_000:
             issues.append(f"High avg poll time: {avg_pt:,.0f}ns (threshold: 100,000ns)")
-    if prom.tokio_worker_busy_ratio:
-        n_saturated = sum(1 for v in prom.tokio_worker_busy_ratio if v >= 0.95)
-        avg_br = sum(prom.tokio_worker_busy_ratio) / len(prom.tokio_worker_busy_ratio)
-        if avg_br > 0.8:
-            issues.append(f"High avg busy ratio: {avg_br:.3f} (threshold: 0.8)")
-        if n_saturated > 0:
-            issues.append(f"{n_saturated} worker(s) saturated (busy ratio >= 0.95)")
     if prom.tokio_event_loop_stall_total > 0:
         issues.append(
             f"Event loop stalls detected: {prom.tokio_event_loop_stall_total:.0f}"
