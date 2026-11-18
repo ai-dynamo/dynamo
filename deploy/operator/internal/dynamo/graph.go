@@ -1033,6 +1033,29 @@ func ElasticEPLeaderServiceName(componentServiceName string) string {
 	return name[:maxServiceNameLength-len(suffix)-1] + "-" + suffix
 }
 
+// IsSinglePodElasticEPLeader reports whether the component is the single-pod elastic-EP
+// leader the headless Service is meant to address.
+//
+// The Service selector matches every pod carrying the component labels, so it resolves
+// to the Ray head alone only while the component renders as one pod. Two shapes break
+// that:
+//
+//   - replicas > 1: every replica runs its own Ray head, so one DNS name would
+//     round-robin across unrelated clusters.
+//   - numberOfNodes > 1: worker pods share the component labels, so the Service would
+//     publish them as heads. That topology reaches its leader through the Grove leader
+//     hostname and does not need this Service.
+func IsSinglePodElasticEPLeader(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	container := GetMainContainer(component)
+	if container == nil || !IsElasticEPRayLaunch(container) {
+		return false
+	}
+	if component.GetNumberOfNodes() > 1 {
+		return false
+	}
+	return component.Replicas == nil || *component.Replicas == 1
+}
+
 // GenerateElasticEPHeadlessService returns a headless Service that gives a single-pod
 // elastic-EP leader a stable address its followers join with
 // `ray start --address=<service>:6379` (see injectElasticEPRayLaunchFlags).

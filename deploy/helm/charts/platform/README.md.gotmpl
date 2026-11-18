@@ -115,9 +115,13 @@ is not valid in Kubernetes. For each component that Dynamo manages (not one hand
 external controller), the `nvidia.com/selector` label value is `<dgd>-<component>`, and the
 component's Service, when it has one, is that value with dots replaced by hyphens. A frontend
 always gets a Service; other components get one only with Kubernetes discovery, the default.
-Outside Grove, a worker DCD is named `<dgd>-<component>-<hash>`, where the hash has 8
-characters. That name is also the selector value of its Pods and, with a Service, the Service
-name. A standalone DCD name is its selector value and, under the same rule, its Service name.
+On Grove, a single-pod elastic-EP leader also gets a headless Service named
+`<dgd>-<component>-ray` with any discovery backend. Outside Grove, a worker DCD is named
+`<dgd>-<component>-<hash>`, where the hash has 8 characters. That name is also the selector
+value of its Pods and, with a Service, the Service name after dots are replaced by hyphens. A
+standalone DCD name is its selector value and, under the same rule, its Service name after dots
+are replaced by hyphens: a standalone frontend DCD named `model.v1` gets a Service named
+`model-v1`.
 Selector values allow at most 63 characters. A Service name must be a DNS-1035 label: at most 63
 characters, starting with a letter. A generated DCD name must also be a valid Kubernetes object
 name. The DGD name is also the `nvidia.com/dynamo-graph-deployment-name` label value, which

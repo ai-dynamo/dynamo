@@ -448,7 +448,6 @@ type generatedNameViolationKey struct {
 	hasService    bool
 }
 
-// generatedNameViolation is a generated name that Kubernetes would reject.
 type generatedNameViolation struct {
 	key generatedNameViolationKey
 	err *field.Error
@@ -528,16 +527,18 @@ func generatedDynamoGraphDeploymentNameViolations(
 	return violations
 }
 
-// dynamoGraphDeploymentComponentHasService reports whether the controller renders a Service for
-// component: a frontend always gets one, other components only under Kubernetes discovery.
-// dgd and component must not be nil.
+// dynamoGraphDeploymentComponentHasService reports whether the controller renders a Service named
+// from component: a frontend always gets one, and on Grove so does a single-pod elastic-EP leader,
+// whose <dgd>-<component>-ray name starts like the base name. Other components get one only under
+// Kubernetes discovery. dgd and component must not be nil.
 func dynamoGraphDeploymentComponentHasService(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	grovePathway bool,
 	discoveryBackend configv1alpha1.DiscoveryBackend,
 ) bool {
-	if component.ComponentType == nvidiacomv1beta1.ComponentTypeFrontend {
+	if component.ComponentType == nvidiacomv1beta1.ComponentTypeFrontend ||
+		(grovePathway && dynamo.IsSinglePodElasticEPLeader(component)) {
 		return true
 	}
 	// Grove reads the DGD annotation; child DCDs inherit it unless the component overrides it.

@@ -106,6 +106,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	workerBoundaryDGDName := "w" + strings.Repeat("x", 46)
 	// <dgd>-worker-00000000 is 64 characters, from either a worker or a component of that name.
 	collisionDGDName := "c" + strings.Repeat("x", 47)
+	// These args make a single-pod worker an elastic-EP leader with its own headless Service.
+	elasticEPArgs := []string{"--model", "test", "--data-parallel-backend", "ray", "--enable-elastic-ep"}
 
 	tests := []dgdAdmissionTestCase{
 		{name: "vLLM multi-GPU snapshot failover is admitted", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
@@ -2796,6 +2798,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
+			// On Grove the worker name has no hash; with one it would be 70 characters here.
 			name: "generated frontend Service name accepts 63 characters",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Name = frontendBoundaryDGDName
@@ -2839,12 +2842,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "generated worker name has no hash suffix on Grove",
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Name = workerBoundaryDGDName + "x"
-			}),
-		},
-		{
 			name: "DGD name label value longer than 63 characters is rejected on create",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Name = "g" + strings.Repeat("x", 63)
@@ -2886,6 +2883,39 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				generatedNameErr("spec.components[0].name", digitLeadingDGDName+"-frontend", shortenDGDOrComponent, invalidDNS1035ServiceName),
+			},
+		},
+		{
+			name: "a single-pod elastic-EP leader on Grove gets a Service without Kubernetes discovery",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+				dgd.Spec.Components[1].Replicas = new(int32(1))
+				dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+				dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Args = elasticEPArgs
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[0].name", digitLeadingDGDName+"-frontend", shortenDGDOrComponent, invalidDNS1035ServiceName),
+				generatedNameErr("spec.components[1].name", digitLeadingDGDName+"-worker", shortenDGDOrComponent, invalidDNS1035ServiceName),
+			},
+		},
+		{
+			name:               "an update that makes a Grove component a single-pod elastic-EP leader rejects a digit-leading name",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+				dgd.Spec.Components[1].Replicas = new(int32(1))
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+				dgd.Spec.Components[1].Replicas = new(int32(1))
+				dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+				dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Args = elasticEPArgs
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[1].name", digitLeadingDGDName+"-worker", shortenDGDOrComponent, invalidDNS1035ServiceName),
 			},
 		},
 		{
