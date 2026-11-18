@@ -20,6 +20,7 @@ package validation
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -238,13 +239,23 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 	}
 	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpec(&dgd.Spec, field.NewPath("spec"), specOpts)...)
 
-	// Generated names are checked on create only. The DGD name, its component
-	// set, and each componentType are immutable, so an update cannot change
-	// them; an update check would only block edits of objects created before
-	// this rule.
-	if oldDGD == nil {
-		allErrs = append(allErrs, generatedDynamoGraphDeploymentNameErrors(dgd, grovePathway)...)
+	// Generated names are checked on create and update. The DGD name and its
+	// component set are immutable, but a componentType is immutable only once
+	// set: an unset type can become a worker type, which adds the worker hash
+	// to that component's DCD name. On update, report only generated names the
+	// old object did not already have, so objects created before this rule stay
+	// editable. The generated name is the bad value and is derived from every
+	// rule input, so it is the match key; the field path is not, because a
+	// component index changes when components are reordered.
+	nameErrs := generatedDynamoGraphDeploymentNameErrors(dgd, grovePathway)
+	if oldDGD != nil && len(nameErrs) > 0 {
+		existing := map[any]bool{}
+		for _, err := range generatedDynamoGraphDeploymentNameErrors(oldDGD, grovePathway) {
+			existing[err.BadValue] = true
+		}
+		nameErrs = slices.DeleteFunc(nameErrs, func(err *field.Error) bool { return existing[err.BadValue] })
 	}
+	allErrs = append(allErrs, nameErrs...)
 
 	// LPX children require the Grove route for materialization.
 	if dgd.HasLPXComponent() && !grovePathway {

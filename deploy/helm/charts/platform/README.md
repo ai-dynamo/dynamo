@@ -110,8 +110,8 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ##### Generated Service names and selector values
 
-**Change:** The DGD and DCD webhooks reject a new object when a name the operator generates from
-it is not valid in Kubernetes. Each DGD component gets a Service named `<dgd>-<component>`, and
+**Change:** The DGD and DCD webhooks reject an object when a name the operator generates from it
+is not valid in Kubernetes. Each DGD component gets a Service named `<dgd>-<component>`, and
 the same value is its `nvidia.com/selector` label. Outside Grove, a worker DCD is named
 `<dgd>-<component>-<hash>`, where the hash has 8 characters. That name is also the selector
 value of its Pods and, with Kubernetes discovery, a Service name. A standalone DCD name is its
@@ -123,8 +123,10 @@ Service, Deployment, or Pod that the operator created.
 
 **Affected:** New DGDs and standalone DCDs whose generated names break these rules. Examples are
 a DGD or DCD named `70b-llama-production`, and a 58-character DGD name with a `Frontend`
-component, which gives a 67-character Service name. DCDs that a DGD owns are not checked: the
-DGD webhook checks their names when the DGD is created.
+component, which gives a 67-character Service name. Also affected is an update that sets an unset
+component `type` to `worker`, `prefill`, or `decode` outside Grove when the hash-suffixed worker
+DCD name would be too long. DCDs that a DGD owns are not checked: the DGD webhook checks their
+names.
 
 Clusters with the Kubernetes `RelaxedServiceNameValidation` feature gate enabled accept Service
 names that start with a digit, so a DGD or standalone DCD whose name starts with a digit works
@@ -134,8 +136,9 @@ clusters too.
 **Action:** Choose a shorter DGD, DCD, or component name, or one that starts with a letter. The
 error names the field to change and the generated name that is invalid.
 
-**Existing deployments:** The rule runs on create only. An existing DGD or DCD with such a name
-can still be updated and deleted. To create it again, choose a valid name.
+**Existing deployments:** The DCD rule runs on create only. The DGD rule also runs on update,
+but it reports only generated names that the old object did not already have. An existing DGD or
+DCD with such a name can still be updated and deleted. To create it again, choose a valid name.
 
 #### Operator behavior breaking changes
 

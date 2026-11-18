@@ -52,12 +52,14 @@ spec:
 
 The operator names each component's Service `<dgd>-<component>` and uses the same value as the
 `nvidia.com/selector` label. Outside Grove, worker DCDs are named `<dgd>-<component>-<hash>`,
-where the hash has 8 characters, and that name is also a selector value. On create, admission
-rejects a DGD when one of these names is not a DNS-1035 label: at most 63 characters, starting
+where the hash has 8 characters, and that name is also a selector value. Admission rejects a
+DGD when one of these names is not a DNS-1035 label: at most 63 characters, starting
 with a letter, after dots are replaced by hyphens. The DGD name itself is the
 `nvidia.com/dynamo-graph-deployment-name` label value and allows at most 63 characters. The
-error is reported on `metadata.name` or `spec.components[*].name`. Existing DGDs stay
-updatable and deletable.
+error is reported on `metadata.name` or `spec.components[*].name`. On update, only generated
+names that the old object did not already have are rejected, such as a worker DCD name that
+appears when an unset component `type` is set to a worker type. Existing DGDs with invalid names
+stay updatable and deletable.
 
 ## Grove update strategy
 

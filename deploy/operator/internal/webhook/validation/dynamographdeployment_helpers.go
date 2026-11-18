@@ -489,7 +489,7 @@ func generatedDynamoGraphDeploymentNameErrors(
 			namePath,
 			workerName,
 			fmt.Sprintf(
-				"worker DynamoComponentDeployment names end with a %d-character worker hash; choose a shorter DynamoGraphDeployment or component name",
+				"worker DynamoComponentDeployment names end with an %d-character worker hash; choose a shorter DynamoGraphDeployment or component name",
 				dynamo.WorkerHashLength,
 			),
 		); err != nil {

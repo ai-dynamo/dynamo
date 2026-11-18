@@ -20,6 +20,7 @@ package validation_test
 import (
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 
@@ -96,7 +97,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	const tooLongSelectorValue = "nvidia.com/selector label value: must be no more than 63 bytes"
 	const invalidDNS1035ServiceName = "Service name: a DNS-1035 label must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character (e.g. 'my-name',  or 'abc-123', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?')"
 	const shortenDGDOrComponent = "choose a shorter or letter-leading DynamoGraphDeployment name, or a shorter component name"
-	shortenWorkerDGDOrComponent := fmt.Sprintf("worker DynamoComponentDeployment names end with a %d-character worker hash; choose a shorter DynamoGraphDeployment or component name", dynamo.WorkerHashLength)
+	shortenWorkerDGDOrComponent := fmt.Sprintf("worker DynamoComponentDeployment names end with an %d-character worker hash; choose a shorter DynamoGraphDeployment or component name", dynamo.WorkerHashLength)
 	generatedNameErr := func(path, value, action string, problems ...string) string {
 		return fmt.Sprintf("%s: Invalid value: %q: generated name is invalid (%s); %s", path, value, strings.Join(problems, "; "), action)
 	}
@@ -2823,6 +2824,19 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
+			name: "setting an unset component type to worker rejects a generated worker DCD name of 64 characters",
+			oldDeployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = workerBoundaryDGDName + "x"
+				dgd.Spec.Components[1].ComponentType = ""
+			}),
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = workerBoundaryDGDName + "x"
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[1].name", workerBoundaryDGDName+"x-worker-00000000", shortenWorkerDGDOrComponent, tooLongServiceName, tooLongSelectorValue),
+			},
+		},
+		{
 			name: "generated worker name has no hash suffix on Grove",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Name = workerBoundaryDGDName + "x"
@@ -2848,6 +2862,17 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Name = ticketDGDName
 				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name:               "existing DGD with invalid generated Service names remains updateable when components are reordered",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = ticketDGDName
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = ticketDGDName
+				slices.Reverse(dgd.Spec.Components)
 			}),
 		},
 
