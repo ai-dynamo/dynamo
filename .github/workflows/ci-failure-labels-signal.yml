@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Sends failed PR / Pre Merge / Post-Merge / Nightly runs to the Devin CI failure-labels
+# automation, at most one batch per 10 minutes. The automation's preflight filters scope and
+# dedups by run_id:attempt, so overlapping batches are safe.
+name: CI Failure Labels Signal
+
+on:
+  workflow_run:
+    workflows:
+      - 'PR'
+      - 'Pre Merge'
+      - 'Post-Merge CI Pipeline'
+      - 'Nightly CI Pipeline'
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  actions: read
+
+jobs:
+  send-batch:
+    if: >-
+      github.repository == 'ai-dynamo/dynamo' &&
+      (github.event_name == 'workflow_dispatch' ||
+       contains(fromJSON('["failure", "timed_out", "startup_failure"]'), github.event.workflow_run.conclusion))
+    runs-on: ubuntu-slim
+    timeout-minutes: 20
+    # One running batch plus one pending; a newer pending job replaces the older one.
+    concurrency:
+      group: ci-failure-labels-signal
+      cancel-in-progress: false
+    steps:
+      - name: Wait for the batch window
+        if: github.event_name == 'workflow_run'
+        run: sleep 600
+      - name: Send failed runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WEBHOOK_URL: ${{ secrets.CI_FAILURE_LABELS_WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.CI_FAILURE_LABELS_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${WEBHOOK_URL}" || -z "${WEBHOOK_SECRET}" ]]; then
+            echo "::notice::CI failure-labels webhook secrets are not set; skipping."
+            exit 0
+          fi
+          created_since=$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)
+          updated_since=$(date -u -d '-3 hours' +%Y-%m-%dT%H:%M:%SZ)
+          for wf in pr.yaml pre-merge.yml post-merge-ci.yml nightly-ci.yml; do
+            gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${wf}/runs?status=completed&per_page=100&created=>=${created_since}" \
+              --jq '.workflow_runs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "startup_failure")'
+          done | jq -sc --arg since "${updated_since}" --arg repo "${GITHUB_REPOSITORY}" '{
+              kind: "ci-failure-batch",
+              repo: $repo,
+              runs: ([.[] | select(.updated_at >= $since)
+                      | {id, run_attempt, name, path, event, head_branch, head_sha, conclusion, updated_at,
+                         pull_requests: [.pull_requests[].number]}]
+                     | unique_by(.id) | sort_by(.updated_at) | .[-50:])
+            }' > batch.json
+          echo "Sending $(jq '.runs | length' batch.json) failed run(s)"
+          curl -fsS --retry 3 --max-time 30 -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-Webhook-Secret: ${WEBHOOK_SECRET}" \
+            --data @batch.json "${WEBHOOK_URL}" -o /dev/null
