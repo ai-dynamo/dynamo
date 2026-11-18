@@ -19,7 +19,6 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import numpy as np
 import pytest
 import torch
-from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 
@@ -1036,6 +1035,8 @@ async def test_generate_engine_failure_status(case):
     request with a bare finish_reason="error". That bare "error" is now only
     vLLM's internal request failure (KV load, encoder cache, ...), which vLLM
     itself maps to 500, so it stays the terminal error chunk."""
+    from vllm.exceptions import VLLMValidationError
+
     handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
     handler.use_vllm_tokenizer = False
     handler._to_local_dp_rank = MagicMock(return_value=None)
