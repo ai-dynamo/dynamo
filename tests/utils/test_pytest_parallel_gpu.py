@@ -452,8 +452,14 @@ def test_simulation_conserves_work_and_respects_budget():
     assert makespan >= total_work / 8 - 1e-6
 
 
+@pytest.mark.timeout(10)  # ~0.6s measured per case; headroom for child startup
+@pytest.mark.parametrize(
+    "summary_args",
+    [[], ["-q"], ["--color=yes"]],
+    ids=["fenced", "quiet", "color"],
+)
 def test_run_parallel_prints_output_of_pass_rescued_by_retry(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, capsys, summary_args
 ):
     # A child that fails once and passes on an in-session retry exits 0. Its
     # buffered output must still reach the log, or the failed attempt is lost.
@@ -480,6 +486,10 @@ def test_run_parallel_prints_output_of_pass_rescued_by_retry(
         lambda: [{"index": 0, "name": "fake", "total_mib": 1024}],
     )
     monkeypatch.setattr(pytest_parallel_gpu, "_get_gpu_used_gib", lambda gi=0: 0.0)
+    real_sleep = pytest_parallel_gpu.time.sleep
+    monkeypatch.setattr(
+        pytest_parallel_gpu.time, "sleep", lambda s: real_sleep(min(s, 0.05))
+    )
 
     rc = pytest_parallel_gpu.run_parallel(
         test_ids=[test_id],
@@ -493,10 +503,12 @@ def test_run_parallel_prints_output_of_pass_rescued_by_retry(
             "no:ddtrace",
             "--reruns",
             "1",
+            "--color=no",
+            *summary_args,
         ],
     )
 
-    err = capsys.readouterr().err
+    err = pytest_parallel_gpu._ANSI_ESCAPE_RE.sub("", capsys.readouterr().err)
     assert rc == 0
     assert counter.read_text() == "2"
     assert "1 passed, 1 rerun" in err

@@ -268,9 +268,13 @@ _RETRYABLE_INIT_MARKERS = [
 ]
 _MAX_RETRIES = 3
 
-# Banners a passing child prints when an in-session retry hid a failed attempt:
-# ddtrace retries print FAILURES; pytest-rerunfailures prints "N rerun".
-_RETRIED_FAILURE_RE = re.compile(r"^=+ (FAILURES|.*\b\d+ rerun\b.*) =+$")
+# Lines a passing child prints when an in-session retry hid a failed attempt:
+# ddtrace retries print the FAILURES banner; pytest-rerunfailures puts "N rerun"
+# in the final summary, which -q prints without "=" fences.
+_RETRIED_FAILURE_RE = re.compile(
+    r"^(=+ FAILURES =+|(=+ )?.*\b\d+ rerun\b.* in [\d.]+s\b.*)$"
+)
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _capture_output(pipe, captured: list[str], prefix: str | None = None) -> None:
@@ -824,7 +828,8 @@ def run_parallel(
                 # retried attempt. With -s, output was already streamed live.
                 failed = not passed and not skipped
                 passed_after_retry = passed and any(
-                    _RETRIED_FAILURE_RE.match(line) for line in run_info.captured
+                    _RETRIED_FAILURE_RE.match(_ANSI_ESCAPE_RE.sub("", line))
+                    for line in run_info.captured
                 )
                 fail_reason = ""
                 if (failed or passed_after_retry) and not stream:
