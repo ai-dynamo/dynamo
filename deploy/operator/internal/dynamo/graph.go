@@ -20,6 +20,7 @@ package dynamo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"maps"
@@ -2473,6 +2474,7 @@ func PrepareDGDComponentMainContainers(
 	// Two nodes already yield every role, so a large nodeCount does not expand one entry per rank.
 	// Engine roles only: inter-pod GMS weight servers have no engine launch.
 	var prepared []RoleMainContainer
+	var errs []error
 	for _, serviceRole := range expandRolesForComponent(component.ComponentName, component.Replicas, min(numberOfNodes, 2), component) {
 		role := serviceRole.Role
 		if role == RoleGMS || slices.ContainsFunc(prepared, func(p RoleMainContainer) bool { return p.Role == role }) {
@@ -2489,13 +2491,15 @@ func PrepareDGDComponentMainContainers(
 			effective, ownership, nativeSidecar, err = lowerComponentForRole(source, role)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to resolve component for role %s: %w", role, err)
+			errs = append(errs, fmt.Errorf("failed to resolve component for role %s: %w", role, err))
+			continue
 		}
 
 		// Operator-owned MPI leaders allocate one hostname per node before their shell launch can be checked.
 		if backendFramework == BackendFrameworkTRTLLM && role == RoleLeader && !nativeSidecar &&
 			ownership == roleLaunchOwnedByOperator && numberOfNodes > maxRestoreLaunchMPIHosts {
-			return nil, fmt.Errorf("restore launch rendering supports at most %d MPI hosts for an operator-managed multinode TensorRT-LLM leader", maxRestoreLaunchMPIHosts)
+			errs = append(errs, fmt.Errorf("restore launch rendering supports at most %d MPI hosts for an operator-managed multinode TensorRT-LLM leader", maxRestoreLaunchMPIHosts))
+			continue
 		}
 
 		// Resolve GPUs from the role's template before Grove applies DGD defaults.
@@ -2530,11 +2534,12 @@ func PrepareDGDComponentMainContainers(
 			containerGPUs,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to prepare main container for role %s: %w", role, err)
+			errs = append(errs, fmt.Errorf("failed to prepare main container for role %s: %w", role, err))
+			continue
 		}
 		prepared = append(prepared, RoleMainContainer{Role: role, Container: main.container})
 	}
-	return prepared, nil
+	return prepared, errors.Join(errs...)
 }
 
 // ResolveContainerGPUs returns the GPU count requested by the main container,

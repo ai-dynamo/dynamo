@@ -2251,6 +2251,61 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 
+		// Repair one role without losing another role's unchanged legacy launch.
+		{
+			name:               "Grove keeps a legacy leader launch while repairing worker GPU claims",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointSGLangRoleRepairDGDForAdmission("worker", true, false),
+			deployment:         checkpointSGLangRoleRepairDGDForAdmission("worker", false, false),
+		},
+		{
+			name:               "Grove keeps a legacy worker launch while repairing leader GPU claims",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointSGLangRoleRepairDGDForAdmission("leader", true, false),
+			deployment:         checkpointSGLangRoleRepairDGDForAdmission("leader", false, false),
+		},
+		{
+			name:               "component keeps a legacy leader launch while repairing worker GPU claims",
+			groveDisabled:      true,
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointSGLangRoleRepairDGDForAdmission("worker", true, true),
+			deployment:         checkpointSGLangRoleRepairDGDForAdmission("worker", false, true),
+		},
+		{
+			name:               "component keeps a legacy worker launch while repairing leader GPU claims",
+			groveDisabled:      true,
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointSGLangRoleRepairDGDForAdmission("leader", true, true),
+			deployment:         checkpointSGLangRoleRepairDGDForAdmission("leader", false, true),
+		},
+		{
+			name:               "Grove rejects a changed legacy launch while repairing worker GPU claims",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointSGLangRoleRepairDGDForAdmission("worker", true, false),
+			deployment: func() *nvidiacomv1beta1.DynamoGraphDeployment {
+				dgd := checkpointSGLangRoleRepairDGDForAdmission("worker", false, false)
+				betaWorkerComponent(dgd).Roles[0].PodTemplate.Spec.Containers[0].Args = []string{"python3 -m dynamo.sglang --model-path other"}
+				return dgd
+			}(),
+			wantWebhookErrs: []string{
+				unsupportedRestoreLaunchError("spec.components[1].roles[0].podTemplate.spec.containers[0].command", "main", "leader", ""),
+			},
+		},
+		{
+			name:               "component rejects a changed legacy launch while repairing worker GPU claims",
+			groveDisabled:      true,
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointSGLangRoleRepairDGDForAdmission("worker", true, true),
+			deployment: func() *nvidiacomv1beta1.DynamoGraphDeployment {
+				dgd := checkpointSGLangRoleRepairDGDForAdmission("worker", false, true)
+				betaWorkerComponent(dgd).Roles[0].PodTemplate.Spec.Containers[0].Args = []string{"python3 -m dynamo.sglang --model-path other"}
+				return dgd
+			}(),
+			wantWebhookErrs: []string{
+				unsupportedRestoreLaunchError("spec.components[1].roles[0].podTemplate.spec.containers[0].command", "main", "leader", ""),
+			},
+		},
+
 		// Bound MPI host generation without changing authored role launches or replica-only updates.
 		{
 			name:            "Grove restore launch rejects an oversized MPI hostname list",
@@ -5376,6 +5431,38 @@ func checkpointTRTLLMDGDForAdmission(nodeCount int32, scale, roleTemplates, grov
 	}
 	if roleTemplates {
 		setBetaExplicitMultinodeRoleTemplates(worker, nodeCount)
+	}
+	return dgd
+}
+
+func checkpointSGLangRoleRepairDGDForAdmission(failedRole string, missingClaim, groveDisabled bool) *nvidiacomv1beta1.DynamoGraphDeployment {
+	dgd := checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.sglang"}, nil, nil)
+	dgd.Spec.BackendFramework = sglangBackendFramework
+	if groveDisabled {
+		dgd.Annotations = map[string]string{consts.KubeAnnotationEnableGrove: consts.KubeLabelValueFalse}
+	}
+	worker := betaWorkerComponent(dgd)
+	setBetaExplicitMultinodeRoleTemplates(worker, 2)
+	for i := range worker.Roles {
+		role := &worker.Roles[i]
+		main := &role.PodTemplate.Spec.Containers[0]
+		main.Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{
+			corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
+		}}
+		main.Env = append(main.Env,
+			corev1.EnvVar{Name: "NIXL_TELEMETRY_ENABLE", Value: "y"},
+			corev1.EnvVar{Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"},
+		)
+		main.Ports = []corev1.ContainerPort{{Name: consts.DynamoNixlPortName, ContainerPort: 20000}}
+		if role.Name != failedRole {
+			main.Command = []string{"/bin/sh", "-c"}
+			main.Args = []string{"python3 -m dynamo.sglang"}
+		} else if missingClaim {
+			main.Resources = corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "gpu"}}}
+			role.PodTemplate.Spec.ResourceClaims = []corev1.PodResourceClaim{{
+				Name: "gpu", ResourceClaimTemplateName: new("missing-restore-gpu-template"),
+			}}
+		}
 	}
 	return dgd
 }

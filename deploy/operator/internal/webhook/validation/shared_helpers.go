@@ -539,12 +539,12 @@ func renderRestoreLaunches(
 		deploymentType = consts.MultinodeDeploymentTypeGrove
 	}
 	mains, err := dynamo.PrepareDGDComponentMainContainers(ctx, reader, dgd, component, operatorConfig, deploymentType)
-	if err != nil {
-		return nil, err
-	}
 
 	launches := make([]restoreLaunch, 0, len(mains))
 	var errs []error
+	if err != nil {
+		errs = append(errs, err)
+	}
 	for _, main := range mains {
 		effective, err := dynamo.EffectiveComponentForRole(component, main.Role)
 		if err != nil {
