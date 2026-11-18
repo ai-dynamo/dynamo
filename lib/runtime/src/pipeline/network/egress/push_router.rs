@@ -650,7 +650,7 @@ async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPu
 struct TransportDispatch<T, U> {
     request_plane: Arc<AddressedPushRouter>,
     drt: crate::DistributedRuntime,
-    direct: std::sync::OnceLock<Arc<dyn StreamingDispatch<T, U>>>,
+    _phantom: PhantomData<(T, U)>,
 }
 
 impl<T, U> TransportDispatch<T, U>
@@ -662,22 +662,14 @@ where
         Self {
             request_plane,
             drt,
-            direct: std::sync::OnceLock::new(),
+            _phantom: PhantomData,
         }
-    }
-
-    fn registered_direct(&self) -> Option<Arc<dyn StreamingDispatch<T, U>>> {
-        if let Some(dispatch) = self.direct.get() {
-            return Some(dispatch.clone());
-        }
-        let dispatch = self.drt.direct_dispatch::<T, U>()?;
-        Some(self.direct.get_or_init(|| dispatch).clone())
     }
 
     /// A missing registration is a process misconfiguration, not a worker
     /// fault: `Internal` fails the request without reporting the worker down.
     fn direct(&self, instance_id: u64) -> Result<Arc<dyn StreamingDispatch<T, U>>, Error> {
-        self.registered_direct().ok_or_else(|| {
+        self.drt.direct_dispatch::<T, U>().ok_or_else(|| {
             DynamoError::builder()
                 .error_type(ErrorType::Internal)
                 .message(format!(
@@ -732,14 +724,14 @@ where
 
     async fn on_instance_removed(&self, id: &EndpointInstanceId) {
         StreamingDispatch::<T, U>::on_instance_removed(self.request_plane.as_ref(), id).await;
-        if let Some(direct) = self.registered_direct() {
+        if let Some(direct) = self.drt.direct_dispatch::<T, U>() {
             direct.on_instance_removed(id).await;
         }
     }
 
     async fn on_instance_added(&self, id: &EndpointInstanceId) {
         StreamingDispatch::<T, U>::on_instance_added(self.request_plane.as_ref(), id).await;
-        if let Some(direct) = self.registered_direct() {
+        if let Some(direct) = self.drt.direct_dispatch::<T, U>() {
             direct.on_instance_added(id).await;
         }
     }
