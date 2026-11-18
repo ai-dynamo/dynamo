@@ -215,6 +215,13 @@ def sglang_dsa_supports_decode_context_parallel(server_args: Any) -> bool | None
             return False
         if sglang_get_platform().device_sm not in (100, 103):
             return False
+    elif "prims_ts" in (prefill, decode) and sglang_get_platform().device_sm not in (
+        100,
+        103,
+        107,
+    ):
+        # SGLang checks the Prims-TS GPU only at backend init.
+        return False
     # K3.1's native validator owns its model-specific platform constraints.
     if prefill is None or decode is None:
         return None
