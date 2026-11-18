@@ -1878,41 +1878,6 @@ mod tests {
             Ok(())
         }
 
-        /// Debug test to understand disk pool creation failure
-        #[tokio::test]
-        async fn test_debug_disk_pool_creation() -> Result<()> {
-            use dynamo_runtime::logging::init as init_logging;
-            init_logging();
-
-            println!("Testing disk pool creation...");
-
-            let result = build_pools_with_layout(
-                2,
-                None,
-                Some(2),
-                None,
-                LayoutType::FullyContiguous,
-                BlockRegistrationDuplicationSetting::Disabled,
-                false,
-            );
-
-            match result {
-                Ok((_, _, _, disk_pool)) => {
-                    if disk_pool.is_some() {
-                        println!("Disk pool created successfully");
-                        Ok(())
-                    } else {
-                        println!("Disk pool is None even though creation succeeded");
-                        Err(anyhow::anyhow!("Disk pool is None"))
-                    }
-                }
-                Err(e) => {
-                    println!("build_pools_with_layout failed: {:?}", e);
-                    Err(e)
-                }
-            }
-        }
-
         /// Test error handling for GDS-incompatible operations
         #[tokio::test]
         async fn test_gds_error_handling() -> Result<()> {

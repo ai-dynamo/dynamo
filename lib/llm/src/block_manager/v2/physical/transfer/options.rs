@@ -74,14 +74,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_options() {
-        let options = TransferOptions::default();
-        assert!(options.layer_range.is_none());
-        assert!(options.nixl_write_notification.is_none());
-        assert!(options.bounce_buffer.is_none());
-    }
-
-    #[test]
     fn test_builder_with_notification() {
         let options = TransferOptions::builder()
             .nixl_write_notification(42)

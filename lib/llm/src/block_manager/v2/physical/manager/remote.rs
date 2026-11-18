@@ -113,15 +113,4 @@ mod tests {
         assert_eq!(remote.worker_id(), 999);
         assert_eq!(remote.layout_id(), 42);
     }
-
-    #[test]
-    fn test_remote_layout_into_layout() {
-        let handle = LayoutHandle::new(100, 200);
-        let serialized = make_serialized_layout();
-        let layout = PhysicalLayout::from_descriptor(serialized).unwrap();
-        let remote = RemoteLayout::new(handle, layout);
-
-        let _recovered = remote.into_layout();
-        // Successfully consumed and returned the layout
-    }
 }

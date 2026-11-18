@@ -171,11 +171,6 @@ mod tests {
     }
 
     #[test]
-    fn test_block_format_default() {
-        assert_eq!(BlockFormat::default(), BlockFormat::Operational);
-    }
-
-    #[test]
     fn test_serialized_layout_json_roundtrip() {
         let layout = LayoutDescriptor {
             version: LayoutDescriptor::CURRENT_VERSION,

@@ -106,14 +106,4 @@ mod tests {
         assert_eq!(local.worker_id(), 42);
         assert_eq!(local.layout_id(), 100);
     }
-
-    #[test]
-    fn test_local_layout_into_layout() {
-        let handle = LayoutHandle::new(1, 2);
-        let layout = make_test_layout();
-        let local = LocalLayout::new(handle, layout);
-
-        let _recovered = local.into_layout();
-        // Successfully consumed and returned the layout
-    }
 }

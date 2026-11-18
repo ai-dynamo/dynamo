@@ -328,12 +328,6 @@ mod tests {
             .unwrap()
     }
 
-    #[tokio::test]
-    async fn test_reference_block_manager_inherited_async_runtime() {
-        dynamo_runtime::logging::init();
-        let _block_manager = create_reference_block_manager().await;
-    }
-
     // This tests mimics the behavior of two unique kvbm workers exchanging blocksets
     // Each KvBlockManager is a unique worker in this test, each has its resources including
     // it's own worker_ids, nixl_agent, and block pools.

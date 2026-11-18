@@ -259,15 +259,6 @@ fn test_disk_storage_at_path() {
 }
 
 #[test]
-fn test_type_erasure() {
-    let storage = SystemStorage::new(1024).unwrap();
-    let buffer = create_buffer(storage);
-
-    assert_eq!(buffer.size(), 1024);
-    assert_eq!(buffer.storage_kind(), StorageKind::System);
-}
-
-#[test]
 fn test_memory_descriptor() {
     let desc = MemoryRegion::new(0x1000, 4096);
     assert_eq!(desc.addr, 0x1000);

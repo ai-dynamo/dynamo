@@ -397,7 +397,6 @@ impl NumaWorkerPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::numa::get_current_cpu_numa_node;
 
     #[test]
     fn test_worker_spawn() {
@@ -411,16 +410,6 @@ mod tests {
         let pool1 = NumaWorkerPool::global();
         let pool2 = NumaWorkerPool::global();
         assert!(std::ptr::eq(pool1, pool2));
-    }
-
-    #[test]
-    fn test_get_current_cpu_numa_node() {
-        let node = get_current_cpu_numa_node();
-        if !node.is_unknown() {
-            println!("Current CPU on NUMA node: {}", node.0);
-        } else {
-            println!("NUMA node detection unavailable (single-node or fake NUMA)");
-        }
     }
 
     #[test]

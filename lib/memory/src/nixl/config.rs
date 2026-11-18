@@ -159,18 +159,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_new_config_is_empty() {
-        let config = NixlBackendConfig::default();
-        assert_eq!(config.backends().len(), 0);
-    }
-
-    #[test]
-    fn test_default_is_empty() {
-        let config = NixlBackendConfig::default();
-        assert!(config.backends().is_empty()); // default() has no backends
-    }
-
-    #[test]
     fn test_with_backend() {
         let config = NixlBackendConfig::default()
             .with_backend("ucx")

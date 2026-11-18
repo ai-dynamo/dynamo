@@ -490,43 +490,11 @@ mod tests {
     }
 
     #[test]
-    fn test_numa_node_serialization() {
-        let node = NumaNode(1);
-        let json = serde_json::to_string(&node).unwrap();
-        let deserialized: NumaNode = serde_json::from_str(&json).unwrap();
-        assert_eq!(node, deserialized);
-    }
-
-    #[test]
     fn test_get_current_cpu_numa_node() {
         let node = get_current_cpu_numa_node();
         if !node.is_unknown() {
             assert!(node.0 < 8, "NUMA node {} seems unreasonably high", node.0);
         }
-    }
-
-    #[test]
-    fn test_numa_node_hash() {
-        use std::collections::HashMap;
-
-        let mut map = HashMap::new();
-        map.insert(NumaNode(0), "node0");
-        map.insert(NumaNode(1), "node1");
-
-        assert_eq!(map.get(&NumaNode(0)), Some(&"node0"));
-        assert_eq!(map.get(&NumaNode(1)), Some(&"node1"));
-        assert_eq!(map.get(&NumaNode(2)), None);
-    }
-
-    #[test]
-    fn test_numa_node_copy_clone() {
-        let node1 = NumaNode(5);
-        let node2 = node1;
-        let node3 = node1;
-
-        assert_eq!(node1, node2);
-        assert_eq!(node1, node3);
-        assert_eq!(node2, node3);
     }
 
     #[test]

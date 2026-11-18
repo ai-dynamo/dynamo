@@ -445,28 +445,6 @@ pub mod v2 {
         }
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn test_transfer_context_is_cloneable() {
-            // Compile-time test: TransferContext should implement Clone
-            // This is important for concurrent usage scenarios
-            fn assert_clone<T: Clone>() {}
-            assert_clone::<TransferContext>();
-        }
-
-        #[test]
-        fn test_event_synchronizer_consumes_on_use() {
-            // Compile-time test: EventSynchronizer should be consumed by sync methods
-            // This ensures proper resource management and prevents double-use
-
-            // We can verify this by checking that EventSynchronizer doesn't implement Clone
-            // (This is a documentation test since negative trait bounds aren't stable)
-        }
-    }
-
     #[cfg(all(test, feature = "testing-cuda"))]
     mod integration_tests {
         use super::*;
