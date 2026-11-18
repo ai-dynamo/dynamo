@@ -212,11 +212,11 @@ If `medium` is missing or Host-tier transitions never report `CPU_PINNED`, confi
 
 **Router sees the shared pool.** Shared-cache metrics are exposed on the frontend's Prometheus endpoint:
 
-| Metric                                    | Meaning                                                                  |
-| ----------------------------------------- | ------------------------------------------------------------------------ |
-| `router_shared_cache_hit_rate`            | Fraction of request blocks found in the shared pool (0.0–1.0).           |
-| `router_shared_cache_beyond_blocks`       | Blocks in the shared pool _beyond_ the selected worker's device overlap. |
-| `dynamo_router_shared_cache_errors_total` | Shared-cache query and Mooncake subscriber failures.                     |
+| Metric                                    | Meaning                                                                                 |
+| ----------------------------------------- | --------------------------------------------------------------------------------------- |
+| `router_shared_cache_hit_rate`            | Fraction of request blocks found in the shared pool (0.0–1.0).                          |
+| `router_shared_cache_beyond_blocks`       | Shared-pool blocks the selected worker can load past its device, host, and disk prefix. |
+| `dynamo_router_shared_cache_errors_total` | Shared-cache query and Mooncake subscriber failures.                                    |
 
 ```bash
 curl -s localhost:8000/metrics | grep shared_cache

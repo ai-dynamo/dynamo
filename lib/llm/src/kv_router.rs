@@ -1553,8 +1553,11 @@ impl KvRouter {
                     m.shared_cache_hit_rate
                         .observe(hits.total_hits as f64 / num_blocks as f64);
                 }
+                // What the scorer credits: the run past the worker's device, host and
+                // disk prefix. A multi-rank worker's snapshot holds its deepest rank.
+                let local_blocks = overlap_blocks.max(response.selected_worker_tiers.disk_blocks);
                 m.shared_cache_beyond_blocks
-                    .observe(hits.hits_beyond(overlap_blocks) as f64);
+                    .observe(hits.loadable_beyond(local_blocks) as f64);
             }
         }
 

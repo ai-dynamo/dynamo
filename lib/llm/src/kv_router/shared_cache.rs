@@ -108,8 +108,8 @@ impl SglangHicacheMooncakeConfig {
     /// layout, which publishes no threshold.
     fn effective_prefetch_threshold(&self) -> Option<u32> {
         match self.key_layout() {
-            // Compatibility with v1.5 and v1.6 workers, which omit the field: assume
-            // SGLang's default. TODO(v1.9): remove when v1.6 leaves the N-2 window.
+            // Compatibility with workers before v1.8, which omit the field: assume
+            // SGLang's default. TODO(v1.10): remove when v1.7 leaves the N-2 window.
             MooncakeKeyLayout::Hicache => Some(
                 self.prefetch_threshold
                     .unwrap_or(SGLANG_DEFAULT_PREFETCH_THRESHOLD)
