@@ -69,9 +69,13 @@ which uses the multiprocessing executor with a sidecar on the leader only, and t
 [hybrid-LB DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/multinode_dp.yaml),
 where every Pod runs a sidecar for its local DP ranks. Unlike `agg.yaml`, which
 launches `vllm-rs serve`, both multinode examples launch their serving ranks with
-`vllm serve --grpc-port` and `VLLM_USE_RUST_FRONTEND=1`. The TP worker runs
-`vllm serve --headless`. That entry point needs vLLM v0.32.0 or later. The examples
-use it because `vllm-rs serve` does not support `--data-parallel-hybrid-lb`.
+`vllm serve --grpc-port` and `VLLM_USE_RUST_FRONTEND=1`. That entry point needs
+vLLM v0.32.0 or later. The examples use it because `vllm-rs serve` does not support
+`--data-parallel-hybrid-lb`. The TP worker runs `vllm serve --headless` and also sets
+`VLLM_USE_RUST_FRONTEND=1`, although it runs no frontend. vLLM reads the variable in
+each Pod to decide whether image models such as Qwen3-VL normalize pixels on the GPU.
+The Rust frontend has already normalized them, so a worker without the variable
+normalizes them a second time, and image requests return wrong answers with HTTP 200.
 Engine-failure KV recovery remains incomplete and is tracked in
 [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
 

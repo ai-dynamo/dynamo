@@ -17,9 +17,9 @@ from sglang.srt.entrypoints.openai.protocol import Tool as SglangTool
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.parser.reasoning_parser import ReasoningParser
-from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo.frontend.sglang_prepost import SglangStreamingPostProcessor
+from dynamo.frontend.sglang_processor import get_tokenizer
 
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
