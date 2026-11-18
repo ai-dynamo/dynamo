@@ -5,8 +5,6 @@
 //! shaped like SGLang's Rust server, with typed discovery, `GenerateStreamItem`
 //! frames, and in-stream error items carrying HTTP status codes.
 
-use tonic_v14 as tonic;
-
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -20,8 +18,8 @@ use dynamo_mocker::live::{
 };
 use dynamo_mocker::scheduler::MockerMetrics;
 use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
+use dynamo_sglang_sidecar::proto as pb;
 use futures::Stream;
-use sglang_api_types::api::v1 as pb;
 use tokio::sync::Semaphore;
 use tonic::{Request, Response, Status};
 
