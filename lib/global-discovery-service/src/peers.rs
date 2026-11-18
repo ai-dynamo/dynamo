@@ -1510,6 +1510,7 @@ mod tests {
                 routers: Arc::new(StaticReplicaDirectory::new(Vec::new())),
                 registrar: Some(registrar),
                 sharing: Some(Arc::new(sharing.clone())),
+                router_registrar: None,
             },
             None,
             stop.clone(),

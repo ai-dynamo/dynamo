@@ -44,6 +44,7 @@
 //!     registrar: Some(registrations),
 //!     // Or the `Sharing` from `crate::peers::PeerSync::new`.
 //!     sharing: None,
+//!     router_registrar: None,
 //! };
 //! service::serve(listener, backend, None, shutdown).await?;
 //! ```
