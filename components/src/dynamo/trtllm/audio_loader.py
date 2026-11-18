@@ -25,6 +25,9 @@ from dynamo.common.multimodal.media_source import decode_data_uri, describe_medi
 class AudioLoader:
     """Fetch and decode TRT-LLM audio inputs with bounded concurrency."""
 
+    # Limit the float32 waveform to 256 MiB across all channels.
+    _MAX_DECODED_SAMPLES = 64 * 1024 * 1024
+
     def __init__(self, max_bytes: int, url_policy: UrlValidationPolicy) -> None:
         self._max_bytes = max_bytes
         self._url_policy = url_policy
@@ -75,10 +78,19 @@ class AudioLoader:
 
         try:
             waveform, sample_rate = await asyncio.to_thread(
-                sf.read, io.BytesIO(content), dtype="float32"
+                self._read_bounded, content, source
             )
             if waveform.size == 0 or sample_rate <= 0 or waveform.ndim not in (1, 2):
                 raise ValueError("Audio has no decodable samples")
             return waveform, sample_rate
         except (RuntimeError, ValueError) as exc:
             raise HttpStatusError(400, "Invalid audio data", source) from exc
+
+    def _read_bounded(self, content: bytes, source: str) -> tuple[Any, int]:
+        # Compressed audio can expand far beyond the encoded byte limit.
+        with sf.SoundFile(io.BytesIO(content)) as audio:
+            max_frames = self._MAX_DECODED_SAMPLES // audio.channels
+            waveform = audio.read(frames=max_frames + 1, dtype="float32")
+            if len(waveform) > max_frames:
+                raise HttpStatusError(400, "Audio is too long", source)
+            return waveform, audio.samplerate

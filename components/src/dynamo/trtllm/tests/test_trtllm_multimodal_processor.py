@@ -151,6 +151,35 @@ async def test_audio_is_forwarded_to_trtllm_processor(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("channels", [1, 2], ids=["mono", "stereo"])
+@pytest.mark.parametrize("exceeds_limit", [False, True], ids=["at_limit", "over_limit"])
+async def test_audio_loader_enforces_decoded_sample_limit(
+    channels, exceeds_limit, monkeypatch
+) -> None:
+    max_samples = 64
+    monkeypatch.setattr(trt_audio.AudioLoader, "_MAX_DECODED_SAMPLES", max_samples)
+    frames = max_samples // channels + int(exceeds_limit)
+    samples = np.full((frames, channels), 0.25, dtype=np.float32)
+    clip = io.BytesIO()
+    sf.write(clip, samples, 16000, format="FLAC", subtype="PCM_16")
+    content = clip.getvalue()
+    loader = trt_audio.AudioLoader(1024, UrlValidationPolicy.from_env())
+    assert len(content) < 1024
+    url = "data:audio/flac;base64," + base64.b64encode(content).decode()
+
+    if exceeds_limit:
+        with pytest.raises(HttpStatusError, match="Audio is too long") as excinfo:
+            await loader.load_audio_batch([{"Url": url}])
+        assert excinfo.value.status == 400
+    else:
+        [(waveform, sample_rate)] = await loader.load_audio_batch([{"Url": url}])
+        assert waveform.size == max_samples
+        expected = samples[:, 0] if channels == 1 else samples
+        np.testing.assert_allclose(waveform, expected)
+        assert sample_rate == 16000
+
+
+@pytest.mark.asyncio
 async def test_load_audio_batch_limits_concurrency_and_preserves_order(
     monkeypatch,
 ) -> None:

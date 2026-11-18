@@ -147,6 +147,10 @@ curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '
 For aggregated serving, use a model with audio support in TensorRT-LLM and enable
 `--modality multimodal` or `--enable-multimodal`.
 
+Each clip is limited to 256 MiB of decoded audio across all channels.
+This limit is fixed and separate from the encoded-file limit controlled by
+`--max-file-size-mb`.
+
 ### Example Request
 
 With `google/gemma-4-E2B-it` running, send an audio URL:
@@ -183,7 +187,8 @@ Set `data` to the encoded file contents and `format` to `wav` or `mp3`:
 }
 ```
 
-Non-streaming requests with unsupported models or invalid audio return HTTP 400.
+Non-streaming requests with unsupported models, invalid audio, or clips exceeding
+the decoded-audio limit return HTTP 400.
 If a streaming response has already started, errors are reported in the stream
 and the HTTP status remains 200.
 
