@@ -1661,6 +1661,7 @@ def test_build_sampling_params_rejects_guided_json_reference_cycles(schema):
 @pytest.mark.parametrize(
     ("error_type", "expected_status"),
     [
+        ("VLLMClientError", 400),
         ("VLLMValidationError", 400),
         ("VLLMNotFoundError", 404),
         ("VLLMUnprocessableEntityError", 422),
@@ -1669,11 +1670,18 @@ def test_build_sampling_params_rejects_guided_json_reference_cycles(schema):
 def test_vllm_client_error_preserves_http_status(error_type, expected_status):
     from vllm import exceptions as vllm_exceptions
 
+    from dynamo.llm.exceptions import HttpError
     from dynamo.vllm.errors import vllm_client_error_to_http_error
 
-    error = getattr(vllm_exceptions, error_type)("invalid request")
+    diagnostic = "/private/worker.py: enum array must not be empty"
+    if error_type != "VLLMValidationError":
+        diagnostic = f"Grammar error: {diagnostic}"
+    error = getattr(vllm_exceptions, error_type)(diagnostic)
+    translated = vllm_client_error_to_http_error(error)
 
-    assert vllm_client_error_to_http_error(error).code == expected_status
+    assert isinstance(translated, HttpError)
+    assert translated.code == expected_status
+    assert translated.message == diagnostic
 
 
 @pytest.mark.parametrize(

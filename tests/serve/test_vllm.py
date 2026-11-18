@@ -51,6 +51,7 @@ from tests.utils.payloads import (
     EmbeddingPayload,
     ToolCallingChatPayload,
 )
+from tests.utils.structured_output import structured_output_validation_payloads
 
 logger = logging.getLogger(__name__)
 
@@ -475,6 +476,9 @@ vllm_configs = {
         ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
+            *structured_output_validation_payloads(
+                ("DYN_SYSTEM_PORT1", "DYN_SYSTEM_PORT2")
+            ),
             chat_payload_default(),
             completion_payload_default(),
             metric_payload_default(
@@ -483,6 +487,7 @@ vllm_configs = {
                 port=DefaultPort.SYSTEM2.value,
             ),
         ],
+        env={"DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS": "0"},
     ),
     "disaggregated_same_gpu": VLLMConfig(
         name="disaggregated_same_gpu",
@@ -743,6 +748,7 @@ vllm_configs = {
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
+            *structured_output_validation_payloads(("DYN_SYSTEM_PORT1",)),
             chat_payload(
                 "Generate a person with name and age",
                 repeat_count=1,
@@ -777,6 +783,7 @@ vllm_configs = {
                 extra_body={"guided_choice": ["red", "blue", "green"]},
             ),
         ],
+        env={"DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS": "0"},
     ),
     "embedding_agg": VLLMConfig(
         name="embedding_agg",
