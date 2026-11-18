@@ -1314,6 +1314,50 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				},
 			}),
 		},
+		{
+			name: "cold-start failover graph archive is accepted",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled:      true,
+					Mode:         nvidiacomv1alpha1.GMSModeIntraPod,
+					NumShadows:   1,
+					GraphArchive: &nvidiacomv1alpha1.GraphArchiveSpec{SizeLimit: new(resource.MustParse("8Gi"))},
+				},
+			}),
+		},
+		{
+			name: "failover graph archive rejects inter-pod failover",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+				},
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled:      true,
+					Mode:         nvidiacomv1alpha1.GMSModeInterPod,
+					NumShadows:   1,
+					GraphArchive: &nvidiacomv1alpha1.GraphArchiveSpec{},
+				},
+			}),
+			wantWebhookErrs: []string{`spec.experimental.failover.graphArchive: Forbidden: requires failover mode "IntraPod"`},
+		},
+		{
+			name: "failover graph archive rejects non-vLLM backends",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.BackendFramework = admissionSGLangBackend
+				enableBetaIntraPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+				dcd.Spec.Experimental.Failover = &nvidiacomv1beta1.FailoverSpec{GraphArchive: &nvidiacomv1beta1.GraphArchiveSpec{}}
+			}),
+			wantWebhookErrs: []string{"spec.experimental.failover.graphArchive: Forbidden: is supported only for the vLLM backend (detected: sglang)"},
+		},
 
 		// Compatibility warnings.
 		{

@@ -460,6 +460,46 @@ func snapshotFailoverBackendSupported(backendFramework BackendFramework) bool {
 	return backendFramework == BackendFrameworkVLLM || backendFramework == BackendFrameworkSGLang
 }
 
+// ValidateFailoverGraphArchive checks that failover.graphArchive is set only
+// where it is rendered: single-node intra-pod cold-start failover with vLLM.
+// component and fldPath must not be nil.
+func ValidateFailoverGraphArchive(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path, explicitBackendFramework string) field.ErrorList {
+	if component.Experimental == nil || component.Experimental.Failover == nil || component.Experimental.Failover.GraphArchive == nil {
+		return nil
+	}
+	graphArchive := component.Experimental.Failover.GraphArchive
+	graphArchivePath := fldPath.Child("experimental", "failover", "graphArchive")
+
+	var allErrs field.ErrorList
+
+	// The archive is pod-local, and snapshot-backed engines restore rather than cold-start.
+	if !IsIntraPodFailoverEnabled(component) {
+		allErrs = append(allErrs, field.Forbidden(graphArchivePath, fmt.Sprintf("requires failover mode %q", v1beta1.GMSModeIntraPod)))
+	} else if GetCheckpoint(component) != nil {
+		allErrs = append(allErrs, field.Forbidden(graphArchivePath, "is supported only for cold-start (snapshot-less) failover and cannot be combined with checkpoint"))
+	}
+
+	// Resolve the backend exactly as rendering does, including command inference.
+	backendFramework, err := determineBackendFrameworkForComponent(component, explicitBackendFramework)
+	if err != nil {
+		allErrs = append(allErrs, field.Forbidden(graphArchivePath, "requires a consistent vLLM backend"))
+	} else if backendFramework != BackendFrameworkVLLM {
+		allErrs = append(allErrs, field.Forbidden(graphArchivePath, fmt.Sprintf("is supported only for the vLLM backend (detected: %s)", backendFramework)))
+	}
+
+	// Multinode worker engines run headless, which dynamo.vllm refuses with an
+	// archive, and an emptyDir cannot hold the ranks of other pods.
+	if component.GetNumberOfNodes() != 1 {
+		allErrs = append(allErrs, field.Forbidden(graphArchivePath, "requires a single node setup"))
+	}
+
+	// A non-positive limit cannot hold an archive; reject it before rendering.
+	if graphArchive.SizeLimit != nil && graphArchive.SizeLimit.Sign() <= 0 {
+		allErrs = append(allErrs, field.Invalid(graphArchivePath.Child("sizeLimit"), graphArchive.SizeLimit.String(), "must be greater than zero"))
+	}
+	return allErrs
+}
+
 // IsIntraPodFailoverEnabled is true only when failover clones engine
 // containers inside one pod. Inter-pod failover keeps one main container per
 // engine pod. v1beta1 FailoverSpec is presence-only: v1alpha1 conversion only

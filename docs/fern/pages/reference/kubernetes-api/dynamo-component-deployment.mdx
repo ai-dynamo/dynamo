@@ -377,7 +377,7 @@ Nested struct types referenced by the fields above, broken out here to keep the 
 
 ### ExperimentalSpec
 
-Groups opt-in preview features for a component. Referenced by `experimental`. Nested types (`GMSClientPodSpec`, `ComponentCheckpointJobConfig`, `DynamoCheckpointIdentity`) are expanded inline under the field that references them.
+Groups opt-in preview features for a component. Referenced by `experimental`. Nested types (`GMSClientPodSpec`, `GraphArchiveSpec`, `ComponentCheckpointJobConfig`, `DynamoCheckpointIdentity`) are expanded inline under the field that references them.
 
 <Warning>
   These preview features can change or disappear between `v1beta1` releases without a name-preserving graduation path. They are excluded from the `v1beta1` deprecation policy — do not rely on them for production workloads.
@@ -427,6 +427,20 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
   <ParamField path="numShadows" type="integer" default="1">
     Number of shadow (standby) engine containers per rank. Reserved for future use; the operator currently creates exactly one shadow. Minimum `1`, maximum `1`.
   </ParamField>
+  <ParamField path="graphArchive" type="GraphArchiveSpec">
+    Shares a pod-local CUDA graph archive between the two engine containers. The operator adds an `emptyDir` volume named `gms-graph-archive`, mounts it at `/gms-graph-archive` in `engine-0` and `engine-1` only, and sets `DYN_VLLM_GMS_GRAPH_ARCHIVE=/gms-graph-archive` in both, replacing any authored value. `dynamo.vllm` reads that variable as its `--gms-graph-archive` option: the first read-only shadow engine saves its CUDA graphs there, and later replacement engines load them. The archive is removed with the pod. Setting the field, even as `graphArchive: {}`, enables it.
+
+    The volume name and mount path are reserved: an authored volume named `gms-graph-archive` is replaced, and another volume mounted at `/gms-graph-archive` in the main container fails rendering.
+
+    Supported only for single-node `IntraPod` failover without `checkpoint` (cold-start failover) and the vLLM backend. The validation webhook rejects other combinations.
+  </ParamField>
+  <Indent>
+    <ParamField path="sizeLimit" type="resource.Quantity">
+      Size limit of the archive `emptyDir` volume. Must be greater than zero. When omitted, the volume has no limit of its own. The archive uses the node's ephemeral storage, and the kubelet evicts a pod whose archive grows past the limit, so leave room for one archive: it holds the CUDA graphs of every rank at every capture size, from tens of megabytes for a small model to gigabytes for a large tensor-parallel one.
+
+      <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/api/resource#Quantity" target="_blank">resource.Quantity</a>
+    </ParamField>
+  </Indent>
 </Indent>
 
 <ParamField path="grove" type="GroveSpec">

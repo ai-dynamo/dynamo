@@ -10,11 +10,11 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 4 Kubernetes API packages with 220 typed CRD and config sections.
+Dynamo publishes 4 Kubernetes API packages with 222 typed CRD and config sections.
 
 <CardGroup cols={3}>
-<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">74 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">76 types</Card>
+<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">75 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">77 types</Card>
 <Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">41 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
 </CardGroup>
@@ -1553,6 +1553,12 @@ See [GPUMemoryServiceMode](#gpumemoryservicemode).
 NumShadows is the number of shadow (standby) engine pods per rank. Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows). NumShadows is only meaningful for mode=interPod; intraPod uses a fixed 1 primary + 1 shadow sidecar layout and any value other than 1 is rejected at admission time.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
+
+<ParamField path="graphArchive" type="GraphArchiveSpec">
+GraphArchive mounts a pod-local emptyDir into both engine containers and points dynamo.vllm --gms-graph-archive at it. The first read-only shadow engine saves its CUDA graphs there, and later replacement engines load them. Presence enables the archive, which never outlives the pod. Experimental: supported only for single-node intraPod cold-start (snapshot-less) failover with the vLLM backend.
+See [GraphArchiveSpec](#grapharchivespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
 </Accordion>
 
 <Accordion id="frontendsidecarspec" title="FrontendSidecarSpec">
@@ -1650,6 +1656,21 @@ ExtraClientContainers lists additional user-declared containers that should be w
 <ParamField path="extraClientPods" type="GMSClientPodSpec array">
 ExtraClientPods declares additional GMS client pods for inter-pod GMS. This field is reserved for future use and is rejected until inter-pod client orchestration is wired.
 See [GMSClientPodSpec](#gmsclientpodspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="grapharchivespec" title="GraphArchiveSpec">
+GraphArchiveSpec configures the pod-local CUDA graph archive shared by the
+intraPod failover engine containers.
+
+
+**Kind:** `type`
+**Appears in:** [FailoverSpec](#failoverspec)
+
+<ParamField path="sizeLimit" type="Quantity">
+SizeLimit is the emptyDir size limit of the archive volume. Must be greater than zero. When omitted, the volume has no limit of its own. The archive uses the node's ephemeral storage, and the kubelet evicts a pod whose archive grows past the limit.
+See [Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -3851,6 +3872,12 @@ See [GPUMemoryServiceMode](#v1beta1-gpumemoryservicemode).
 numShadows is the number of shadow (standby) engine containers per rank. Reserved for future use; the operator currently creates exactly one shadow.
 **Validation:** Maximum: 1  Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
+
+<ParamField path="graphArchive" type="GraphArchiveSpec">
+graphArchive mounts a pod-local `emptyDir` into both engine containers and points `dynamo.vllm --gms-graph-archive` at it. The first read-only shadow engine saves its CUDA graphs there, and later replacement engines load them. Setting it (even as an empty object, `graphArchive: \{\}`) enables the archive, which never outlives the pod. Supported only for single-node intra-pod cold-start (snapshot-less) failover with the vLLM backend (enforced by the validation webhook). See ExperimentalSpec for the stability caveat.
+See [GraphArchiveSpec](#v1beta1-grapharchivespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
 </Accordion>
 
 <Accordion id="featuresspec" title="FeaturesSpec">
@@ -3976,6 +4003,22 @@ GPUSKUType identifies a supported GPU for discovery and profiling.
 - <Badge intent="note" minimal>t4</Badge>
 - <Badge intent="note" minimal>mi200</Badge> --- AMD ---
 - <Badge intent="note" minimal>mi300</Badge>
+</Accordion>
+
+<Accordion id="v1beta1-grapharchivespec" title="GraphArchiveSpec">
+GraphArchiveSpec configures the pod-local CUDA graph archive shared by the
+intra-pod failover engine containers.
+See ExperimentalSpec for the stability caveat.
+
+
+**Kind:** `type`
+**Appears in:** [FailoverSpec](#v1beta1-failoverspec)
+
+<ParamField path="sizeLimit" type="Quantity">
+sizeLimit is the `emptyDir` size limit of the archive volume. Must be greater than zero. When omitted, the volume has no limit of its own. The archive uses the node's ephemeral storage, and the kubelet evicts a pod whose archive grows past the limit.
+See [Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
 </Accordion>
 
 <Accordion id="grovespec" title="GroveSpec">

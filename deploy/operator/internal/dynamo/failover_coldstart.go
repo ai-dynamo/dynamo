@@ -10,25 +10,43 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 )
 
 const (
 	vllmMasterPortFlag   = "--master-port"
 	vllmMasterPortStride = 100
+
+	// The CUDA graph archive is an emptyDir so it never outlives the pod or
+	// crosses builds. The path is passed as env rather than a launch flag
+	// because the engine args may be shell-wrapped.
+	gmsGraphArchiveVolumeName = "gms-graph-archive"
+	gmsGraphArchiveMountPath  = "/gms-graph-archive"
+	gmsGraphArchiveEnvVar     = "DYN_VLLM_GMS_GRAPH_ARCHIVE"
 )
 
 // buildColdStartFailoverPod prepares snapshot-less failover, supported only for
 // vLLM with GMS V0. Engines initialize concurrently in shadow mode and need
 // separate collective/KV ports, unlike the restored snapshot engine pair.
 // Mutates podSpec, which must not be nil and must already have GMS resources.
-func buildColdStartFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, backendFramework BackendFramework) error {
+// graphArchive may be nil, in which case no CUDA graph archive is rendered.
+func buildColdStartFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, backendFramework BackendFramework, graphArchive *v1beta1.GraphArchiveSpec) error {
 	// Reject other backends before changing the pod.
 	if backendFramework != BackendFrameworkVLLM {
 		return fmt.Errorf("cold-start failover is currently supported only for vLLM (detected: %s)", backendFramework)
 	}
 	if err := buildFailoverEnginePair(podSpec); err != nil {
 		return err
+	}
+
+	// One archive per pod lets replacement engines load the first shadow's CUDA graphs.
+	if graphArchive != nil {
+		// Defend direct rendering as well as objects that bypassed admission.
+		if numberOfNodes != 1 {
+			return fmt.Errorf("failover.graphArchive requires a single node setup")
+		}
+		ensureGraphArchiveVolume(podSpec, graphArchive)
 	}
 
 	// Only the two cloned engines receive legacy shadow initialization settings.
@@ -56,7 +74,58 @@ func buildColdStartFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, bac
 				corev1.EnvVar{Name: "NNODES", Value: strconv.Itoa(int(numberOfNodes))},
 			)
 		}
+
+		// The operator-managed archive path replaces any value inherited from main.
+		if graphArchive != nil {
+			if err := mountGraphArchive(c); err != nil {
+				return err
+			}
+			removeEnvVar(c, gmsGraphArchiveEnvVar)
+			c.Env = append(c.Env, corev1.EnvVar{Name: gmsGraphArchiveEnvVar, Value: gmsGraphArchiveMountPath})
+		}
 	}
+	return nil
+}
+
+// ensureGraphArchiveVolume adds the archive emptyDir to the pod. The volume
+// name is operator-owned, so an authored volume with that name is replaced.
+// Mutates podSpec; podSpec and graphArchive must not be nil.
+func ensureGraphArchiveVolume(podSpec *corev1.PodSpec, graphArchive *v1beta1.GraphArchiveSpec) {
+	// Copy the limit so the rendered pod never aliases the component spec.
+	volume := corev1.Volume{
+		Name:     gmsGraphArchiveVolumeName,
+		EmptyDir: &corev1.EmptyDirVolumeSource{},
+	}
+	if graphArchive.SizeLimit != nil {
+		sizeLimit := graphArchive.SizeLimit.DeepCopy()
+		volume.EmptyDir.SizeLimit = &sizeLimit
+	}
+
+	// Replace by name: two volumes with one name make the pod invalid.
+	for i := range podSpec.Volumes {
+		if podSpec.Volumes[i].Name == gmsGraphArchiveVolumeName {
+			podSpec.Volumes[i] = volume
+			return
+		}
+	}
+	podSpec.Volumes = append(podSpec.Volumes, volume)
+}
+
+// mountGraphArchive mounts the archive volume in an engine container at the
+// operator-owned path. Mutates container, which must not be nil.
+func mountGraphArchive(container *corev1.Container) error {
+	// Drop an inherited mount of the archive volume; refuse another volume at its path.
+	mounts := make([]corev1.VolumeMount, 0, len(container.VolumeMounts)+1)
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == gmsGraphArchiveVolumeName {
+			continue
+		}
+		if mount.MountPath == gmsGraphArchiveMountPath {
+			return fmt.Errorf("failover.graphArchive mount path %q is already used by volume %q", gmsGraphArchiveMountPath, mount.Name)
+		}
+		mounts = append(mounts, mount)
+	}
+	container.VolumeMounts = append(mounts, corev1.VolumeMount{Name: gmsGraphArchiveVolumeName, MountPath: gmsGraphArchiveMountPath})
 	return nil
 }
 

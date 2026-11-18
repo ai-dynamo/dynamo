@@ -2414,6 +2414,89 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				"spec.components[1].experimental.checkpoint: Forbidden: Snapshot with gpuMemoryService.mode=InterPod is unsupported",
 			},
 		},
+		{
+			name: "cold-start vLLM failover graph archive is admitted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				enableBetaContainerDiscovery(dgd)
+				worker := betaWorkerComponent(dgd)
+				enableBetaIntraPodGMS(worker)
+				worker.Experimental.Failover = &nvidiacomv1beta1.FailoverSpec{
+					Mode:         nvidiacomv1beta1.GMSModeIntraPod,
+					GraphArchive: &nvidiacomv1beta1.GraphArchiveSpec{SizeLimit: new(resource.MustParse("8Gi"))},
+				}
+			}),
+		},
+		{
+			name: "failover graph archive rejects snapshot-backed failover",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				enableBetaContainerDiscovery(dgd)
+				worker := betaWorkerComponent(dgd)
+				enableBetaSnapshotFailover(worker, "vllm")
+				worker.Experimental.Failover.GraphArchive = &nvidiacomv1beta1.GraphArchiveSpec{}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].experimental.failover.graphArchive: Forbidden: is supported only for cold-start (snapshot-less) failover and cannot be combined with checkpoint"},
+		},
+		{
+			name: "failover graph archive rejects an inferred non-vLLM backend",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				enableBetaContainerDiscovery(dgd)
+				dgd.Spec.BackendFramework = ""
+				worker := betaWorkerComponent(dgd)
+				enableBetaIntraPodGMS(worker)
+				worker.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.trtllm"}
+				worker.Experimental.Failover = &nvidiacomv1beta1.FailoverSpec{GraphArchive: &nvidiacomv1beta1.GraphArchiveSpec{}}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].experimental.failover.graphArchive: Forbidden: is supported only for the vLLM backend (detected: trtllm)"},
+		},
+		{
+			name: "failover graph archive rejects conflicting backend selection",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				enableBetaContainerDiscovery(dgd)
+				worker := betaWorkerComponent(dgd)
+				enableBetaIntraPodGMS(worker)
+				worker.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.sglang"}
+				worker.Experimental.Failover = &nvidiacomv1beta1.FailoverSpec{GraphArchive: &nvidiacomv1beta1.GraphArchiveSpec{}}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].experimental.failover.graphArchive: Forbidden: requires a consistent vLLM backend"},
+		},
+		{
+			name: "failover graph archive rejects multiple nodes",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				enableBetaContainerDiscovery(dgd)
+				worker := betaWorkerComponent(dgd)
+				enableBetaIntraPodGMS(worker)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				worker.Experimental.Failover = &nvidiacomv1beta1.FailoverSpec{GraphArchive: &nvidiacomv1beta1.GraphArchiveSpec{}}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].experimental.failover.graphArchive: Forbidden: requires a single node setup"},
+		},
+		{
+			name: "failover graph archive size limit must be positive",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				enableBetaContainerDiscovery(dgd)
+				worker := betaWorkerComponent(dgd)
+				enableBetaIntraPodGMS(worker)
+				worker.Experimental.Failover = &nvidiacomv1beta1.FailoverSpec{
+					GraphArchive: &nvidiacomv1beta1.GraphArchiveSpec{SizeLimit: new(resource.MustParse("0"))},
+				}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].experimental.failover.graphArchive.sizeLimit: Invalid value: "0": must be greater than zero`},
+		},
+		{
+			name: "alpha failover graph archive is validated after conversion",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}
+				service := dgd.Spec.Services["worker"]
+				service.Resources = &nvidiacomv1alpha1.Resources{Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "1"}}
+				service.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: nvidiacomv1alpha1.GMSModeIntraPod}
+				service.Failover = &nvidiacomv1alpha1.FailoverSpec{
+					Enabled:      true,
+					Mode:         nvidiacomv1alpha1.GMSModeIntraPod,
+					GraphArchive: &nvidiacomv1alpha1.GraphArchiveSpec{SizeLimit: new(resource.MustParse("0"))},
+				}
+			}),
+			wantWebhookErrs: []string{`spec.components[0].experimental.failover.graphArchive.sizeLimit: Invalid value: "0": must be greater than zero`},
+		},
 
 		// Source-version compatibility rules.
 		{

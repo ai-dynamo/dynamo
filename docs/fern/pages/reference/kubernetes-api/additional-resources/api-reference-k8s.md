@@ -910,6 +910,7 @@ _Appears in:_
 | `enabled` _boolean_ | Enabled activates failover mode. |  | Required: \{\} <br /> |
 | `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | Mode selects the failover deployment topology.<br />intraPod: engine containers run within the same pod (requires gpuMemoryService.enabled).<br />interPod: a dedicated GMS weight server pod + engine pods per rank (requires Grove). | intraPod | Enum: [intraPod interPod] <br />Optional: \{\} <br /> |
 | `numShadows` _integer_ | NumShadows is the number of shadow (standby) engine pods per rank.<br />Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows).<br />NumShadows is only meaningful for mode=interPod; intraPod uses a fixed<br />1 primary + 1 shadow sidecar layout and any value other than 1 is<br />rejected at admission time. | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
+| `graphArchive` _[GraphArchiveSpec](#grapharchivespec)_ | GraphArchive mounts a pod-local emptyDir into both engine containers<br />and points dynamo.vllm --gms-graph-archive at it. The first read-only<br />shadow engine saves its CUDA graphs there, and later replacement<br />engines load them. Presence enables the archive, which never outlives<br />the pod. Experimental: supported only for single-node intraPod<br />cold-start (snapshot-less) failover with the vLLM backend. |  | Optional: \{\} <br /> |
 
 
 #### FrontendSidecarSpec
@@ -988,6 +989,23 @@ _Appears in:_
 | `deviceClassName` _string_ | DeviceClassName is the DRA DeviceClass to request GPUs from. | gpu.nvidia.com | Optional: \{\} <br /> |
 | `extraClientContainers` _string array_ | ExtraClientContainers lists additional user-declared containers that should<br />be wired as GMS clients in pods rendered from the enclosing spec.<br />DGD/DCD services apply this to service pods. Automatic captures apply<br />SnapshotJob capture Pod clients before creating the SnapshotJob.<br />Every name must match a user-declared container in the enclosing pod spec. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
 | `extraClientPods` _[GMSClientPodSpec](#gmsclientpodspec) array_ | ExtraClientPods declares additional GMS client pods for inter-pod GMS. This field is<br />reserved for future use and is rejected until inter-pod client orchestration is wired. |  | Optional: \{\} <br /> |
+
+
+#### GraphArchiveSpec
+
+
+
+GraphArchiveSpec configures the pod-local CUDA graph archive shared by the
+intraPod failover engine containers.
+
+
+
+_Appears in:_
+- [FailoverSpec](#failoverspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `sizeLimit` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | SizeLimit is the emptyDir size limit of the archive volume. Must be<br />greater than zero. When omitted, the volume has no limit of its own.<br />The archive uses the node's ephemeral storage, and the kubelet evicts<br />a pod whose archive grows past the limit. |  | Optional: \{\} <br /> |
 
 
 #### IngressSpec
@@ -2453,6 +2471,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | mode selects the failover deployment topology. Must match<br />`spec.experimental.gpuMemoryService.mode` (or<br />`spec.components[*].experimental.gpuMemoryService.mode` inside a<br />DynamoGraphDeployment). | IntraPod | Enum: [IntraPod InterPod] <br />Optional: \{\} <br /> |
 | `numShadows` _integer_ | numShadows is the number of shadow (standby) engine containers per<br />rank. Reserved for future use; the operator currently creates exactly<br />one shadow. | 1 | Maximum: 1 <br />Minimum: 1 <br />Optional: \{\} <br /> |
+| `graphArchive` _[GraphArchiveSpec](#grapharchivespec)_ | graphArchive mounts a pod-local `emptyDir` into both engine containers<br />and points `dynamo.vllm --gms-graph-archive` at it. The first read-only<br />shadow engine saves its CUDA graphs there, and later replacement<br />engines load them. Setting it (even as an empty object,<br />`graphArchive: \{\}`) enables the archive, which never outlives the pod.<br />Supported only for single-node intra-pod cold-start (snapshot-less)<br />failover with the vLLM backend (enforced by the validation webhook).<br />See ExperimentalSpec for the stability caveat. |  | Optional: \{\} <br /> |
 
 
 #### FeaturesSpec
@@ -2565,6 +2584,24 @@ _Appears in:_
 | `t4` |  |
 | `mi200` | --- AMD ---<br /> |
 | `mi300` |  |
+
+
+#### GraphArchiveSpec
+
+
+
+GraphArchiveSpec configures the pod-local CUDA graph archive shared by the
+intra-pod failover engine containers.
+See ExperimentalSpec for the stability caveat.
+
+
+
+_Appears in:_
+- [FailoverSpec](#failoverspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `sizeLimit` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | sizeLimit is the `emptyDir` size limit of the archive volume. Must be<br />greater than zero. When omitted, the volume has no limit of its own.<br />The archive uses the node's ephemeral storage, and the kubelet evicts<br />a pod whose archive grows past the limit. |  | Optional: \{\} <br /> |
 
 
 #### GroveSpec

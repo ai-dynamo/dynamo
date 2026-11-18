@@ -20,6 +20,7 @@ package v1beta1
 import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
@@ -397,6 +398,29 @@ type FailoverSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=1
 	NumShadows int32 `json:"numShadows,omitempty"`
+
+	// graphArchive mounts a pod-local `emptyDir` into both engine containers
+	// and points `dynamo.vllm --gms-graph-archive` at it. The first read-only
+	// shadow engine saves its CUDA graphs there, and later replacement
+	// engines load them. Setting it (even as an empty object,
+	// `graphArchive: {}`) enables the archive, which never outlives the pod.
+	// Supported only for single-node intra-pod cold-start (snapshot-less)
+	// failover with the vLLM backend (enforced by the validation webhook).
+	// See ExperimentalSpec for the stability caveat.
+	// +optional
+	GraphArchive *GraphArchiveSpec `json:"graphArchive,omitempty"`
+}
+
+// GraphArchiveSpec configures the pod-local CUDA graph archive shared by the
+// intra-pod failover engine containers.
+// See ExperimentalSpec for the stability caveat.
+type GraphArchiveSpec struct {
+	// sizeLimit is the `emptyDir` size limit of the archive volume. Must be
+	// greater than zero. When omitted, the volume has no limit of its own.
+	// The archive uses the node's ephemeral storage, and the kubelet evicts
+	// a pod whose archive grows past the limit.
+	// +optional
+	SizeLimit *resource.Quantity `json:"sizeLimit,omitempty"`
 }
 
 // Deprecated: use checkpoint.enabled instead.

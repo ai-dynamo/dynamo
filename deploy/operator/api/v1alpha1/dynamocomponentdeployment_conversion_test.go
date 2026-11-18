@@ -627,6 +627,10 @@ func TestDCD_RoundTrip_Experimental(t *testing.T) {
 							PodTemplate: *clientPodTemplate.DeepCopy(),
 						}},
 					},
+					Failover: &v1beta1.FailoverSpec{
+						Mode:         v1beta1.GMSModeIntraPod,
+						GraphArchive: &v1beta1.GraphArchiveSpec{},
+					},
 					Checkpoint: &v1beta1.ComponentCheckpointConfig{
 						Enabled:             true,
 						Mode:                v1beta1.CheckpointModeAuto,

@@ -19,9 +19,11 @@ package dynamo
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -620,7 +622,7 @@ func TestBuildColdStartFailoverPod_TwoEnginesPlusSidecar(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
 	ps.Containers[1].Name = "engine-helper"
 	sidecar := ps.Containers[1].DeepCopy()
-	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM, nil)
 	require.NoError(t, err)
 
 	t.Log("Clone main and leave the sidecar untouched by legacy overrides")
@@ -632,14 +634,14 @@ func TestBuildColdStartFailoverPod_TwoEnginesPlusSidecar(t *testing.T) {
 
 func TestBuildColdStartFailoverPod_EmptyContainers(t *testing.T) {
 	ps := corev1.PodSpec{}
-	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "at least one container")
 }
 
 func TestBuildColdStartFailoverPod_RejectsSGLangColdStart(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkSGLang)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkSGLang, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "currently supported only for vLLM")
 }
@@ -689,7 +691,7 @@ func TestBuildSnapshotFailoverPod_Backends(t *testing.T) {
 func TestBuildColdStartFailoverPod_EngineEnvVars(t *testing.T) {
 	t.Log("Build the active-passive engine containers from a container-discovery base")
 	ps := intraPodFailoverPodSpec()
-	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM, nil)
 	require.NoError(t, err)
 
 	t.Log("Verify each engine keeps container discovery and receives its own container identity")
@@ -762,7 +764,7 @@ func TestStaggerFlagValue(t *testing.T) {
 
 func TestBuildColdStartFailoverPod_StaggeredPorts(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM, nil)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -777,7 +779,7 @@ func TestBuildColdStartFailoverPod_StaggeredPorts(t *testing.T) {
 
 func TestBuildColdStartFailoverPod_ProbesRetargetedToNamedPort(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM, nil)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -797,7 +799,7 @@ func TestBuildColdStartFailoverPod_ProbesRetargetedToNamedPort(t *testing.T) {
 
 func TestBuildColdStartFailoverPod_PreservesDRAClaim(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM, nil)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -809,7 +811,7 @@ func TestBuildColdStartFailoverPod_PreservesDRAClaim(t *testing.T) {
 
 func TestBuildColdStartFailoverPod_PreservesDiscoveryBackend(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM, nil)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -820,7 +822,7 @@ func TestBuildColdStartFailoverPod_PreservesDiscoveryBackend(t *testing.T) {
 
 func TestBuildColdStartFailoverPod_MultinodeNNODES(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildColdStartFailoverPod(&ps, 4, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 4, BackendFrameworkVLLM, nil)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -831,13 +833,141 @@ func TestBuildColdStartFailoverPod_MultinodeNNODES(t *testing.T) {
 
 func TestBuildColdStartFailoverPod_SingleNodeNoNNODES(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM, nil)
 	require.NoError(t, err)
 
 	for i := range 2 {
 		env := envToMap(ps.Containers[i].Env)
 		_, has := env["NNODES"]
 		assert.False(t, has, "engine-%d should not have NNODES for single-node", i)
+	}
+}
+
+func TestBuildColdStartFailoverPod_GraphArchiveRequiresSingleNode(t *testing.T) {
+	ps := intraPodFailoverPodSpec()
+	err := buildColdStartFailoverPod(&ps, 2, BackendFrameworkVLLM, &v1beta1.GraphArchiveSpec{})
+	require.ErrorContains(t, err, "failover.graphArchive requires a single node setup")
+}
+
+func TestGenerateBasePodSpec_FailoverGraphArchive(t *testing.T) {
+	const inheritedArchivePath = "/user-archive"
+	sizeLimit := k8sresource.MustParse("8Gi")
+	tests := []struct {
+		name           string
+		graphArchive   *v1beta1.GraphArchiveSpec
+		checkpoint     *v1beta1.ComponentCheckpointConfig
+		authoredVolume *corev1.Volume
+		authoredMount  *corev1.VolumeMount
+		wantArchive    bool
+		wantErr        string
+	}{
+		{name: "cold start with size limit", graphArchive: &v1beta1.GraphArchiveSpec{SizeLimit: &sizeLimit}, wantArchive: true},
+		{name: "cold start without size limit", graphArchive: &v1beta1.GraphArchiveSpec{}, wantArchive: true},
+		{name: "cold start without archive"},
+		{
+			name:           "authored volume with the archive name is replaced",
+			graphArchive:   &v1beta1.GraphArchiveSpec{SizeLimit: &sizeLimit},
+			authoredVolume: &corev1.Volume{Name: gmsGraphArchiveVolumeName, EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}},
+			authoredMount:  &corev1.VolumeMount{Name: gmsGraphArchiveVolumeName, MountPath: "/authored-archive"},
+			wantArchive:    true,
+		},
+		{
+			name:           "another volume at the archive path is refused",
+			graphArchive:   &v1beta1.GraphArchiveSpec{},
+			authoredVolume: &corev1.Volume{Name: "scratch", EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			authoredMount:  &corev1.VolumeMount{Name: "scratch", MountPath: gmsGraphArchiveMountPath},
+			wantErr:        `failover.graphArchive mount path "/gms-graph-archive" is already used by volume "scratch"`,
+		},
+		{
+			name:         "snapshot path refuses the archive",
+			graphArchive: &v1beta1.GraphArchiveSpec{SizeLimit: &sizeLimit},
+			checkpoint:   &v1beta1.ComponentCheckpointConfig{Enabled: true, StartupPolicy: v1beta1.CheckpointStartupPolicyWaitForCheckpoint},
+			wantErr:      "failover.graphArchive is supported only for cold-start (snapshot-less) failover",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Declare a vLLM intra-pod failover worker with a sidecar and an authored archive path")
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Experimental: &v1beta1.ExperimentalSpec{
+					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
+					Failover:         &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeIntraPod, GraphArchive: tt.graphArchive},
+					Checkpoint:       tt.checkpoint,
+				},
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
+					{
+						Name: commonconsts.MainContainerName, Image: "runtime:1.6.0", Command: []string{"python3", "-m", "dynamo.vllm"},
+						Env:       []corev1.EnvVar{{Name: gmsGraphArchiveEnvVar, Value: inheritedArchivePath}},
+						Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("1")}},
+					},
+					{Name: "metrics-sidecar", Image: "sidecar:latest"},
+				}}},
+			}
+			if tt.authoredVolume != nil {
+				component.PodTemplate.Spec.Volumes = []corev1.Volume{*tt.authoredVolume}
+				component.PodTemplate.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{*tt.authoredMount}
+			}
+			original := component.DeepCopy()
+
+			t.Log("Render the worker pod through the production failover path")
+			podSpec, err := GenerateBasePodSpec(component, BackendFrameworkVLLM, &mockSecretsRetriever{}, "test-deployment", "default", RoleMain, 1,
+				&configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(1))
+			require.Equal(t, original, component, "rendering must not mutate the component")
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, podSpec.Containers, failoverEngineCount+1)
+			require.True(t, slices.ContainsFunc(podSpec.InitContainers, func(c corev1.Container) bool { return c.Name == gms.ServerContainerName }), "GMS server sidecar")
+
+			t.Log("Verify the pod has exactly one archive volume, the operator's emptyDir, only on the cold-start path")
+			var archiveVolumes []corev1.Volume
+			for _, volume := range podSpec.Volumes {
+				if volume.Name == gmsGraphArchiveVolumeName {
+					archiveVolumes = append(archiveVolumes, volume)
+				}
+			}
+			if tt.wantArchive {
+				require.Len(t, archiveVolumes, 1)
+				assert.Equal(t, &corev1.EmptyDirVolumeSource{SizeLimit: tt.graphArchive.SizeLimit}, archiveVolumes[0].EmptyDir)
+			} else {
+				assert.Empty(t, archiveVolumes)
+			}
+
+			t.Log("Verify both engines mount the archive once and the operator path replaces the authored one")
+			archiveMount := corev1.VolumeMount{Name: gmsGraphArchiveVolumeName, MountPath: gmsGraphArchiveMountPath}
+			wantEngineArchivePaths := []string{inheritedArchivePath}
+			var wantEngineArchiveMounts []corev1.VolumeMount
+			if tt.wantArchive {
+				wantEngineArchivePaths = []string{gmsGraphArchiveMountPath}
+				wantEngineArchiveMounts = []corev1.VolumeMount{archiveMount}
+			}
+			for i, engine := range podSpec.Containers[:failoverEngineCount] {
+				assert.Equal(t, fmt.Sprintf("engine-%d", i), engine.Name)
+				var archiveMounts []corev1.VolumeMount
+				for _, mount := range engine.VolumeMounts {
+					if mount.Name == gmsGraphArchiveVolumeName {
+						archiveMounts = append(archiveMounts, mount)
+					}
+				}
+				assert.Equal(t, wantEngineArchiveMounts, archiveMounts, "%s archive mount", engine.Name)
+				var archivePaths []string
+				for _, env := range engine.Env {
+					if env.Name == gmsGraphArchiveEnvVar {
+						archivePaths = append(archivePaths, env.Value)
+					}
+				}
+				assert.Equal(t, wantEngineArchivePaths, archivePaths, "%s archive env", engine.Name)
+			}
+
+			t.Log("Verify the GMS server and user sidecars never see the archive")
+			for _, c := range slices.Concat(podSpec.InitContainers, podSpec.Containers[failoverEngineCount:]) {
+				assert.NotContains(t, c.VolumeMounts, archiveMount, "%s archive mount", c.Name)
+				assert.NotContains(t, envToMap(c.Env), gmsGraphArchiveEnvVar, "%s archive env", c.Name)
+			}
+		})
 	}
 }
 

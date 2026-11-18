@@ -10754,6 +10754,27 @@ spec:
                     enabled:
                       description: Enabled activates failover mode.
                       type: boolean
+                    graphArchive:
+                      description: |-
+                        GraphArchive mounts a pod-local emptyDir into both engine containers
+                        and points dynamo.vllm --gms-graph-archive at it. The first read-only
+                        shadow engine saves its CUDA graphs there, and later replacement
+                        engines load them. Presence enables the archive, which never outlives
+                        the pod. Experimental: supported only for single-node intraPod
+                        cold-start (snapshot-less) failover with the vLLM backend.
+                      properties:
+                        sizeLimit:
+                          anyOf:
+                            - type: integer
+                            - type: string
+                          description: |-
+                            SizeLimit is the emptyDir size limit of the archive volume. Must be
+                            greater than zero. When omitted, the volume has no limit of its own.
+                            The archive uses the node's ephemeral storage, and the kubelet evicts
+                            a pod whose archive grows past the limit.
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                      type: object
                     mode:
                       default: intraPod
                       description: |-
@@ -20419,6 +20440,29 @@ spec:
                         Requires `gpuMemoryService` to also be set, and `failover.mode` must
                         match `gpuMemoryService.mode` (enforced by the validation webhook).
                       properties:
+                        graphArchive:
+                          description: |-
+                            graphArchive mounts a pod-local `emptyDir` into both engine containers
+                            and points `dynamo.vllm --gms-graph-archive` at it. The first read-only
+                            shadow engine saves its CUDA graphs there, and later replacement
+                            engines load them. Setting it (even as an empty object,
+                            `graphArchive: {}`) enables the archive, which never outlives the pod.
+                            Supported only for single-node intra-pod cold-start (snapshot-less)
+                            failover with the vLLM backend (enforced by the validation webhook).
+                            See ExperimentalSpec for the stability caveat.
+                          properties:
+                            sizeLimit:
+                              anyOf:
+                                - type: integer
+                                - type: string
+                              description: |-
+                                sizeLimit is the `emptyDir` size limit of the archive volume. Must be
+                                greater than zero. When omitted, the volume has no limit of its own.
+                                The archive uses the node's ephemeral storage, and the kubelet evicts
+                                a pod whose archive grows past the limit.
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                          type: object
                         mode:
                           default: IntraPod
                           description: |-
