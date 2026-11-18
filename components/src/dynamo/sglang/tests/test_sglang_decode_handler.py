@@ -29,6 +29,7 @@ from dynamo.sglang.protocol import (
 )
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
+    _engine_validation_stream,
     _extract_sglang_stop_reason,
     _kv_cache_hit_engine_data,
     _model_default_sampling_params,
@@ -606,6 +607,73 @@ async def test_error_abort_with_missing_or_invalid_status_uses_server_error(
     assert error.value.code == 500
     assert error.value.message == message
     abort_context.notify_first_token.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exception_type", "message"),
+    [
+        pytest.param(
+            ValueError,
+            "The input (1248032 tokens) is longer than the model's context length "
+            "(1048576 tokens).",
+            id="over-context-valueerror",
+        ),
+        pytest.param(
+            TypeError, "The input is not a valid sequence", id="input-typeerror"
+        ),
+    ],
+)
+async def test_engine_validation_failure_crosses_as_typed_invalid_argument(
+    exception_type, message
+):
+    """An engine iterator ValueError/TypeError crosses as InvalidArgument with its text.
+
+    SGLang reports request-level input failures as plain ValueError/TypeError
+    from the engine output iterator. Without the wrapper the Rust binding
+    classifies the failure as invalid-argument but keeps the text private, so
+    the client only sees the generic "Invalid request" 400 body.
+    """
+
+    async def failing_engine_stream():
+        raise exception_type(message)
+        yield {}
+
+    wrapped = _engine_validation_stream(failing_engine_stream())
+
+    with pytest.raises(InvalidArgument) as error:
+        async for _ in wrapped:
+            pass
+
+    assert str(error.value) == message
+
+
+@pytest.mark.asyncio
+async def test_engine_validation_stream_passes_chunks_through_unchanged():
+    async def engine_stream():
+        yield {"token_ids": [1]}
+        yield {"token_ids": [2], "finish_reason": "stop"}
+
+    assert await _collect(_engine_validation_stream(engine_stream())) == [
+        {"token_ids": [1]},
+        {"token_ids": [2], "finish_reason": "stop"},
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exception_type", [RuntimeError, KeyError, asyncio.TimeoutError]
+)
+async def test_non_validation_engine_failures_keep_their_type(exception_type):
+    """Only ValueError/TypeError are promoted; other engine failures propagate."""
+
+    async def failing_engine_stream():
+        raise exception_type("engine exploded")
+        yield {}
+
+    with pytest.raises(exception_type, match="engine exploded"):
+        async for _ in _engine_validation_stream(failing_engine_stream()):
+            pass
 
 
 @pytest.mark.asyncio
