@@ -933,7 +933,7 @@ async fn test_responses_non_streaming_observes_metrics_before_backend_error_pref
 
 /// Names of the fields recorded on `http-request` spans.
 #[derive(Clone, Default)]
-struct RequestSpanRecords(Arc<std::sync::Mutex<Vec<String>>>);
+struct RequestSpanRecords(Arc<std::sync::Mutex<Vec<&'static str>>>);
 
 impl<S> tracing_subscriber::Layer<S> for RequestSpanRecords
 where
@@ -945,17 +945,10 @@ where
         values: &tracing::span::Record<'_>,
         ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        struct Names<'a>(&'a mut Vec<String>);
-        impl tracing::field::Visit for Names<'_> {
-            fn record_debug(&mut self, field: &tracing::field::Field, _: &dyn std::fmt::Debug) {
-                self.0.push(field.name().to_string());
-            }
-        }
-        if ctx
-            .span(id)
-            .is_some_and(|span| span.name() == "http-request")
-        {
-            values.record(&mut Names(&mut self.0.lock().unwrap()));
+        if let Some(span) = ctx.span(id).filter(|span| span.name() == "http-request") {
+            let recorded = span.fields().iter().filter(|field| values.contains(field));
+            let mut names = self.0.lock().unwrap();
+            names.extend(recorded.map(|field| field.name()));
         }
     }
 }
@@ -1031,7 +1024,7 @@ async fn test_streamed_request_summary_is_recorded_on_http_request_span() {
         let recorded = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let recorded = records.0.lock().unwrap().clone();
-                if recorded.iter().any(|name| name == "output_tokens") {
+                if recorded.contains(&"output_tokens") {
                     return recorded;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1040,10 +1033,7 @@ async fn test_streamed_request_summary_is_recorded_on_http_request_span() {
         .await
         .unwrap_or_else(|_| panic!("{path}: no summary on http-request"));
         for field in ["input_tokens", "ttft_ms"] {
-            assert!(
-                recorded.iter().any(|name| name == field),
-                "{path}: {recorded:?}"
-            );
+            assert!(recorded.contains(&field), "{path}: {recorded:?}");
         }
     }
 

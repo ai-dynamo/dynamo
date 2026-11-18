@@ -20,7 +20,8 @@ use axum::http::Response;
 use axum::middleware::Next;
 use dynamo_runtime::logging::make_inference_request_span;
 use http_body::{Frame, SizeHint};
-use tracing::{Instrument, Span};
+use tracing::Instrument;
+use tracing::instrument::Instrumented;
 
 use super::service_v2::log_response;
 
@@ -46,10 +47,9 @@ pub(crate) async fn inference_request_span(request: Request, next: Next) -> Resp
     }
     .instrument(span.clone())
     .await;
-    response.map(|inner| {
+    response.map(|body| {
         Body::new(SpanBody {
-            inner,
-            span,
+            body: body.instrument(span),
             stream_start: Some(Instant::now()),
         })
     })
@@ -57,8 +57,10 @@ pub(crate) async fn inference_request_span(request: Request, next: Next) -> Resp
 
 /// A response body that keeps its request span open until the body is dropped.
 struct SpanBody {
-    inner: Body,
-    span: Span,
+    /// Polled through `inner_mut`, which does not enter the span. `Instrumented` enters it
+    /// once, to drop the body: the response stream's own cleanup (a cancelled request's) runs
+    /// in the span, and that exit is the span's last.
+    body: Instrumented<Body>,
     /// Taken by the end-of-stream event.
     stream_start: Option<Instant>,
 }
@@ -72,13 +74,13 @@ impl HttpBody for SpanBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, axum::Error>>> {
         let this = self.get_mut();
-        let frame = Pin::new(&mut this.inner).poll_frame(cx);
+        let frame = Pin::new(this.body.inner_mut()).poll_frame(cx);
         if let Poll::Ready(None) = frame
             && let Some(stream_start) = this.stream_start.take()
         {
             tracing::debug!(
                 target: "tower_http::trace::on_eos",
-                parent: &this.span,
+                parent: this.body.span(),
                 stream_duration = %format_args!("{} ms", stream_start.elapsed().as_millis()),
                 "end of stream"
             );
@@ -87,20 +89,11 @@ impl HttpBody for SpanBody {
     }
 
     fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
+        self.body.inner().is_end_stream()
     }
 
     fn size_hint(&self) -> SizeHint {
-        self.inner.size_hint()
-    }
-}
-
-impl Drop for SpanBody {
-    fn drop(&mut self) {
-        // The response stream's own cleanup (a cancelled request's) runs in the span, and this
-        // exit is the span's last.
-        let _entered = self.span.enter();
-        self.inner = Body::empty();
+        self.body.inner().size_hint()
     }
 }
 
