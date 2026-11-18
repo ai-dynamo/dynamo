@@ -1,31 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-data:
-  lpu_servers: lpx-${GROVE_PCSG_INDEX}-agt-0
-immutable: true
-metadata:
-  annotations:
-    lpx.nvidia.com/deployment-name: node-local-v2-hybrid
-  labels:
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-hybrid-9d06-decode-734ce683f6b7ea5f
-  namespace: test
----
-data:
-  nodes_per_partition: "4"
-  partition_ids: "0"
-  partition_node_offsets: "0"
-  partition_paths: part-0
-immutable: true
-metadata:
-  annotations:
-    lpx.nvidia.com/deployment-name: node-local-v2-hybrid
-  labels:
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-hybrid-9d06-lpu-8d6eca440bc0b75b
-  namespace: test
----
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: node-local-v2-hybrid
@@ -41,9 +16,8 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-hybrid
-        nvidia.com/extra-resources-hash: 8d6eca440bc0b75bbfa1bce8f7b6fc05ede250bfe9fbc1679683cc9cc0d51bae
-        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:854ab24e6fc14c78d58e9ec555076b7989fb69313e3fa5b904e4862171805846
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:2c4af29ceff09a818bd40a75337da3523c304cc3a9c0a3b04ce5b44c99ad8922
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:f83d97c51073a5a054e2192bd240af17a9c79c93defe435bfb3d47e28ae56c47
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:5f0ca6fd1bfaa490df578dcfd41bcf15d82b15c5c31bce16e0531ca57d17711d
         scheduling.lpu.nvidia.com/model: default
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2StrictHybrid
@@ -59,11 +33,8 @@ spec:
         minAvailable: 4
         podSpec:
           containers:
-          - args:
-            - serve
-            command:
-            - /opt/dynamo-lpu
-            env:
+          - env:
+            - name: LPX_LOCAL_PARTITION_IDS
             - name: LPX_MODEL_PATH
               value: /nfs/node-local-v2-connected-lpx
             - name: DYN_COMPONENT
@@ -78,14 +49,14 @@ spec:
               value: test
             - name: ETCD_ENDPOINTS
               value: etcd-address
-            - name: GAS_DIR
-              value: $(LPX_MODEL_PATH)
             - name: GLUE_RDMA_PATH_MTU
               value: "1024"
             - name: LPU_MODEL_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.annotations['scheduling.lpu.nvidia.com/model']
+            - name: MODEL_PATH
+              value: $(LPX_MODEL_PATH)
             - name: NATS_SERVER
               value: nats-address
             - name: NIC_NAME
@@ -112,7 +83,7 @@ spec:
               value: "19878"
             - name: UCX_TLS
               value: tcp
-            image: example.invalid/lpu-runtime:test
+            image: example.invalid/hydra:test
             name: main
             readinessProbe:
               failureThreshold: 6
@@ -146,8 +117,6 @@ spec:
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
-            - mountPath: /configs
-              name: config
             - mountPath: /dev/hugepages
               name: hugepages
             - mountPath: /sys
@@ -194,15 +163,11 @@ spec:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - configMap:
-              name: node-local-v2-hybrid-9d06-lpu-8d6eca440bc0b75b
-            name: config
         replicas: 4
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-hybrid
-        nvidia.com/extra-resources-hash: 734ce683f6b7ea5f7b0c0172b07d5e1ed45773120ab8c7d834967d180c62cea2
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:2c4af29ceff09a818bd40a75337da3523c304cc3a9c0a3b04ce5b44c99ad8922
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:5f0ca6fd1bfaa490df578dcfd41bcf15d82b15c5c31bce16e0531ca57d17711d
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
         lpx.nvidia.com/serving: "true"
@@ -217,27 +182,23 @@ spec:
         minAvailable: 1
         podSpec:
           containers:
-          - args:
-            - serve
-            command:
-            - /usr/local/bin/cyborg-entrypoint
-            - --expand-hosts
-            - --
-            - /opt/gpu-runtime
-            env:
+          - env:
+            - name: LPX_ALLOCATION
+              value: agt
+            - name: LPX_LOCAL_PARTITION_IDS
             - name: GBUILD_MANIFEST_PATH
-              value: /nfs/node-local-v2-connected-lpx/manifest.v2.capnp.bin
+              value: /nfs/node-local-v2-connected-lpx/deployment.v1.capnp.bin
             - name: LPX_MODEL_PATH
               value: /nfs/node-local-v2-connected-lpx
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.labels['grove.io/podclique-pod-index']
+            - name: MODEL_PATH
+              value: $(LPX_MODEL_PATH)
             - name: RDMA_PORT
               value: "19877"
-            - name: SERVER_HOSTS_FILE
-              value: /tmp/lpu_servers
-            image: example.invalid/gpu-runtime:test
+            image: example.invalid/cyborg:test
             livenessProbe:
               failureThreshold: 1
               httpGet:
@@ -264,8 +225,6 @@ spec:
               periodSeconds: 10
               timeoutSeconds: 5
             volumeMounts:
-            - mountPath: /configs
-              name: config
             - mountPath: /dev/infiniband
               name: infiniband
             - mountPath: /nfs
@@ -372,9 +331,6 @@ spec:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - configMap:
-              name: node-local-v2-hybrid-9d06-decode-734ce683f6b7ea5f
-            name: config
         replicas: 1
         roleName: cond
         startsAfter:
@@ -384,7 +340,7 @@ spec:
     podCliqueScalingGroups:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-hybrid
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:2c4af29ceff09a818bd40a75337da3523c304cc3a9c0a3b04ce5b44c99ad8922
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:5f0ca6fd1bfaa490df578dcfd41bcf15d82b15c5c31bce16e0531ca57d17711d
       cliqueNames:
       - agt
       - cond

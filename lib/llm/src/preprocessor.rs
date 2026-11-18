@@ -1774,6 +1774,19 @@ fn attach_image_cache_scope_from_context(
     }
 }
 
+/// Start the tracker's arrival age from the time a gateway reports it held the request, so a
+/// backend that orders admission by arrival counts the wait in front of this process too.
+fn apply_upstream_elapsed(context: &PipelineContext<()>, tracker: Option<&RequestTracker>) {
+    use crate::protocols::common::extensions::UPSTREAM_ELAPSED_CONTEXT_KEY;
+
+    if let Some(tracker) = tracker
+        && let Ok(upstream_elapsed) =
+            context.get::<std::time::Duration>(UPSTREAM_ELAPSED_CONTEXT_KEY)
+    {
+        tracker.set_upstream_elapsed(*upstream_elapsed);
+    }
+}
+
 fn attach_request_context_metadata(
     request: &mut PreprocessedRequest,
     context: &PipelineContext<()>,
@@ -8747,6 +8760,7 @@ impl
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
         let tracker = Some(response_generator.tracker());
+        apply_upstream_elapsed(&context, tracker.as_deref());
         let preprocess_options = PreprocessRequestOptions {
             preserve_omitted_max_tokens: context
                 .get::<bool>(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY)
@@ -8968,6 +8982,7 @@ impl
         let response_generator = request.response_generator(request_id.clone());
         let mut response_generator = Box::new(response_generator);
         let tracker = Some(response_generator.tracker());
+        apply_upstream_elapsed(&context, tracker.as_deref());
         // convert the chat completion request to a common completion request
         let mut builder = self.builder_with_lora(
             &request,
@@ -16080,6 +16095,23 @@ responses_tools: None,
             .output_options(crate::protocols::common::OutputOptions::default())
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn upstream_elapsed_in_the_context_starts_the_tracker_from_it() {
+        use crate::protocols::common::extensions::UPSTREAM_ELAPSED_CONTEXT_KEY;
+        use std::time::Duration;
+
+        let mut context = PipelineContext::new(());
+        let untouched = RequestTracker::new();
+        apply_upstream_elapsed(&context, Some(&untouched));
+        assert!(untouched.elapsed_since_arrival() < Duration::from_secs(1));
+
+        context.insert(UPSTREAM_ELAPSED_CONTEXT_KEY, Duration::from_secs(40));
+        let tracker = RequestTracker::new();
+        apply_upstream_elapsed(&context, Some(&tracker));
+        assert!(tracker.elapsed_since_arrival() >= Duration::from_secs(40));
+        apply_upstream_elapsed(&context, None);
     }
 
     #[test]
