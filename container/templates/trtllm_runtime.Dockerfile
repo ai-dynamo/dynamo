@@ -510,6 +510,18 @@ RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade certifi==2
 RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "pillow>=13.0.0,<14" && \
     /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/pillow-*.dist-info"); vs = [os.path.basename(p)[7:-10] for p in d]; print("pillow dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (13, 0, 0) <= tv(vs[0]) < (14, 0, 0) else 1)'
 
+# Raise transformers in system site past the exact pin that tensorrt-llm
+# declares (transformers==5.5.4), for the inventory reason given for aiohttp
+# above. 5.10.4 declares the same requirements as 5.5.4, so the solve moves no
+# other distribution. Fail if it does: that distribution's package paths must be
+# added to the pre_runtime whiteout first. The version bounds of the checks below
+# must hold this pin (tests/dependencies/test_system_site_pins.py).
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade \
+        --report /tmp/transformers-upgrade.json "transformers==5.10.4" && \
+    /usr/bin/python3 -c 'import json; d = json.load(open("/tmp/transformers-upgrade.json")); changed = {p["metadata"]["name"].lower().replace("_", "-") for p in d["install"]}; print("upgraded system distributions:", sorted(changed)); assert changed <= {"transformers"}, "Add whiteouts for upgraded transitive distributions"' && \
+    rm /tmp/transformers-upgrade.json && \
+    /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"transformers": ("5.10.4", "5.10.5")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items())'
+
 # Pin the upstream developer stack in system site, where the image inventory
 # reads it. The rc29 baseline on both architectures satisfies all transitive
 # requirements of these versions. Fail if the solve changes another distribution:
@@ -604,6 +616,9 @@ RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 # only replaces paths that match. Dropping the tree first means the image ships
 # exactly runtime_full's copy, even if a later stage changes the DALI version.
 #
+# transformers is here for the same reason as aiohttp below: runtime_full raises it
+# in system site, and the upgrade renames its version-stamped dist-info directory.
+#
 # aiohttp is here for the DALI reason, not the opencv one: runtime_full upgrades
 # it in system site, and the version-stamped metadata directory is renamed by the
 # upgrade (aiohttp-3.13.5.dist-info -> aiohttp-3.14.3.dist-info). The overlay COPY
@@ -678,6 +693,8 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/attrs-* \
     /usr/local/lib/python3.12/dist-packages/certifi \
     /usr/local/lib/python3.12/dist-packages/certifi-* \
+    /usr/local/lib/python3.12/dist-packages/transformers \
+    /usr/local/lib/python3.12/dist-packages/transformers-*.dist-info \
     /usr/local/lib/python3.12/dist-packages/PIL \
     /usr/local/lib/python3.12/dist-packages/pillow-* \
     /usr/local/lib/python3.12/dist-packages/pillow.libs \
@@ -700,6 +717,7 @@ COPY --from=runtime_full / /
 # Validate after the overlay so stale base metadata cannot survive the refresh.
 RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n.replace("-", "_") + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3'
 RUN /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/certifi-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("certifi dist-info after overlay:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and tv(vs[0]) >= (2026, 10, 23) else 1)'
+RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"transformers": ("5.10.4", "5.10.5")}; versions = {n: m.version(n) for n in bounds}; print("transformers after overlay:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items())'
 RUN /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/pillow-*.dist-info"); vs = [os.path.basename(p)[7:-10] for p in d]; print("pillow dist-info after overlay:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (13, 0, 0) <= tv(vs[0]) < (14, 0, 0) else 1)'
 RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"datasets": ("5.1.0", "5.1.1"), "fsspec": ("2026.7.0", "2026.7.1"), "filelock": ("4.2.1", "5"), "pyasn1": ("0.6.5", "0.7")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions after overlay:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items())'
 # A missed Mooncake whiteout keeps the old hash-named libraries beside a correct
@@ -708,6 +726,7 @@ RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.ve
 RUN /usr/bin/python3 -c 'import glob, os, importlib.metadata as m; from packaging.version import Version; site = "/usr/local/lib/python3.12/dist-packages/"; dist = m.distribution("mooncake-transfer-engine-cuda13"); d = glob.glob(site + "mooncake_transfer_engine_cuda13-*.dist-info"); recorded = {os.path.normpath(os.path.join(site, str(f))) for f in dist.files}; unrecorded = sorted(p for t in ("mooncake", "mooncake_transfer_engine_cuda13.libs") for p in glob.glob(site + t + "/**", recursive=True) if os.path.isfile(p) and "__pycache__" not in p and p not in recorded); print("mooncake after overlay:", dist.version, d, "unrecorded files:", unrecorded); assert len(d) == 1 and Version("0.3.14") <= Version(dist.version) < Version("0.4") and not unrecorded'
 
 {% if target not in ("dev", "local-dev") %}
+RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m; from packaging.version import Version; bounds = {"transformers": ("5.10.4", "5.10.5")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import transformers; print("runtime import path:", transformers.__file__); assert transformers.__file__ == "/usr/local/lib/python3.12/dist-packages/transformers/__init__.py"'
 RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m, sys; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3; print("runtime import paths:", sys.modules[ServerApp.__module__].__file__, sys.modules[LabApp.__module__].__file__, sys.modules[JupyterNotebookApp.__module__].__file__, urllib3.__file__)'
 RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m; from packaging.version import Version; bounds = {"datasets": ("5.1.0", "5.1.1"), "fsspec": ("2026.7.0", "2026.7.1"), "filelock": ("4.2.1", "5"), "pyasn1": ("0.6.5", "0.7")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import datasets, fsspec, filelock, pyasn1; print("runtime import paths:", datasets.__file__, fsspec.__file__, filelock.__file__, pyasn1.__file__)'
 RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m; from packaging.version import Version; v = m.version("mooncake-transfer-engine-cuda13"); print("runtime interpreter version:", v); assert Version("0.3.14") <= Version(v) < Version("0.4"); import mooncake; print("runtime import path:", mooncake.__file__); assert mooncake.__file__ == "/usr/local/lib/python3.12/dist-packages/mooncake/__init__.py"'
