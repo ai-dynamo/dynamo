@@ -21,6 +21,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
 	"strings"
@@ -807,6 +808,125 @@ func TestStandaloneDCDServiceMetadataConverges(t *testing.T) {
 	service = &corev1.Service{}
 	require.NoError(t, kubeClient.Get(ctx, key, service))
 	require.Equal(t, resourceVersion, service.ResourceVersion)
+}
+
+func TestStandaloneDCDServiceInventoryIsWrittenOnCreate(t *testing.T) {
+	t.Log("Arrange a standalone frontend DCD whose Service updates fail")
+	ctx := context.Background()
+	dcd := &v1beta1.DynamoComponentDeployment{
+		Name:      "frontend",
+		Namespace: "default",
+		UID:       "frontend-uid",
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoComponent: "frontend",
+			commonconsts.KubeLabelDynamoNamespace: "dynamo-graph",
+			"example.com/old-label":               "old",
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "frontend",
+				ComponentType: v1beta1.ComponentTypeFrontend,
+				PodTemplate:   &corev1.PodTemplateSpec{},
+			},
+		},
+	}
+	failServiceUpdates := true
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(dcd).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				if _, ok := obj.(*corev1.Service); ok && failServiceUpdates {
+					return errors.New("injected Service update failure")
+				}
+				return c.Update(ctx, obj, opts...)
+			},
+		}).Build()
+	r := &DynamoComponentDeploymentReconciler{
+		Client:   kubeClient,
+		Recorder: events.NewFakeRecorder(10),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+	}
+	opt := generateResourceOption{dynamoComponentDeployment: dcd}
+	key := client.ObjectKey{Namespace: dcd.Namespace, Name: "frontend"}
+
+	t.Log("Create the Service and verify the create request recorded the inventory")
+	modified, err := r.createOrUpdateOrDeleteServices(ctx, opt)
+	require.NoError(t, err)
+	require.True(t, modified)
+	service := &corev1.Service{}
+	require.NoError(t, kubeClient.Get(ctx, key, service))
+	require.Contains(t, service.Annotations[managedServiceMetadataAnnotation], "example.com/old-label")
+
+	t.Log("Remove the authored label, allow updates, and verify the retry prunes it")
+	failServiceUpdates = false
+	delete(dcd.Labels, "example.com/old-label")
+	_, err = r.createOrUpdateOrDeleteServices(ctx, opt)
+	require.NoError(t, err)
+	service = &corev1.Service{}
+	require.NoError(t, kubeClient.Get(ctx, key, service))
+	require.NotContains(t, service.Labels, "example.com/old-label")
+}
+
+func TestStandaloneDCDServiceMetadataKeepsOperatorBookkeeping(t *testing.T) {
+	t.Log("Arrange a standalone frontend DCD that authors the operator's bookkeeping annotations")
+	ctx := context.Background()
+	dcd := &v1beta1.DynamoComponentDeployment{
+		Name:      "frontend",
+		Namespace: "default",
+		UID:       "frontend-uid",
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoComponent: "frontend",
+			commonconsts.KubeLabelDynamoNamespace: "dynamo-graph",
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "frontend",
+				ComponentType: v1beta1.ComponentTypeFrontend,
+				PodTemplate:   &corev1.PodTemplateSpec{},
+			},
+		},
+	}
+	dcd.Spec.PodTemplate.Annotations = map[string]string{
+		controller_common.NvidiaAnnotationHashKey:       "authored",
+		controller_common.NvidiaAnnotationGenerationKey: "99",
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(dcd).Build()
+	r := &DynamoComponentDeploymentReconciler{
+		Client:   kubeClient,
+		Recorder: events.NewFakeRecorder(10),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+	}
+	opt := generateResourceOption{dynamoComponentDeployment: dcd}
+	key := client.ObjectKey{Namespace: dcd.Namespace, Name: "frontend"}
+
+	t.Log("Create the Service and verify the operator's values win and stay out of the inventory")
+	_, err := r.createOrUpdateOrDeleteServices(ctx, opt)
+	require.NoError(t, err)
+	service := &corev1.Service{}
+	require.NoError(t, kubeClient.Get(ctx, key, service))
+	require.NotEqual(t, "authored", service.Annotations[controller_common.NvidiaAnnotationHashKey])
+	require.Equal(t, "1", service.Annotations[controller_common.NvidiaAnnotationGenerationKey])
+	require.NotContains(t, service.Annotations[managedServiceMetadataAnnotation], controller_common.NvidiaAnnotationHashKey)
+	resourceVersion := service.ResourceVersion
+
+	t.Log("Verify a steady-state reconcile writes nothing")
+	modified, err := r.createOrUpdateOrDeleteServices(ctx, opt)
+	require.NoError(t, err)
+	require.False(t, modified)
+	service = &corev1.Service{}
+	require.NoError(t, kubeClient.Get(ctx, key, service))
+	require.Equal(t, resourceVersion, service.ResourceVersion)
+
+	t.Log("Corrupt the inventory and verify the next reconcile rewrites it without pruning")
+	service.Labels["external.example.com/keep"] = "label"
+	service.Annotations[managedServiceMetadataAnnotation] = "not-json"
+	require.NoError(t, kubeClient.Update(ctx, service))
+	modified, err = r.createOrUpdateOrDeleteServices(ctx, opt)
+	require.NoError(t, err)
+	require.True(t, modified)
+	service = &corev1.Service{}
+	require.NoError(t, kubeClient.Get(ctx, key, service))
+	require.Equal(t, "label", service.Labels["external.example.com/keep"])
+	require.True(t, json.Valid([]byte(service.Annotations[managedServiceMetadataAnnotation])))
 }
 
 func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentService(t *testing.T) {

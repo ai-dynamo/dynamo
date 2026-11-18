@@ -25,6 +25,7 @@ import (
 	"sort"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -260,9 +261,10 @@ func reconcileDGDStableServiceMetadata(
 	if existing != nil {
 		maps.Copy(labels, existing.Labels)
 		maps.Copy(annotations, existing.Annotations)
+		// An unreadable inventory prunes nothing; it is rewritten from desired below.
 		if raw := existing.Annotations[managedServiceMetadataAnnotation]; raw != "" {
 			if err := json.Unmarshal([]byte(raw), &previous); err != nil {
-				return nil, nil, fmt.Errorf("decode managed Service metadata inventory: %w", err)
+				previous = managedServiceMetadata{}
 			}
 		}
 	}
@@ -290,6 +292,24 @@ func reconcileDGDStableServiceMetadata(
 	return labels, annotations, nil
 }
 
+// syncResourceBookkeepingAnnotations are owned by SyncResource. Authored values never replace them.
+var syncResourceBookkeepingAnnotations = []string{
+	commoncontroller.NvidiaAnnotationHashKey,
+	commoncontroller.NvidiaAnnotationGenerationKey,
+}
+
+// stampManagedServiceMetadata gives a Service rendered for SyncResource its managed-key inventory,
+// so the inventory is written in the create request.
+func stampManagedServiceMetadata(service *corev1.Service) error {
+	labels, annotations, err := managedServiceMetadataFor(nil, service)
+	if err != nil {
+		return err
+	}
+	service.Labels = labels
+	service.Annotations = annotations
+	return nil
+}
+
 // syncManagedServiceMetadata converges a synced Service's labels and annotations, pruning only
 // keys it recorded. Copy desired before SyncResource, which stamps bookkeeping annotations into it.
 func syncManagedServiceMetadata(
@@ -298,7 +318,7 @@ func syncManagedServiceMetadata(
 	synced *corev1.Service,
 	desired *corev1.Service,
 ) (bool, error) {
-	labels, annotations, err := reconcileDGDStableServiceMetadata(synced, desired)
+	labels, annotations, err := managedServiceMetadataFor(synced, desired)
 	if err != nil {
 		return false, err
 	}
@@ -312,6 +332,33 @@ func syncManagedServiceMetadata(
 		return false, err
 	}
 	return true, nil
+}
+
+// managedServiceMetadataFor is reconcileDGDStableServiceMetadata for Services synced by
+// SyncResource, which owns the bookkeeping annotations: desired copies of them are ignored and
+// existing values are kept. existing is nil for a Service that does not exist yet.
+func managedServiceMetadataFor(existing, desired *corev1.Service) (map[string]string, map[string]string, error) {
+	// Keep authored bookkeeping keys out of the desired metadata and the inventory.
+	desired = desired.DeepCopy()
+	for _, key := range syncResourceBookkeepingAnnotations {
+		delete(desired.Annotations, key)
+	}
+	labels, annotations, err := reconcileDGDStableServiceMetadata(existing, desired)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Restore the stamped values, which an older inventory may have pruned.
+	for _, key := range syncResourceBookkeepingAnnotations {
+		delete(annotations, key)
+		if existing == nil {
+			continue
+		}
+		if value, ok := existing.Annotations[key]; ok {
+			annotations[key] = value
+		}
+	}
+	return labels, annotations, nil
 }
 
 func sortedMetadataKeys(metadata map[string]string) []string {

@@ -860,6 +860,11 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 
 	// Snapshot the rendered metadata before SyncResource stamps its bookkeeping annotations into it.
 	desiredService := service.DeepCopy()
+	if !toDelete {
+		if err := stampManagedServiceMetadata(service); err != nil {
+			return false, err
+		}
+	}
 	modified, syncedService, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(context.Context) (*corev1.Service, bool, error) {
 		return service, toDelete, nil
 	})
