@@ -5,7 +5,6 @@
 
 import logging
 
-import torch
 from vllm.exceptions import (
     VLLMClientError,
     VLLMNotFoundError,
@@ -22,10 +21,6 @@ logger = logging.getLogger(__name__)
 _HF_PROCESSOR_WRAPPER_PREFIX = "Failed to apply "
 
 PROCESSOR_REJECTED_INPUT_MESSAGE = "The model's processor rejected the multimodal input"
-
-# Transformers' BatchFeature.convert_to_tensors re-raises any tensor-creation
-# failure, including these, as ValueError.
-_RESOURCE_ERRORS = (MemoryError, torch.OutOfMemoryError)
 
 
 def vllm_client_error_to_http_error(exc: VLLMClientError) -> HttpError:
@@ -57,15 +52,27 @@ def vllm_client_error_to_public_error(
     return http_error
 
 
-def _caused_by_resource_error(exc: BaseException) -> bool:
+def _only_value_errors(exc: BaseException) -> bool:
+    """Whether ``exc`` and every exception chained under it are ``ValueError``.
+
+    Transformers' ``BatchFeature.convert_to_tensors`` re-raises any
+    tensor-creation failure as ``ValueError``, including a CPU allocation
+    failure (a ``RuntimeError`` from PyTorch) or ``MemoryError``, so a
+    ``ValueError`` alone does not show that the input was at fault.
+    """
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
-        if isinstance(current, _RESOURCE_ERRORS):
-            return True
+        if not isinstance(current, ValueError):
+            return False
         seen.add(id(current))
-        current = current.__cause__ or current.__context__
-    return False
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif current.__suppress_context__:
+            current = None
+        else:
+            current = current.__context__
+    return True
 
 
 def processor_input_error(
@@ -78,7 +85,8 @@ def processor_input_error(
     error. Only a ``ValueError`` from the processor itself (an image with an
     aspect ratio or size the processor refuses) is treated as client input;
     a processor bug (``TypeError``, ``IndexError``, ...) or a ``ValueError``
-    caused by running out of memory stays a server error.
+    wrapping another failure, such as running out of memory, stays a server
+    error.
     The wrapper text embeds the prompt and media, so the public message is
     fixed and the processor's reason is only logged.
     """
@@ -88,7 +96,7 @@ def processor_input_error(
     ):
         return None
     reason = wrapper.__cause__
-    if not isinstance(reason, ValueError) or _caused_by_resource_error(reason):
+    if reason is None or not _only_value_errors(reason):
         return None
     logger.warning(
         "Request %s: model processor rejected request input: %s", request_id, reason

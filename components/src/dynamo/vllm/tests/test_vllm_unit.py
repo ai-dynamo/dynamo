@@ -1732,12 +1732,14 @@ def test_vllm_validation_error_public_message_is_truncated():
         (TypeError("'NoneType' object is not subscriptable"), False),
         (None, False),
         ("memory_error", False),
+        ("cpu_allocation_error", False),
     ],
     ids=[
         "processor_rejects_input",
         "processor_bug",
         "engine_fault",
         "processor_out_of_memory",
+        "processor_cpu_allocation_failure",
     ],
 )
 @pytest.mark.asyncio
@@ -1752,11 +1754,20 @@ async def test_translate_vllm_client_errors_processor_rejection(
 
     # vLLM's chain: EngineGenerateError wraps ValueError("Failed to apply ..."),
     # which wraps the processor error and embeds the request data in its text.
-    if processor_error == "memory_error":
+    if processor_error in ("memory_error", "cpu_allocation_error"):
         # Transformers' BatchFeature.convert_to_tensors re-raises any
         # tensor-creation failure as ValueError.
+        if processor_error == "memory_error":
+            allocation_error: BaseException = MemoryError()
+        else:
+            import torch
+
+            # PyTorch's CPU allocator raises a plain RuntimeError.
+            with pytest.raises(RuntimeError, match="can't allocate memory") as alloc:
+                torch.empty(2**62, dtype=torch.uint8)
+            allocation_error = alloc.value
         processor_error = ValueError("Unable to convert output 'pixel_values'")
-        processor_error.__cause__ = MemoryError()
+        processor_error.__cause__ = allocation_error
     if processor_error is None:
         cause: Exception = RuntimeError("engine step failed")
     else:
