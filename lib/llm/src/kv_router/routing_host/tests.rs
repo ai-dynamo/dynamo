@@ -3240,9 +3240,9 @@ async fn tracked_admission_without_lifecycle_bypasses_classifier() {
 
     // `find_best_match_details_with_policy_class` with `update_states` is a tracked admission
     // that never calls `begin_request_lifecycle` — the same funnel as the
-    // Python bindings `best_worker` and the standalone `RouterRequest::New`
-    // path. The plugin would receive no lifecycle events for it, so admission
-    // must use the default queue inputs instead of the classifier.
+    // Python bindings `best_worker`. The plugin would receive no lifecycle
+    // events for it, so admission must use the default queue inputs instead of
+    // the classifier.
     let outcome = router
         .kv_router()
         .find_best_match_details_with_policy_class(
@@ -4418,7 +4418,8 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
     let dispatch = Arc::new(RejectFirstDispatch::default());
     let harness =
         two_worker_migration_harness("worker-overload-migration", dispatch.clone(), None).await;
-    let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
+    let metrics = Arc::new(Metrics::new());
+    let migration = Migration::new(1, None, "test".to_string(), metrics.clone());
 
     let responses: Vec<_> = migration
         .generate(Context::new(request()), harness.engine.clone())
@@ -4430,6 +4431,8 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
     assert_eq!(responses.len(), 1);
     assert!(responses[0].error.is_none());
     assert_eq!(responses[0].data.as_ref().unwrap().token_ids, vec![2]);
+    assert_eq!(metrics.get_migration_ongoing_request_count("test"), 1);
+    assert_eq!(metrics.get_migration_new_request_count("test"), 0);
     let attempts = {
         let attempts = dispatch.attempts.lock().unwrap();
         attempts.clone()
