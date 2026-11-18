@@ -15,6 +15,8 @@ pub(crate) const HEADER_CODEX_THREAD_ID: &str = "thread-id";
 pub(crate) const HEADER_CODEX_PARENT_THREAD_ID: &str = "x-codex-parent-thread-id";
 pub(crate) const HEADER_OPENCODE_SESSION_ID: &str = "x-session-id";
 pub(crate) const HEADER_OPENCODE_PARENT_SESSION_ID: &str = "x-parent-session-id";
+/// Generic session routing header, read at the lowest precedence. It has no parent header.
+pub(crate) const HEADER_SESSION_AFFINITY: &str = "x-session-affinity";
 pub const HEADER_DYNAMO_SESSION_ID: &str = "x-dynamo-session-id";
 pub(crate) const HEADER_DYNAMO_PARENT_SESSION_ID: &str = "x-dynamo-parent-session-id";
 pub(crate) const HEADER_DYNAMO_SESSION_FINAL: &str = "x-dynamo-session-final";
@@ -44,6 +46,12 @@ const AGENT_HEADER_MAPPINGS: &[AgentHeaderMapping] = &[
         root_session_header: HEADER_OPENCODE_SESSION_ID,
         child_session_header: None,
         parent_session_header: Some(HEADER_OPENCODE_PARENT_SESSION_ID),
+        infer_parent_from_session_for_child: false,
+    },
+    AgentHeaderMapping {
+        root_session_header: HEADER_SESSION_AFFINITY,
+        child_session_header: None,
+        parent_session_header: None,
         infer_parent_from_session_for_child: false,
     },
 ];
