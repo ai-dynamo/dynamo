@@ -7,11 +7,11 @@ import pytest
 from prometheus_client import CollectorRegistry
 
 from dynamo.sglang.request_handlers.embedding import embedding_handler as eh
+from dynamo.sglang.request_handlers.embedding import metrics as embedding_metrics
 from dynamo.sglang.request_handlers.embedding.metrics import (
     init_embedding_metrics,
     observe_embedding_batch_size,
     observe_embedding_input_tokens,
-    reset_metrics_for_testing,
 )
 
 pytestmark = [
@@ -25,19 +25,17 @@ pytestmark = [
 
 
 @pytest.fixture
-def fresh_registry() -> CollectorRegistry:
-    """Reset the metrics-module singletons and hand back a fresh registry.
+def uninitialized_metrics(monkeypatch):
+    monkeypatch.setattr(embedding_metrics, "_EMBEDDING_BATCH_SIZE", None)
+    monkeypatch.setattr(embedding_metrics, "_EMBEDDING_INPUT_TOKENS", None)
 
-    Pairing the reset with the registry creation ensures that
-    ``init_embedding_metrics`` actually creates new Histograms bound to
-    THIS test's registry rather than reusing whichever one a previous
-    test bound to.
-    """
-    reset_metrics_for_testing()
+
+@pytest.fixture
+def fresh_registry(uninitialized_metrics) -> CollectorRegistry:
+    """``init_embedding_metrics`` keeps existing histograms, so unset them first."""
     registry = CollectorRegistry()
     init_embedding_metrics(registry)
-    yield registry
-    reset_metrics_for_testing()
+    return registry
 
 
 def _collect_histogram(registry: CollectorRegistry, metric_name: str) -> dict:
@@ -135,13 +133,12 @@ def test_buckets_are_in_expected_order(fresh_registry):
     assert counts == sorted(counts), f"Bucket counts not monotonic: {counts}"
 
 
-def test_observers_noop_before_init_embedding_metrics():
+def test_observers_noop_before_init_embedding_metrics(uninitialized_metrics):
     """Until ``init_embedding_metrics`` is called, ``observe_*`` is a no-op.
 
     Important: in test/CI configurations that don't wire the embedding
     metrics endpoint, handler call sites must NOT crash.
     """
-    reset_metrics_for_testing()
     # Both helpers should silently do nothing — no exception.
     observe_embedding_batch_size("m", 3)
     observe_embedding_input_tokens("m", 100)
