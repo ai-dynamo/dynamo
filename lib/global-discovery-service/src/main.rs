@@ -236,24 +236,11 @@ struct Args {
         required_if_eq_any = MCS_VALUES
     )]
     router_port_name: Option<String>,
-    /// This service's own Service, exported through MCS. With it, the
-    /// instances in every cluster share their registrations, over plain HTTP
-    /// on a trusted network, so not with `--tls-cert-path` yet. Every cluster
-    /// that runs an instance must import it, so that the import lists its own
-    /// instances too: with Karmada, place the ServiceImport on each of those
-    /// clusters, not only on the others. The lease must be at least three
-    /// heartbeat intervals, and every instance must use the same heartbeat
-    /// interval and lease. While registrations made with another instance may
-    /// be missing here, `GET /pools` says the list is not complete, so Global
-    /// Routers keep pools that may have left: until this instance has asked
-    /// the others and found itself in the list, for a lease after an instance
-    /// leaves, once one has not answered completely for the lease minus two
-    /// heartbeat intervals, while one holding registrations that has not
-    /// answered asks this one or one that it reads, and for about a lease and
-    /// a heartbeat interval after, as when this cluster's import lags behind,
-    /// and after a registration lapses here, until every instance has
-    /// answered again, a round later, since its PoolRelay may have renewed it
-    /// late with any of them.
+    /// This service's own Service, exported through MCS, through which the
+    /// instances in every cluster share registrations over plain HTTP, so not
+    /// with `--tls-cert-path` yet. Every cluster that runs an instance must
+    /// import it, its own included. All instances must use the same heartbeat
+    /// interval and lease, and the lease must be at least three intervals.
     #[arg(
         long,
         value_parser = NonEmptyStringValueParser::new(),

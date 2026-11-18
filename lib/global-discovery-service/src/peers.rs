@@ -439,7 +439,7 @@ impl Instances {
             tracing::warn!(
                 peer = %peer.replica.0,
                 url = %peer.url,
-                error = format!("{error:#}"),
+                error = %format_args!("{error:#}"),
                 "cannot read another discovery instance's registrations"
             );
             return;
@@ -448,7 +448,7 @@ impl Instances {
             tracing::error!(
                 peer = %peer.replica.0,
                 url = %peer.url,
-                error = format!("{error:#}"),
+                error = %format_args!("{error:#}"),
                 "another discovery instance has not answered for a lease; pool lists stay \
                  incomplete until it does, so Global Routers keep pools that may have left"
             );
