@@ -4707,9 +4707,8 @@ func TestPrepareDGDComponentMainContainers_MatchesRendering(t *testing.T) {
 		nodeCount       int32
 		args            []string
 		interPodGMS     bool
-		// mixedBackends omits spec.backendFramework and adds a vLLM worker next to the tested one.
-		mixedBackends bool
-		wantShell     map[Role]bool
+		mixedBackends   bool
+		wantShell       map[Role]bool
 	}{
 		{
 			name:           "Grove multinode TP over DRA GPUs uses the Ray shell launch",
