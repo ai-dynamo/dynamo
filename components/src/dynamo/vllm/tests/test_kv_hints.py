@@ -13,7 +13,7 @@ from dynamo.common.constants import (
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
 )
 from dynamo.llm import WorkerType
-from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
+from dynamo.vllm.kv_hints import kvcr_host_capacity_blocks, publish_kv_hint_capabilities
 
 pytestmark = [
     pytest.mark.unit,
@@ -319,3 +319,74 @@ def test_publish_kv_hint_capabilities_fails_with_invalid_transfer_hint_config(
         )
 
     runtime_config.set_engine_specific.assert_not_called()
+
+
+def test_publish_kv_hint_capabilities_reads_tier_inside_multi_connector():
+    runtime_config = MagicMock()
+    engine_args = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="MultiConnector",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "NixlConnector", "kv_role": "kv_both"},
+                    {
+                        "kv_connector": "OffloadingConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {
+                            "spec_name": "TieringOffloadingSpec",
+                            "secondary_tiers": [
+                                {
+                                    "type": "kvcr",
+                                    "router_capabilities": [
+                                        KV_HINT_TRANSFER_CAPABILITY_KEY
+                                    ],
+                                    "control_advertise_host": "127.0.0.1",
+                                    "control_ports": [17771],
+                                }
+                            ],
+                        },
+                    },
+                ]
+            },
+        )
+    )
+
+    publish_kv_hint_capabilities(runtime_config, engine_args, WorkerType.Prefill)
+
+    runtime_config.set_engine_specific.assert_any_call(
+        KV_HINT_TRANSFER_CAPABILITY_KEY, json.dumps(True)
+    )
+    runtime_config.set_engine_specific.assert_any_call(
+        KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+        json.dumps({"0": "tcp://127.0.0.1:17771"}),
+    )
+
+
+# KVCR host capacity is secondary_g2_slots offload chunks, counted in router blocks,
+# except for a kvcr-service pool.
+_KVCR_TIER = {"type": "kvcr", "secondary_g2_slots": 1024}
+
+
+@pytest.mark.parametrize(
+    ("extra_config", "expected"),
+    [
+        ({"secondary_tiers": [_KVCR_TIER]}, 1024),
+        ({"blocks_per_chunk": 4, "secondary_tiers": [_KVCR_TIER]}, 4096),
+        ({"block_size": 64, "secondary_tiers": [_KVCR_TIER]}, 4096),
+        (
+            {
+                "secondary_tiers": [
+                    {**_KVCR_TIER, "kvcr_service_socket_path": "/run/kvcr.sock"}
+                ]
+            },
+            None,
+        ),
+        ({"secondary_tiers": [{**_KVCR_TIER, "type": "custom"}]}, None),
+    ],
+)
+def test_kvcr_host_capacity_blocks(extra_config, expected):
+    engine_args = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(kv_connector_extra_config=extra_config)
+    )
+
+    assert kvcr_host_capacity_blocks(engine_args, 16, 16) == expected

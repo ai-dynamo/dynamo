@@ -4,7 +4,7 @@
 id: qwen3-5-122b
 title: Qwen3.5-122B-A10B
 page: pages/recipes/model-recipes/qwen3-5-122b.mdx
-provider: alibaba
+provider: qwen
 model:
   name: Qwen3.5-122B-A10B
   hf_id: nvidia/Qwen3.5-122B-A10B-NVFP4 (B200) / Qwen/Qwen3.5-122B-A10B-FP8 (H200)

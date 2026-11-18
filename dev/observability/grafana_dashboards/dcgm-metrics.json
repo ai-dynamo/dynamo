@@ -725,7 +725,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "rate(DCGM_FI_PROF_PCIE_RX_BYTES[10s])",
+          "expr": "DCGM_FI_PROF_PCIE_RX_BYTES",
           "legendFormat": "GPU {{gpu}} PCIe RX",
           "range": true,
           "refId": "A"
@@ -736,7 +736,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "rate(DCGM_FI_PROF_PCIE_TX_BYTES[10s])",
+          "expr": "DCGM_FI_PROF_PCIE_TX_BYTES",
           "legendFormat": "GPU {{gpu}} PCIe TX",
           "range": true,
           "refId": "B"

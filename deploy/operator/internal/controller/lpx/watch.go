@@ -18,7 +18,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -55,13 +54,16 @@ func (r *graphReconciler) setupWithManager(mgr ctrl.Manager) error {
 		return ctrlBuilder.Complete(r)
 	}
 
+	// Do not add ResourceClaim, ResourceClaimTemplate or DeviceClass watches for Cyborg GPU
+	// validation: the resolved count does not affect the rendered workload. Lookup failures
+	// use ordinary error retries, and DGD edits already trigger reconciliation.
+
 	// Active integration observes its workload and scheduling dependencies.
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &lpxv1alpha1.LPUPipelineRequest{}, pipelineRequestPCSOwnerUIDIndex, pipelineRequestOwnerUID); err != nil {
 		return fmt.Errorf("register LPR owner UID index: %w", err)
 	}
 
-	return ctrlBuilder.Owns(&corev1.ConfigMap{}).
-		Owns(&corev1.Service{}).
+	return ctrlBuilder.Owns(&corev1.Service{}).
 		Owns(&grovev1alpha1.PodCliqueSet{}).
 		Watches(&grovev1alpha1.PodClique{}, handler.EnqueueRequestsFromMapFunc(mapChildToLPXGraphDeployment), builder.WithPredicates(podCliquePredicate())).
 		Watches(&grovev1alpha1.PodCliqueScalingGroup{}, handler.EnqueueRequestsFromMapFunc(mapChildToLPXGraphDeployment), builder.WithPredicates(podCliqueScalingGroupPredicate())).
@@ -71,6 +73,7 @@ func (r *graphReconciler) setupWithManager(mgr ctrl.Manager) error {
 
 func pipelineRequestOwnerUID(obj client.Object) []string {
 	owner := metav1.GetControllerOf(obj)
+	// Dynamo authors these references with its alpha PCS client.
 	if owner == nil || owner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() || owner.Kind != podCliqueSetKind {
 		return nil
 	}
@@ -105,7 +108,7 @@ func mapChildToLPXGraphDeployment(_ context.Context, obj client.Object) []ctrl.R
 	if deploymentName == "" {
 		return nil
 	}
-	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: deploymentName}}}
+	return []ctrl.Request{{Namespace: obj.GetNamespace(), Name: deploymentName}}
 }
 
 // lpxGraphDeploymentPredicate observes every field that grants publication authority.
@@ -172,6 +175,8 @@ func podCliquePredicate() predicate.Funcs {
 				return false
 			}
 			return commoncontroller.PodCliqueStatusChangeIsSignificant(oldClique, newClique) ||
+				(oldClique.Status.UpdateProgress == nil || oldClique.Status.UpdateProgress.UpdateEndedAt != nil) !=
+					(newClique.Status.UpdateProgress == nil || newClique.Status.UpdateProgress.UpdateEndedAt != nil) ||
 				oldClique.Generation != newClique.Generation ||
 				!maps.Equal(oldClique.Annotations, newClique.Annotations) ||
 				!maps.Equal(oldClique.Labels, newClique.Labels) ||

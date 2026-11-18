@@ -38,6 +38,8 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.sglang._compat import supports_disagg_prefill_cancel_anytime
 from dynamo.sglang.args import Config
 from dynamo.sglang.capacity import kv_event_block_size
+from dynamo.sglang.drain import DrainConflict, WorkerDrain
+from dynamo.sglang.engine_generate import native_generate_payload
 from dynamo.sglang.engine_routes import resolve_configured_engine_routes
 from dynamo.sglang.gateway import follow_pause_broadcasts
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -617,6 +619,7 @@ class BaseWorkerHandler(
             self.input_param_manager = InputParamManager(None)
             self._engine_supports_priority = False
         self._engine_route_lock = asyncio.Lock()
+        self._worker_drain: WorkerDrain | None = None
 
         # Serializes elastic-EP scaling: SGLang tracks a single in-flight scale
         # phase, so concurrent scale_elastic_ep calls must not overlap.
@@ -882,10 +885,13 @@ class BaseWorkerHandler(
         ):
             return
 
-        if tokenizer_manager.is_pause:
+        drain = getattr(self, "_worker_drain", None)
+        if tokenizer_manager.is_pause or (drain is not None and drain.withdrawn):
             await self.generate_endpoint.unregister_endpoint_instance()
         else:
             await self.generate_endpoint.register_endpoint_instance()
+            if drain is not None and drain.withdrawn:
+                await self.generate_endpoint.unregister_endpoint_instance()
 
     def follow_shared_pause_state(self) -> None:
         async def resync() -> None:
@@ -894,9 +900,15 @@ class BaseWorkerHandler(
 
         follow_pause_broadcasts(getattr(self.engine, "tokenizer_manager", None), resync)
 
-    async def _invoke_engine_route(self, route_handler, body: dict) -> dict:
+    async def _invoke_engine_route(
+        self, route_handler, body: dict, *, generation_control: bool = False
+    ) -> dict:
         """Invoke one engine route and then synchronize worker discovery."""
         async with self._engine_route_lock:
+            if generation_control:
+                drain = self._worker_drain
+                assert drain is not None
+                drain.check_generation_control()
             try:
                 return await route_handler(body)
             finally:
@@ -909,6 +921,22 @@ class BaseWorkerHandler(
             return await self._invoke_engine_route(route_handler, body)
 
         return synchronized_handler
+
+    def _wrap_generation_control_http(self, route_handler):
+        async def control(request):
+            if request["path"]:
+                return {"status": 404, "body": {"error": "Unknown engine route"}}
+            try:
+                result = await self._invoke_engine_route(
+                    route_handler,
+                    {} if request["body"] is None else request["body"],
+                    generation_control=True,
+                )
+            except DrainConflict as error:
+                return {"status": 409, "body": {"error": str(error)}}
+            return {"status": 200, "body": result}
+
+        return control
 
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
@@ -962,7 +990,18 @@ class BaseWorkerHandler(
         for path, handler in built_in_routes.items():
             runtime.register_engine_route(path, handler)
         for path, route_handler in [*default_native_routes, *configured_routes]:
-            runtime.register_engine_route(path, self._wrap_engine_route(route_handler))
+            if getattr(self, "_drain_controls_enabled", False) and (
+                path in ("pause_generation", "continue_generation")
+                or route_handler.descriptor.method
+                in ("pause_generation", "continue_generation")
+            ):
+                runtime.register_engine_http_handler(
+                    path, self._wrap_generation_control_http(route_handler)
+                )
+            else:
+                runtime.register_engine_route(
+                    path, self._wrap_engine_route(route_handler)
+                )
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
@@ -987,7 +1026,7 @@ class BaseWorkerHandler(
         request_input = self.input_param_manager.get_input_param(
             request, use_tokenizer=self.use_sglang_tokenizer
         )
-        self._validate_nvext_token_data(request, request_input)
+        self._validate_request_token_ids(request, request_input)
 
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
@@ -1056,39 +1095,65 @@ class BaseWorkerHandler(
         self,
         token_ids: Any,
         allowed_oov_ids: frozenset[int] = frozenset(),
+        *,
+        label: str = "token_ids",
     ) -> None:
+        """Reject IDs outside the model vocabulary in one ID list or a batch of them.
+
+        ``label`` names the request field in error messages.
+        """
         if not isinstance(token_ids, list):
-            raise HttpError(400, "nvext.token_data must resolve to a token ID list")
+            raise HttpError(400, f"{label} must resolve to a token ID list")
 
+        batched = bool(token_ids) and isinstance(token_ids[0], list)
+        prompts = token_ids if batched else [token_ids]
         max_input_token_id = self._max_input_token_id
-        for index, token_id in enumerate(token_ids):
-            if isinstance(token_id, bool) or not isinstance(token_id, int):
-                raise HttpError(
-                    400,
-                    f"nvext.token_data[{index}] must be an integer token ID",
-                )
-            # Dynamo's Rust frontend uses u32 token IDs, so negatives are not expected.
-            if (
-                max_input_token_id is not None and token_id > max_input_token_id
-            ) and token_id not in allowed_oov_ids:
-                raise HttpError(400, f"Token id {token_id} is out of vocabulary")
+        for prompt_index, prompt_ids in enumerate(prompts):
+            prompt_label = f"{label}[{prompt_index}]" if batched else label
+            if not isinstance(prompt_ids, list):
+                raise HttpError(400, f"{prompt_label} must be a token ID list")
+            for index, token_id in enumerate(prompt_ids):
+                if isinstance(token_id, bool) or not isinstance(token_id, int):
+                    raise HttpError(
+                        400,
+                        f"{prompt_label}[{index}] must be an integer token ID",
+                    )
+                # Packed int32 token_ids decode ids above i32::MAX as negative numbers.
+                if token_id < 0:
+                    raise HttpError(
+                        400, f"{prompt_label}[{index}] must not be negative"
+                    )
+                if (
+                    max_input_token_id is not None and token_id > max_input_token_id
+                ) and token_id not in allowed_oov_ids:
+                    raise HttpError(
+                        400,
+                        f"Token id {token_id} is out of vocabulary at "
+                        f"{prompt_label}[{index}]",
+                    )
 
-    def _validate_nvext_token_data(
+    def _validate_request_token_ids(
         self,
         request: Dict[str, Any],
-        token_ids: Any,
+        request_input: Any,
     ) -> None:
-        """Reject out-of-vocabulary IDs supplied through ``nvext.token_data``."""
+        """Reject token IDs outside the model vocabulary on every token input path."""
         extra_args = request.get("extra_args")
-        if not isinstance(extra_args, dict):
+        nvext = extra_args.get("nvext") if isinstance(extra_args, dict) else None
+        if isinstance(nvext, dict) and nvext.get("token_in") is True:
+            label = "nvext.token_data"
+        elif not isinstance(request_input, list):
+            # Not token input, for example text for the SGLang tokenizer.
             return
-        nvext = extra_args.get("nvext")
-        if not isinstance(nvext, dict) or nvext.get("token_in") is not True:
-            return
+        elif native_generate_payload(request) is not None:
+            label = "input_ids"
+        else:
+            label = "token_ids"
 
         self._validate_token_ids(
-            token_ids,
+            request_input,
             self._resolve_request_multimodal_token_ids(request),
+            label=label,
         )
 
     @staticmethod

@@ -3,18 +3,22 @@
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use validator::Validate;
+
+use super::MediaDelivery;
+use crate::engines::ValidateRequest;
 
 mod aggregator;
 mod nvext;
 
-pub use nvext::{NvExt, NvExtProvider};
+pub use nvext::NvExt;
 
 /// Request for audio speech generation (/v1/audio/speech endpoint).
 ///
 /// Follows vLLM-Omni's OpenAICreateSpeechRequest format with TTS-specific
 /// parameters as top-level fields.
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateAudioSpeechRequest {
     /// The text to synthesize into speech (required)
     pub input: String,
@@ -27,20 +31,25 @@ pub struct NvCreateAudioSpeechRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub voice: Option<String>,
 
-    /// How the generated data should be returned: "url" or "b64_json" (default: "b64_json")
-    /// Note that in image and video generation, the 'response_format' is the equivalent of
-    /// this field. However, in audio generation, OpenAI specifies the 'response_format'
-    /// to be used for output format.
+    /// Delivery mode of the generated audio. Absent means [`MediaDelivery::B64Json`].
+    /// Image and video generation use `response_format` for this choice. The
+    /// OpenAI audio API uses `response_format` for the codec. Audio uses a
+    /// separate field for the delivery mode.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub data_source: Option<String>,
+    pub data_source: Option<MediaDelivery>,
 
     /// Output codec: "wav", "mp3", "pcm", "flac", "aac", "opus" (default: "wav")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<String>,
 
-    /// Speed factor (0.25-4.0, default: 1.0)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub speed: Option<f64>,
+    /// Speed factor, 0.25 to 4.0. An omitted `speed` and an explicit `null`
+    /// both mean 1.0, as they did when this field was an `Option`. The
+    /// frontend rejects a value outside the range and always forwards a
+    /// number, so the worker-side contract is a non-null `speed`.
+    #[serde(default = "default_speed", deserialize_with = "speed_or_default")]
+    #[schema(default = default_speed, minimum = 0.25, maximum = 4.0)]
+    #[validate(range(min = 0.25, max = 4.0, message = "speed must be between 0.25 and 4.0"))]
+    pub speed: f64,
 
     // Qwen3-TTS specific parameters (top-level, matching vLLM-Omni)
     /// TTS task type: "CustomVoice", "VoiceDesign", or "Base"
@@ -88,6 +97,7 @@ pub struct NvCreateAudioSpeechRequest {
     /// extra_body option, which merges into the top level of the body.
     /// Stable knobs can be promoted to typed fields over time.
     #[serde(default, flatten)]
+    #[schema(ignore)]
     pub passthrough: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -100,7 +110,7 @@ impl NvCreateAudioSpeechRequest {
 }
 
 /// Audio data in response
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct AudioData {
     /// Actual codec used for this audio: "wav", "mp3", "pcm", "flac", "aac", "opus"
     pub output_format: String,
@@ -115,13 +125,14 @@ pub struct AudioData {
 }
 
 /// Response structure for audio speech generation
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct NvAudioSpeechResponse {
     /// Unique identifier for the response
     pub id: String,
 
     /// Object type (always "audio.speech")
     #[serde(default = "default_object_type")]
+    #[schema(default = default_object_type)]
     pub object: String,
 
     /// Model used for generation
@@ -129,10 +140,12 @@ pub struct NvAudioSpeechResponse {
 
     /// Status of the generation ("completed", "failed", etc.)
     #[serde(default = "default_status")]
+    #[schema(default = default_status)]
     pub status: String,
 
     /// Progress percentage (0-100)
     #[serde(default = "default_progress")]
+    #[schema(default = default_progress)]
     pub progress: i32,
 
     /// Unix timestamp of creation
@@ -140,6 +153,7 @@ pub struct NvAudioSpeechResponse {
 
     /// Generated audio data
     #[serde(default)]
+    #[schema(default = json!([]))]
     pub data: Vec<AudioData>,
 
     /// Error message if generation failed
@@ -149,6 +163,19 @@ pub struct NvAudioSpeechResponse {
     /// Inference time in seconds
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inference_time_s: Option<f64>,
+}
+
+fn default_speed() -> f64 {
+    1.0
+}
+
+/// `null` reads as the default speed. Serde's `default` covers only an
+/// absent key; this covers a present key with a `null` value.
+fn speed_or_default<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<f64>::deserialize(deserializer)?.unwrap_or_else(default_speed))
 }
 
 fn default_object_type() -> String {
@@ -179,10 +206,11 @@ impl NvAudioSpeechResponse {
     }
 }
 
-/// Implements `NvExtProvider` for `NvCreateAudioSpeechRequest`.
-impl NvExtProvider for NvCreateAudioSpeechRequest {
-    fn nvext(&self) -> Option<&NvExt> {
-        self.nvext.as_ref()
+impl ValidateRequest for NvCreateAudioSpeechRequest {
+    fn validate(&self) -> Result<(), anyhow::Error> {
+        // `Validate` and `ValidateRequest` share the method name, so the
+        // call names the trait.
+        Validate::validate(self).map_err(anyhow::Error::from)
     }
 }
 
@@ -220,7 +248,7 @@ mod tests {
     fn audio_request_data_source_url_round_trips() {
         let json = r#"{"input":"hello","data_source":"url"}"#;
         let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.data_source.as_deref(), Some("url"));
+        assert_eq!(req.data_source, Some(MediaDelivery::Url));
 
         let out = serde_json::to_string(&req).unwrap();
         assert!(out.contains("\"data_source\":\"url\""));
@@ -230,15 +258,95 @@ mod tests {
     fn audio_request_data_source_b64_json_round_trips() {
         let json = r#"{"input":"hi","data_source":"b64_json"}"#;
         let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.data_source.as_deref(), Some("b64_json"));
+        assert_eq!(req.data_source, Some(MediaDelivery::B64Json));
     }
 
     #[test]
     fn audio_request_data_source_and_response_format_coexist() {
         let json = r#"{"input":"hi","data_source":"url","response_format":"mp3"}"#;
         let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.data_source.as_deref(), Some("url"));
+        assert_eq!(req.data_source, Some(MediaDelivery::Url));
         assert_eq!(req.response_format.as_deref(), Some("mp3"));
+    }
+
+    #[test]
+    fn audio_request_unknown_data_source_is_rejected() {
+        let json = r#"{"input":"hi","data_source":"ftp"}"#;
+        let err = serde_json::from_str::<NvCreateAudioSpeechRequest>(json).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("url") && message.contains("b64_json"),
+            "expected the parse error to list the valid values; got: {message}"
+        );
+    }
+
+    #[test]
+    fn audio_request_speed_omitted_or_null_is_the_default() {
+        // Both spellings of "no speed" mean 1.0, and the worker receives the
+        // number either way.
+        for json in [r#"{"input":"hi"}"#, r#"{"input":"hi","speed":null}"#] {
+            let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+            assert_eq!(req.speed, 1.0, "for {json}");
+            let out: serde_json::Value = serde_json::to_value(&req).unwrap();
+            assert_eq!(out["speed"], serde_json::json!(1.0), "for {json}");
+        }
+    }
+
+    #[test]
+    fn audio_request_explicit_speed_is_kept() {
+        let req: NvCreateAudioSpeechRequest =
+            serde_json::from_str(r#"{"input":"hi","speed":2.5}"#).unwrap();
+        assert_eq!(req.speed, 2.5);
+        let out: serde_json::Value = serde_json::to_value(&req).unwrap();
+        assert_eq!(out["speed"], serde_json::json!(2.5));
+    }
+
+    #[test]
+    fn audio_request_speed_of_wrong_type_is_rejected() {
+        // `null` is the one non-number `speed` accepts.
+        for json in [
+            r#"{"input":"hi","speed":"1.0"}"#,
+            r#"{"input":"hi","speed":true}"#,
+        ] {
+            let err = serde_json::from_str::<NvCreateAudioSpeechRequest>(json).unwrap_err();
+            assert!(
+                err.to_string().contains("expected f64"),
+                "for {json}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn audio_request_speed_in_range_passes_validation() {
+        // The bounds are inclusive, and an absent speed means 1.0.
+        for json in [
+            r#"{"input":"hi"}"#,
+            r#"{"input":"hi","speed":0.25}"#,
+            r#"{"input":"hi","speed":1.0}"#,
+            r#"{"input":"hi","speed":4.0}"#,
+        ] {
+            let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+            assert!(
+                ValidateRequest::validate(&req).is_ok(),
+                "expected {json} to pass validation"
+            );
+        }
+    }
+
+    #[test]
+    fn audio_request_speed_out_of_range_fails_validation() {
+        for json in [
+            r#"{"input":"hi","speed":0.1}"#,
+            r#"{"input":"hi","speed":5.0}"#,
+        ] {
+            let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+            let err = ValidateRequest::validate(&req).unwrap_err();
+            let message = err.to_string();
+            assert!(
+                message.contains("speed"),
+                "expected the error for {json} to name the field; got: {message}"
+            );
+        }
     }
 
     #[test]
@@ -260,7 +368,7 @@ mod tests {
             voice: None,
             data_source: None,
             response_format: None,
-            speed: None,
+            speed: 1.0,
             task_type: None,
             language: None,
             instructions: None,
@@ -324,12 +432,13 @@ mod tests {
 
     #[test]
     fn audio_request_empty_passthrough_adds_nothing() {
+        // `speed` is the one field with a protocol default.
         let json = r#"{"input":"hello"}"#;
         let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
         assert!(req.passthrough.is_empty());
         let out: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
-        assert_eq!(out, serde_json::json!({"input":"hello"}));
+        assert_eq!(out, serde_json::json!({"input":"hello","speed":1.0}));
     }
 
     #[test]

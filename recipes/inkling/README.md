@@ -342,18 +342,18 @@ curl -s http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-**Keep both structured-output flags on the worker.** `tool_choice: "required"` and named
-`tool_choice` are enforced through a structural-tag grammar that needs both flags the manifests
-already set:
+**Keep structured output support enabled on the worker.** `tool_choice: "required"` and named
+`tool_choice` are enforced through a structural-tag grammar. The manifests set:
 
 ```
 --dyn-enable-structural-tag
 --structured-outputs-config '{"enable_in_reasoning": true}'
 ```
 
-Drop the second and the grammar is silently inert on a reasoning model — HTTP 200, no error, and
-the requested tool is not enforced. Both belong on the worker; the frontend does not accept
-`--dyn-enable-structural-tag`.
+`--dyn-enable-structural-tag` pins Dynamo's default-on behavior. The
+`--structured-outputs-config` setting remains required for this reasoning model; remove it and the
+grammar is silently inert — HTTP 200, no error, and the requested tool is not enforced. Both are
+worker arguments; the frontend does not accept `--dyn-enable-structural-tag`.
 
 **Image and audio input are not supported.** The Dynamo vLLM runtime has no multimodal support for
 this model yet, so the vLLM GB300 profiles are text-only; use the SGLang B200 profile for image and

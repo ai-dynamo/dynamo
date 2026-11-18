@@ -64,11 +64,7 @@ def _load_device(
         sharded_ssd_roots=sharded_ssd_roots,
         sharded_ssd_queues_per_root=sharded_ssd_queues_per_root,
     )
-    client.load_to_gms(
-        input_dir,
-        max_workers=max_workers,
-        clear_existing=True,
-    )
+    client.load_to_gms(input_dir, max_workers=max_workers)
     elapsed = time.monotonic() - t0
     logger.info("GMS checkpoint loaded: device=%d elapsed=%.2fs", device, elapsed)
 
@@ -180,10 +176,17 @@ def main(argv: list[str] | None = None) -> None:
     argv = argv if argv is not None else sys.argv[1:]
     if os.environ.get("DYN_GMS_USE_V1") == "true":
         run_per_device("gpu_memory_service.v1.snapshot.loader", argv)
-        return
+        if "-h" in argv or "--help" in argv:
+            return
+        # Stay alive like V0: a restarted container would request a second RW
+        # session, which times out on the restored worker's RO lease.
+        while True:
+            time.sleep(3600)
 
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.transfer_backend == TransferBackendKind.MX.value:
+        parser.error("--transfer-backend=mx requires DYN_GMS_USE_V1=true")
     if not args.checkpoint_dir:
         parser.error(
             f"--checkpoint-dir is required for --transfer-backend={args.transfer_backend}"

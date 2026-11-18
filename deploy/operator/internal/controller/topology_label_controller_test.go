@@ -7,6 +7,7 @@ package controller
 
 import (
 	"context"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -32,29 +33,23 @@ func dynamoComponentPodLabels(labels map[string]string) map[string]string {
 		consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 		consts.KubeLabelDynamoComponent:           "worker",
 	}
-	for k, v := range labels {
-		result[k] = v
-	}
+	maps.Copy(result, labels)
 	return result
 }
 
 func TestTopologyLabelReconciler_CopiesToPod(t *testing.T) {
 	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "node-1",
-			Labels: map[string]string{"topology.kubernetes.io/zone": "us-east-1a"},
-		},
+		Name:   "node-1",
+		Labels: map[string]string{"topology.kubernetes.io/zone": "us-east-1a"},
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "worker-abc",
-			Namespace: "default",
-			Annotations: map[string]string{
-				consts.KubeAnnotationTopologyLabelKey: "topology.kubernetes.io/zone",
-			},
-			Labels: dynamoComponentPodLabels(nil),
+		Name:      "worker-abc",
+		Namespace: "default",
+		Annotations: map[string]string{
+			consts.KubeAnnotationTopologyLabelKey: "topology.kubernetes.io/zone",
 		},
-		Spec: corev1.PodSpec{NodeName: "node-1"},
+		Labels: dynamoComponentPodLabels(nil),
+		Spec:   corev1.PodSpec{NodeName: "node-1"},
 	}
 
 	cl := fake.NewClientBuilder().WithObjects(pod).Build()
@@ -62,7 +57,7 @@ func TestTopologyLabelReconciler_CopiesToPod(t *testing.T) {
 	r := &TopologyLabelReconciler{Client: cl, NodeReader: nodeReader}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "worker-abc", Namespace: "default"},
+		Name: "worker-abc", Namespace: "default",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -78,16 +73,14 @@ func TestTopologyLabelReconciler_CopiesClusterTopologyLevelsToDynamoPodLabels(t 
 	require.NoError(t, grovev1alpha1.AddToScheme(scheme))
 
 	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "node-1",
-			Labels: map[string]string{
-				"topology.kubernetes.io/zone": "us-east-1a",
-				"nvidia.com/rack":             "rack-22",
-			},
+		Name: "node-1",
+		Labels: map[string]string{
+			"topology.kubernetes.io/zone": "us-east-1a",
+			"nvidia.com/rack":             "rack-22",
 		},
 	}
 	ct := &grovev1alpha1.ClusterTopologyBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: "grove-topology"},
+		Name: "grove-topology",
 		Spec: grovev1alpha1.ClusterTopologyBindingSpec{
 			Levels: []grovev1alpha1.TopologyLevel{
 				{Domain: grovev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
@@ -96,15 +89,13 @@ func TestTopologyLabelReconciler_CopiesClusterTopologyLevelsToDynamoPodLabels(t 
 		},
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "worker-abc",
-			Namespace: "default",
-			Annotations: map[string]string{
-				consts.KubeAnnotationTopologyClusterTopologyName: "grove-topology",
-			},
-			Labels: dynamoComponentPodLabels(nil),
+		Name:      "worker-abc",
+		Namespace: "default",
+		Annotations: map[string]string{
+			consts.KubeAnnotationTopologyClusterTopologyName: "grove-topology",
 		},
-		Spec: corev1.PodSpec{NodeName: "node-1"},
+		Labels: dynamoComponentPodLabels(nil),
+		Spec:   corev1.PodSpec{NodeName: "node-1"},
 	}
 
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod, ct).Build()
@@ -112,7 +103,7 @@ func TestTopologyLabelReconciler_CopiesClusterTopologyLevelsToDynamoPodLabels(t 
 	r := &TopologyLabelReconciler{Client: cl, NodeReader: nodeReader}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "worker-abc", Namespace: "default"},
+		Name: "worker-abc", Namespace: "default",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -127,22 +118,18 @@ func TestTopologyLabelReconciler_CopiesClusterTopologyLevelsToDynamoPodLabels(t 
 
 func TestTopologyLabelReconciler_SkipsIfLabelExists(t *testing.T) {
 	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "node-1",
-			Labels: map[string]string{"topology.kubernetes.io/zone": "us-east-1b"},
-		},
+		Name:   "node-1",
+		Labels: map[string]string{"topology.kubernetes.io/zone": "us-east-1b"},
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "worker-abc",
-			Namespace: "default",
-			Annotations: map[string]string{
-				consts.KubeAnnotationTopologyLabelKey: "topology.kubernetes.io/zone",
-			},
-			Labels: dynamoComponentPodLabels(map[string]string{
-				"topology.kubernetes.io/zone": "us-east-1a",
-			}),
+		Name:      "worker-abc",
+		Namespace: "default",
+		Annotations: map[string]string{
+			consts.KubeAnnotationTopologyLabelKey: "topology.kubernetes.io/zone",
 		},
+		Labels: dynamoComponentPodLabels(map[string]string{
+			"topology.kubernetes.io/zone": "us-east-1a",
+		}),
 		Spec: corev1.PodSpec{NodeName: "node-1"},
 	}
 
@@ -150,7 +137,7 @@ func TestTopologyLabelReconciler_SkipsIfLabelExists(t *testing.T) {
 	r := &TopologyLabelReconciler{Client: cl, NodeReader: cl}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "worker-abc", Namespace: "default"},
+		Name: "worker-abc", Namespace: "default",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -162,22 +149,20 @@ func TestTopologyLabelReconciler_SkipsIfLabelExists(t *testing.T) {
 
 func TestTopologyLabelReconciler_SkipsUnscheduledPod(t *testing.T) {
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "worker-abc",
-			Namespace: "default",
-			Annotations: map[string]string{
-				consts.KubeAnnotationTopologyLabelKey: "topology.kubernetes.io/zone",
-			},
-			Labels: dynamoComponentPodLabels(nil),
+		Name:      "worker-abc",
+		Namespace: "default",
+		Annotations: map[string]string{
+			consts.KubeAnnotationTopologyLabelKey: "topology.kubernetes.io/zone",
 		},
-		Spec: corev1.PodSpec{}, // No NodeName yet
+		Labels: dynamoComponentPodLabels(nil),
+		Spec:   corev1.PodSpec{}, // No NodeName yet
 	}
 
 	cl := fake.NewClientBuilder().WithObjects(pod).Build()
 	r := &TopologyLabelReconciler{Client: cl, NodeReader: cl}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "worker-abc", Namespace: "default"},
+		Name: "worker-abc", Namespace: "default",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -195,15 +180,13 @@ func TestTopologyLabelReconciler_SkipsIfNodeMissingLabel(t *testing.T) {
 		},
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "worker-abc",
-			Namespace: "default",
-			Annotations: map[string]string{
-				consts.KubeAnnotationTopologyLabelKey: "topology.kubernetes.io/zone",
-			},
-			Labels: dynamoComponentPodLabels(nil),
+		Name:      "worker-abc",
+		Namespace: "default",
+		Annotations: map[string]string{
+			consts.KubeAnnotationTopologyLabelKey: "topology.kubernetes.io/zone",
 		},
-		Spec: corev1.PodSpec{NodeName: "node-1"},
+		Labels: dynamoComponentPodLabels(nil),
+		Spec:   corev1.PodSpec{NodeName: "node-1"},
 	}
 
 	cl := fake.NewClientBuilder().WithObjects(node, pod).Build()
@@ -211,7 +194,7 @@ func TestTopologyLabelReconciler_SkipsIfNodeMissingLabel(t *testing.T) {
 	r := &TopologyLabelReconciler{Client: cl, NodeReader: cl, Recorder: recorder}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "worker-abc", Namespace: "default"},
+		Name: "worker-abc", Namespace: "default",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -234,26 +217,22 @@ func TestTopologyLabelReconciler_SkipsIfNodeMissingLabel(t *testing.T) {
 
 func TestTopologyLabelReconciler_SkipsPodWithoutAnnotation(t *testing.T) {
 	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "node-1",
-			Labels: map[string]string{"topology.kubernetes.io/zone": "us-east-1a"},
-		},
+		Name:   "node-1",
+		Labels: map[string]string{"topology.kubernetes.io/zone": "us-east-1a"},
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "worker-abc",
-			Namespace: "default",
-			// No topology-label-key annotation
-			Labels: dynamoComponentPodLabels(nil),
-		},
-		Spec: corev1.PodSpec{NodeName: "node-1"},
+		Name:      "worker-abc",
+		Namespace: "default",
+		// No topology-label-key annotation
+		Labels: dynamoComponentPodLabels(nil),
+		Spec:   corev1.PodSpec{NodeName: "node-1"},
 	}
 
 	cl := fake.NewClientBuilder().WithObjects(node, pod).Build()
 	r := &TopologyLabelReconciler{Client: cl, NodeReader: cl}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "worker-abc", Namespace: "default"},
+		Name: "worker-abc", Namespace: "default",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -265,18 +244,14 @@ func TestTopologyLabelReconciler_SkipsPodWithoutAnnotation(t *testing.T) {
 
 func TestTopologyLabelReconciler_SkipsNonDynamoComponentPod(t *testing.T) {
 	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "node-1",
-			Labels: map[string]string{"topology.kubernetes.io/zone": "us-east-1a"},
-		},
+		Name:   "node-1",
+		Labels: map[string]string{"topology.kubernetes.io/zone": "us-east-1a"},
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "worker-abc",
-			Namespace: "default",
-			Annotations: map[string]string{
-				consts.KubeAnnotationTopologyLabelKey: "topology.kubernetes.io/zone",
-			},
+		Name:      "worker-abc",
+		Namespace: "default",
+		Annotations: map[string]string{
+			consts.KubeAnnotationTopologyLabelKey: "topology.kubernetes.io/zone",
 		},
 		Spec: corev1.PodSpec{NodeName: "node-1"},
 	}
@@ -285,7 +260,7 @@ func TestTopologyLabelReconciler_SkipsNonDynamoComponentPod(t *testing.T) {
 	r := &TopologyLabelReconciler{Client: cl, NodeReader: cl}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "worker-abc", Namespace: "default"},
+		Name: "worker-abc", Namespace: "default",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -302,13 +277,11 @@ const (
 
 func topologyPredicatePod(nodeName string, annotations map[string]string, labels map[string]string) *corev1.Pod {
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        "worker-abc",
-			Namespace:   "default",
-			Annotations: annotations,
-			Labels:      dynamoComponentPodLabels(labels),
-		},
-		Spec: corev1.PodSpec{NodeName: nodeName},
+		Name:        "worker-abc",
+		Namespace:   "default",
+		Annotations: annotations,
+		Labels:      dynamoComponentPodLabels(labels),
+		Spec:        corev1.PodSpec{NodeName: nodeName},
 	}
 }
 
@@ -319,20 +292,18 @@ func topologyPredicateClusterPod(nodeName string, labels map[string]string) *cor
 	p.Spec.Volumes = []corev1.Volume{
 		{
 			Name: "topology-labels",
-			VolumeSource: corev1.VolumeSource{
-				DownwardAPI: &corev1.DownwardAPIVolumeSource{
-					Items: []corev1.DownwardAPIVolumeFile{
-						{
-							Path: "zone",
-							FieldRef: &corev1.ObjectFieldSelector{
-								FieldPath: "metadata.labels['" + consts.DynamoTopologyLabelKey("zone") + "']",
-							},
+			DownwardAPI: &corev1.DownwardAPIVolumeSource{
+				Items: []corev1.DownwardAPIVolumeFile{
+					{
+						Path: "zone",
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.labels['" + consts.DynamoTopologyLabelKey("zone") + "']",
 						},
-						{
-							Path: "rack",
-							FieldRef: &corev1.ObjectFieldSelector{
-								FieldPath: "metadata.labels['" + consts.DynamoTopologyLabelKey("rack") + "']",
-							},
+					},
+					{
+						Path: "rack",
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.labels['" + consts.DynamoTopologyLabelKey("rack") + "']",
 						},
 					},
 				},
@@ -344,15 +315,13 @@ func topologyPredicateClusterPod(nodeName string, labels map[string]string) *cor
 
 func topologyPredicateNonDynamoPod(labels map[string]string) *corev1.Pod {
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "non-dynamo",
-			Namespace: "default",
-			Annotations: map[string]string{
-				consts.KubeAnnotationTopologyLabelKey: topologyPredicateLabelKey,
-			},
-			Labels: labels,
+		Name:      "non-dynamo",
+		Namespace: "default",
+		Annotations: map[string]string{
+			consts.KubeAnnotationTopologyLabelKey: topologyPredicateLabelKey,
 		},
-		Spec: corev1.PodSpec{NodeName: "node-1"},
+		Labels: labels,
+		Spec:   corev1.PodSpec{NodeName: "node-1"},
 	}
 }
 
@@ -372,52 +341,48 @@ func TestExpectedDynamoTopologyLabelKeys(t *testing.T) {
 				Spec: corev1.PodSpec{
 					Volumes: []corev1.Volume{
 						{
-							Name: "config",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{},
-							},
+							Name:      "config",
+							ConfigMap: &corev1.ConfigMapVolumeSource{},
 						},
 						{
 							Name: "topology-labels",
-							VolumeSource: corev1.VolumeSource{
-								DownwardAPI: &corev1.DownwardAPIVolumeSource{
-									Items: []corev1.DownwardAPIVolumeFile{
-										{Path: "nil-field-ref"},
-										{
-											Path: "metadata-name",
-											FieldRef: &corev1.ObjectFieldSelector{
-												FieldPath: "metadata.name",
-											},
+							DownwardAPI: &corev1.DownwardAPIVolumeSource{
+								Items: []corev1.DownwardAPIVolumeFile{
+									{Path: "nil-field-ref"},
+									{
+										Path: "metadata-name",
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: "metadata.name",
 										},
-										{
-											Path: "app-label",
-											FieldRef: &corev1.ObjectFieldSelector{
-												FieldPath: topologyPredicateLabelFieldPath("app.kubernetes.io/name"),
-											},
+									},
+									{
+										Path: "app-label",
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: topologyPredicateLabelFieldPath("app.kubernetes.io/name"),
 										},
-										{
-											Path: "zone",
-											FieldRef: &corev1.ObjectFieldSelector{
-												FieldPath: topologyPredicateLabelFieldPath(consts.DynamoTopologyLabelKey("zone")),
-											},
+									},
+									{
+										Path: "zone",
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: topologyPredicateLabelFieldPath(consts.DynamoTopologyLabelKey("zone")),
 										},
-										{
-											Path: "double-quotes",
-											FieldRef: &corev1.ObjectFieldSelector{
-												FieldPath: "metadata.labels[\"" + consts.DynamoTopologyLabelKey("node") + "\"]",
-											},
+									},
+									{
+										Path: "double-quotes",
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: "metadata.labels[\"" + consts.DynamoTopologyLabelKey("node") + "\"]",
 										},
-										{
-											Path: "rack",
-											FieldRef: &corev1.ObjectFieldSelector{
-												FieldPath: topologyPredicateLabelFieldPath(consts.DynamoTopologyLabelKey("rack")),
-											},
+									},
+									{
+										Path: "rack",
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: topologyPredicateLabelFieldPath(consts.DynamoTopologyLabelKey("rack")),
 										},
-										{
-											Path: "malformed",
-											FieldRef: &corev1.ObjectFieldSelector{
-												FieldPath: "metadata.labels['" + consts.DynamoTopologyLabelKey("host"),
-											},
+									},
+									{
+										Path: "malformed",
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: "metadata.labels['" + consts.DynamoTopologyLabelKey("host"),
 										},
 									},
 								},
@@ -438,20 +403,18 @@ func TestExpectedDynamoTopologyLabelKeys(t *testing.T) {
 					Volumes: []corev1.Volume{
 						{
 							Name: "topology-labels",
-							VolumeSource: corev1.VolumeSource{
-								DownwardAPI: &corev1.DownwardAPIVolumeSource{
-									Items: []corev1.DownwardAPIVolumeFile{
-										{
-											Path: "metadata-name",
-											FieldRef: &corev1.ObjectFieldSelector{
-												FieldPath: "metadata.name",
-											},
+							DownwardAPI: &corev1.DownwardAPIVolumeSource{
+								Items: []corev1.DownwardAPIVolumeFile{
+									{
+										Path: "metadata-name",
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: "metadata.name",
 										},
-										{
-											Path: "app-label",
-											FieldRef: &corev1.ObjectFieldSelector{
-												FieldPath: topologyPredicateLabelFieldPath("app.kubernetes.io/name"),
-											},
+									},
+									{
+										Path: "app-label",
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: topologyPredicateLabelFieldPath("app.kubernetes.io/name"),
 										},
 									},
 								},
@@ -680,8 +643,8 @@ func TestTopologyLabelPredicateUpdate(t *testing.T) {
 		},
 		{
 			name: "non-pod update",
-			old:  &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
-			new:  &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+			old:  &corev1.Node{Name: "node-1"},
+			new:  &corev1.Node{Name: "node-1"},
 			want: false,
 		},
 	}

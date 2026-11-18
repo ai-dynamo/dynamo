@@ -10,6 +10,8 @@
 use std::path::PathBuf;
 
 use clap::Args;
+use dynamo_llm::local_model::runtime_config::{StructuralTagConfig, StructuralTagScope};
+use dynamo_runtime::config::parse_bool_opt;
 
 use crate::disagg::DisaggregationMode;
 
@@ -28,6 +30,9 @@ use crate::disagg::DisaggregationMode;
 /// ```
 #[derive(Args, Clone, Debug)]
 pub struct CommonArgs {
+    #[command(flatten)]
+    pub runtime: crate::RuntimeConfig,
+
     /// Dynamo namespace for discovery routing. `DYN_NAMESPACE_WORKER_SUFFIX`
     /// is appended as `-{suffix}` unless it is empty or already present.
     #[arg(
@@ -73,6 +78,16 @@ pub struct CommonArgs {
     )]
     pub exclude_tools_when_tool_choice_none: bool,
 
+    /// Structural-tag guided decoding for tool calls: `true`, `false`, or a JSON object.
+    #[arg(
+        long = "dyn-structural-tag",
+        env = "DYN_STRUCTURAL_TAG",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = parse_structural_tag
+    )]
+    pub dyn_structural_tag: Option<StructuralTagFlag>,
+
     /// Disaggregation role: `agg` (default), `prefill`, `decode`, or `encode`.
     /// Prefill workers register with `ModelType::empty()` and
     /// `WorkerType::Prefill` regardless of `endpoint_types`; decode and encode
@@ -102,6 +117,27 @@ pub struct CommonArgs {
     pub enable_rl: bool,
 }
 
+/// An explicit `--dyn-structural-tag` value; `StructuralTagFlag(None)` is `false`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructuralTagFlag(pub Option<StructuralTagConfig>);
+
+impl CommonArgs {
+    /// The flag's value, or the always-on policy when unset and `on_by_default`.
+    pub fn structural_tag(&self, on_by_default: bool) -> Option<StructuralTagConfig> {
+        match &self.dyn_structural_tag {
+            Some(StructuralTagFlag(config)) => config.clone(),
+            None => on_by_default.then(always_on),
+        }
+    }
+}
+
+fn always_on() -> StructuralTagConfig {
+    StructuralTagConfig {
+        scope: StructuralTagScope::Always,
+        ..Default::default()
+    }
+}
+
 fn parse_worker_namespace(namespace: &str) -> Result<String, std::convert::Infallible> {
     let Ok(suffix) = std::env::var("DYN_NAMESPACE_WORKER_SUFFIX") else {
         return Ok(namespace.to_owned());
@@ -116,6 +152,22 @@ fn parse_worker_namespace(namespace: &str) -> Result<String, std::convert::Infal
     Ok(format!("{namespace}{suffix}"))
 }
 
+fn parse_structural_tag(value: &str) -> Result<StructuralTagFlag, String> {
+    if let Some(enabled) = parse_bool_opt(value) {
+        return Ok(StructuralTagFlag(enabled.then(always_on)));
+    }
+    let mut config: serde_json::Value =
+        serde_json::from_str(value).map_err(|error| error.to_string())?;
+    let Some(fields) = config.as_object_mut() else {
+        return Err("expected true, false, or a JSON object".to_string());
+    };
+    // Unlike the wire type, the flag defaults scope to `always`.
+    fields.entry("scope").or_insert_with(|| "always".into());
+    StructuralTagConfig::from_value_strict(config)
+        .map(|config| StructuralTagFlag(Some(config)))
+        .map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -126,6 +178,31 @@ mod tests {
     struct TestArgs {
         #[command(flatten)]
         common: CommonArgs,
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn runtime_environment_values_remain_compatible() {
+        temp_env::with_vars(
+            [
+                ("DYN_DISCOVERY_BACKEND", Some("mem")),
+                ("DYN_REQUEST_PLANE", Some("TCP")),
+                ("DYN_RESPONSE_PLANE", None),
+                ("DYN_EVENT_PLANE", Some("")),
+            ],
+            || {
+                let args = TestArgs::try_parse_from(["test"]).unwrap();
+                let config = args.common.runtime.to_distributed_config().unwrap();
+                assert_eq!(
+                    config.request_plane,
+                    dynamo_runtime::distributed::RequestPlaneMode::Tcp
+                );
+                assert_eq!(
+                    config.event_transport_kind,
+                    dynamo_runtime::discovery::EventTransportKind::Zmq
+                );
+            },
+        );
     }
 
     #[test]

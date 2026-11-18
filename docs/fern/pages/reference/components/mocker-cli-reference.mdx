@@ -47,7 +47,9 @@ mode.
 </ParamField>
 
 <ParamField path="--extra-engine-args" type="path" default="null">
-  Path to a JSON file with mocker configuration. Overrides individual CLI arguments.
+  Path to a JSON file with canonical AISimulate launch configuration and optional `dynamo` runtime options.
+  Engine fields belong under `engine`. This file overrides individual CLI arguments; see
+  [Canonical Python Engine Configuration](dynosim-replay-cli-reference.mdx#canonical-python-engine-configuration).
 </ParamField>
 
 ## KV cache
@@ -78,6 +80,61 @@ mode.
   KV cache bytes per token. Overrides the auto-computation.
 </ParamField>
 
+## Native G2 host offload
+
+The vLLM mocker can simulate framework-native G1-to-host (G2) KV offload. Offloaded blocks are
+restored from host memory on a later prefix hit. As with the native vLLM offloading connector, G2
+residency is published as `HostPinned` (CPU-medium) KV events alongside device events, so the KV
+router can credit a host-resident prefix with `host_cache_hit_weight` and route to the worker that
+holds it. Host offload requires `--engine-type vllm` and prefix caching. Host blocks are sized by
+`--kv-bytes-per-token`.
+
+G2 events are not published on the vLLM ZMQ wire (`--zmq-kv-events-ports`), which needs per-block
+token IDs that the simulated G2 does not carry; a router consuming that stream sees only G1.
+
+<ParamField path="--num-host-blocks" type="integer" default="null">
+  Enable native G2 host offload with this host cache capacity per data-parallel rank, in blocks.
+</ParamField>
+
+<ParamField path="--host-offload-d2h-bandwidth-gbps" type="float" default="AISimulate default">
+  Per-rank device-to-host bandwidth in decimal GB/s. `0` is unlimited. Requires `--num-host-blocks`.
+</ParamField>
+
+<ParamField path="--host-offload-h2d-bandwidth-gbps" type="float" default="AISimulate default">
+  Per-rank host-to-device bandwidth in decimal GB/s. `0` is unlimited. Requires `--num-host-blocks`.
+</ParamField>
+
+Offline replay can also simulate one G2 pool shared by every worker of the simulated deployment.
+Live mocker workers reject this scope, so pass it through the offline replay Python API:
+
+```python
+from dynamo.replay import run_trace_replay
+
+engine_args = {
+    "engine": {
+        "backend": "vllm",
+        "kv_cache_bytes_per_token": 131072,
+        "native_host_offload": {
+            "scope": "cluster_shared",
+            "num_host_blocks": 65536,
+            "kv_layout_id": "llama-3-8b-tp1",
+        },
+    },
+}
+report = run_trace_replay(
+    "trace.jsonl",
+    extra_engine_args=engine_args,
+    num_workers=4,
+    replay_mode="offline",
+    router_mode="kv_router",
+)
+```
+
+Offline replay does not compute bytes per token from a model, so set `engine.kv_cache_bytes_per_token`
+explicitly. `engine.native_host_offload` also accepts
+`latency_to_first_byte_ms` and the shared-pool bandwidth caps. G2 host offload does not support
+MTP (`--ais-nextn`).
+
 ## Scheduling
 
 <ParamField path="--max-num-seqs" type="integer" default="256">
@@ -97,6 +154,22 @@ mode.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>lifo</Badge> <Badge intent="note" minimal>fifo</Badge></span>
 </ParamField>
+
+A vLLM engine models async scheduling by default, except with MTP and native host offload, where
+it keeps synchronous scheduling: a busy engine keeps its next batch committed, so a request that
+arrives while the engine is busy is admitted up to two passes later than with synchronous
+scheduling. A request that arrives at an idle engine is not delayed. To model
+synchronous scheduling (`--no-async-scheduling` in vLLM), set `engine.async_scheduling` to `false`
+in the `--extra-engine-args` file. SGLang and TensorRT-LLM engines reject the setting. The file
+replaces the engine flags and the command line's default `dynamo.enable_local_indexer: true`, so a
+file that changes only the scheduling of a default Mocker is:
+
+```json
+{
+  "engine": {"async_scheduling": false},
+  "dynamo": {"enable_local_indexer": true}
+}
+```
 
 ## Timing
 
@@ -161,7 +234,7 @@ For the timing-model design, see [Mocker Engine Architecture](../../developer-gu
 
 <ParamField path="--ais-perf-model" type="boolean" default="false">
   Use the canonical AISimulate performance-model API for latency prediction instead of the
-  interpolated or polynomial models. Install `aisimulate` and use a supported
+  interpolated or polynomial models. Install `aisim` and use a supported
   `system/backend/version` tuple.
 </ParamField>
 
@@ -246,7 +319,7 @@ For the timing-model design, see [Mocker Engine Architecture](../../developer-gu
   Comma-separated rendezvous base ports, one per worker in disaggregated mode.
 </ParamField>
 
-<ParamField path="--kv-transfer-bandwidth" type="float" default="64.0">
+<ParamField path="--kv-transfer-bandwidth" type="float" default="null">
   KV cache transfer bandwidth in GB/s. Set to `0` to disable.
 </ParamField>
 
@@ -287,18 +360,45 @@ For the timing-model design, see [Mocker Engine Architecture](../../developer-gu
 
 ## SGLang-specific
 
-Apply only when `--engine-type sglang`.
+Apply only when `--engine-type sglang`. Set the radix-cache page size with `--block-size`.
 
-<ParamField path="--sglang-schedule-policy" type="string" default="fifo / fcfs">
-  SGLang scheduling policy. `fifo`/`fcfs` is the default; `lpm` is longest prefix match.
+The SGLang scheduler keeps one token of the context for itself, admits a prompt only when more
+than five further tokens stay free, and caps the output by the free KV capacity. A decode worker
+reserves 512 tokens for each handoff and keeps no prefix cache. To change these two defaults, set
+`engine.sglang.num_reserved_decode_tokens` or
+`engine.sglang.disaggregation_decode_enable_radix_cache` in the `--extra-engine-args` file. That
+file replaces the engine flags, so it also names the backend and the worker role. Without
+`engine.backend` the engine is vLLM and the SGLang settings have no effect.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>fifo</Badge> <Badge intent="note" minimal>fcfs</Badge> <Badge intent="note" minimal>lpm</Badge></span>
+```json
+{
+  "engine": {
+    "backend": "sglang",
+    "worker_type": "decode",
+    "sglang": {
+      "num_reserved_decode_tokens": 128,
+      "disaggregation_decode_enable_radix_cache": true
+    }
+  }
+}
+```
+
+<ParamField path="--sglang-schedule-policy" type="string" default="fifo">
+  SGLang scheduling policy. `fifo` is the default; `lpm` is longest prefix match.
+  The deprecated `fcfs` alias maps to `fifo` and prints a warning when used.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>fifo</Badge> <Badge intent="note" minimal>lpm</Badge></span>
 </ParamField>
 
-<ParamField path="--sglang-page-size" type="integer" default="1">
-  SGLang radix-cache page size in tokens. Also becomes the effective block size when
-  `--engine-type sglang` and `--block-size` is omitted.
+<ParamField path="--sglang-page-size" type="integer" default="null">
+  Deprecated alias for `--block-size` when `--engine-type sglang`. Prints a warning when used;
+  other backends ignore it. If both flags are supplied for SGLang, their values must match.
 </ParamField>
+
+<Warning>
+  Both aliases are deprecated in Dynamo 1.6.0 and will be removed in Dynamo 1.8.0, after two
+  releases. Use `--sglang-schedule-policy fifo` and `--block-size` instead.
+</Warning>
 
 <ParamField path="--sglang-max-prefill-tokens" type="integer" default="16384">
   SGLang max prefill-token budget per batch.
@@ -336,7 +436,7 @@ for the shared fields.
   Advertise a Router configuration for this worker set. When omitted, the worker advertises no
   Router configuration and inherits the Frontend configuration.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>power-of-two</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
 </ParamField>
 
 ## Environment variables

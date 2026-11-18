@@ -37,7 +37,6 @@ Below is a summary of the general file structure for the framework Dockerfile st
 |  /usr/local/ucx/ | Built from source (→ runtime)
 |  /opt/nvidia/nvda_nixl/ | Built from source (→ runtime)
 |  /opt/nvidia/nvda_nixl/lib64/ | Built from source (→ runtime)
-|  /opt/dynamo/target/ | Cargo build output (→ runtime)
 |  /opt/dynamo/dist/*.whl | Built wheels (→ runtime)
 |  /opt/dynamo/dist/nixl/ | Built nixl wheels (→ runtime)
 | **STAGE: runtime** | **FROM ${RUNTIME_IMAGE} (multi-arch upstream runtime image)** |
@@ -253,9 +252,9 @@ docker build -t dynamo:latest-sglang-xpu-runtime -f container/sglang-runtime-xpu
 # Build Triton runtime image (prebuilt Dynamo wheels from PyPI on the upstream
 # Triton release image). --network=host lets the build reach PyPI.
 # The Triton release is selected with --build-arg RUNTIME_IMAGE_TAG=<tag>
-# (defaults to 26.08-py3); pick any nvcr.io/nvidia/tritonserver:<tag>.
+# (defaults to 26.09-py3); pick any nvcr.io/nvidia/tritonserver:<tag>.
 container/render.py --framework=triton --target=runtime --output-short-filename
-docker build --network=host --build-arg RUNTIME_IMAGE_TAG=26.08-py3 -t dynamo:latest-triton-runtime -f container/rendered.Dockerfile .
+docker build --network=host --build-arg RUNTIME_IMAGE_TAG=26.09-py3 -t dynamo:latest-triton-runtime -f container/rendered.Dockerfile .
 ```
 
 The `--device` flag selects the accelerator backend. It defaults to `cuda`; pass `--device=xpu`
@@ -479,12 +478,9 @@ container/run.sh --image dynamo:latest-sglang-xpu-local-dev --device=xpu \
 
 # From this point forward, commands run inside the container started in step 2.
 
-# 3. Editable install of dynamo into the SGLang conda env
+# 3. Editable install of dynamo into the upstream SGLang venv at /opt/venv
 # (local-dev images intentionally skip the dynamo wheel install; see
 #  container/templates/dev.Dockerfile -> "The editable install must be done at runtime")
-# The conda env at /opt/miniforge3/envs/sglang is root-owned, so chown it once
-# to the dynamo user (the image grants NOPASSWD sudo) before installing.
-sudo chown -R dynamo:0 /opt/miniforge3/envs/sglang
 cargo build --locked --features dynamo-llm/block-manager --workspace
 # 3a. ai_dynamo_runtime (Rust bindings: dynamo._core)
 # Add `--features request-trace-s3` to enable the S3 request-trace sink

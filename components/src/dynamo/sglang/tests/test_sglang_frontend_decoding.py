@@ -439,8 +439,10 @@ def _new_decode_handler(*, enable_frontend_decoding: bool):
     handler.enable_trace = False
     handler.serving_mode = DisaggregationMode.AGGREGATED
     handler.config = SimpleNamespace(
-        server_args=SimpleNamespace(served_model_name="test-model")
+        server_args=SimpleNamespace(served_model_name="test-model"),
+        dynamo_args=SimpleNamespace(enable_rl=False),
     )
+    handler._default_sampling_params = {}
     handler._routed_experts_kwargs = {}
     handler._enable_frontend_decoding = enable_frontend_decoding
     handler._first_token_source = None
@@ -696,7 +698,8 @@ def _enable_session_radix_cache(handler: Any) -> None:
     handler.config = SimpleNamespace(
         server_args=SimpleNamespace(
             served_model_name="test-model", enable_session_radix_cache=True
-        )
+        ),
+        dynamo_args=SimpleNamespace(enable_rl=False),
     )
 
 
@@ -707,8 +710,16 @@ def _new_prefill_handler() -> PrefillWorkerHandler:
     handler.enable_trace = False
     handler.serving_mode = DisaggregationMode.PREFILL
     handler.config = SimpleNamespace(
-        server_args=SimpleNamespace(served_model_name="test-model")
+        server_args=SimpleNamespace(
+            served_model_name="test-model",
+            enable_strict_thinking=True,
+            reasoning_parser="qwen3",
+            skip_tokenizer_init=False,
+            grammar_backend="xgrammar",
+        ),
+        dynamo_args=SimpleNamespace(enable_rl=False),
     )
+    handler._default_sampling_params = {}
     handler.bootstrap_host = "127.0.0.1"
     handler.bootstrap_port = 1234
     handler._generate_bootstrap_room = lambda: 7
@@ -875,3 +886,29 @@ async def test_prefill_omits_session_params_for_agent_context(
     captured = recorder.calls[0]
     assert captured["input_ids"] == [1, 2, 3]
     assert "session_params" not in captured
+
+
+@pytest.mark.asyncio
+async def test_prefill_forwards_thinking_budget_on_first_token():
+    handler = _new_prefill_handler()
+    recorder = _GenerateRecorder()
+    handler.engine = recorder
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "require_reasoning": True,
+        "sampling_options": {},
+        "stop_conditions": {"max_thinking_tokens": 0},
+    }
+
+    async for _ in handler.generate(request, _Context()):
+        pass
+
+    assert len(recorder.calls) == 1
+    captured = recorder.calls[0]
+    assert captured["sampling_params"] == {
+        "custom_params": {"thinking_budget": 0},
+        "n": 1,
+        "max_new_tokens": 1,
+    }
+    assert captured["require_reasoning"] is True

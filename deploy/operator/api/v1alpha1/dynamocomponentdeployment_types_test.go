@@ -27,7 +27,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 )
 
 func TestDynamoComponentDeployment_IsFrontendComponent(t *testing.T) {
@@ -327,8 +326,8 @@ func TestPVC_Validation(t *testing.T) {
 		{
 			name: "valid PVC with create false",
 			pvc: PVC{
-				Create: ptr.To(false),
-				Name:   ptr.To("test-pvc"),
+				Create: new(false),
+				Name:   new("test-pvc"),
 			},
 			expectValid: true,
 			description: "When create is false, size/storageClass/volumeAccessMode are not required",
@@ -336,7 +335,7 @@ func TestPVC_Validation(t *testing.T) {
 		{
 			name: "valid PVC with create nil (omitted)",
 			pvc: PVC{
-				Name: ptr.To("test-pvc"),
+				Name: new("test-pvc"),
 			},
 			expectValid: true,
 			description: "When create is omitted, size/storageClass/volumeAccessMode are not required",
@@ -344,8 +343,8 @@ func TestPVC_Validation(t *testing.T) {
 		{
 			name: "valid PVC with create true and all required fields",
 			pvc: PVC{
-				Create:           ptr.To(true),
-				Name:             ptr.To("test-pvc"),
+				Create:           new(true),
+				Name:             new("test-pvc"),
 				Size:             resource.MustParse("10Gi"),
 				StorageClass:     "fast-ssd",
 				VolumeAccessMode: corev1.ReadWriteOnce,
@@ -356,8 +355,8 @@ func TestPVC_Validation(t *testing.T) {
 		{
 			name: "invalid PVC with create true but missing size",
 			pvc: PVC{
-				Create:           ptr.To(true),
-				Name:             ptr.To("test-pvc"),
+				Create:           new(true),
+				Name:             new("test-pvc"),
 				StorageClass:     "fast-ssd",
 				VolumeAccessMode: corev1.ReadWriteOnce,
 			},
@@ -367,8 +366,8 @@ func TestPVC_Validation(t *testing.T) {
 		{
 			name: "invalid PVC with create true but missing storageClass",
 			pvc: PVC{
-				Create:           ptr.To(true),
-				Name:             ptr.To("test-pvc"),
+				Create:           new(true),
+				Name:             new("test-pvc"),
 				Size:             resource.MustParse("10Gi"),
 				VolumeAccessMode: corev1.ReadWriteOnce,
 			},
@@ -378,8 +377,8 @@ func TestPVC_Validation(t *testing.T) {
 		{
 			name: "invalid PVC with create true but missing volumeAccessMode",
 			pvc: PVC{
-				Create:       ptr.To(true),
-				Name:         ptr.To("test-pvc"),
+				Create:       new(true),
+				Name:         new("test-pvc"),
 				Size:         resource.MustParse("10Gi"),
 				StorageClass: "fast-ssd",
 			},
@@ -389,8 +388,8 @@ func TestPVC_Validation(t *testing.T) {
 		{
 			name: "invalid PVC with create true but missing all required fields",
 			pvc: PVC{
-				Create: ptr.To(true),
-				Name:   ptr.To("test-pvc"),
+				Create: new(true),
+				Name:   new("test-pvc"),
 			},
 			expectValid: false,
 			description: "When create is true but all required fields are missing",

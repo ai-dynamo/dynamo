@@ -23,6 +23,35 @@ ENV RUSTUP_HOME=/home/${USERNAME}/.rustup
 ENV CARGO_HOME=/home/${USERNAME}/.cargo
 ENV PATH=${VIRTUAL_ENV}/bin:/usr/local/cargo/bin:/usr/local/bin:${CARGO_HOME}/bin:${PATH}
 
+# Framework runtime bases bake their own uv cache location into the image env
+# (vllm/vllm-openai sets UV_CACHE_DIR=/opt/uv/cache), and its entries are root-owned
+# 0755. That works while the image runs as root, but this stage remaps to a non-root
+# user, so afterwards every uv call dies with:
+#   error: Failed to initialize cache at `/opt/uv/cache`
+#   Caused by: failed to open file `/opt/uv/cache/sdists-v9/.git`: Permission denied
+# which breaks the two commands the dev docs tell you to run (`maturin develop --uv`
+# and `uv pip install --no-deps -e /workspace`).
+#
+# Point the cache at the user's own cache dir — the same /home/dynamo/.cache/uv path
+# the runtime, frontend and planner stages already use. `chmod -R g+w /opt/uv/cache`
+# would also work but copies a ~780MB tree into a new layer, which the permissions
+# memo below rules out.
+# Use a cache path this stage owns outright rather than an inherited one. uv does not
+# only create new entries — it OPENS existing cache metadata on init, which is the exact
+# original failure (`failed to open file .../sdists-v9/.git: Permission denied`). So a
+# shallow chown of the cache root is not enough: any root-owned file nested inside an
+# inherited cache re-breaks it. trtllm already ships ~27MB of root-owned content under
+# /home/dynamo/.cache/uv, group-writable today but not guaranteed to stay that way.
+# Recursively chmod-ing instead would copy a 781MB tree into a new layer, which the
+# permissions memo below rules out.
+ENV UV_CACHE_DIR=/home/${USERNAME}/.cache/uv-local-dev
+
+# The dirs are prepared in the root RUN below. `usermod -u` there re-chowns only
+# files owned by the OLD uid, so whatever the base left root-owned survives the
+# remap; as the remapped user we could neither chmod such a dir nor mkdir inside
+# a root-owned parent, which turns any base that ships 0755 into a hard build
+# failure.
+
 # https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
 # Configure user with sudo access for Dev Container workflows
 #
@@ -48,8 +77,12 @@ RUN mkdir -p /etc/sudoers.d \
     # violate the "no recursive chown on large mounts" rule.
     && mkdir -p /home/$USERNAME/.local/lib /home/$USERNAME/.local/bin /home/$USERNAME/.local/share \
     && chown -R $USERNAME:$USER_GID /home/$USERNAME/.local \
-    && [ ! -e /home/$USERNAME/.gitconfig ] || chown $USERNAME:$USER_GID /home/$USERNAME/.gitconfig \
-    && chsh -s /bin/bash $USERNAME
+    && { [ ! -e /home/$USERNAME/.gitconfig ] || chown $USERNAME:$USER_GID /home/$USERNAME/.gitconfig; } \
+    && chsh -s /bin/bash $USERNAME \
+    # Prepare the cache dirs while still root (see UV_CACHE_DIR above).
+    && for d in /home/$USERNAME/.cache /home/$USERNAME/.cache/pre-commit "$UV_CACHE_DIR"; do \
+        mkdir -p "$d" && chown "$USERNAME:$USER_GID" "$d" && chmod g+rwx "$d" || exit 1; \
+    done
 
 # Set workspace directory variable
 ENV WORKSPACE_DIR=${WORKSPACE_DIR}
@@ -68,54 +101,17 @@ ENV PATH=${VIRTUAL_ENV}/bin:${CARGO_HOME}/bin:$PATH
 USER $USERNAME
 WORKDIR $HOME
 
-# Create user-level cargo/rustup state dirs as the target user (avoids root-owned caches).
-RUN mkdir -p "${CARGO_HOME}" "${RUSTUP_HOME}"
-
-# Ensure Python user site-packages exists and is writable (important for non-venv frameworks like SGLang).
-RUN python3 -c 'import os, site; p = site.getusersitepackages(); os.makedirs(p, exist_ok=True); print(p)'
-
-# https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
-RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.commandhistory/.bash_history" \
+# As the target user (avoids root-owned caches):
+# - Create user-level cargo/rustup state dirs.
+# - Ensure Python user site-packages exists and is writable (important for non-venv frameworks like SGLang).
+# - Persist bash history: https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
+RUN mkdir -p "${CARGO_HOME}" "${RUSTUP_HOME}" \
+    && python3 -c 'import os, site; p = site.getusersitepackages(); os.makedirs(p, exist_ok=True); print(p)' \
+    && SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.commandhistory/.bash_history" \
     && mkdir -p $HOME/.commandhistory \
     && chmod g+w $HOME/.commandhistory \
     && touch $HOME/.commandhistory/.bash_history \
     && echo "$SNIPPET" >> "$HOME/.bashrc"
-
-# Framework runtime bases bake their own uv cache location into the image env
-# (vllm/vllm-openai sets UV_CACHE_DIR=/opt/uv/cache), and its entries are root-owned
-# 0755. That works while the image runs as root, but this stage remaps to a non-root
-# user, so afterwards every uv call dies with:
-#   error: Failed to initialize cache at `/opt/uv/cache`
-#   Caused by: failed to open file `/opt/uv/cache/sdists-v9/.git`: Permission denied
-# which breaks the two commands the dev docs tell you to run (`maturin develop --uv`
-# and `uv pip install --no-deps -e /workspace`).
-#
-# Point the cache at the user's own cache dir — the same /home/dynamo/.cache/uv path
-# the runtime, frontend and planner stages already use. `chmod -R g+w /opt/uv/cache`
-# would also work but copies a ~780MB tree into a new layer, which the permissions
-# memo above rules out.
-# Use a cache path this stage owns outright rather than an inherited one. uv does not
-# only create new entries — it OPENS existing cache metadata on init, which is the exact
-# original failure (`failed to open file .../sdists-v9/.git: Permission denied`). So a
-# shallow chown of the cache root is not enough: any root-owned file nested inside an
-# inherited cache re-breaks it. trtllm already ships ~27MB of root-owned content under
-# /home/dynamo/.cache/uv, group-writable today but not guaranteed to stay that way.
-# Recursively chmod-ing instead would copy a 781MB tree into a new layer, which the
-# permissions memo above rules out.
-ENV UV_CACHE_DIR=/home/${USERNAME}/.cache/uv-local-dev
-
-# Prepare the dirs while we are still root. `usermod -u` above re-chowns only files owned
-# by the OLD uid, so whatever the base left root-owned survives the remap; as the remapped
-# user we could neither chmod such a dir nor mkdir inside a root-owned parent, which turns
-# any base that ships 0755 into a hard build failure.
-USER root
-RUN set -eux; \
-    for d in /home/$USERNAME/.cache /home/$USERNAME/.cache/pre-commit "$UV_CACHE_DIR"; do \
-        mkdir -p "$d"; \
-        chown "$USERNAME:$USER_GID" "$d"; \
-        chmod g+rwx "$d"; \
-    done
-USER $USERNAME
 
 {% if device == "xpu" or device == "cpu" %}
 SHELL ["bash", "-c"]

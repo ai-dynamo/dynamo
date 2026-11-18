@@ -1,0 +1,276 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Reviewed against the released crate's source, not the target framework schema.
+openai:
+  repository: https://github.com/64bit/async-openai
+  revision: d453592328fdbb3f59c1ea74f8e6cdf7f9140efb
+  path: openapi.yaml
+  sha256: 6bfa47154802813b1241490dd89d909e0295f20b16efb2b9e620c75fea894f83
+dependencies:
+  async-openai: 0.42.1
+  dynamo-protocols: 8.1.0
+exclusions:
+  - endpoints: [/v1/chat/completions, /v1/completions]
+    field: nvext
+    reason: Dynamo-only extension contents; not a claim of framework compatibility.
+imports:
+  FunctionType:
+    pointer: /components/schemas/ChatCompletionTool/properties/type
+  ImageDetail:
+    pointer: /components/schemas/ChatCompletionRequestMessageContentPartImage/properties/image_url/properties/detail
+    rationale: ImageDetail is a non-optional enum; its containing Option controls omission, not this documented default.
+    patch:
+      - {op: test, path: /default, value: auto}
+      - {op: remove, path: /default}
+  ServiceTier:
+    pointer: /components/schemas/ServiceTier/anyOf/0
+    rationale: The containing Rust Option supplies nullability; ServiceTier has no deserialization default.
+    patch:
+      - {op: test, path: /default, value: auto}
+      - {op: remove, path: /default}
+  ResponseModalities:
+    pointer: /components/schemas/ResponseModalities/anyOf/0/items
+  ChatCompletionRequestAssistantMessageAudio:
+    pointer: /components/schemas/ChatCompletionRequestAssistantMessage/properties/audio/anyOf/0
+  ChatCompletionRequestAssistantMessageContent:
+    pointer: /components/schemas/ChatCompletionRequestAssistantMessage/properties/content/anyOf/0
+    rationale: Rust Vec accepts an empty array; nullability belongs to the containing Option.
+    patch:
+      - {op: test, path: /oneOf/1/minItems, value: 1}
+      - {op: remove, path: /oneOf/1/minItems}
+  ChatCompletionRequestSystemMessageContent:
+    pointer: /components/schemas/ChatCompletionRequestSystemMessage/properties/content
+    rationale: Rust Vec accepts an empty array.
+    patch:
+      - {op: test, path: /oneOf/1/minItems, value: 1}
+      - {op: remove, path: /oneOf/1/minItems}
+  ChatCompletionRequestDeveloperMessage:
+    pointer: /components/schemas/ChatCompletionRequestDeveloperMessage
+    redirect_references: false
+    rationale: The containing enum supplies role; the struct has nullable optional name and accepts empty content arrays.
+    patch:
+      - {op: test, path: /required, value: [content, role]}
+      - {op: replace, path: /required, value: [content]}
+      - op: test
+        path: /properties/role
+        value:
+          type: string
+          enum: [developer]
+          description: The role of the messages author, in this case `developer`.
+          x-stainless-const: true
+      - {op: remove, path: /properties/role}
+      - {op: test, path: /properties/name/type, value: string}
+      - {op: replace, path: /properties/name/type, value: [string, 'null']}
+      - {op: test, path: /properties/content/oneOf/1/minItems, value: 1}
+      - {op: remove, path: /properties/content/oneOf/1/minItems}
+  ChatCompletionRequestFunctionMessage:
+    pointer: /components/schemas/ChatCompletionRequestFunctionMessage
+    redirect_references: false
+    rationale: The containing enum supplies role; Option<String> content may be omitted as well as null.
+    patch:
+      - {op: test, path: /required, value: [role, content, name]}
+      - {op: replace, path: /required, value: [name]}
+      - op: test
+        path: /properties/role
+        value:
+          type: string
+          enum: [function]
+          description: The role of the messages author, in this case `function`.
+          x-stainless-const: true
+      - {op: remove, path: /properties/role}
+  ChatCompletionRequestMessageContentPartText:
+    pointer: /components/schemas/ChatCompletionRequestMessageContentPartText
+    redirect_references: false
+    rationale: The struct owns text and optional prompt_cache_breakpoint, not the type tag. Tagged enum parents supply type; baseline tagged references retain their own schema.
+    patch:
+      - {op: test, path: /required, value: [type, text]}
+      - {op: replace, path: /required, value: [text]}
+      - op: test
+        path: /properties/type
+        value: {type: string, enum: [text], description: The type of the content part., x-stainless-const: true}
+      - {op: remove, path: /properties/type}
+  ChatCompletionRequestMessageContentPartAudio:
+    pointer: /components/schemas/ChatCompletionRequestMessageContentPartAudio
+    redirect_references: false
+    rationale: This struct contains only input_audio; the enclosing enum supplies the input_audio tag.
+    patch:
+      - {op: test, path: /required, value: [type, input_audio]}
+      - {op: replace, path: /required, value: [input_audio]}
+      - op: test
+        path: /properties/type
+        value: {type: string, enum: [input_audio], description: 'The type of the content part. Always `input_audio`.', x-stainless-const: true}
+      - {op: remove, path: /properties/type}
+  FunctionObject:
+    pointer: /components/schemas/FunctionObject
+    rationale: Optional description permits null; parameters is arbitrary serde_json::Value, not restricted to objects. Option<bool> strict has no false deserialization default.
+    patch:
+      - {op: test, path: /properties/description/type, value: string}
+      - {op: replace, path: /properties/description/type, value: [string, 'null']}
+      - {op: test, path: /properties/parameters, value: {$ref: '#/components/schemas/FunctionParameters'}}
+      - {op: replace, path: /properties/parameters, value: {}}
+      - {op: test, path: /properties/strict/anyOf/0/default, value: false}
+      - {op: remove, path: /properties/strict/anyOf/0/default}
+  ChatCompletionFunctions:
+    pointer: /components/schemas/ChatCompletionFunctions
+    rationale: Optional description permits null; non-optional serde_json::Value parameters accepts any JSON but must be present.
+    patch:
+      - {op: test, path: /required, value: [name]}
+      - {op: replace, path: /required, value: [name, parameters]}
+      - {op: test, path: /properties/description/type, value: string}
+      - {op: replace, path: /properties/description/type, value: [string, 'null']}
+      - {op: test, path: /properties/parameters, value: {$ref: '#/components/schemas/FunctionParameters'}}
+      - {op: replace, path: /properties/parameters, value: {}}
+  ChatCompletionFunctionCall:
+    pointer: /components/schemas/CreateChatCompletionRequest/allOf/1/properties/function_call
+  ChatCompletionAudio:
+    pointer: /components/schemas/CreateChatCompletionRequest/allOf/1/properties/audio
+    rationale: The containing Option supplies nullability. ChatCompletionAudioVoice::Other(String) accepts arbitrary strings, but not custom voice objects.
+    patch:
+      - {op: test, path: /nullable, value: true}
+      - {op: remove, path: /nullable}
+      - op: test
+        path: /properties/voice
+        value:
+          $ref: '#/components/schemas/VoiceIdsOrCustomVoice'
+          description: "The voice the model uses to respond. Supported built-in voices are\n`alloy`, `ash`, `ballad`, `coral`, `echo`, `fable`, `nova`, `onyx`,\n`sage`, `shimmer`, `marin`, and `cedar`. You may also provide a\ncustom voice object with an `id`, for example `{ \"id\": \"voice_1234\" }`.\n"
+      - {op: replace, path: /properties/voice, value: {type: string}}
+  PredictionContent:
+    pointer: /components/schemas/PredictionContent
+    rationale: Vec accepts empty arrays; prediction array items are plain Text structs, not the tagged content-part enum.
+    patch:
+      - {op: test, path: /properties/content/oneOf/1/minItems, value: 1}
+      - {op: remove, path: /properties/content/oneOf/1/minItems}
+      - {op: test, path: /properties/content/oneOf/1/items, value: {$ref: '#/components/schemas/ChatCompletionRequestMessageContentPartText'}}
+      - {op: replace, path: /properties/content/oneOf/1/items, value: {type: object, required: [text], properties: {text: {type: string}}}}
+  ResponseFormat:
+    pointer: /components/schemas/CreateChatCompletionRequest/allOf/1/properties/response_format
+  WebSearchOptions:
+    pointer: /components/schemas/CreateChatCompletionRequest/allOf/1/properties/web_search_options
+    rationale: Both fields are Option. The pinned YAML retains obsolete nullable syntax here; use JSON Schema nullability and do not invent a default.
+    patch:
+      - {op: test, path: /properties/user_location/nullable, value: true}
+      - {op: remove, path: /properties/user_location/nullable}
+      - {op: test, path: /properties/user_location/type, value: object}
+      - {op: replace, path: /properties/user_location/type, value: [object, 'null']}
+      - {op: test, path: /properties/search_context_size, value: {$ref: '#/components/schemas/WebSearchContextSize'}}
+      - {op: replace, path: /properties/search_context_size, value: {anyOf: [{$ref: '#/components/schemas/WebSearchContextSize'}, {type: 'null'}]}}
+  Prompt:
+    pointer: /components/schemas/CreateCompletionRequest/properties/prompt
+    rationale: Non-optional Rust Prompt is a Serde untagged union (anyOf); Vec accepts empty arrays, token IDs are u32, and no default or null variant exists.
+    patch:
+      - op: test
+        path: ''
+        value:
+          description: "The prompt(s) to generate completions for, encoded as a string, array of strings, array of tokens, or array of token arrays.\n\nNote that <|endoftext|> is the document separator that the model sees during training, so if a prompt is not specified the model will generate as if from the beginning of a new document.\n"
+          default: <|endoftext|>
+          nullable: true
+          oneOf:
+            - {type: string, default: '', example: This is a test.}
+            - {type: array, items: {type: string, default: '', example: This is a test.}}
+            - {type: array, minItems: 1, items: {type: integer}, example: '[1212, 318, 257, 1332, 13]'}
+            - {type: array, minItems: 1, items: {type: array, minItems: 1, items: {type: integer}}, example: '[[1212, 318, 257, 1332, 13]]'}
+      - op: replace
+        path: ''
+        value:
+          anyOf:
+            - {type: string}
+            - {type: array, items: {type: string}}
+            - {type: array, items: {type: integer, minimum: 0, maximum: 4294967295}}
+            - {type: array, items: {type: array, items: {type: integer, minimum: 0, maximum: 4294967295}}}
+  FinishReason:
+    pointer: /components/schemas/CreateChatCompletionResponse/properties/choices/items/properties/finish_reason
+  Role:
+    pointer: /components/schemas/ChatCompletionRole
+    rationale: The released Rust Role enum has no developer variant.
+    patch:
+      - {op: test, path: /enum, value: [developer, system, user, assistant, tool, function]}
+      - {op: replace, path: /enum, value: [system, user, assistant, tool, function]}
+  ChatCompletionResponseMessageAudio:
+    pointer: /components/schemas/ChatCompletionResponseMessage/properties/audio/anyOf/0
+  TopLogprobs:
+    pointer: /components/schemas/ChatCompletionTokenLogprob/properties/top_logprobs/items
+    rationale: UTF-8 bytes are u8 values in the Rust payload.
+    patch:
+      - {op: test, path: /properties/bytes/anyOf/0/items, value: {type: integer}}
+      - {op: replace, path: /properties/bytes/anyOf/0/items, value: {type: integer, minimum: 0, maximum: 255}}
+  CompletionUsage:
+    pointer: /components/schemas/CompletionUsage
+    # Chat's custom serializer omits absent detail fields. The legacy completion
+    # response uses upstream Serde instead, so it must not redirect to this slot.
+    redirect_references: false
+  CreateCompletionResponse:
+    pointer: /components/schemas/CreateCompletionResponse
+    rationale: Upstream Serde always writes nullable usage/fingerprint, omits absent choice finish_reason/logprobs, and emits nullable token logprobs and arbitrary JSON top-logprob values.
+    patch:
+      - {op: test, path: /required, value: [id, object, created, model, choices]}
+      - {op: replace, path: /required, value: [id, object, created, model, choices, usage, system_fingerprint]}
+      - {op: test, path: /properties/system_fingerprint/type, value: string}
+      - {op: replace, path: /properties/system_fingerprint/type, value: [string, 'null']}
+      - {op: test, path: /properties/usage, value: {$ref: '#/components/schemas/CompletionUsage'}}
+      - {op: replace, path: /properties/usage, value: {anyOf: [{$ref: '#/components/schemas/CompletionUsage'}, {type: 'null'}]}}
+      - {op: test, path: /properties/choices/items/required, value: [finish_reason, index, logprobs, text]}
+      - {op: replace, path: /properties/choices/items/required, value: [index, text]}
+      - op: test
+        path: /properties/choices/items/properties/logprobs
+        value:
+          anyOf:
+            - type: object
+              properties:
+                text_offset: {type: array, items: {type: integer}}
+                token_logprobs: {type: array, items: {type: number}}
+                tokens: {type: array, items: {type: string}}
+                top_logprobs: {type: array, items: {type: object, additionalProperties: {type: number}}}
+            - {type: 'null'}
+      - op: replace
+        path: /properties/choices/items/properties/logprobs
+        value:
+          type: object
+          required: [text_offset, token_logprobs, tokens, top_logprobs]
+          properties:
+            text_offset: {type: array, items: {type: integer, minimum: 0, maximum: 4294967295}}
+            token_logprobs: {type: array, items: {type: [number, 'null']}}
+            tokens: {type: array, items: {type: string}}
+            top_logprobs: {type: array, items: {}}
+components:
+  CompletionUsage:
+    rationale: Only legacy completion imports this component; unlike the chat shadow serializer, async-openai always emits nullable members inside present detail objects.
+    patch:
+      - {op: test, path: /properties/prompt_tokens_details/properties/audio_tokens/type, value: integer}
+      - {op: replace, path: /properties/prompt_tokens_details/properties/audio_tokens/type, value: [integer, 'null']}
+      - {op: test, path: /properties/prompt_tokens_details/properties/cached_tokens/type, value: integer}
+      - {op: replace, path: /properties/prompt_tokens_details/properties/cached_tokens/type, value: [integer, 'null']}
+      - {op: test, path: /properties/completion_tokens_details/properties/accepted_prediction_tokens/type, value: integer}
+      - {op: replace, path: /properties/completion_tokens_details/properties/accepted_prediction_tokens/type, value: [integer, 'null']}
+      - {op: test, path: /properties/completion_tokens_details/properties/audio_tokens/type, value: integer}
+      - {op: replace, path: /properties/completion_tokens_details/properties/audio_tokens/type, value: [integer, 'null']}
+      - {op: test, path: /properties/completion_tokens_details/properties/reasoning_tokens/type, value: integer}
+      - {op: replace, path: /properties/completion_tokens_details/properties/reasoning_tokens/type, value: [integer, 'null']}
+      - {op: test, path: /properties/completion_tokens_details/properties/rejected_prediction_tokens/type, value: integer}
+      - {op: replace, path: /properties/completion_tokens_details/properties/rejected_prediction_tokens/type, value: [integer, 'null']}
+  ResponseFormatJsonSchema:
+    rationale: Rust description permits null; schema is required arbitrary JSON Value (including null), not just an object; strict has no false default.
+    patch:
+      - {op: test, path: /properties/json_schema/required, value: [name]}
+      - {op: replace, path: /properties/json_schema/required, value: [name, schema]}
+      - {op: test, path: /properties/json_schema/properties/description/type, value: string}
+      - {op: replace, path: /properties/json_schema/properties/description/type, value: [string, 'null']}
+      - {op: test, path: /properties/json_schema/properties/schema, value: {$ref: '#/components/schemas/ResponseFormatJsonSchemaSchema'}}
+      - {op: replace, path: /properties/json_schema/properties/schema, value: {}}
+      - {op: test, path: /properties/json_schema/properties/strict/anyOf/0/default, value: false}
+      - {op: remove, path: /properties/json_schema/properties/strict/anyOf/0/default}
+  WebSearchLocation:
+    rationale: All four Rust fields are Option<String> and accept null.
+    patch:
+      - {op: test, path: /properties/country/type, value: string}
+      - {op: replace, path: /properties/country/type, value: [string, 'null']}
+      - {op: test, path: /properties/region/type, value: string}
+      - {op: replace, path: /properties/region/type, value: [string, 'null']}
+      - {op: test, path: /properties/city/type, value: string}
+      - {op: replace, path: /properties/city/type, value: [string, 'null']}
+      - {op: test, path: /properties/timezone/type, value: string}
+      - {op: replace, path: /properties/timezone/type, value: [string, 'null']}
+  WebSearchContextSize:
+    rationale: The enclosing field is Option; missing or null does not deserialize to Medium.
+    patch:
+      - {op: test, path: /default, value: medium}
+      - {op: remove, path: /default}

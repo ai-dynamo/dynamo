@@ -1,35 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-data:
-  nodes_per_partition: |-
-    2
-    2
-  partition_ids: |-
-    0
-    1
-  partition_node_offsets: |-
-    0
-    2
-  partition_paths: |-
-    part-0
-    part-1
-  topologies: |-
-    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
-    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
-immutable: true
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: lpu-gpu-specdecode
-  labels:
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: lpu-gpu-specdecode-bc86-lpu-6bcf1f4cf22aaf55
-  namespace: test
----
-metadata:
-  annotations:
-    lpx.nvidia.com/deployment-name: lpu-gpu-specdecode
-    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:4c12ac1cf94c73e86adf88e2b9ae81de18f9286dcf1d83a0401325c6125a1379
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     nvidia.com/dynamo-graph-deployment-name: lpu-gpu-specdecode
@@ -42,9 +16,8 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-gpu-specdecode
-        nvidia.com/extra-resources-hash: 6bcf1f4cf22aaf552736014dfc177eec81d993bf14b94b3328a39dd1b7d38e5d
-        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:0d06b39bcb17ce3d6ed500ab51251a7bd13b5bd99b68e261743aa68c66242ca2
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:15c36b313ead3714748f06279e21588b5fbb83cad6d114dd1cc2849394c15859
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:732b9f6d82c0710eb5af219d64eb6035411d9d796e52914095d2048b419eb0d5
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:7cb034a93a830cf4bc54191fae9132e7975827e376e8dc9cb489006640f5256f
         scheduling.lpu.nvidia.com/model: default
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2LpuOnly
@@ -65,6 +38,9 @@ spec:
             command:
             - /opt/dynamo-lpu
             env:
+            - name: LPX_LOCAL_PARTITION_IDS
+            - name: LPX_MODEL_PATH
+              value: /models/node-local-v2-connected
             - name: DYN_COMPONENT
               value: lpx
             - name: DYN_DISCOVERY_BACKEND
@@ -96,7 +72,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.uid
             image: example.invalid/lpu-agent:test
-            name: agent
+            name: main
             resources:
               limits:
                 lpu.nvidia.com/lpu: "8"
@@ -118,15 +94,11 @@ spec:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - configMap:
-              name: lpu-gpu-specdecode-bc86-lpu-6bcf1f4cf22aaf55
-            name: config
         replicas: 4
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-gpu-specdecode
-        nvidia.com/extra-resources-hash: 6bcf1f4cf22aaf552736014dfc177eec81d993bf14b94b3328a39dd1b7d38e5d
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:15c36b313ead3714748f06279e21588b5fbb83cad6d114dd1cc2849394c15859
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:7cb034a93a830cf4bc54191fae9132e7975827e376e8dc9cb489006640f5256f
         scheduling.lpu.nvidia.com/role: conductor
       labels:
         lpx.nvidia.com/serving: "true"
@@ -181,7 +153,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.uid
             image: example.invalid/lpu-conductor:test
-            name: conductor
+            name: main
             resources: {}
             volumeMounts:
             - mountPath: /models
@@ -199,9 +171,6 @@ spec:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - configMap:
-              name: lpu-gpu-specdecode-bc86-lpu-6bcf1f4cf22aaf55
-            name: config
         replicas: 1
         roleName: cond
         startsAfter:
@@ -211,7 +180,7 @@ spec:
     podCliqueScalingGroups:
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-gpu-specdecode
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:15c36b313ead3714748f06279e21588b5fbb83cad6d114dd1cc2849394c15859
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:7cb034a93a830cf4bc54191fae9132e7975827e376e8dc9cb489006640f5256f
       cliqueNames:
       - cond
       - agt
@@ -247,7 +216,7 @@ spec:
           containers:
           - args:
             - --experimental-external-draft-endpoint
-            - test-lpu-gpu-specdecode/backend/generate
+            - $(DYN_NAMESPACE)-$(DYN_NAMESPACE_WORKER_SUFFIX)/backend/generate
             command:
             - python
             - -m

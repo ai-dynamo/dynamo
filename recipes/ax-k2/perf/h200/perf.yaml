@@ -1,0 +1,203 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# One Job sweeps c16, c32, c64, c128 against an existing deployment.
+# Set ARM, ENDPOINT, and WORKLOAD. No Kubernetes API access or cache reset.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  labels:
+    app.kubernetes.io/name: axk2-bench
+    app.kubernetes.io/part-of: axk2
+  name: axk2-h200-perf
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 21600
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: axk2-bench
+        app.kubernetes.io/part-of: axk2
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+      - name: aiperf
+        image: nvcr.io/nvidia/ai-dynamo/aiperf:0.12.0@sha256:d22eb02bccadcd2acbbd905a1742f1e642f2bdd7bc3a0377cebda685a233902d
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        env:
+        - name: ARM
+          value: disagg
+        - name: ENDPOINT
+          value: axk2-vllm-disagg-h200-frontend:8000
+        - name: WORKLOAD
+          value: w1
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: HF_HOME
+          value: /model-cache
+        - name: HF_HUB_OFFLINE
+          value: '1'
+        - name: AIPERF_HTTP_CONNECTION_LIMIT
+          value: '1024'
+        - name: AIPERF_HTTP_SO_RCVTIMEO
+          value: '120'
+        - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
+          value: '600'
+        - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
+          value: '600'
+        - name: PYTHONUNBUFFERED
+          value: '1'
+        - name: COLUMNS
+          value: '200'
+        - name: TRANSFORMERS_OFFLINE
+          value: '1'
+        command:
+        - bash
+        - -ec
+        resources:
+          requests:
+            cpu: '8'
+            memory: 16Gi
+          limits:
+            cpu: '16'
+            memory: 32Gi
+        volumeMounts:
+        - name: model-cache
+          mountPath: /model-cache
+        args:
+        - |
+          set -eu
+          case "$ARM" in agg|disagg) ;; *) echo "ARM must be agg or disagg" >&2; exit 1;; esac
+          case "$WORKLOAD" in w1|w2) ;; *) echo "WORKLOAD must be w1 or w2" >&2; exit 1;; esac
+          export endpoint="http://${ENDPOINT}"
+          export ROOT="${HF_HOME}/perf/axk2/h200-eagle3/${ARM}/${WORKLOAD}/${POD_UID}"
+          mkdir -p "$ROOT"
+          python3 - <<'PYREADY'
+          import json, os, time, urllib.request
+          for attempt in range(120):
+              try:
+                  with urllib.request.urlopen(os.environ['endpoint'] + '/v1/models', timeout=10) as response:
+                      if any(m['id'] == 'A.X-K2' for m in json.load(response)['data']):
+                          break
+              except OSError:
+                  pass
+              time.sleep(5)
+          else:
+              raise SystemExit('A.X-K2 endpoint readiness timeout')
+          PYREADY
+          profile() {
+            dir=$1; count=$2; seed=$3; isl=$4; conc=$5; prefix=$6
+            mkdir -p "$dir"
+            set -- --synthetic-input-tokens-mean "$isl"
+            if [ "$prefix" = yes ]; then
+              set -- "$@" --prefix-prompt-length 10240 --num-prefix-prompts 32
+            fi
+            printf 'arm=%s\nworkload=%s\nconcurrency=%s\nrequests=%s\nseed=%s\ncache_protocol=sequential-no-reset\n' \
+              "$ARM" "$WORKLOAD" "$conc" "$count" "$seed" > "$dir/run.txt"
+            aiperf profile \
+              --model A.X-K2 --tokenizer skt/A.X-K2 \
+              --tokenizer-revision 2287ca456927eed33b899c404c0b2ffaf17aa09f \
+              --tokenizer-trust-remote-code --endpoint-type chat \
+              --endpoint /v1/chat/completions --streaming \
+              --synthetic-input-tokens-stddev 0 --output-tokens-mean 1024 \
+              --output-tokens-stddev 0 --extra-inputs max_tokens:1024 \
+              --extra-inputs min_tokens:1024 --extra-inputs ignore_eos:true \
+              --no-allow-dataset-wrap --use-server-token-count --no-server-metrics \
+              --workers-max 8 --request-timeout-seconds 900 --ui simple \
+              --url "$endpoint" --concurrency "$conc" --request-count "$count" \
+              --num-dataset-entries "$count" --random-seed "$seed" \
+              --output-artifact-dir "$dir" "$@"
+            python3 - "$dir" "$count" "$conc" <<'PYRESULT'
+          import hashlib, json, math, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          expected, concurrency = map(int, sys.argv[2:])
+          report = json.loads((root / 'profile_export_aiperf.json').read_text())
+          rows = [json.loads(line) for line in (root / 'profile_export.jsonl').read_text().splitlines() if line.strip()]
+          if report.get('was_cancelled') or report.get('error_summary') or len(rows) != expected:
+              raise SystemExit('Incomplete or failed AIPerf run: ' + str(root))
+          if any(r.get('error') or r.get('metadata', {}).get('was_cancelled') for r in rows):
+              raise SystemExit('Failed or cancelled request: ' + str(root))
+          if any(r['metrics']['output_sequence_length']['value'] != 1024 for r in rows):
+              raise SystemExit('Output length must be 1024 for every request')
+          def stats(key):
+              values = sorted(float(r['metrics'][key]['value']) for r in rows)
+              if not all(math.isfinite(x) for x in values):
+                  raise SystemExit('Non-finite metric: ' + key)
+              def p(q):
+                  at = (len(values)-1)*q
+                  lo, hi = math.floor(at), math.ceil(at)
+                  return values[lo]+(values[hi]-values[lo])*(at-lo)
+              return {'mean': sum(values)/len(values), 'p50': p(.5), 'p99': p(.99)}
+          tpot = stats('inter_token_latency')
+          # AIPerf latency values are milliseconds; mean user throughput is mean(1000/TPOT).
+          latencies = [float(r['metrics']['inter_token_latency']['value']) for r in rows]
+          if min(latencies) <= 0:
+              raise SystemExit('TPOT must be positive')
+          tps = report['output_token_throughput']['avg']
+          if not math.isfinite(tps) or tps <= 0:
+              raise SystemExit('Invalid output throughput')
+          summary = {'requests': len(rows), 'concurrency': concurrency,
+                     'cache_protocol': 'sequential-no-reset',
+                     'output_tok_s': tps, 'output_tok_s_gpu': tps/32,
+                     'user_tok_s_mean': sum(1000/x for x in latencies)/len(latencies),
+                     'tpot_ms': tpot, 'ttft_ms': stats('time_to_first_token'),
+                     'inputs_sha256': hashlib.sha256((root/'inputs.json').read_bytes()).hexdigest()}
+          (root/'summary.json').write_text(json.dumps(summary, indent=2)+'\n')
+          print(json.dumps(summary))
+          PYRESULT
+          }
+          # One readiness warmup, then a fixed ascending sweep. Serving caches persist.
+          profile "$ROOT/warmup" 64 43 16384 16 no
+          isl=16384; prefix=no
+          if [ "$WORKLOAD" = w1 ]; then isl=6144; prefix=yes; fi
+          for concurrency in 16 32 64 128; do
+            count=1024; repeats=1
+            if [ "$concurrency" = 128 ]; then count=2048; repeats=3; fi
+            for repeat in $(seq 1 "$repeats"); do
+              profile "$ROOT/c${concurrency}/r${repeat}" "$count" 42 "$isl" "$concurrency" "$prefix"
+            done
+          done
+          python3 - <<'PYSUMMARY'
+          import csv, json, os, pathlib, statistics
+          root = pathlib.Path(os.environ['ROOT'])
+          fields = ['concurrency', 'runs', 'requests_per_run', 'output_tok_s', 'output_tok_s_gpu',
+                    'user_tok_s_mean', 'tpot_p50_ms', 'tpot_p99_ms', 'ttft_p50_s']
+          with (root/'summary.csv').open('w') as output:
+              writer = csv.DictWriter(output, fieldnames=fields)
+              writer.writeheader()
+              for c in (16,32,64,128):
+                  runs = [json.loads(p.read_text()) for p in sorted((root/f'c{c}').glob('r*/summary.json'))]
+                  expected = 3 if c == 128 else 1
+                  if len(runs) != expected or len({r['inputs_sha256'] for r in runs}) != 1:
+                      raise SystemExit('Missing repeats or mismatched inputs')
+                  mean = lambda key: statistics.mean(r[key] for r in runs)
+                  row = {'concurrency': c, 'runs': len(runs), 'requests_per_run': runs[0]['requests'],
+                         **{key: mean(key) for key in ('output_tok_s','output_tok_s_gpu','user_tok_s_mean')},
+                         'tpot_p50_ms': statistics.mean(r['tpot_ms']['p50'] for r in runs),
+                         'tpot_p99_ms': statistics.mean(r['tpot_ms']['p99'] for r in runs),
+                         'ttft_p50_s': statistics.mean(r['ttft_ms']['p50']/1000 for r in runs)}
+                  writer.writerow(row)
+                  print(json.dumps(row))
+          print('Artifacts: '+str(root))
+          PYSUMMARY
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache

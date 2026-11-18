@@ -13,7 +13,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -38,7 +37,7 @@ func TestLeaseAwareDefaulter(t *testing.T) {
 	wrapped := NewLeaseAwareDefaulter(defaulter, testExcludedNamespaces{"claimed": true})
 
 	if err := wrapped.Default(context.Background(), &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "claimed"},
+		Namespace: "claimed",
 	}); err != nil {
 		t.Fatalf("defaulting excluded namespace: %v", err)
 	}
@@ -47,7 +46,7 @@ func TestLeaseAwareDefaulter(t *testing.T) {
 	}
 
 	if err := wrapped.Default(context.Background(), &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "unclaimed"},
+		Namespace: "unclaimed",
 	}); err != nil {
 		t.Fatalf("defaulting unclaimed namespace: %v", err)
 	}

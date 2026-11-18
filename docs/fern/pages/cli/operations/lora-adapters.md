@@ -153,6 +153,7 @@ The following Kubernetes and local workflows use vLLM. For the aggregated SGLang
     | `AWS_REGION` | AWS region | `us-east-1` |
     | `AWS_ALLOW_HTTP` | Allow HTTP (non-TLS) connections | `false` |
     | `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` | Use bucket-qualified virtual-hosted requests | `false` |
+    | `DYN_LORA_S3_TLS_INSECURE` | Skip TLS certificate verification for S3 LoRA downloads. Use only on trusted internal networks, such as S3-compatible storage with a private-CA or self-signed certificate | `false` |
 
     For `s3://` sources, Dynamo uses the standard AWS credential provider chain, including environment variables, shared configuration and credentials files, web identity, container credentials, and Amazon EC2 instance metadata. Endpoint precedence is `AWS_ENDPOINT_URL_S3`, the active profile's S3 service endpoint, `AWS_ENDPOINT_URL`, the active profile's generic `endpoint_url`, then the legacy `AWS_ENDPOINT` fallback.
 
@@ -411,7 +412,7 @@ This section describes the validated vLLM path. KV-aware routing with SGLang LoR
 
 > [!IMPORTANT]
 > With `DYN_LORA_ENABLED`, only KV, random, and round-robin routing are LoRA-aware.
-> Direct, power-of-two, least-loaded, and device-aware-weighted modes fail startup.
+> Direct, least-loaded, and device-aware-weighted modes fail startup.
 > Session affinity with LoRA is supported only in KV mode; random and round-robin
 > plus affinity are rejected.
 

@@ -153,3 +153,15 @@ def test_agg_load_loop_holds_scale_down_at_fixed_budget():
     assert decision is not None
     assert decision.num_decode == 64
     assert state.diagnostics().load_decision_reason == "gpu_budget_guard_hold"
+
+
+def test_raising_gpu_floor_does_not_shrink_decode_on_load_hold():
+    state = _state(1, 10, min_gpus=26, max_gpus=-1, p_gpu=16, d_gpu=1)
+    assert _decision(state, None, None) is None
+
+    state._config.min_gpu_budget = 27
+    decision = _decision(state, None, None)
+
+    assert decision is not None
+    assert (decision.num_prefill, decision.num_decode) == (2, 10)
+    assert state.diagnostics().load_decision_reason == "gpu_budget_reconcile"
