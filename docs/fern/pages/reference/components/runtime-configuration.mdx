@@ -100,6 +100,23 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Environment variable: `DYN_DISCOVERY_BACKEND`
 </ParamField>
 
+<ParamField path="DYN_MODEL_IDENTITY_INDEX" type="boolean" default="false">
+  Environment-only. With `etcd`, `file`, or `mem` discovery, use only the model identity index
+  to check whether a model can share an endpoint. On etcd, each check reads one record per
+  distinct identity plus one final read, regardless of the number of workers. The default
+  also reads the endpoint's model cards, so cards written by older workers remain visible.
+  Both modes write identity records for new cards. Kubernetes discovery ignores this variable.
+
+  Enable only after every worker that can register on these endpoints has been upgraded to
+  write identity records and every older worker's card has been removed or expired. An
+  existing index does not prove that older workers have stopped writing. Before rolling
+  back to older workers, disable this variable on all workers that register models.
+  Restart the processes after changing it.
+
+  Accepts `1`, `true`, `yes`, and `on`, case-insensitive and with surrounding whitespace
+  removed. Unset or any other value keeps the card checks enabled.
+</ParamField>
+
 <ParamField path="NATS_STARTUP_CONNECT_TIMEOUT_SECONDS" type="integer" default="120">
   Maximum number of seconds that a process spends establishing its initial NATS connection. Applies
   only to processes that connect to NATS. Dynamo retries DNS, I/O, and timeout failures with

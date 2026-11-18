@@ -161,6 +161,7 @@ async fn model_identities_in_bucket(
 pub struct KVStoreDiscovery {
     store: Arc<kv::Manager>,
     cancel_token: CancellationToken,
+    is_model_identity_index_enabled: bool,
 }
 
 impl KVStoreDiscovery {
@@ -168,6 +169,9 @@ impl KVStoreDiscovery {
         Self {
             store: Arc::new(store),
             cancel_token,
+            is_model_identity_index_enabled: crate::config::env_is_truthy(
+                crate::config::environment_names::discovery::DYN_MODEL_IDENTITY_INDEX,
+            ),
         }
     }
 
@@ -757,14 +761,32 @@ impl Discovery for KVStoreDiscovery {
         component: &str,
         endpoint: &str,
     ) -> Result<Vec<ModelRegistrationIdentity>> {
-        let Some(identities) = self.store.get_bucket(MODEL_IDENTITIES_BUCKET).await? else {
-            return Ok(Vec::new());
+        let mut identities = match self.store.get_bucket(MODEL_IDENTITIES_BUCKET).await? {
+            Some(bucket) => {
+                model_identities_in_bucket(
+                    bucket.as_ref(),
+                    &format!("{namespace}/{component}/{endpoint}"),
+                )
+                .await?
+            }
+            None => Vec::new(),
         };
-        model_identities_in_bucket(
-            identities.as_ref(),
-            &format!("{namespace}/{component}/{endpoint}"),
-        )
-        .await
+        // Older workers can still write cards without identity records during a rolling upgrade.
+        if !self.is_model_identity_index_enabled {
+            let cards = self
+                .list(DiscoveryQuery::EndpointModels {
+                    namespace: namespace.to_string(),
+                    component: component.to_string(),
+                    endpoint: endpoint.to_string(),
+                })
+                .await?;
+            for identity in super::distinct_model_identities(&cards)? {
+                if !identities.contains(&identity) {
+                    identities.push(identity);
+                }
+            }
+        }
+        Ok(identities)
     }
 
     async fn update_model_taints_internal(
@@ -1904,6 +1926,74 @@ mod tests {
             .await
             .unwrap()
             .len()
+    }
+
+    #[tokio::test]
+    async fn register_rejects_legacy_cards_with_or_without_an_identity_index() {
+        for has_index in [false, true] {
+            let mut client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
+            client.is_model_identity_index_enabled = false;
+            let legacy = named_model_spec("a", "/models/a").into_instance(client.instance_id() + 1);
+            let cards = client
+                .store
+                .get_or_create_bucket(MODELS_BUCKET, None)
+                .await
+                .unwrap();
+            let key = kv::Key::new(KVStoreDiscovery::model_key(
+                "ns",
+                "worker",
+                "generate",
+                legacy.instance_id(),
+            ));
+            cards
+                .insert(&key, serde_json::to_vec(&legacy).unwrap().into(), 0)
+                .await
+                .unwrap();
+            if has_index {
+                let (record_key, identity) = KVStoreDiscovery::model_identity_record(
+                    &named_model_spec("b", "/models/b").into_instance(client.instance_id()),
+                )
+                .unwrap()
+                .unwrap();
+                client
+                    .store
+                    .get_or_create_bucket(MODEL_IDENTITIES_BUCKET, None)
+                    .await
+                    .unwrap()
+                    .insert(
+                        &record_key,
+                        serde_json::to_vec(&identity).unwrap().into(),
+                        0,
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            let error = client
+                .register(named_model_spec("b", "/models/b"))
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("a different model 'a' is already registered there"),
+                "unexpected error: {error:#}"
+            );
+
+            // Once the old card has drained, index-only registration still checks new identities.
+            cards.delete(&key).await.unwrap();
+            client.is_model_identity_index_enabled = true;
+            client
+                .register(named_model_spec("b", "/models/b"))
+                .await
+                .unwrap();
+            assert!(
+                client
+                    .register(named_model_spec("c", "/models/c"))
+                    .await
+                    .is_err()
+            );
+        }
     }
 
     #[tokio::test]
