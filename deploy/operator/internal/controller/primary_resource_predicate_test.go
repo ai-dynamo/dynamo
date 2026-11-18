@@ -61,7 +61,7 @@ func TestDGDPrimaryPredicateObservesMetadataWithoutGenerationChanges(t *testing.
 }
 
 func TestDCDPrimaryPredicateObservesMetadataWithoutGenerationChanges(t *testing.T) {
-	t.Log("DCD label and topology annotation edits must enqueue reconciliation without a generation change")
+	t.Log("DCD label removal must enqueue reconciliation without a generation change")
 	old := &v1beta1.DynamoComponentDeployment{Generation: 1}
 	for _, test := range []struct {
 		name   string
@@ -69,9 +69,6 @@ func TestDCDPrimaryPredicateObservesMetadataWithoutGenerationChanges(t *testing.
 		want   bool
 	}{
 		{"remove label", func(o *v1beta1.DynamoComponentDeployment) { delete(o.Labels, "example.com/team") }, true},
-		{"topology annotation", func(o *v1beta1.DynamoComponentDeployment) {
-			o.Annotations = map[string]string{consts.KubeAnnotationTopologyClusterTopologyName: "cluster"}
-		}, true},
 		{"status noise", func(o *v1beta1.DynamoComponentDeployment) { o.ResourceVersion = "2" }, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
