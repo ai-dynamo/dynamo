@@ -697,7 +697,7 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 ## Tokenizer
 
 <ParamField path="--tokenizer" type="string" default="default">
-  Tokenizer implementation. `default` uses HuggingFace; `fastokens` uses the high-performance hybrid encoder; and `basetenkenizer` uses Baseten Tokenizer for native encoding and decoding. See [Tokenizer](../../developer-guide/knowledge-base/modular-components/frontend/tokenizer.md).
+  Tokenizer implementation. `default` uses HuggingFace; `fastokens` uses the high-performance hybrid encoder; and `basetenkenizer` uses Baseten Tokenizer for native encoding and decoding. With `--dyn-chat-processor sglang`, `fastokens` also applies to the SGLang chat processor (needs the `fastokens` Python package) and `basetenkenizer` uses HuggingFace there. See [Tokenizer](../../developer-guide/knowledge-base/modular-components/frontend/tokenizer.md).
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>default</Badge> <Badge intent="note" minimal>fastokens</Badge> <Badge intent="note" minimal>basetenkenizer</Badge></span>
 
