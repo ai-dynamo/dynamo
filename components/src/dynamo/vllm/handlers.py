@@ -1238,6 +1238,7 @@ ResponseT = TypeVar("ResponseT")
 
 async def _translate_vllm_client_errors(
     generator: AsyncIterator[ResponseT],
+    request_id: str,
 ) -> AsyncIterator[ResponseT]:
     """Keep request-side vLLM errors client-visible on worker endpoints."""
     from vllm.exceptions import VLLMClientError
@@ -1251,7 +1252,7 @@ async def _translate_vllm_client_errors(
     except VLLMClientError as exc:
         raise vllm_client_error_to_http_error(exc) from exc
     except EngineGenerateError as exc:
-        client_error = processor_input_error(exc)
+        client_error = processor_input_error(exc, request_id)
         if client_error is None:
             raise
         raise client_error from exc
@@ -3872,7 +3873,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # Token-in-token-out mode: internal protocol format
                 generator = self._generate_token_mode(request, context, request_id)
 
-            async for chunk in _translate_vllm_client_errors(generator):
+            async for chunk in _translate_vllm_client_errors(generator, request_id):
                 if first_token:
                     decode_timer.stop_interval()
                     first_token = False
@@ -4575,7 +4576,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Token-in-token-out mode: internal protocol format
         with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
             generator = self._generate_token_mode(request, context, request_id)
-            async for chunk in _translate_vllm_client_errors(generator):
+            async for chunk in _translate_vllm_client_errors(generator, request_id):
                 yield chunk
 
     def _prefill_kv_protocol(
@@ -5158,7 +5159,7 @@ class EmbeddingWorkerHandler:
                 # Input vLLM rejects here (e.g. a conversation that renders
                 # to an empty prompt) is a client error, as with ``vllm serve``.
                 async for out in _translate_vllm_client_errors(
-                    self.engine_client.encode(**encode_kwargs)
+                    self.engine_client.encode(**encode_kwargs), request_id
                 ):
                     final_output = out
             if final_output is None:

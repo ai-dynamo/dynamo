@@ -1731,8 +1731,14 @@ def test_vllm_validation_error_public_message_is_truncated():
         (ValueError("absolute aspect ratio must be smaller than 200, got 400.0"), True),
         (TypeError("'NoneType' object is not subscriptable"), False),
         (None, False),
+        ("memory_error", False),
     ],
-    ids=["processor_rejects_input", "processor_bug", "engine_fault"],
+    ids=[
+        "processor_rejects_input",
+        "processor_bug",
+        "engine_fault",
+        "processor_out_of_memory",
+    ],
 )
 @pytest.mark.asyncio
 async def test_translate_vllm_client_errors_processor_rejection(
@@ -1741,10 +1747,16 @@ async def test_translate_vllm_client_errors_processor_rejection(
     from vllm.v1.engine.exceptions import EngineGenerateError
 
     from dynamo.llm.exceptions import InvalidArgument
+    from dynamo.vllm import errors
     from dynamo.vllm.handlers import _translate_vllm_client_errors
 
     # vLLM's chain: EngineGenerateError wraps ValueError("Failed to apply ..."),
     # which wraps the processor error and embeds the request data in its text.
+    if processor_error == "memory_error":
+        # Transformers' BatchFeature.convert_to_tensors re-raises any
+        # tensor-creation failure as ValueError.
+        processor_error = ValueError("Unable to convert output 'pixel_values'")
+        processor_error.__cause__ = MemoryError()
     if processor_error is None:
         cause: Exception = RuntimeError("engine step failed")
     else:
@@ -1761,8 +1773,13 @@ async def test_translate_vllm_client_errors_processor_rejection(
         raise error
 
     chunks = []
-    with pytest.raises((InvalidArgument, EngineGenerateError)) as raised:
-        async for chunk in _translate_vllm_client_errors(failing_generator()):
+    with (
+        patch.object(errors.logger, "warning") as warning,
+        pytest.raises((InvalidArgument, EngineGenerateError)) as raised,
+    ):
+        async for chunk in _translate_vllm_client_errors(
+            failing_generator(), "req-123"
+        ):
             chunks.append(chunk)
 
     assert chunks == ["first"]
@@ -1771,6 +1788,7 @@ async def test_translate_vllm_client_errors_processor_rejection(
         assert raised.value.__cause__ is error
         assert "data=" not in str(raised.value)
         assert "secret prompt" not in str(raised.value)
+        assert warning.call_args.args[1] == "req-123"
     else:
         assert raised.value is error
 

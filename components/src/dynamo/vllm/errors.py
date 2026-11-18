@@ -5,6 +5,7 @@
 
 import logging
 
+import torch
 from vllm.exceptions import (
     VLLMClientError,
     VLLMNotFoundError,
@@ -21,6 +22,10 @@ logger = logging.getLogger(__name__)
 _HF_PROCESSOR_WRAPPER_PREFIX = "Failed to apply "
 
 PROCESSOR_REJECTED_INPUT_MESSAGE = "The model's processor rejected the multimodal input"
+
+# Transformers' BatchFeature.convert_to_tensors re-raises any tensor-creation
+# failure, including these, as ValueError.
+_RESOURCE_ERRORS = (MemoryError, torch.OutOfMemoryError)
 
 
 def vllm_client_error_to_http_error(exc: VLLMClientError) -> HttpError:
@@ -52,14 +57,28 @@ def vllm_client_error_to_public_error(
     return http_error
 
 
-def processor_input_error(exc: EngineGenerateError) -> InvalidArgument | None:
+def _caused_by_resource_error(exc: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, _RESOURCE_ERRORS):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def processor_input_error(
+    exc: EngineGenerateError, request_id: str
+) -> InvalidArgument | None:
     """Return a 400 when the model's HF processor rejected the request input.
 
     vLLM wraps the processor's exception in ``ValueError("Failed to apply ...")``
     and ``AsyncLLM.generate`` wraps that in ``EngineGenerateError``, a server
     error. Only a ``ValueError`` from the processor itself (an image with an
     aspect ratio or size the processor refuses) is treated as client input;
-    a processor bug (``TypeError``, ``IndexError``, ...) stays a server error.
+    a processor bug (``TypeError``, ``IndexError``, ...) or a ``ValueError``
+    caused by running out of memory stays a server error.
     The wrapper text embeds the prompt and media, so the public message is
     fixed and the processor's reason is only logged.
     """
@@ -69,7 +88,9 @@ def processor_input_error(exc: EngineGenerateError) -> InvalidArgument | None:
     ):
         return None
     reason = wrapper.__cause__
-    if not isinstance(reason, ValueError):
+    if not isinstance(reason, ValueError) or _caused_by_resource_error(reason):
         return None
-    logger.warning("Model processor rejected request input: %s", reason)
+    logger.warning(
+        "Request %s: model processor rejected request input: %s", request_id, reason
+    )
     return InvalidArgument(PROCESSOR_REJECTED_INPUT_MESSAGE)
