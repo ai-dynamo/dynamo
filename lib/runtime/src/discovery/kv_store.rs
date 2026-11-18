@@ -696,9 +696,21 @@ impl Discovery for KVStoreDiscovery {
                 .store
                 .get_or_create_bucket(MODEL_IDENTITIES_BUCKET, None)
                 .await?;
-            let outcome = identities
+            let outcome = match identities
                 .insert(&record_key, serde_json::to_vec(&identity)?.into(), 0)
-                .await?;
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    Self::remove_unused_identity_record(
+                        Some((identities, record_key)),
+                        bucket.as_ref(),
+                        &key,
+                    )
+                    .await;
+                    return Err(error.into());
+                }
+            };
             if matches!(outcome, kv::StoreOutcome::Created(_)) {
                 created_identity_record = Some((identities, record_key));
             }
@@ -2105,7 +2117,10 @@ mod tests {
     async fn null_card_unregister_recovers_identity_cleanup_after_card_deletion() {
         for suffix in [None, Some("adapter")] {
             let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
-            let mut spec = named_model_spec("a", "/models/a");
+            let mut spec = named_model_spec(
+                if suffix.is_some() { "adapter" } else { "base" },
+                "/models/a",
+            );
             let DiscoverySpec::Model { model_suffix, .. } = &mut spec else {
                 unreachable!()
             };
@@ -2120,7 +2135,10 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            let mut other_spec = named_model_spec("a", "/models/a");
+            let mut other_spec = named_model_spec(
+                if suffix.is_some() { "base" } else { "adapter" },
+                "/models/a",
+            );
             let DiscoverySpec::Model { model_suffix, .. } = &mut other_spec else {
                 unreachable!()
             };
