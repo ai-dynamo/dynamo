@@ -36,7 +36,10 @@ hf-xet>=1.5.2
 # (added in 1.23.0). This floor is satisfied by the runtime image's own hub
 # version; it is declared so that a future cap fails resolution loudly here
 # instead of silently downgrading the hub underneath diffusers.
-huggingface-hub>=1.23.0
+# The ceiling keeps transformers importable in the TensorRT-LLM test image:
+# this file installs into /opt/dynamo/venv there, which shadows the system
+# site where transformers requires huggingface-hub>=1.5.0,<2.0.
+huggingface-hub>=1.23.0,<2.0
 # Kustomize recipe template renderer
 jinja2==3.1.6
 # For Kubernetes operations in deploy tests
