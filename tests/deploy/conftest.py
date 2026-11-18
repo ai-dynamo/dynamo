@@ -136,9 +136,17 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
     parser.addoption(
         "--slime-gpu-toleration",
-        default="",
+        action="append",
+        default=[],
         help="Taint key, such as nvidia.com/gpu, for the Slime tutorial test's "
-        "GPU Pods to tolerate (operator Exists, effect NoSchedule).",
+        "GPU Pods to tolerate (operator Exists, effect NoSchedule). Repeatable.",
+    )
+    parser.addoption(
+        "--slime-gpu-node-selector",
+        action="append",
+        default=[],
+        help="Node label, as KEY=VALUE, that the Slime tutorial test's GPU Pods "
+        "must match, such as nvidia.com/mig.config=all-disabled. Repeatable.",
     )
 
 

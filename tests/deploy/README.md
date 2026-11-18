@@ -65,8 +65,10 @@ tutorial's checks:
 - Each engine loads all 11 weight updates.
 - The engines' token log-probabilities match the trainer's.
 
-No CI job selects this test. It runs against the current kubectl context and
-needs:
+The nightly CI pipeline runs this test in its `deploy-test-slime` job, with the
+commit's SGLang and frontend images and the KubeRay version that
+`.github/actions/setup-kuberay` pins. The test runs against the current kubectl
+context and needs:
 
 - Three free GPUs, with 16 CPUs and 200 GiB of memory free on the Ray head's
   node.
@@ -98,6 +100,7 @@ temporary directory. Other options:
 | `--slime-pvc` | Mounts an existing ReadWriteMany claim, such as one bound to a static volume, instead of creating one. The test does not delete it. Replaces `--slime-storage-class`. |
 | `--image`, `--frontend-image` | Replace the DGD's images, which default to the tutorial's Dynamo 1.6.1 images. `--image` sets every component, then `--frontend-image` sets the frontend. |
 | `--slime-image` | Replaces the Slime image in the setup Job and the Ray head. |
-| `--slime-gpu-toleration` | Adds a toleration for this taint key to every Pod that requests a GPU, for clusters that do not add one themselves. |
+| `--slime-gpu-toleration` | Adds a toleration for this taint key to every Pod that requests a GPU, for clusters that do not add one themselves. Repeat it for more keys. |
+| `--slime-gpu-node-selector` | Adds this `KEY=VALUE` node label to the node selector of every Pod that requests a GPU. On clusters that split some GPUs into MIG slices, `nvidia.com/mig.config=all-disabled` keeps the trainer on a whole GPU. Repeat it for more labels. |
 
 New operator deployment tests belong in this directory.

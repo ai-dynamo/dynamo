@@ -20,8 +20,10 @@ ones the tutorial tells readers to run, which read logs: the frontend routed
 every rollout request round-robin, both engines loaded every weight update,
 and the engines' token log-probabilities match the trainer's.
 
-No CI job selects this test. Run it by path against a cluster with three free
-GPUs, the Dynamo platform, and KubeRay; tests/deploy/README.md has the command.
+Nightly CI runs this test with the commit's SGLang and frontend images: see
+the deploy-test-slime job in .github/workflows/nightly-ci.yml. To run it
+yourself, pass its path against a cluster with three free GPUs, the Dynamo
+platform, and KubeRay; tests/deploy/README.md has the command.
 """
 
 from __future__ import annotations
@@ -100,10 +102,10 @@ pytestmark = [
     pytest.mark.k8s,
     pytest.mark.deploy,
     pytest.mark.e2e,
-    # No CI job selects this test: every CI selector names a framework marker,
-    # and this test carries none. A framework marker would also make
-    # tests/conftest.py skip the test wherever SGLang is not installed, such as
-    # on the workstation that drives the cluster.
+    # Nightly CI selects this test by its path, not by a marker. It carries
+    # no framework marker, because one would make tests/conftest.py skip it
+    # wherever SGLang is not installed, such as on the CI runner or the
+    # workstation that drives the cluster.
     pytest.mark.nightly,
     # Three GPUs at once: two engines and the trainer. There is no gpu_3.
     pytest.mark.gpu_4,
@@ -114,11 +116,18 @@ pytestmark = [
 
 @pytest.fixture
 def slime_options(request: pytest.FixtureRequest) -> SlimeTutorialOptions:
+    node_selector: dict[str, str] = {}
+    for label in request.config.getoption("--slime-gpu-node-selector"):
+        key, equals, value = label.partition("=")
+        if not (key and equals):
+            pytest.fail(f"--slime-gpu-node-selector takes KEY=VALUE, not {label!r}")
+        node_selector[key] = value
     options = SlimeTutorialOptions(
         storage_class=request.config.getoption("--slime-storage-class"),
         existing_claim=request.config.getoption("--slime-pvc"),
         slime_image=request.config.getoption("--slime-image"),
-        gpu_toleration=request.config.getoption("--slime-gpu-toleration"),
+        gpu_tolerations=tuple(request.config.getoption("--slime-gpu-toleration")),
+        gpu_node_selector=node_selector,
     )
     if options.storage_class and options.existing_claim:
         pytest.fail("Pass --slime-storage-class or --slime-pvc, not both")

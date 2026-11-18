@@ -21,7 +21,7 @@ import shlex
 import time
 from collections import Counter
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -79,14 +79,18 @@ class SlimeTutorialOptions:
         neither creates nor deletes it.
     slime_image: replaces the tutorial's Slime image in the setup Job and the
         Ray head.
-    gpu_toleration: a taint key that every Pod requesting a GPU tolerates, as
+    gpu_tolerations: taint keys that every Pod requesting a GPU tolerates, as
         the tutorial asks for clusters whose GPU nodes are tainted.
+    gpu_node_selector: node labels that every Pod requesting a GPU must match,
+        such as a label of nodes whose GPUs are not split into MIG slices,
+        which the trainer outgrows.
     """
 
     storage_class: str = ""
     existing_claim: str = ""
     slime_image: str = ""
-    gpu_toleration: str = ""
+    gpu_tolerations: tuple[str, ...] = ()
+    gpu_node_selector: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -183,10 +187,12 @@ def _customize(
             for container in containers:
                 if container.get("image") == tutorial_image:
                     container["image"] = options.slime_image
-        if options.gpu_toleration and any(_requests_gpu(c) for c in containers):
+        if not any(_requests_gpu(c) for c in containers):
+            continue
+        for key in options.gpu_tolerations:
             node.setdefault("tolerations", []).append(
                 {
-                    "key": options.gpu_toleration,
+                    "key": key,
                     # Exists, not Equal: on clusters that run the
                     # ExtendedResourceToleration and PodTolerationRestriction
                     # admission plugins, such as AKS, an Equal toleration next
@@ -196,6 +202,8 @@ def _customize(
                     "effect": "NoSchedule",
                 }
             )
+        if options.gpu_node_selector:
+            node.setdefault("nodeSelector", {}).update(options.gpu_node_selector)
 
 
 def _mappings(value: Any) -> Iterator[dict[str, Any]]:

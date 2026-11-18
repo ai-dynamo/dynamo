@@ -7,6 +7,7 @@ and for the wiring of the tutorial's manifests in tests/deploy/slime/."""
 import ast
 import math
 import shlex
+from typing import Any
 from urllib.parse import urlsplit
 
 import pytest
@@ -31,7 +32,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 TUTORIAL_SLIME_IMAGE = "slimerl/slime:nightly-dev-20261027a-cu130"
 
 
-def _load(**options: str) -> SlimeTutorialManifests:
+def _load(**options: Any) -> SlimeTutorialManifests:
     return SlimeTutorialManifests.load(SlimeTutorialOptions(**options))
 
 
@@ -66,6 +67,7 @@ def test_tutorial_manifests_change_only_the_storage_class_by_default() -> None:
     assert _claim_names(manifests) == {TUTORIAL_CLAIM}
     specs = _pod_specs(manifests)
     assert not any("tolerations" in spec for spec in specs.values())
+    assert not any("nodeSelector" in spec for spec in specs.values())
     for owner in ("setup", "ray-head"):
         assert [c["image"] for c in specs[owner]["containers"]] == [
             TUTORIAL_SLIME_IMAGE
@@ -80,11 +82,12 @@ def test_existing_claim_replaces_the_tutorial_claim() -> None:
     assert manifests.creation_order()[0] == [manifests.setup_job]
 
 
-def test_slime_image_and_gpu_toleration_reach_only_their_pods() -> None:
+def test_slime_image_and_gpu_scheduling_reach_only_their_pods() -> None:
     manifests = _load(
         storage_class="rwx-class",
         slime_image="registry.example/slime:dev",
-        gpu_toleration="nvidia.com/gpu",
+        gpu_tolerations=("nvidia.com/gpu", "dedicated"),
+        gpu_node_selector={"nvidia.com/mig.config": "all-disabled"},
     )
 
     specs = _pod_specs(manifests)
@@ -92,10 +95,17 @@ def test_slime_image_and_gpu_toleration_reach_only_their_pods() -> None:
         assert [c["image"] for c in specs[owner]["containers"]] == [
             "registry.example/slime:dev"
         ]
-    toleration = {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}
+    tolerations = [
+        {"key": key, "operator": "Exists", "effect": "NoSchedule"}
+        for key in ("nvidia.com/gpu", "dedicated")
+    ]
     for owner in ("setup", "ray-head", "worker-0", "worker-1"):
-        assert specs[owner]["tolerations"] == [toleration], owner
+        assert specs[owner]["tolerations"] == tolerations, owner
+        assert specs[owner]["nodeSelector"] == {
+            "nvidia.com/mig.config": "all-disabled"
+        }, owner
     assert "tolerations" not in specs["frontend"]
+    assert "nodeSelector" not in specs["frontend"]
     frontend = specs["frontend"]["containers"][0]
     assert frontend["image"] == "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.1"
 

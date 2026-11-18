@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Setup KubeRay'
+description: 'Install the KubeRay operator inside a vCluster at a pinned version, as the RL tutorials do'
+
+inputs:
+  kubeconfig_base64:
+    description: 'Base64-encoded kubeconfig for the vCluster'
+    required: true
+  namespace:
+    description: 'Namespace for the operator'
+    required: false
+    default: kuberay
+  chart_version:
+    description: >-
+      kuberay-operator chart version to install (pinned, never latest). The RL
+      tutorials name the KubeRay version that they were validated with; change
+      both together, so that the nightly run validates the new version.
+    required: false
+    default: 1.7.1
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install the KubeRay operator
+      shell: bash
+      env:
+        KUBECONFIG_B64: ${{ inputs.kubeconfig_base64 }}
+        NAMESPACE: ${{ inputs.namespace }}
+        CHART_VERSION: ${{ inputs.chart_version }}
+      run: |
+        set -euo pipefail
+        echo "::group::Install KubeRay ${CHART_VERSION}"
+        export KUBECONFIG="${RUNNER_TEMP}/kubeconfig-kuberay"
+        printf '%s' "${KUBECONFIG_B64}" | base64 --decode > "${KUBECONFIG}"
+        chmod 600 "${KUBECONFIG}"
+
+        # The command from the Install KubeRay docs page. The chart installs the
+        # Ray CRDs and an operator that watches every namespace. --repo leaves
+        # the runner's Helm repository list alone.
+        helm upgrade --install kuberay-operator kuberay-operator \
+          --repo https://ray-project.github.io/kuberay-helm/ \
+          --version "${CHART_VERSION}" \
+          --namespace "${NAMESPACE}" \
+          --create-namespace \
+          --wait \
+          --timeout 10m
+
+        kubectl wait --for=condition=Established \
+          crd/rayclusters.ray.io crd/rayjobs.ray.io \
+          --timeout=120s
+        kubectl rollout status deployment/kuberay-operator \
+          --namespace "${NAMESPACE}" \
+          --timeout=300s
+
+        # Log the operator image that this run tests.
+        kubectl get pods --namespace "${NAMESPACE}" \
+          --output 'custom-columns=POD:.metadata.name,IMAGE:.spec.containers[*].image,IMAGE_ID:.status.containerStatuses[*].imageID'
+        echo "::endgroup::"
+
+    - name: Debug KubeRay failure
+      if: failure()
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        export KUBECONFIG="${RUNNER_TEMP}/kubeconfig-kuberay"
+        echo "::group::KubeRay status"
+        kubectl --request-timeout=10s get deployment,pods --namespace "${NAMESPACE}" --output wide || true
+        kubectl --request-timeout=10s get events --namespace "${NAMESPACE}" --sort-by=.lastTimestamp || true
+        kubectl --request-timeout=10s describe pods --namespace "${NAMESPACE}" || true
+        kubectl --request-timeout=10s logs deployment/kuberay-operator --namespace "${NAMESPACE}" --tail=200 || true
+        echo "::endgroup::"
