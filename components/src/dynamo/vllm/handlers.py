@@ -113,6 +113,7 @@ from .dp_topology import get_dp_range_for_worker
 from .engine_generate import (
     adapt_engine_generate_request,
     publish_engine_generate_capability,
+    publish_json_multimodal_capability,
 )
 from .engine_monitor import VllmEngineMonitor
 from .lora_state import LoRAState
@@ -2696,6 +2697,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         if self.config.route_to_encoder:
             lora_needs_set.append(WorkerType.Encode)
 
+        publish_json_multimodal_capability(
+            runtime_config,
+            ModelInput.Tokens,
+            lora_worker_type,
+            self.config.enable_multimodal,
+        )
         apply_data_parallel_runtime_config(runtime_config, self.dp_range)
         publish_kv_hint_capabilities(
             runtime_config,
@@ -3366,6 +3373,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         multi_modal_data: Dict[str, Any] | None,
         log_prefix: str = "",
         mm_processor_kwargs: Dict[str, Any] | None = None,
+        custom_data: Dict[str, Any] | None = None,
     ) -> TokensPrompt | EmbedsPrompt:
         """
         Build a prompt from request, handling both prompt_embeds and token_ids.
@@ -3426,6 +3434,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             request,
             multi_modal_data,
             mm_processor_kwargs,
+            custom_data=custom_data,
         )
         return prompt
 
@@ -4082,6 +4091,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             multi_modal_data = None
             mm_processor_kwargs = None
             pre_rendered = None
+            custom_data = None
         else:
             try:
                 prepared_input = await self._multimodal_request_processor.prepare_input(
@@ -4103,6 +4113,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             multi_modal_data = prepared_input.multi_modal_data
             mm_processor_kwargs = prepared_input.mm_processor_kwargs
             pre_rendered = prepared_input.pre_rendered_prompt
+            custom_data = prepared_input.custom_data
 
         # Build prompt from request. `prompt` is either a pre-rendered
         # MultiModalInput dict (fast path) or a TokensPrompt/EmbedsPrompt from
@@ -4127,6 +4138,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request_id,
                     multi_modal_data,
                     mm_processor_kwargs=mm_processor_kwargs,
+                    custom_data=custom_data,
                 )
 
         _apply_nvext_cache_salt(request, prompt)

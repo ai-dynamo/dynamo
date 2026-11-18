@@ -104,6 +104,53 @@ up to your target version. Each entry describes changes introduced in that relea
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
 versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration).
 
+### Unreleased
+
+#### Operator behavior breaking changes
+
+##### LPX units-only deployment contract
+
+**Change:** LPX reconciliation reads `deployment.v1.capnp.bin` with explicit `lpuUnits`.
+The operator no longer reads `manifest.v2.capnp.bin` or legacy placement fields,
+and it no longer generates placement ConfigMaps under `/configs`.
+
+**Affected:** Every existing LPX deployment must be deployed again. Bundles that have no
+`deployment.v1.capnp.bin` or no `lpuUnits`, including bundles that have only
+`manifest.v2.capnp.bin`, must also be recompiled. Bundles that already contain
+`lpuUnits` can be used as they are.
+
+**Action:**
+
+1. Recompile the affected models with a compiler that writes `lpuUnits`, and record the new
+   build IDs.
+2. With the old operator and the old LPU scheduler still installed, delete each DGD that has an
+   LPX component. Wait until its `LpuPipelineRequest` objects and Pods are gone. Rolling overlap
+   across this upgrade is not supported.
+3. Upgrade the operator and the LPU scheduler together. Install a compatible scheduler version with an
+   `LpuPipelineRequest` CRD that has no `allocationMetadata` and `compilerPartitionId`
+   fields. This command prints `0` for a compatible CRD:
+
+   ```bash
+   kubectl get crd lpupipelinerequests.scheduling.lpu.nvidia.com -o json | grep -c -e allocationMetadata -e compilerPartitionId
+   ```
+
+4. Update each DGD manifest: set the new `buildId`, use runtime images that read placement from
+   `lpuUnits`, and remove each `/configs` mount and its volume.
+5. Apply the DGD manifests.
+
+A bundle that has no `lpuUnits` fails reconciliation with a message that contains
+`config.lpuUnits is empty; recompile the model with LPU units`. The operator creates no
+workload for that bundle.
+
+> [!WARNING]
+> Remove `/configs` mounts and their volumes before you create the workloads again. The operator
+> no longer rejects them. A `main` container mount named `config` that has no volume is treated
+> as any other mount without a volume: the operator adds a PersistentVolumeClaim volume with the
+> claim name `config`, and the Pods stay Pending unless that claim exists.
+
+**Existing deployments:** An LPX workload that the old operator created does not continue across
+this upgrade. Step 2 removes it before the upgrade, and step 5 creates it again.
+
 ### v1.7.0
 
 #### Deployment Tool Compatibility
