@@ -2796,7 +2796,6 @@ dependencies = [
  "dynamo-router-protocol",
  "dynamo-session-affinity",
  "dynamo-slot-tracker",
- "fastrand",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",

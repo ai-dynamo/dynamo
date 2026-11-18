@@ -513,7 +513,6 @@ Each rejected attempt is counted once in `dynamo_frontend_router_admission_rejec
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
 | `dynamo_component_kv_cache_events_applied` | counter | `status`, `event_type` | KV cache events applied to the router's radix-tree index, including events for lower tiers such as host-pinned memory and disk. See [Metric-specific labels](metric-labels.mdx#metric-specific-labels). | |
-| `dynamo_component_ckf_mutation_total` | counter | `outcome` | CKF block-level mutation outcomes recorded by the router indexer. Always 0: nothing increments it. No replacement; remove it from dashboards and alerts. | Deprecated |
 | `dynamo_component_kv_cache_event_warnings` | counter | `warning_kind` | Suspicious KV cache events seen by the index, such as duplicate stores. | |
 | `dynamo_component_router_kv_event_source_mismatch_workers` | gauge | `model`, `worker_type`, `target_namespace`, `target_component`, `target_endpoint` | Serving worker DP ranks whose KV event source is missing, ambiguous, or disabled, or that lack an expected recovery target. While the KV event subscription fails, every rank counts. | |
 | `dynamo_component_router_kv_zmq_ingress_sources` | gauge | `state` | KV event sources on the ZMQ event plane, by lifecycle state. | |
@@ -708,7 +707,6 @@ Recorded when live retune is configured (`retune` in the planner configuration),
 | `dynamo_kvindexer_listeners` | gauge | `status` | ZMQ listeners, by status. | |
 | `dynamo_kvrouter_kv_cache_events_applied` | counter | `event_type`, `status` | KV cache events applied to the index. Device tier only. | |
 | `dynamo_kvrouter_kv_cache_event_warnings` | counter | `warning_kind` | Suspicious KV cache events seen by the index. | |
-| `dynamo_kvrouter_ckf_mutation_total` | counter | `outcome` | Block-level index mutation outcomes. Always 0: nothing increments it. No replacement; remove it from dashboards and alerts. | Deprecated |
 
 ## KV State Agent Metrics
 
