@@ -36,6 +36,9 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentV
 		field.NewPath("spec"),
 		dcd.GetDynamoNamespace(),
 	)
+	if operatorOwnedDCDNameExemption(v.ctx, dcd, v.operatorPrincipal) {
+		return allErrs
+	}
 	var oldIngress *nvidiacomv1alpha1.IngressSpec
 	var oldName string
 	if oldDCD != nil {

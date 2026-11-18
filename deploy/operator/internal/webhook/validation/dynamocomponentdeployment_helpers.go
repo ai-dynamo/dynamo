@@ -78,7 +78,7 @@ func hasDynamoComponentDeploymentV1alpha1CompatibilityFields(
 
 // controlledByDynamoGraphDeployment reports whether dcd's controller owner
 // reference names a DynamoGraphDeployment. dcd must not be nil.
-func controlledByDynamoGraphDeployment(dcd *nvidiacomv1beta1.DynamoComponentDeployment) bool {
+func controlledByDynamoGraphDeployment(dcd metav1.Object) bool {
 	controller := metav1.GetControllerOf(dcd)
 	if controller == nil || controller.Kind != nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind {
 		return false
@@ -110,7 +110,7 @@ func standaloneDCDNameViolations(
 
 // operatorOwnedDCDNameExemption applies only to authenticated operator writes for graph children.
 // ctx and dcd must not be nil. An unset principal does not grant an exemption.
-func operatorOwnedDCDNameExemption(ctx context.Context, dcd *nvidiacomv1beta1.DynamoComponentDeployment, operatorPrincipal string) bool {
+func operatorOwnedDCDNameExemption(ctx context.Context, dcd metav1.Object, operatorPrincipal string) bool {
 	if operatorPrincipal == "" || !controlledByDynamoGraphDeployment(dcd) {
 		return false
 	}

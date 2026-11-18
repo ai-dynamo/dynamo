@@ -139,6 +139,14 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			dcd.Spec.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
 			dcd.Spec.Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "worker.example.com", IngressControllerClassName: new("nginx")}
 		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated Ingress backend Service name is invalid: %s; choose a shorter name starting with a letter", "7b", invalidDNS1035Label)}},
+		{name: "authenticated operator can create a legacy child with an invalid alpha Ingress backend", username: admissionOperatorPrincipal,
+			deployment: alphaOwnedDCDWithIngressForAdmission("worker.example.com")},
+		{name: "forged owner does not bypass alpha Ingress backend checks",
+			deployment:      alphaOwnedDCDWithIngressForAdmission("worker.example.com"),
+			wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated Ingress backend Service name is invalid: %s; choose a shorter name starting with a letter", "7b", invalidDNS1035Label)}},
+		{name: "operator child naming exemption still checks the alpha Ingress host", username: admissionOperatorPrincipal,
+			deployment:      alphaOwnedDCDWithIngressForAdmission(""),
+			wantWebhookErrs: []string{"spec.ingress.host: Required value: is required when ingress is enabled"}},
 		{name: "enabling alpha ingress rejects a digit-leading backend Service name", oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 			dcd.Name = "7b"
 			dcd.Spec.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
@@ -2357,6 +2365,16 @@ func admittedBetaDCD(t *testing.T, actual *unstructured.Unstructured) *nvidiacom
 		t.Fatalf("convert admitted DCD to v1beta1: %v", err)
 	}
 	return beta
+}
+
+// alphaOwnedDCDWithIngressForAdmission exercises the child naming exemption independently of other alpha rules.
+func alphaOwnedDCDWithIngressForAdmission(host string) *nvidiacomv1alpha1.DynamoComponentDeployment {
+	return alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+		dcd.Name = "7b"
+		dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
+		dcd.Spec.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		dcd.Spec.Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: host, IngressControllerClassName: new("nginx")}
+	})
 }
 
 func alphaDCDForAdmission(
