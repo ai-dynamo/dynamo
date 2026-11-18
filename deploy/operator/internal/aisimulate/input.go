@@ -67,7 +67,8 @@ func LowerWithUnderlay(spec *v1beta2.NativeSearchInput, staticUnderlay map[strin
 	return input, nil
 }
 
-// InputOverrides returns spec.aisim.inputOverrides as a JSON object, or nil when absent.
+// InputOverrides returns spec.aisim.inputOverrides as a JSON object, expanding exact
+// {"$null":true} objects to native nulls. An absent or null document returns nil.
 func InputOverrides(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 	if spec.AISim == nil || spec.AISim.InputOverrides == nil {
 		return nil, nil
@@ -91,7 +92,7 @@ func InputOverrides(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return nil, fmt.Errorf("spec.aisim.inputOverrides: trailing JSON value")
 	}
-	switch typed := value.(type) {
+	switch typed := expandNullSentinels(value).(type) {
 	case nil:
 		return nil, nil
 	case map[string]any:
@@ -99,6 +100,28 @@ func InputOverrides(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 	default:
 		return nil, fmt.Errorf("spec.aisim.inputOverrides: must be a JSON object, got %T", value)
 	}
+}
+
+// expandNullSentinels replaces exact {"$null":true} objects in decoded JSON; nil is JSON null.
+// It mutates the decoded maps and slices, never the spec.
+func expandNullSentinels(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		if len(typed) == 1 && typed["$null"] == true {
+			return nil
+		}
+
+		// Keep non-marker objects and recursively decode their values.
+		for key, member := range typed {
+			typed[key] = expandNullSentinels(member)
+		}
+	case []any:
+		// Arrays keep their length when a marker becomes a null element.
+		for i, member := range typed {
+			typed[i] = expandNullSentinels(member)
+		}
+	}
+	return value
 }
 
 // Underlay translates the typed spec into the public CoreRecommendationConfig input consumed by

@@ -465,6 +465,60 @@ func TestInputOverridesPreserveLargeIntegers(t *testing.T) {
 	}
 }
 
+func TestLowerNullSentinelsMatchNativeNulls(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		overrides string
+	}{
+		{name: "inactive workers", overrides: `{"engine":{"mode":"aggregated","workers":{"prefill":null,"decode":null}}}`},
+		{name: "typed field", overrides: `{"traffic":{"source":{"input_tokens":null}}}`},
+		{name: "derived default", overrides: `{"traffic":{"stop":{"requests":null,"requests_per_load_unit":10}}}`},
+		{name: "complete section", overrides: `{"optimizer":null}`},
+		{name: "absent field", overrides: `{"optimizer":{"missing":null,"seed":9007199254740993}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Compare the transported sentinel with the existing native-null merge behavior")
+			sentinel := strings.ReplaceAll(tc.overrides, "null", `{"$null":true}`)
+			spec := withInputOverrides(defaultedSpec(), sentinel)
+			got := encode(t, lower(t, spec))
+			want := encode(t, lower(t, withInputOverrides(defaultedSpec(), tc.overrides)))
+			if got != want {
+				t.Fatalf("sentinel input = %s, want native-null input %s", got, want)
+			}
+			if string(spec.AISim.InputOverrides.Raw) != sentinel {
+				t.Fatal("lowering changed the stored override document")
+			}
+		})
+	}
+}
+
+func TestInputOverridesNullSentinelValues(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "whole document", raw: `{"$null":true}`, want: `null`},
+		{name: "array values", raw: `{"values":[{"$null":true},{"nested":{"$null":true}},null]}`, want: `{"values":[null,{"nested":null},null]}`},
+		{name: "false is ordinary data", raw: `{"value":{"$null":false}}`, want: `{"value":{"$null":false}}`},
+		{name: "number is ordinary data", raw: `{"value":{"$null":1}}`, want: `{"value":{"$null":1}}`},
+		{name: "string is ordinary data", raw: `{"value":{"$null":"true"}}`, want: `{"value":{"$null":"true"}}`},
+		{name: "extra keys are ordinary data", raw: `{"value":{"$null":true,"other":1}}`, want: `{"value":{"$null":true,"other":1}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Interpret only the exact sentinel and retain array replacement values")
+			spec := withInputOverrides(defaultedSpec(), tc.raw)
+			got, err := InputOverrides(&spec.NativeSearchInput)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if encoded := encode(t, got); encoded != tc.want {
+				t.Fatalf("input overrides = %s, want %s", encoded, tc.want)
+			}
+		})
+	}
+}
+
 func TestHasPath(t *testing.T) {
 	overrides := map[string]any{
 		"optimization": map[string]any{"target": nil},
