@@ -12,9 +12,9 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from aisimulate_core import _native
-from aisimulate_core.datasets import Identity, configuration_id
-from aisimulate_core.sdk import engine
+from aisim_core import _native
+from aisim_core.datasets import Identity, configuration_id
+from aisim_core.sdk import engine
 
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,

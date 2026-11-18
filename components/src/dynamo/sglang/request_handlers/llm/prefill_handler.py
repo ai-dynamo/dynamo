@@ -12,7 +12,11 @@ from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend.health_check import is_probe
-from dynamo.sglang._compat import cache_salt_kwargs, require_reasoning_kwargs
+from dynamo.sglang._compat import (
+    cache_salt_kwargs,
+    require_reasoning_kwargs,
+    routed_dp_rank_kwargs,
+)
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.agent_session import agent_session_kwargs
 from dynamo.sglang.args import Config
@@ -288,7 +292,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 bootstrap_room=bootstrap_room,
                 external_trace_header=trace_header,
                 rid=sglang_request_id,
-                data_parallel_rank=dp_rank,
+                **routed_dp_rank_kwargs(self.engine, dp_rank),
                 lora_path=lora_path,
                 **priority_kwargs,
                 **agent_session_kwargs(self.engine, inner_request),
