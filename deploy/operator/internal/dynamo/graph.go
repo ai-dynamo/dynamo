@@ -1747,13 +1747,25 @@ func generateBasePodSpec(
 	)
 }
 
-// generateBasePodSpecWithDefaultsAndOwnership requires non-nil component and operatorConfig.
-//
-//nolint:gocyclo
-func generateBasePodSpecWithDefaultsAndOwnership(
+// preparedMainContainer is the launch-preparation result that Pod rendering
+// continues from.
+type preparedMainContainer struct {
+	container             corev1.Container
+	componentContext      ComponentContext
+	annotations           map[string]string
+	multinodeDeployer     MultinodeDeployer
+	backend               Backend
+	frontendSidecarMounts []corev1.VolumeMount
+}
+
+// prepareMainContainer builds the main container's final launch: component
+// defaults, the authored main container, and backend launch rewrites such as
+// the vLLM Ray shell wrapper. Pod rendering and admission both use it so they
+// cannot disagree about the command a Pod runs.
+// component and operatorConfig must be non-nil.
+func prepareMainContainer(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	backendFramework BackendFramework,
-	secretsRetriever SecretsRetriever,
 	parentGraphDeploymentName string,
 	namespace string,
 	role Role,
@@ -1766,7 +1778,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	roleLaunchOwnership roleLaunchOwnership,
 	nativeSidecar bool,
 	containerGPUs ContainerGPUCount,
-) (*corev1.PodSpec, error) {
+) (*preparedMainContainer, error) {
 	// Use the selected runtime sidecar's image, or main in combined-runtime mode.
 	// A compute-only role's engine image does not describe a Dynamo version.
 	annotations := GetPodTemplateAnnotations(component)
@@ -1864,6 +1876,62 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	if backendFramework == BackendFrameworkVLLM && component.CompilationCache != nil {
 		container.Env = append(container.Env, corev1.EnvVar{Name: "VLLM_CACHE_ROOT", Value: component.CompilationCache.MountPath})
 	}
+
+	return &preparedMainContainer{
+		container:             container,
+		componentContext:      componentContext,
+		annotations:           annotations,
+		multinodeDeployer:     multinodeDeployer,
+		backend:               backend,
+		frontendSidecarMounts: frontendSidecarMounts,
+	}, nil
+}
+
+// generateBasePodSpecWithDefaultsAndOwnership requires non-nil component and operatorConfig.
+//
+//nolint:gocyclo
+func generateBasePodSpecWithDefaultsAndOwnership(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	backendFramework BackendFramework,
+	secretsRetriever SecretsRetriever,
+	parentGraphDeploymentName string,
+	namespace string,
+	role Role,
+	numberOfNodes int32,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
+	serviceName string,
+	deployerOverride MultinodeDeployer,
+	componentDefaults ComponentDefaults,
+	roleLaunchOwnership roleLaunchOwnership,
+	nativeSidecar bool,
+	containerGPUs ContainerGPUCount,
+) (*corev1.PodSpec, error) {
+	prepared, err := prepareMainContainer(
+		component,
+		backendFramework,
+		parentGraphDeploymentName,
+		namespace,
+		role,
+		numberOfNodes,
+		operatorConfig,
+		multinodeDeploymentType,
+		serviceName,
+		deployerOverride,
+		componentDefaults,
+		roleLaunchOwnership,
+		nativeSidecar,
+		containerGPUs,
+	)
+	if err != nil {
+		return nil, err
+	}
+	container := prepared.container
+	componentContext := prepared.componentContext
+	annotations := prepared.annotations
+	multinodeDeployer := prepared.multinodeDeployer
+	backend := prepared.backend
+	frontendSidecarMounts := prepared.frontendSidecarMounts
 
 	// get base podspec from component
 	podSpec, err := componentDefaults.GetBasePodSpec(componentContext)
@@ -2355,6 +2423,100 @@ func generatePodSpecForComponent(
 	return podSpec, nil
 }
 
+// RoleMainContainer is the main container prepared for one engine Pod role.
+type RoleMainContainer struct {
+	Role      Role
+	Container corev1.Container
+}
+
+// PrepareDGDComponentMainContainers prepares the main container of every
+// engine Pod role that a DGD component renders, through the same launch
+// preparation as Pod rendering, without building the rest of the Pod.
+// Admission uses it to check the launch that a restore destination runs.
+// multinodeDeploymentType selects the workload provider's input sequence:
+// Grove renders each role from the DGD component, while the component and
+// DisaggregatedSet providers, which use LWS, render from the normalized
+// component that DCD generation produces.
+// ctx, reader, dgd, component, and operatorConfig must be non-nil. reader
+// resolves DRA-backed GPU counts in dgd.Namespace.
+func PrepareDGDComponentMainContainers(
+	ctx context.Context,
+	reader ctrlclient.Reader,
+	dgd *v1beta1.DynamoGraphDeployment,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
+) ([]RoleMainContainer, error) {
+	backendFramework, err := getBackendFrameworkFromComponent(component, dgd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine backend framework for component %s: %w", component.ComponentName, err)
+	}
+	numberOfNodes := component.GetNumberOfNodes()
+	grove := multinodeDeploymentType == commonconsts.MultinodeDeploymentTypeGrove
+
+	// Non-Grove providers apply DGD defaults once, before selecting a role.
+	source := component
+	if !grove {
+		source, err = normalizeDGDComponent(dgd, component.ComponentName, component, nil, nil, RollingUpdateContext{})
+		if err != nil {
+			return nil, fmt.Errorf("failed to normalize component %s: %w", component.ComponentName, err)
+		}
+	}
+
+	// Engine roles only: inter-pod GMS weight servers have no engine launch.
+	var prepared []RoleMainContainer
+	for _, serviceRole := range expandRolesForComponent(component.ComponentName, component.Replicas, numberOfNodes, component) {
+		role := serviceRole.Role
+		if role == RoleGMS || slices.ContainsFunc(prepared, func(p RoleMainContainer) bool { return p.Role == role }) {
+			continue
+		}
+
+		// Select the role's component as the provider's renderer does.
+		var effective *v1beta1.DynamoComponentDeploymentSharedSpec
+		var ownership roleLaunchOwnership
+		var nativeSidecar bool
+		if grove {
+			effective, ownership, nativeSidecar, err = lowerGroveComponentForRole(source, dgd, role)
+		} else {
+			effective, ownership, nativeSidecar, err = lowerComponentForRole(source, role)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve component for role %s: %w", role, err)
+		}
+
+		// Resolve GPUs from the role's template before Grove applies DGD defaults.
+		gpuSource := effective.DeepCopy()
+		containerGPUs := sync.OnceValues(func() (int64, error) {
+			return ResolveContainerGPUs(ctx, reader, dgd.Namespace, gpuSource)
+		})
+		if grove {
+			applyDGDTemplateDefaults(effective, dgd, nil, nativeSidecar)
+		}
+
+		main, err := prepareMainContainer(
+			effective,
+			backendFramework,
+			dgd.Name,
+			dgd.Namespace,
+			role,
+			numberOfNodes,
+			operatorConfig,
+			multinodeDeploymentType,
+			component.ComponentName,
+			nil,
+			ComponentDefaultsFactory(string(effective.ComponentType)),
+			ownership,
+			nativeSidecar,
+			containerGPUs,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to prepare main container for role %s: %w", role, err)
+		}
+		prepared = append(prepared, RoleMainContainer{Role: role, Container: main.container})
+	}
+	return prepared, nil
+}
+
 // ResolveContainerGPUs returns the GPU count requested by the main container,
 // whether expressed as scalar resources or DRA ResourceClaims.
 func ResolveContainerGPUs(
@@ -2674,6 +2836,23 @@ type cliqueParams struct {
 	containerGPUs               ContainerGPUCount
 }
 
+// lowerGroveComponentForRole selects the component a Grove role renders from
+// and applies DGD metadata annotations before the remaining DGD defaults, so
+// they take precedence over spec.annotations on the Grove path.
+// component and dgd must not be nil. The returned component is an independent copy.
+func lowerGroveComponentForRole(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	dgd *v1beta1.DynamoGraphDeployment,
+	role Role,
+) (*v1beta1.DynamoComponentDeploymentSharedSpec, roleLaunchOwnership, bool, error) {
+	effective, ownership, nativeSidecar, err := lowerComponentForRole(component, role)
+	if err != nil {
+		return nil, ownership, nativeSidecar, err
+	}
+	propagateDGDAnnotations(dgd.GetAnnotations(), effective)
+	return effective, ownership, nativeSidecar, nil
+}
+
 // buildCliqueForRole generates a single PodCliqueTemplateSpec for the given role,
 // injecting labels, annotations, checkpoint config, and scheduler settings.
 func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, error) {
@@ -2684,12 +2863,11 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 			templateRole = RoleLeader
 		}
 	}
-	effectiveComponent, roleLaunchOwnership, nativeSidecar, err := lowerComponentForRole(p.component, templateRole)
+	effectiveComponent, roleLaunchOwnership, nativeSidecar, err := lowerGroveComponentForRole(p.component, p.dynamoDeployment, templateRole)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve component for role %s: %w", p.r.Name, err)
 	}
 	p.component = effectiveComponent
-	propagateDGDAnnotations(p.dynamoDeployment.GetAnnotations(), p.component)
 	podTemplate := ensurePodTemplate(p.component)
 	podTemplate.Labels[commonconsts.KubeLabelDynamoNamespace] = GetDynamoNamespace(p.dynamoDeployment, p.component)
 	if p.discoveryBackend != "" {

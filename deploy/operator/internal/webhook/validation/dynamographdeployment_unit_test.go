@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -109,13 +110,14 @@ type fakeManager struct {
 }
 
 func (m *fakeManager) GetClient() client.Client             { return m.client }
+func (m *fakeManager) GetAPIReader() client.Reader          { return m.client }
 func (m *fakeManager) GetConfig() *rest.Config              { return m.config }
 func (m *fakeManager) GetScheme() *runtime.Scheme           { return m.scheme }
 func (m *fakeManager) GetWebhookServer() ctrlwebhook.Server { return m.webhookServer }
 
 func newDynamoGraphDeploymentTestValidator(t *testing.T) *DynamoGraphDeploymentValidator {
 	t.Helper()
-	return NewDynamoGraphDeploymentValidator(newGroveTopologyTestManager(t))
+	return NewDynamoGraphDeploymentValidator(newGroveTopologyTestManager(t), &configv1alpha1.OperatorConfiguration{})
 }
 
 func newGroveTopologyTestManager(t *testing.T) ctrl.Manager {

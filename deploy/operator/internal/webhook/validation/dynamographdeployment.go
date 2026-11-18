@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -45,13 +46,15 @@ import (
 
 // DynamoGraphDeploymentValidator validates v1beta1 DynamoGraphDeployment resources.
 type DynamoGraphDeploymentValidator struct {
-	mgr ctrl.Manager
+	mgr            ctrl.Manager
+	operatorConfig *configv1alpha1.OperatorConfiguration
 }
 
 // NewDynamoGraphDeploymentValidator creates a validator for v1beta1 DynamoGraphDeployment.
-// mgr must not be nil.
-func NewDynamoGraphDeploymentValidator(mgr ctrl.Manager) *DynamoGraphDeploymentValidator {
-	return &DynamoGraphDeploymentValidator{mgr: mgr}
+// mgr and operatorConfig must not be nil; operatorConfig renders the restore
+// launch of checkpoint-enabled components.
+func NewDynamoGraphDeploymentValidator(mgr ctrl.Manager, operatorConfig *configv1alpha1.OperatorConfiguration) *DynamoGraphDeploymentValidator {
+	return &DynamoGraphDeploymentValidator{mgr: mgr, operatorConfig: operatorConfig}
 }
 
 // dynamoGraphDeploymentValidation carries DGD-specific request state.
@@ -71,6 +74,8 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 	oldComponents           map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 	groveUpdateStrategy     grovev1alpha1.UpdateStrategyType
 	oldGroveUpdateStrategy  grovev1alpha1.UpdateStrategyType
+	dgd                     *nvidiacomv1beta1.DynamoGraphDeployment
+	oldDGD                  *nvidiacomv1beta1.DynamoGraphDeployment
 }
 
 // Validate performs stateless validation on the v1beta1 DynamoGraphDeployment.
@@ -93,6 +98,7 @@ func (v *DynamoGraphDeploymentValidator) validate(
 	validation := &dynamoGraphDeploymentValidation{
 		ctx:                   ctx,
 		mgr:                   v.mgr,
+		operatorConfig:        v.operatorConfig,
 		runtimeVersionSource:  runtimeVersionSource,
 		ratchetRuntimeVersion: ratchetRuntimeVersion,
 	}
@@ -121,6 +127,7 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 	validation := &dynamoGraphDeploymentValidation{
 		ctx:                   ctx,
 		mgr:                   v.mgr,
+		operatorConfig:        v.operatorConfig,
 		runtimeVersionSource:  runtimeVersionSource,
 		ratchetRuntimeVersion: true,
 		userInfo:              userInfo,
@@ -172,6 +179,7 @@ func (v *DynamoGraphDeploymentValidator) ValidateTerminatingUpdate(
 	validation := &dynamoGraphDeploymentValidation{
 		ctx:                  ctx,
 		mgr:                  v.mgr,
+		operatorConfig:       v.operatorConfig,
 		runtimeVersionSource: runtimeVersionSourceV1Beta1,
 		userInfo:             userInfo,
 		operatorPrincipal:    operatorPrincipal,
@@ -229,6 +237,8 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		oldComponents:           oldComponents,
 		groveUpdateStrategy:     k8sptr.Deref(updateStrategy, grovev1alpha1.RollingRecreateStrategy),
 		oldGroveUpdateStrategy:  oldStrategy,
+		dgd:                     dgd,
+		oldDGD:                  oldDGD,
 	}
 	if grovePathway {
 		specOpts.pcsName = dynamo.PCSNameForDGD(
@@ -461,6 +471,8 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				oldComponent:                      opts.oldComponents[component.ComponentName],
 				groveUpdateStrategy:               opts.groveUpdateStrategy,
 				groveStrategyChanged:              opts.oldGroveUpdateStrategy != opts.groveUpdateStrategy,
+				restoreLaunchDGD:                  opts.dgd,
+				oldRestoreLaunchDGD:               opts.oldDGD,
 			},
 		)...)
 	}

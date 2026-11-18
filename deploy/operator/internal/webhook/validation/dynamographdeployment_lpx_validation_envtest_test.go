@@ -408,6 +408,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			name: "LPX admits an ordinary component checkpoint",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := *betaWorkerComponent(betaDGDForAdmission(nil))
+				worker.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
 					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
 				}

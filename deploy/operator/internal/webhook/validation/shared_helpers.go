@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -39,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -501,4 +503,128 @@ func inputJSONPointer(location []string) string {
 		tokens[i] = escape.Replace(token)
 	}
 	return "/" + strings.Join(tokens, "/")
+}
+
+// restoreLaunch is the rendered launch of one restore destination container.
+// The destination is identified by role and container name, never by list
+// position, so an update that reorders containers keeps its identity.
+type restoreLaunch struct {
+	role      dynamo.Role
+	container corev1.Container
+	authored  *corev1.Container
+}
+
+// renderRestoreLaunches returns the launch that each restore destination of a
+// checkpoint-enabled DGD component runs, in role order. Main containers come
+// from the production launch preparation; intra-pod failover engines are
+// clones of main, and any other target container keeps its authored launch.
+// ctx, reader, operatorConfig, dgd, and component must be non-nil.
+func renderRestoreLaunches(
+	ctx context.Context,
+	reader client.Reader,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	grovePathway bool,
+) ([]restoreLaunch, error) {
+	// Restore uses the same destination rule as the operator's candidate metadata.
+	target := consts.MainContainerName
+	if name := dynamo.GetCheckpoint(component).TargetContainerName; name != "" && !dynamo.IsIntraPodFailoverEnabled(component) {
+		target = name
+	}
+
+	// Render with the multinode deployer of the DGD's workload provider.
+	deploymentType := consts.MultinodeDeploymentTypeLWS
+	if grovePathway {
+		deploymentType = consts.MultinodeDeploymentTypeGrove
+	}
+	mains, err := dynamo.PrepareDGDComponentMainContainers(ctx, reader, dgd, component, operatorConfig, deploymentType)
+	if err != nil {
+		return nil, err
+	}
+
+	launches := make([]restoreLaunch, 0, len(mains))
+	for _, main := range mains {
+		effective, err := dynamo.EffectiveComponentForRole(component, main.Role)
+		if err != nil {
+			return nil, err
+		}
+		var authored *corev1.Container
+		if effective.PodTemplate != nil {
+			if i := slices.IndexFunc(effective.PodTemplate.Spec.Containers, func(c corev1.Container) bool { return c.Name == target }); i >= 0 {
+				authored = &effective.PodTemplate.Spec.Containers[i]
+			}
+		}
+
+		// Only main is rewritten by the operator; another target must exist as authored.
+		launch := main.Container
+		if target != consts.MainContainerName {
+			if authored == nil {
+				return nil, fmt.Errorf("restore destination container %q not found in role %s", target, main.Role)
+			}
+			launch = *authored
+		}
+		launches = append(launches, restoreLaunch{
+			role:      main.Role,
+			container: corev1.Container{Name: target, Command: launch.Command, Args: launch.Args},
+			authored:  authored,
+		})
+	}
+	return launches, nil
+}
+
+// hasUnchangedRestoreLaunch reports whether old holds the same destination with
+// an identical rendered command and args.
+func hasUnchangedRestoreLaunch(old []restoreLaunch, launch restoreLaunch) bool {
+	return slices.ContainsFunc(old, func(o restoreLaunch) bool {
+		return o.role == launch.role &&
+			o.container.Name == launch.container.Name &&
+			slices.Equal(o.container.Command, launch.container.Command) &&
+			slices.Equal(o.container.Args, launch.container.Args)
+	})
+}
+
+// restoreLaunchPath returns the authored field that owns a restore destination's
+// launch: the target container's command in the role's PodTemplate, or the
+// PodTemplate itself when the container is not authored. fldPath is the component path.
+func restoreLaunchPath(
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	launch restoreLaunch,
+	fldPath *field.Path,
+) *field.Path {
+	templatePath := fldPath.Child("podTemplate")
+	template := component.PodTemplate
+	if dynamo.HasRolePodTemplates(component) {
+		if i := slices.IndexFunc(component.Roles, func(r nvidiacomv1beta1.ComponentRoleSpec) bool { return r.Name == string(launch.role) }); i >= 0 {
+			templatePath = fldPath.Child("roles").Index(i).Child("podTemplate")
+			template = component.Roles[i].PodTemplate
+		}
+	}
+	if template == nil {
+		return templatePath
+	}
+	i := slices.IndexFunc(template.Spec.Containers, func(c corev1.Container) bool { return c.Name == launch.container.Name })
+	if i < 0 {
+		return templatePath
+	}
+	return templatePath.Child("spec", "containers").Index(i).Child("command")
+}
+
+// unsupportedRestoreLaunchDetail describes a rejected restore launch in the
+// restore Pod webhook's terms, and says when the operator rewrote it.
+func unsupportedRestoreLaunchDetail(launch restoreLaunch) string {
+	detail := fmt.Sprintf(
+		"checkpoint restore destination container %q (role %s) must directly invoke python -m <module>, "+
+			"and the module must call maybe_run_restore_standby_mode(); rendered command=%q",
+		launch.container.Name,
+		launch.role,
+		launch.container.Command,
+	)
+	switch {
+	case launch.authored == nil || len(launch.authored.Command) == 0:
+		detail += "; no command is authored, so this is the operator's default launch"
+	case !slices.Equal(launch.authored.Command, launch.container.Command):
+		detail += "; the operator rewrote the authored command into this form"
+	}
+	return detail
 }
