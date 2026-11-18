@@ -104,6 +104,9 @@ func (v *DynamoGraphDeploymentValidator) validate(
 	}
 
 	allErrs := validation.validateDynamoGraphDeployment(deployment, oldDeployment)
+	if err := restoreReadInfrastructureError(validation.restoreReader); err != nil {
+		return validation.warnings, err
+	}
 	alpha, err := alphaDynamoGraphDeploymentForValidation(deployment)
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
@@ -135,6 +138,9 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 	}
 
 	allErrs := validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD)
+	if err := restoreReadInfrastructureError(validation.restoreReader); err != nil {
+		return validation.warnings, err
+	}
 	if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		newAlpha, err := alphaDynamoGraphDeploymentForValidation(newDGD)
 		if err != nil {

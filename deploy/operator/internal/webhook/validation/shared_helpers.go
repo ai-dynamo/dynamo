@@ -22,9 +22,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"net"
 	"reflect"
 	"slices"
 	"strings"
+	"syscall"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -39,6 +42,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6/kind"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
@@ -629,7 +633,6 @@ func unsupportedRestoreLaunchDetail(launch restoreLaunch) string {
 	return detail
 }
 
-// restoreLaunchReader returns the request's API reader that memoizes Gets, creating it on first use.
 func (v *sharedValidation) restoreLaunchReader() *memoReader {
 	if v.restoreReader == nil {
 		v.restoreReader = newMemoReader(v.mgr.GetAPIReader())
@@ -637,7 +640,6 @@ func (v *sharedValidation) restoreLaunchReader() *memoReader {
 	return v.restoreReader
 }
 
-// renderErrorExplained reports whether an error already in allErrs states the cause of a render failure.
 func renderErrorExplained(allErrs field.ErrorList, renderErr error) bool {
 	return slices.ContainsFunc(allErrs, func(e *field.Error) bool {
 		return e.Detail != "" && strings.Contains(renderErr.Error(), e.Detail)
@@ -679,6 +681,31 @@ type memoResult struct {
 
 func newMemoReader(reader client.Reader) *memoReader {
 	return &memoReader{Reader: reader, gets: map[memoKey]memoResult{}}
+}
+
+func restoreReadInfrastructureError(reader *memoReader) error {
+	if reader == nil {
+		return nil
+	}
+	keys := slices.SortedFunc(maps.Keys(reader.gets), func(a, b memoKey) int {
+		return cmp.Or(cmp.Compare(a.kind, b.kind), cmp.Compare(a.key.Namespace, b.key.Namespace), cmp.Compare(a.key.Name, b.key.Name))
+	})
+	for _, key := range keys {
+		err := reader.gets[key].err
+		if isRestoreReadInfrastructureError(err) {
+			return k8serrors.NewInternalError(fmt.Errorf("cannot read a restore launch dependency: %w", err))
+		}
+	}
+	return nil
+}
+
+func isRestoreReadInfrastructureError(err error) bool {
+	var networkError net.Error
+	return errors.As(err, &networkError) ||
+		errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) || errors.Is(err, syscall.ENOMEM) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		k8serrors.IsInternalError(err) || k8serrors.IsServiceUnavailable(err) ||
+		k8serrors.IsTimeout(err) || k8serrors.IsServerTimeout(err) || k8serrors.IsTooManyRequests(err)
 }
 
 // Get implements client.Reader.

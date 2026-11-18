@@ -26,6 +26,7 @@ import (
 	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	resourcev1 "k8s.io/api/resource/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -68,7 +69,11 @@ var (
 	admissionReader client.Reader
 
 	// Hardware that the v1beta2 defaulter discovers; tests set it before each case.
-	admissionHardware = &fakeHardwareDiscoverer{}
+	admissionHardware         = &fakeHardwareDiscoverer{}
+	admissionClaimReadFailure struct {
+		mu  sync.RWMutex
+		err error
+	}
 
 	// Admission cases must remain sequential because they share this gate and a cluster-scoped topology fixture.
 	admissionGate = &mutableFeatureGate{}
@@ -90,7 +95,7 @@ func TestMain(m *testing.M) {
 
 func setupAdmissionWebhooks(mgr ctrl.Manager, opts operatorenv.WebhookSetupOptions) error {
 	admissionReader = mgr.GetClient()
-	return webhooksetup.Setup(mgr, webhooksetup.Options{
+	return webhooksetup.Setup(&admissionReadManager{Manager: mgr}, webhooksetup.Options{
 		Config:            opts.OperatorConfig,
 		RuntimeConfig:     opts.RuntimeConfig,
 		OperatorVersion:   opts.OperatorVersion,
@@ -100,6 +105,32 @@ func setupAdmissionWebhooks(mgr ctrl.Manager, opts operatorenv.WebhookSetupOptio
 			Hardware: admissionHardware,
 		},
 	})
+}
+
+// Inject read failures while requests still pass through the API server and production handlers.
+// Exhausting the webhook process's sockets would disrupt every admission case in this suite.
+type admissionReadManager struct {
+	ctrl.Manager
+}
+
+func (m *admissionReadManager) GetAPIReader() client.Reader {
+	return &admissionClaimReader{Reader: m.Manager.GetAPIReader()}
+}
+
+type admissionClaimReader struct {
+	client.Reader
+}
+
+func (r *admissionClaimReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, claim := obj.(*resourcev1.ResourceClaimTemplate); claim {
+		admissionClaimReadFailure.mu.RLock()
+		err := admissionClaimReadFailure.err
+		admissionClaimReadFailure.mu.RUnlock()
+		if err != nil {
+			return err
+		}
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
 }
 
 // fakeHardwareDiscoverer stands in for the cluster's GPU discovery. Cases run sequentially,
@@ -157,6 +188,7 @@ type admissionTestCase struct {
 	statusOnly         bool
 	terminating        bool
 	username           string
+	claimReadError     error
 
 	// beforeUpdate runs after the old state is seeded and before the update is submitted. Use
 	// it to change what the webhooks see between the two writes, such as hardware discovery.
@@ -165,6 +197,7 @@ type admissionTestCase struct {
 	wantSchemaError   string
 	wantCELError      string
 	wantStatusError   string
+	wantStatusCode    int32
 	wantAdmissionErrs []string
 	wantWebhookErrors []string
 	wantWarnings      []string
@@ -176,6 +209,14 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 
 	t.Log("Create an isolated namespace in the shared operator environment")
 	env := admissionEnv.ForTest(t)
+	admissionClaimReadFailure.mu.Lock()
+	admissionClaimReadFailure.err = test.claimReadError
+	admissionClaimReadFailure.mu.Unlock()
+	t.Cleanup(func() {
+		admissionClaimReadFailure.mu.Lock()
+		admissionClaimReadFailure.err = nil
+		admissionClaimReadFailure.mu.Unlock()
+	})
 	warnings := &warningRecorder{}
 	resourceClient := newAdmissionResourceClient(t, env, test.object, test.username, warnings)
 
@@ -239,7 +280,7 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 			originalNamespace,
 			env.Namespace(),
 		)[0]
-		assertAdmissionStatusError(t, err, wantStatusError)
+		assertAdmissionStatusError(t, err, wantStatusError, test.wantStatusCode)
 	} else {
 		assertAdmissionErrors(t, err, wantErrors, test.notWantError)
 	}
@@ -610,7 +651,7 @@ func expectedAdmissionErrors(t *testing.T, test admissionTestCase) []string {
 	return test.wantWebhookErrors
 }
 
-func assertAdmissionStatusError(t *testing.T, err error, want string) {
+func assertAdmissionStatusError(t *testing.T, err error, want string, wantCode int32) {
 	t.Helper()
 	if err == nil {
 		t.Fatalf("admission error = nil, want status error containing %q", want)
@@ -621,6 +662,9 @@ func assertAdmissionStatusError(t *testing.T, err error, want string) {
 	}
 	if message := statusError.Status().Message; !strings.Contains(message, want) {
 		t.Fatalf("admission status error = %q, want substring %q", message, want)
+	}
+	if wantCode != 0 && statusError.Status().Code != wantCode {
+		t.Fatalf("admission status code = %d, want %d", statusError.Status().Code, wantCode)
 	}
 }
 

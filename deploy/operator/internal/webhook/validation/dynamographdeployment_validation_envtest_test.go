@@ -20,7 +20,9 @@ package validation_test
 import (
 	"fmt"
 	"maps"
+	"net"
 	"strings"
+	"syscall"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -29,11 +31,13 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
@@ -60,9 +64,12 @@ type dgdAdmissionTestCase struct {
 	seedWithoutWebhook bool                             // seeds oldDeployment without validating it
 	terminating        bool                             // deletes the seeded object so the update runs while it terminates
 	username           string                           // supplies the admission request identity
+	claimReadError     error
 
 	wantSchemaErr          string
 	wantCELErr             string
+	wantStatusError        string
+	wantStatusCode         int32
 	wantAdmissionErrs      []string
 	wantWebhookErrs        []string
 	wantWarnings           []string
@@ -81,6 +88,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	const unrelatedInitContainerName = "setup"
 	const customSidecarImage = "runtime:custom"
 	const trtllmBackendFramework = "trtllm"
+	fileLimitError := &net.OpError{Op: "dial", Net: "tcp", Err: fmt.Errorf("socket: %w", syscall.EMFILE)}
+	memoryError := &net.OpError{Op: "dial", Net: "tcp", Err: fmt.Errorf("socket: %w", syscall.ENOMEM)}
 
 	longDGDName := "test-graph-" + strings.Repeat("x", 50)
 	boundaryComponentName := "w" + strings.Repeat("x", 36)
@@ -2249,6 +2258,47 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: checkpointWorkerDGDForAdmission([]string{"/bin/sh", "-c"}, []string{"python3 -m dynamo.vllm"}, func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental.Checkpoint.Enabled = false
 			}),
+		},
+
+		// API read failures are server errors, including when identical old/new render inputs would ratchet an input error.
+		{
+			name:            "restore admission reports socket file exhaustion as a server error",
+			deployment:      checkpointVLLMDRAForAdmission(),
+			claimReadError:  fileLimitError,
+			wantStatusError: "cannot read a restore launch dependency",
+			wantStatusCode:  500,
+		},
+		{
+			name:               "restore update does not waive socket file exhaustion",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointVLLMDRAForAdmission(),
+			deployment:         checkpointVLLMDRAForAdmission(),
+			claimReadError:     fileLimitError,
+			wantStatusError:    "cannot read a restore launch dependency",
+			wantStatusCode:     500,
+		},
+		{
+			name:            "restore admission reports socket memory exhaustion as a server error",
+			deployment:      checkpointVLLMDRAForAdmission(),
+			claimReadError:  memoryError,
+			wantStatusError: "cannot read a restore launch dependency",
+			wantStatusCode:  500,
+		},
+		{
+			name:               "restore update does not waive socket memory exhaustion",
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointVLLMDRAForAdmission(),
+			deployment:         checkpointVLLMDRAForAdmission(),
+			claimReadError:     memoryError,
+			wantStatusError:    "cannot read a restore launch dependency",
+			wantStatusCode:     500,
+		},
+		{
+			name:            "restore admission still reports a missing GPU template as an input error",
+			deployment:      checkpointVLLMDRAForAdmission(),
+			claimReadError:  apierrors.NewNotFound(schema.GroupResource{Group: "resource.k8s.io", Resource: "resourceclaimtemplates"}, "restore-gpu-template"),
+			wantStatusError: "spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch",
+			wantStatusCode:  422,
 		},
 
 		// Repair one role without losing another role's unchanged legacy launch.
@@ -4576,8 +4626,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				seedWithoutWebhook: tt.seedWithoutWebhook,
 				terminating:        tt.terminating,
 				username:           tt.username,
+				claimReadError:     tt.claimReadError,
 				wantSchemaError:    tt.wantSchemaErr,
 				wantCELError:       tt.wantCELErr,
+				wantStatusError:    tt.wantStatusError,
+				wantStatusCode:     tt.wantStatusCode,
 				wantAdmissionErrs:  tt.wantAdmissionErrs,
 				wantWebhookErrors:  tt.wantWebhookErrs,
 				wantWarnings:       tt.wantWarnings,
@@ -5471,4 +5524,12 @@ func checkpointSGLangRoleRepairDGDForAdmission(failedRole string, missingClaim, 
 		}
 	}
 	return dgd
+}
+
+func checkpointVLLMDRAForAdmission() *nvidiacomv1beta1.DynamoGraphDeployment {
+	return checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.vllm"}, []string{"--tensor-parallel-size", "2"}, func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+		worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+		worker.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "gpu"}}}
+		worker.PodTemplate.Spec.ResourceClaims = []corev1.PodResourceClaim{{Name: "gpu", ResourceClaimTemplateName: new("restore-gpu-template")}}
+	})
 }
