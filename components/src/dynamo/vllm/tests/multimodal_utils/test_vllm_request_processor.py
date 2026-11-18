@@ -632,7 +632,7 @@ async def test_rejects_malformed_encoder_image_item_before_dispatch():
         load_multimodal_embeddings=AsyncMock(return_value={})
     )
 
-    with pytest.raises(ValueError, match="Unsupported image item"):
+    with pytest.raises(RuntimeError, match="Unsupported image item"):
         await processor.extract_multimodal_data(
             {
                 "multi_modal_data": {
