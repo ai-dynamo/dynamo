@@ -120,7 +120,7 @@ if [ "$USE_MOCKERS" = false ] && [ "$USE_TRTLLM" = false ] && [ "$MODE" != "agg"
     HAS_KV_TRANSFER_CONFIG=false
     for arg in "${EXTRA_ARGS[@]}"; do
         case "$arg" in
-            --kv-transfer-config|--kv-transfer-config=*)
+            --kv-transfer-config|--kv-transfer-config=*|--kv-transfer-config.*)
                 HAS_KV_TRANSFER_CONFIG=true
                 break
                 ;;
@@ -281,7 +281,8 @@ else
                 VLLM_ARGS+=("${EXTRA_ARGS[@]}")
 
                 VLLM_ARGS+=("--kv-events-config" "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:$((20080 + i))\",\"enable_kv_cache_events\":true}")
-                exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES VLLM_NIXL_SIDE_CHANNEL_PORT=$((20096 + i)) python3 -m dynamo.vllm \
+                # GPU ranges also reserve space for each worker's data-parallel NIXL ports.
+                exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES VLLM_NIXL_SIDE_CHANNEL_PORT=$((20097 + START_GPU)) python3 -m dynamo.vllm \
                     "${VLLM_ARGS[@]}"
             fi
         } &
