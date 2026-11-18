@@ -2330,7 +2330,7 @@ def _model_warning(model: str) -> Optional[str]:
     try:
         # Optional dependency of a warn-only premise: without it, P6 is not
         # checked.
-        from aisimulate_core.sdk.common import DefaultHFModels
+        from aisim_core.sdk.common import DefaultHFModels
     except ImportError:
         return None
     except Exception as error:  # noqa: BLE001 - evaluate_premises never raises
