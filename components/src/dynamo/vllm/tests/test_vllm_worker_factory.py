@@ -1013,8 +1013,10 @@ class TestCreate:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", [None, "handler", "clef"])
 async def test_classify_worker_registers_classify_and_pooling(
     monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str | None,
 ) -> None:
     endpoint = Mock()
     endpoint.connection_id.return_value = "worker-1"
@@ -1023,7 +1025,7 @@ async def test_classify_worker_registers_classify_and_pooling(
     runtime.endpoint.return_value = endpoint
 
     engine_client = Mock()
-    vllm_config = Mock(model_config=Mock())
+    vllm_config = Mock(model_config=Mock(), shutdown_timeout=5.0)
     engine_tuple: EngineSetupResult = (
         engine_client,
         vllm_config,
@@ -1035,7 +1037,12 @@ async def test_classify_worker_registers_classify_and_pooling(
     handler = Mock()
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.ClassifyWorkerHandler",
-        Mock(return_value=handler),
+        Mock(
+            return_value=handler,
+            side_effect=ValueError("handler setup failed")
+            if failure_stage == "handler"
+            else None,
+        ),
     )
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.StatLoggerFactory",
@@ -1058,11 +1065,32 @@ async def test_classify_worker_registers_classify_and_pooling(
         model="model",
     )
     shutdown_endpoints: list = []
+    shutdown_event = asyncio.Event()
+    if failure_stage == "clef":
+        monkeypatch.setattr(
+            "dynamo.vllm.worker_factory.initialize_clef",
+            AsyncMock(side_effect=ValueError("clef setup failed")),
+        )
+    if failure_stage is not None:
+        with pytest.raises(ValueError, match=f"{failure_stage} setup failed"):
+            await factory._create_classify_worker(
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+            )
+        engine_client.shutdown.assert_called_once_with(timeout=5.0)
+        assert shutdown_event.is_set()
+        register_model.assert_not_awaited()
+        endpoint.serve_endpoint.assert_not_awaited()
+        if failure_stage == "clef":
+            handler.cleanup.assert_called_once()
+        return
 
     await factory._create_classify_worker(
         runtime,
         config,
-        asyncio.Event(),
+        shutdown_event,
         shutdown_endpoints,
     )
 
@@ -1085,6 +1113,8 @@ async def test_classify_worker_registers_classify_and_pooling(
     }
     assert shutdown_endpoints == [endpoint]
     handler.cleanup.assert_called_once()
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    assert shutdown_event.is_set()
 
 
 @pytest.mark.asyncio
