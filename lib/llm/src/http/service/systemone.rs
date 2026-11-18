@@ -635,6 +635,7 @@ async fn run_branch(
     let Bound {
         request: mut preprocessed,
         exchange,
+        migration: _,
     } = bind_native(
         &selection.canonical_model,
         selection.card.kv_cache_block_size,
@@ -652,6 +653,9 @@ async fn run_branch(
         pin_to_placement(&mut preprocessed, placement);
     }
     preprocessed.tracker = Some(tracker.clone());
+    preprocessed.continuation = Some(Err(
+        "scoring generates no tokens, so a failed branch is retried whole".to_string(),
+    ));
     let context: Context<PreprocessedRequest> =
         Context::with_id_and_metadata(preprocessed, branch_id, Default::default());
     let branch_context = context.context();
@@ -714,6 +718,7 @@ fn bind_native(
         .map_err(|error| anyhow::anyhow!(error.message))?;
     (opened.bind)(&Worker {
         model,
+        engine_info: &serde_json::Value::Null,
         kv_cache_block_size,
         lora_name: None,
         tower_connector_lora_enabled: false,
