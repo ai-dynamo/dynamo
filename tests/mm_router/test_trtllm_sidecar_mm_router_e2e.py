@@ -193,7 +193,6 @@ def test_trtllm_sidecar_image_cache_selection_across_two_workers(
             ), f"router did not index the cached images: kv_hit_rate={hit_rates}"
             time.sleep(0.5)
 
-        # Unpinned: each image must go back to the worker that holds it.
         x_hit_rate, x_cached = 0.0, 0
         for image in (image_x, image_x, image_y, image_x, image_y, image_y):
             label = "same-image X" if image == image_x else "different-image Y"
