@@ -119,8 +119,9 @@ fi
 if [ "$USE_MOCKERS" = false ] && [ "$USE_TRTLLM" = false ] && [ "$MODE" != "agg" ]; then
     HAS_KV_TRANSFER_CONFIG=false
     for arg in "${EXTRA_ARGS[@]}"; do
-        case "$arg" in
-            --kv-transfer-config|--kv-transfer-config=*|--kv-transfer-config.*)
+        OPTION_NAME="${arg%%=*}"
+        case "${OPTION_NAME//_/-}" in
+            --kv-transfer-config|--kv-transfer-config.*)
                 HAS_KV_TRANSFER_CONFIG=true
                 break
                 ;;
