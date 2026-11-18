@@ -1644,9 +1644,12 @@ async fn completions_single(
     let stream = stream::iter(annotations).chain(stream);
 
     if streaming {
-        // Honor the configured peek window. Later backend errors are SSE frames
-        // behind HTTP 200, including runtime LoRA resolution failures.
-        let error_check = state.streaming_backend_error_check();
+        // Runtime adapter resolution/load errors must precede HTTP 200.
+        let error_check = if runtime_lora.is_some() {
+            BackendErrorCheck::UntilFirstEvent
+        } else {
+            state.streaming_backend_error_check()
+        };
         let stream =
             until_client_disconnects(check_for_backend_error_info(stream, error_check), &ctx)
                 .await
@@ -2002,10 +2005,10 @@ async fn completions_batch(
         all_streams.push(remapped_stream);
     }
 
-    let check = if streaming {
-        state.streaming_backend_error_check()
-    } else {
+    let check = if !streaming || runtime_lora.is_some() {
         BackendErrorCheck::UntilFirstEvent
+    } else {
+        state.streaming_backend_error_check()
     };
     let all_streams = until_client_disconnects(
         check_completion_batch_streams(all_streams, check),
@@ -2877,6 +2880,7 @@ async fn handler_chat_completions(
                 return Err(error);
             }
         };
+    let has_runtime_lora = runtime_lora.is_some();
     if let Some(runtime_lora) = runtime_lora {
         request.insert(RUNTIME_LORA_CONTEXT_KEY, runtime_lora);
     }
@@ -2891,7 +2895,10 @@ async fn handler_chat_completions(
     // only when the engine's stream is read before the response is committed;
     // otherwise the engine would race the commit.
     let response_headers = ResponseHeaders::default();
-    if !streaming || state.streaming_backend_error_check() != BackendErrorCheck::Skip {
+    if !streaming
+        || has_runtime_lora
+        || state.streaming_backend_error_check() != BackendErrorCheck::Skip
+    {
         request.insert(RESPONSE_HEADERS_CONTEXT_KEY, response_headers.clone());
     }
     let context = request.context();
@@ -4567,14 +4574,19 @@ async fn chat_completions(
         // error (e.g. `Backend(InvalidArgument)` from a text-only model
         // receiving image content) before committing HTTP 200, so we can
         // return the typed 4xx that the non-streaming path returns. How long
-        // to wait is service configuration; with a bounded window and no
+        // to wait is service configuration, except runtime LoRA always waits
+        // for the first event. With a bounded window and no
         // signal, fall through to SSE, and `monitor_for_disconnects` owns the
         // long backend-inactivity timeout from there. That monitor arms only
         // once the response is built, so it does not bound this wait:
         // `UntilFirstEvent` ends on the first event or on the client
         // disconnecting, and on nothing else.
         let stream = custom_tools.stream(stream);
-        let error_check = state.streaming_backend_error_check();
+        let error_check = if runtime_lora.is_some() {
+            BackendErrorCheck::UntilFirstEvent
+        } else {
+            state.streaming_backend_error_check()
+        };
         let stream =
             until_client_disconnects(check_for_backend_error_info(stream, error_check), &ctx)
                 .await

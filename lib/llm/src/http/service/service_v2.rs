@@ -379,7 +379,8 @@ fn effective_sse_keep_alive(
 /// Non-streaming handlers always wait for the first event because they need it
 /// to build the response, as does audio speech. The streaming chat, completions,
 /// responses, and Anthropic messages handlers use the service-wide policy from
-/// [`State::streaming_backend_error_check`].
+/// [`State::streaming_backend_error_check`], except runtime LoRA requests always
+/// wait for the first event so resolver/load failures precede HTTP 200.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendErrorCheck {
     /// Commit the status immediately and hand the stream to the client
@@ -2408,6 +2409,205 @@ mod tests {
             error.to_string(),
             "TLS must be enabled when a client CA certificate is configured"
         );
+    }
+
+    struct RuntimeLoraErrorEngine {
+        started: Arc<tokio::sync::Semaphore>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+
+    #[async_trait::async_trait]
+    impl<Req, Resp>
+        dynamo_runtime::engine::AsyncEngine<
+            dynamo_runtime::pipeline::SingleIn<Req>,
+            dynamo_runtime::pipeline::ManyOut<crate::protocols::Annotated<Resp>>,
+            dynamo_runtime::pipeline::Error,
+        > for RuntimeLoraErrorEngine
+    where
+        Req: Send + Sync + 'static,
+        Resp: dynamo_runtime::engine::Data,
+    {
+        async fn generate(
+            &self,
+            request: dynamo_runtime::pipeline::SingleIn<Req>,
+        ) -> Result<
+            dynamo_runtime::pipeline::ManyOut<crate::protocols::Annotated<Resp>>,
+            dynamo_runtime::pipeline::Error,
+        > {
+            use dynamo_runtime::pipeline::AsyncEngineContextProvider;
+
+            let context = request.context();
+            let started = self.started.clone();
+            let release = self.release.clone();
+            let stream = async_stream::stream! {
+                yield crate::protocols::Annotated::from_annotation("event.dynamo.test.loading", &true).unwrap();
+                started.add_permits(1);
+                release.acquire().await.unwrap().forget();
+                yield crate::protocols::Annotated {
+                    data: None,
+                    id: None,
+                    event: Some("error".into()),
+                    comment: None,
+                    error: Some(dynamo_runtime::error::DynamoError::builder()
+                        .class(dynamo_runtime::error::ErrorClass::InvalidRequest)
+                        .public_message("invalid_lora_adapter")
+                        .diagnostic("private resolver source")
+                        .build()),
+                };
+            };
+            Ok(dynamo_runtime::pipeline::ResponseStream::new(
+                Box::pin(stream),
+                context,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_lora_stream_errors_precede_headers_for_chat_and_completion_batches() {
+        use crate::discovery::WorkerSet;
+        use crate::model_card::ModelDeploymentCard;
+        use crate::model_type::{ModelInput, ModelType};
+        use crate::worker_type::WorkerType;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            for check in [
+                BackendErrorCheck::Skip,
+                BackendErrorCheck::Bounded(Duration::ZERO),
+            ] {
+                let cancel = CancellationToken::new();
+                let discovery = Arc::new(dynamo_runtime::discovery::KVStoreDiscovery::new(
+                    dynamo_runtime::storage::kv::Manager::memory(),
+                    cancel.clone(),
+                ));
+                let state = Arc::new(State::new(
+                    Arc::new(ModelManager::new()),
+                    discovery,
+                    cancel.clone(),
+                    StateConfig {
+                        metrics_config: MetricsConfig::new(None),
+                        runtime_lora_config: RuntimeLoraConfig { enabled: true },
+                        frontend_api_config: FrontendApiConfig::default(),
+                        responses_api_enabled: false,
+                        generate_api_enabled: false,
+                        nvext_enabled: true,
+                        sse_keep_alive: None,
+                        streaming_backend_error_check: check,
+                        migration_limit: 0,
+                    },
+                ));
+                state.flags.set(&EndpointType::Chat, true);
+                state.flags.set(&EndpointType::Completion, true);
+                let mut card = ModelDeploymentCard::default();
+                card.model_input = ModelInput::Tokens;
+                card.model_type = ModelType::Chat | ModelType::Completions;
+                card.worker_type = Some(WorkerType::Aggregated);
+                card.runtime_config
+                    .taints
+                    .insert("dynamo.runtime-lora/v2".into());
+                for (key, value) in [
+                    ("supports_runtime_lora_resolution", serde_json::json!(true)),
+                    ("runtime_lora_protocol_versions", serde_json::json!([2])),
+                    ("runtime_lora_schemes", serde_json::json!(["custom"])),
+                ] {
+                    card.runtime_config.set_engine_specific(key, value).unwrap();
+                }
+                let router =
+                    super::super::openai::chat_completions_router(state.clone(), None, None)
+                        .1
+                        .merge(super::super::openai::completions_router(state.clone(), None).1);
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server_cancel = cancel.clone();
+                let server = tokio::spawn(async move {
+                    axum::serve(listener, router)
+                        .with_graceful_shutdown(server_cancel.cancelled_owned())
+                        .await
+                        .unwrap();
+                });
+                let client = reqwest::Client::builder()
+                    .no_proxy()
+                    .timeout(Duration::from_secs(5))
+                    .build()
+                    .unwrap();
+                for model in ["base", "preloaded", "base|custom:///adapter"] {
+                    for (path, payload, prompts) in [
+                        (
+                            "/v1/chat/completions",
+                            serde_json::json!({"messages":[{"role":"user","content":"hello"}]}),
+                            1,
+                        ),
+                        ("/v1/completions", serde_json::json!({"prompt":"hello"}), 1),
+                        (
+                            "/v1/completions",
+                            serde_json::json!({"prompt":["hello","world"]}),
+                            2,
+                        ),
+                    ] {
+                        let engine = Arc::new(RuntimeLoraErrorEngine {
+                            started: Arc::new(tokio::sync::Semaphore::new(0)),
+                            release: Arc::new(tokio::sync::Semaphore::new(0)),
+                        });
+                        let mut worker_card = card.clone();
+                        let registered_model = if model == "preloaded" {
+                            worker_card.lora = Some(crate::model_card::LoraInfo {
+                                name: "preloaded".into(),
+                                max_gpu_lora_count: None,
+                            });
+                            "preloaded"
+                        } else {
+                            "base"
+                        };
+                        let mut workers =
+                            WorkerSet::new("workers".into(), "checksum".into(), worker_card);
+                        workers.chat_engine = Some(engine.clone());
+                        workers.completions_engine = Some(engine.clone());
+                        let (_instances, instance_rx) = tokio::sync::watch::channel(vec![1]);
+                        let (_configs, config_rx) = tokio::sync::watch::channel(HashMap::from([(
+                            1,
+                            card.runtime_config.clone(),
+                        )]));
+                        workers.set_instance_watcher(instance_rx);
+                        workers.set_runtime_config_watcher(config_rx);
+                        assert!(state.manager().add_worker_set(
+                            registered_model,
+                            "workers",
+                            workers
+                        ));
+                        let mut body = payload;
+                        body["model"] = model.into();
+                        body["stream"] = true.into();
+                        body["nvext"] = serde_json::json!({"annotations":["request_id"]});
+                        let send = client
+                            .post(format!("http://{address}{path}"))
+                            .json(&body)
+                            .send();
+                        let response = tokio::spawn(send);
+                        engine.started.acquire_many(prompts).await.unwrap().forget();
+                        let expected = if model == "base|custom:///adapter" {
+                            reqwest::StatusCode::BAD_REQUEST
+                        } else {
+                            reqwest::StatusCode::OK
+                        };
+                        let response = if expected == reqwest::StatusCode::BAD_REQUEST {
+                            engine.release.add_permits(prompts as usize);
+                            response.await.unwrap().unwrap()
+                        } else {
+                            let response = response.await.unwrap().unwrap();
+                            engine.release.add_permits(prompts as usize);
+                            response
+                        };
+                        assert_eq!(response.status(), expected, "{check:?} {model} {path}");
+                        let body = response.text().await.unwrap();
+                        assert!(body.contains("invalid_lora_adapter"), "{body}");
+                        assert!(!body.contains("private resolver source"), "{body}");
+                    }
+                }
+                cancel.cancel();
+                server.await.unwrap();
+            }
+        })
+        .await
+        .expect("runtime LoRA HTTP preflight timed out");
     }
 
     struct ReadinessOnlyEngine;
