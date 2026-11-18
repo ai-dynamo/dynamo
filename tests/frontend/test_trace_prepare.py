@@ -657,6 +657,22 @@ def test_reviewed_responses_require_explicit_ids_pins_and_exact_binding(
             reviewed_corpus=root,
         )
     assert not (tmp_path / "changed-request-out" / "manifest.json").exists()
+    original_messages = setup["seed"]["request"]["messages"]
+    setup["seed"]["request"]["messages"] = [
+        dict(reversed(list(message.items()))) for message in original_messages
+    ]
+    changed_prompt = capture(setup, tmp_path / "changed-prompt")
+    setup["seed"]["request"]["messages"] = original_messages
+    changed_output = capture(setup, tmp_path / "changed-output", output=[7, 9, 1])
+    for name, changed in (("prompt", changed_prompt), ("output", changed_output)):
+        with pytest.raises(ReplayError, match="binding mismatch"):
+            run(
+                setup,
+                tmp_path / f"changed-{name}-out",
+                captures=changed,
+                reviewed_corpus=root,
+            )
+        assert not (tmp_path / f"changed-{name}-out" / "manifest.json").exists()
     for mutation in (
         "request",
         "prompt",

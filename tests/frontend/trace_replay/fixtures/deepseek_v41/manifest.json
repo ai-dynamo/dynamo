@@ -123,7 +123,7 @@
         "sha256": "502bdaec8a3fd88ebc24c4721a7038fbe42f2063c664638127056107920035c1"
       },
       "tokenizers_version": "0.21.4",
-      "prompt_check": "All five selected prompt arrays match the pinned offline vendor audit receipt; the complete source audit covers 9392 requests",
+      "prompt_check": "All five selected prompt arrays match the pinned offline vendor audit recorded inline in provenance.prompt_audit; the complete source audit covers 9392 requests",
       "response_check": "all five fresh V4.1 completion parse/render byte roundtrips include EOS; render at continuation index with captured reasoning effort; consume structural two-newline DSML separator; project empty channels to null",
       "reference_policy": "Peer parsed messages remain diagnostic; these five response expectations were independently reviewed against the pinned vendor reference"
     },
