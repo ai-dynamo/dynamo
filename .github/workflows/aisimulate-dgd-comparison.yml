@@ -30,11 +30,27 @@ permissions:
   contents: read
 
 jobs:
-  compare:
+  validate-ref:
     runs-on: ubuntu-latest
+    steps:
+      - name: Require a post-merge planner image
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "Run this workflow from main so its exact-SHA planner image exists." >&2
+            exit 2
+          fi
+
+  compare:
+    needs: validate-ref
+    runs-on: prod-tester-amd-v2
     timeout-minutes: 120
-    env:
-      PLANNER_IMAGE: nvcr.io/nvidia/ai-dynamo/dynamo-planner-nightly:latest
+    container:
+      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}-dynamo-planner
+      env:
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+        PYTHONPATH: ${{ github.workspace }}/components/src:${{ github.workspace }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -46,34 +62,24 @@ jobs:
           OUTPUT_DIR: components/src/dynamo/aisimulate/tests/dgd/comparison/generated/workflow-${{ github.run_id }}
           SELECTION: ${{ inputs.selection }}
           SUITE: ${{ inputs.suite }}
-        shell: bash
+        shell: sh
         run: |
-          set -euo pipefail
+          set -efu
           mkdir -p "${OUTPUT_DIR}"
-          if [[ "${SELECTION}" == "suite" ]]; then
-            docker run --rm \
-              --user 0:0 \
-              --volume "${GITHUB_WORKSPACE}:/workspace" \
-              --workdir /workspace \
-              "${PLANNER_IMAGE}" \
-              python components/src/dynamo/aisimulate/tests/dgd/comparison/run_cases.py \
+          if [ "${SELECTION}" = "suite" ]; then
+            python components/src/dynamo/aisimulate/tests/dgd/comparison/run_cases.py \
               --suite "${SUITE}" \
               --output-dir "${OUTPUT_DIR}"
           else
-            read -r -a selected_cases <<< "${CASES}"
-            if (( ${#selected_cases[@]} == 0 )); then
+            set -- ${CASES}
+            if [ "$#" -eq 0 ]; then
               echo "At least one case is required in cases mode." >&2
               exit 2
             fi
-            docker run --rm \
-              --user 0:0 \
-              --volume "${GITHUB_WORKSPACE}:/workspace" \
-              --workdir /workspace \
-              "${PLANNER_IMAGE}" \
-              python components/src/dynamo/aisimulate/tests/dgd/comparison/run_cases.py \
+            python components/src/dynamo/aisimulate/tests/dgd/comparison/run_cases.py \
               --hardware "${HARDWARE}" \
               --output-dir "${OUTPUT_DIR}" \
-              "${selected_cases[@]}"
+              "$@"
           fi
       - name: Upload generated DGDs and diagnostics
         if: always()

@@ -290,6 +290,8 @@ a stochastic search an exact-diff gate.
 The comparison runner is a manual corpus-generation tool. Its unit tests cover composition and
 failure isolation. The automatic public Recommend-to-DGD coverage lives in the
 [DGD CLI E2E table](../e2e/test_dgd_cli.py), using small fixed searches.
+DGDR v1beta2 Request, Run, Candidate, and Job orchestration is covered separately by
+`tests/deploy/test_dgdr_v1beta2.py`.
 
 ## Non-goals
 
