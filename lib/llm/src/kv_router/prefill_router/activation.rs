@@ -139,6 +139,7 @@ impl PrefillRouter {
             model_manager,
             decode_router_mode,
             false,
+            false,
             kv_cache_block_size,
             kv_router_config,
             SelectionPolicySource::Registry,
@@ -162,7 +163,8 @@ impl PrefillRouter {
         session_affinity_mode: SessionAffinityMode,
     ) -> Arc<Self> {
         Arc::new(Self {
-            binding: arc_swap::ArcSwapOption::empty(),
+            binding: Arc::new(arc_swap::ArcSwapOption::empty()),
+            retained_kv: None,
             target: parking_lot::Mutex::new(None),
             target_tx: None,
             decode_routing_host: std::sync::OnceLock::new(),
@@ -192,6 +194,7 @@ impl PrefillRouter {
         model_manager: Arc<ModelManager>,
         decode_router_mode: RouterMode,
         decode_supports_prefill_cancellation: bool,
+        decode_supports_retained_kv: bool,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         selection_policy: SelectionPolicySource,
@@ -221,7 +224,12 @@ impl PrefillRouter {
             .and_then(|c| c.conditional_disagg_decode_busy_threshold);
 
         let router = Arc::new(Self {
-            binding: arc_swap::ArcSwapOption::empty(),
+            binding: Arc::new(arc_swap::ArcSwapOption::empty()),
+            retained_kv: decode_supports_retained_kv
+                .then(super::retained_kv::Config::from_env)
+                .flatten()
+                .map(super::retained_kv::Catalog::new)
+                .map(Arc::new),
             target: parking_lot::Mutex::new(None),
             target_tx: Some(target_tx),
             decode_routing_host: std::sync::OnceLock::new(),
@@ -613,6 +621,9 @@ impl PrefillRouter {
             return;
         }
         *current = target_id.clone();
+        if let Some(catalog) = &self.retained_kv {
+            catalog.clear();
+        }
         let reuses_binding = target_id.is_some()
             && self
                 .binding
@@ -955,6 +966,7 @@ mod tests {
             Arc::new(ModelManager::new()),
             RouterMode::RoundRobin,
             false,
+            false,
             16,
             None,
             SelectionPolicySource::Registry,
@@ -1262,6 +1274,7 @@ mod tests {
             None,
             Arc::new(ModelManager::new()),
             RouterMode::KV,
+            false,
             false,
             64,
             None,
@@ -1581,6 +1594,7 @@ mod tests {
             Arc::new(ModelManager::new()),
             RouterMode::KV,
             false,
+            false,
             64,
             None,
             SelectionPolicySource::Registry,
@@ -1782,6 +1796,7 @@ mod tests {
                 None,
                 manager.clone(),
                 mode,
+                false,
                 false,
                 16,
                 None,
