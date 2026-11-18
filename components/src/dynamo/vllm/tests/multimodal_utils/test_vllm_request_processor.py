@@ -1245,6 +1245,16 @@ def test_mm_internal_contract_breaks_are_server_errors():
         mod.compute_mm_uuids({"vision_chunk": ["not-a-dict"]})
 
 
+def test_qwen_decode_handoff_contract_breaks_are_server_errors():
+    from dynamo.vllm.multimodal_utils.model import construct_qwen_decode_mm_data
+
+    with pytest.raises(RuntimeError, match="No image grid provided"):
+        construct_qwen_decode_mm_data(None, (1, 3, 1024), "req-1")
+
+    with pytest.raises(RuntimeError, match="embeddings_shape is required"):
+        construct_qwen_decode_mm_data([(1, 3, 1024)], None, "req-1")
+
+
 def test_build_tokens_prompt_omits_absent_processor_kwargs():
     prompt = _processor().build_tokens_prompt(
         {"token_ids": [1, 2, 3]},
