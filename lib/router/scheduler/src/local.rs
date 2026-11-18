@@ -2798,6 +2798,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn required_taints_keep_their_own_room_answer() {
+        // Worker 0 carries zone-a and worker 1 nothing; both start full. Session a requires
+        // zone-a, session b requires nothing. When worker 1 frees, b must go: a's refusal is its
+        // own, not the class's shared answer, so a at the front of the queue cannot stand for b.
+        let zone_a = HashSet::from(["zone-a".to_string()]);
+        let workers = HashMap::from([
+            (
+                0,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(64),
+                    taints: zone_a.clone(),
+                    ..Default::default()
+                },
+            ),
+            (
+                1,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(64),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let (scheduler, _slots, _cfg_tx, cancel_token) =
+            make_scheduler(workers, Some(0.5), true, None);
+
+        let mut fill_a = request(ScheduleMode::Tracked {
+            request_id: "fill-a".to_string(),
+        });
+        fill_a.routing_constraints.required_taints = zone_a.clone();
+        assert_eq!(
+            scheduler
+                .schedule_request(fill_a)
+                .await
+                .unwrap()
+                .best_worker
+                .worker_id,
+            0
+        );
+        let mut fill_b = request(ScheduleMode::Tracked {
+            request_id: "fill-b".to_string(),
+        });
+        fill_b.allowed_worker_ids = Some(HashSet::from([1]));
+        assert_eq!(
+            scheduler
+                .schedule_request(fill_b)
+                .await
+                .unwrap()
+                .best_worker
+                .worker_id,
+            1
+        );
+
+        let tainted = {
+            let scheduler = Arc::clone(&scheduler);
+            tokio::spawn(async move {
+                let mut request = session_request("a1", "a");
+                request.routing_constraints.required_taints = zone_a;
+                scheduler.schedule_request(request).await
+            })
+        };
+        wait_for_pending_count(&scheduler, 1).await;
+        let plain = {
+            let scheduler = Arc::clone(&scheduler);
+            tokio::spawn(
+                async move { scheduler.schedule_request(session_request("b1", "b")).await },
+            )
+        };
+        wait_for_pending_count(&scheduler, 2).await;
+
+        scheduler.free("fill-b").await.unwrap();
+        let response = tokio::time::timeout(Duration::from_millis(250), plain)
+            .await
+            .expect("the untainted session must dispatch when worker 1 frees")
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.best_worker.worker_id, 1);
+        assert_eq!(scheduler.pending_count(), 1);
+        assert!(!tainted.is_finished());
+
+        tainted.abort();
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
     async fn worker_taint_update_wakes_constrained_pending_request() {
         let fast = HashSet::from(["capacity/fast".to_string()]);
         let workers = HashMap::from([

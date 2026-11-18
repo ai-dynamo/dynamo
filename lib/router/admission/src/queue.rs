@@ -1011,6 +1011,9 @@ impl<T> PolicyClassQueue<T> {
                 } else {
                     self.ready_by_lane.remove(&key);
                     self.affinity_lanes.remove(&key);
+                    // The shared group's stand-in expired without dispatching: hand the role
+                    // on, or the room it stood for waits for the next capacity change.
+                    self.stand_in_left(key, None);
                 }
                 entry
             }
@@ -1075,7 +1078,11 @@ impl<T> PolicyClassQueue<T> {
 
     fn rebuild_lane_heads(&mut self) {
         self.candidate_lane_heads.clear();
-        self.promoted_shared = None;
+        if self.promoted_shared.take().is_some() {
+            // The stand-in may have left with the removed entries; a capacity recheck asks the
+            // group's best head again and promotes it if the room is still there.
+            self.recheck.capacity = true;
+        }
         self.blocked_lanes
             .retain(|lane, _| self.ready_by_lane.contains_key(lane));
         self.shared_blocked

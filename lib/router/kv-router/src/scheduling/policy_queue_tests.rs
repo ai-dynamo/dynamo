@@ -520,6 +520,96 @@ fn capacity_recheck_skips_gate_held_lanes() {
 }
 
 #[test]
+fn shared_group_stand_in_is_handed_on_when_it_leaves_without_dispatching() {
+    // Three session lanes refused as SharedCapacity; the pinned lane keeps its own reason.
+    let mut queue = PolicyQueue::new(&edf_profile());
+    for id in 1..=3 {
+        enqueue_due(&mut queue, None, None, lane_of(id), "session");
+    }
+    enqueue_due(
+        &mut queue,
+        None,
+        None,
+        QueueLane::Exact(WorkerWithDpRank::new(9, 0)),
+        "pinned",
+    );
+    let room = std::cell::Cell::new(false);
+    let predicate =
+        |_: usize, _: &PolicyClassConfig, payload: &&'static str| match (*payload, room.get()) {
+            ("session", false) => LaneCheck::Blocked(BlockReason::SharedCapacity),
+            ("session", true) => LaneCheck::Dispatch,
+            _ => LaneCheck::Blocked(BlockReason::Capacity),
+        };
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(queue.class_blocked_lane_count(0), 4);
+
+    // Room appears: the recheck promotes the group's best head as the stand-in. Before it
+    // dispatches, a cancellation removes it (any removal rebuilds the lane indexes).
+    room.set(true);
+    queue.recheck_blocked_lanes(RecheckScope::Capacity);
+    let (removed, _) = queue.take_if_in_class(0, |payload| *payload == "session");
+    // `take_if_in_class` removes every matching entry; put two sessions back so the group
+    // still has members, which is the state a single cancellation leaves behind.
+    assert_eq!(removed.len(), 3);
+    for id in 2..=3 {
+        enqueue_due(&mut queue, None, None, lane_of(id), "session");
+    }
+    // The dropped stand-in did not take the room with it: the next pass still dispatches a
+    // session, and the chain continues to the last one.
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "session");
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "session");
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(
+        queue.class_lane_block_reason(0, QueueLane::Exact(WorkerWithDpRank::new(9, 0))),
+        Some(BlockReason::Capacity)
+    );
+}
+
+#[test]
+fn shared_group_stand_in_expiry_hands_the_role_on() {
+    let mut queue = PolicyQueue::new(&edf_profile());
+    let now = Instant::now();
+    // Lane 1's only entry expires first; lanes 2 and 3 live on.
+    enqueue_due(
+        &mut queue,
+        Some(now + std::time::Duration::from_secs(1)),
+        None,
+        lane_of(1),
+        "session",
+    );
+    for id in 2..=3 {
+        enqueue_due(
+            &mut queue,
+            Some(now + std::time::Duration::from_secs(60)),
+            None,
+            lane_of(id),
+            "session",
+        );
+    }
+    let room = std::cell::Cell::new(false);
+    let predicate = |_: usize, _: &PolicyClassConfig, _: &&'static str| {
+        if room.get() {
+            LaneCheck::Dispatch
+        } else {
+            LaneCheck::Blocked(BlockReason::SharedCapacity)
+        }
+    };
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(queue.class_blocked_lane_count(0), 3);
+
+    // EDF order puts lane 1 at the front of the group, so it becomes the stand-in; then it
+    // expires before the dispatch pass runs.
+    room.set(true);
+    queue.recheck_blocked_lanes(RecheckScope::Capacity);
+    let expired = queue.take_expired(0, now + std::time::Duration::from_secs(2));
+    assert_eq!(expired.len(), 1);
+    // The role moved to the next lane: both remaining sessions dispatch in turn.
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "session");
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "session");
+    assert!(queue.pop_next(predicate).is_none());
+}
+
+#[test]
 fn shared_capacity_lanes_are_probed_once_per_capacity_recheck() {
     let mut queue = PolicyQueue::new(&edf_profile());
     for id in 1..=3 {

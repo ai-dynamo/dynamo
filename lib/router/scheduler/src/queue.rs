@@ -125,12 +125,14 @@ impl QueuedRequest {
     }
 }
 
-/// Whether a head's eligible ranks are the class's: no pin, caller allow-list, LoRA, or, under
-/// an exclusive selector, affinity target. Such heads share one room answer per class.
+/// Whether a head's eligible ranks are the class's: no pin, caller allow-list, LoRA, required
+/// taint, or, under an exclusive selector, affinity target. Such heads share one room answer
+/// per class.
 fn unconstrained(request: &SchedulingRequest, exclusive: bool) -> bool {
     request.pinned_worker.is_none()
         && request.allowed_worker_ids.is_none()
         && request.lora_name.is_none()
+        && !request.routing_constraints.has_hard_constraints()
         && !(exclusive && request.affinity_target.is_some())
 }
 
@@ -2450,6 +2452,7 @@ impl<
         let decay_now = Instant::now();
         let slots = &self.slots;
         let eligibility = &self.eligibility;
+        let exclusive = eligibility.exclusive;
         let workers = &self.workers_with_configs;
         let full_ranks = &mut self.gate_full_ranks;
         let reject = self
@@ -2460,7 +2463,12 @@ impl<
         let mut gate_fresh = false;
         let gate = self.dispatch_gate.get();
         let gate_recheck_at = Cell::new(self.gate_recheck_at);
-        let dispatchable = self.pending.any_ready_head(|_, class, queued| {
+        // As in the dispatch pass: unconstrained heads share one room answer per class, so a
+        // cleanup batch with a lane per session costs one walk per class, not one per lane.
+        let class_room = &mut self.class_room;
+        class_room.clear();
+        class_room.resize(self.pending.class_count(), None);
+        let dispatchable = self.pending.any_ready_head(|class_index, class, queued| {
             if let Some(gate) = gate
                 && !gate_allows(gate.as_ref(), &class.name, queued, &gate_recheck_at)
             {
@@ -2469,6 +2477,14 @@ impl<
             if !class.queueing_enabled() {
                 return LaneCheck::Dispatch;
             }
+            let shared_answer = unconstrained(&queued.request, exclusive);
+            if shared_answer && let Some(room) = class_room[class_index] {
+                return if room {
+                    LaneCheck::Dispatch
+                } else {
+                    LaneCheck::Blocked(BlockReason::SharedCapacity)
+                };
+            }
             if !gate_fresh {
                 let rejecting = reset_full_ranks(full_ranks, reject);
                 if let Some(full_ranks) = rejecting {
@@ -2476,7 +2492,7 @@ impl<
                 }
                 gate_fresh = true;
             }
-            LaneCheck::from(eligibility.with(
+            let room = eligibility.with(
                 &queued.request,
                 workers,
                 full_ranks,
@@ -2489,7 +2505,11 @@ impl<
                         eligibility,
                     )
                 },
-            ))
+            );
+            if shared_answer {
+                class_room[class_index] = Some(room);
+            }
+            LaneCheck::from(room)
         });
         self.gate_recheck_at = gate_recheck_at.get();
         dispatchable
