@@ -262,7 +262,6 @@ func generatedNameViolations(fldPath *field.Path, generatedName string, hasServi
 		rules[1].messages = k8svalidation.IsDNS1035Label(dynamo.NormalizeKubeResourceName(generatedName))
 	}
 
-	// Keep one error per failing rule, in DCD, Service, then selector order.
 	var violations []generatedNameViolation
 	for _, rule := range rules {
 		if len(rule.messages) == 0 {
