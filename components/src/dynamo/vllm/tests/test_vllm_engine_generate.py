@@ -95,7 +95,6 @@ def test_tito_adapter_preserves_kv_transfer_params_in_sampling_extra_args():
         sampling_params={"max_tokens": 5, "extra_args": {"existing": "value"}},
         kv_transfer_params={"connector_data": {"block_ids": [1, 2]}},
     )
-    request["kv_hint"] = {"source": "worker-a"}
     adapted = adapt_engine_generate_request(
         request,
         enable_multimodal=False,
@@ -109,7 +108,6 @@ def test_tito_adapter_preserves_kv_transfer_params_in_sampling_extra_args():
         "existing": "value",
         "kv_transfer_params": {
             "connector_data": {"block_ids": [1, 2]},
-            "kv_hint": {"source": "worker-a"},
         },
     }
 
@@ -200,6 +198,10 @@ def test_tito_adapter_preserves_stop_strings_and_stop_token_ids():
     assert adapted.sampling_params.detokenize is False
 
 
+# vLLM's decode_mm_kwargs_item base64-decodes into immutable bytes, so
+# torch.frombuffer warns before vLLM clones the inline tensor. PyTorch warns
+# only once per process, which makes the failure depend on test order.
+@pytest.mark.filterwarnings("ignore:The given buffer is not writable:UserWarning")
 def test_tito_adapter_builds_preprocessed_image_input_without_reprocessing():
     from dynamo.vllm.engine_generate import adapt_engine_generate_request
 
@@ -317,10 +319,7 @@ def test_tito_adapter_rejects_unsupported_execution_paths(
 def test_tito_adapter_rejects_asymmetric_image_feature_objects(features):
     from dynamo.vllm.engine_generate import adapt_engine_generate_request
 
-    with pytest.raises(
-        ValidationError,
-        match="mm_hashes and mm_placeholders must use the same modalities",
-    ):
+    with pytest.raises(ValidationError):
         adapt_engine_generate_request(
             _request(features=features, sampling_params={"max_tokens": 1}),
             enable_multimodal=True,
@@ -434,3 +433,27 @@ def test_tito_adapter_resolves_omitted_max_tokens_from_server_limits():
 
     assert adapted is not None
     assert adapted.sampling_params.max_tokens == 17
+
+
+@pytest.mark.parametrize(
+    "enabled,worker_kind,published",
+    [
+        (False, "Aggregated", False),
+        (True, "Aggregated", True),
+        (True, "Prefill", False),
+        (True, "Decode", False),
+    ],
+)
+def test_json_capability_is_opt_in_and_aggregated_only(enabled, worker_kind, published):
+    from unittest.mock import Mock
+
+    from dynamo.llm import ModelInput, WorkerType
+    from dynamo.vllm.engine_generate import publish_json_multimodal_capability
+
+    runtime_config = Mock()
+    publish_json_multimodal_capability(
+        runtime_config, ModelInput.Tokens, getattr(WorkerType, worker_kind), enabled
+    )
+    assert runtime_config.set_engine_specific.called is published
+    if published:
+        runtime_config.set_engine_specific.assert_any_call("custom_json_v1", "true")

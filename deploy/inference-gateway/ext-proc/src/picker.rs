@@ -7,6 +7,7 @@
 //! routing decision.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use bytes::Bytes;
 use dynamo_llm::http::service::metadata::MetadataHeaderError;
@@ -63,9 +64,9 @@ pub enum CacheSaltForwarding {
     #[default]
     Preserve,
     /// Write `cache_salt = "dynamo-cache-salt:" + namespace` at the top level.
-    /// Raw native vLLM has no Dynamo code in the request path to add the
-    /// marker, so the EPP must add it.
-    NativeVllm,
+    /// Raw engines (vLLM, SGLang, TensorRT-LLM) read that field but have no
+    /// Dynamo code in the request path to add the marker, so the EPP must add it.
+    RawEngine,
 }
 
 /// The endpoint selection result, with the Dynamo-specific routing headers
@@ -95,12 +96,40 @@ pub struct PickResult {
     pub cache_namespace: Option<String>,
     /// Body-encoding policy for `cache_namespace`.
     pub cache_salt_forwarding: CacheSaltForwarding,
+    /// Remove the client's top-level `nvext` from the forwarded body. Standalone
+    /// pickers set it: raw engines never read it, and TensorRT-LLM
+    /// (`extra="forbid"`) rejects requests that carry it.
+    pub strip_nvext: bool,
     /// Booking id the picker recorded for this request's load reservation, if
     /// any. The server carries it on the per-stream context and hands it back to
     /// [`EndpointPicker::on_prefill_complete`] / [`EndpointPicker::on_request_complete`]
     /// so the picker can free the exact reservation for this stream without a
     /// shared, request-id-keyed lookup. `None` when the picker booked nothing.
     pub reservation_id: Option<String>,
+    /// How long the pick spent in each step, for the per-request routing log.
+    /// `None` from pickers that do not tokenize in this process.
+    pub timings: Option<PickTimings>,
+}
+
+/// Where one `pick()` spent its time. The same steps feed
+/// `dynamo_epp_stage_duration_seconds`; these per-request copies go into the
+/// "Request routed" log line, so a slow request can be traced to its step.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PickTimings {
+    /// Prompt tokens the pick routed on.
+    pub prompt_tokens: usize,
+    /// Parsing the body into the typed request.
+    pub parse: Duration,
+    /// Waiting for a blocking-pool thread, for chat requests.
+    pub blocking_wait: Option<Duration>,
+    /// Rendering the chat template, for chat requests.
+    pub template: Option<Duration>,
+    /// Tokenizing the prompt, unless the request carried token ids.
+    pub tokenize: Option<Duration>,
+    /// Choosing the prefill and decode workers, including router queueing.
+    pub select: Duration,
+    /// Registering the request with the router's load bookkeeping.
+    pub book: Duration,
 }
 
 /// Resolve the request's cache namespace with the canonical precedence:

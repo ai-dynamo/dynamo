@@ -8,7 +8,7 @@
 //! - `NixlBackendConfig`: Configuration for NIXL backends from environment variables
 
 use anyhow::Result;
-use nixl_sys::{Agent, is_stub};
+use nixl_sys::{Agent, AgentConfig, NixlError, is_stub};
 use std::collections::{HashMap, HashSet};
 
 use crate::nixl::NixlBackendConfig;
@@ -34,13 +34,22 @@ pub struct NixlAgent {
 impl NixlAgent {
     /// Create a NIXL agent without any backends.
     pub fn new(name: &str) -> Result<Self> {
+        Self::create(|| Agent::new(name))
+    }
+
+    /// Create a NIXL agent without any backends, using the given agent configuration.
+    pub fn new_with_config(name: &str, config: &AgentConfig) -> Result<Self> {
+        Self::create(|| Agent::new_configured(name, config))
+    }
+
+    // Check for stub mode before the first NIXL call: a stub build without the NIXL
+    // library aborts the process on that call.
+    fn create(new_agent: impl FnOnce() -> Result<Agent, NixlError>) -> Result<Self> {
         if is_stub() {
             return Err(anyhow::anyhow!("NIXL is not supported in stub mode"));
         }
-        let agent = Agent::new(name)?;
-
         Ok(Self {
-            agent,
+            agent: new_agent()?,
             available_backends: HashSet::new(),
         })
     }
@@ -242,6 +251,18 @@ mod tests {
         // Should fail if any backend is missing (GDS likely not available)
         let result = NixlAgent::with_backends("test_strict_fail", &["UCX", "DUDE"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_new_with_config() {
+        let config = AgentConfig {
+            pthr_delay_us: 1_000,
+            ..AgentConfig::default()
+        };
+        let mut agent = NixlAgent::new_with_config("test_new_with_config", &config)
+            .expect("Failed to create agent");
+        agent.add_backend("UCX").expect("Need UCX for test");
+        assert!(agent.has_backend("UCX"));
     }
 
     #[test]

@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -15,31 +14,25 @@ func TestDockerSecretIndexer_RefreshIndex(t *testing.T) {
 	// Create mock secrets
 	mockSecrets := []corev1.Secret{
 		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "secret1",
-				Namespace: "default",
-			},
-			Type: corev1.SecretTypeDockerConfigJson,
+			Name:      "secret1",
+			Namespace: "default",
+			Type:      corev1.SecretTypeDockerConfigJson,
 			Data: map[string][]byte{
 				".dockerconfigjson": []byte(`{"auths":{"docker.io":{}, "my-registry.com:5005/registry1":{}}}`),
 			},
 		},
 		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "secret2",
-				Namespace: "default",
-			},
-			Type: corev1.SecretTypeDockerConfigJson,
+			Name:      "secret2",
+			Namespace: "default",
+			Type:      corev1.SecretTypeDockerConfigJson,
 			Data: map[string][]byte{
 				".dockerconfigjson": []byte(`{"auths":{"my-registry.com:5005/registry2":{}}}`),
 			},
 		},
 		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "secret3",
-				Namespace: "another-namespace",
-			},
-			Type: corev1.SecretTypeDockerConfigJson,
+			Name:      "secret3",
+			Namespace: "another-namespace",
+			Type:      corev1.SecretTypeDockerConfigJson,
 			Data: map[string][]byte{
 				".dockerconfigjson": []byte(`{"auths":{"my-registry.com:5005/registry2":{}}}`),
 			},
@@ -97,21 +90,17 @@ func TestDockerSecretIndexer_RefreshIndex(t *testing.T) {
 func TestDockerSecretIndexer_DeterministicSecrets(t *testing.T) {
 	mockSecrets := []corev1.Secret{
 		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "secret-b",
-				Namespace: "default",
-			},
-			Type: corev1.SecretTypeDockerConfigJson,
+			Name:      "secret-b",
+			Namespace: "default",
+			Type:      corev1.SecretTypeDockerConfigJson,
 			Data: map[string][]byte{
 				".dockerconfigjson": []byte(`{"auths":{"my-registry.com/team-a":{}, "my-registry.com/team-b":{}}}`),
 			},
 		},
 		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "secret-a",
-				Namespace: "default",
-			},
-			Type: corev1.SecretTypeDockerConfigJson,
+			Name:      "secret-a",
+			Namespace: "default",
+			Type:      corev1.SecretTypeDockerConfigJson,
 			Data: map[string][]byte{
 				".dockerconfigjson": []byte(`{"auths":{"my-registry.com/team-a":{}}}`),
 			},
@@ -149,31 +138,25 @@ func TestDockerSecretIndexer_DeterministicSecrets(t *testing.T) {
 func TestDockerSecretIndexer_RefreshIndexSkipsMalformedSecrets(t *testing.T) {
 	mockSecrets := []corev1.Secret{
 		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "good-secret",
-				Namespace: "default",
-			},
-			Type: corev1.SecretTypeDockerConfigJson,
+			Name:      "good-secret",
+			Namespace: "default",
+			Type:      corev1.SecretTypeDockerConfigJson,
 			Data: map[string][]byte{
 				".dockerconfigjson": []byte(`{"auths":{"docker.io":{}}}`),
 			},
 		},
 		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "bad-secret",
-				Namespace: "default",
-			},
-			Type: corev1.SecretTypeDockerConfigJson,
+			Name:      "bad-secret",
+			Namespace: "default",
+			Type:      corev1.SecretTypeDockerConfigJson,
 			Data: map[string][]byte{
 				".dockerconfigjson": []byte(`not-json`),
 			},
 		},
 		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "invalid-registry-secret",
-				Namespace: "default",
-			},
-			Type: corev1.SecretTypeDockerConfigJson,
+			Name:      "invalid-registry-secret",
+			Namespace: "default",
+			Type:      corev1.SecretTypeDockerConfigJson,
 			Data: map[string][]byte{
 				".dockerconfigjson": []byte(`{"auths":{"pip install torch --index-url https:":{}}}`),
 			},
@@ -202,21 +185,17 @@ func TestDockerSecretIndexer_RefreshIndexSkipsMalformedSecrets(t *testing.T) {
 func TestDockerSecretIndexer_RefreshIndexRespectsNamespaceScope(t *testing.T) {
 	mockSecrets := []corev1.Secret{
 		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "target-secret",
-				Namespace: "target",
-			},
-			Type: corev1.SecretTypeDockerConfigJson,
+			Name:      "target-secret",
+			Namespace: "target",
+			Type:      corev1.SecretTypeDockerConfigJson,
 			Data: map[string][]byte{
 				".dockerconfigjson": []byte(`{"auths":{"target-registry.io/team":{}}}`),
 			},
 		},
 		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "malformed-secret",
-				Namespace: "other",
-			},
-			Type: corev1.SecretTypeDockerConfigJson,
+			Name:      "malformed-secret",
+			Namespace: "other",
+			Type:      corev1.SecretTypeDockerConfigJson,
 			Data: map[string][]byte{
 				".dockerconfigjson": []byte(`not-json`),
 			},

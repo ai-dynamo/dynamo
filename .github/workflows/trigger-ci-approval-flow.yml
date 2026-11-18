@@ -63,7 +63,7 @@ jobs:
        vars.GLAMR_CI_REQUESTS_DISABLED != 'true' &&
        github.event.comment.user.id == 282374502 &&
        contains(github.event.comment.body, '@dynamo-ops please run full CI for '))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: external_collaborator
     concurrency:
       group: ci-approval-${{ github.event.pull_request.number || github.event.issue.number }}

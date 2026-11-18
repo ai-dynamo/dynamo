@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_kv_router::plugins::prelude::*;
 
 /// Cached per-worker program-retention capacity derived from model deployment cards.
 static NEXT_SNAPSHOT_ID: AtomicU64 = AtomicU64::new(1);
@@ -61,6 +61,10 @@ impl WorkerCapacitySnapshot {
         self.live_workers
             .as_ref()
             .is_none_or(|workers| workers.contains(&worker))
+    }
+
+    pub(crate) fn capacity(&self, worker: WorkerWithDpRank) -> Option<usize> {
+        self.capacities.get(&worker).copied()
     }
 
     pub(crate) fn has_liveness(&self) -> bool {

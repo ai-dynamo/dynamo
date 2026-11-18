@@ -39,11 +39,12 @@ pub(super) enum RequestCancellation {
 }
 
 #[derive(Clone)]
-struct RequestLifecycle {
+pub(super) struct RequestLifecycle {
     state: RequestState,
     cancellation: RequestCancellation,
     stream_abandoned: bool,
     terminal_seen: bool,
+    pub(super) is_aborted: bool,
 }
 
 pub(super) struct RequestRoute {
@@ -67,6 +68,7 @@ impl RequestRoute {
             cancellation: RequestCancellation::Request,
             stream_abandoned: false,
             terminal_seen: false,
+            is_aborted: false,
         });
         #[cfg(test)]
         let (output_gate_bypass_tx, _) = watch::channel(false);
@@ -104,6 +106,17 @@ impl RequestRoute {
             true
         });
         abandoned
+    }
+
+    pub(super) fn lifecycle_receiver(&self) -> watch::Receiver<RequestLifecycle> {
+        self.lifecycle_tx.subscribe()
+    }
+
+    pub(super) fn abort(&self) {
+        self.lifecycle_tx.send_modify(|lifecycle| {
+            lifecycle.is_aborted = true;
+        });
+        self.abandon_stream();
     }
 
     pub(super) async fn wait_for_admission(&self) -> bool {

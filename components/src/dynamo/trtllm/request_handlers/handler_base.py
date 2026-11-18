@@ -32,6 +32,7 @@ from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
+from tensorrt_llm.llmapi.llm_args import WaitingQueuePolicy
 
 try:
     from tensorrt_llm.llmapi.llm import PreprocessedInputs
@@ -61,12 +62,16 @@ from dynamo.trtllm.conversation_affinity import (
     engine_conversation_affinity_enabled,
 )
 from dynamo.trtllm.engine import TensorRTLLMEngine
+from dynamo.trtllm.engine_monitor import exit_worker_on_fatal_error
+from dynamo.trtllm.errors import guided_decoding_error_to_invalid_argument
+from dynamo.trtllm.health_check import HEALTH_CHECK_CACHE_SALT
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import Publisher
 from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
 from dynamo.trtllm.utils.disagg_utils import (
+    TRTLLM_HAS_ORIG_ELAPSED_S,
     DisaggregatedParams,
     DisaggregatedParamsCodec,
     get_compatible_global_disagg_request_id,
@@ -74,7 +79,9 @@ from dynamo.trtllm.utils.disagg_utils import (
 from dynamo.trtllm.utils.request_utils import (
     apply_stop_conditions_to_sampling_params,
     normalize_top_k_for_trtllm,
+    orig_elapsed_s,
     request_cache_salt,
+    request_trtllm_priority,
 )
 
 if TYPE_CHECKING:
@@ -207,8 +214,23 @@ class _Abortable(Protocol):
     """Structural type for objects that support abort(). Satisfied by both
     GenerationResult and _DeferredAbort."""
 
+    @property
+    def finished(self) -> bool:
+        ...
+
     def abort(self) -> None:
         ...
+
+
+def _abort_unless_finished(generation_result: _Abortable, request_id: str) -> None:
+    """The frontend stops streams it considers complete and the worker sees that
+    as a kill, so an unconditional abort() sends an executor cancel for a
+    request TRT-LLM already finished."""
+    if generation_result.finished:
+        logging.debug(f"Skip abort of finished Request ID: {request_id}")
+        return
+    generation_result.abort()
+    logging.debug(f"Aborted Request ID: {request_id}")
 
 
 class _DeferredAbort:
@@ -228,6 +250,10 @@ class _DeferredAbort:
         """Called by generate_locally() when first generation result is yielded."""
         self._first_token_received = True
 
+    @property
+    def finished(self) -> bool:
+        return self._generation_result.finished
+
     def abort(self) -> None:
         """Abort immediately if first token received, otherwise defer."""
         if self._first_token_received:
@@ -246,6 +272,9 @@ class _DeferredAbort:
                 break  # First result = KV transfer complete
         except Exception:
             pass
+        if self._generation_result.finished:
+            logging.debug("Deferred abort: deferred path, request already finished")
+            return
         self._generation_result.abort()
         logging.debug("Deferred abort: deferred path, engine abort fired")
 
@@ -311,6 +340,9 @@ class HandlerBase(BaseGenerativeHandler):
         self._conversation_affinity_dp_rank_source: str = (
             config.conversation_affinity_dp_rank_source
         )
+        # Whether the engine's waiting queue orders by request priority
+        # (scheduler_config.waiting_queue_policy); resolved lazily like the gate above.
+        self._engine_orders_by_priority: Optional[bool] = None
         self.encode_client = config.encode_client
         self.multimodal_processor = config.multimodal_processor
         self.first_generation = True
@@ -508,8 +540,7 @@ class HandlerBase(BaseGenerativeHandler):
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            generation_result.abort()
-            logging.debug(f"Aborted Request ID: {context.id()}")
+            _abort_unless_finished(generation_result, context.id())
 
             # Clean up any remaining background task
             for task in pending:
@@ -826,6 +857,11 @@ class HandlerBase(BaseGenerativeHandler):
                 disaggregated_params,
                 epd_metadata,
             ) = self._decode_disaggregated_params_from_prefill(prefill_result)
+            # TRT-LLM's generation admission orders this request by its arrival at
+            # the frontend rather than at this worker.
+            elapsed_s = orig_elapsed_s(request)
+            if elapsed_s is not None and TRTLLM_HAS_ORIG_ELAPSED_S:
+                disaggregated_params.orig_elapsed_s = elapsed_s
             # For full EPD flow, make decoded params available to multimodal processor
             ep_disaggregated_params = disaggregated_params
 
@@ -972,22 +1008,13 @@ class HandlerBase(BaseGenerativeHandler):
             request["sampling_options"].setdefault("temperature", temperature)
 
     async def _initiate_shutdown(self, error: Exception):
-        """Initiate graceful shutdown after fatal error"""
+        """Shut down and exit the worker after a fatal error.
+
+        Engine teardown is bounded and runs off the event loop; see
+        exit_worker_on_fatal_error().
+        """
         logging.warning(f"Initiating graceful shutdown due to: {error}")
-
-        try:
-            if self.runtime:
-                logging.info("Shutting down Dynamo runtime...")
-                self.runtime.shutdown()
-
-            if self.engine:
-                logging.info("Shutting down TensorRT-LLM engine...")
-                await self.engine.cleanup()
-        except Exception as cleanup_error:
-            logging.error(f"Error during graceful shutdown: {cleanup_error}")
-        finally:
-            logging.critical("Forcing process exit for restart")
-            os._exit(1)
+        await asyncio.to_thread(exit_worker_on_fatal_error, self.engine, self.runtime)
 
     async def generate_locally(
         self,
@@ -1199,7 +1226,9 @@ class HandlerBase(BaseGenerativeHandler):
             or self.disaggregation_mode == DisaggregationMode.PREFILL
         ):
             apply_stop_conditions_to_sampling_params(
-                sampling_params, request["stop_conditions"]
+                sampling_params,
+                request["stop_conditions"],
+                no_stop_trim=(output_options or {}).get("no_stop_trim", False),
             )
 
         # TODO: Instead of True, we should use streaming from the request.
@@ -1247,6 +1276,13 @@ class HandlerBase(BaseGenerativeHandler):
                     "release newer than 1.3.0rc20)."
                 )
         conv_affinity = self._conversation_affinity
+        if self._engine_orders_by_priority is None:
+            # Engine args without a scheduler config run the default FCFS queue.
+            scheduler_config = getattr(self.engine.llm.args, "scheduler_config", None)
+            self._engine_orders_by_priority = (
+                getattr(scheduler_config, "waiting_queue_policy", None)
+                == WaitingQueuePolicy.PRIORITY
+            )
 
         # Extract dp_rank from request's routing hints for attention DP routing
         routing = request.get("routing", {})
@@ -1283,9 +1319,14 @@ class HandlerBase(BaseGenerativeHandler):
                 f"Using dynamo router dp_rank={dp_rank} for TRTLLM attention DP scheduling"
             )
 
-        # Priority is a float in [0.0, 1.0]; health checks use 1.0. Default is 0.5.
-        priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
+        priority = request_trtllm_priority(
+            request, DEFAULT_REQUEST_PRIORITY, self._engine_orders_by_priority
+        )
         cache_salt = request_cache_salt(request)
+        if cache_salt is None and request.get(HEALTH_CHECK_KEY):
+            # Keep the canary out of the unsalted namespace that TRT-LLM's
+            # attention-DP dummy requests match against.
+            cache_salt = HEALTH_CHECK_CACHE_SALT
 
         try:
             # NEW: Updated engine call to include multimodal data
@@ -1313,6 +1354,10 @@ class HandlerBase(BaseGenerativeHandler):
             generate_async = self.engine.llm.generate_async
             try:
                 generation_result = generate_async(**generate_kwargs)
+            except RequestError as e:
+                # The engine owns request validation, including its token budget.
+                # Surface pre-submission rejections as 400 without copying its rules.
+                raise InvalidArgument(str(e)) from e
             except (ValueError, TypeError, NotImplementedError) as e:
                 # TRT-LLM performs request validation and preprocessing synchronously in
                 # `generate_async()`, before executor submission. A TypeError can also mean
@@ -1579,14 +1624,18 @@ class HandlerBase(BaseGenerativeHandler):
         # 2. Per-request errors - send to client, don't shutdown
         except RequestError as e:
             error_msg = str(e)
-            logging.warning(f"Request {request_id} error: {error_msg}")
+            logging.warning("Request %s error: %s", request_id, error_msg)
+            if not output_tokens_per_choice:
+                client_error = guided_decoding_error_to_invalid_argument(error_msg)
+                if client_error is not None:
+                    raise client_error from e
             yield {
                 "finish_reason": {"error": error_msg},
                 "token_ids": [],
             }
 
-        # 3. EngineShutdown - let it propagate to the Rust bridge
-        except EngineShutdown:
+        # 3. Typed errors - let the Rust bridge preserve their error codes
+        except (EngineShutdown, InvalidArgument):
             raise
 
         # 4. ALL OTHER ERRORS - graceful shutdown
@@ -1658,6 +1707,12 @@ class HandlerBase(BaseGenerativeHandler):
             for key, value in request["sampling_options"].items()
             if value is not None
         }
+        # TRT-LLM's SamplingParams has no logit_bias field, so reject a
+        # non-empty bias instead of generating without it.
+        if overrides.pop("logit_bias", None):
+            raise InvalidArgument(
+                "logit_bias is not supported by the TensorRT-LLM backend"
+            )
         if "top_k" in overrides:
             overrides["top_k"] = normalize_top_k_for_trtllm(overrides["top_k"])
 

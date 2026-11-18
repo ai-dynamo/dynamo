@@ -4,9 +4,9 @@
 use std::collections::BTreeSet;
 
 use dynamo_mocker::common::protocols::DirectRequest;
-use dynamo_mocker::live::{deterministic_token_id, stable_request_uuid};
+use dynamo_mocker::live::{DeterministicTokenGenerator, stable_request_uuid};
 use dynamo_trtllm_sidecar::proto as pb;
-use prost_types::{Struct, value::Kind};
+use prost_types::{Struct, Value, value::Kind};
 use tonic::Status;
 use uuid::Uuid;
 
@@ -19,29 +19,28 @@ use super::{BoxedStatusResult, MockerServerConfig, ServerMode};
 /// whole integration suite and fail against a real engine.
 const REQUEST_TYPE_KEY: &str = "request_type";
 const CONTEXT_ONLY: &str = "context_only";
+/// TensorRT-LLM's token-only switch, spelled out for the same reason.
+const DETOKENIZE_KEY: &str = "detokenize";
 
 pub(super) const DEFAULT_MAX_NEW_TOKENS: u32 = 20;
-// Bound the request-owned synthetic token plan independently of LiveEngine's
-// fixed per-request delivery buffer.
-pub(super) const MAX_NEW_TOKENS: u32 = 32_768;
+// Bound the synthetic token plan and full-response delivery buffer.
+pub(super) const MAX_NEW_TOKENS: u32 = 1_000_000;
 pub(super) const MAX_CANDIDATES: usize = 20;
 
 #[derive(Debug)]
 pub(super) struct PreparedRequest {
     pub(super) uuid: Uuid,
     pub(super) request_id: String,
-    pub(super) session_id: String,
     pub(super) has_kv_session: bool,
-    seed: u64,
+    output_tokens: DeterministicTokenGenerator,
     /// The context phase's first token, replayed as this leg's first output —
     /// what a real generation worker does with the handoff. The sidecar drops
     /// the prefill leg's tokens, so the token is delivered to the client once.
     replayed_first_token: Option<u32>,
-    /// The replayed token's logprob, when the context phase computed one. A
-    /// decode leg asked for logprobs after a context leg that was not reports
-    /// its first token without one, exactly as a real engine does.
-    replayed_first_logprob: Option<f64>,
+    /// Selected and candidate logprobs from the context phase, absent if not requested.
+    replayed_first_logprobs: Option<Vec<pb::LogProb>>,
     prompt_tokens: Vec<u32>,
+    prompt_len: usize,
     pub(super) max_output_tokens: usize,
     /// Token IDs that end the request with `STOP` instead of `LENGTH`. Stop
     /// *strings* are accepted and never match: this server has no tokenizer, so
@@ -50,6 +49,7 @@ pub(super) struct PreparedRequest {
     min_output_tokens: usize,
     return_output_logprobs: bool,
     return_prompt_logprobs: bool,
+    needs_text: bool,
     output_candidates: Option<pb::CandidateTokenSelection>,
     prompt_candidates: Option<pb::CandidateTokenSelection>,
 }
@@ -108,28 +108,33 @@ impl PreparedRequest {
 
         let stopping = request.stopping.unwrap_or_default();
         let max_output_tokens = max_output_tokens(&stopping, config.mode)?;
-        if prompt_tokens.len().saturating_add(max_output_tokens) > config.context_length as usize {
+        let remaining_tokens = (config.context_length as usize).saturating_sub(prompt_tokens.len());
+        if remaining_tokens == 0 {
             return Err(Box::new(Status::invalid_argument(format!(
-                "prompt ({}) plus max_tokens ({}) exceeds the context length of {}",
+                "prompt ({}) leaves no output tokens within the context length of {}",
                 prompt_tokens.len(),
-                max_output_tokens,
                 config.context_length
             ))));
         }
+        let max_output_tokens = max_output_tokens.min(remaining_tokens);
 
         let request_id = request.request_id;
         let uuid = stable_request_uuid(config.seed, &request_id);
-        let session_id = handoff::session_id(uuid);
         let response = request.response.unwrap_or_default();
 
         Ok(Self {
             uuid,
             has_kv_session: kv.session.is_some(),
-            session_id,
-            seed: config.seed,
+            output_tokens: DeterministicTokenGenerator::new(config.seed, &request_id),
             replayed_first_token: kv.session.as_ref().and_then(handoff::first_gen_token),
-            replayed_first_logprob: kv.session.as_ref().and_then(handoff::first_gen_logprob),
+            replayed_first_logprobs: kv
+                .session
+                .as_ref()
+                .map(handoff::first_gen_logprobs)
+                .transpose()?
+                .flatten(),
             request_id,
+            prompt_len: prompt_tokens.len(),
             prompt_tokens,
             max_output_tokens,
             stop_token_ids: stopping
@@ -143,14 +148,19 @@ impl PreparedRequest {
             min_output_tokens: stopping.min_tokens.unwrap_or(0) as usize,
             return_output_logprobs: response.return_output_logprobs == Some(true),
             return_prompt_logprobs: response.return_prompt_logprobs == Some(true),
+            needs_text: needs_text(request.extra.as_ref())?,
             output_candidates: response.output_candidates,
             prompt_candidates: response.prompt_candidates,
         })
     }
 
-    pub(super) fn direct_request(&self) -> DirectRequest {
+    pub(super) fn direct_request(&mut self) -> DirectRequest {
         DirectRequest {
-            tokens: self.prompt_tokens.clone(),
+            tokens: if self.return_prompt_logprobs {
+                self.prompt_tokens.clone()
+            } else {
+                std::mem::take(&mut self.prompt_tokens)
+            },
             max_output_tokens: self.max_output_tokens,
             uuid: Some(self.uuid),
             dp_rank: super::DP_RANK,
@@ -188,13 +198,13 @@ impl PreparedRequest {
     }
 
     pub(super) fn prompt_len(&self) -> usize {
-        self.prompt_tokens.len()
+        self.prompt_len
     }
 
     pub(super) fn output_token(&self, position: usize) -> u32 {
         match (position, self.replayed_first_token) {
             (0, Some(token_id)) => token_id,
-            _ => deterministic_token_id(self.seed, &self.request_id, position),
+            _ => self.output_tokens.token_id(position),
         }
     }
 
@@ -202,58 +212,84 @@ impl PreparedRequest {
     /// to: output tokens and prompt tokens are configured separately, and using
     /// one for the other silently returns nothing when only the other was asked
     /// for.
-    ///
-    /// `logprob` is an override rather than a computation for one case only --
-    /// the replayed first token of a decode request, whose value was produced
-    /// by the context phase and arrives in the handoff.
     fn token_info(
         &self,
         token_id: u32,
         with_logprobs: bool,
         selection: Option<&pb::CandidateTokenSelection>,
-        logprob: Option<f64>,
     ) -> pb::TokenInfo {
+        // The real servicer decodes token strings only for logprob display.
+        if !with_logprobs {
+            return pb::TokenInfo {
+                token_id,
+                ..Default::default()
+            };
+        }
         pb::TokenInfo {
             token_id,
             token: token_text(token_id),
-            logprob: with_logprobs.then(|| logprob.unwrap_or_else(|| selected_logprob(token_id))),
-            rank: with_logprobs.then_some(1),
-            candidates: if with_logprobs {
-                candidates(token_id, selection)
-            } else {
-                Vec::new()
-            },
+            logprob: Some(selected_logprob(token_id)),
+            rank: Some(1),
+            candidates: candidates(token_id, selection),
         }
     }
 
-    /// Output position 0 of a decode request is the token the context phase
-    /// already produced, so its logprob belongs to the handoff rather than to
-    /// this engine: replay the received value instead of regenerating one, and
-    /// if the context phase computed none, leave the hole it left.
-    ///
-    /// Keyed on the position, not the token id. The same token can be sampled
-    /// again later in the stream, and those occurrences are this engine's own
-    /// -- they must not inherit the replayed token's logprob or its absence.
-    fn replayed_logprob(&self, token_id: u32, position: usize) -> Option<Replayed> {
-        if position != 0 || self.replayed_first_token != Some(token_id) {
-            return None;
+    /// Reports the logprobs the context phase handed off rather than
+    /// regenerating them.
+    fn replayed_token_info(&self, token_id: u32, logprobs: &[pb::LogProb]) -> pb::TokenInfo {
+        let selected = logprobs.iter().find(|entry| entry.token_id == token_id);
+        let selection = self
+            .output_candidates
+            .as_ref()
+            .and_then(|selection| selection.selection.as_ref());
+        let mut candidates: Vec<_> = logprobs
+            .iter()
+            .filter(|entry| match selection {
+                Some(pb::candidate_token_selection::Selection::TopN(count)) => {
+                    entry.rank.is_some_and(|rank| rank <= *count)
+                }
+                Some(pb::candidate_token_selection::Selection::TokenIds(ids)) => {
+                    ids.ids.contains(&entry.token_id)
+                }
+                Some(pb::candidate_token_selection::Selection::All(_)) => true,
+                None => false,
+            })
+            .map(|entry| pb::LogProb {
+                token_id: entry.token_id,
+                logprob: entry.logprob,
+                token: token_text(entry.token_id),
+                rank: entry.rank,
+            })
+            .collect();
+        candidates.sort_by_key(|entry| entry.rank);
+        pb::TokenInfo {
+            token_id,
+            token: token_text(token_id),
+            logprob: selected.map(|entry| entry.logprob),
+            rank: selected.and_then(|entry| entry.rank),
+            candidates,
         }
-        Some(Replayed(self.replayed_first_logprob))
     }
 
     pub(super) fn token_output(&self, token_id: u32, position: usize) -> pb::TokenOutput {
-        let replayed = self.replayed_logprob(token_id, position);
-        let with_logprobs =
-            self.return_output_logprobs && !matches!(replayed, Some(Replayed(None)));
-        let info = self.token_info(
-            token_id,
-            with_logprobs,
-            self.output_candidates.as_ref(),
-            replayed.and_then(|Replayed(logprob)| logprob),
-        );
+        let is_replayed = position == 0 && self.replayed_first_token == Some(token_id);
+        let info = match &self.replayed_first_logprobs {
+            Some(logprobs) if is_replayed && self.return_output_logprobs => {
+                self.replayed_token_info(token_id, logprobs)
+            }
+            _ => self.token_info(
+                token_id,
+                self.return_output_logprobs && !is_replayed,
+                self.output_candidates.as_ref(),
+            ),
+        };
         pb::TokenOutput {
             output_index: Some(0),
-            text: info.token.clone(),
+            text: if self.needs_text {
+                token_text(token_id)
+            } else {
+                String::new()
+            },
             tokens: vec![info],
         }
     }
@@ -263,9 +299,7 @@ impl PreparedRequest {
             tokens: self
                 .prompt_tokens
                 .iter()
-                .map(|token_id| {
-                    self.token_info(*token_id, true, self.prompt_candidates.as_ref(), None)
-                })
+                .map(|token_id| self.token_info(*token_id, true, self.prompt_candidates.as_ref()))
                 .collect(),
         })
     }
@@ -317,12 +351,14 @@ impl PreparedRequest {
         pb::PrefillReady {
             kv_session: Some(handoff::build_session(
                 config,
-                self.session_id.clone(),
+                handoff::session_id(self.uuid),
                 &self.request_id,
                 self.prompt_len(),
-                first_token,
-                self.return_output_logprobs
-                    .then(|| selected_logprob(first_token)),
+                &self.token_info(
+                    first_token,
+                    self.return_output_logprobs,
+                    self.output_candidates.as_ref(),
+                ),
             )),
         }
     }
@@ -411,15 +447,29 @@ fn is_context_only(extra: Option<&Struct>) -> bool {
         .is_some_and(|kind| matches!(kind, Kind::StringValue(value) if value == CONTEXT_ONLY))
 }
 
+/// `extra.detokenize`, true when absent. A non-boolean is refused, as the real
+/// servicer refuses it, rather than read as true.
+fn needs_text(extra: Option<&Struct>) -> BoxedStatusResult<bool> {
+    match extra.and_then(|extra| extra.fields.get(DETOKENIZE_KEY)) {
+        None => Ok(true),
+        Some(Value {
+            kind: Some(Kind::BoolValue(value)),
+        }) => Ok(*value),
+        Some(_) => Err(Box::new(Status::invalid_argument(
+            "extra.detokenize must be a boolean",
+        ))),
+    }
+}
+
 /// A request's disaggregation role has to agree with the role this process was
 /// started as. Serving a decode request on a prefill server would "work" and
 /// quietly invalidate whatever the test was asserting.
 fn validate_role(
-    context_only: bool,
+    is_context_only: bool,
     session: Option<&pb::KvSessionRef>,
     mode: ServerMode,
 ) -> BoxedStatusResult<()> {
-    let (shape, accepted_by): (&str, &[ServerMode]) = match (context_only, session.is_some()) {
+    let (shape, accepted_by): (&str, &[ServerMode]) = match (is_context_only, session.is_some()) {
         (true, true) => {
             return Err(Box::new(Status::invalid_argument(
                 "a request cannot be both context_only and carry a kv_session",
@@ -447,11 +497,6 @@ fn validate_role(
     Ok(())
 }
 
-/// A replayed position's logprob: `None` inside means the context phase
-/// computed none, which is different from this position not being a replay.
-#[derive(Clone, Copy)]
-struct Replayed(Option<f64>);
-
 fn token_text(token_id: u32) -> String {
     format!("<token:{token_id}>")
 }
@@ -461,26 +506,27 @@ fn selected_logprob(token_id: u32) -> f64 {
 }
 
 fn candidates(selected: u32, selection: Option<&pb::CandidateTokenSelection>) -> Vec<pb::LogProb> {
-    let ids: Vec<u32> = match selection.and_then(|selection| selection.selection.as_ref()) {
+    let candidate = |index: usize, token_id: u32| pb::LogProb {
+        token_id,
+        logprob: selected_logprob(selected) - 0.1 * index as f64,
+        token: token_text(token_id),
+        rank: Some(index as u32 + 1),
+    };
+    match selection.and_then(|selection| selection.selection.as_ref()) {
         None => Vec::new(),
         Some(pb::candidate_token_selection::Selection::TopN(count)) => (0..(*count as usize)
             .min(MAX_CANDIDATES))
-            .map(|offset| selected.wrapping_add(offset as u32))
+            .map(|index| candidate(index, selected.wrapping_add(index as u32)))
             .collect(),
-        Some(pb::candidate_token_selection::Selection::TokenIds(ids)) => {
-            ids.ids.iter().copied().take(MAX_CANDIDATES).collect()
-        }
+        Some(pb::candidate_token_selection::Selection::TokenIds(ids)) => ids
+            .ids
+            .iter()
+            .take(MAX_CANDIDATES)
+            .enumerate()
+            .map(|(index, &token_id)| candidate(index, token_id))
+            .collect(),
         Some(pb::candidate_token_selection::Selection::All(_)) => (0..MAX_CANDIDATES)
-            .map(|offset| selected.wrapping_add(offset as u32))
+            .map(|index| candidate(index, selected.wrapping_add(index as u32)))
             .collect(),
-    };
-    ids.into_iter()
-        .enumerate()
-        .map(|(index, token_id)| pb::LogProb {
-            token_id,
-            logprob: selected_logprob(selected) - 0.1 * index as f64,
-            token: token_text(token_id),
-            rank: Some(index as u32 + 1),
-        })
-        .collect()
+    }
 }

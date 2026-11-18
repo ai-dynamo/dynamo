@@ -49,6 +49,17 @@ class _SlowPlugin:
         return req
 
 
+class _BrieflySlowPlugin:
+    async def Predict(self, req):
+        await asyncio.sleep(0.1)
+        return req
+
+
+class _TimeoutRaisingPlugin:
+    async def Propose(self, req):
+        raise TimeoutError("plugin's own deadline")
+
+
 # ----- construction validation -----
 
 
@@ -115,6 +126,24 @@ async def test_timeout_raises_typed_error():
         await t.call("Predict", "x")
     assert exc.value.plugin_id == "slow"
     assert exc.value.method == "Predict"
+
+
+@pytest.mark.asyncio
+async def test_no_timeout_runs_a_call_to_completion():
+    # ``timeout_seconds=None`` (replay): a call longer than the deadline
+    # above returns its result.
+    t = InProcessTransport("slow", _BrieflySlowPlugin(), timeout_seconds=None)
+    assert await t.call("Predict", "x") == "x"
+
+
+@pytest.mark.asyncio
+async def test_no_timeout_reports_a_plugin_timeout_error_as_a_call_error():
+    # Without a deadline a TimeoutError can only come from the plugin.
+    t = InProcessTransport("p", _TimeoutRaisingPlugin(), timeout_seconds=None)
+    with pytest.raises(PluginCallError) as exc:
+        await t.call("Propose", "x")
+    assert not isinstance(exc.value, PluginTimeoutError)
+    assert isinstance(exc.value.cause, TimeoutError)
 
 
 # ----- close idempotent -----

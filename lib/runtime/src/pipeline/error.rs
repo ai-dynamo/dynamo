@@ -60,6 +60,13 @@ pub enum PipelineError {
     #[error("Unlinked response; response task was dropped or cancelled")]
     DetachedStreamSender,
 
+    /// A request was issued while another in-flight request through the same source already
+    /// uses this id. A pipeline source routes responses back by id, and a worker's ingress
+    /// refuses a call while an earlier call with that id has not returned, so the new request
+    /// is refused.
+    #[error("Duplicate in-flight request id: {0}")]
+    DuplicateRequestId(String),
+
     #[error("Serialzation Error: {0}")]
     SerializationError(String),
 
