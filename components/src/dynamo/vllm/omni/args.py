@@ -534,7 +534,7 @@ class OmniConfig(DynamoRuntimeConfig):
             )
         # Omni registers ModelInput.Text and renders prompts itself, so Dynamo's
         # preprocessor never applies a custom template.
-        if self.custom_jinja_template is not None:
+        if self.custom_jinja_template:
             raise ValueError(
                 "--custom-jinja-template is not supported by vLLM-Omni workers. "
                 "Remove it or unset DYN_CUSTOM_JINJA_TEMPLATE: Omni workers take "

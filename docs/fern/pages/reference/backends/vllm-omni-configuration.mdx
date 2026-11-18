@@ -9,6 +9,7 @@ The vLLM-Omni backend uses a dedicated entrypoint: `python -m dynamo.vllm.omni`.
 
 <Note>
 These are the vLLM-Omni orchestration flags. The omni worker also accepts the same underlying vLLM engine arguments and the cross-cutting [Dynamo Runtime](../components/runtime-configuration.mdx) flags (`--namespace`, `--endpoint`, and others).
+The vLLM-Omni worker exits at startup when `--custom-jinja-template` or `DYN_CUSTOM_JINJA_TEMPLATE` has a nonempty value, because it renders prompts with the model's own chat template; an empty value is treated as unset.
 </Note>
 
 ## General Flags
