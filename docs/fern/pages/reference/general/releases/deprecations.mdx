@@ -90,7 +90,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 | Pre-split module | Owner crate |
 | :---- | :---- |
-| root re-exports (`ActiveSequences`, `KvSchedulerError`, `RouterEvent`, `WorkerId`, `WorkerSelector`, ...) | the owner of each item, below |
+| root re-exports (`ActiveSequencesMultiWorker`, `KvSchedulerError`, `RouterEvent`, `WorkerId`, `WorkerSelector`, ...) | the owner of each item, below |
 | `protocols` | `dynamo_router_protocol`, `dynamo_kv_events`, `dynamo_kv_hashing`, `dynamo_kv_hints`, `dynamo_slot_tracker`, `dynamo_kv_indexer`, `dynamo_worker_selection`, `dynamo_scheduler`, `dynamo_session_affinity` |
 | `identity`, `worker_type` | `dynamo_router_protocol` (`dynamo_kv_indexer` for the indexer identity specs) |
 | `indexer` and its submodules, `concurrent_radix_tree_compressed`, `nested_map`, `approx`, `radix_tree`, `session_prefix_index` | `dynamo_kv_indexer` |
@@ -115,6 +115,9 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 | `services::selection::CatalogObserver`, `CatalogReconciler::with_observer` | Nothing implemented the observer. |
 | `services::shared_cache::{SharedCacheConfig, run_server}`, `services::shared_cache::server::{AppState, RemoveRequest, SharedCacheQueryRequest, SharedCacheQueryResponse, SharedCacheStore, StoreRequest, create_router}` | The dummy shared-cache server; no replacement. |
 | `indexer::cuckoo::{LocalCkfAdapter, LocalCkfAdapterBuildError, LocalCkfAdapterError, LocalCkfDeltaSinkError, LocalCkfDrainReport, LocalCkfEventResult, LocalCkfRecoveryReport}` and the `DEFAULT_GLOBAL_INGESTION_CONTROL_TIMEOUT`, `DEFAULT_GLOBAL_INGESTION_QUEUE_CAPACITY`, `DEFAULT_GLOBAL_INGESTION_WORKERS` constants | The unused in-process adapter; no replacement. The rest of `indexer::cuckoo` still resolves. |
+| `ActiveSequences` and `DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION` at the root, under `sequences` and `sequences::single`, and `dynamo_llm::kv_router::sequence::ActiveSequences` | The single-worker slot tracker is crate-private in `dynamo-slot-tracker`. Use `ActiveSequencesMultiWorker`, which stays the public tracker. |
+| `protocols::{ActiveBlockEvent, ActiveBlockEventData, PrefillEvent, PrefillEventData}` | Unused wire types; nothing published them. |
+| The `dynamo-slot-tracker` `bench` feature and `ActiveSequencesMultiWorker::bench_project_worker_loads_into` | Benchmark-only surface; no replacement. |
 | `protocols::ActiveLoad` | Not re-exported, because `dynamo-kv-router` cannot depend on `dynamo-llm`. Import `dynamo_llm::kv_router::ActiveLoad`. |
 
   > **Migrate:** Delete the import. If the code depended on one of these for behavior, the `Reason` column names what owns it now; otherwise there is nothing to port.

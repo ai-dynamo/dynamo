@@ -17,7 +17,7 @@ description = "Dynamo router scheduler kernel: runs the routing stages atomicall
 default = []
 # Test-only hooks consumed by dependent crates' tests; never enable in release.
 testing = ["dynamo-router-protocol/testing", "dynamo-kv-indexer/testing", "dynamo-slot-tracker/testing", "dynamo-session-affinity/testing", "dynamo-worker-selection/testing", "dynamo-admission/testing"]
-bench = ["testing", "dynamo-router-protocol/bench", "dynamo-kv-indexer/bench", "dynamo-slot-tracker/bench", "dynamo-worker-selection/bench"]
+bench = ["testing", "dynamo-router-protocol/bench", "dynamo-kv-indexer/bench", "dynamo-worker-selection/bench"]
 
 [dependencies]
 dynamo-admission = { workspace = true }

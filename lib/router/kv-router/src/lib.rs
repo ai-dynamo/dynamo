@@ -38,13 +38,13 @@ mod compat;
 pub use compat::DefaultWorkerSelector;
 #[allow(deprecated)]
 pub use compat::{
-    ActiveSequences, ActiveSequencesMultiWorker, AnchorAwareBranchShardedIndexer, AnchorRef,
-    AnchorTask, BranchShardedIndexer, ClusterId, ConcurrentRadixTreeCompressed,
-    ConditionalDisaggPolicyKind, DEFAULT_ROUTING_GROUP, KvCacheEventError, KvRouterConfig,
-    KvSchedulerError, KvTransferEnforcement, LocalBlockHash, LocalScheduler, LogicalNode,
-    LoraWorkerFilter, LowerTierContinuation, LowerTierIndexer, NodeId, NoopSequencePublisher,
-    OverlapScores, PositionalIndexer, PotentialLoad, PrefillLoadEstimator, PrefillTokenDeltas,
-    RadixTree, ReplicaWorkerPolicy, RequestId, RouterConfigOverride, RouterEvent, RouterEventSink,
+    ActiveSequencesMultiWorker, AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask,
+    BranchShardedIndexer, ClusterId, ConcurrentRadixTreeCompressed, ConditionalDisaggPolicyKind,
+    DEFAULT_ROUTING_GROUP, KvCacheEventError, KvRouterConfig, KvSchedulerError,
+    KvTransferEnforcement, LocalBlockHash, LocalScheduler, LogicalNode, LoraWorkerFilter,
+    LowerTierContinuation, LowerTierIndexer, NodeId, NoopSequencePublisher, OverlapScores,
+    PositionalIndexer, PotentialLoad, PrefillLoadEstimator, PrefillTokenDeltas, RadixTree,
+    ReplicaWorkerPolicy, RequestId, RouterConfigOverride, RouterEvent, RouterEventSink,
     RouterPrefillLoadModel, RouterQueuePolicy, RoutingPartitionId, RoutingPartitionRef,
     SchedulerQueue, SchedulingRequest, SchedulingResponse, SequenceError, SequencePublisher,
     SequenceRequest, SequenceSubscriber, SessionContext, SessionId, SessionPrefixIndexError,
