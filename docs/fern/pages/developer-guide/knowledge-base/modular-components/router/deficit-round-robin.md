@@ -41,8 +41,8 @@ amounts of credit.
 
 The scheduler maintains the following state for each class:
 
-- A shared pending heap for requests without a session context.
-- One pending heap per session with queued requests, ordered by the same queue policy.
+- A shared pending heap for requests without a session context, worker pin, or exclusive affinity target.
+- One pending heap per session with queued requests, and one per pinned or exclusively targeted worker for sessionless requests, ordered by the same queue policy.
 - A deficit containing earned but unspent credit.
 - A quantum controlling how quickly the deficit grows.
 
@@ -144,11 +144,12 @@ error instead of parking it indefinitely. Eligibility continues to enforce exact
 pins, worker allow-lists, DP-rank bounds, taints, and overload filtering.
 
 Head-of-line blocking is lane-local. The shared heap does not search past a
-blocked shared head, so a pinned request whose worker is full holds the shared
-lane until that worker frees. A session lane does not search past its own
-blocked head, and a blocked session lane does not prevent another session lane,
-or a dispatchable shared head, from competing for the class. The class's queue
-policy is not bypassed within any individual lane.
+blocked shared head. A sessionless pinned request whose worker is full waits in
+that worker's lane and holds only the requests pinned to the same worker. A
+session lane does not search past its own blocked head, and a blocked session
+lane does not prevent another session lane, or a dispatchable shared head, from
+competing for the class. The class's queue policy is not bypassed within any
+individual lane.
 
 New arrivals also join an existing backlog in their resolved class instead of
 bypassing queued work. Queue limits, ordering, and DRR charging apply equally
