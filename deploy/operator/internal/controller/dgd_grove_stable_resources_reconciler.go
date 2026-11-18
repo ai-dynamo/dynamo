@@ -213,10 +213,8 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 	return resource, nil
 }
 
-// syncServiceMetadata converges the operator-managed labels and annotations of an
-// already-synced Service onto the rendered desired Service and records a warning event
-// when the update fails. desired must be a copy taken before SyncResource; see
-// syncManagedServiceMetadata.
+// syncServiceMetadata runs syncManagedServiceMetadata and records a warning event on failure.
+// desired must be a copy taken before SyncResource.
 func (r *groveStableResourcesReconciler) syncServiceMetadata(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
