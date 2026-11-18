@@ -183,7 +183,7 @@ async fn runtime_shutdown_withdraws_readiness_without_stopping_liveness() {
     .await;
 }
 
-// DYN_SYSTEM_PORT is an i16. Reserve a dynamically selected port in its range.
+// Reserve a dynamically selected port below the Linux ephemeral range.
 fn reserve_system_port() -> std::net::TcpListener {
     for _ in 0..1000 {
         if let Ok(listener) =

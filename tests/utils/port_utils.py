@@ -24,8 +24,8 @@ from pathlib import Path
 _PORT_LOCK_FILE = Path(tempfile.gettempdir()) / "pytest_port_allocations.lock"
 _PORT_REGISTRY_FILE = Path(tempfile.gettempdir()) / "pytest_port_allocations.json"
 
-# Port range for allocation (i16 range for Rust compatibility)
-# TODO: Get Rust backend to use u16 instead of i16 so we can use full 1024-65535 range
+# Port range for allocation, kept below the Linux ephemeral range (32768-60999)
+# so allocated ports do not collide with the kernel's outgoing-connection ports.
 _PORT_MIN = 1024
 _PORT_MAX = 32767
 _START_PORT_RANDOM_OFFSET_MAX = 500
@@ -100,12 +100,12 @@ def _cleanup_stale_allocations(registry: dict, max_age: float = 900.0) -> dict:
 
 
 def allocate_ports(count: int, start_port: int) -> list[int]:
-    """Find and return available ports in i16 range with flock-based locking.
+    """Find and return available ports in [_PORT_MIN, _PORT_MAX] with flock-based locking.
 
     Uses file locking (flock) to prevent race conditions when multiple test processes
     allocate ports simultaneously.
 
-    Port range is limited to i16 (1024-32767) due to Rust backend expecting i16.
+    Port range is limited to 1024-32767 to stay below the Linux ephemeral range.
 
     Searches from a random offset (start_port + random(500)) and walks up incrementally.
     Wraps around to _PORT_MIN (1024) when exceeding _PORT_MAX. Retries up to 100 times.
@@ -130,7 +130,7 @@ def allocate_ports(count: int, start_port: int) -> list[int]:
         caller_file = caller_info.filename
         caller_line = caller_info.lineno
 
-    # Validate start_port is in valid i16 range. Note that <1024 is reserved for system services (root only)
+    # Validate start_port is in the allocation range. Note that <1024 is reserved for system services (root only)
     if start_port < _PORT_MIN or start_port > _PORT_MAX:
         raise ValueError(
             f"start_port must be between {_PORT_MIN} and {_PORT_MAX}, got {start_port}"
@@ -214,7 +214,7 @@ def allocate_ports(count: int, start_port: int) -> list[int]:
 def allocate_contiguous_ports(
     count: int, block_size: int, start_port: int
 ) -> list[int]:
-    """Find and return contiguous port blocks in i16 range with flock-based locking.
+    """Find and return contiguous port blocks in [_PORT_MIN, _PORT_MAX] with flock-based locking.
 
     Args:
         count: Number of contiguous blocks to allocate
@@ -332,13 +332,13 @@ def allocate_contiguous_ports(
 
 
 def allocate_port(start_port: int) -> int:
-    """Find and return a single available port in i16 range.
+    """Find and return a single available port in [_PORT_MIN, _PORT_MAX].
 
     Args:
         start_port: Starting port number for allocation (required)
 
     Returns:
-        int: An available port number between start_port and 32767 (i16 max)
+        int: An available port number between start_port and _PORT_MAX (32767)
     """
     return allocate_ports(1, start_port)[0]
 

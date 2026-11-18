@@ -62,8 +62,8 @@ def _reserved_port() -> tuple[int, socket.socket]:
     process can claim, which shows up as an intermittent failure under parallel
     runs. The caller keeps the reservation open until the moment it binds.
 
-    `DYN_SYSTEM_PORT` is parsed as an i16, so the kernel's ephemeral range is
-    often too high and the runtime rejects the config.
+    Candidates stay below the kernel's ephemeral range, so an outgoing
+    connection cannot already hold the port.
     """
     for _ in range(200):
         candidate = random.randint(20000, 32000)
@@ -75,7 +75,7 @@ def _reserved_port() -> tuple[int, socket.socket]:
             sock.close()
             continue
         return candidate, sock
-    raise RuntimeError("no free port below the i16 ceiling")
+    raise RuntimeError("no free port in 20000-32000")
 
 
 class _OtlpReceiver(metrics_service_pb2_grpc.MetricsServiceServicer):
