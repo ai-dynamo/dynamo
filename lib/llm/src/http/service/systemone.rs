@@ -39,8 +39,8 @@ use crate::{
         },
         response_merge::PREFILL_OUTPUT_ANNOTATION,
         systemone::{
-            ScoringBackend, build_native_score_request, parse_candidate_scores,
-            vllm::{VllmScoreCollector, causal_scoring_request},
+            ScoringBackend, VllmScoreCollector, build_native_score_request, causal_scoring_request,
+            parse_candidate_scores,
         },
     },
 };
@@ -476,9 +476,7 @@ fn prepare_branches(
             ScoringBackend::Sglang => {
                 build_native_score_request(&prompt_ids, &label_ids, "validation")
             }
-            ScoringBackend::Vllm => {
-                causal_scoring_request(prompt_ids.clone(), &label_ids, "validation")
-            }
+            ScoringBackend::Vllm => causal_scoring_request(&prompt_ids, &label_ids, "validation"),
         }
         .map_err(|cause| {
             tracing::error!(error = %cause, "failed to build System One native request");

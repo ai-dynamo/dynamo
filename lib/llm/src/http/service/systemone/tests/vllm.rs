@@ -143,12 +143,8 @@ pub(super) fn prepared_branch(index: usize) -> PreparedBranch {
     let mut branch = prepared_noul_branch(index);
     branch.prompt_ids.push(3);
     branch.native = Some(
-        super::super::causal_scoring_request(
-            branch.prompt_ids.clone(),
-            &branch.label_ids,
-            "preflight",
-        )
-        .unwrap(),
+        super::super::causal_scoring_request(&branch.prompt_ids, &branch.label_ids, "preflight")
+            .unwrap(),
     );
     branch
 }

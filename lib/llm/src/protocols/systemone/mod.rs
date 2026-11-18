@@ -4,9 +4,11 @@
 //! Backend-native scoring transports used by the reusable decision API core.
 
 mod native;
-pub mod vllm;
+mod vllm;
 
 pub use native::{build_native_score_request, parse_candidate_scores};
+pub(crate) use vllm::VllmScoreCollector;
+pub use vllm::causal_scoring_request;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScoringBackend {

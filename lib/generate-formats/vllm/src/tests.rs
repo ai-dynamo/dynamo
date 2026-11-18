@@ -29,8 +29,8 @@ fn project(raw: &Value, worker: &Worker<'_>) -> PreprocessedRequest {
 
 #[test]
 fn causal_scoring_request_survives_the_native_format_boundary() {
-    let native = dynamo_llm::protocols::systemone::vllm::causal_scoring_request(
-        vec![1, 2, 3],
+    let native = dynamo_llm::protocols::systemone::causal_scoring_request(
+        &[1, 2, 3],
         &[20, 10],
         "request-cache-scope",
     )

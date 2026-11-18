@@ -8,7 +8,7 @@ use crate::protocols::common::{FinishReason, llm_backend::LLMEngineOutput};
 
 /// Build an isolated one-token read, without inherited generation controls.
 pub fn causal_scoring_request(
-    prompt_ids: Vec<u32>,
+    prompt_ids: &[u32],
     label_ids: &[u32],
     cache_salt: &str,
 ) -> Result<serde_json::Value, SystemOneError> {
@@ -47,13 +47,13 @@ pub fn causal_scoring_request(
 }
 
 #[derive(Debug, PartialEq)]
-pub struct VllmScoreResult {
-    pub scores: Vec<f64>,
-    pub cached_tokens: usize,
+pub(crate) struct VllmScoreResult {
+    pub(crate) scores: Vec<f64>,
+    pub(crate) cached_tokens: usize,
 }
 
 /// Collect delta outputs before accepting a complete, measured scoring result.
-pub struct VllmScoreCollector {
+pub(crate) struct VllmScoreCollector {
     expected_ids: Vec<u32>,
     prompt_tokens: usize,
     sampled_token: Option<u32>,
@@ -70,7 +70,10 @@ enum CollectionState {
 }
 
 impl VllmScoreCollector {
-    pub fn new(expected_ids: Vec<u32>, prompt_tokens: usize) -> Result<Self, SystemOneError> {
+    pub(crate) fn new(
+        expected_ids: Vec<u32>,
+        prompt_tokens: usize,
+    ) -> Result<Self, SystemOneError> {
         validate_inputs(&expected_ids, prompt_tokens)?;
         Ok(Self {
             expected_ids,
@@ -82,7 +85,7 @@ impl VllmScoreCollector {
         })
     }
 
-    pub fn observe(&mut self, frame: &LLMEngineOutput) -> Result<(), SystemOneError> {
+    pub(crate) fn observe(&mut self, frame: &LLMEngineOutput) -> Result<(), SystemOneError> {
         let result = self.observe_frame(frame);
         if result.is_err() {
             self.state = CollectionState::Failed;
@@ -186,7 +189,7 @@ impl VllmScoreCollector {
         Ok(())
     }
 
-    pub fn finish(self) -> Result<VllmScoreResult, SystemOneError> {
+    pub(crate) fn finish(self) -> Result<VllmScoreResult, SystemOneError> {
         if self.state != CollectionState::Terminal {
             return Err(invalid("scoring stream failed or lacks a terminal result"));
         }
@@ -264,7 +267,7 @@ mod tests {
 
     #[test]
     fn scoring_request_has_explicit_neutral_one_token_sampling() {
-        let request = causal_scoring_request(vec![1, 2, 3], &[20, 10], "tenant").unwrap();
+        let request = causal_scoring_request(&[1, 2, 3], &[20, 10], "tenant").unwrap();
         assert_eq!(request["token_ids"], json!([1, 2, 3]));
         assert_eq!(request["cache_salt"], "tenant");
         assert_eq!(request["stream"], false);
@@ -287,10 +290,10 @@ mod tests {
         ] {
             assert_eq!(params[key], expected, "{key}");
         }
-        assert!(causal_scoring_request(vec![], &[10], "tenant").is_err());
-        assert!(causal_scoring_request(vec![1], &[], "tenant").is_err());
-        assert!(causal_scoring_request(vec![1], &[10, 10], "tenant").is_err());
-        assert!(causal_scoring_request(vec![1], &[10], "").is_err());
+        assert!(causal_scoring_request(&[], &[10], "tenant").is_err());
+        assert!(causal_scoring_request(&[1], &[], "tenant").is_err());
+        assert!(causal_scoring_request(&[1], &[10, 10], "tenant").is_err());
+        assert!(causal_scoring_request(&[1], &[10], "").is_err());
     }
 
     #[test]
