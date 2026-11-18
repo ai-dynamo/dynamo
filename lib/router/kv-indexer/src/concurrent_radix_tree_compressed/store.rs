@@ -22,7 +22,6 @@ impl ConcurrentRadixTreeCompressed {
     // apply_stored
     // ------------------------------------------------------------------
 
-    #[cfg_attr(feature = "profile", inline(never))]
     pub(super) fn apply_stored(
         &self,
         lookup: &mut LaneLookup,
@@ -225,7 +224,6 @@ impl ConcurrentRadixTreeCompressed {
         KvCacheEventError::ParentBlockNotFound
     }
 
-    #[cfg_attr(feature = "profile", inline(never))]
     fn insert_for_resolved_parent(
         &self,
         lookup: &mut LaneLookup,
@@ -554,7 +552,6 @@ impl ConcurrentRadixTreeCompressed {
         }
     }
 
-    #[cfg_attr(feature = "profile", inline(never))]
     fn insert_blocks_from(
         &self,
         lookup: &mut LaneLookup,
