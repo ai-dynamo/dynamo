@@ -129,6 +129,20 @@ def _disaggregated_payloads(
     ]
 
 
+def _sglang_unmatched_transfer_cancellation_payload():
+    transfer = disaggregated_token_count_payload()
+    return SGLangUnmatchedKvTransferCancellationPayload(
+        body=transfer.body,
+        expected_response=[],
+        expected_log=[],
+        expected_finish_reason=transfer.expected_finish_reason,
+        expected_completion_tokens=transfer.expected_completion_tokens,
+        prefill_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+        decode_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT2"),
+        transfer_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+    )
+
+
 KV_ROUTING_BLOCK_SIZE = 64
 KV_ROUTING_ENV = {
     "PYTHONUNBUFFERED": "1",
@@ -482,18 +496,7 @@ sidecar_configs = {
                 decode_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT2"),
                 transfer_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
             ),
-            # Cancel a decode request stuck on an unmatched KV transfer, then
-            # require a fresh completed transfer through the frontend.
-            SGLangUnmatchedKvTransferCancellationPayload(
-                body=disaggregated_token_count_payload().body,
-                expected_response=[],
-                expected_log=[],
-                expected_finish_reason="length",
-                expected_completion_tokens=8,
-                prefill_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
-                decode_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT2"),
-                transfer_metrics=SGLangMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
-            ),
+            _sglang_unmatched_transfer_cancellation_payload(),
         ],
     ),
     "vllm_kv_router": SidecarConfig(

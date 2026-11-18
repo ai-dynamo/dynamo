@@ -37,6 +37,7 @@ import psutil
 import requests
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
+from dynamo.runtime import Context, DistributedRuntime
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_metrics import EngineMetrics, SGLangMetricsChecker
 from tests.utils.http_checks import check_health_generate as check_health_generate
@@ -687,7 +688,13 @@ class SGLangUnmatchedKvTransferCancellationPayload(KvTransferPayload):
         self._env = env
 
     def before_request(self) -> None:
-        asyncio.run(self._cancel_unmatched_transfer())
+        decode_before = asyncio.run(self._cancel_unmatched_transfer())
+        self.decode_metrics.wait_for_scheduler()
+        self.prefill_metrics.wait_for_scheduler()
+        decode_after = self.decode_metrics.progress()
+        assert (
+            decode_after == decode_before
+        ), f"Cancelled decode request advanced decode: {decode_before=}, {decode_after=}"
         super().before_request()
 
     async def _wait_for_decode_queues(self, *, is_waiting: bool) -> tuple[int, int]:
@@ -697,7 +704,6 @@ class SGLangUnmatchedKvTransferCancellationPayload(KvTransferPayload):
                 self.decode_metrics.decode_queue_counts
             )
             if is_waiting:
-                # Waiting for KV, not decoding.
                 is_ready = prealloc + transfer >= 1 and running == 0
             else:
                 is_ready = prealloc == transfer == 0
@@ -709,9 +715,7 @@ class SGLangUnmatchedKvTransferCancellationPayload(KvTransferPayload):
             )
             await asyncio.sleep(0.25)
 
-    async def _cancel_unmatched_transfer(self) -> None:
-        from dynamo.runtime import Context, DistributedRuntime
-
+    async def _cancel_unmatched_transfer(self) -> float:
         self.prefill_metrics.wait_for_scheduler()
         self.decode_metrics.wait_for_scheduler()
         decode_before = self.decode_metrics.progress()
@@ -782,12 +786,7 @@ class SGLangUnmatchedKvTransferCancellationPayload(KvTransferPayload):
             if reader is not None and not reader.done():
                 reader.cancel()
             runtime.shutdown()
-        await asyncio.to_thread(self.decode_metrics.wait_for_scheduler)
-        await asyncio.to_thread(self.prefill_metrics.wait_for_scheduler)
-        decode_after = await asyncio.to_thread(self.decode_metrics.progress)
-        assert (
-            decode_after == decode_before
-        ), f"Cancelled decode request advanced decode: {decode_before=}, {decode_after=}"
+        return decode_before
 
 
 _KV_ROUTING_PROMPTS = (
