@@ -23,9 +23,23 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 DEFAULT_COLD_START_DELAY_S = 60.0
+
+
+def resolve_nextn(
+    extra_args: Mapping[str, Any],
+    *,
+    field_name: str = "extra_args",
+    error_type: type[ValueError] = ValueError,
+) -> Optional[int]:
+    """Resolve the canonical nextn setting and reject conflicting aliases."""
+    canonical = extra_args.get("aic_nextn")
+    legacy = extra_args.get("ais_nextn")
+    if canonical is not None and legacy is not None and canonical != legacy:
+        raise error_type(f"{field_name}.aic_nextn conflicts with ais_nextn")
+    return canonical if canonical is not None else legacy
 
 
 @dataclass(frozen=True)
@@ -57,13 +71,8 @@ class Substrate:
             raise ValueError(
                 "extra_engine_args.timing_model may override only fixed or polynomial timing; external model identity belongs in the substrate"
             )
-        # Same alias resolution as Match Config's EngineConfig: aic_nextn is
-        # canonical, ais_nextn is the legacy alias.
-        canonical = rank.get("aic_nextn")
-        legacy = rank.pop("ais_nextn", None)
-        if canonical is not None and legacy is not None and canonical != legacy:
-            raise ValueError("extra_engine_args.aic_nextn conflicts with ais_nextn")
-        nextn = canonical if canonical is not None else legacy
+        nextn = resolve_nextn(rank, field_name="extra_engine_args")
+        rank.pop("ais_nextn", None)
         if nextn is not None:
             rank["aic_nextn"] = nextn
         perf_config = {

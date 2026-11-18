@@ -18,7 +18,11 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional, Sequence
 
 import yaml
-from autoscaling_arena.substrates import DEFAULT_COLD_START_DELAY_S, SUBSTRATES
+from autoscaling_arena.substrates import (
+    DEFAULT_COLD_START_DELAY_S,
+    SUBSTRATES,
+    resolve_nextn,
+)
 from autoscaling_arena.trace_preparation import TracePreparationConfig
 from autoscaling_arena.workloads import WORKLOADS, validate_mooncake_trace
 
@@ -256,15 +260,11 @@ class EngineConfig:
     runtime: EngineRuntimeConfig = field(default_factory=EngineRuntimeConfig)
 
     def __post_init__(self) -> None:
-        canonical = self.extra_args.get("aic_nextn")
-        legacy = self.extra_args.get("ais_nextn")
-        if canonical is not None and legacy is not None and canonical != legacy:
-            raise MatchConfigError("extra_args.aic_nextn conflicts with ais_nextn")
+        resolve_nextn(self.extra_args, error_type=MatchConfigError)
 
     @property
     def nextn(self) -> Optional[int]:
-        canonical = self.extra_args.get("aic_nextn")
-        return canonical if canonical is not None else self.extra_args.get("ais_nextn")
+        return resolve_nextn(self.extra_args, error_type=MatchConfigError)
 
 
 @dataclass(frozen=True)
