@@ -248,17 +248,21 @@ async def test_rejection_retains_demand_and_grant_without_raising(connector):
 
 # Both pool-local reads carry the managed status poll; the environment uses
 # whichever one the connector supports on each replica-count refresh.
-WORKER_OBSERVATIONS = [
-    ("get_actual_worker_counts", (0, 1, False)),
-    ("get_worker_inventory", WorkerCounts(ready_num_decode=1, pending_num_decode=1)),
-]
+WORKER_OBSERVATION_METHODS = ("get_actual_worker_counts", "get_worker_inventory")
+
+
+def _worker_observation(method):
+    if method == "get_actual_worker_counts":
+        return (0, 1, False)
+    return WorkerCounts(ready_num_decode=1, pending_num_decode=1)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("method,observed", WORKER_OBSERVATIONS)
+@pytest.mark.parametrize("method", WORKER_OBSERVATION_METHODS)
 async def test_worker_observation_refreshes_status_without_substituting_grant(
-    connector, method, observed
+    connector, method
 ):
+    observed = _worker_observation(method)
     connector.last_managed_allocation = _allocation(granted_replicas=2)
     connector.managed_allocation = True
     connector.last_desired_replicas = [_target(3)]
@@ -287,10 +291,11 @@ async def test_worker_observation_refreshes_status_without_substituting_grant(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("method,observed", WORKER_OBSERVATIONS)
+@pytest.mark.parametrize("method", WORKER_OBSERVATION_METHODS)
 async def test_legacy_worker_observation_never_polls_managed_endpoint(
-    connector, method, observed
+    connector, method
 ):
+    observed = _worker_observation(method)
     local = MagicMock()
     setattr(local, method, AsyncMock(return_value=observed))
     connector._local_k8s_connector = local
