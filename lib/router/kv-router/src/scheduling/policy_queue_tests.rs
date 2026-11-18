@@ -551,14 +551,36 @@ fn shared_capacity_lanes_are_probed_once_per_capacity_recheck() {
     assert_eq!(asks.get(), 2);
     assert_eq!(queue.class_blocked_lane_count(0), 4);
 
-    // Once the probe may go, every shared lane is asked and dispatches in order.
+    // Once the probe may go, only the group's best head is promoted: the probe, the pinned
+    // lane, and the promoted head at dispatch are asked, the other shared lanes stay where
+    // they are without a visit.
     room.set(true);
     asks.set(0);
     queue.recheck_blocked_lanes(RecheckScope::Capacity);
-    assert_eq!(
-        drain_payloads(&mut queue, predicate),
-        ["session", "session", "session"]
-    );
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "session");
+    assert_eq!(asks.get(), 3);
+    // The dispatch hands the stand-in to the next best head, so more room is used up in
+    // later passes at one ask each, without another capacity change: stand-in, then the
+    // pinned lane is not asked again as no recheck was filed.
+    assert_eq!(queue.class_blocked_lane_count(0), 2);
+    asks.set(0);
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "session");
+    assert_eq!(asks.get(), 1);
+    assert_eq!(queue.class_blocked_lane_count(0), 1);
+    // The room is gone: the last stand-in is refused for the shared reason and rejoins the
+    // group, which now waits for the next capacity change.
+    room.set(false);
+    asks.set(0);
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(asks.get(), 1);
+    assert_eq!(queue.class_blocked_lane_count(0), 2);
+    asks.set(0);
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(asks.get(), 0);
+    room.set(true);
+    queue.recheck_blocked_lanes(RecheckScope::Capacity);
+    assert_eq!(queue.pop_next(predicate).unwrap().into_payload(), "session");
+    assert!(queue.pop_next(predicate).is_none());
     assert_eq!(queue.class_blocked_lane_count(0), 1);
     assert_eq!(
         queue.class_lane_block_reason(0, QueueLane::Exact(WorkerWithDpRank::new(9, 0))),
