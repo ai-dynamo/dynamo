@@ -29,6 +29,7 @@ from tensorrt_llm.inputs.multimodal_data import VideoData
 from tensorrt_llm.inputs.registry import MULTIMODAL_PLACEHOLDER_REGISTRY
 from tensorrt_llm.inputs.utils import async_load_video
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
+from torchvision.transforms.functional import to_tensor
 
 from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_bytes
 from dynamo.common.http.url_validator import (
@@ -61,14 +62,16 @@ _EMBEDDING_FETCH_MIN_RATE = 64 * 1024
 _EMBEDDING_FETCH_READ_TIMEOUT_S = 300.0
 
 # Model types whose TRT-LLM input processor rescales images and videos with
-# one flag. Next to float video frames, a PIL image would reach such a model
-# unscaled, so image + video requests are refused for them (MiniCPM-V 4.6's
-# processor currently refuses the mix itself as well).
-# TODO: remove once images go to TRT-LLM as float tensors for models without
-# a preferred image format, as trtllm-serve sends them.
+# one flag, and asks for no media format. Next to float video frames, a PIL
+# image would reach such a model unscaled, so in an image + video request the
+# images go over as float (3, H, W) tensors in [0, 1], as trtllm-serve sends
+# them.
 _SHARED_RESCALE_FLAG_MODEL_TYPES = frozenset(
     {"qwen2_vl", "qwen2_5_vl", "exaone4_5", "minicpmv4_6"}
 )
+# MiniCPM-V 4.6's TRT-LLM input processor refuses an image and a video in one
+# request itself, so such requests are refused before any video is fetched.
+_IMAGE_AND_VIDEO_REFUSED_MODEL_TYPES = frozenset({"minicpmv4_6"})
 
 
 def _nvdec_video_data(content: bytes, num_frames: int) -> VideoData:
@@ -669,10 +672,14 @@ class MultimodalRequestProcessor:
             # unscaled. Next to an image, videos therefore go over as uint8
             # when the model asks for that format, as Qwen3-VL does. For the
             # models in _SHARED_RESCALE_FLAG_MODEL_TYPES, which do not, the
-            # request is refused before any video is fetched; other models get
-            # the media as decoded. Video-only requests are unchanged.
+            # images go over as float tensors instead (below), except where
+            # the model refuses the mix; other models get the media as
+            # decoded. Single-modality requests are unchanged.
             image_and_video = bool(video_items) and "image" in processed_mm_data
-            if image_and_video and self.model_type in _SHARED_RESCALE_FLAG_MODEL_TYPES:
+            if (
+                image_and_video
+                and self.model_type in _IMAGE_AND_VIDEO_REFUSED_MODEL_TYPES
+            ):
                 raise InvalidArgument(
                     "This model cannot take an image and a video in the same "
                     "request yet; send them in separate requests"
@@ -802,6 +809,21 @@ class MultimodalRequestProcessor:
                         else v
                         for v in videos
                     ]
+                elif (
+                    image_and_video
+                    and self.model_type in _SHARED_RESCALE_FLAG_MODEL_TYPES
+                    and isinstance(videos[0].frames[0], torch.Tensor)
+                ):
+                    # The processor skips rescaling for both modalities when
+                    # the first video frame is a tensor, so the images must
+                    # already be in [0, 1]: the same to_tensor conversion
+                    # trtllm-serve's ImageMediaIO(format="pt") applies. Next
+                    # to uint8 video, PIL images are rescaled correctly and
+                    # stay as they are. map is lazy, so the conversion runs
+                    # in the worker thread, off the event loop.
+                    processed_mm_data["image"] = await asyncio.to_thread(
+                        list, map(to_tensor, processed_mm_data["image"])
+                    )
                 processed_mm_data["video"] = videos
                 logging.info("Loaded %d video(s)", len(videos))
 
