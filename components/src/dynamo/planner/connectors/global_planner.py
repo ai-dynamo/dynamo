@@ -396,9 +396,8 @@ class GlobalPlannerConnector(PlannerConnector):
             prefill_component_name=prefill_component_name,
             decode_component_name=decode_component_name,
         )
-        # A non-None inventory replaces the replica-count poll that carries the
-        # managed status refresh, so refresh here. On None the caller's
-        # fallback to get_actual_worker_counts polls instead; poll only once.
+        # This read replaces the count poll that refreshes managed status. On None
+        # the caller falls back to get_actual_worker_counts, which polls instead.
         if inventory is not None and self.managed_allocation:
             await self.get_allocation_status()
         return inventory
