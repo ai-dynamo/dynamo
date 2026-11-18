@@ -7989,9 +7989,7 @@ class InstrumentedScheduler(AsyncScheduler):
         window["gpus"] = self._bench_power_gpus
         window["t0"] = time.monotonic()
         # The latency sample's last output; t0 only if none was recorded.
-        window["last_output"] = (
-            getattr(self, "_bench_last_output_arrival", 0.0) or window["t0"]
-        )
+        window["last_output"] = self._bench_last_output_arrival or window["t0"]
         try:
             window["start"] = _bench_read_gpu_energy(window["gpus"])
         except _BenchPowerUnavailable as error:

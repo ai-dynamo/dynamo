@@ -10187,6 +10187,7 @@ def _power_window_stub(monkeypatch, point, *, energy=None):
     stub._bench_expected_fpms = 1
     stub._bench_synchronizer = None
     stub._bench_power_gpus = [("GPU-a", object())]
+    stub._bench_last_output_arrival = 0.0
     stub._bench_active_req_ids = {"r0", "r1"}
     stub.requests = {
         "r0": SimpleNamespace(num_computed_tokens=64),
