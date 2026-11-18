@@ -23,6 +23,7 @@ import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
 
 import numpy as np
@@ -88,6 +89,7 @@ if TYPE_CHECKING:
 configure_dynamo_logging()
 
 logger = logging.getLogger(__name__)
+_decode_token_cap_warned = False
 
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 
@@ -1048,6 +1050,8 @@ class HandlerBase(BaseGenerativeHandler):
             embeddings: Optional tensor or dict containing embeddings for multimodal processing
             ep_disaggregated_params: Optional DisaggregatedParams from encode worker (full EPD flow)
         """
+        global _decode_token_cap_warned
+
         reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
 
         # With DYN_TOKEN_IDS_AS_BYTES the ingress hands token ids over as a packed
@@ -1226,7 +1230,6 @@ class HandlerBase(BaseGenerativeHandler):
             and disaggregated_params.request_type == "generation_only"
         )
         output_token_cap = sampling_params.max_tokens if is_generation_only else None
-        capped_choices: set[int] = set()
 
         # TODO: Instead of True, we should use streaming from the request.
         # However, currently dynamo run does not send streaming in the request.
@@ -1427,24 +1430,33 @@ class HandlerBase(BaseGenerativeHandler):
 
                     for output in res.outputs:
                         output_idx = getattr(output, "index", 0) or 0
-                        if output_idx in capped_choices:
-                            # Its finish chunk was already sent at the cap.
-                            continue
                         tokens_so_far = output_tokens_per_choice.get(output_idx, 0)
                         token_ids = output.token_ids
                         finish_reason = output.finish_reason
                         stop_reason = output.stop_reason
-                        clamped = False
+                        logprobs_output = output
                         if (
                             output_token_cap is not None
-                            and len(token_ids) >= output_token_cap
-                            and (len(token_ids) > output_token_cap or not finish_reason)
+                            and len(token_ids) > output_token_cap
                         ):
+                            if not _decode_token_cap_warned:
+                                _decode_token_cap_warned = True
+                                logger.warning(
+                                    "Clamping TensorRT-LLM decode output for request %s: "
+                                    "%s tokens exceed max_tokens=%s; "
+                                    "check whether the engine still needs this workaround",
+                                    context.id(),
+                                    len(token_ids),
+                                    output_token_cap,
+                                )
                             token_ids = token_ids[:output_token_cap]
-                            finish_reason = "length"
-                            stop_reason = None
-                            clamped = True
-                            capped_choices.add(output_idx)
+                            logprobs_output = SimpleNamespace(
+                                token_ids=token_ids, logprobs=output.logprobs
+                            )
+                            # Keep the terminal chunk aligned with engine completion.
+                            if finish_reason:
+                                finish_reason = "length"
+                                stop_reason = None
                         next_total_toks = len(token_ids)
 
                         # The engine returns all tokens generated so far for
@@ -1466,14 +1478,8 @@ class HandlerBase(BaseGenerativeHandler):
                         # aligned with the cumulative token list, so use the
                         # same per-choice cursor as token_ids.
                         log_probs, top_logprobs = self._extract_logprobs(
-                            output, tokens_so_far
+                            logprobs_output, tokens_so_far
                         )
-                        if clamped:
-                            num_new_tokens = len(out["token_ids"])
-                            if log_probs:
-                                log_probs = log_probs[:num_new_tokens]
-                            if top_logprobs:
-                                top_logprobs = top_logprobs[:num_new_tokens]
                         if log_probs:
                             out["log_probs"] = log_probs
                         if top_logprobs:
