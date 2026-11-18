@@ -233,10 +233,8 @@ func eppRuntimeCompatibilityError(contract eppRuntimeContract, eppConfigPath *fi
 	return nil
 }
 
-// generatedNameError reports a name the operator generates and uses both as a
-// Service name and as the nvidia.com/selector label value when Kubernetes would
-// reject it as either. fldPath is the user-chosen name it is derived from, and
-// action tells the user which name to change.
+// generatedNameError reports generatedName if invalid as a Service name or selector label value.
+// fldPath is the user-chosen name it derives from; action says which name to change.
 func generatedNameError(fldPath *field.Path, generatedName, action string) *field.Error {
 	serviceNameErrs := k8svalidation.IsDNS1035Label(dynamo.NormalizeKubeResourceName(generatedName))
 	labelValueErrs := k8svalidation.IsValidLabelValue(generatedName)

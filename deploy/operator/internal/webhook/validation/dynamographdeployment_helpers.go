@@ -436,12 +436,8 @@ func difference(a, b map[string]struct{}) []string {
 	return result
 }
 
-// generatedDynamoGraphDeploymentNameErrors reports names derived from the DGD
-// name that Kubernetes would reject: the DGD name label value and, for each
-// component, the Service name and nvidia.com/selector label value
-// <dgd>-<component>. Outside Grove, worker DCD names also end with the worker
-// hash, and that name is the pods' selector value and, under Kubernetes
-// discovery, a Service name. dgd must not be nil.
+// generatedDynamoGraphDeploymentNameErrors reports generated names Kubernetes would reject: the DGD
+// label value, <dgd>-<component>, and outside Grove the worker DCD name. dgd must not be nil.
 func generatedDynamoGraphDeploymentNameErrors(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	grovePathway bool,

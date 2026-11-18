@@ -239,14 +239,8 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 	}
 	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpec(&dgd.Spec, field.NewPath("spec"), specOpts)...)
 
-	// Generated names are checked on create and update. The DGD name and its
-	// component set are immutable, but a componentType is immutable only once
-	// set: an unset type can become a worker type, which adds the worker hash
-	// to that component's DCD name. On update, report only generated names the
-	// old object did not already have, so objects created before this rule stay
-	// editable. The generated name is the bad value and is derived from every
-	// rule input, so it is the match key; the field path is not, because a
-	// component index changes when components are reordered.
+	// Check on update too: an unset componentType can become a worker type, adding the hash.
+	// Skip names the old object had, keyed by name because reordering changes field paths.
 	nameErrs := generatedDynamoGraphDeploymentNameErrors(dgd, grovePathway)
 	if oldDGD != nil && len(nameErrs) > 0 {
 		existing := map[any]bool{}

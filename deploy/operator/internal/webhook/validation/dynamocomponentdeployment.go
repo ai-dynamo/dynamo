@@ -162,10 +162,8 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 		oldMeta = &oldDCD.ObjectMeta
 	}
 	allErrs := v.validateObjectMeta(&dcd.ObjectMeta, oldMeta, field.NewPath("metadata"))
-	// A standalone DCD's name is its Service name and pod selector value. It is
-	// checked on create only because metadata.name is immutable. DGD-owned DCDs
-	// are checked by the DGD webhook when the DGD is created; the controller
-	// also creates new worker DCDs during rollouts of DGDs that predate this rule.
+	// A standalone DCD name is its Service and selector value; immutable, so checked on create.
+	// DGD-owned DCDs are left to the DGD webhook; older DGDs' rollouts still create them.
 	if oldDCD == nil && !controlledByDynamoGraphDeployment(dcd) {
 		if err := generatedNameError(
 			field.NewPath("metadata", "name"),
