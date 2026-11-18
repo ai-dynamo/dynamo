@@ -1303,7 +1303,7 @@ def test_benchmark_synchronizer_stage_round_follower_rejects_an_invalid_result(b
             {"type": "stage_round_result", "benchmark_id": 0, "seq": 1, **bad},
         )
         with pytest.raises(
-            RuntimeError, match="invalid attention-DP warm-up stage round result"
+            RuntimeError, match="invalid attention-DP stage round result"
         ):
             _join(t1, r1)
     finally:
@@ -1338,7 +1338,7 @@ def test_benchmark_synchronizer_stage_round_rank0_rejects_a_malformed_status(bad
             }
         )
         with pytest.raises(
-            RuntimeError, match="invalid attention-DP warm-up stage status"
+            RuntimeError, match="invalid attention-DP stage round status"
         ):
             rank0.stage_round(1, 8, "done", True)
         assert rank1._socket.poll(500)
@@ -1352,9 +1352,7 @@ def test_benchmark_synchronizer_stage_round_rank0_rejects_a_malformed_status(bad
 def test_benchmark_synchronizer_stage_round_rejects_an_invalid_phase():
     rank0, rank1 = _stage_pair()
     try:
-        with pytest.raises(
-            ValueError, match="invalid attention-DP warm-up stage phase"
-        ):
+        with pytest.raises(ValueError, match="invalid attention-DP stage round phase"):
             rank0.stage_round(1, 8, "parked", None)
         with pytest.raises(ValueError, match="with outcome"):
             rank0.stage_round(1, 8, "done", None)
@@ -4149,16 +4147,15 @@ def test_prefill_real_seed_explicit_value_overrides_layout(
     assert InstrumentedScheduler._bench_realseed_on(dense) is expected
 
 
-@pytest.mark.parametrize("value", ["auto", "on"])
-def test_prefill_real_seed_auto_follows_layout_under_attention_dp(monkeypatch, value):
+def test_prefill_real_seed_auto_follows_layout_under_attention_dp(monkeypatch):
     """The ranks agree on every real-seed hit, so auto seeds hybrid layouts
     under attention-DP too; attention-only layouts keep synthetic prefixes."""
-    monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", value)
+    monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", "auto")
     hybrid = _realseed_layout_stub("FullAttentionSpec", "MambaSpec")
     dense = _realseed_layout_stub("FullAttentionSpec")
     hybrid._bench_dp_size = dense._bench_dp_size = 2
     assert InstrumentedScheduler._bench_realseed_on(hybrid) is True
-    assert InstrumentedScheduler._bench_realseed_on(dense) is (value == "on")
+    assert InstrumentedScheduler._bench_realseed_on(dense) is False
 
 
 def _realseed_dp_ranks(point, monkeypatch, hits_by_rank):
@@ -10000,7 +9997,24 @@ def test_prefill_seed_preserves_exact_kv_reads_at_eagle_block_boundary(
     seeded, _ = _complete_realseed_cache_shot(scheduler)
     assert [request.num_tokens for request in seeded] == [kv_read_tokens + drop]
 
-    for _ in ("warm", "measure"):
+    for stage in ("warm", "measure"):
+        if stage == "measure":
+            # The attention-DP check-only path validates the hit but admits nothing.
+            seq = scheduler._bench_seq
+            shot = scheduler._bench_realseed_shot(
+                *scheduler._bench_realseed_ready, "rsm"
+            )
+            assert (
+                scheduler._bench_inject_prefill(
+                    max_tokens=1,
+                    expected_kv_read_tokens=[kv_read_tokens],
+                    admit=False,
+                    **shot,
+                )
+                == 1
+            )
+            assert scheduler._bench_seq == seq
+            assert not scheduler.requests
         assert scheduler._bench_realseed_pending_step()
         requests, hits = _complete_realseed_cache_shot(scheduler)
         assert hits == [kv_read_tokens]

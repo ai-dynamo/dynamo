@@ -1522,10 +1522,10 @@ class _BenchmarkSynchronizer:
         phase honours.
         """
         if phase not in self.STAGE_PHASES:
-            raise ValueError(f"invalid attention-DP warm-up stage phase: {phase!r}")
+            raise ValueError(f"invalid attention-DP stage round phase: {phase!r}")
         if (phase == "done") != isinstance(ok, bool):
             raise ValueError(
-                f"attention-DP warm-up stage status {phase!r} with outcome {ok!r}"
+                f"attention-DP stage round status {phase!r} with outcome {ok!r}"
             )
         status = {
             "type": "stage_round",
@@ -1549,9 +1549,7 @@ class _BenchmarkSynchronizer:
             or (all_done and not isinstance(verdict, bool))
             or (not all_done and verdict is not None)
         ):
-            raise RuntimeError(
-                f"invalid attention-DP warm-up stage round result: {reply}"
-            )
+            raise RuntimeError(f"invalid attention-DP stage round result: {reply}")
         return _BenchmarkStageRound(all_done, verdict)
 
     def _coordinate_stage_round(self, local: dict) -> _BenchmarkStageRound:
@@ -1575,14 +1573,14 @@ class _BenchmarkSynchronizer:
                     or (phase != "done" and ok is not None)
                 ):
                     raise RuntimeError(
-                        f"invalid attention-DP warm-up stage status: {message}"
+                        f"invalid attention-DP stage round status: {message}"
                     )
                 if (
                     message.get("seq") != local["seq"]
                     or message.get("batch") != local["batch"]
                 ):
                     raise RuntimeError(
-                        "attention-DP warm-up ranks are not in lockstep: rank 0 is at "
+                        "attention-DP stage round ranks are not in lockstep: rank 0 is at "
                         f"round {local['seq']} batch={local['batch']}, rank {rank} at "
                         f"round {message.get('seq')} batch={message.get('batch')}"
                     )
@@ -4716,8 +4714,8 @@ class InstrumentedScheduler(AsyncScheduler):
                 actual_kv_read_tokens = self._bench_cached_kv_read_tokens(req)
                 if actual_kv_read_tokens != expected_tokens:
                     logger.warning(
-                        "Skipping benchmark point after seed cache validation "
-                        "failed: expected_kv_read_tokens=%d "
+                        "Benchmark seed cache validation failed: "
+                        "expected_kv_read_tokens=%d "
                         "actual_kv_read_tokens=%d",
                         expected_tokens,
                         actual_kv_read_tokens,
