@@ -5748,9 +5748,18 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SelectedWorkerCapt
 impl SelectedWorkerCapture {
     /// Capture on the current thread. Tests run on a current-thread runtime, so the
     /// scheduler actor's events land here too.
-    fn install(&self) -> tracing::subscriber::DefaultGuard {
+    ///
+    /// The returned guard also holds a second, unused dispatcher. While the capture
+    /// is the only registered dispatcher, tracing-core computes a new callsite's
+    /// interest from the default of the thread that first hits it, so a parallel
+    /// test that first logs "Selected worker" without a subscriber caches `never`
+    /// for that callsite and this capture sees no event.
+    fn install(&self) -> (tracing::subscriber::DefaultGuard, tracing::Dispatch) {
         use tracing_subscriber::layer::SubscriberExt;
-        tracing::subscriber::set_default(tracing_subscriber::registry().with(self.clone()))
+        let second_dispatcher = tracing::Dispatch::new(tracing_subscriber::registry());
+        let guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(self.clone()));
+        (guard, second_dispatcher)
     }
 
     fn events(&self) -> Vec<CapturedEvent> {
