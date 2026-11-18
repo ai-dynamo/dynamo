@@ -3,6 +3,8 @@
 
 """Unit tests for direct NIXL/GDS restore integrity handling."""
 
+import os
+
 import pytest
 from _deps import HAS_GMS
 
@@ -59,7 +61,34 @@ def test_one_integrity_record_covers_multiple_allocation_extents(tmp_path):
         verify_file_source_digests(sources[1:], integrity, max_workers=1)
 
 
-def _session_and_targets(shard_path, expected_data):
+class _FileAgent:
+    """Fake NIXL agent that accepts or rejects FILE registration."""
+
+    def __init__(self, register_error=None):
+        self.register_error = register_error
+        self.registered = []
+
+    def register_memory(self, descs, mem_type):
+        if self.register_error is not None:
+            raise self.register_error
+        self.registered.append((descs, mem_type))
+        return object()
+
+    def deregister_memory(self, _registration):
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _buffered_reads(monkeypatch):
+    # tmp_path may be on tmpfs, which rejects O_DIRECT.
+    monkeypatch.setattr(
+        nixl_gds,
+        "open_direct_read_fd",
+        lambda path, **_kwargs: os.open(path, os.O_RDONLY),
+    )
+
+
+def _session_and_targets(shard_path, expected_data, agent=None):
     source = FileTransferSource(
         allocation_id="weight",
         file_path=str(shard_path),
@@ -67,7 +96,7 @@ def _session_and_targets(shard_path, expected_data):
         byte_count=len(expected_data),
     )
     session = _NixlGDSTransferSession(
-        agent=object(),
+        agent=agent or _FileAgent(),
         agent_name="test-agent",
         device=0,
         max_workers=1,
@@ -122,13 +151,39 @@ def test_gds_rejects_same_length_mutation_before_direct_transfer(
         session.restore(targets)
 
 
+def test_gds_rejects_unregistrable_file_before_reading_the_artifact(
+    tmp_path,
+    monkeypatch,
+):
+    expected_data = b"checkpoint-bytes"
+    shard_path = tmp_path / "shard.bin"
+    shard_path.write_bytes(expected_data)
+    session, targets = _session_and_targets(
+        shard_path,
+        expected_data,
+        agent=_FileAgent(register_error=Exception("NIXL_ERR_BACKEND")),
+    )
+
+    def unexpected_read(*_args, **_kwargs):
+        pytest.fail("integrity pass must not read shards GDS cannot register")
+
+    monkeypatch.setattr(nixl_gds, "verify_file_source_digests", unexpected_read)
+
+    with pytest.raises(RuntimeError, match="could not register") as exc_info:
+        session.restore(targets)
+    message = str(exc_info.value)
+    assert str(shard_path) in message
+    assert nixl_gds._file_system_type(str(shard_path)) in message
+    assert "'nixl' transfer backend" in message
+
+
 def test_gds_backend_hands_integrity_records_to_its_restore(tmp_path, monkeypatch):
     expected_data = b"checkpoint-bytes"
     shard_path = tmp_path / "shard.bin"
     shard_path.write_bytes(b"X" + expected_data[1:])
     monkeypatch.setattr(nixl_gds, "load_nixl_api", lambda: object())
     monkeypatch.setattr(
-        nixl_gds, "create_nixl_agent", lambda *_args, **_kwargs: object()
+        nixl_gds, "create_nixl_agent", lambda *_args, **_kwargs: _FileAgent()
     )
 
     def unexpected_transfer(**_kwargs):

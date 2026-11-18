@@ -20,7 +20,7 @@ use dynamo_backend_common::{
     MultimodalData, PreprocessedRequest, PromptTokensDetails, StopReason, TopLogprob, usage,
 };
 
-use dynamo_kv_router::zmq_wire::IMAGE_ROUTING_UUID_PREFIX;
+use dynamo_kv_events::zmq_wire::IMAGE_ROUTING_UUID_PREFIX;
 
 use crate::client::{self, ModelLimits};
 use crate::disagg;
@@ -528,6 +528,11 @@ fn media(
                     ))
                 })?;
             let source = match item {
+                MultimodalData::Json(_) => {
+                    return Err(client::invalid_argument(
+                        "Custom JSON content requires a dynamo.vllm worker; the TensorRT-LLM sidecar does not support it",
+                    ));
+                }
                 MultimodalData::Url(url) => media_source(String::from(url), kind.key, index)?,
                 MultimodalData::RawUrl(url) => media_source(url, kind.key, index)?,
                 MultimodalData::Decoded(_) => {
@@ -1014,7 +1019,7 @@ impl ResponseState {
             // which the frontend forwards to the decode leg and which cannot be
             // reconstructed client-side.
             completion_usage: Some(prefill_usage(reported, self.prompt_tokens)),
-            disaggregated_params: Some(disagg::session_to_json(session)?),
+            disaggregated_params: Some(Box::new(disagg::session_to_json(session)?)),
             ..Default::default()
         })
     }

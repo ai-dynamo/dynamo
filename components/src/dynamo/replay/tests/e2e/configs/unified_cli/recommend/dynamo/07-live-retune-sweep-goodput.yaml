@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A live retune sweep (retune.executor: dgdr) as its DGDR Request lowers it:
+# the window trace, two router temperatures, and the Planner's configuration
+# with two load sensitivities. Each candidate's inner planner scales from the
+# window start, warmed with the 20-s history buckets.
+traffic:
+  source:
+    type: trace
+    format: dynamo
+    paths: [components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/traces/dynamo-retune-window.jsonl]
+  load: {type: trace_timestamps}
+engine:
+  mode: aggregated
+  model: components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/tiny-model
+  hardware: h200_sxm
+  backend: vllm
+  context_length: 2048
+  workers:
+    aggregated:
+      parallelism:
+        preset:
+          - {replicas: 2, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
+      scheduler: {max_batched_tokens: 8192, max_sequences: 256}
+      kv_cache: {block_size: 64, prefix_caching: true, capacity: {type: fixed, blocks: 256}}
+      timing: {type: fixed, prefill_ms: 1, decode_ms: 1}
+router:
+  policy: kv_router
+  prefill_load_model: {type: none}
+  overlap_score_credit: 1.0
+  prefill_load_scale: 1.0
+  temperature: {choices: [0.0, 0.5]}
+planner:
+  retune_sweep:
+    base:
+      mode: agg
+      optimization_target: sla
+      ttft_ms: 10.0
+      itl_ms: 5.0
+      enable_throughput_scaling: true
+      enable_load_scaling: true
+      throughput_adjustment_interval_seconds: 20
+      load_adjustment_interval_seconds: 5
+      max_gpu_budget: 4
+      min_endpoint: 1
+      load_predictor: constant
+      scheduling: {scale_interval_seconds: 5}
+    points:
+      - {load_scaling_down_sensitivity: 70}
+      - {load_scaling_down_sensitivity: 90}
+    warmup:
+      "20":
+        - [20.0, 18.0, 128.0, 4.0, null, null]
+        - [20.0, 19.0, 128.0, 4.0, null, null]
+        - [20.0, 20.0, 128.0, 4.0, null, null]
+        - [20.0, 21.0, 128.0, 4.0, null, null]
+evaluation:
+  sla: {ttft_ms: 10.0, itl_ms: 5.0}
+optimization:
+  target: goodput_per_gpu
+  constraints: {max_candidate_gpus: 2}
+  strict_sla: false
+optimizer: {algorithm: random, max_trials: 8, parallelism: 1, candidate_timeout_seconds: 60.0, seed: 23}

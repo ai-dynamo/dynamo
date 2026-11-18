@@ -5,7 +5,7 @@ use super::*;
 #[allow(unused_imports)]
 use bytes::Bytes;
 #[allow(unused_imports)]
-use dynamo_kv_router::RouterEventSink;
+use dynamo_scheduler::host::RouterEventSink;
 #[allow(unused_imports)]
 use rmp_serde as rmps;
 #[allow(unused_imports)]
@@ -17,8 +17,8 @@ use std::time::Duration;
 #[cfg(test)]
 mod test_event_processing {
     use super::*;
-    use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
-    use dynamo_kv_router::zmq_wire::StoredBlockOptions;
+    use dynamo_kv_events::zmq_wire::StoredBlockOptions;
+    use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
 
     #[tokio::test]
     async fn publisher_readiness_and_fatal_termination_are_observable_when_idle() {
@@ -863,10 +863,10 @@ mod tests_startup_helpers {
     use super::*;
     use crate::utils::zmq::{bind_pub_socket, send_multipart};
     use bytes::Bytes;
-    use dynamo_kv_router::indexer::{
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_kv_indexer::host::{
         GetWorkersRequest, KvIndexer, KvIndexerInterface, WorkerKvQueryResponse,
     };
-    use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_runtime::discovery::{
         Discovery, DiscoveryQuery, EventSourceQuery, MockDiscovery, SharedMockRegistry,
     };
@@ -947,7 +947,16 @@ mod tests_startup_helpers {
         let cleanup_discovery = discovery.clone();
         let processor = tokio::spawn(async move {
             let (publisher, _) = MockComponent::new();
-            start_event_processor(publisher, 1, processor_token, rx, None, None).await;
+            start_event_processor(
+                publisher,
+                1,
+                processor_token,
+                rx,
+                None,
+                None,
+                EventDedupPolicy::RefCounted,
+            )
+            .await;
             cleanup_discovery.unregister(source_instance).await.unwrap();
         });
         let listener_handle = tokio::spawn(async {});
@@ -1020,6 +1029,7 @@ mod tests_startup_helpers {
             rx,
             None,
             Some(10_000),
+            EventDedupPolicy::RefCounted,
         ));
 
         tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
@@ -1079,6 +1089,7 @@ mod tests_startup_helpers {
             rx,
             Some(local_indexer.clone()), // arc::clone just increments atomic counters
             Some(10_000),
+            EventDedupPolicy::RefCounted,
         ));
 
         // Wait for processing
@@ -1164,6 +1175,7 @@ mod tests_startup_helpers {
             rx,
             Some(local_indexer.clone()),
             Some(10_000),
+            EventDedupPolicy::RefCounted,
         ));
 
         // Then remove same event
@@ -1256,6 +1268,7 @@ mod tests_startup_helpers {
             rx,
             Some(local_indexer.clone()),
             Some(10_000),
+            EventDedupPolicy::RefCounted,
         ));
 
         tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
@@ -1326,6 +1339,7 @@ mod tests_startup_helpers {
             rx,
             Some(local_indexer),
             Some(10_000),
+            EventDedupPolicy::RefCounted,
         ));
 
         tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
@@ -1887,6 +1901,7 @@ mod tests_startup_helpers {
             worker_rx,
             Some(local_indexer_1.clone()),
             Some(10), // 10ms batching timeout
+            EventDedupPolicy::RefCounted,
         ));
 
         // === SETUP: Router Components ===
@@ -2026,7 +2041,7 @@ mod tests_startup_helpers {
             .unwrap();
         let router_overlap = overlap
             .scores
-            .get(&dynamo_kv_router::protocols::WorkerWithDpRank::from_worker_id(worker_1_id))
+            .get(&dynamo_router_protocol::worker::WorkerWithDpRank::from_worker_id(worker_1_id))
             .copied()
             .unwrap_or(0);
         assert_eq!(
@@ -2042,9 +2057,9 @@ mod tests_startup_helpers {
             .get_events_in_id_range(Some(last_known_id + 1), None)
             .await;
         let missed_events = match response {
-            dynamo_kv_router::indexer::WorkerKvQueryResponse::Events { events: e, .. } => e,
-            dynamo_kv_router::indexer::WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
-            dynamo_kv_router::indexer::WorkerKvQueryResponse::Error(message) => {
+            dynamo_kv_indexer::host::WorkerKvQueryResponse::Events { events: e, .. } => e,
+            dynamo_kv_indexer::host::WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
+            dynamo_kv_indexer::host::WorkerKvQueryResponse::Error(message) => {
                 panic!("Unexpected error response: {message}")
             }
             other => panic!("Unexpected response: {:?}", other),
@@ -2070,7 +2085,7 @@ mod tests_startup_helpers {
         let overlap = router_indexer.find_matches(block_hashes_2).await.unwrap();
         let router_overlap_after = overlap
             .scores
-            .get(&dynamo_kv_router::protocols::WorkerWithDpRank::from_worker_id(worker_1_id))
+            .get(&dynamo_router_protocol::worker::WorkerWithDpRank::from_worker_id(worker_1_id))
             .copied()
             .unwrap_or(0);
         assert_eq!(
@@ -2322,8 +2337,8 @@ mod test_event_dedup_filter {
 mod worker_metrics_tests {
     use std::time::Duration;
 
+    use crate::kv_router::ActiveLoad;
     use anyhow::Result;
-    use dynamo_kv_router::protocols::ActiveLoad;
 
     use super::super::worker_metrics::{WorkerMetricsPublisher, WorkerMetricsSink};
 
@@ -2378,8 +2393,8 @@ mod worker_metrics_tests {
 #[cfg(all(test, feature = "integration"))]
 mod test_integration_publisher {
     use super::*;
+    use crate::kv_router::ActiveLoad;
     use crate::kv_router::KV_METRICS_SUBJECT;
-    use dynamo_kv_router::protocols::ActiveLoad;
     use dynamo_runtime::distributed_test_utils::create_test_drt_async;
     use dynamo_runtime::transports::event_plane::{EventPublisher, EventSubscriber};
 
@@ -2553,7 +2568,7 @@ mod event_processor_tests {
 
     #[tokio::test]
     async fn recovery_barrier_waits_for_the_index_like_live_ingestion() {
-        use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer};
+        use dynamo_kv_indexer::host::{KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer};
         for (is_rejected, is_offline) in [(false, false), (true, false), (false, true)] {
             let indexer_cancel = CancellationToken::new();
             if is_offline {
@@ -2576,6 +2591,7 @@ mod event_processor_tests {
                 Some(indexer.clone()),
                 Some(60_000),
                 DEFAULT_MAX_BATCH_BLOCKS,
+                EventDedupPolicy::RefCounted,
             ));
             let (done, ack) = tokio::sync::oneshot::channel();
             // A missing parent reaches the index and is rejected there, as on the live path.
@@ -2618,6 +2634,7 @@ mod event_processor_tests {
             None,
             None,
             DEFAULT_MAX_BATCH_BLOCKS,
+            EventDedupPolicy::RefCounted,
         ));
 
         tx.send(
@@ -2641,6 +2658,47 @@ mod event_processor_tests {
     }
 
     #[tokio::test]
+    async fn test_idempotent_stores_publish_each_blocks_only_remove() {
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
+        let publisher = MockPublisher::new();
+        let handle = tokio::spawn(run_event_processor_loop(
+            publisher.clone(),
+            1,
+            CancellationToken::new(),
+            rx,
+            None,
+            None,
+            DEFAULT_MAX_BATCH_BLOCKS,
+            EventDedupPolicy::SetLike,
+        ));
+
+        // SGLang announces a block more than once and removes it once: a host block after an
+        // auxiliary backup, a device block when a storage backend re-announces a split parent.
+        tx.send(local_host_event(stored_event(0, None, 10, 0)).into())
+            .unwrap();
+        tx.send(local_host_event(stored_event(1, None, 10, 0)).into())
+            .unwrap();
+        tx.send(local_host_event(removed_event(2, 10, 0)).into())
+            .unwrap();
+        tx.send(local_gpu_event(stored_event(3, None, 20, 0)).into())
+            .unwrap();
+        tx.send(local_gpu_event(stored_event(4, None, 20, 0)).into())
+            .unwrap();
+        tx.send(local_gpu_event(removed_event(5, 20, 0)).into())
+            .unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        let remove_tiers: Vec<StorageTier> = publisher
+            .get_events()
+            .into_iter()
+            .filter(|event| matches!(event.event.data, KvCacheEventData::Removed(_)))
+            .map(|event| event.storage_tier)
+            .collect();
+        assert_eq!(remove_tiers, [StorageTier::HostPinned, StorageTier::Device]);
+    }
+
+    #[tokio::test]
     async fn test_native_list_merges_removals_and_preserves_type_order() {
         let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
@@ -2652,6 +2710,7 @@ mod event_processor_tests {
             None,
             None,
             DEFAULT_MAX_BATCH_BLOCKS,
+            EventDedupPolicy::RefCounted,
         ));
 
         tx.send(
@@ -2689,6 +2748,7 @@ mod event_processor_tests {
             None,
             None,
             DEFAULT_MAX_BATCH_BLOCKS,
+            EventDedupPolicy::RefCounted,
         ));
 
         let host_removed = removed_event(5, 51, 1);
@@ -2772,6 +2832,7 @@ mod event_processor_tests {
             None,
             None,
             DEFAULT_MAX_BATCH_BLOCKS,
+            EventDedupPolicy::RefCounted,
         ));
 
         tx.send(local_gpu_event(removed_event(0, 30, 0)).into())
@@ -2801,6 +2862,7 @@ mod event_processor_tests {
             None,
             Some(1_000),
             DEFAULT_MAX_BATCH_BLOCKS,
+            EventDedupPolicy::RefCounted,
         ));
 
         tx.send(local_gpu_event(removed_event(0, 40, 0)).into())
@@ -2830,6 +2892,7 @@ mod event_processor_tests {
             None,
             Some(1_000),
             DEFAULT_MAX_BATCH_BLOCKS,
+            EventDedupPolicy::RefCounted,
         ));
 
         let events = (0..=DEFAULT_MAX_BATCH_BLOCKS * 2)
@@ -2902,6 +2965,7 @@ mod event_processor_tests {
             None,
             Some(1_000),
             DEFAULT_MAX_BATCH_BLOCKS,
+            EventDedupPolicy::RefCounted,
         ));
 
         let block_count = DEFAULT_MAX_BATCH_BLOCKS + 1;
@@ -2970,6 +3034,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3067,6 +3132,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3166,6 +3232,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                EventDedupPolicy::RefCounted,
             )
             .await
             // SLEEP HERE?! so that events are not batched!
@@ -3235,6 +3302,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3382,6 +3450,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3455,6 +3524,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3526,6 +3596,7 @@ mod event_processor_tests {
                 None,
                 Some(100),
                 DEFAULT_MAX_BATCH_BLOCKS,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3577,6 +3648,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3638,6 +3710,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3736,6 +3809,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3828,6 +3902,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -3901,6 +3976,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -4030,6 +4106,7 @@ mod event_processor_tests {
                 None,
                 timeout_ms,
                 DEFAULT_MAX_BATCH_BLOCKS,
+                EventDedupPolicy::RefCounted,
             )
             .await
         });
@@ -4127,11 +4204,12 @@ mod event_processor_tests {
 #[cfg(test)]
 mod event_plane_batch_tests {
     use super::*;
-    use dynamo_kv_router::protocols::{
-        BlockExtraInfo, BlockMmObjectInfo, ExternalSequenceBlockHash, KvCacheEvent,
-        KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
-        LocalBlockHash, RouterEvent,
+    use dynamo_kv_events::event::{
+        KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
+        KvCacheStoredBlockData, RouterEvent,
     };
+    use dynamo_kv_hashing::multimodal::{BlockExtraInfo, BlockMmObjectInfo};
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_runtime::config::environment_names::zmq_broker as broker_env;
     use dynamo_runtime::distributed::DistributedConfig;
     use dynamo_runtime::transports::event_plane::{

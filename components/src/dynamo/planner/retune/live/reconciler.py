@@ -177,6 +177,7 @@ class Reconciler:
         fs_root: str,
         metrics: RetuneMetricsSink,
         now: Callable[[], float] = time.time,
+        history_s: float = 0.0,
     ) -> None:
         self._kube = kube
         self._cfg = cfg
@@ -185,8 +186,11 @@ class Reconciler:
         self._now = now
         interval_s = float(retune.interval_seconds)
         sweep_timeout_s = float(retune.effective_timeout_seconds)
+        # A scaling Planner's sweep also reads history_s before its window
+        # (the inner planners' predictor warmup).
         self._segment_max_age_s = (
-            interval_s
+            float(history_s)
+            + interval_s
             + float(retune.grace_seconds)
             + sweep_timeout_s
             + VISIBILITY_MARGIN_S

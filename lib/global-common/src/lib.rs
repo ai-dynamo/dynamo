@@ -13,6 +13,7 @@
 //!   | `POST /pools` | [`PoolRegistration`] | [`Lease`] |
 //!   | `GET /pools` | | [`PoolsResponse`] |
 //!   | `GET /routers` | | [`RoutersResponse`] |
+//!   | `POST /routers` | [`RouterRegistration`] | [`Lease`] |
 //!
 //!   A router matches a connecting PoolRelay against a listing's
 //!   `relay_identities` with [`address_identity`].
@@ -35,8 +36,8 @@ mod replicas;
 mod watch;
 
 pub use discovery::{
-    Capacity, Lease, LeaseError, PoolListing, PoolRegistration, PoolsResponse, RoutersResponse,
-    address_identity,
+    Capacity, Lease, LeaseError, PoolListing, PoolRegistration, PoolsResponse, RouterRegistration,
+    RouterRegistrationError, RoutersResponse, address_identity,
 };
 pub use pool::{PoolId, PoolIdDeriver, PoolKey, PoolKeyError, PoolLocation, V1PoolIdDeriver};
 pub use replicas::{RouterReplica, RouterReplicaEvent, RouterReplicaId};

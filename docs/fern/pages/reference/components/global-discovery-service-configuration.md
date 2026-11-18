@@ -32,7 +32,8 @@ the `global-discovery-service` binary. For choosing and setting up a registratio
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--router <id>=<url>` | None | A Global Router replica. Repeat for each replica. Ids must be unique. |
+| `--router <id>=<url>` | None | A static Global Router replica. Repeat for each replica. IDs must be unique. Conflicts with `--router-discovery registrations`. |
+| `--router-discovery <mode>` | `static` | `static` reads `--router` entries; `registrations` accepts trusted-network router registration using the selected registration store. |
 
 ### With `--pool-discovery karmada` or `mcs`
 
@@ -87,6 +88,7 @@ short plain-text reason, and `GET /healthz` answers with a status and an empty b
 | --- | --- | --- | --- |
 | `POST /pools` | Register a pool and renew its lease. | 200 with a lease | 400 for malformed JSON, 413 for a body over 64 KiB, 415 without `Content-Type: application/json`, 422 for an invalid registration or one the store cannot keep, 503 when the store is unreachable |
 | `GET /pools` | List live pools. | 200 with a pool list | 503 when the backend is unreachable. With `dynamodb`, only before the first read of the table. |
+| `POST /routers` | Register a router incarnation and renew its lease. | 200 with a lease | 501 unless router registration is enabled; 400/413/415 for request errors, 422 for invalid or conflicting identity/endpoint, 503 on storage errors |
 | `GET /routers` | List Global Router replicas. | 200 with a router list | 503 when the backend is unreachable |
 | `GET /healthz` | Readiness: the backend has answered once. With DynamoDB, that follows the startup check that the table can be read and written. Later backend failures show in the answers to requests, not here. | 200 | 503 until the backend has answered |
 
@@ -148,8 +150,39 @@ In `karmada` and `mcs` modes, the listed frontend addresses come from MCS; the r
 ### `GET /routers`
 
 ```json
-{"routers": [{"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/"}]}
+{"routers": [{"replica": "aws-ohio/pod-uid", "url": "http://10.42.0.5:50051/"}], "complete": true}
 ```
+
+With `complete: false`, merge the response with known replicas and retain missing ones. Only a
+complete response removes missing replicas. Clients accept older services without this field as
+complete. Upgrade Pool Relays before enabling router self-registration, because older clients
+ignore `complete`.
+
+### `POST /routers`
+
+Available with `--pool-discovery registrations --router-discovery registrations`. The default
+static directory and MCS/Karmada return 501. Request:
+
+```json
+{"replica": "aws-ohio/pod-uid", "url": "http://10.42.0.5:50051/"}
+```
+
+`replica` is a nonempty incarnation ID of at most 256 bytes without whitespace or control characters.
+`url` is an HTTP(S) authority with no credentials, query, fragment, or path other than `/`;
+wildcard/unspecified and multicast addresses and port zero are rejected. It must address one replica's
+state listener and be reachable from every Pool Relay. Validation does not verify network reachability.
+The reply uses the same lease shape as `POST /pools`; repeat the registration to renew.
+
+The endpoint and DynamoDB writer region are immutable for the row's lifetime. A conflicting registration
+returns 422 without changing the directory. Use globally unique incarnation IDs and renew through one
+region: DynamoDB Global Table conditions are regional, not global ownership locks. Registration assumes
+a trusted network and provides no caller authentication. A stopped router expires by lease; TTL is
+only garbage collection. Configure the frontend with paired `--router-replica-id` and
+`--router-advertise-url`, together with `--global-discovery-url` and `--relay-view-port`.
+
+Router lists are incomplete for one lease after startup and after the first successful read following
+a storage error, and while remote registrations are retained under replication grace. Each router-list
+request performs a fresh paginated regional query. A failed page or malformed router row returns 503.
 
 ## DynamoDB item layout
 
@@ -177,12 +210,18 @@ without a condition. Each replica reads the table with one strongly consistent, 
 `--dynamodb-poll-interval-secs`, and `GET /pools` answers from the last read, leaving out at once a pool
 whose lease has lapsed since.
 
+Router registrations use the same table, with `pk = "ROUTERS"`, `sk = replica`, and attributes
+`url`, `writer_region` (strings), `renewed_at_ms`, `lease_ms`, and `expires_at` (numbers).
+TTL remains renewal plus seven days. Router writes use conditional `UpdateItem`; router lists
+use strongly consistent regional `Query`. Allow the `ROUTERS` partition in IAM policies that
+restrict keys. The existing `pool` items and session-affinity table are unchanged.
+
 ## IAM actions
 
 | Action | Needed for |
 | --- | --- |
-| `dynamodb:Query` | Reading the table every poll interval, which `GET /pools` answers from, and the startup check. |
-| `dynamodb:UpdateItem` | `POST /pools`, and the startup check, whose conditional write never writes. |
+| `dynamodb:Query` | Pool polls, `GET /routers`, and the startup check. |
+| `dynamodb:UpdateItem` | `POST /pools`, `POST /routers`, and the startup check, whose conditional write never writes. |
 | `dynamodb:DescribeTable` | The startup check. |
 | `dynamodb:CreateTable` | Only with `--dynamodb-ensure-table`. |
 | `dynamodb:DescribeTimeToLive` | Only with `--dynamodb-ensure-table`. |

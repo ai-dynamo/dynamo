@@ -240,7 +240,7 @@ async def test_rebuilt_real_controllers_never_sweep_at_once():
     """
 
     pytest.importorskip(
-        "aisimulate.sweeper",
+        "aisim.sweeper",
         reason="AI Simulate is an optional Dynamo simulation dependency",
     )
     from dynamo.planner.retune.sweep import SweepResult
@@ -375,6 +375,7 @@ class FakeLiveRetune:
         self.effects.append(effects)
         if self.on_effects_error is not None:
             raise self.on_effects_error
+        return list(effects.retune_decisions or ())
 
 
 def _live_config(executor: str = "dgdr") -> PlannerConfig:

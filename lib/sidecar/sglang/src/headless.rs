@@ -283,6 +283,7 @@ fn start_publishers(
                     // The sidecar cannot inspect the SGLang build. Unflagged
                     // sources still exclude values that do not fit in u32.
                     engine_owned_mm_identity: false,
+                    idempotent_stores: true,
                     recovery: None,
                 }),
                 config.enable_local_indexer,
@@ -601,7 +602,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_zmq_events_keep_global_rank_and_leader_identity_without_serving() {
-        use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, RouterEvent};
+        use dynamo_kv_events::event::{KV_EVENT_SUBJECT, RouterEvent};
         use dynamo_llm::discovery::KvEventSource;
         use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, EventSourceQuery};
         use dynamo_runtime::transports::event_plane::EventSubscriber;

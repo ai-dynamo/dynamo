@@ -171,11 +171,32 @@ USER root
 # Redeclare build args for use in this stage
 ARG PYTHON_VERSION
 
-# Ensure the runtime stage always has /usr/bin/python3.
-# - vLLM/TRTLLM runtime images may only have Python in /opt/dynamo/venv/bin/{python,python3}
-# - SGLang runtime images typically have /usr/bin/python3 already
-# - framework=none runtime stage now installs /usr/bin/python3
-RUN if [ ! -e /usr/bin/python3 ]; then \
+# Copy NIXL SDK material for dev stage compilation.
+# cargo build needs NIXL headers plus linkable -lnixl, -lnixl_build, and -lnixl_common.
+# - SGLang: Copy NIXL/UCX/libfabric/gdrcopy binaries from wheel_builder (not in upstream lmsysorg/sglang runtime).
+# - vLLM CUDA: Reuse upstream vLLM's Python-wheel NIXL libs and copy only headers beside them.
+# - trtllm/none: NIXL/UCX are already present in runtime (no-op).
+ARG TARGETARCH
+{% if framework == "vllm" and device == "cuda" %}
+ARG CUDA_MAJOR
+{% endif %}
+COPY --chmod=755 container/deps/vllm/install_nixl_from_wheel.sh /usr/local/bin/install_nixl_from_wheel
+
+# Copy shell profile script for framework-specific environment variables
+# This script conditionally adds PATH/LD_LIBRARY_PATH entries based on what exists
+COPY --chmod=755 container/dev/50-framework-paths.sh /etc/profile.d/50-framework-paths.sh
+
+# Runtime-derived images sit close to overlay2's ~128-layer cap, so the
+# small setup steps below share one RUN:
+# - Ensure the runtime stage always has /usr/bin/python3.
+#   vLLM/TRTLLM runtime images may only have Python in /opt/dynamo/venv/bin/{python,python3};
+#   SGLang runtime images typically have /usr/bin/python3 already;
+#   framework=none runtime stage now installs /usr/bin/python3.
+# - Set umask for group-writable files in dev stage (runs as root).
+# - Stash the pre-tools python3 (see the dynamo_tools copy below).
+RUN --mount=from=wheel_builder,target=/wheel_builder \
+    set -eux; \
+    if [ ! -e /usr/bin/python3 ]; then \
         if [ -x /opt/dynamo/venv/bin/python3 ]; then \
             ln -s /opt/dynamo/venv/bin/python3 /usr/bin/python3; \
         elif [ -x /opt/dynamo/venv/bin/python ]; then \
@@ -188,20 +209,7 @@ RUN if [ ! -e /usr/bin/python3 ]; then \
             echo "ERROR: Could not find Python to symlink to /usr/bin/python3" >&2; \
             exit 1; \
         fi; \
-    fi
-
-# Copy NIXL SDK material for dev stage compilation.
-# cargo build needs NIXL headers plus linkable -lnixl, -lnixl_build, and -lnixl_common.
-# - SGLang: Copy NIXL/UCX/libfabric/gdrcopy binaries from wheel_builder (not in upstream lmsysorg/sglang runtime).
-# - vLLM CUDA: Reuse upstream vLLM's Python-wheel NIXL libs and copy only headers beside them.
-# - trtllm/none: NIXL/UCX are already present in runtime (no-op).
-ARG TARGETARCH
-{% if framework == "vllm" and device == "cuda" %}
-ARG CUDA_MAJOR
-{% endif %}
-COPY --chmod=755 container/deps/vllm/install_nixl_from_wheel.sh /usr/local/bin/install_nixl_from_wheel
-RUN --mount=from=wheel_builder,target=/wheel_builder \
-    set -eux; \
+    fi; \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
         test -d /wheel_builder/usr/local/ucx; \
         test -d /wheel_builder/opt/nvidia/nvda_nixl; \
@@ -220,7 +228,9 @@ RUN --mount=from=wheel_builder,target=/wheel_builder \
             --prefix /opt/dynamo/nixl \
             --headers-src /wheel_builder/opt/nvidia/nvda_nixl/include; \
 {% endif %}
-    fi
+    fi; \
+    mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh; \
+    if [ -e /usr/bin/python3 ]; then cp -a /usr/bin/python3 /tmp/python3.pretools; fi
 
 {% if device == "xpu" %}
 ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
@@ -231,9 +241,13 @@ ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins
-{% elif framework == "trtllm" or (framework == "vllm" and device == "cuda") %}
-# trtllm and vLLM CUDA dev images inherit upstream containers that ship NIXL
-# inside Python wheels. These env vars provide a stable prefix for source builds.
+{% elif framework == "trtllm" %}
+# Reuse TRT-LLM's native SDK for source builds as well as runtime transfers.
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+# Runtime registers both architecture-specific native paths with ldconfig.
+# Keep those inherited paths rather than selecting another Python wheel copy.
+{% elif framework == "vllm" and device == "cuda" %}
+# vLLM's NIXL wheel provides the stable prefix used for source builds.
 # For vLLM CUDA, /opt/dynamo/nixl is a symlink to the wheel's
 # .nixl_cu${CUDA_MAJOR}.mesonpy.libs directory, with headers added by the dev stage.
 ENV NIXL_PREFIX=/opt/dynamo/nixl \
@@ -266,27 +280,22 @@ ENV CUDA_HOME=/usr/local/cuda \
 # Framework-specific paths are conditionally added in /etc/profile.d/50-framework-paths.sh
 ARG PYTHON_VERSION
 ENV LD_LIBRARY_PATH=\
+{% if framework != "trtllm" %}
 ${NIXL_LIB_DIR}:\
 ${NIXL_PLUGIN_DIR}:\
+{% endif %}
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 ${LD_LIBRARY_PATH}
 
-# Copy shell profile script for framework-specific environment variables
-# This script conditionally adds PATH/LD_LIBRARY_PATH entries based on what exists
-COPY --chmod=755 container/dev/50-framework-paths.sh /etc/profile.d/50-framework-paths.sh
-
-# Set umask for group-writable files in dev stage (runs as root)
-RUN mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 
 # Developer tools are installed in the dynamo_tools layer and copied into the runtime-based dev image.
 # This keeps dev builds fast and avoids apt-get in runtime-derived stages.
 #
 # IMPORTANT: Do not clobber runtime /usr/bin/python3 (SGLang depends on system python3 being present).
-# We stash the pre-tools python3 (which may be a real binary or a symlink we created earlier for vLLM/TRTLLM)
-# and restore it after copying toolchains from dynamo_tools.
-RUN if [ -e /usr/bin/python3 ]; then cp -a /usr/bin/python3 /tmp/python3.pretools; fi
+# The pre-tools python3 (which may be a real binary or a symlink we created earlier for vLLM/TRTLLM)
+# was stashed above and is restored after copying toolchains from dynamo_tools.
 # Pull the developer toolchain from dynamo_tools in as few COPY layers as
 # possible (overlay2 caps a downstream image at ~128 layers). The six /usr/*
 # subtrees collapse into one COPY; --exclude=local skips the multi-GB /usr/local
@@ -305,17 +314,7 @@ ARG WORKSPACE_DIR=/workspace
 
 # Dev environment variables (aligned with framework dev stages)
 # Framework-specific PATH additions are handled in /etc/profile.d/50-framework-paths.sh
-{% if device == "xpu" and framework == "sglang" %}
-# XPU SGLang: reuse the conda env created in the framework stage
-ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
-    DYNAMO_HOME=${WORKSPACE_DIR} \
-    RUSTUP_HOME=/home/dynamo/.rustup \
-    CARGO_HOME=/usr/local/cargo \
-    CARGO_TARGET_DIR=/workspace/target \
-    CONDA_DIR=/opt/miniforge3 \
-    VIRTUAL_ENV=/opt/miniforge3/envs/sglang \
-    PATH=/opt/miniforge3/envs/sglang/bin:/opt/miniforge3/bin:/usr/local/cargo/bin:$PATH
-{% elif device == "cuda" or framework != "vllm" %}
+{% if device == "cuda" or framework not in ("vllm", "sglang") %}
 ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     DYNAMO_HOME=${WORKSPACE_DIR} \
     RUSTUP_HOME=/home/dynamo/.rustup \
@@ -324,6 +323,7 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:/usr/local/cargo/bin:$PATH
 {% else %}
+{# CPU/XPU vLLM and XPU SGLang share this: both use the runtime's upstream /opt/venv. #}
 # CPU/XPU vLLM: Use runtime's /opt/venv
 ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     DYNAMO_HOME=${WORKSPACE_DIR} \
@@ -343,13 +343,17 @@ COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /workspace/.venv/bin/matu
 
 {% if framework == "sglang" %}
 {% if device == "xpu" %}
-# SGLang XPU: conda env from framework stage; install uv and maturin.
-# uv doesn't natively recognize conda envs (no pyvenv.cfg), so we use
-# --python to target the conda interpreter explicitly.
+# SGLang XPU: reuse the upstream /opt/venv rather than a --system-site-packages
+# /opt/dynamo/venv, which would miss its sglang/torch/nixl. The python wrapper
+# (not a symlink) preserves the venv context; uv must match every other stage.
 COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /tmp/uv-binary
-RUN cp /tmp/uv-binary ${VIRTUAL_ENV}/bin/uv && \
-    chmod +x ${VIRTUAL_ENV}/bin/uv && \
-    pip install maturin[patchelf]
+RUN chown -R dynamo:0 /opt/venv && \
+    cp /tmp/uv-binary /opt/venv/bin/uv && \
+    chmod +x /opt/venv/bin/uv && \
+    rm -f /usr/local/bin/python && \
+    echo '#!/bin/bash' > /usr/local/bin/python && \
+    echo 'exec /opt/venv/bin/python "$@"' >> /usr/local/bin/python && \
+    chmod +x /usr/local/bin/python
 {% else %}
 # SGLang CUDA: Create a writable Dynamo venv and seed it from the upstream
 # SGLang venv. The runtime keeps its packages outside the system Python's
@@ -432,39 +436,31 @@ WORKDIR ${WORKSPACE_DIR}
 # We don't actually need /workspace because for development, this must be mounted as a volume.
 #COPY --chmod=775 --chown=dynamo:0 ./ ${WORKSPACE_DIR}/
 
-RUN mkdir -p ${WORKSPACE_DIR} && chmod g+w ${WORKSPACE_DIR}
-
-# Remove pre-built dynamo packages inherited from the runtime stage.
-# The dev image builds from source, so these would conflict with the editable installs.
-# NOTE: This does NOT reclaim disk space in the image (files still exist in lower layers).
-# Space is only recovered if the image is later squashed / compacted (e.g. docker-squash,
-# `docker build --squash`, or export/import).
+# One RUN for the remaining setup:
+# - Make the workspace mount point group-writable.
+# - Remove pre-built dynamo packages inherited from the runtime stage. The dev
+#   image builds from source, so these would conflict with the editable
+#   installs. This does NOT reclaim disk space in the image (files still exist
+#   in lower layers).
+# - Install maturin only (no editable install of the dynamo package). /workspace
+#   is empty at build time — the repo is bind-mounted at container start, not
+#   COPYed — so the editable install must be done at runtime after the volume
+#   mount (e.g. `maturin develop`).
+# - Set up the dev launch banner (guard prevents double-print when framework
+#   runtimes already added it).
+RUN --mount=type=bind,source=./container/launch_message/dev.txt,target=/opt/dynamo/launch_message.txt \
+    mkdir -p ${WORKSPACE_DIR} && chmod g+w ${WORKSPACE_DIR} && \
 {% if device == "xpu" and framework == "sglang" %}
-RUN uv pip uninstall --python ${VIRTUAL_ENV}/bin/python ai-dynamo ai-dynamo-runtime 2>/dev/null || true
+    { uv pip uninstall --python ${VIRTUAL_ENV}/bin/python ai-dynamo ai-dynamo-runtime 2>/dev/null || true; } && \
+    uv pip install --python ${VIRTUAL_ENV}/bin/python maturin[patchelf] && \
 {% else %}
-RUN uv pip uninstall ai-dynamo ai-dynamo-runtime 2>/dev/null || true
-{% endif %}
-
-# Install maturin only (no editable install of the dynamo package).
-# /workspace is empty at build time — the repo is bind-mounted at container start, not COPYed.
-# `uv pip install -e .` would fail here because there is no pyproject.toml in /workspace yet.
-# The editable install must be done at runtime after the volume mount (e.g. `maturin develop`).
-{% if device == "xpu" and framework == "sglang" %}
-RUN uv pip install --python ${VIRTUAL_ENV}/bin/python maturin[patchelf]
-{% else %}
-RUN if command -v uv >/dev/null 2>&1; then \
+    { uv pip uninstall ai-dynamo ai-dynamo-runtime 2>/dev/null || true; } && \
+    if command -v uv >/dev/null 2>&1; then \
         uv pip install maturin[patchelf] ; \
     else \
         python3 -m pip install maturin[patchelf] ; \
-    fi
+    fi && \
 {% endif %}
-
-# Set commit SHA for tests (passed via docker build as --build-arg)
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
-
-# Setup dev launch banner (guard prevents double-print when framework runtimes already added it)
-RUN --mount=type=bind,source=./container/launch_message/dev.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen && \
     chmod 755 /opt/dynamo/.launch_screen && \
     (grep -q 'launch_screen' /etc/bash.bashrc || echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc) && \
@@ -480,6 +476,10 @@ RUN --mount=type=bind,source=./container/launch_message/dev.txt,target=/opt/dyna
     '    echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"' \
     '    echo ""' \
     'fi' >> /etc/bash.bashrc
+
+# Set commit SHA for tests (passed via docker build as --build-arg)
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 {% if device == "xpu" or device == "cpu" %}
 SHELL ["bash", "-c"]
