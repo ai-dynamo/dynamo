@@ -494,15 +494,14 @@ impl Bucket for Directory {
         let full_path = self.p.join(safe_key.as_ref());
         let str_path = full_path.display().to_string();
         let _mutation_lock = self.lock_mutations().await?;
-        if !full_path.exists() {
-            return Err(StoreError::MissingKey(str_path));
-        }
 
         self.owned_files.lock().remove(&full_path);
 
-        fs::remove_file(&full_path)
-            .context(str_path)
-            .map_err(a_to_fs_err)
+        match fs::remove_file(&full_path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(a_to_fs_err(anyhow::Error::new(err).context(str_path))),
+        }
     }
 
     async fn watch(
@@ -769,6 +768,23 @@ mod tests {
         }
 
         release_thread.join().unwrap();
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn delete_missing_key_is_idempotent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cancel_token = CancellationToken::new();
+        let store = FileStore::new(cancel_token.clone(), temp_dir.path());
+        let bucket = store.get_or_create_bucket("v1/tests", None).await.unwrap();
+        let key = Key::new("missing".to_string());
+
+        bucket.delete(&key).await.unwrap();
+
+        bucket.insert(&key, "value".into(), 0).await.unwrap();
+        bucket.delete(&key).await.unwrap();
+        bucket.delete(&key).await.unwrap();
+
         cancel_token.cancel();
     }
 
