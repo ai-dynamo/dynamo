@@ -365,11 +365,19 @@ def _create_dynamo_media_parser(tracker: Any) -> Any:
             "TITO content_parts: the installed vLLM parser has no _connector "
             "hook, so Dynamo cannot enforce its media URL policy"
         )
+    # vLLM 0.33+ charges per-request media budgets through the connector.
+    # Older trackers have neither the budgets nor the connector parameters.
+    budgets = {
+        name: getattr(tracker, name)
+        for name in ("decoded_budget", "download_budget")
+        if hasattr(tracker, name)
+    }
     parser.__dict__["_connector"] = MEDIA_CONNECTOR_REGISTRY.load(
         "dynamo",
         media_io_kwargs=tracker.media_io_kwargs,
         allowed_local_media_path=tracker.allowed_local_media_path,
         allowed_media_domains=tracker.allowed_media_domains,
+        **budgets,
     )
     return parser
 

@@ -342,6 +342,17 @@ def test_tito_adapter_rejects_content_parts_without_multimodal_worker(
         )
 
 
+def _async_content_parser_class():
+    # Newer vLLM no longer re-exports the parser from chat_utils.
+    try:
+        from vllm.renderers.chat_utils import AsyncMultiModalContentParser
+    except ImportError:
+        from vllm.renderers.chat_utils.content_parser import (
+            AsyncMultiModalContentParser,
+        )
+    return AsyncMultiModalContentParser
+
+
 def _tracker_stub():
     return SimpleNamespace(
         media_io_kwargs=None,
@@ -351,8 +362,7 @@ def _tracker_stub():
 
 
 def test_content_parts_fetch_through_dynamo_media_connector():
-    from vllm.renderers.chat_utils import AsyncMultiModalContentParser
-
+    AsyncMultiModalContentParser = _async_content_parser_class()
     from dynamo.common.multimodal.media_connector import DynamoMediaConnector
     from dynamo.vllm.engine_generate import _create_dynamo_media_parser
 
@@ -362,6 +372,23 @@ def test_content_parts_fetch_through_dynamo_media_connector():
     parser = _create_dynamo_media_parser(tracker)
 
     assert isinstance(parser._connector, DynamoMediaConnector)
+
+
+def test_content_parts_connector_keeps_request_media_budgets():
+    """The replacement connector charges the tracker's per-request budgets,
+    as vLLM's own connector does (vLLM 0.33+)."""
+    AsyncMultiModalContentParser = _async_content_parser_class()
+    from dynamo.vllm.engine_generate import _create_dynamo_media_parser
+
+    tracker = _tracker_stub()
+    tracker.decoded_budget = object()
+    tracker.download_budget = object()
+    tracker.create_parser = lambda: AsyncMultiModalContentParser(tracker)
+
+    connector = _create_dynamo_media_parser(tracker)._connector
+
+    assert connector.decoded_budget is tracker.decoded_budget
+    assert connector.download_budget is tracker.download_budget
 
 
 def test_content_parts_refuse_vllm_parser_without_connector_hook():
@@ -398,7 +425,6 @@ def test_render_content_parts_maps_unreachable_media_to_400(monkeypatch):
 
     from dynamo.common.http import HttpStatusError
     from dynamo.vllm import engine_generate
-    from dynamo.vllm.engine_generate import render_content_parts
 
     class Tracker:
         def __init__(self, _model_config):
@@ -414,7 +440,9 @@ def test_render_content_parts_maps_unreachable_media_to_400(monkeypatch):
         lambda _tracker: SimpleNamespace(parse_image=lambda url, uuid: None),
     )
     with pytest.raises(HttpStatusError) as excinfo:
-        asyncio.run(render_content_parts(None, None, {}, [_IMAGE_PART]))
+        # Call through the patched module: other tests re-import dynamo.vllm
+        # submodules, so a separate import could see an unpatched copy.
+        asyncio.run(engine_generate.render_content_parts(None, None, {}, [_IMAGE_PART]))
 
     assert excinfo.value.status == 400
     assert isinstance(excinfo.value.__cause__, aiohttp.ClientConnectionError)
