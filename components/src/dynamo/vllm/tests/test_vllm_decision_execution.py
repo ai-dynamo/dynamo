@@ -15,7 +15,6 @@ from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.exceptions import VLLMValidationError
 
-from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import ModelInput, ModelRuntimeConfig, WorkerType
 from dynamo.vllm import decision_cache_provenance as cache
 from dynamo.vllm import decision_execution as decisions
@@ -41,15 +40,7 @@ def profile(monkeypatch):
         "model_input": ModelInput.Tokens,
         "worker_type": WorkerType.Aggregated,
         "native_generate_supported": True,
-        "config": SimpleNamespace(
-            systemone_serial=True,
-            disaggregation_mode=DisaggregationMode.AGGREGATED,
-            enable_rl=False,
-            route_to_encoder=False,
-            custom_encoder_class=None,
-            enable_multimodal=False,
-            realtime=False,
-        ),
+        "config": SimpleNamespace(systemone_serial=True),
         "vllm_config": SimpleNamespace(
             model_config=SimpleNamespace(
                 architecture="Qwen3ForCausalLM",
@@ -78,6 +69,7 @@ def test_disabled_worker_preserves_metadata_and_skips_qualification(
     profile, monkeypatch
 ):
     profile["config"].systemone_serial = False
+    profile["vllm_config"] = None
     qualification = Mock(side_effect=AssertionError("disabled worker must not qualify"))
     monkeypatch.setattr(decisions, "_released_runtime", qualification)
     original = dict(profile["runtime_config"].runtime_data)
@@ -193,9 +185,44 @@ def test_explicit_opt_in_names_unsupported_architecture(profile):
     assert profile["runtime_config"].runtime_data == original
 
 
-def test_explicit_opt_in_rejects_unqualified_runtime_settings(profile):
-    profile["vllm_config"].model_config.logprobs_mode = "processed_logprobs"
-    with pytest.raises(ValueError, match="qualified causal model"):
+@pytest.mark.parametrize(
+    ("section", "name", "value"),
+    [
+        ("model_config", "runner_type", "pooling"),
+        ("model_config", "logprobs_mode", "processed_logprobs"),
+        ("model_config", "is_encoder_decoder", True),
+        ("model_config", "is_diffusion", True),
+        ("model_config", "model_impl", "transformers"),
+        ("model_config", "model_class_overrides", {"custom": "Model"}),
+        ("model_config", "convert_type", "embed"),
+        ("model_config", "max_model_len", 1),
+        ("model_config", "max_model_len", True),
+        ("scheduler_config", "max_num_seqs", 2),
+        ("scheduler_config", "max_num_seqs", True),
+        ("scheduler_config", "async_scheduling", None),
+        ("scheduler_config", "scheduler_cls", "custom.Scheduler"),
+        ("parallel_config", "data_parallel_size", 2),
+        ("parallel_config", "data_parallel_size", True),
+        (None, "lora_config", object()),
+        (None, "speculative_config", object()),
+        (None, "kv_transfer_config", object()),
+        (None, "ec_transfer_config", object()),
+    ],
+)
+def test_explicit_opt_in_names_unqualified_runtime_setting(
+    profile, section, name, value
+):
+    runtime = profile["vllm_config"]
+    setattr(getattr(runtime, section) if section else runtime, name, value)
+    original = dict(profile["runtime_config"].runtime_data)
+    with pytest.raises(ValueError, match=name):
+        decisions.publish_vllm_decision_capability(**profile)
+    assert profile["runtime_config"].runtime_data == original
+
+
+def test_explicit_opt_in_rejects_missing_runtime_metadata(profile):
+    del profile["vllm_config"].model_config.runner_type
+    with pytest.raises(ValueError, match="missing runtime metadata"):
         decisions.publish_vllm_decision_capability(**profile)
 
 

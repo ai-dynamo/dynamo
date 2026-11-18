@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 
 from packaging.version import InvalidVersion, Version
 
-from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import ModelInput, ModelRuntimeConfig, WorkerType
 
 from .decision_cache_provenance import verify_cache_sources
@@ -40,7 +39,7 @@ def _released_runtime() -> bool:
         return False
 
 
-def _qualified_configuration(config: "Config", runtime: "VllmConfig") -> bool:
+def _unqualified_runtime_condition(runtime: "VllmConfig") -> str | None:
     model = runtime.model_config
     scheduler = runtime.scheduler_config
     expected_scheduler = (
@@ -48,39 +47,42 @@ def _qualified_configuration(config: "Config", runtime: "VllmConfig") -> bool:
         if scheduler.async_scheduling
         else "vllm.v1.core.sched.scheduler.Scheduler"
     )
-    return (
-        config.disaggregation_mode == DisaggregationMode.AGGREGATED
-        and config.enable_rl is False
-        and config.route_to_encoder is False
-        and config.custom_encoder_class is None
-        and config.enable_multimodal is False
-        and config.realtime is False
-        and model.architecture in _ARCHITECTURES
-        and model.runner_type == "generate"
-        and model.logprobs_mode == "raw_logprobs"
-        and model.is_encoder_decoder is False
-        and model.is_diffusion is False
-        and model.model_impl in ("auto", "vllm")
-        and not model.model_class_overrides
-        and model.convert_type == "none"
-        and type(model.max_model_len) is int
-        and model.max_model_len >= 2
-        and type(scheduler.max_num_seqs) is int
-        and scheduler.max_num_seqs == 1
-        and type(scheduler.async_scheduling) is bool
-        and scheduler.scheduler_cls in (None, expected_scheduler)
-        and type(runtime.parallel_config.data_parallel_size) is int
-        and runtime.parallel_config.data_parallel_size == 1
-        and all(
-            extension is None
-            for extension in (
-                runtime.lora_config,
-                runtime.speculative_config,
-                runtime.kv_transfer_config,
-                runtime.ec_transfer_config,
-            )
-        )
+    checks = (
+        (
+            f"unsupported model architecture {model.architecture!r}",
+            model.architecture in _ARCHITECTURES,
+        ),
+        ("runner_type=generate", model.runner_type == "generate"),
+        ("logprobs_mode=raw_logprobs", model.logprobs_mode == "raw_logprobs"),
+        ("is_encoder_decoder=False", model.is_encoder_decoder is False),
+        ("is_diffusion=False", model.is_diffusion is False),
+        ("model_impl=auto or vllm", model.model_impl in ("auto", "vllm")),
+        ("no model_class_overrides", not model.model_class_overrides),
+        ("convert_type=none", model.convert_type == "none"),
+        (
+            "max_model_len integer >= 2",
+            type(model.max_model_len) is int and model.max_model_len >= 2,
+        ),
+        (
+            "max_num_seqs integer = 1",
+            type(scheduler.max_num_seqs) is int and scheduler.max_num_seqs == 1,
+        ),
+        ("async_scheduling boolean", type(scheduler.async_scheduling) is bool),
+        (
+            "standard scheduler_cls",
+            scheduler.scheduler_cls in (None, expected_scheduler),
+        ),
+        (
+            "data_parallel_size integer = 1",
+            type(runtime.parallel_config.data_parallel_size) is int
+            and runtime.parallel_config.data_parallel_size == 1,
+        ),
+        ("lora_config=None", runtime.lora_config is None),
+        ("speculative_config=None", runtime.speculative_config is None),
+        ("kv_transfer_config=None", runtime.kv_transfer_config is None),
+        ("ec_transfer_config=None", runtime.ec_transfer_config is None),
     )
+    return next((name for name, qualified in checks if not qualified), None)
 
 
 def publish_vllm_decision_capability(
@@ -115,22 +117,15 @@ def publish_vllm_decision_capability(
     if not _released_runtime():
         raise ValueError("--systemone-serial requires qualified vLLM 0.33.0")
     try:
-        if not _qualified_configuration(config, vllm_config):
-            architecture = vllm_config.model_config.architecture
-            if architecture not in _ARCHITECTURES:
-                raise ValueError(
-                    "--systemone-serial: unsupported model architecture "
-                    f"{architecture!r}"
-                )
-            raise ValueError(
-                "--systemone-serial requires a qualified causal model and runtime: "
-                "raw_logprobs, max_num_seqs=1, data_parallel_size=1, standard "
-                "scheduler, and no LoRA, speculation, or KV/encoder transfers"
-            )
+        condition = _unqualified_runtime_condition(vllm_config)
     except AttributeError as exc:
         raise ValueError(
             "--systemone-serial cannot qualify missing runtime metadata"
         ) from exc
+    if condition is not None:
+        raise ValueError(
+            f"--systemone-serial: runtime qualification failed: {condition}"
+        )
     if not verify_cache_sources():
         raise ValueError("--systemone-serial requires qualified vLLM cache sources")
     runtime_config.set_engine_specific(VLLM_CAUSAL_DECISION_CAPABILITY, "true")
