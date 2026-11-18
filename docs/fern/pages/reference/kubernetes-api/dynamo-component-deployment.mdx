@@ -441,6 +441,9 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
       <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/api/resource#Quantity" target="_blank">resource.Quantity</a>
     </ParamField>
   </Indent>
+  <ParamField path="engineLauncher" type="boolean" default="false">
+    Starts each engine container with `python3 -m dynamo.vllm.launcher -- <args>` instead of `python3 -m dynamo.vllm <args>`. The launcher imports the engine's modules once and forks the engine from that process; when the engine dies, it starts the replacement in the same container instead of the container restarting. Requires `IntraPod` mode without a checkpoint, a single node, the vLLM backend, and a `main` container whose `command` starts with the separate items `python3`, `-m`, `dynamo.vllm` (not a shell string), and a plain HTTP liveness probe if there is one. The launcher runs the engine's HTTP liveness probe itself and replaces a hung engine, and the container's liveness probe checks the launcher instead. The engine containers get `OPENBLAS_NUM_THREADS=1` unless their `env` sets it. The runtime image must ship `dynamo.vllm.launcher`, and the engine containers need a writable `/tmp`.
+  </ParamField>
 </Indent>
 
 <ParamField path="grove" type="GroveSpec">

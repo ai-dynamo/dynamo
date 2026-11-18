@@ -10754,6 +10754,12 @@ spec:
                     enabled:
                       description: Enabled activates failover mode.
                       type: boolean
+                    engineLauncher:
+                      description: |-
+                        EngineLauncher starts each engine container through the pre-imported
+                        engine launcher (`python3 -m dynamo.vllm.launcher -- <args>`), which
+                        replaces a dead engine in the same container. Same as the v1beta1 field.
+                      type: boolean
                     graphArchive:
                       description: |-
                         GraphArchive mounts a pod-local emptyDir into both engine containers
@@ -20440,6 +20446,22 @@ spec:
                         Requires `gpuMemoryService` to also be set, and `failover.mode` must
                         match `gpuMemoryService.mode` (enforced by the validation webhook).
                       properties:
+                        engineLauncher:
+                          description: |-
+                            engineLauncher starts each engine container with
+                            `python3 -m dynamo.vllm.launcher -- <args>` instead of
+                            `python3 -m dynamo.vllm <args>`. The launcher imports the engine's
+                            modules once and forks the engine from that process. When the engine
+                            dies, the launcher starts its replacement in the same container, so the
+                            container no longer restarts for an engine failure.
+                            Requires intra-pod failover without a checkpoint, a single node, the
+                            vLLM backend, and a main container that runs `python3 -m dynamo.vllm`
+                            directly. The launcher runs the engine's HTTP liveness probe itself
+                            and replaces a hung engine; the container's liveness probe checks the
+                            launcher instead. The engine containers get OPENBLAS_NUM_THREADS=1
+                            unless their env sets it. The runtime image must ship
+                            `dynamo.vllm.launcher`, and the engine containers need a writable /tmp.
+                          type: boolean
                         graphArchive:
                           description: |-
                             graphArchive mounts a pod-local `emptyDir` into both engine containers

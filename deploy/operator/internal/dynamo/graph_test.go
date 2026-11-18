@@ -7327,6 +7327,62 @@ func TestGenerateBasePodSpec_SnapshotUsesGMSV1(t *testing.T) {
 	assert.Equal(t, "true", envVarsToMap(server.Env)[gmsruntime.EnvUseV1])
 }
 
+func TestGenerateBasePodSpec_ColdStartFailoverEngineLauncher(t *testing.T) {
+	t.Log("Declare a cold-start vLLM failover worker without the engine launcher")
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: v1beta1.ComponentTypeWorker,
+		Experimental: &v1beta1.ExperimentalSpec{
+			GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
+			Failover:         &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeIntraPod},
+		},
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: "main", Image: "runtime:1.6.0", Command: []string{"python3", "-m", "dynamo.vllm"},
+			Args:      []string{"--model", "Qwen/Qwen3-0.6B", "--load-format", "gms"},
+			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1")}},
+		}}}},
+	}
+	withoutLauncher, err := GenerateBasePodSpec(component, BackendFrameworkVLLM, &mockSecretsRetriever{}, "test-deployment", "default", RoleMain, 1,
+		&configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(1))
+	require.NoError(t, err)
+
+	t.Log("Render the same worker with the engine launcher")
+	component.Experimental.Failover.EngineLauncher = true
+	withLauncher, err := GenerateBasePodSpec(component, BackendFrameworkVLLM, &mockSecretsRetriever{}, "test-deployment", "default", RoleMain, 1,
+		&configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(1))
+	require.NoError(t, err)
+
+	t.Log("Only the engine commands, liveness probes and the OpenBLAS default differ")
+	want := withoutLauncher.DeepCopy()
+	for i := range failoverEngineCount {
+		engine := &want.Containers[i]
+		require.Equal(t, fmt.Sprintf("engine-%d", i), engine.Name)
+		live := engine.LivenessProbe
+		require.NotNil(t, live, "the default worker has a liveness probe to move")
+		require.NotNil(t, live.HTTPGet)
+		require.Equal(t, "/live", live.HTTPGet.Path)
+		liveFile := fmt.Sprintf("/tmp/dynamo-launcher-engine-%d.live", i)
+		engine.Command = []string{
+			"python3", "-m", "dynamo.vllm.launcher",
+			"--liveness-url", fmt.Sprintf("http://127.0.0.1:%d/live", commonconsts.DynamoSystemPort+i),
+			"--liveness-period", "5", "--liveness-timeout", "4",
+			"--liveness-failure-threshold", strconv.Itoa(int(live.FailureThreshold)),
+			"--startup-timeout", "7200", // the worker startup probe: 720 x 10 s
+			"--liveness-file", liveFile,
+			"--",
+		}
+		engine.LivenessProbe = &corev1.Probe{
+			Exec: &corev1.ExecAction{Command: []string{
+				"sh", "-c", fmt.Sprintf(`test "$(cut -d. -f1 /proc/uptime)" -lt "$(cat %s)"`, liveFile),
+			}},
+			InitialDelaySeconds: live.InitialDelaySeconds,
+			PeriodSeconds:       5, TimeoutSeconds: 4, FailureThreshold: live.FailureThreshold,
+			TerminationGracePeriodSeconds: live.TerminationGracePeriodSeconds,
+		}
+		engine.Env = append(engine.Env, corev1.EnvVar{Name: "OPENBLAS_NUM_THREADS", Value: "1"})
+	}
+	assert.Equal(t, want, withLauncher)
+}
+
 func TestGenerateBasePodSpec_MultiGPUSnapshotFailover(t *testing.T) {
 	for _, backend := range []BackendFramework{BackendFrameworkVLLM, BackendFrameworkSGLang} {
 		t.Run(string(backend), func(t *testing.T) {

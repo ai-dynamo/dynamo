@@ -34,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
@@ -41,6 +42,7 @@ import (
 
 const (
 	dgdAdmissionWorkerName      = "worker"
+	engineLauncherCommandErr    = "spec.components[1].experimental.failover.engineLauncher: Forbidden: requires the main container's command to start with the separate items `python3`, `-m`, `dynamo.vllm`: not a shell string, an interpreter flag or another module"
 	dgdAdmissionUpperWorkerName = "WORKER"
 	dgdAdmissionPriorityClass   = "high-priority"
 )
@@ -91,6 +93,82 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			enableBetaContainerDiscovery(dgd)
 			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), "vllm")
 		})},
+		// Engine launcher: cold-start intra-pod vLLM failover whose engine command the operator can rewrite.
+		{name: "cold-start vLLM failover with the engine launcher is admitted", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaEngineLauncher(worker)
+			worker.PodTemplate.Spec.Containers[0].LivenessProbe = &corev1.Probe{HTTPGet: &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromString("system")}}
+		})},
+		{name: "engine launcher is rejected with a checkpoint", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, "vllm")
+			worker.Experimental.Failover.EngineLauncher = true
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover.engineLauncher: Forbidden: is not supported with a checkpoint: restored engines do not run the container command"}},
+		{name: "engine launcher rejects a shell-wrapped engine command", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaEngineLauncher(worker)
+			worker.PodTemplate.Spec.Containers[0].Command = []string{"sh", "-c"}
+			worker.PodTemplate.Spec.Containers[0].Args = []string{"python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B"}
+		}), wantWebhookErrs: []string{engineLauncherCommandErr}},
+		{name: "engine launcher rejects an engine left to the image entrypoint", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaEngineLauncher(worker)
+			worker.PodTemplate.Spec.Containers[0].Command = nil
+			worker.PodTemplate.Spec.Containers[0].Args = []string{"python3", "-m", "dynamo.vllm", "--model", "Qwen/Qwen3-0.6B"}
+		}), wantWebhookErrs: []string{engineLauncherCommandErr}},
+		{name: "engine launcher rejects an elastic-EP Ray launch", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaEngineLauncher(worker)
+			worker.PodTemplate.Spec.Containers[0].Args = append(worker.PodTemplate.Spec.Containers[0].Args, "--enable-elastic-ep", "--data-parallel-backend", "ray")
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover.engineLauncher: Forbidden: is not supported with elastic expert parallelism on the Ray backend: the engine is started from a shell wrapper"}},
+		{name: "engine launcher rejects a liveness probe it cannot run", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaEngineLauncher(worker)
+			worker.PodTemplate.Spec.Containers[0].LivenessProbe = &corev1.Probe{HTTPGet: &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromString("system"), Scheme: corev1.URISchemeHTTPS}}
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover.engineLauncher: Forbidden: requires the engine liveness probe to be a plain HTTP GET (no HTTPS, no headers)"}},
+		{name: "engine launcher rejects multiple nodes", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaEngineLauncher(worker)
+			worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover.engineLauncher: Forbidden: requires a single node setup"}},
+		{name: "engine launcher rejects inter-pod failover", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaEngineLauncher(worker)
+			worker.Experimental.GPUMemoryService.Mode = nvidiacomv1beta1.GMSModeInterPod
+			worker.Experimental.Failover.Mode = nvidiacomv1beta1.GMSModeInterPod
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover.engineLauncher: Forbidden: requires intra-pod failover"}},
+		{name: "engine launcher rejects another backend", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			dgd.Spec.BackendFramework = sglangBackendFramework
+			worker := dgd.GetComponentByName("worker")
+			enableBetaEngineLauncher(worker)
+			worker.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.sglang"}
+		}), wantWebhookErrs: []string{
+			"spec.components[1].experimental.failover.engineLauncher: Forbidden: requires the vLLM backend",
+			engineLauncherCommandErr,
+		}},
+		{name: "engine launcher cannot be enabled on update over a shell-wrapped engine command", oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaEngineLauncher(worker)
+			worker.Experimental.Failover.EngineLauncher = false
+			worker.PodTemplate.Spec.Containers[0].Command = []string{"sh", "-c"}
+			worker.PodTemplate.Spec.Containers[0].Args = []string{"python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B"}
+		}), deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaEngineLauncher(worker)
+			worker.PodTemplate.Spec.Containers[0].Command = []string{"sh", "-c"}
+			worker.PodTemplate.Spec.Containers[0].Args = []string{"python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B"}
+		}), wantWebhookErrs: []string{engineLauncherCommandErr}},
 		{name: "SGLang multi-GPU snapshot failover is admitted", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 			enableBetaContainerDiscovery(dgd)
 			dgd.Spec.BackendFramework = sglangBackendFramework
@@ -436,6 +514,20 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				betaWorkerComponent(dgd).PodTemplate = nil
 			}),
 			wantWebhookErrs: []string{"spec.components[1].podTemplate.spec.containers: Required value: is required"},
+		},
+		// The engine launcher is validated once, after conversion, for both API versions.
+		{
+			name: "alpha engine launcher rejects a shell-wrapped engine command",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.Resources = &nvidiacomv1alpha1.Resources{Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "1"}}
+				component.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: nvidiacomv1alpha1.GMSModeIntraPod}
+				component.Failover = &nvidiacomv1alpha1.FailoverSpec{Enabled: true, Mode: nvidiacomv1alpha1.GMSModeIntraPod, NumShadows: 1, EngineLauncher: true}
+				component.ExtraPodSpec.MainContainer.Command = []string{"sh", "-c"}
+				component.ExtraPodSpec.MainContainer.Args = []string{"python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B"}
+			}),
+			wantWebhookErrs: []string{strings.Replace(engineLauncherCommandErr, "components[1]", "components[0]", 1)},
 		},
 		{
 			name: "alpha service main image is required when extra pod spec is absent on create",
@@ -4899,6 +4991,13 @@ func enableBetaSnapshotFailover(component *nvidiacomv1beta1.DynamoComponentDeplo
 	component.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo." + backend}
 	component.PodTemplate.Spec.Containers[0].Args = []string{"--model", "Qwen/Qwen3-0.6B", tpFlag, "2"}
 	component.PodTemplate.Spec.Containers[0].Resources.Limits = corev1.ResourceList{corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("2")}
+}
+
+// enableBetaEngineLauncher configures cold-start intra-pod vLLM failover started through the engine launcher.
+func enableBetaEngineLauncher(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+	enableBetaSnapshotFailover(component, "vllm")
+	component.Experimental.Checkpoint = nil
+	component.Experimental.Failover.EngineLauncher = true
 }
 
 func enableBetaIntraPodGMS(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {

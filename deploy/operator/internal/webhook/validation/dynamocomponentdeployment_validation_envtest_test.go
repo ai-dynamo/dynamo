@@ -33,6 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
@@ -112,6 +113,57 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, "vllm")
 			dcd.Spec.Experimental.Checkpoint.StartupPolicy = ""
 		}), wantWebhookErrs: []string{"spec.experimental.checkpoint.startupPolicy: Forbidden: Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture"}},
+		// Engine launcher: cold-start intra-pod vLLM failover whose engine command the operator can rewrite.
+		{name: "cold-start vLLM failover with the engine launcher is admitted", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			enableBetaEngineLauncher(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+			dcd.Spec.PodTemplate.Spec.Containers[0].LivenessProbe = &corev1.Probe{HTTPGet: &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromString("system")}}
+		})},
+		{name: "engine launcher is rejected with a checkpoint", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, "vllm")
+			dcd.Spec.Experimental.Failover.EngineLauncher = true
+		}), wantWebhookErrs: []string{"spec.experimental.failover.engineLauncher: Forbidden: is not supported with a checkpoint: restored engines do not run the container command"}},
+		{name: "engine launcher rejects a shell-wrapped engine command", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			enableBetaEngineLauncher(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+			dcd.Spec.PodTemplate.Spec.Containers[0].Command = []string{"sh", "-c"}
+			dcd.Spec.PodTemplate.Spec.Containers[0].Args = []string{"python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B"}
+		}), wantWebhookErrs: []string{"spec.experimental.failover.engineLauncher: Forbidden: requires the main container's command to start with the separate items `python3`, `-m`, `dynamo.vllm`: not a shell string, an interpreter flag or another module"}},
+		{name: "engine launcher rejects an engine left to the image entrypoint", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			enableBetaEngineLauncher(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+			dcd.Spec.PodTemplate.Spec.Containers[0].Command = nil
+			dcd.Spec.PodTemplate.Spec.Containers[0].Args = []string{"python3", "-m", "dynamo.vllm", "--model", "Qwen/Qwen3-0.6B"}
+		}), wantWebhookErrs: []string{"spec.experimental.failover.engineLauncher: Forbidden: requires the main container's command to start with the separate items `python3`, `-m`, `dynamo.vllm`: not a shell string, an interpreter flag or another module"}},
+		{name: "engine launcher rejects an elastic-EP Ray launch", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			enableBetaEngineLauncher(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+			dcd.Spec.PodTemplate.Spec.Containers[0].Args = append(dcd.Spec.PodTemplate.Spec.Containers[0].Args, "--enable-elastic-ep", "--data-parallel-backend", "ray")
+		}), wantWebhookErrs: []string{"spec.experimental.failover.engineLauncher: Forbidden: is not supported with elastic expert parallelism on the Ray backend: the engine is started from a shell wrapper"}},
+		{name: "engine launcher rejects a liveness probe it cannot run", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			enableBetaEngineLauncher(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+			dcd.Spec.PodTemplate.Spec.Containers[0].LivenessProbe = &corev1.Probe{Exec: &corev1.ExecAction{Command: []string{"true"}}}
+		}), wantWebhookErrs: []string{"spec.experimental.failover.engineLauncher: Forbidden: requires the engine liveness probe to be a plain HTTP GET (no HTTPS, no headers)"}},
+		{name: "engine launcher rejects multiple nodes", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			enableBetaEngineLauncher(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+			dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+		}), wantWebhookErrs: []string{"spec.experimental.failover.engineLauncher: Forbidden: requires a single node setup"}},
+		{name: "engine launcher rejects inter-pod failover", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			enableBetaEngineLauncher(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+			dcd.Spec.Experimental.GPUMemoryService.Mode = nvidiacomv1beta1.GMSModeInterPod
+			dcd.Spec.Experimental.Failover.Mode = nvidiacomv1beta1.GMSModeInterPod
+		}), wantWebhookErrs: []string{"spec.experimental.failover.engineLauncher: Forbidden: requires intra-pod failover"}},
+		{name: "engine launcher rejects another backend", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Spec.BackendFramework = admissionSGLangBackend
+			enableBetaEngineLauncher(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+			dcd.Spec.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.sglang"}
+		}), wantWebhookErrs: []string{"spec.experimental.failover.engineLauncher: Forbidden: requires the vLLM backend", "spec.experimental.failover.engineLauncher: Forbidden: requires the main container's command to start with the separate items `python3`, `-m`, `dynamo.vllm`: not a shell string, an interpreter flag or another module"}},
+		{name: "engine launcher cannot be enabled on update over a shell-wrapped engine command", oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			enableBetaEngineLauncher(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+			dcd.Spec.PodTemplate.Spec.Containers[0].Command = []string{"sh", "-c"}
+			dcd.Spec.PodTemplate.Spec.Containers[0].Args = []string{"python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B"}
+			dcd.Spec.Experimental.Failover.EngineLauncher = false
+		}), deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			enableBetaEngineLauncher(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+			dcd.Spec.PodTemplate.Spec.Containers[0].Command = []string{"sh", "-c"}
+			dcd.Spec.PodTemplate.Spec.Containers[0].Args = []string{"python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B"}
+		}), wantWebhookErrs: []string{"spec.experimental.failover.engineLauncher: Forbidden: requires the main container's command to start with the separate items `python3`, `-m`, `dynamo.vllm`: not a shell string, an interpreter flag or another module"}},
 		// Sidecar mode is derived from live init-container names in both API versions.
 		{name: "beta unrelated init container retains standard mode", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage

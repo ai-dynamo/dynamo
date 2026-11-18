@@ -1292,8 +1292,9 @@ func ConvertToGPUMemoryServiceSpec(src *v1beta1.GPUMemoryServiceSpec, dst *GPUMe
 // v1beta1 and are skipped by the caller.
 func ConvertFromFailoverSpec(src *FailoverSpec, dst *v1beta1.FailoverSpec) {
 	*dst = v1beta1.FailoverSpec{
-		Mode:       gmsModeToV1beta1(src.Mode),
-		NumShadows: src.NumShadows,
+		Mode:           gmsModeToV1beta1(src.Mode),
+		NumShadows:     src.NumShadows,
+		EngineLauncher: src.EngineLauncher,
 	}
 	if src.GraphArchive != nil {
 		dst.GraphArchive = &v1beta1.GraphArchiveSpec{}
@@ -1305,9 +1306,10 @@ func ConvertFromFailoverSpec(src *FailoverSpec, dst *v1beta1.FailoverSpec) {
 // the failover config.
 func ConvertToFailoverSpec(src *v1beta1.FailoverSpec, dst *FailoverSpec) {
 	*dst = FailoverSpec{
-		Enabled:    true,
-		Mode:       gmsModeFromV1beta1(src.Mode),
-		NumShadows: src.NumShadows,
+		Enabled:        true,
+		Mode:           gmsModeFromV1beta1(src.Mode),
+		NumShadows:     src.NumShadows,
+		EngineLauncher: src.EngineLauncher,
 	}
 	if src.GraphArchive != nil {
 		dst.GraphArchive = &GraphArchiveSpec{}

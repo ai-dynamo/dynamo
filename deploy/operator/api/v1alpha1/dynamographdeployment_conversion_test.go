@@ -669,9 +669,10 @@ func TestDGD_RoundTrip_Experimental(t *testing.T) {
 							}},
 						},
 						Failover: &v1beta1.FailoverSpec{
-							Mode:         v1beta1.GMSModeIntraPod,
-							NumShadows:   1,
-							GraphArchive: &v1beta1.GraphArchiveSpec{SizeLimit: new(resource.MustParse("8Gi"))},
+							Mode:           v1beta1.GMSModeIntraPod,
+							NumShadows:     1,
+							GraphArchive:   &v1beta1.GraphArchiveSpec{SizeLimit: new(resource.MustParse("8Gi"))},
+							EngineLauncher: true,
 						},
 						Checkpoint: &v1beta1.ComponentCheckpointConfig{
 							Enabled:             true,

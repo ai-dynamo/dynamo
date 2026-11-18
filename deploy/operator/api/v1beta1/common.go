@@ -409,6 +409,22 @@ type FailoverSpec struct {
 	// See ExperimentalSpec for the stability caveat.
 	// +optional
 	GraphArchive *GraphArchiveSpec `json:"graphArchive,omitempty"`
+
+	// engineLauncher starts each engine container with
+	// `python3 -m dynamo.vllm.launcher -- <args>` instead of
+	// `python3 -m dynamo.vllm <args>`. The launcher imports the engine's
+	// modules once and forks the engine from that process. When the engine
+	// dies, the launcher starts its replacement in the same container, so the
+	// container no longer restarts for an engine failure.
+	// Requires intra-pod failover without a checkpoint, a single node, the
+	// vLLM backend, and a main container that runs `python3 -m dynamo.vllm`
+	// directly. The launcher runs the engine's HTTP liveness probe itself
+	// and replaces a hung engine; the container's liveness probe checks the
+	// launcher instead. The engine containers get OPENBLAS_NUM_THREADS=1
+	// unless their env sets it. The runtime image must ship
+	// `dynamo.vllm.launcher`, and the engine containers need a writable /tmp.
+	// +optional
+	EngineLauncher bool `json:"engineLauncher,omitempty"`
 }
 
 // GraphArchiveSpec configures the pod-local CUDA graph archive shared by the
