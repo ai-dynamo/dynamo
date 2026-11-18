@@ -62,10 +62,8 @@ _EMBEDDING_FETCH_MIN_RATE = 64 * 1024
 _EMBEDDING_FETCH_READ_TIMEOUT_S = 300.0
 
 # Model types whose TRT-LLM input processor rescales images and videos with
-# one flag, and asks for no media format. Next to float video frames, a PIL
-# image would reach such a model unscaled, so in an image + video request the
-# images go over as float (3, H, W) tensors in [0, 1], as trtllm-serve sends
-# them.
+# one flag and asks for no media format. Next to float video, their images go
+# over as float [0, 1] tensors, as trtllm-serve sends them.
 _SHARED_RESCALE_FLAG_MODEL_TYPES = frozenset(
     {"qwen2_vl", "qwen2_5_vl", "exaone4_5", "minicpmv4_6"}
 )
@@ -672,9 +670,8 @@ class MultimodalRequestProcessor:
             # unscaled. Next to an image, videos therefore go over as uint8
             # when the model asks for that format, as Qwen3-VL does. For the
             # models in _SHARED_RESCALE_FLAG_MODEL_TYPES, which do not, the
-            # images go over as float tensors instead (below), except where
-            # the model refuses the mix; other models get the media as
-            # decoded. Single-modality requests are unchanged.
+            # images go over as float tensors instead (below), unless the model
+            # refuses the mix; other models get the media as decoded.
             image_and_video = bool(video_items) and "image" in processed_mm_data
             if (
                 image_and_video
@@ -814,13 +811,8 @@ class MultimodalRequestProcessor:
                     and self.model_type in _SHARED_RESCALE_FLAG_MODEL_TYPES
                     and isinstance(videos[0].frames[0], torch.Tensor)
                 ):
-                    # The processor skips rescaling for both modalities when
-                    # the first video frame is a tensor, so the images must
-                    # already be in [0, 1]: the same to_tensor conversion
-                    # trtllm-serve's ImageMediaIO(format="pt") applies. Next
-                    # to uint8 video, PIL images are rescaled correctly and
-                    # stay as they are. map is lazy, so the conversion runs
-                    # in the worker thread, off the event loop.
+                    # Tensor video frames turn off image rescaling too, so
+                    # convert as trtllm-serve does; lazy map runs off the loop.
                     processed_mm_data["image"] = await asyncio.to_thread(
                         list, map(to_tensor, processed_mm_data["image"])
                     )
