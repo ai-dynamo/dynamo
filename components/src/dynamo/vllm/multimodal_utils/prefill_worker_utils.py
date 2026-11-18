@@ -60,7 +60,7 @@ def parse_image_item(item: Any) -> tuple[str | None, Dict[str, Any] | None]:
                 item[DECODED_VARIANT_KEY], dict
             ):
                 return None, item[DECODED_VARIANT_KEY]
-    raise ValueError(f"Unsupported image item: {item!r}")
+    raise RuntimeError(f"Unsupported image item: {item!r}")
 
 
 def _image_item_cache_key(
@@ -240,7 +240,7 @@ def _accumulate_embeddings(
             (multi_modal_data["image"], mm_data["image"])
         )
     else:
-        raise ValueError(
+        raise RuntimeError(
             f"Unexpected image data format from construct_mm_data: {type(mm_data['image'])}"
         )
 
