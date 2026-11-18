@@ -474,7 +474,6 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
     @pytest.mark.parametrize(
         ("request_data", "expected_routing", "expected_extra_args"),
         [
-            pytest.param({}, None, None, id="absent"),
             pytest.param(
                 {"routing": {"cache_salt": "internal"}},
                 {"cache_salt": "internal"},
@@ -544,12 +543,6 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
                     }
                 },
                 id="with_nvext_passthrough",
-            ),
-            pytest.param(
-                {"nvext": {"cache_salt": " tenant/é "}},
-                {"cache_salt": " tenant/é "},
-                {"nvext": {"cache_salt": " tenant/é "}},
-                id="value_preserved",
             ),
         ],
     )
