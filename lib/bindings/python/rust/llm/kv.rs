@@ -22,26 +22,37 @@ use crate::Endpoint;
     feature = "select-service"
 ))]
 use clap::Parser;
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, RouterEvent,
+};
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
+use dynamo_kv_hashing::routing::{BlockHashOptions, TokensWithHashes, compute_block_hash_for_seq};
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_kv_router::config::KvRouterConfig;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
-use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::plugins::RouterPlugins;
-use dynamo_kv_router::protocols::compute_block_hash_for_seq;
-use dynamo_kv_router::protocols::*;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::services::selection::{
-    self, OverlapScoresRequest, PotentialLoadsRequest, PromptRequest, ReservationRequest,
-    SelectAndReserveRequest, SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig,
-    SelectionError, SelectionService as RustSelectionService, SelectionServiceBuilder,
-    SelectionServiceConfig, WorkerPatchRequest, WorkerRequest,
-    warn_for_unserved_worker_selection_policies,
+    self, SelectionService as RustSelectionService, SelectionServiceBuilder,
+    SelectionServiceConfig, warn_for_unserved_worker_selection_policies,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
 #[cfg(feature = "select-service")]
-use dynamo_kv_router::{TrackingHashAlgorithm, WorkerType};
+use dynamo_router_protocol::WorkerType;
+use dynamo_router_protocol::worker::{DpRank, WorkerId};
+use dynamo_scheduler::host::RouterConfigOverride;
+#[cfg(feature = "select-service")]
+use dynamo_scheduler::host::TrackingHashAlgorithm;
+#[cfg(feature = "select-service")]
+use dynamo_scheduler::host::{
+    OverlapScoresRequest, PotentialLoadsRequest, PromptRequest, ReservationRequest,
+    SelectAndReserveRequest, SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig,
+    SelectionError, WorkerPatchRequest, WorkerRequest,
+};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing::Instrument;
@@ -617,29 +628,7 @@ fn extract_token_ids(tokens: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
             .extract::<Vec<u32>>()
             .map_err(|e| PyValueError::new_err(format!("token_ids: {e}")))
     };
-    let Ok(list) = tokens.downcast_exact::<pyo3::types::PyList>() else {
-        return generic();
-    };
-    let mut token_ids = Vec::with_capacity(list.len());
-    // SAFETY: the GIL is held and the loop runs no Python code (only exact `int`s are
-    // converted, and `PyLong_AsUnsignedLong` does not call `__index__`), so the exact
-    // list cannot change, every index is in range, and the borrowed items stay valid.
-    unsafe {
-        for index in 0..list.len() {
-            let item = pyo3::ffi::PyList_GetItem(list.as_ptr(), index as pyo3::ffi::Py_ssize_t);
-            if pyo3::ffi::PyLong_CheckExact(item) == 0 {
-                return generic();
-            }
-            // A negative int sets OverflowError and returns `c_ulong::MAX`; both it and
-            // values past `u32::MAX` fail `try_from`, and the generic path raises.
-            let Ok(id) = u32::try_from(pyo3::ffi::PyLong_AsUnsignedLong(item)) else {
-                pyo3::ffi::PyErr_Clear();
-                return generic();
-            };
-            token_ids.push(id);
-        }
-    }
-    Ok(token_ids)
+    super::py_convert::read_exact_u32_list(tokens).map_or_else(generic, Ok)
 }
 
 /// Map a [`SelectionError`] to a Python exception: invalid input becomes a
@@ -1410,8 +1399,9 @@ impl KvEventPublisher {
     ///         format (after sgl-project/sglang#43043), including for caller hashes,
     ///         so every event token at or above 1,000,000 is excluded from the
     ///         index. Otherwise only values that do not fit in 32 bits are.
+    ///     idempotent_stores: Do not refcount repeated stores. Set for SGLang.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None, video_token_id=None, engine_owned_mm_identity=false))]
+    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None, video_token_id=None, engine_owned_mm_identity=false, idempotent_stores=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
@@ -1426,6 +1416,7 @@ impl KvEventPublisher {
         kv_state_endpoint: Option<String>,
         video_token_id: Option<u32>,
         engine_owned_mm_identity: bool,
+        idempotent_stores: bool,
     ) -> PyResult<Self> {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             liveness: None,
@@ -1435,6 +1426,7 @@ impl KvEventPublisher {
             image_token_id,
             video_token_id,
             engine_owned_mm_identity,
+            idempotent_stores,
             recovery: None,
         });
 
@@ -1570,7 +1562,7 @@ impl KvEventPublisher {
 #[pyclass]
 #[derive(Clone)]
 pub(crate) struct OverlapScores {
-    inner: dynamo_kv_router::protocols::OverlapScores,
+    inner: dynamo_kv_indexer::host::OverlapScores,
 }
 
 #[pymethods]
@@ -1596,7 +1588,7 @@ enum RadixTreeRequest {
     FindMatches {
         local_block_hashes: Vec<LocalBlockHash>,
         early_exit: bool,
-        response_tx: mpsc::SyncSender<dynamo_kv_router::protocols::OverlapScores>,
+        response_tx: mpsc::SyncSender<dynamo_kv_indexer::host::OverlapScores>,
     },
     ApplyEvent {
         worker_id: WorkerId,
@@ -1631,7 +1623,7 @@ impl RadixTree {
 
         // Spawn dedicated thread with simplified sync processing
         std::thread::spawn(move || {
-            let mut radix_tree = dynamo_kv_router::indexer::RadixTree::new();
+            let mut radix_tree = dynamo_kv_indexer::host::RadixTree::new();
 
             loop {
                 match request_rx.recv() {
@@ -1796,7 +1788,7 @@ impl RadixTree {
 
 impl RadixTree {
     fn handle_request(
-        radix_tree: &mut dynamo_kv_router::indexer::RadixTree,
+        radix_tree: &mut dynamo_kv_indexer::host::RadixTree,
         request: RadixTreeRequest,
     ) {
         match request {
@@ -2047,7 +2039,7 @@ async fn create_kv_router_from_endpoint(
     block_size: usize,
     kv_router_config: Option<KvRouterConfig>,
     load_threshold_config: RsLoadThresholdConfig,
-    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
+    prefill_load_estimator: Option<Arc<dyn dynamo_scheduler::host::PrefillLoadEstimator>>,
     plugins: RouterPlugins,
 ) -> anyhow::Result<RsManagedKvRouter> {
     // Create ModelManager and use it to create KvRouter (ensures registration)
@@ -2182,9 +2174,9 @@ async fn create_kv_router_from_endpoint(
             factory(
                 config,
                 policy_worker_role,
-                dynamo_kv_router::RoutingPartitionRef::new(
+                dynamo_router_protocol::identity::RoutingPartitionRef::new(
                     &policy_model_name,
-                    dynamo_kv_router::DEFAULT_ROUTING_GROUP,
+                    dynamo_router_protocol::identity::DEFAULT_ROUTING_GROUP,
                 ),
             )
         }))
@@ -2569,15 +2561,9 @@ impl KvRouter {
         let mut request: llm_rs::protocols::common::preprocessor::PreprocessedRequest =
             depythonize(request.bind(py)).map_err(to_pyerr)?;
 
-        // Create tracker if not already set, to capture worker routing info
-        let tracker = match request.tracker {
-            Some(ref t) => t.clone(),
-            None => {
-                let t = Arc::new(RequestTracker::new());
-                request.tracker = Some(t.clone());
-                t
-            }
-        };
+        // The tracker captures worker routing info, and carries on from the age an upstream
+        // router stamped on the request.
+        let tracker = request.ensure_tracker().clone();
         let request = crate::create_request_context(request, &context);
         let dispatch_span = context
             .as_ref()

@@ -48,10 +48,11 @@ If you use another path, update `TRACE_DIR` in [perf.yaml](perf.yaml).
 The Job uses the same cached tokenizer as the serving workers and needs network
 access to install AIPerf. The checksum command requires Python 3.11 or later.
 
+The Job sets these defaults: `BENCHMARK_DURATION` 3600 seconds,
+`WARMUP_GRACE_PERIOD` 1800 seconds, `REQUEST_TIMEOUT_SECONDS` 7200 seconds,
+and `MAX_CONTEXT_LENGTH` 1048576 tokens.
 Set the empty Job environment values in `perf.yaml`: `ENDPOINT`, `CONCURRENCY`,
-`BENCHMARK_DURATION`, `WARMUP_GRACE_PERIOD`, `REQUEST_TIMEOUT_SECONDS`,
-`MAX_CONTEXT_LENGTH`, `ARTIFACT_DIR`, and `CACHE_SALT`.
-Use seconds for durations and timeouts, and tokens for the context limit.
+`ARTIFACT_DIR`, and `CACHE_SALT`.
 Use a new artifact directory and cache salt for each run.
 Set `NAMESPACE` to your deployment namespace, then apply the Job:
 

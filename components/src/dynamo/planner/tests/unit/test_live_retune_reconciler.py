@@ -217,7 +217,7 @@ class RecordingMetrics:
 
 
 def make(
-    tmp_path: Path, *, keep_requests: int = 2
+    tmp_path: Path, *, keep_requests: int = 2, history_s: float = 0.0
 ) -> tuple[Reconciler, FakeKube, RecordingMetrics]:
     cfg = DgdrExecutorConfig(
         claim_name="traces",
@@ -237,7 +237,14 @@ def make(
     kube = FakeKube()
     metrics = RecordingMetrics()
     reconciler = Reconciler(
-        kube, DGD, cfg, retune, str(tmp_path), metrics, now=lambda: NOW
+        kube,
+        DGD,
+        cfg,
+        retune,
+        str(tmp_path),
+        metrics,
+        now=lambda: NOW,
+        history_s=history_s,
     )
     return reconciler, kube, metrics
 
@@ -298,6 +305,21 @@ def test_segments_of_a_live_pod_keep_the_newest_and_recent_ones(tmp_path: Path) 
     assert not old0.exists() and not old2.exists()
     assert recent.exists() and newest.exists() and other.exists()
     assert report.errors == {}
+
+
+def test_a_scaling_planner_keeps_the_segments_of_its_history(tmp_path: Path) -> None:
+    # Sweeps also read history_s before the window (the inner planners'
+    # predictor warmup), so segments live that much longer.
+    reconciler, _, _ = make(tmp_path, history_s=3600.0)
+    pod_dir = Path(reconciler.segments_root) / "fe-0"
+    history = touch(pod_dir / "req.000000.jsonl.gz", SEGMENT_AGE + 1800)
+    older = touch(pod_dir / "req.000001.jsonl.gz", SEGMENT_AGE + 3601)
+    touch(pod_dir / "req.000002.jsonl.gz", 10)
+
+    report = run_once(reconciler, pods=[frontend("fe-0")])
+
+    assert report.deleted_segments == 1
+    assert history.exists() and not older.exists()
 
 
 def test_directory_of_a_gone_pod_goes_only_when_everything_is_old(

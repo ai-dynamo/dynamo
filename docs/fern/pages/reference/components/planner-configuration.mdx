@@ -119,7 +119,7 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
 
 <ParamField path="ais_perf_model" type="AISPerfModelSpec" default="null">
   Role-indexed AISimulate forward-pass configurations. Constructs each model through
-  `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
+  `aisim_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
   interpolation sweep. Configure model identity and estimator controls through
   `ais_perf_model.roles`, or select local dataset manifests with `dataset_profiles`;
   the retired `aic_perf_model` and `hf_id` / pick shape
@@ -185,9 +185,12 @@ build, or mount a local copy before starting Planner. Use the
 generic AISimulate wheel; measurements do not belong inside the wheel. Use matching
 AISimulate Python and Rust releases that support execution profiles through the
 common forward-pass query API. This integration pins Python
-`0.13.0.dev202610290000000087` and Rust `0.13.0-dev.202610290000000087`,
+`0.15.0.dev202611130000000104` and Rust `0.15.0-dev.202611130000000104`,
 which include that support. Use version-2 execution profiles; version 1 retains
 its legacy direct-phase queries and must be explicitly migrated and repinned.
+An execution profile is accepted only when its engine spec schema version matches the
+pinned AISimulate release. The move from 0.13 to 0.15 changes that version, so download
+or generate the dataset again.
 
 The following configuration illustrates the paths to supply for a prefill role:
 
@@ -279,7 +282,12 @@ The Planner does not have per-component maximum endpoint fields. `max_gpu_budget
 </ParamField>
 
 <ParamField path="load_scaling_down_sensitivity" type="integer" default="80">
-  Scale-down sensitivity from 0 to 100 (0 = never scale down, 100 = aggressive).
+  Scale-down sensitivity from 0 to 100 for SLA-mode load scaling (100 = most aggressive). It sets how much
+  latency headroom the performance model must predict before load-based scaling removes a replica; 0 blocks
+  these model-based scale-downs. It does not apply when every fresh FPM observation for a pool is idle: the
+  Planner then removes one replica per decision, down to the larger of 1 and the endpoint floor. Set
+  `min_endpoint` (or the per-component floors) to keep idle capacity. Ignored unless `optimization_target`
+  is `sla`.
 </ParamField>
 
 <ParamField path="load_min_observations" type="integer" default="5">
@@ -665,7 +673,7 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
 **Experimental.** Where retune runs depends on `executor`:
 
 - `local`, the default, runs only inside planner-in-the-loop offline replay: `dynamo.replay.run_trace_replay` with `trace_format="dynamo"`, or `aisimulate predict --stack dynamo` on a Dynamo request trace. A live Planner rejects it at startup.
-- `dgdr` runs on a live Planner on Kubernetes, through DGDR v1beta2 Requests. It retunes three KV router knobs with fixed replicas and is meant for development clusters only; see [Planner Live Retune](../../kubernetes/auto-deployment/planner-live-retune.md).
+- `dgdr` runs on a live Planner on Kubernetes, through DGDR v1beta2 Requests. It retunes three KV router knobs, with fixed replicas or with scaling, and with scaling the Planner fields of `retune.planner` too. It is meant for development clusters only; see [Planner Live Retune](../../kubernetes/auto-deployment/planner-live-retune.md).
 </Warning>
 
 <ParamField path="retune" type="RetuneConfig" default="null">
@@ -726,7 +734,7 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
   <ParamField path="executor" type="string" default="local">
     Where sweeps run. `local` replays the candidates in worker processes of the Planner and runs only inside planner-in-the-loop replay; a live Planner rejects it at startup with `planner.retune is replay-only with executor 'local'; use executor: dgdr`. `dgdr` runs each sweep as DGDR v1beta2 Requests from a live Planner on Kubernetes and requires the `dgdr` section below. **Experimental**, development clusters only: see [Planner Live Retune](../../kubernetes/auto-deployment/planner-live-retune.md).
 
-    With `dgdr`, the Planner also rejects at startup a config that breaks a [configuration rule](../../kubernetes/auto-deployment/planner-live-retune.md#deployment-rules) of live retune: it requires `environment: kubernetes`, retune-only mode with no `planner` domain, a `router` domain that writes only `overlap_score_credit`, `prefill_load_scale`, `temperature`, `policy: kv_router` and `prefill_load_model: {type: none}`, the `timeout_seconds` and `decision_latency_seconds` limits above, a `dgdr.engine` that follows the rules below, and a largest grid shard of at most 100 points that fits the [time budget](../../kubernetes/auto-deployment/planner-live-retune.md#time-budget).
+    With `dgdr`, the Planner also rejects at startup a config that breaks a [configuration rule](../../kubernetes/auto-deployment/planner-live-retune.md#deployment-rules) of live retune: it requires `environment: kubernetes`, a `router` domain (pin its knobs with scalars to retune only the Planner) that writes only `overlap_score_credit`, `prefill_load_scale`, `temperature`, `policy: kv_router` and `prefill_load_model: {type: none}`, the `timeout_seconds` and `decision_latency_seconds` limits above, a `dgdr.engine` that follows the rules below, and a largest grid shard of at most 100 points that fits the [time budget](../../kubernetes/auto-deployment/planner-live-retune.md#time-budget). With scaling, the Planner points are one more shard dimension, the history read takes another `cut_budget_seconds`, and the history before a window may hold at most 1024 buckets of the shortest throughput interval.
 
     <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>local</Badge> <Badge intent="note" minimal>dgdr</Badge></span>
   </ParamField>

@@ -14,11 +14,11 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper", reason="AISimulate is an optional simulation dependency"
+    "aisim.sweeper", reason="AISimulate is an optional simulation dependency"
 )
 
-from aisimulate.sweeper.provider import AdapterReplaySpec, RuntimeHookSpec
-from aisimulate.sweeper.replay import (
+from aisim.sweeper.provider import AdapterReplaySpec, RuntimeHookSpec
+from aisim.sweeper.replay import (
     BackendDeploymentSpec,
     ReplayOutputRequirements,
     ReplaySpec,
