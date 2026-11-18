@@ -38,26 +38,31 @@ import yaml
 
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
 from tests.deploy.dgdr_utils import parse_served_model_ids
+from tests.deploy.kubectl_utils import (
+    LOGS_TIMEOUT,
+    Kubectl,
+    Owner,
+    created,
+    delete_leftovers,
+    missing_crds,
+    use_namespace,
+    wait_for_job,
+)
 from tests.deploy.slime_utils import (
     FRONTEND_ROLE,
-    LOGS_TIMEOUT,
+    OWNER_LABEL,
     RAYJOB,
+    REQUIRED_CRDS,
     ROLE_LABEL,
     SETUP_JOB,
-    Kubectl,
     SlimeTrainingPlan,
     SlimeTutorialManifests,
     SlimeTutorialOptions,
     count_weight_reloads,
-    created,
-    delete_leftovers,
-    missing_crds,
     missing_paths,
     parse_ls_listing,
     routed_requests,
     summarize_driver_log,
-    tutorial_namespace,
-    wait_for_job,
     wait_for_rayjob,
 )
 from tests.utils.output_paths import resolve_test_output_path
@@ -137,15 +142,21 @@ async def test_slime_tutorial(
         pytest.skip("The Slime tutorial test needs --namespace")
 
     kubectl = Kubectl(namespace)
+    owner = Owner.new(OWNER_LABEL)
+    logger.info("Labeling this run's objects %s=%s", owner.label, owner.run)
     output_dir = Path(resolve_test_output_path(request.node.name))
     output_dir.mkdir(parents=True, exist_ok=True)
     manifests = SlimeTutorialManifests.load(slime_options)
     plan = SlimeTrainingPlan.from_rayjob(manifests.rayjob)
     deployment_spec = _deployment_spec(
-        manifests, tmp_path, image, request.config.getoption("--frontend-image")
+        manifests,
+        owner,
+        tmp_path,
+        image,
+        request.config.getoption("--frontend-image"),
     )
 
-    missing = missing_crds(kubectl)
+    missing = missing_crds(kubectl, REQUIRED_CRDS)
     assert not missing, (
         "Install the Dynamo platform and the KubeRay operator, as the tutorial's "
         f"first page does. Missing CRDs: {missing}"
@@ -153,14 +164,17 @@ async def test_slime_tutorial(
 
     async with AsyncExitStack() as stack:
         logger.info("Installation and Setup: staging the model and dataset")
-        if not stack.enter_context(tutorial_namespace(kubectl)):
-            delete_leftovers(kubectl, manifests)
+        # A namespace that the test creates is deleted at the end, as the
+        # tutorial's clean-up step does.
+        if not stack.enter_context(use_namespace(kubectl, owner)):
+            delete_leftovers(kubectl, manifests.creation_order(), owner)
         if manifests.pvc is not None:
-            stack.enter_context(created(kubectl, [manifests.pvc]))
+            stack.enter_context(created(kubectl, [manifests.pvc], owner))
         stack.enter_context(
             created(
                 kubectl,
                 [manifests.setup_job],
+                owner,
                 before_delete=partial(
                     _save_output,
                     kubectl,
@@ -174,7 +188,7 @@ async def test_slime_tutorial(
         _check_staged_data(kubectl, plan, output_dir)
 
         logger.info("Serve Inference with Dynamo: starting the engines")
-        stack.enter_context(created(kubectl, manifests.engine_services))
+        stack.enter_context(created(kubectl, manifests.engine_services, owner))
         await stack.enter_async_context(
             ManagedDeployment(
                 log_dir=request.node.name,
@@ -195,11 +209,12 @@ async def test_slime_tutorial(
         )
 
         logger.info("Train with Slime on KubeRay: running %d steps", plan.train_steps)
-        stack.enter_context(created(kubectl, [manifests.functions]))
+        stack.enter_context(created(kubectl, [manifests.functions], owner))
         stack.enter_context(
             created(
                 kubectl,
                 [manifests.rayjob],
+                owner,
                 before_delete=partial(_save_rayjob, kubectl, output_dir),
             )
         )
@@ -219,13 +234,19 @@ async def test_slime_tutorial(
 
 def _deployment_spec(
     manifests: SlimeTutorialManifests,
+    owner: Owner,
     directory: Path,
     image: str | None,
     frontend_image: str | None,
 ) -> DeploymentSpec:
     """Wrap the tutorial's DGD for ManagedDeployment, with the image options
     that the other deploy tests take: --image sets every component, and
-    --frontend-image then sets the frontend."""
+    --frontend-image then sets the frontend.
+
+    The DGD carries the run's owner label, like the objects that created()
+    makes, so that a later run can delete it as a leftover.
+    """
+    owner.mark(manifests.dgd)
     path = directory / "dgd.yaml"
     path.write_text(yaml.safe_dump(manifests.dgd, sort_keys=False), encoding="utf-8")
     spec = DeploymentSpec(str(path))

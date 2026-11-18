@@ -5,29 +5,35 @@
 
 tests/deploy/slime/ holds the tutorial's manifests, one file per step. These
 helpers apply a run's cluster-specific options to them, read the run's expected
-counts from the RayJob, create and delete the objects with kubectl, and parse
-the logs that the tutorial's checks read. They import only the standard library
-and PyYAML, so test_slime_utils.py checks them without a cluster.
+counts from the RayJob, wait for the RayJob, and parse the logs that the
+tutorial's checks read; kubectl_utils.py creates and deletes the objects. They
+import only the standard library and PyYAML, so test_slime_utils.py checks them
+without a cluster.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
 import re
 import shlex
-import subprocess
 import time
 from collections import Counter
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
+
+from tests.deploy.kubectl_utils import (
+    GPU_RESOURCE,
+    POLL_INTERVAL,
+    Kubectl,
+    StatusReader,
+    log_tail,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,16 +47,11 @@ ROLE_LABEL = "dynamo.nvidia.com/slime-role"
 FRONTEND_ROLE = "frontend"
 REQUIRED_CRDS = ("dynamographdeployments.nvidia.com", "rayjobs.ray.io")
 
-# Marks every object that this test creates. In an existing namespace, the test
-# deletes only leftovers that carry it, never a reader's own tutorial objects.
+# Marks each object that this test creates, with the run's ID as its value
+# (kubectl_utils.Owner). A run deletes only objects with this label: its own
+# when it exits, and earlier runs' leftovers when it starts. A reader's own
+# tutorial objects lack the label, so the test never deletes them.
 OWNER_LABEL = "dynamo.nvidia.com/slime-e2e-test"
-OWNER_LABEL_VALUE = "true"
-
-GPU_RESOURCE = "nvidia.com/gpu"
-KUBECTL_TIMEOUT = 120
-LOGS_TIMEOUT = 300
-DELETE_TIMEOUT = 600
-POLL_INTERVAL = 10
 
 RAYJOB_FAILED = frozenset({"FAILED", "STOPPED"})
 RAYJOB_DEPLOYMENT_FAILED = frozenset({"Failed", "ValidationFailed"})
@@ -121,7 +122,7 @@ class SlimeTutorialManifests:
             pvc = None
         else:
             pvc["spec"]["storageClassName"] = options.storage_class
-        manifests = cls(
+        return cls(
             pvc=pvc,
             setup_job=setup_job,
             engine_services=engine_services,
@@ -129,11 +130,6 @@ class SlimeTutorialManifests:
             functions=functions,
             rayjob=rayjob,
         )
-        for documents in manifests.creation_order():
-            for document in documents:
-                labels = document["metadata"].setdefault("labels", {})
-                labels[OWNER_LABEL] = OWNER_LABEL_VALUE
-        return manifests
 
     def creation_order(self) -> list[list[dict[str, Any]]]:
         """The tutorial's objects in the order that its pages create them."""
@@ -382,327 +378,6 @@ def missing_paths(
     ]
 
 
-class KubectlError(RuntimeError):
-    """A kubectl command failed."""
-
-
-class Kubectl:
-    """Run kubectl against one namespace in the current context."""
-
-    def __init__(self, namespace: str) -> None:
-        self.namespace = namespace
-        self.cleanup_errors: list[str] = []
-
-    def run(
-        self,
-        *args: str,
-        input_: str | None = None,
-        check: bool = True,
-        timeout: float = KUBECTL_TIMEOUT,
-    ) -> subprocess.CompletedProcess[str]:
-        command = ["kubectl", f"--namespace={self.namespace}", *args]
-        logger.debug("Running %s", shlex.join(command))
-        result = subprocess.run(
-            command,
-            input=input_,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=timeout,
-        )
-        if check and result.returncode != 0:
-            raise KubectlError(
-                f"{shlex.join(command)} exited with {result.returncode}: "
-                f"{result.stderr.strip()}"
-            )
-        return result
-
-    def get(self, kind: str, name: str) -> dict[str, Any]:
-        return json.loads(self.run("get", kind, name, "--output=json").stdout)
-
-    def logs(self, target: str, *args: str) -> str:
-        return self.run("logs", target, *args, timeout=LOGS_TIMEOUT).stdout
-
-    def pod(self, selector: str) -> str:
-        """Return the one Pod with the label, as each engine Service needs."""
-        names = self.run(
-            "get", "pods", f"--selector={selector}", "--output=name"
-        ).stdout.split()
-        if len(names) != 1:
-            raise AssertionError(
-                f"expected one Pod with label {selector}, found {names or 'none'}"
-            )
-        return names[0]
-
-    def get_in_cluster(self, pod: str, url: str) -> tuple[str, str]:
-        """GET a URL with curl from inside a Pod; return the status and body."""
-        result = self.run(
-            "exec",
-            pod,
-            "--container=main",
-            "--",
-            "curl",
-            "--silent",
-            "--max-time",
-            "60",
-            "--write-out",
-            "\n%{http_code}",
-            url,
-            check=False,
-        )
-        body, _, status = result.stdout.rpartition("\n")
-        return status.strip() or f"no response ({result.stderr.strip()})", body
-
-    def delete(self, manifest: str) -> subprocess.CompletedProcess[str]:
-        """Delete a manifest's objects and wait until they and their
-        dependents, such as a Job's Pods, are gone."""
-        return self.run(
-            "delete",
-            "--ignore-not-found",
-            "--wait=true",
-            "--cascade=foreground",
-            f"--timeout={DELETE_TIMEOUT}s",
-            "--filename=-",
-            input_=manifest,
-            check=False,
-            timeout=DELETE_TIMEOUT + 60,
-        )
-
-    def cleanup(
-        self, description: str, action: Callable[[], subprocess.CompletedProcess[str]]
-    ) -> None:
-        """Run one cleanup command and record a failure instead of raising it,
-        so later steps still run and an earlier test failure stays the one
-        that pytest reports."""
-        try:
-            result = action()
-        except (KubectlError, subprocess.SubprocessError, OSError) as error:
-            message = f"{description}: {error}"
-        else:
-            if result.returncode == 0:
-                return
-            message = f"{description}: {result.stderr.strip()}"
-        logger.error("Cleanup failed: %s", message)
-        self.cleanup_errors.append(message)
-
-    def snapshot(self) -> str:
-        """Pods and recent warning events in the namespace, for failure messages."""
-        pods = self.run("get", "pods", "--output=wide", check=False)
-        events = self.run(
-            "get",
-            "events",
-            "--field-selector=type=Warning",
-            "--sort-by=.lastTimestamp",
-            check=False,
-        )
-        recent = "\n".join(events.stdout.splitlines()[-20:])
-        return (
-            f"Pods:\n{pods.stdout or pods.stderr}\n"
-            f"Recent warning events:\n{recent or events.stderr}"
-        )
-
-
-def missing_crds(kubectl: Kubectl) -> list[str]:
-    missing = []
-    for crd in REQUIRED_CRDS:
-        result = kubectl.run("get", "crd", crd, "--output=name", check=False)
-        if result.returncode == 0:
-            continue
-        if "NotFound" not in result.stderr:
-            raise KubectlError(f"could not read CRD {crd}: {result.stderr.strip()}")
-        missing.append(crd)
-    return missing
-
-
-@contextmanager
-def tutorial_namespace(kubectl: Kubectl) -> Iterator[bool]:
-    """Use the namespace, creating it if it does not exist.
-
-    Yields whether this run created it. A namespace created here is deleted on
-    exit, as the tutorial's clean-up step does; an existing one is kept.
-    """
-    result = kubectl.run(
-        "get", "namespace", kubectl.namespace, "--output=name", check=False
-    )
-    is_new = result.returncode != 0
-    if is_new:
-        if "NotFound" not in result.stderr:
-            raise KubectlError(
-                f"could not read namespace {kubectl.namespace}: "
-                f"{result.stderr.strip()}"
-            )
-        kubectl.run("create", "namespace", kubectl.namespace)
-        logger.info("Created namespace %s", kubectl.namespace)
-    try:
-        yield is_new
-    finally:
-        if is_new:
-            kubectl.cleanup(
-                f"deleting namespace {kubectl.namespace}",
-                lambda: kubectl.run(
-                    "delete",
-                    "namespace",
-                    kubectl.namespace,
-                    "--ignore-not-found",
-                    "--wait=true",
-                    f"--timeout={DELETE_TIMEOUT}s",
-                    check=False,
-                    timeout=DELETE_TIMEOUT + 60,
-                ),
-            )
-
-
-def _describe(documents: list[dict[str, Any]]) -> str:
-    return ", ".join(
-        f"{document['kind']}/{document['metadata']['name']}" for document in documents
-    )
-
-
-def _owned_or_absent(kubectl: Kubectl, document: dict[str, Any]) -> bool:
-    """Whether the namespace lacks the document's object, or has it with
-    OWNER_LABEL."""
-    kind, name = document["kind"], document["metadata"]["name"]
-    result = kubectl.run("get", kind, name, "--output=json", check=False)
-    if result.returncode != 0:
-        if "NotFound" not in result.stderr:
-            raise KubectlError(f"could not read {kind}/{name}: {result.stderr.strip()}")
-        return True
-    labels = json.loads(result.stdout)["metadata"].get("labels") or {}
-    return labels.get(OWNER_LABEL) == OWNER_LABEL_VALUE
-
-
-def delete_leftovers(kubectl: Kubectl, manifests: SlimeTutorialManifests) -> None:
-    """Delete the tutorial's objects that an interrupted run left behind.
-
-    Fails before deleting anything if an object with one of the tutorial's
-    names lacks OWNER_LABEL, such as a reader's own tutorial deployment or its
-    claim. Goes in reverse creation order, so the RayJob and the DGD release
-    the volume before its claim is deleted. Without this, a finished RayJob or
-    Job from an earlier run would satisfy this run's waits.
-    """
-    groups = list(reversed(manifests.creation_order()))
-    unowned = [
-        document
-        for documents in groups
-        for document in documents
-        if not _owned_or_absent(kubectl, document)
-    ]
-    if unowned:
-        raise AssertionError(
-            f"Namespace {kubectl.namespace} already has {_describe(unowned)} "
-            f"without the {OWNER_LABEL} label, so this test did not create "
-            "them and will not delete them. Use another namespace, or delete "
-            "them yourself."
-        )
-    for documents in groups:
-        result = kubectl.delete(yaml.safe_dump_all(documents, sort_keys=False))
-        if result.returncode != 0:
-            raise KubectlError(
-                f"could not delete leftover {_describe(documents)}: "
-                f"{result.stderr.strip()}"
-            )
-
-
-@contextmanager
-def created(
-    kubectl: Kubectl,
-    documents: list[dict[str, Any]],
-    *,
-    before_delete: Callable[[], None] | None = None,
-) -> Iterator[None]:
-    """Create the documents, and on exit delete them and wait for them to go.
-
-    before_delete runs first on exit, to save logs that deletion removes. Its
-    failures are only logged: missing diagnostics must not fail a run.
-    """
-    manifest = yaml.safe_dump_all(documents, sort_keys=False)
-    names = _describe(documents)
-    kubectl.run("create", "--filename=-", input_=manifest)
-    logger.info("Created %s", names)
-    try:
-        yield
-    finally:
-        if before_delete is not None:
-            try:
-                before_delete()
-            except (KubectlError, subprocess.SubprocessError, OSError) as error:
-                logger.warning("Could not save diagnostics for %s: %s", names, error)
-        kubectl.cleanup(f"deleting {names}", lambda: kubectl.delete(manifest))
-
-
-def _log_tail(kubectl: Kubectl, target: str, lines: int = 40) -> str:
-    result = kubectl.run("logs", target, f"--tail={lines}", check=False)
-    return result.stdout or result.stderr
-
-
-class _StatusReader:
-    """Read an object's status while waiting on it.
-
-    A few consecutive failed reads only log a warning, so a brief API server
-    or credential hiccup does not end a half-hour wait.
-    """
-
-    max_failures = 6
-
-    def __init__(self, kubectl: Kubectl, kind: str, name: str) -> None:
-        self._kubectl = kubectl
-        self._kind = kind
-        self._name = name
-        self._failures = 0
-
-    def read(self) -> dict[str, Any] | None:
-        try:
-            status = self._kubectl.get(self._kind, self._name).get("status", {})
-        except (KubectlError, subprocess.TimeoutExpired) as error:
-            self._failures += 1
-            if self._failures > self.max_failures:
-                raise
-            logger.warning(
-                "Could not read %s/%s, will retry: %s", self._kind, self._name, error
-            )
-            return None
-        self._failures = 0
-        return status
-
-
-async def wait_for_job(kubectl: Kubectl, name: str, timeout: float) -> None:
-    """Wait for a Job's Complete condition, as ``kubectl wait`` does, but
-    stop as soon as the Job fails."""
-    reader = _StatusReader(kubectl, "job", name)
-    deadline = time.monotonic() + timeout
-    conditions: dict[str, dict[str, Any]] = {}
-    while True:
-        status = reader.read()
-        if status is not None:
-            conditions = {
-                condition["type"]: condition
-                for condition in status.get("conditions", [])
-                if condition.get("status") == "True"
-            }
-            if "Complete" in conditions:
-                return
-            if "Failed" in conditions:
-                raise AssertionError(
-                    f"Job {name} failed: "
-                    f"{conditions['Failed'].get('message', '')}\n"
-                    f"Log tail:\n{_log_tail(kubectl, f'job/{name}')}\n"
-                    f"{kubectl.snapshot()}"
-                )
-        if time.monotonic() >= deadline:
-            hint = ""
-            if "SuccessCriteriaMet" in conditions:
-                hint = (
-                    " Its Pod succeeded, but the Job controller could not "
-                    "finish the Job. Check the Pod's tolerations: on AKS, a "
-                    f"{GPU_RESOURCE} toleration with operator Equal causes this."
-                )
-            raise AssertionError(
-                f"Job {name} did not complete within {timeout:.0f}s.{hint}\n"
-                f"{kubectl.snapshot()}"
-            )
-        await asyncio.sleep(POLL_INTERVAL)
-
-
 async def wait_for_rayjob(
     kubectl: Kubectl, name: str, start_timeout: float, run_timeout: float
 ) -> dict[str, Any]:
@@ -712,7 +387,7 @@ async def wait_for_rayjob(
     covers: the Ray head's start and the job's submission. Raises as soon as
     KubeRay reports a failure. Returns the RayJob's final status.
     """
-    reader = _StatusReader(kubectl, "rayjob", name)
+    reader = StatusReader(kubectl, "rayjob", name)
     deadline = time.monotonic() + start_timeout
     started = False
     job_status = deployment_status = ""
@@ -739,7 +414,7 @@ async def wait_for_rayjob(
                     f"jobDeploymentStatus={deployment_status} "
                     f"reason={status.get('reason', '')} "
                     f"message={status.get('message', '')}\n"
-                    f"Driver log tail:\n{_log_tail(kubectl, f'job/{name}')}\n"
+                    f"Driver log tail:\n{log_tail(kubectl, f'job/{name}')}\n"
                     f"{kubectl.snapshot()}"
                 )
             if job_status == "SUCCEEDED" and deployment_status == "Complete":
