@@ -7,6 +7,9 @@
 //! thread keeps one counter per rank it owns and sets it to the rank's block count after each
 //! event it applies. Readers find the counters through a copy-on-write map that changes only
 //! when a rank appears or is removed.
+//!
+//! The counts lent to a selection also carry the partition's lower-tier indexes, which hold the
+//! block count of each rank's attached cache owner.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +18,7 @@ use arc_swap::{ArcSwap, Guard};
 use rustc_hash::FxHashMap;
 
 use crate::prelude::WorkerWithDpRank;
+use crate::{CacheOwnerBlockCounts, LowerTierIndexers};
 
 /// Padded so counters written by different event threads never share a cache line: 128 bytes
 /// covers the line, and the adjacent-line prefetch pair, on x86-64 and Apple arm64.
@@ -39,6 +43,8 @@ fn counter(blocks: usize) -> Arc<Counter> {
 #[derive(Clone, Debug, Default)]
 pub struct ResidentBlockCounts {
     counters: FxHashMap<WorkerWithDpRank, Arc<Counter>>,
+    /// Set by [`ResidentBlockCountsHandle::with_lower_tier`] for an indexer with local lower tiers.
+    lower_tier: Option<LowerTierIndexers>,
 }
 
 impl ResidentBlockCounts {
@@ -48,6 +54,12 @@ impl ResidentBlockCounts {
         self.counters
             .get(&worker)
             .map(|counter| counter.load(Ordering::Relaxed))
+    }
+
+    /// Host-pinned block counts of the cache owners attached to workers, pinned as
+    /// [`LowerTierIndexers::cache_owner_block_counts`] describes; `None` without local lower tiers.
+    pub fn cache_owner_block_counts(&self) -> Option<CacheOwnerBlockCounts> {
+        self.lower_tier.as_ref()?.cache_owner_block_counts()
     }
 }
 
@@ -63,6 +75,17 @@ impl ResidentBlockCountsHandle {
         self.counts.load()
     }
 
+    /// Lends the partition's lower-tier indexes, so a selection can also read the block count of
+    /// each rank's attached cache owner. Repeating the call changes nothing.
+    pub(crate) fn with_lower_tier(self, lower_tier: &LowerTierIndexers) -> Self {
+        self.counts.rcu(|current| {
+            let mut next = ResidentBlockCounts::clone(current);
+            next.lower_tier = Some(lower_tier.clone());
+            next
+        });
+        self
+    }
+
     /// Counters fixed at `counts`, for tests and benchmarks.
     #[cfg(any(test, feature = "testing", feature = "bench"))]
     pub fn fixed(counts: impl IntoIterator<Item = (WorkerWithDpRank, u64)>) -> Self {
@@ -71,7 +94,10 @@ impl ResidentBlockCountsHandle {
             .map(|(worker, blocks)| (worker, counter(blocks as usize)))
             .collect();
         Self {
-            counts: Arc::new(ArcSwap::from_pointee(ResidentBlockCounts { counters })),
+            counts: Arc::new(ArcSwap::from_pointee(ResidentBlockCounts {
+                counters,
+                lower_tier: None,
+            })),
         }
     }
 

@@ -2695,6 +2695,7 @@ async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch)
             "num_gpu_blocks": 16,
             "max_num_seqs": 8,
             "max_num_batched_tokens": 512,
+            "block_size": 16,
             "kv_event_block_size": 16,
         },
     )

@@ -148,6 +148,10 @@ pub const ENV_TOKENIZER_FALLBACK: &str = "DYN_TOKENIZER_FALLBACK";
 /// surfaces without implementing vLLM's Generate contract.
 pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
 
+/// An opted-in worker can consume opaque JSON through `multi_modal_data`.
+/// Absence means unsupported, including workers predating this transport.
+pub const JSON_MULTIMODAL_CAPABILITY: &str = "custom_json_v1";
+
 /// Worker-reported Qwen3 video prompt-expansion contract used by vLLM.
 ///
 /// Absence disables exact video routing so a newer frontend remains safe with
@@ -289,6 +293,11 @@ pub struct ModelRuntimeConfig {
     /// dual-write their minimum here for old readers; aggregate division stays an adapter-only
     /// estimate and must not silently become a hard-admission denominator.
     pub total_kv_blocks: Option<u64>,
+
+    /// Host-pinned capacity, in KV blocks, of the cache owner (KVCR instance) attached
+    /// to each router-visible data-parallel rank.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_owner_capacity_blocks: Option<u64>,
 
     pub max_num_seqs: Option<u64>,
 
@@ -454,6 +463,7 @@ impl Default for ModelRuntimeConfig {
         Self {
             context_length: None,
             total_kv_blocks: None,
+            cache_owner_capacity_blocks: None,
             max_num_seqs: None,
             max_num_batched_tokens: None,
             tool_call_parser: None,
@@ -592,6 +602,10 @@ impl dynamo_scheduler::host::WorkerConfigLike for ModelRuntimeConfig {
             .get("native_offloading_capacity")?
             .get("total_tokens")?
             .as_u64()
+    }
+
+    fn cache_owner_capacity_blocks(&self) -> Option<u64> {
+        self.cache_owner_capacity_blocks
     }
 
     fn taints(&self) -> &HashSet<String> {

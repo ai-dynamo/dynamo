@@ -86,7 +86,12 @@ from dynamo.frontend.utils import (
     random_call_id,
     random_uuid,
 )
-from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
+from dynamo.llm.exceptions import (
+    InvalidArgument,
+    RoutedEngineError,
+    Unknown,
+    WorkerUnavailable,
+)
 from dynamo.sglang.thinking_budget import apply_thinking_budget
 
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
@@ -1301,6 +1306,7 @@ def _qwen_guided_request_without_separation(tool_choice):
     ("routed_error", "expected"),
     [
         (WorkerUnavailable("prefill routing is still activating"), WorkerUnavailable),
+        (RoutedEngineError("worker pool at capacity"), RoutedEngineError),
         (RuntimeError("worker crashed"), Unknown),
     ],
 )
@@ -1329,7 +1335,7 @@ def test_routed_engine_rejection_keeps_worker_unavailable(
 
     with pytest.raises(expected) as caught:
         asyncio.run(collect())
-    if expected is WorkerUnavailable:
+    if expected is not Unknown:
         assert caught.value is routed_error
 
 
