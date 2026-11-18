@@ -185,9 +185,7 @@ def recurrent_kv_layout(
     if dcp_size != 1 or pcp_size != 1:
         raise ValueError("Recurrent KV events do not yet support context parallelism")
     if speculative is not None:
-        raise ValueError(
-            "Recurrent KV events do not yet support EAGLE or speculative decoding"
-        )
+        _check_speculative_resume_contract(vllm_config, speculative)
     if transfer is not None:
         extra = transfer.kv_connector_extra_config
         if (
@@ -204,9 +202,10 @@ def recurrent_kv_layout(
                 "default CPU offloading spec"
             )
 
-    # With no CP, no speculative tail, equal physical group sizes and no finer
-    # prefix-match override, vLLM's scheduler LCM, hash GCD and hit alignment
-    # are all this same unit. This is intentionally narrower than general HMA.
+    # With no CP, no trailing-block drop, equal physical group sizes and no
+    # finer prefix-match override, vLLM's scheduler LCM, hash GCD and hit
+    # alignment are all this same unit. This is intentionally narrower than
+    # general HMA.
     return RecurrentKvLayout(
         recurrent_groups=recurrent_groups,
         cache_groups=metadata,
@@ -215,3 +214,35 @@ def recurrent_kv_layout(
         scheduler_block_size=unit,
         cache_hit_alignment_tokens=unit,
     )
+
+
+def _check_speculative_resume_contract(
+    vllm_config: VllmConfig, speculative: Any
+) -> None:
+    """Allow speculative decoding only when it leaves the resume positions alone.
+
+    EAGLE/MTP drafters need the tokens right before the generation point
+    recomputed. vLLM satisfies that in one of two ways. With lookahead block
+    hashes (the default when prefix caching is on), every block hash already
+    covers the drafter's lookahead tokens, no prefix-cache block is dropped
+    and the recurrent checkpoint hash stays the engine's resume position, so
+    the published events need no adjustment. With the trailing-block drop
+    (``disable_lookahead_block_hashes`` or a KV connector without lookahead
+    support), the engine resumes one scheduler block below the attention
+    match, which this contract does not express yet; fail closed there.
+    Methods that never drop a block (ngram, draft_model, dflash, dspark) pass.
+    """
+    use_block_drop = getattr(speculative, "use_eagle_block_drop", None)
+    lookahead_tokens = getattr(vllm_config, "num_hash_lookahead_tokens", None)
+    if not callable(use_block_drop) or type(lookahead_tokens) is not int:
+        raise ValueError(
+            "Recurrent KV events with speculative decoding require vLLM's "
+            "use_eagle_block_drop and num_hash_lookahead_tokens capability fields"
+        )
+    if use_block_drop() and lookahead_tokens <= 0:
+        raise ValueError(
+            "Recurrent KV events do not yet support the EAGLE/MTP trailing-block "
+            "drop; keep lookahead block hashes enabled (do not set "
+            "disable_lookahead_block_hashes) and use a KV connector that supports "
+            "lookahead block hashes"
+        )
