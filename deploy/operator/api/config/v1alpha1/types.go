@@ -75,6 +75,7 @@ type OperatorConfiguration struct {
 	Discovery DiscoveryConfiguration `json:"discovery"`
 
 	// MultiCluster configures exporting Global Router pools to other clusters.
+	// +optional
 	MultiCluster MultiClusterConfiguration `json:"multiCluster,omitempty"`
 
 	// GPU discovery configuration
@@ -489,6 +490,7 @@ type MultiClusterConfiguration struct {
 	// the default, exports nothing: Global Router pools are then discovered without
 	// Kubernetes. Clearing it leaves earlier exports in place until their
 	// DynamoPoolRelays are deleted.
+	// +optional
 	MCSImplementation MCSImplementation `json:"mcsImplementation,omitempty"`
 }
 

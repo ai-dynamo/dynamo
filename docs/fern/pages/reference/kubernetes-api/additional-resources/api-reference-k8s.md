@@ -4435,7 +4435,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `mcsImplementation` _[MCSImplementation](#mcsimplementation)_ | MCSImplementation is the MCS implementation that imports the exports. Empty,<br />the default, exports nothing: Global Router pools are then discovered without<br />Kubernetes. Clearing it leaves earlier exports in place until their<br />DynamoPoolRelays are deleted. |  |  |
+| `mcsImplementation` _[MCSImplementation](#mcsimplementation)_ | MCSImplementation is the MCS implementation that imports the exports. Empty,<br />the default, exports nothing: Global Router pools are then discovered without<br />Kubernetes. Clearing it leaves earlier exports in place until their<br />DynamoPoolRelays are deleted. |  | Optional: \{\} <br /> |
 
 
 #### NamespaceConfiguration
@@ -4498,7 +4498,7 @@ OperatorConfiguration is the Schema for the operator configuration.
 | `mpi` _[MPIConfiguration](#mpiconfiguration)_ | MPI SSH secret configuration |  | Required: \{\} <br /> |
 | `checkpoint` _[CheckpointConfiguration](#checkpointconfiguration)_ | Checkpoint/restore configuration |  | Required: \{\} <br /> |
 | `discovery` _[DiscoveryConfiguration](#discoveryconfiguration)_ | Discovery backend configuration |  | Required: \{\} <br /> |
-| `multiCluster` _[MultiClusterConfiguration](#multiclusterconfiguration)_ | MultiCluster configures exporting Global Router pools to other clusters. |  |  |
+| `multiCluster` _[MultiClusterConfiguration](#multiclusterconfiguration)_ | MultiCluster configures exporting Global Router pools to other clusters. |  | Optional: \{\} <br /> |
 | `gpu` _[GPUConfiguration](#gpuconfiguration)_ | GPU discovery configuration |  | Required: \{\} <br /> |
 | `logging` _[LoggingConfiguration](#loggingconfiguration)_ | Logging configuration |  | Required: \{\} <br /> |
 | `security` _[SecurityConfiguration](#securityconfiguration)_ | HTTP/2 and TLS settings |  | Required: \{\} <br /> |
