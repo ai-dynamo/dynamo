@@ -47,6 +47,10 @@ versions:
     path: ./index.yml
 
 redirects:
+  - source: "/dynamo/dev/reinforcement-learning/decision-model/ap-is"
+    destination: "/dynamo/dev/decision-model/apis"
+  - source: "/dynamo/dev/reinforcement-learning/decision-model/sg-lang"
+    destination: "/dynamo/dev/decision-model/sglang"
   - source: "/dynamo/dev/kubernetes/kv-aware-routing/deploy-the-dc-kv-relay-experimental"
     destination: "/dynamo/dev/kubernetes/kv-aware-routing/deploy-the-pool-relay-experimental"
   - source: "/dynamo/dev/reference/components/dc-kv-relay-configuration"

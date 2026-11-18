@@ -445,6 +445,8 @@ navigation:
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/frontend-guide.md
                   - page: Python Route Extensions
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/python-route-extensions.md
+                  - page: Custom Chat Processors
+                    path: pages/developer-guide/knowledge-base/modular-components/frontend/custom-chat-processors.md
                   - page: Tokenizer
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/tokenizer.md
                   - section: Tool Calling & Reasoning
@@ -744,6 +746,19 @@ navigation:
                 path: pages/use-cases/reinforcement-learning/implementation-guide.md
               - page: RL Integration Reference
                 path: pages/use-cases/reinforcement-learning/integration-reference.md
+
+      # ==================== Decision Model ====================
+      - section: Decision Model
+        slug: decision-model
+        collapsed: true
+        icon: list-check
+        contents:
+          - page: APIs
+            slug: apis
+            path: pages/use-cases/decision-model/apis.md
+          - page: SGLang
+            slug: sglang
+            path: pages/use-cases/decision-model/sglang.md
 
       # ==================== Agents ====================
       - section: Agents
@@ -1318,6 +1333,11 @@ navigation:
         path: pages/reference/api/image-edits.mdx
         slug: api/image-edits
 
+      - page: Decision APIs
+        icon: list-check
+        path: pages/reference/api/decision-apis.md
+        slug: api/decisions
+
       - section: Components
         icon: sliders
         slug: components
@@ -1381,6 +1401,8 @@ navigation:
             path: pages/reference/observability/forward-pass-metrics-traces.mdx
           - page: Request Traces
             path: pages/reference/observability/request-traces.mdx
+          - page: NVTX Profiling
+            path: pages/reference/observability/nvtx-profiling.md
           - page: Environment Variables
             path: pages/reference/observability/environment-variables.mdx
           - page: Metrics Catalog

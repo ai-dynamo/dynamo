@@ -5,10 +5,8 @@
 
 //! Universal `Request → Vec<PositionalLineageHash>` contract for KV cache identity.
 //!
-//! See `README.md` for the design rationale (the three-representation problem, why PLH
-//! wins, the multimodal gap, and the extension-vs-PLH-alone caveat). This crate is the
-//! single contract that the router and framework workers should converge on for
-//! block hashing.
+//! This crate is the single contract that the router and framework workers should converge on
+//! for block hashing.
 //!
 //! # Pure-computation contract
 //!

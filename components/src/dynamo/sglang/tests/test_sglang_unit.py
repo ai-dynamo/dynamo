@@ -5,6 +5,7 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import re
@@ -15,8 +16,13 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import torch
 import yaml
 from packaging.requirements import Requirement
+from safetensors.torch import save_file
+from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
+from sglang.multimodal_gen.runtime.server_args import auto_tune
+from sglang.multimodal_gen.runtime.utils.precision import resolve_component_precision
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.managers.io_struct import ProfileReq
 
@@ -30,6 +36,7 @@ from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang._compat import (
     add_sglang_cli_compat,
     cache_salt_kwargs,
+    diffusers_text_encoder_precision_kwargs,
     filter_supported_async_generate_kwargs,
     get_sglang_model_config,
     override_server_args,
@@ -60,6 +67,12 @@ from dynamo.sglang.publisher import finish_worker_teardown
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
+
+try:
+    from sglang.multimodal_gen.runtime.loader.utils import checkpoint_component_sizes
+except ImportError:
+    # SGLang 0.5.22 has no sizing check. Remove when minimum is 0.5.23+.
+    checkpoint_component_sizes = None
 
 try:
     from dynamo.sglang import register as sglang_register
@@ -226,6 +239,119 @@ def test_diffusion_generator_kwargs_omits_unset_master_port():
 
     assert kwargs["num_gpus"] == 1
     assert "master_port" not in kwargs
+
+
+def _write_diffusers_checkpoint(root: Path, encoders: list[str]) -> str:
+    """Write metadata and tiny weights for SGLang's real checkpoint sizing."""
+    components = {name: ["transformers", "CLIPTextModel"] for name in encoders}
+    components |= {
+        "tokenizer": ["transformers", "CLIPTokenizer"],
+        "unet": ["diffusers", "UNet2DConditionModel"],
+        "vae": ["diffusers", "AutoencoderKL"],
+        "scheduler": ["diffusers", "EulerDiscreteScheduler"],
+    }
+    for name in components:
+        (root / name).mkdir()
+    for name in encoders:
+        save_file({"weight": torch.zeros(1)}, str(root / name / "model.safetensors"))
+    index = {
+        # No native SGLang pipeline, so SGLang falls back to Diffusers.
+        "_class_name": "StableDiffusionXLPipeline",
+        "_diffusers_version": "0.24.0",
+        "feature_extractor": [None, None],
+        **components,
+    }
+    (root / "model_index.json").write_text(json.dumps(index))
+    return str(root)
+
+
+def _resolve_text_encoder_precisions(kwargs: dict, encoders: list[str]) -> dict:
+    """Resolve each encoder's precision the way SGLang's memory sizing does."""
+    server_args = SimpleNamespace(
+        pipeline_config=PipelineConfig.from_kwargs(dict(kwargs)),
+        component_precisions=kwargs.get("component_precisions", {}),
+    )
+    return {name: resolve_component_precision(server_args, name) for name in encoders}
+
+
+@pytest.mark.parametrize(
+    "encoders",
+    [
+        pytest.param(["text_encoder", "text_encoder_2"], id="sdxl"),
+        pytest.param(
+            ["text_encoder", "text_encoder_2", "text_encoder_3"], id="three-encoders"
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "index_cached", [True, False], ids=["index-cached", "weights-only"]
+)
+@pytest.mark.skipif(
+    checkpoint_component_sizes is None,
+    reason="SGLang 0.5.22 has no memory sizing check",
+)
+def test_diffusers_text_encoder_precision_kwargs_sizes_every_encoder(
+    tmp_path, encoders, index_cached, monkeypatch
+):
+    """Keep cached multi-encoder checkpoints usable by SGLang's auto-tuner."""
+    kwargs = {
+        "model_path": _write_diffusers_checkpoint(tmp_path, encoders),
+        "num_gpus": 1,
+    }
+    # Exercise the auto-tuner too: a fix there must prompt shim removal even
+    # when the fallback precision tuple stays unchanged.
+    server_args = SimpleNamespace(
+        model_path=kwargs["model_path"],
+        pipeline_config=PipelineConfig.from_kwargs(dict(kwargs)),
+        component_precisions={},
+        performance_mode="auto",
+        batching_max_size=1,
+        quantization=None,
+        transformer_weights_path=None,
+        nunchaku_config=None,
+        component_paths={},
+        component_weights_paths={},
+        component_quantizations={},
+        model_subfolder=None,
+        revision=None,
+        tp_size=1,
+    )
+    monkeypatch.setattr(auto_tune.current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(auto_tune.current_platform, "is_mps", lambda: False)
+    monkeypatch.setattr(
+        auto_tune.current_platform, "device_shares_host_memory", lambda: False
+    )
+    tuner = SimpleNamespace(
+        server_args=server_args, _get_min_available_device_memory_gb=lambda: 80
+    )
+    with pytest.raises(
+        ValueError, match="No configured precision for 'text_encoder_2'"
+    ):
+        auto_tune.ServerArgsAutoTuner._fits_all_components_resident(tuner)
+
+    if not index_cached:
+        index_path = tmp_path / "model_index.json"
+        index = index_path.read_text()
+        index_path.unlink()
+        from_kwargs = PipelineConfig.from_kwargs
+
+        def resolve_config(config_kwargs):
+            # Stand in for the metadata fetch during SGLang config resolution.
+            index_path.write_text(index)
+            return from_kwargs(config_kwargs)
+
+        monkeypatch.setattr(PipelineConfig, "from_kwargs", resolve_config)
+
+    patched = diffusers_text_encoder_precision_kwargs(kwargs)
+
+    assert "component_precisions" not in kwargs
+    server_args.component_precisions = patched["component_precisions"]
+    assert auto_tune.ServerArgsAutoTuner._fits_all_components_resident(tuner)
+    # The fallback loads every component at dit_precision (bf16).
+    assert _resolve_text_encoder_precisions(patched, encoders) == {
+        "text_encoder": torch.float16,
+        **{name: torch.bfloat16 for name in encoders[1:]},
+    }
 
 
 def test_override_server_args_uses_declarative_resolution(monkeypatch):
@@ -602,6 +728,8 @@ def _dcp_server_args_stub(**overrides):
         attention_backend=None,
         prefill_attention_backend=None,
         decode_attention_backend=None,
+        dsa_prefill_backend=None,
+        dsa_decode_backend=None,
         use_mla_backend=lambda: False,
         get_model_config=lambda: SimpleNamespace(is_multimodal=False),
     )
@@ -854,11 +982,17 @@ async def test_parse_args_rejects_mla_dcp_on_backend_without_dcp_decode(
 async def test_parse_args_rejects_mla_dcp_on_dsa_backend(
     monkeypatch, mock_sglang_cli, tmp_path, overrides
 ):
-    """SGLang overrides the default to dsa for DSA models, whose decode returns no LSE."""
+    """Older SGLang builds must reject DSA decode without DCP support."""
     # The platform default alone would accept; the DSA override must win.
     monkeypatch.setattr(
         "dynamo.sglang._compat.sglang_get_default_attn_backend",
         lambda *_: "flashinfer",
+    )
+    # DSA is rejected only on SGLang builds without DSA DCP decode (< 0.5.22).
+    # Pin that condition so the test does not depend on the installed SGLang.
+    monkeypatch.setattr(
+        "dynamo.sglang.args.sglang_dsa_supports_decode_context_parallel",
+        lambda _: False,
     )
     hf_config = SimpleNamespace(
         architectures=["DeepseekV32ForCausalLM"], index_topk=2048
@@ -888,15 +1022,19 @@ async def test_parse_args_rejects_mla_dcp_on_dsa_backend(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("decode_backend", ["cutedsl_mla", "fa3"])
+@pytest.mark.parametrize(
+    "architecture",
+    ["KimiK3ForConditionalGeneration", "KimiK31ForConditionalGeneration"],
+)
 async def test_kimi_k3_dcp_defers_automatic_backend_until_engine_resolution(
-    monkeypatch, mock_sglang_cli, tmp_path, decode_backend
+    monkeypatch, mock_sglang_cli, tmp_path, decode_backend, architecture
 ):
-    """Do not reject Kimi-K3 using Hopper's generic default; check resolved decode."""
+    """Defer Kimi-K3/K3.1 backend prediction; still check the resolved decode."""
     platform_default = Mock(return_value="fa3")
     monkeypatch.setattr(
         "dynamo.sglang._compat.sglang_get_default_attn_backend", platform_default
     )
-    hf_config = SimpleNamespace(architectures=["KimiK3ForConditionalGeneration"])
+    hf_config = SimpleNamespace(architectures=[architecture])
     server_args = _dcp_server_args_stub(
         dcp_size=2,
         use_mla_backend=lambda: True,
@@ -924,6 +1062,138 @@ async def test_kimi_k3_dcp_defers_automatic_backend_until_engine_resolution(
         resolved = config.use_resolved_server_args(engine_args)
         assert resolved.decode_attention_backend == "cutedsl_mla"
         assert config.server_args is resolved
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["dsa", "nsa"])
+async def test_parse_args_accepts_sparse_mla_dcp_when_engine_supports_it(
+    monkeypatch, mock_sglang_cli, tmp_path, backend
+):
+    monkeypatch.setattr(sglang_compat, "_sglang_has_dsa_dcp_module", lambda _: True)
+    monkeypatch.setattr(
+        sglang_compat, "sglang_get_platform", lambda: SimpleNamespace(device_sm=100)
+    )
+    server_args = _dcp_server_args_stub(
+        dcp_size=8,
+        use_mla_backend=lambda: True,
+        attention_backend=backend,
+        dsa_prefill_backend="trtllm",
+        dsa_decode_backend="trtllm",
+    )
+    monkeypatch.setattr(sglang_args.ServerArgs, "from_cli_args", lambda _: server_args)
+    mock_sglang_cli(model=str(tmp_path), attention_backend=backend)
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args is server_args
+    assert config.use_resolved_server_args(server_args).attention_backend == backend
+
+
+@pytest.mark.parametrize("probe_result", [object(), None, ModuleNotFoundError()])
+def test_dsa_dcp_module_probe_handles_older_engines(monkeypatch, probe_result):
+    def find_spec(module_name):
+        assert module_name == "sglang.srt.layers.attention.dsa.dsa_dcp"
+        if isinstance(probe_result, Exception):
+            raise probe_result
+        return probe_result
+
+    monkeypatch.setattr(sglang_compat.importlib.util, "find_spec", find_spec)
+    probe = sglang_compat._sglang_has_dsa_dcp_module
+    probe.cache_clear()
+    try:
+        assert probe("sglang.srt.layers.attention.dsa.dsa_dcp") is (
+            probe_result is not None and not isinstance(probe_result, Exception)
+        )
+    finally:
+        probe.cache_clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prefill,decode,sm,kimi_k31,sharded,supported",
+    [
+        ("fa3", "fa3", 90, False, False, False),
+        ("flashmla_kv", "flashmla_kv", 90, False, False, False),
+        (None, "fa3", 90, False, False, False),
+        ("fa3", None, 90, False, False, False),
+        ("trtllm", "trtllm", 90, False, False, False),
+        (None, "trtllm", 90, False, False, False),
+        (None, "flashmla_kv", 100, False, False, False),
+        ("trtllm", "trtllm", 100, False, False, True),
+        ("trtllm", "trtllm", 103, False, False, True),
+        ("trtllm", "trtllm", 107, False, False, False),
+        ("flashmla_kv", "flashmla_kv", 107, True, False, False),
+        ("flashmla_kv", "flashmla_kv", 107, True, True, True),
+        ("flashmla_kv", "flashmla_kv", 90, True, True, True),
+        ("trtllm", "trtllm", 107, True, True, True),
+        ("trtllm", "flashmla_kv", 107, True, True, False),
+        ("flashmla_kv", "trtllm", 100, True, True, False),
+    ],
+)
+async def test_dsa_dcp_requires_supported_kernel_pair(
+    monkeypatch,
+    mock_sglang_cli,
+    tmp_path,
+    prefill,
+    decode,
+    sm,
+    kimi_k31,
+    sharded,
+    supported,
+):
+    monkeypatch.setattr(
+        sglang_compat,
+        "_sglang_has_dsa_dcp_module",
+        lambda name: not name.endswith("dsa_dcp_sharded") or sharded,
+    )
+    monkeypatch.setattr(
+        sglang_compat, "sglang_get_platform", lambda: SimpleNamespace(device_sm=sm)
+    )
+    architecture = (
+        "KimiK31ForConditionalGeneration" if kimi_k31 else "DeepseekV32ForCausalLM"
+    )
+    server_args = _dcp_server_args_stub(
+        dcp_size=8,
+        use_mla_backend=lambda: True,
+        attention_backend="dsa",
+        dsa_prefill_backend=prefill,
+        dsa_decode_backend=decode,
+        get_model_config=lambda: SimpleNamespace(
+            is_multimodal=False, hf_config=SimpleNamespace(architectures=[architecture])
+        ),
+    )
+    monkeypatch.setattr(sglang_args.ServerArgs, "from_cli_args", lambda _: server_args)
+    mock_sglang_cli(model=str(tmp_path), attention_backend="dsa")
+
+    if supported:
+        config = await parse_args(sys.argv[1:])
+        resolved = config.use_resolved_server_args(server_args)
+        assert resolved.dsa_prefill_backend == prefill
+        assert resolved.dsa_decode_backend == decode
+    else:
+        with pytest.raises(ValueError, match="selected DSA kernels"):
+            await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
+async def test_dsa_dcp_rechecks_unresolved_kernels_after_engine_selection(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    monkeypatch.setattr(sglang_compat, "_sglang_has_dsa_dcp_module", lambda _: True)
+    monkeypatch.setattr(
+        sglang_compat, "sglang_get_platform", lambda: SimpleNamespace(device_sm=100)
+    )
+    raw_args = _dcp_server_args_stub(
+        dcp_size=8, use_mla_backend=lambda: True, attention_backend="dsa"
+    )
+    monkeypatch.setattr(sglang_args.ServerArgs, "from_cli_args", lambda _: raw_args)
+    mock_sglang_cli(model=str(tmp_path), attention_backend="dsa")
+    config = await parse_args(sys.argv[1:])
+
+    engine_args = SimpleNamespace(**vars(raw_args))
+    engine_args.dsa_prefill_backend = engine_args.dsa_decode_backend = "fa3"
+    with pytest.raises(ValueError, match="selected DSA kernels"):
+        config.use_resolved_server_args(engine_args)
 
 
 def _raise_runtime_error(*_):

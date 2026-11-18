@@ -2708,7 +2708,7 @@ _Appears in:_
 
 LPXLocalPartitions selects the runtime partitions that run on the Cyborg GPU.
 Partition IDs are the compiler partition IDs of the build's runtime
-partitions. A selected prop-sync chain is identified by its first partition.
+partitions. A selected unit is identified by its first partition.
 
 
 

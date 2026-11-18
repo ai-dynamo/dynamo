@@ -45,6 +45,8 @@ joblib>=1.0,<1.6  # Keep the dependency-free support line for --no-deps installs
 # XPU image in sglang_runtime.Dockerfile.
 mooncake-transfer-engine-cuda13>=0.3.14,<0.4
 nltk>=3.10.3,<4
+# Refresh the upstream image's bundled oauthlib; it has no required dependencies.
+oauthlib>=4.0.1,<5
 packaging>=23.1,<27
 # The upstream SGLang image bundles pillow at an older release; floor it so the
 # install refreshes it to the current release line.

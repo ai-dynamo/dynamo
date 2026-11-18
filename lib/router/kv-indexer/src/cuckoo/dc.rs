@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use dynamo_kv_events::event::{KvCacheEventData, KvCacheEventError, KvCacheStoreData, RouterEvent};
 use dynamo_kv_hashing::ExternalSequenceBlockHash;
-use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 use super::addressing::CkfAddressing;
 use super::bucket::{CuckooBucketStore, OwnedPackedCkfLane, PackedBucket};
@@ -622,34 +622,6 @@ impl DcCkfState {
         worker: WorkerWithDpRank,
     ) -> Result<Option<DcCkfPublicationBatch>, KvCacheEventError> {
         self.remove_member(worker)?;
-        Ok(self.drain_publication())
-    }
-
-    pub fn remove_worker(
-        &mut self,
-        worker_id: WorkerId,
-    ) -> Result<Option<DcCkfPublicationBatch>, KvCacheEventError> {
-        let mut members = Vec::new();
-        members
-            .try_reserve(self.source_lineage.len())
-            .map_err(|_| KvCacheEventError::AllocationFailed)?;
-        members.extend(
-            self.source_lineage
-                .keys()
-                .copied()
-                .filter(|member| member.worker_id == worker_id),
-        );
-        let mapping_count = members.iter().try_fold(0usize, |count, member| {
-            count.checked_add(self.source_lineage.get(member).map_or(0, FxHashMap::len))
-        });
-        let mapping_count = mapping_count.ok_or(KvCacheEventError::AllocationFailed)?;
-        self.remove_scratch
-            .try_reserve(mapping_count)
-            .map_err(|_| KvCacheEventError::AllocationFailed)?;
-        self.reserve_publication_scratch(mapping_count.min(self.format.bucket_count))?;
-        for member in members {
-            self.remove_member(member)?;
-        }
         Ok(self.drain_publication())
     }
 
@@ -1468,6 +1440,7 @@ mod tests {
     use dynamo_kv_events::residency::{ResidencyDomain, StorageTier, WireResidencyDomain};
     use dynamo_kv_hashing::LocalBlockHash;
     use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
+    use dynamo_router_protocol::worker::WorkerId;
 
     use super::*;
 

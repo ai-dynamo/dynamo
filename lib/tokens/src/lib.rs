@@ -67,7 +67,7 @@ pub const CHAIN_XXH3_SEED: u64 = 1337;
 /// - [`PositionalLineageHash::extend`]
 /// - `TokenBlock::from_chunk`
 /// - `dynamo_kv_hashing::routing::compute_next_seq_hash` (request side)
-/// - `dynamo_kv_indexer::positional::PositionalIndexer` (chain re-validation)
+/// - `dynamo_kv_indexer::host::PositionalIndexer` (chain re-validation)
 ///
 /// Salt is already mixed into `block_hash[0]` and propagates through every parent, so
 /// the per-step seed is a constant: re-feeding salt at each step would be redundant.
