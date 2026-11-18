@@ -3240,9 +3240,9 @@ async fn tracked_admission_without_lifecycle_bypasses_classifier() {
 
     // `find_best_match_details_with_policy_class` with `update_states` is a tracked admission
     // that never calls `begin_request_lifecycle` — the same funnel as the
-    // Python bindings `best_worker` and the standalone `RouterRequest::New`
-    // path. The plugin would receive no lifecycle events for it, so admission
-    // must use the default queue inputs instead of the classifier.
+    // Python bindings `best_worker`. The plugin would receive no lifecycle
+    // events for it, so admission must use the default queue inputs instead of
+    // the classifier.
     let outcome = router
         .kv_router()
         .find_best_match_details_with_policy_class(

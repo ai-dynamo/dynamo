@@ -139,6 +139,17 @@ impl<'a> WorkerCandidate<'a> {
             .resident_blocks
             .and_then(|counts| counts.resident_blocks(self.data.worker))
     }
+
+    /// Backs `experimental::resident_blocks::ResidentBlocks::cache_owner_blocks`: the attached
+    /// cache owner's count, under the same gate as [`Self::resident_block_count`].
+    pub(crate) fn cache_owner_block_count(self) -> Option<u64> {
+        if !self.inputs.contains(WorkerInputs::RESIDENT_BLOCKS) {
+            return None;
+        }
+        self.cache_snapshot
+            .resident_blocks?
+            .cache_owner_blocks(self.data.worker)
+    }
 }
 
 /// Borrowed candidate batch restricted to one scorer's declared inputs.
@@ -226,6 +237,10 @@ pub trait ResidentBlockSource {
     /// Blocks held for `worker` as of the host's last event for it, or `None` when the host has
     /// no count for the rank.
     fn resident_blocks(&self, worker: WorkerWithDpRank) -> Option<u64>;
+
+    /// Host-pinned blocks the host's index holds for the cache owner (KVCR instance) attached
+    /// to `worker`, or `None` when no owner is attached or the host has no count for it.
+    fn cache_owner_blocks(&self, worker: WorkerWithDpRank) -> Option<u64>;
 }
 
 /// Request-wide facts borrowed once for all cache views in a selection.
@@ -762,5 +777,13 @@ impl<'a> WorkerInputView<'a> {
         self.candidates()
             .get(row)
             .and_then(|candidate| counts.resident_blocks(candidate.worker))
+    }
+
+    /// Backs `experimental::resident_blocks::ResidentBlocksByRow::cache_owner_blocks`: the
+    /// attached cache owner's count for candidate `row`, under the same gate as
+    /// [`Self::resident_block_count`].
+    pub(crate) fn cache_owner_block_count(self, row: usize) -> Option<u64> {
+        let counts = self.resident_blocks?;
+        counts.cache_owner_blocks(self.candidates().get(row)?.worker)
     }
 }

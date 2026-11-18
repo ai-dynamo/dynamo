@@ -40,10 +40,10 @@ dynamo:
   planner_build_image: python
   planner_build_image_tag: 3.13.18-slim
   planner_runtime_image: nvcr.io/nvidia/distroless/python
-  planner_runtime_image_tag: 3.13-v4.1.10
+  planner_runtime_image_tag: 3.13-v4.2.1
   # Self-baseline of the distroless-python runtime; the licenses stage subtracts
   # it so planner NOTICES attribute only what the builder adds on top.
-  planner_baseline_sbom: python@c718fc95
+  planner_baseline_sbom: python@794a5902
   # Planner-scoped interpreter. The planner uses a separate, newer CPython line
   # from the global python_version below because it is the only stage whose
   # interpreter is decoupled from the framework/runtime bases: the build stage
@@ -63,8 +63,8 @@ dynamo:
   uv_version: "0.13.5"
   go_version: "1.27.3"
 
-  nats_version: v2.14.8
-  nats_commit: 3e47c8fa715b0e3b2feaeedc378c25fff88a966e
+  nats_version: v2.14.9
+  nats_commit: 9ece5884153a3e39a3904d53210b9b8b26dd7364
   etcd_version: v3.5.35
   etcd_commit: b0dc93710686bba178c9b6408e545be21d27b2ce
 

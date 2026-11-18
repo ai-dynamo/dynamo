@@ -27,14 +27,28 @@ RUN for attempt in 1 2 3; do \
     done && \
     test "$(git -C /src/nats rev-parse HEAD)" = "${NATS_COMMIT}" && \
     cd /src/nats && go build -trimpath -o /out/nats-server .
-RUN for attempt in 1 2 3; do \
+# Build etcd with golang.org/x/net v0.62.0, the current patch release, in place
+# of the v0.61.0 that the release's modules pin. go get raises it in server,
+# etcdctl and etcdutl, whose binaries build.sh compiles, and in the root module,
+# which replaces them with their local copies and which build.sh loads first.
+RUN x_net=v0.62.0 && \
+    for attempt in 1 2 3; do \
         git clone --depth 1 --branch "${ETCD_VERSION}" https://github.com/etcd-io/etcd.git /src/etcd && break; \
         rm -rf /src/etcd; \
         [ "$attempt" -lt 3 ] || exit 1; \
         sleep 5; \
     done && \
     test "$(git -C /src/etcd rev-parse HEAD)" = "${ETCD_COMMIT}" && \
-    cd /src/etcd && ./build.sh && \
+    cd /src/etcd && \
+    for module in . server etcdctl etcdutl; do \
+        (cd "${module}" && go get "golang.org/x/net@${x_net}" && go mod tidy) || exit 1; \
+    done && \
+    ./build.sh && \
+    for binary in etcd etcdctl etcdutl; do \
+        go version -m "bin/${binary}" | awk -v want="${x_net}" -v bin="${binary}" \
+            '$1 == "dep" && $2 == "golang.org/x/net" { print bin ": golang.org/x/net " $3; found = ($3 == want) } END { exit !found }' \
+        || { echo "ERROR: bin/${binary} is not built with golang.org/x/net ${x_net}" >&2; exit 1; }; \
+    done && \
     mkdir -p /out/etcd && cp bin/etcd bin/etcdctl bin/etcdutl /out/etcd/
 
 ARG ENABLE_SOURCE_ARCHIVAL=false
@@ -44,6 +58,7 @@ RUN mkdir -p /out/native-sources && \
             -o "/out/native-sources/nats-server-${NATS_VERSION}.tar.gz" HEAD && \
         git -C /src/etcd archive --format=tar.gz --prefix="etcd-${ETCD_VERSION}/" \
             -o "/out/native-sources/etcd-${ETCD_VERSION}.tar.gz" HEAD && \
+        git -C /src/etcd diff > "/out/native-sources/etcd-${ETCD_VERSION}-go-modules.patch" && \
         tar --exclude=./cache -czf /out/native-sources/go-service-modules.tar.gz -C /go/pkg/mod .; \
     fi
 

@@ -39,7 +39,7 @@ pub struct AppState {
 
 /// The HTTP response for a selection error: its status class, and a JSON body
 /// that keeps plugin-produced detail server-side.
-pub(crate) fn selection_error_response(error: SelectionError) -> Response {
+fn selection_error_response(error: SelectionError) -> Response {
     let status = error.status();
     if matches!(
         &error,
