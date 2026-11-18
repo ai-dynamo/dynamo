@@ -324,14 +324,17 @@ def create_parsers(
     Shared by both the single-process preprocessing path and the pool path
     (which must recreate non-picklable parsers in the main process).
 
-    If ``sglang_tools`` is provided, reuses them; otherwise converts from
-    the request's ``tools`` field.
+    Output recognition uses the declared catalog when ``allowed_tools``
+    restricts generation. This lets the HTTP allowlist reject a parsed call
+    to a declared tool outside the subset.
 
     Required and named choices use the model-specific :class:`FunctionCallParser`
     when the effective guidance is a structural tag. Their JSON fallback keeps
     :class:`JsonArrayParser`. Automatic choices use :class:`FunctionCallParser`.
     """
-    if sglang_tools is None:
+    if catalog := request.get("chat_template_tools"):
+        sglang_tools = convert_tools(catalog)
+    elif sglang_tools is None:
         sglang_tools = convert_tools(request.get("tools"))
     tool_choice = request.get("tool_choice", "auto")
 

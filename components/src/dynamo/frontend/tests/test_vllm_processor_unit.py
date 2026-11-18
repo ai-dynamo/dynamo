@@ -113,6 +113,7 @@ class TestDynamoJsonToolCallFallback:
         stream_response,
         parallel_tool_calls=None,
         tool_parameters=None,
+        tool_catalog_names=None,
     ):
         request = json.loads(json.dumps(TOOL_REQUEST))
         request["tool_choice"] = tool_choice
@@ -135,7 +136,49 @@ class TestDynamoJsonToolCallFallback:
             chat_template_kwargs={},
             stream_response=stream_response,
             uses_dynamo_json_tool_call_fallback=True,
+            tool_catalog_names=tool_catalog_names,
         )
+
+    @pytest.mark.parametrize("stream_response", [False, True])
+    @pytest.mark.parametrize("name", ["get_weather", "other_tool"])
+    def test_fallback_keeps_declared_calls_for_http_allowlist(
+        self, tokenizer, stream_response, name
+    ):
+        post = self._post_processor(
+            tokenizer,
+            tool_choice="required",
+            stream_response=stream_response,
+            tool_catalog_names=frozenset({"get_weather", "other_tool"}),
+        )
+        text = json.dumps([{"name": name, "parameters": {}}])
+        if stream_response:
+            assert (
+                post.process_output(
+                    SimpleNamespace(
+                        index=0,
+                        text=text[:12],
+                        token_ids=[],
+                        finish_reason=None,
+                        logprobs=None,
+                    )
+                )
+                is None
+            )
+            text = text[12:]
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice["finish_reason"] == "tool_calls"
+        assert "content" not in choice["delta"]
+        assert choice["delta"]["tool_calls"][0]["function"]["name"] == name
 
     def test_streaming_required_choice_converts_json_to_tool_calls(self, tokenizer):
         post = self._post_processor(
