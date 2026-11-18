@@ -20,6 +20,7 @@
 
 mod anthropic;
 mod batch_proxy;
+mod chat_content;
 mod decision_lifecycle;
 mod image_edits;
 pub mod metadata;
