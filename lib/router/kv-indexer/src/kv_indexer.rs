@@ -176,6 +176,8 @@ enum MutationRequest {
 
 struct DirectLruSink {
     sender: flume::Sender<ApproximateLruTask>,
+    /// Cancelled when the indexer thread exits.
+    lane_exited: CancellationToken,
 }
 
 impl ApproximateLruCommandSink for DirectLruSink {
@@ -184,6 +186,10 @@ impl ApproximateLruCommandSink for DirectLruSink {
         self.sender
             .send(task)
             .map_err(|_| KvRouterError::IndexerOffline)
+    }
+
+    fn lane_exited(&self) -> Option<&CancellationToken> {
+        Some(&self.lane_exited)
     }
 }
 
@@ -479,15 +485,18 @@ impl KvIndexer {
         let (approximate_lru_tx, approximate_lru_rx) = approximate_lru_enabled
             .then(flume::unbounded::<ApproximateLruTask>)
             .map_or((None, None), |(tx, rx)| (Some(tx), Some(rx)));
+        let thread_exited = CancellationToken::new();
         let approximate_lru = approximate_lru_tx.as_ref().map(|sender| {
             ApproximateLruClient::new(Arc::new(DirectLruSink {
                 sender: sender.clone(),
+                lane_exited: thread_exited.clone(),
             }))
         });
 
         let cancel_clone = token.clone();
 
         std::thread::spawn(move || {
+            let _exited = thread_exited.drop_guard();
             let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -1160,24 +1169,58 @@ mod fifo_reset_tests {
     /// Until release, mutations only queue up, so the test fixes their order. Only
     /// enqueue-only calls are safe before release; `flush` or `find_matches` would deadlock.
     async fn parked_indexer() -> (KvIndexer, std::sync::mpsc::Sender<()>) {
+        parked_indexer_with(CancellationToken::new(), None).await
+    }
+
+    async fn parked_indexer_with(
+        token: CancellationToken,
+        retention: Option<ApproximateRetentionConfig>,
+    ) -> (KvIndexer, std::sync::mpsc::Sender<()>) {
         let (entered_tx, entered_rx) = oneshot::channel();
         let (open_tx, open_rx) = std::sync::mpsc::channel();
         let gate = Arc::new(Gate {
             entered: Mutex::new(Some(entered_tx)),
             open: Mutex::new(open_rx),
         });
-        let indexer = KvIndexer::builder(
-            CancellationToken::new(),
-            32,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-        )
-        .delegate(gate)
-        .build();
+        let mut builder =
+            KvIndexer::builder(token, 32, Arc::new(KvIndexerMetrics::new_unregistered()))
+                .delegate(gate);
+        builder.retention = retention;
+        let indexer = builder.build();
         indexer
             .apply_event(create_store_event(99, 0, vec![1], None))
             .await;
         entered_rx.await.unwrap();
         (indexer, open_tx)
+    }
+
+    /// The thread shuts down with an acknowledged LRU task still queued. The client's sender
+    /// keeps that task and its reply alive, so the wait must observe the thread's exit.
+    #[tokio::test]
+    async fn lru_wait_fails_when_indexer_thread_exits_with_it_queued() {
+        let token = CancellationToken::new();
+        let retention = ApproximateRetentionConfig::Lru {
+            fallback_ttl: PruneConfig {
+                ttl: std::time::Duration::from_secs(120),
+            },
+        };
+        let (indexer, release) = parked_indexer_with(token.clone(), Some(retention)).await;
+        let (result, ()) = tokio::join!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                indexer.approximate_lru_stats()
+            ),
+            async {
+                tokio::task::yield_now().await;
+                token.cancel();
+                release.send(()).unwrap();
+            },
+        );
+        let result = result.expect("LRU wait hung after the indexer thread exited");
+        assert!(
+            matches!(result, Err(KvRouterError::IndexerOffline)),
+            "returned {result:?}"
+        );
     }
 
     /// Removing one dp_rank must apply after already-queued stores and keep sibling ranks.

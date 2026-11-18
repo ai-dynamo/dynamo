@@ -591,9 +591,13 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         }
 
         for (worker_idx, receiver) in install_receivers.into_iter().enumerate() {
-            let accepted = receiver
-                .await
-                .map_err(|_| ObservationError::InstallCanceled(worker_idx))?;
+            let accepted = await_observation_reply(
+                receiver,
+                &self.thread_exited[worker_idx],
+                worker_idx,
+                ObservationError::InstallCanceled,
+            )
+            .await?;
             if !accepted {
                 return Err(ObservationError::InstallRejected(worker_idx));
             }
@@ -673,13 +677,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                 stats.push(None);
                 continue;
             };
-            // A thread that exits with this request queued neither answers nor drops it, since
-            // our own senders keep its queue alive.
-            stats.push(tokio::select! {
-                biased;
-                stats = resp_rx => stats.ok(),
-                _ = exited.cancelled() => None,
-            });
+            stats.push(await_lane_reply(resp_rx, exited).await.ok());
         }
         stats
     }
@@ -1223,6 +1221,23 @@ impl<'a, T: SyncIndexer> ThreadPoolObservationSession<'a, T> {
     }
 }
 
+/// [`await_lane_reply`] for an observation task: a lane exit is `WorkerOffline`, and a dropped
+/// reply is the step's own `canceled` error.
+#[cfg(feature = "bench")]
+async fn await_observation_reply<R>(
+    reply: oneshot::Receiver<R>,
+    lane_exited: &tokio_util::sync::CancellationToken,
+    worker_idx: usize,
+    canceled: fn(usize) -> ObservationError,
+) -> Result<R, ObservationError> {
+    await_lane_reply(reply, lane_exited)
+        .await
+        .map_err(|error| match error {
+            KvRouterError::IndexerOffline => ObservationError::WorkerOffline(worker_idx),
+            _ => canceled(worker_idx),
+        })
+}
+
 #[cfg(feature = "bench")]
 impl<'a, T: SyncIndexer> ThreadPoolObservationDrain<'a, T> {
     pub async fn seal(mut self) -> Result<ThreadPoolSealedObservation<'a, T>, ObservationError> {
@@ -1237,10 +1252,14 @@ impl<'a, T: SyncIndexer> ThreadPoolObservationDrain<'a, T> {
 
         let mut seals = Vec::with_capacity(self.indexer.num_workers);
         for (worker_idx, receiver) in self.seal_receivers.into_iter().enumerate() {
-            let seal = receiver
-                .await
-                .map_err(|_| ObservationError::SealCanceled(worker_idx))?
-                .ok_or(ObservationError::SealRejected(worker_idx))?;
+            let seal = await_observation_reply(
+                receiver,
+                &self.indexer.thread_exited[worker_idx],
+                worker_idx,
+                ObservationError::SealCanceled,
+            )
+            .await?
+            .ok_or(ObservationError::SealRejected(worker_idx))?;
             seals.push(seal);
         }
 
@@ -1278,9 +1297,13 @@ impl<T: SyncIndexer> ThreadPoolSealedObservation<'_, T> {
         let mut buffers = Vec::with_capacity(self.indexer.num_workers);
         for (worker_idx, receiver) in self.harvest_receivers.into_iter().enumerate() {
             buffers.push(
-                receiver
-                    .await
-                    .map_err(|_| ObservationError::HarvestCanceled(worker_idx))?,
+                await_observation_reply(
+                    receiver,
+                    &self.indexer.thread_exited[worker_idx],
+                    worker_idx,
+                    ObservationError::HarvestCanceled,
+                )
+                .await?,
             );
         }
 
