@@ -2251,6 +2251,64 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 
+		// Bound MPI host generation without changing authored role launches or replica-only updates.
+		{
+			name:            "Grove restore launch rejects an oversized MPI hostname list",
+			groveDisabled:   false,
+			deployment:      checkpointTRTLLMDGDForAdmission(2147483647, false, false, false),
+			wantWebhookErrs: []string{`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: restore launch rendering supports at most 1024 MPI hosts for an operator-managed multinode TensorRT-LLM leader`},
+		},
+		{
+			name:               "Grove restore launch keeps an oversized MPI launch during a replica update",
+			groveDisabled:      false,
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointTRTLLMDGDForAdmission(2147483647, false, false, false),
+			deployment:         checkpointTRTLLMDGDForAdmission(2147483647, true, false, false),
+		},
+		{
+			name:               "Grove restore launch rejects a changed oversized MPI node count",
+			groveDisabled:      false,
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointTRTLLMDGDForAdmission(2147483647, false, false, false),
+			deployment:         checkpointTRTLLMDGDForAdmission(2147483646, false, false, false),
+			wantWebhookErrs: []string{`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: restore launch rendering supports at most 1024 MPI hosts for an operator-managed multinode TensorRT-LLM leader`,
+				"spec.components[1].multinode.nodeCount: Invalid value: 2147483646: " + apivalidation.FieldImmutableErrorMsg,
+			},
+		},
+		{
+			name:          "Grove restore launch accepts large node counts with authored role launches",
+			groveDisabled: false,
+			deployment:    checkpointTRTLLMDGDForAdmission(2147483647, false, true, false),
+		},
+		{
+			name:            "component restore launch rejects an oversized MPI hostname list",
+			groveDisabled:   true,
+			deployment:      checkpointTRTLLMDGDForAdmission(2147483647, false, false, true),
+			wantWebhookErrs: []string{`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: restore launch rendering supports at most 1024 MPI hosts for an operator-managed multinode TensorRT-LLM leader`},
+		},
+		{
+			name:               "component restore launch keeps an oversized MPI launch during a replica update",
+			groveDisabled:      true,
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointTRTLLMDGDForAdmission(2147483647, false, false, true),
+			deployment:         checkpointTRTLLMDGDForAdmission(2147483647, true, false, true),
+		},
+		{
+			name:               "component restore launch rejects a changed oversized MPI node count",
+			groveDisabled:      true,
+			seedWithoutWebhook: true,
+			oldDeployment:      checkpointTRTLLMDGDForAdmission(2147483647, false, false, true),
+			deployment:         checkpointTRTLLMDGDForAdmission(2147483646, false, false, true),
+			wantWebhookErrs: []string{`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: restore launch rendering supports at most 1024 MPI hosts for an operator-managed multinode TensorRT-LLM leader`,
+				"spec.components[1].multinode.nodeCount: Invalid value: 2147483646: " + apivalidation.FieldImmutableErrorMsg,
+			},
+		},
+		{
+			name:          "component restore launch accepts large node counts with authored role launches",
+			groveDisabled: true,
+			deployment:    checkpointTRTLLMDGDForAdmission(2147483647, false, true, true),
+		},
+
 		// KV-transfer CEL rules.
 		{
 			name: "v1beta1 conflicting KV-transfer selectors are rejected by CEL",
@@ -5306,4 +5364,22 @@ func unsupportedRestoreLaunchError(path, container, role, note string) string {
 			`and the module must call maybe_run_restore_standby_mode(); rendered command=["/bin/sh" "-c"]%s`,
 		path, container, role, note,
 	)
+}
+
+// checkpointTRTLLMDGDForAdmission selects the MPI backend and optionally authors each role's launch.
+func checkpointTRTLLMDGDForAdmission(nodeCount int32, scale, roleTemplates, groveDisabled bool) *nvidiacomv1beta1.DynamoGraphDeployment {
+	dgd := checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.trtllm"}, nil, nil)
+	dgd.Spec.BackendFramework = "trtllm"
+	if groveDisabled {
+		dgd.Annotations = map[string]string{consts.KubeAnnotationEnableGrove: consts.KubeLabelValueFalse}
+	}
+	worker := betaWorkerComponent(dgd)
+	worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: nodeCount}
+	if scale {
+		worker.Replicas = k8sptr.To(int32(3))
+	}
+	if roleTemplates {
+		setBetaExplicitMultinodeRoleTemplates(worker, nodeCount)
+	}
+	return dgd
 }

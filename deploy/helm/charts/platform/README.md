@@ -122,6 +122,9 @@ example `--enable-elastic-ep --data-parallel-backend ray` or multinode tensor pa
 Ray executor backend. These components could not be restored before this change either. A
 checkpoint-enabled DGD is also rejected when admission cannot render the launch, for example when its
 GPU `ResourceClaimTemplate` does not exist yet.
+Admission also refuses to render more than 1,024 MPI hostnames for an operator-managed
+multinode TensorRT-LLM leader. This bounds memory use while checking checkpoint-enabled components;
+role-authored launches and components without checkpointing are unaffected.
 
 **Action:** Set `command` to a direct `python -m <module>` launch, or disable checkpointing for the
 component. If the operator wraps the launch in a shell for Ray, also change the Ray settings that

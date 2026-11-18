@@ -2432,6 +2432,9 @@ type RoleMainContainer struct {
 	Container corev1.Container
 }
 
+// Limit admission's MPI hostname allocation; this does not bound the general multinode API.
+const maxRestoreLaunchMPIHosts = 1024
+
 // PrepareDGDComponentMainContainers prepares each engine role's main container as its workload provider renders it.
 // ctx, reader, dgd, component, and operatorConfig must be non-nil.
 func PrepareDGDComponentMainContainers(
@@ -2489,6 +2492,12 @@ func PrepareDGDComponentMainContainers(
 		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve component for role %s: %w", role, err)
+		}
+
+		// Operator-owned MPI leaders allocate one hostname per node before their shell launch can be checked.
+		if backendFramework == BackendFrameworkTRTLLM && role == RoleLeader && !nativeSidecar &&
+			ownership == roleLaunchOwnedByOperator && numberOfNodes > maxRestoreLaunchMPIHosts {
+			return nil, fmt.Errorf("restore launch rendering supports at most %d MPI hosts for an operator-managed multinode TensorRT-LLM leader", maxRestoreLaunchMPIHosts)
 		}
 
 		// Resolve GPUs from the role's template before Grove applies DGD defaults.
