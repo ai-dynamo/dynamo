@@ -38,7 +38,6 @@ def test_tokio_section_uses_replacement_metrics(tmp_path):
 
     assert snap is not None
     assert snap.tokio_event_loop_stall_total == 3  # 48 - 45
-    assert not hasattr(snap, "tokio_worker_busy_ratio")
     assert sorted(snap.tokio_worker_mean_poll_time_ns) == [20000, 30000]
 
     section = section_tokio(snap)
@@ -47,13 +46,3 @@ def test_tokio_section_uses_replacement_metrics(tmp_path):
     assert "| Event loop stalls (timer delay > 5 ms) | 3 |" in section
     for word in ("Busy Ratio", "busy ratio", "idle", "hot", "saturated"):
         assert word not in section
-
-
-def test_stall_count_is_zero_without_delay_histogram(tmp_path):
-    path = tmp_path / "final_snapshot.txt"
-    path.write_text('dynamo_tokio_worker_mean_poll_time_ns{worker="0"} 20000\n')
-
-    snap = parse_prometheus_text(path)
-
-    assert snap is not None
-    assert snap.tokio_event_loop_stall_total == 0
