@@ -5432,8 +5432,6 @@ const (
 	restoreLaunchRewriteNote = "; the operator rewrote the authored command into this form"
 )
 
-// checkpointWorkerDGDForAdmission builds a DGD whose worker enables checkpointing
-// with the given main container launch.
 func checkpointWorkerDGDForAdmission(
 	command []string,
 	args []string,
@@ -5466,8 +5464,6 @@ func setRequestVLLMExecutorBackends(metadataValue, specValue string) func(*testi
 	}
 }
 
-// unsupportedRestoreLaunchError is the admission cause for a restore destination
-// whose rendered launch is a /bin/sh -c shell instead of a direct python -m.
 func unsupportedRestoreLaunchError(path, container, role, note string) string {
 	return fmt.Sprintf(
 		"%s: Forbidden: checkpoint restore destination container %q (role %s) must directly invoke python -m <module>, "+

@@ -708,7 +708,6 @@ func isRestoreReadInfrastructureError(err error) bool {
 		k8serrors.IsTimeout(err) || k8serrors.IsServerTimeout(err) || k8serrors.IsTooManyRequests(err)
 }
 
-// Get implements client.Reader.
 func (r *memoReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 	k := memoKey{kind: fmt.Sprintf("%T", obj), key: key}
 	if cached, ok := r.gets[k]; ok {
