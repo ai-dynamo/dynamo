@@ -71,10 +71,10 @@ python -m dynamo.router \
     --no-router-track-active-blocks
 
 # Start decode workers
-python -m dynamo.vllm --model MODEL_NAME --block-size 64 &
+python -m dynamo.vllm --model MODEL_NAME --block-size 64 --disaggregation-mode decode --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' &
 
 # Start prefill workers
-python -m dynamo.vllm --model MODEL_NAME --block-size 64 --disaggregation-mode prefill &
+python -m dynamo.vllm --model MODEL_NAME --block-size 64 --disaggregation-mode prefill --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' &
 ```
 
 For event-driven prefix-cache state, add the backend-specific KV event publishing flags to the workers that the router indexes. Use `--no-router-kv-events` on the router only when approximate cache-state prediction is acceptable.
