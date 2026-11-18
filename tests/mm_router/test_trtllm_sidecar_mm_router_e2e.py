@@ -48,13 +48,14 @@ TRTLLM_MM_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
 pytestmark = [
     pytest.mark.trtllm,
     pytest.mark.sidecar,
-    pytest.mark.router,
     pytest.mark.multimodal,
     pytest.mark.e2e,
     # Both engines share one GPU, as in `trtllm_kv_router` (tests/serve/test_sidecar.py).
     pytest.mark.gpu_1,
     pytest.mark.post_merge,
     pytest.mark.model(TRTLLM_MM_MODEL),
+    # Measured nvidia-smi peak with both engines loaded.
+    pytest.mark.profiled_vram_gib(21.0),
     pytest.mark.requested_trtllm_kv_tokens(2048),
     # Two engines load serially before both sidecars register.
     pytest.mark.timeout(1200),
