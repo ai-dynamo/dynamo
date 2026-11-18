@@ -791,7 +791,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `url` _string_ | URL is the Global Discovery Service's root, such as<br />http://global-discovery.global-router.svc:8080/. |  | Optional: \{\} <br /> |
+| `url` _string_ | URL is the Global Discovery Service's root, such as<br />`http://global-discovery.global-router.svc:8080/`. |  | Optional: \{\} <br /> |
 | `region` _string_ | Region is the region that the pool registers in. |  | Optional: \{\} <br /> |
 | `frontends` _string array_ | Frontends are the HTTP(S) URLs that Global Routers send the pool's<br />requests to. Only a Global Discovery Service that takes pools from<br />registrations, rather than from MCS, needs them. |  | Optional: \{\} <br /> |
 

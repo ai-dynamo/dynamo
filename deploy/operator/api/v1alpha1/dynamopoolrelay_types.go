@@ -51,7 +51,7 @@ type DynamoPoolRelaySpec struct {
 // URL or region takes the operator's globalDiscovery default.
 type DynamoPoolRelayGlobalDiscovery struct {
 	// URL is the Global Discovery Service's root, such as
-	// http://global-discovery.global-router.svc:8080/.
+	// `http://global-discovery.global-router.svc:8080/`.
 	// +optional
 	URL string `json:"url,omitempty"`
 

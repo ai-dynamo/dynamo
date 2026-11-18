@@ -87,7 +87,7 @@ spec:
                     url:
                       description: |-
                         URL is the Global Discovery Service's root, such as
-                        http://global-discovery.global-router.svc:8080/.
+                        `http://global-discovery.global-router.svc:8080/`.
                       type: string
                   type: object
                 podTemplate:
