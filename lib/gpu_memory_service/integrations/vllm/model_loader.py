@@ -39,6 +39,13 @@ from gpu_memory_service.integrations.common.utils import (
     strip_gms_model_loader_config,
     torch_device,
 )
+from gpu_memory_service.integrations.vllm.load_diff import (
+    descriptor as load_diff_descriptor,
+)
+from gpu_memory_service.integrations.vllm.load_diff import writer as load_diff_writer
+from gpu_memory_service.integrations.vllm.load_diff.state import (
+    snapshot as load_diff_snapshot,
+)
 from gpu_memory_service.v1.client.parameter_storage import (
     copy_non_parameter_tensors_to_default_allocator,
 )
@@ -354,6 +361,14 @@ def _prepare_write(
     from vllm.utils.torch_utils import set_default_torch_dtype
 
     mx_ctx = get_mx_load_context(vllm_config, model_config)
+    publish_load_diff = load_diff_writer.selected(vllm_config)
+    # Readers check identity before they construct; construction can change
+    # the HF config.
+    load_diff_identity = (
+        load_diff_descriptor.identity(vllm_config, model_config)
+        if publish_load_diff
+        else None
+    )
 
     # Allocate model tensors using GMS memory pool
     with set_default_torch_dtype(model_config.dtype):
@@ -362,6 +377,7 @@ def _prepare_write(
                 model = initialize_model(
                     vllm_config=vllm_config, model_config=model_config
                 )
+            construct = load_diff_snapshot(model) if publish_load_diff else None
 
             if mx_ctx is not None:
                 # Full MX load strategy chain: RDMA -> ModelStreamer -> GDS -> Default
@@ -373,6 +389,8 @@ def _prepare_write(
             torch_device().empty_cache()
 
     referenced = register_module_tensors(gms_client, model)
+    if publish_load_diff:
+        load_diff_writer.publish(gms_client, model, construct, load_diff_identity)
     stats, rebound_bytes, retained_gms_tensors = _copy_out_and_release_pool(
         gms_client, model
     )

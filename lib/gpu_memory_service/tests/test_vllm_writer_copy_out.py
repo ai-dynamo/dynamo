@@ -10,6 +10,7 @@ pool: one "allocation" is a single storage that the model's tensors view.
 """
 
 import gc
+import hashlib
 import sys
 from contextlib import nullcontext
 from types import ModuleType, SimpleNamespace
@@ -25,6 +26,7 @@ from gpu_memory_service.client.torch import allocator, module
 from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.integrations.common import utils as common_utils
 from gpu_memory_service.integrations.vllm import model_loader
+from gpu_memory_service.integrations.vllm.load_diff import descriptor
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -58,7 +60,13 @@ class _Manager:
         self.metadata = {}
 
     def metadata_put(self, key, allocation_id, offset_bytes, value):
-        self.metadata[key] = (allocation_id, offset_bytes)
+        self.metadata[key] = (allocation_id, offset_bytes, value)
+
+    def metadata_get(self, key):
+        return self.metadata.get(key)
+
+    def metadata_list(self):
+        return list(self.metadata)
 
     def destroy_mapping(self, va):
         self.total_bytes -= self.mappings.pop(va).aligned_size
@@ -102,7 +110,12 @@ def write_with(monkeypatch):
     monkeypatch.setattr(model_loader, "get_mx_load_context", lambda *args: None)
     monkeypatch.setattr(model_loader, "gms_use_mem_pool", lambda *args: nullcontext())
 
-    def run(build, allocations=1):
+    def run(
+        build,
+        extra_config=None,
+        load_weights=lambda model, model_config: None,
+        allocations=1,
+    ):
         storages = [
             torch.zeros(_ARENA_BYTES, dtype=torch.uint8).untyped_storage()
             for _ in range(allocations)
@@ -129,11 +142,14 @@ def write_with(monkeypatch):
         monkeypatch.setitem(sys.modules, loader_utils.__name__, loader_utils)
         monkeypatch.setitem(sys.modules, torch_utils.__name__, torch_utils)
 
+        vllm_config = SimpleNamespace(
+            load_config=SimpleNamespace(model_loader_extra_config=extra_config or {})
+        )
         model = model_loader._load_write_mode(
             manager,
-            SimpleNamespace(),
+            vllm_config,
             SimpleNamespace(dtype=torch.float32),
-            SimpleNamespace(load_weights=lambda model, model_config: None),
+            SimpleNamespace(load_weights=load_weights),
             torch.device("cpu"),
         )
         return manager, model, storages[0]
@@ -285,3 +301,101 @@ def test_one_tensor_under_many_names_stays_one_copy(write_with):
     assert int(model.topk_indices_buffer.sum()) == 5 * 16 * 64
     # One copy's worth of private memory, not one per name.
     assert model_loader.get_model_memory_usage_offset_bytes() == 16 * 64 * 4
+
+
+class _Method:
+    pass
+
+
+class _Impl:
+    pass
+
+
+def test_load_diff_writer_publishes_what_loading_changed(write_with, monkeypatch):
+    """In load-diff mode the writer takes identity before construction, which
+    can change the HF config, snapshots the model before and after loading,
+    and describes the registered tensors as they sit in GMS, before the
+    copy-out moves the non-parameters."""
+    events = []
+
+    def identity(vllm_config, model_config):
+        events.append("identity")
+        return {"model": "m"}
+
+    monkeypatch.setattr(model_loader.load_diff_descriptor, "identity", identity)
+
+    def build(storage):
+        events.append("construct")
+        model = torch.nn.Module()
+        model.weight = torch.nn.Parameter(
+            _view(storage, torch.float32, 0, (1024,)), requires_grad=False
+        )
+        model.register_buffer("scale", _view(storage, torch.float32, 0x2000, (1,)))
+        model.register_buffer("shift", _view(storage, torch.float32, 0x2100, (1,)))
+        model.register_buffer("outside_gms", torch.zeros(4))
+        model.experts = torch.nn.Module()
+        model.experts.quant_method = _Method()
+        model.experts.impl = _Impl()
+        model.experts.register_buffer(
+            "_expert_map", _view(storage, torch.int32, 0x3000, (4,))
+        )
+        return model
+
+    def load_weights(model, model_config):
+        model.loaded_scale = 0.5
+
+    manager, model, _ = write_with(
+        build, {"gms_reconstruction_mode": "load_diff"}, load_weights
+    )
+
+    assert events == ["identity", "construct"]
+    published = descriptor.get(manager)
+    assert published["identity"] == {"model": "m"}
+    names = ["weight", "scale", "shift", "experts._expert_map"]
+    assert published["aliases"] == {name: name for name in names}
+    assert published["storage_aliases"] == {
+        "scale": ["scale", 0],
+        "shift": ["scale", 0x100],
+        "experts._expert_map": ["scale", 0x1000],
+    }
+    assert published["changed"] == {"|module": {"loaded_scale": {"absent": True}}}
+    assert published["modules"]["experts"] == {
+        "cls": "torch.nn.modules.module.Module",
+        "quant": f"{__name__}._Method",
+        "impl": f"{__name__}._Impl",
+        "params": [],
+        "routing": {
+            "shape": [4],
+            "dtype": "torch.int32",
+            "sha256": hashlib.sha256(bytes(16)).hexdigest(),
+        },
+    }
+    assert not manager.in_gms(model.scale)
+
+
+def test_load_diff_aliases_only_names_of_one_tensor(write_with, monkeypatch):
+    """Tensors a property creates must not be taken for aliases of each other
+    because a freed tensor's id was reused."""
+    monkeypatch.setattr(model_loader.load_diff_descriptor, "identity", lambda *args: {})
+
+    def build(storage):
+        # Properties that return a new view of the weight on every access.
+        views = type(
+            "Views",
+            (torch.nn.Module,),
+            {
+                f"row{i}": property(lambda self, i=i: self.weight[i : i + 1])
+                for i in range(8)
+            },
+        )()
+        views.weight = torch.nn.Parameter(
+            _view(storage, torch.float32, 0, (8, 4)), requires_grad=False
+        )
+        return views
+
+    manager, _, _ = write_with(build, {"gms_reconstruction_mode": "load_diff"})
+
+    aliases = descriptor.get(manager)["aliases"]
+    assert {name: aliases[name] for name in aliases if name.startswith("row")} == {
+        f"row{i}": f"row{i}" for i in range(8)
+    }

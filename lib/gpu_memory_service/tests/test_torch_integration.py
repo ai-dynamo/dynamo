@@ -69,6 +69,9 @@ from gpu_memory_service.common.vmm import _reset_vmm_singleton
 from gpu_memory_service.integrations.common import patches as common_patches
 from gpu_memory_service.integrations.common.utils import publish_gms_write, torch_device
 from gpu_memory_service.integrations.vllm import model_loader
+from gpu_memory_service.integrations.vllm.load_diff import descriptor as load_diff
+from gpu_memory_service.integrations.vllm.load_diff import writer as load_diff_writer
+from gpu_memory_service.integrations.vllm.load_diff.state import snapshot
 from gpu_memory_service.server.rpc import GMSRPCServer
 
 pytestmark = [
@@ -615,6 +618,51 @@ def test_vllm_writer_commits_no_allocation_a_reader_cannot_reference(
         )
     finally:
         materialized = None
+        reader.close()
+
+
+def test_load_diff_descriptor_outlives_the_writer_pool_release(
+    running_gms, monkeypatch
+):
+    """The vLLM writer releases allocations that held only storage it copied
+    out, and GMS drops their metadata with them. The first allocation here is
+    one: the descriptor must still reach a reader."""
+    if _allocator_ext is None:
+        pytest.skip("GMS allocator extension is not built")
+    socket_path = running_gms
+    monkeypatch.setattr(common_utils, "get_socket_path", lambda *_: socket_path)
+    writer = gms_allocator.get_or_create_gms_client_memory_manager(
+        socket_path, 0, RequestedLockType.RW, tag="weights"
+    )
+    try:
+        with gms_allocator.gms_use_mem_pool("weights", torch.device(_DEVICE, 0)):
+            workspace = torch.zeros(64 << 20, dtype=torch.uint8, device=_DEVICE)
+            model = _TinyModule()
+        first = next(iter(writer.mappings.values())).allocation_id
+        construct = snapshot(model)
+        # What loading leaves behind: a value, and a tied second name.
+        model.loaded_scale = 0.5
+        model.tied = model.linear.weight
+        register_module_tensors(writer, model)
+        load_diff_writer.publish(writer, model, construct, {"model": "tiny"})
+        _, _, owners = model_loader._copy_out_and_release_pool(writer, model)
+        assert not _in_gms(writer, workspace)
+        assert first not in {m.allocation_id for m in writer.mappings.values()}
+        publish_gms_write(writer)
+        del owners
+    finally:
+        model = workspace = None
+        writer.close()
+
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    reader.connect(RequestedLockType.RO)
+    try:
+        published = load_diff.get(reader)
+        assert published["identity"] == {"model": "tiny"}
+        assert set(published["changed"]["|module"]) == {"loaded_scale", "_parameters"}
+        assert published["aliases"]["tied"] == published["aliases"]["linear.weight"]
+        assert set(published["aliases"]) == {"tied", "linear.weight", "scale", "extra"}
+    finally:
         reader.close()
 
 
