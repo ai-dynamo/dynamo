@@ -39,13 +39,14 @@ const (
 // DynamoComponentDeploymentHandler is a handler for validating DynamoComponentDeployment resources.
 // It is a thin wrapper around DynamoComponentDeploymentValidator.
 type DynamoComponentDeploymentHandler struct {
-	discoveryBackend configv1alpha1.DiscoveryBackend
+	discoveryBackend  configv1alpha1.DiscoveryBackend
+	operatorPrincipal string
 }
 
 // NewDynamoComponentDeploymentHandler creates a new handler for DynamoComponentDeployment Webhook.
 // discoveryBackend is the operator's configured default discovery backend.
-func NewDynamoComponentDeploymentHandler(discoveryBackend configv1alpha1.DiscoveryBackend) *DynamoComponentDeploymentHandler {
-	return &DynamoComponentDeploymentHandler{discoveryBackend: discoveryBackend}
+func NewDynamoComponentDeploymentHandler(discoveryBackend configv1alpha1.DiscoveryBackend, operatorPrincipal string) *DynamoComponentDeploymentHandler {
+	return &DynamoComponentDeploymentHandler{discoveryBackend: discoveryBackend, operatorPrincipal: operatorPrincipal}
 }
 
 // ValidateCreate validates a DynamoComponentDeployment create request.
@@ -58,7 +59,7 @@ func (h *DynamoComponentDeploymentHandler) ValidateCreate(ctx context.Context, o
 
 	logger.Info("validate create", "name", obj.Name, "namespace", obj.Namespace)
 
-	validator := NewDynamoComponentDeploymentValidator(h.discoveryBackend)
+	validator := NewDynamoComponentDeploymentValidator(h.discoveryBackend, h.operatorPrincipal)
 	return validator.validate(
 		ctx,
 		obj,
@@ -85,7 +86,7 @@ func (h *DynamoComponentDeploymentHandler) ValidateUpdate(
 		return nil, nil
 	}
 
-	validator := NewDynamoComponentDeploymentValidator(h.discoveryBackend)
+	validator := NewDynamoComponentDeploymentValidator(h.discoveryBackend, h.operatorPrincipal)
 	return validator.ValidateUpdate(
 		ctx,
 		oldObj,

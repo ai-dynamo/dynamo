@@ -59,7 +59,7 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		internalwebhook.SetExcludedNamespaces(nil)
 	}
 
-	dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler(cfg.Discovery.Backend)
+	dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler(cfg.Discovery.Backend, opts.OperatorPrincipal)
 	if err := dcdHandler.RegisterWithManager(mgr, gate); err != nil {
 		return fmt.Errorf("unable to register DynamoComponentDeployment webhook: %w", err)
 	}

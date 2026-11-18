@@ -50,18 +50,26 @@ spec:
 
 ## Name limits
 
-For each component that Dynamo manages, the operator uses `<dgd>-<component>` as the
-`nvidia.com/selector` label value. When the component has a Service, the Service name is that
-value with dots replaced by hyphens: for DGD `model.v1` and component `frontend`, the selector
-value is `model.v1-frontend` and the Service is `model-v1-frontend`. A frontend always gets a
-Service; other components get one only with Kubernetes discovery, the default. On Grove, a
-single-pod elastic-EP leader also gets a headless Service named `<dgd>-<component>-ray` with any
-discovery backend, so its name must start with a letter too. Outside Grove,
-worker DCDs are named `<dgd>-<component>-<hash>`, where the hash has 8 characters, and that name
-is also a selector value. Admission rejects a DGD when a selector value is longer than 63
-characters, or when a Service name is not a DNS-1035 label: at most 63 characters, starting
-with a letter. The DGD name itself is the `nvidia.com/dynamo-graph-deployment-name` label value
-and allows at most 63 characters. The error is reported on `metadata.name` or
+Component names are lowercased in generated resource names. On Grove, component Pods use
+`<dgd>-<component>` as the `nvidia.com/selector` label value. Outside Grove, a generated DCD is
+named `<dgd>-<component>`, with a `-<hash>` suffix for worker types; the hash has 8 characters.
+Single-node DCD Pods use that full DCD name as their selector value. LeaderWorkerSet and
+DisaggregatedSet Pod templates omit `nvidia.com/selector`.
+
+A frontend always gets a component Service; other components get one only with Kubernetes
+discovery, the default. Grove component Services use `<dgd>-<component>` with dots replaced
+by hyphens. DCD Services use the full DCD name with dots replaced by hyphens. DisaggregatedSet
+worker Services also include the worker hash, even though those workers have no DCD.
+On Grove, a single-pod elastic-EP leader also gets a headless Service with any discovery backend.
+Its name is `<dgd>-<component>-ray` with dots replaced by hyphens. If that exceeds 63 characters,
+the operator keeps the first 58 characters and appends `-` and four hex digits, so the shortened
+name need not end in `-ray`. Grove also creates a headless Service named `<pcs>-0`, where `<pcs>`
+is the generated PodCliqueSet name. That name retains dots, so a dotted DGD name such as
+`model.v1` is invalid on Grove even when its component Service name has no dots.
+
+Admission rejects a DGD when a rendered selector value is longer than 63 characters, or when a
+Service name is not a DNS-1035 label: at most 63 characters, starting with a letter. The DGD name
+itself is the `nvidia.com/dynamo-graph-deployment-name` label value and allows at most 63 characters. The error is reported on `metadata.name` or
 `spec.components[*].name`. On update, only problems that the old object did not already have
 for the same component are rejected, such as a worker DCD name that appears when an unset
 component `type` is set to a worker type. Existing DGDs with invalid names stay updatable and

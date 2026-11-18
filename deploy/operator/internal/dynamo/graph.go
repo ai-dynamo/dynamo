@@ -19,6 +19,8 @@ package dynamo
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -3522,4 +3524,30 @@ func getDefaultCompilationCacheMountPoint(backendFramework BackendFramework) str
 		// For unknown backends, don't assume compilation cache support
 		return ""
 	}
+}
+
+// TruncateDNSLabelWithHash preserves the prefix and appends an eight-character hash.
+func TruncateDNSLabelWithHash(value string, maxLength int) string {
+	if len(value) <= maxLength {
+		return value
+	}
+	hash := sha256.Sum256([]byte(value))
+	hashText := hex.EncodeToString(hash[:])[:8]
+	if maxLength <= len(hashText) {
+		return hashText[:maxLength]
+	}
+	suffix := "-" + hashText
+	prefix := strings.TrimRight(value[:maxLength-len(suffix)], "-")
+	return prefix + suffix
+}
+
+// LeaderWorkerSetNameForWorkload reserves room for revision labels and group indices.
+func LeaderWorkerSetNameForWorkload(workloadName string) string {
+	return TruncateDNSLabelWithHash(workloadName+"-0", 63-(2+10)-6)
+}
+
+// DisaggregatedSetName reserves room for role, slice, revision and worker suffixes.
+// dgd must not be nil.
+func DisaggregatedSetName(dgd *v1beta1.DynamoGraphDeployment) string {
+	return TruncateDNSLabelWithHash(NormalizeKubeResourceName(dgd.Name), 63-10-2-8-3-(2+10+10))
 }

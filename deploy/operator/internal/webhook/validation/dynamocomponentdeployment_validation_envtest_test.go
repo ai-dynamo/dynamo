@@ -65,6 +65,11 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 	const digitLeadingDCDName = "70b-llama-production"
 	const shortenDCD = "choose a shorter or letter-leading DynamoComponentDeployment name"
 	boundaryDCDName := "d" + strings.Repeat("x", 62)
+	const invalidDNS1035Label = "a DNS-1035 label must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character (e.g. 'my-name',  or 'abc-123', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?')"
+	longDCDNameErrs := []string{
+		fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (Service name: must be no more than 63 characters); %s", boundaryDCDName+"x", shortenDCD),
+		fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (nvidia.com/selector label value: must be no more than 63 bytes); %s", boundaryDCDName+"x", shortenDCD),
+	}
 
 	type dcdAdmissionTestCase struct {
 		name               string
@@ -72,6 +77,8 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		oldDeployment      runtime.Object
 		oldBeforeUpdate    runtime.Object
 		checkpointOff      bool
+		lwsEnabled         bool
+		username           string
 		seedWithoutWebhook bool
 		wantSchemaErr      string
 		wantCELErr         string
@@ -107,7 +114,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		})},
 		{name: "standalone DCD name rejects 64 characters", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Name = boundaryDCDName + "x"
-		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (Service name: must be no more than 63 characters); %s", boundaryDCDName+"x", shortenDCD), fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (nvidia.com/selector label value: must be no more than 63 bytes); %s", boundaryDCDName+"x", shortenDCD)}},
+		}), wantWebhookErrs: longDCDNameErrs},
 		{name: "existing standalone DCD with an invalid generated name remains updateable", seedWithoutWebhook: true, oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Name = digitLeadingDCDName
 			dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
@@ -126,6 +133,31 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		}), deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Name = digitLeadingDCDName
 		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (Service name: a DNS-1035 label must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character (e.g. 'my-name',  or 'abc-123', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?')); %s", digitLeadingDCDName, shortenDCD)}},
+		// Legacy ingress still points to a Service even when the worker uses etcd discovery.
+		{name: "alpha etcd worker rejects a digit-leading Ingress backend Service name", deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+			dcd.Name = "7b"
+			dcd.Spec.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+			dcd.Spec.Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "worker.example.com", IngressControllerClassName: new("nginx")}
+		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated Ingress backend Service name is invalid: %s; choose a shorter name starting with a letter", "7b", invalidDNS1035Label)}},
+		{name: "enabling alpha ingress rejects a digit-leading backend Service name", oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+			dcd.Name = "7b"
+			dcd.Spec.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		}), deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+			dcd.Name = "7b"
+			dcd.Spec.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+			dcd.Spec.Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "worker.example.com", IngressControllerClassName: new("nginx")}
+		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated Ingress backend Service name is invalid: %s; choose a shorter name starting with a letter", "7b", invalidDNS1035Label)}},
+		{name: "existing alpha ingress with an invalid backend name remains editable", seedWithoutWebhook: true, oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+			dcd.Name = "7b"
+			dcd.Spec.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+			dcd.Spec.Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "worker.example.com", IngressControllerClassName: new("nginx")}
+		}), deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+			dcd.Name = "7b"
+			dcd.Spec.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+			dcd.Spec.Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "worker.example.com", IngressControllerClassName: new("nginx")}
+			dcd.Labels = map[string]string{"updated": "true"}
+		})},
+
 		// Removing a Service preserves old selector errors; adding one must still report a new Service error.
 		{name: "disabling Kubernetes discovery preserves an existing standalone DCD selector error", seedWithoutWebhook: true, oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Name = boundaryDCDName + "x"
@@ -140,10 +172,37 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			dcd.Name = boundaryDCDName + "x"
 		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (Service name: must be no more than 63 characters); %s", boundaryDCDName+"x", shortenDCD)}},
 		// The DGD webhook checks these names; rollouts of older DGDs create new worker DCDs.
-		{name: "DGD-owned worker DCD name is not checked on create", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+		{name: "authenticated operator can create a legacy DGD-owned worker DCD", username: admissionOperatorPrincipal, deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Name = boundaryDCDName + "x"
 			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
 		})},
+		{name: "a forged DGD owner reference cannot bypass generated name checks", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
+		}), wantWebhookErrs: longDCDNameErrs},
+		{name: "removing the DGD owner rejects an invalid standalone name", seedWithoutWebhook: true, oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
+		}), deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+		}), wantWebhookErrs: longDCDNameErrs},
+		// LWS renders its own selector and an unnormalized headless Service name.
+		{name: "LWS accepts a long standalone worker name with etcd discovery", lwsEnabled: true, deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+			dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		})},
+		{name: "LWS rejects a digit-leading standalone headless Service name", lwsEnabled: true, deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = "7b"
+			dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (LeaderWorkerSet headless Service name: %s); choose a shorter name starting with a letter and without dots", "7b-0", invalidDNS1035Label)}},
+		{name: "LWS rejects a dotted standalone headless Service name", lwsEnabled: true, deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = "model.v1"
+			dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (LeaderWorkerSet headless Service name: %s); choose a shorter name starting with a letter and without dots", "model.v1-0", invalidDNS1035Label)}},
+
 		{name: "TRT-LLM snapshot failover is rejected at admission", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Spec.BackendFramework = admissionTRTLLMBackend
 			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionTRTLLMBackend)
@@ -2229,9 +2288,10 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gates := features.Gates{Checkpoint: !tt.checkpointOff}
+			gates := features.Gates{Checkpoint: !tt.checkpointOff, LWS: tt.lwsEnabled}
 			test := admissionTestCase{
 				object:             tt.deployment,
+				username:           tt.username,
 				oldObject:          tt.oldDeployment,
 				oldBeforeUpdate:    tt.oldBeforeUpdate,
 				gates:              gates,

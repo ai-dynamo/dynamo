@@ -101,7 +101,7 @@ func (r *disaggregatedSetStableResourcesReconciler) Reconcile(
 				service,
 				existing,
 				existingErr == nil,
-				disaggregatedSetName(dgd),
+				dynamo.DisaggregatedSetName(dgd),
 				roleName,
 				targetRevision,
 				component.IsMultinode(),

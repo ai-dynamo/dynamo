@@ -20,22 +20,36 @@ package validation
 import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"strings"
 )
 
-// validateDynamoGraphDeploymentV1alpha1 validates dgd. dgd must not be nil.
+// validateDynamoGraphDeploymentV1alpha1 validates dgd. dgd must not be nil; oldDGD is nil on create.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentV1alpha1(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	oldDGD *nvidiacomv1alpha1.DynamoGraphDeployment,
 ) field.ErrorList {
 	if !hasV1Alpha1CompatibilityFields(dgd) &&
 		!v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		return nil
 	}
-	return v.validateDynamoGraphDeploymentSpecV1alpha1(
+	allErrs := v.validateDynamoGraphDeploymentSpecV1alpha1(
 		&dgd.Spec,
 		field.NewPath("spec"),
 		dgd.Name,
 		dgd.Namespace,
 	)
+	for _, name := range sortedV1Alpha1ServiceNames(dgd.Spec.Services) {
+		service := dgd.Spec.Services[name]
+		if service == nil {
+			continue
+		}
+		var oldIngress *nvidiacomv1alpha1.IngressSpec
+		if oldDGD != nil && oldDGD.Spec.Services[name] != nil {
+			oldIngress = oldDGD.Spec.Services[name].Ingress
+		}
+		allErrs = append(allErrs, alphaIngressBackendNameErrors(service.Ingress, oldIngress, dgd.Name+"-"+strings.ToLower(name), field.NewPath("spec", "services").Key(name).Child("ingress"))...)
+	}
+	return allErrs
 }
 
 // validateDynamoGraphDeploymentSpecV1alpha1 validates spec. spec and fldPath must not be nil.

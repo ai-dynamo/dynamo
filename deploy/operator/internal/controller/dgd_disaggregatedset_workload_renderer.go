@@ -48,11 +48,11 @@ func (r *disaggregatedSetWorkloadRenderer) Render(
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) (*unstructured.Unstructured, error) {
 	ds := newDisaggregatedSetObject()
-	ds.SetName(disaggregatedSetName(dgd))
+	ds.SetName(dynamo.DisaggregatedSetName(dgd))
 	ds.SetNamespace(dgd.Namespace)
 	ds.SetLabels(map[string]string{
 		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-		consts.KubeLabelDynamoSelector:            disaggregatedSetName(dgd),
+		consts.KubeLabelDynamoSelector:            dynamo.DisaggregatedSetName(dgd),
 	})
 	if ownerRef := dgdControllerOwnerReference(dgd); ownerRef != nil {
 		ds.SetOwnerReferences([]metav1.OwnerReference{*ownerRef})

@@ -155,7 +155,7 @@ func TestSyncDisaggregatedSetPreservesUnmanagedMetadata(t *testing.T) {
 		Name: "demo", Namespace: "default", UID: "demo-uid",
 	}
 	current := newDisaggregatedSetObject()
-	current.SetName(disaggregatedSetName(dgd))
+	current.SetName(dynamo.DisaggregatedSetName(dgd))
 	current.SetNamespace(dgd.Namespace)
 	current.SetLabels(map[string]string{"example.com/keep": "label"})
 	current.SetAnnotations(map[string]string{"example.com/keep": "annotation"})
@@ -734,7 +734,7 @@ func TestDisaggregatedSetChildNamesFitDNSLabelLimit(t *testing.T) {
 	selection, reason := selectDisaggregatedSetComponents(dgd)
 	require.Empty(t, reason)
 	require.Len(t, selection.componentToRole, 2)
-	setName := disaggregatedSetName(dgd)
+	setName := dynamo.DisaggregatedSetName(dgd)
 	require.LessOrEqual(t, len(setName), maxDisaggregatedSetNameLength)
 	revisionHash := strings.Repeat("h", maxDisaggregatedSetWorkerRevisionHashLength)
 	groupIndexes := []string{"9", "10", strconv.Itoa(maxInt32GroupIndex)}
@@ -775,7 +775,7 @@ func TestDisaggregatedSetNamesRemainStableWhenRoleScalesAcrossTenReplicas(t *tes
 	}
 
 	t.Log("Resolve DS, role, and child names at ten replicas")
-	nameAtTen := disaggregatedSetName(dgd)
+	nameAtTen := dynamo.DisaggregatedSetName(dgd)
 	selectionAtTen, reason := selectDisaggregatedSetComponents(dgd)
 	require.Empty(t, reason)
 	roleAtTen := selectionAtTen.componentToRole["prefill-worker"]
@@ -787,9 +787,9 @@ func TestDisaggregatedSetNamesRemainStableWhenRoleScalesAcrossTenReplicas(t *tes
 	selectionAtEleven, reason := selectDisaggregatedSetComponents(dgd)
 	require.Empty(t, reason)
 	roleAtEleven := selectionAtEleven.componentToRole["prefill-worker"]
-	require.Equal(t, nameAtTen, disaggregatedSetName(dgd))
+	require.Equal(t, nameAtTen, dynamo.DisaggregatedSetName(dgd))
 	require.Equal(t, roleAtTen, roleAtEleven)
-	require.Equal(t, lwsNameAtTen, disaggregatedsetutils.GenerateName(disaggregatedSetName(dgd), 0, revision, roleAtEleven))
+	require.Equal(t, lwsNameAtTen, disaggregatedsetutils.GenerateName(dynamo.DisaggregatedSetName(dgd), 0, revision, roleAtEleven))
 }
 
 func TestCheckDisaggregatedSetReadiness(t *testing.T) {

@@ -18,8 +18,6 @@
 package controller
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -52,7 +50,6 @@ const (
 	disaggregatedSetWorkerRevisionSuffixLength  = 2*len("-") + maxDisaggregatedSetGroupIndexLength + maxDisaggregatedSetWorkerRevisionHashLength
 	maxDisaggregatedSetNameLength               = maxDisaggregatedSetGeneratedNameLength - maxDisaggregatedSetRoleNameLength - maxDisaggregatedSetSliceIndexLength - disaggregatedSetRevisionLength - disaggregatedSetChildNameSeparatorLength - disaggregatedSetWorkerRevisionSuffixLength
 	disaggregatedSetServiceSuffixLength         = len("-prv")
-	disaggregatedSetNameHashLength              = 8
 	dynamoGraphDeploymentKind                   = "DynamoGraphDeployment"
 	dynamoComponentDeploymentKind               = "DynamoComponentDeployment"
 )
@@ -210,7 +207,7 @@ func disaggregatedSetRoleName(component *nvidiacomv1beta1.DynamoComponentDeploym
 	if preferred == "" || roleNameUsed(preferred, used) {
 		preferred = dynamo.NormalizeKubeResourceName(component.ComponentName)
 	}
-	preferred = truncateDNSLabelWithHash(preferred, maxDisaggregatedSetRoleNameLength)
+	preferred = dynamo.TruncateDNSLabelWithHash(preferred, maxDisaggregatedSetRoleNameLength)
 	roleName := preferred
 	for i := 2; roleNameUsed(roleName, used); i++ {
 		suffix := fmt.Sprintf("-%d", i)
@@ -229,24 +226,6 @@ func truncateDNSLabel(value string, maxLength int) string {
 		return value
 	}
 	return strings.TrimRight(value[:maxLength], "-")
-}
-
-func truncateDNSLabelWithHash(value string, maxLength int) string {
-	if len(value) <= maxLength {
-		return value
-	}
-	hash := sha256.Sum256([]byte(value))
-	hashText := hex.EncodeToString(hash[:])[:disaggregatedSetNameHashLength]
-	if maxLength <= len(hashText) {
-		return hashText[:maxLength]
-	}
-	suffix := "-" + hashText
-	prefix := strings.TrimRight(value[:maxLength-len(suffix)], "-")
-	return prefix + suffix
-}
-
-func disaggregatedSetName(dgd *nvidiacomv1beta1.DynamoGraphDeployment) string {
-	return truncateDNSLabelWithHash(dynamo.NormalizeKubeResourceName(dgd.Name), maxDisaggregatedSetNameLength)
 }
 
 func disaggregatedSetTargetRevision(ds *unstructured.Unstructured) (string, error) {

@@ -246,19 +246,29 @@ type generatedNameViolation struct {
 	err *field.Error
 }
 
+type generatedNameChecks struct {
+	dcd, service, selector bool
+}
+
 // generatedNameViolations reports each rule that generatedName fails independently, so an
 // update can remove a Service error without making an existing selector error look new.
 // fldPath is non-nil and names the user-chosen field; action says which name to change.
-func generatedNameViolations(fldPath *field.Path, generatedName string, hasService bool, action string) []generatedNameViolation {
+func generatedNameViolations(fldPath *field.Path, generatedName string, checks generatedNameChecks, action string) []generatedNameViolation {
 	rules := []struct {
 		name     string
 		messages []string
 	}{
-		{"DynamoComponentDeployment name", k8svalidation.IsDNS1123Subdomain(generatedName)},
+		{"DynamoComponentDeployment name", nil},
 		{"Service name", nil},
-		{consts.KubeLabelDynamoSelector + " label value", k8svalidation.IsValidLabelValue(generatedName)},
+		{consts.KubeLabelDynamoSelector + " label value", nil},
 	}
-	if hasService {
+	if checks.dcd {
+		rules[0].messages = k8svalidation.IsDNS1123Subdomain(generatedName)
+	}
+	if checks.selector {
+		rules[2].messages = k8svalidation.IsValidLabelValue(generatedName)
+	}
+	if checks.service {
 		rules[1].messages = k8svalidation.IsDNS1035Label(dynamo.NormalizeKubeResourceName(generatedName))
 	}
 
@@ -267,9 +277,13 @@ func generatedNameViolations(fldPath *field.Path, generatedName string, hasServi
 		if len(rule.messages) == 0 {
 			continue
 		}
+		value := generatedName
+		if rule.name == "Service name" {
+			value = dynamo.NormalizeKubeResourceName(value)
+		}
 		violations = append(violations, generatedNameViolation{
-			key: generatedNameViolationKey{generatedName: generatedName, rule: rule.name},
-			err: field.Invalid(fldPath, generatedName, fmt.Sprintf(
+			key: generatedNameViolationKey{generatedName: value, rule: rule.name},
+			err: field.Invalid(fldPath, value, fmt.Sprintf(
 				"generated name is invalid (%s: %s); %s", rule.name, strings.Join(rule.messages, "; "), action,
 			)),
 		})
@@ -546,4 +560,20 @@ func inputJSONPointer(location []string) string {
 		tokens[i] = escape.Replace(token)
 	}
 	return "/" + strings.Join(tokens, "/")
+}
+
+// alphaIngressBackendNameErrors checks enabled alpha Ingress backend names and ratchets unchanged errors.
+// newIngress and oldIngress may be nil when the optional ingress is absent. fldPath is non-nil.
+func alphaIngressBackendNameErrors(newIngress, oldIngress *nvidiacomv1alpha1.IngressSpec, name string, fldPath *field.Path) field.ErrorList {
+	if newIngress == nil || !newIngress.Enabled || newIngress.IngressControllerClassName == nil {
+		return nil
+	}
+	if oldIngress != nil && oldIngress.Enabled && oldIngress.IngressControllerClassName != nil {
+		return nil
+	}
+	name = dynamo.NormalizeKubeResourceName(name)
+	if msgs := k8svalidation.IsDNS1035Label(name); len(msgs) > 0 {
+		return field.ErrorList{field.Invalid(fldPath, name, "generated Ingress backend Service name is invalid: "+strings.Join(msgs, "; ")+"; choose a shorter name starting with a letter")}
+	}
+	return nil
 }

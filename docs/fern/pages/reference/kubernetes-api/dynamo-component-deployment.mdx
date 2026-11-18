@@ -37,13 +37,18 @@ spec:
 
 ## Name limits
 
-A standalone DCD name is its `nvidia.com/selector` label value, so admission rejects a name
-longer than 63 characters. A frontend DCD, or any DCD with Kubernetes discovery (the default),
-also gets a Service with the same name after dots are replaced by hyphens; for those DCDs the
-name must also start with a letter. DCDs that a DGD owns are checked by the DGD webhook; see
-[DGD name limits](dynamo-graph-deployment.mdx#name-limits). On update, admission reports only
-a problem the old DCD did not have, such as a digit-leading name when Kubernetes discovery is
-turned on, so existing DCDs stay updatable and deletable.
+A standalone single-node DCD name is its `nvidia.com/selector` label value, so admission rejects
+a name longer than 63 characters. LeaderWorkerSet Pod templates omit that label. A frontend DCD,
+or any DCD with Kubernetes discovery (the default), also gets a Service with the DCD name after
+dots are replaced by hyphens; for those DCDs the name must also start with a letter. For example,
+a single-node frontend DCD with `metadata.name: model.v1` and explicit `spec.name: frontend`
+gets Service `model-v1`. Without explicit `spec.name`, the defaulter copies `model.v1` into it,
+and the schema rejects the dots. For DCDs owned by a DGD, only creates and updates authenticated
+as the configured Dynamo operator skip these naming checks, so older DGD rollouts can continue.
+Other writes receive the checks even when the DCD has a DGD owner reference. The DGD webhook
+checks the parent graph; see [DGD name limits](dynamo-graph-deployment.mdx#name-limits).
+On update, admission reports only a problem the old DCD did not have, such as a digit-leading
+name when Kubernetes discovery is turned on, so existing DCDs stay updatable and deletable.
 
 ## Spec reference
 

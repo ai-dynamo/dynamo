@@ -24,6 +24,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -114,7 +115,7 @@ func (r *disaggregatedSetResourceReconciler) RestartAnnotations(
 	selection disaggregatedSetSelection,
 ) (map[string]string, error) {
 	ds := newDisaggregatedSetObject()
-	key := types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}
+	key := types.NamespacedName{Name: dynamo.DisaggregatedSetName(dgd), Namespace: dgd.Namespace}
 	if err := r.client.Get(ctx, key, ds); err != nil {
 		if apierrors.IsNotFound(err) {
 			return map[string]string{}, nil

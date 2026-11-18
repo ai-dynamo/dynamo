@@ -109,7 +109,14 @@ func (v *DynamoGraphDeploymentValidator) validate(
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
 	}
-	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha)...)
+	var oldAlpha *nvidiacomv1alpha1.DynamoGraphDeployment
+	if oldDeployment != nil {
+		oldAlpha, err = alphaDynamoGraphDeploymentForValidation(oldDeployment)
+		if err != nil {
+			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
+		}
+	}
+	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha, oldAlpha)...)
 
 	return validation.warnings, invalidDynamoGraphDeploymentError(deployment, allErrs)
 }
@@ -248,11 +255,20 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 
 	// Check on update too: a component can gain a worker hash or a Service.
 	// Skip violations the old object had; components are matched by name, not list index.
-	nameViolations := generatedDynamoGraphDeploymentNameViolations(dgd, grovePathway, v.discoveryBackend)
+	nameViolations := generatedDynamoGraphDeploymentNameViolations(dgd, grovePathway, v.discoveryBackend, features.MustGateFrom(v.ctx).Enabled(features.LWS), v.runtimeVersionSource)
 	if oldDGD != nil && len(nameViolations) > 0 {
-		oldGrovePathway, _ := grovePathwayForDynamoGraphDeployment(groveEnabled, oldDGD)
+		// Provider adoption records the already running pathway; judge both objects on that pathway.
+		oldForNames := oldDGD
+		if oldDGD.Annotations[consts.KubeAnnotationWorkloadProvider] == "" && workloadProvider != "" {
+			oldForNames = oldDGD.DeepCopy()
+			if oldForNames.Annotations == nil {
+				oldForNames.Annotations = map[string]string{}
+			}
+			oldForNames.Annotations[consts.KubeAnnotationWorkloadProvider] = workloadProvider
+		}
+		oldGrovePathway, _ := grovePathwayForDynamoGraphDeployment(groveEnabled, oldForNames)
 		existing := map[generatedNameViolationKey]bool{}
-		for _, violation := range generatedDynamoGraphDeploymentNameViolations(oldDGD, oldGrovePathway, v.discoveryBackend) {
+		for _, violation := range generatedDynamoGraphDeploymentNameViolations(oldForNames, oldGrovePathway, v.discoveryBackend, features.MustGateFrom(v.ctx).Enabled(features.LWS), v.runtimeVersionSource) {
 			existing[violation.key] = true
 		}
 		nameViolations = slices.DeleteFunc(nameViolations, func(violation generatedNameViolation) bool {

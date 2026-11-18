@@ -753,7 +753,7 @@ func (r *dcdWorkloadRenderer) hasExistingLegacyWorkerSelector(
 
 	if r.runtimeConfig.Gate.Enabled(features.LWS) {
 		// Both old and bounded resource names can carry the worker identity during upgrades.
-		lwsNames := []string{leaderWorkerSetNameForWorkload(workloadName)}
+		lwsNames := []string{dynamo.LeaderWorkerSetNameForWorkload(workloadName)}
 		if legacyName := legacyLeaderWorkerSetName(workloadName); legacyName != lwsNames[0] {
 			lwsNames = append(lwsNames, legacyName)
 		}

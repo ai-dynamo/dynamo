@@ -688,26 +688,14 @@ const (
 	leaderWorkerSetRevisionHashLength   = 10
 	leaderWorkerSetRevisionSuffixLength = 2*len("-") + leaderWorkerSetRevisionHashLength
 	maxLegacyLeaderWorkerSetGroupDigits = len("9")
-	maxHashedLeaderWorkerSetGroupDigits = len("999999") // LWS allows up to 1,000,000 replicas.
 	maxLegacyLeaderWorkerSetNameLength  = maxLeaderWorkerSetLabelValueLength - leaderWorkerSetRevisionSuffixLength - maxLegacyLeaderWorkerSetGroupDigits
-	maxHashedLeaderWorkerSetNameLength  = maxLeaderWorkerSetLabelValueLength - leaderWorkerSetRevisionSuffixLength - maxHashedLeaderWorkerSetGroupDigits
 	legacyLeaderWorkerSetNameSuffix     = "-0"
 )
 
 // leaderWorkerSetName chooses a name that fits revision labels at every supported
 // group index and does not collide with the operator ClusterIP service.
 func leaderWorkerSetName(dcd *nvidiacomv1beta1.DynamoComponentDeployment) string {
-	return leaderWorkerSetNameForWorkload(dcd.Name)
-}
-
-// leaderWorkerSetNameForWorkload reserves room for every supported group index.
-// Reconciliation separately preserves existing legacy workloads to avoid upgrade restarts.
-func leaderWorkerSetNameForWorkload(workloadName string) string {
-	legacyName := legacyLeaderWorkerSetName(workloadName)
-	if len(legacyName) <= maxHashedLeaderWorkerSetNameLength {
-		return legacyName
-	}
-	return truncateDNSLabelWithHash(legacyName, maxHashedLeaderWorkerSetNameLength)
+	return dynamo.LeaderWorkerSetNameForWorkload(dcd.Name)
 }
 
 // legacyLeaderWorkerSetName matches the name used by earlier operators.

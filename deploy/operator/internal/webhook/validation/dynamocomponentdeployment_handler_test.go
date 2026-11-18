@@ -40,7 +40,7 @@ func TestDynamoComponentDeploymentHandlerRegisterWithManager(t *testing.T) {
 	t.Log("Register the DCD validation webhook")
 	server := ctrlwebhook.NewServer(ctrlwebhook.Options{})
 	mgr := &fakeManager{scheme: scheme, webhookServer: server}
-	handler := NewDynamoComponentDeploymentHandler(configv1alpha1.DiscoveryBackendKubernetes)
+	handler := NewDynamoComponentDeploymentHandler(configv1alpha1.DiscoveryBackendKubernetes, "")
 	if err := handler.RegisterWithManager(mgr, features.Defaults()); err != nil {
 		t.Fatalf("RegisterWithManager() error = %v", err)
 	}

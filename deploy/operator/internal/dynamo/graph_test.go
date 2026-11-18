@@ -9811,24 +9811,6 @@ func TestGetDCDResourceName(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, workerHash, WorkerHashLength)
 
-	// The rendered Service names and selector values are valid exactly up to 63 characters.
-	for _, tc := range []struct {
-		component, dgdName, workerSuffix string
-		valid                            bool
-	}{
-		{"frontend", strings.Repeat("f", 54), "", true},
-		{"frontend", strings.Repeat("f", 55), "", false},
-		{"worker", strings.Repeat("w", 47), workerHash, true},
-		{"worker", strings.Repeat("w", 48), workerHash, false},
-	} {
-		limit := beta.DeepCopy()
-		limit.Name = tc.dgdName
-		name := GetDCDResourceName(limit, tc.component, tc.workerSuffix)
-		service, err := GenerateComponentService(ComponentServiceParams{ServiceName: name, ComponentType: tc.component})
-		require.NoError(t, err)
-		assert.Equal(t, tc.valid, len(validation.IsDNS1035Label(service.Name)) == 0, service.Name)
-		assert.Equal(t, tc.valid, len(validation.IsValidLabelValue(name)) == 0, name)
-	}
 }
 
 func TestGenerateComponentIngressResources_NormalizeBackendServiceName(t *testing.T) {
