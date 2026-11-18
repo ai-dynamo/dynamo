@@ -5376,7 +5376,7 @@ func checkpointTRTLLMDGDForAdmission(nodeCount int32, scale, roleTemplates, grov
 	worker := betaWorkerComponent(dgd)
 	worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: nodeCount}
 	if scale {
-		worker.Replicas = k8sptr.To(int32(3))
+		worker.Replicas = new(int32(3))
 	}
 	if roleTemplates {
 		setBetaExplicitMultinodeRoleTemplates(worker, nodeCount)
