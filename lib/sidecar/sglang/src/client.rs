@@ -3,8 +3,6 @@
 
 //! Thin sidecar client for SGLang's native `sglang.api.v1.SglangService`.
 
-use tonic_v14 as tonic;
-
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -14,8 +12,9 @@ use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
 use dynamo_backend_common::{BackendError, DynamoError, ErrorType};
-use dynamo_sidecar_common::v14::GrpcChannelPool;
-use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig};
+use dynamo_sidecar_common::{
+    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
+};
 use tokio::time::error::Elapsed;
 use tokio::time::{Instant, timeout_at};
 use tonic::transport::Channel;
@@ -554,19 +553,17 @@ pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
 }
 
 /// For a generate stream: a broken stream maps as in
-/// [`dynamo_sidecar_common::v14::stream_status_to_dynamo`]; a status SGLang
-/// sent keeps this module's mapping.
+/// [`dynamo_sidecar_common::stream_status_to_dynamo`]; a status SGLang sent
+/// keeps this module's mapping.
 pub fn stream_status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
-    if dynamo_sidecar_common::v14::is_broken_stream(&status) {
-        return dynamo_sidecar_common::v14::stream_status_to_dynamo(rpc, status);
+    if dynamo_sidecar_common::is_broken_stream(&status) {
+        return dynamo_sidecar_common::stream_status_to_dynamo(rpc, status);
     }
     status_to_dynamo(rpc, status)
 }
 
 #[cfg(test)]
 mod tests {
-    use tonic_v14 as tonic;
-
     use std::time::Duration;
 
     use dynamo_backend_common::{BackendError, ErrorType};

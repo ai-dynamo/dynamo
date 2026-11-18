@@ -10,9 +10,9 @@
 //! parallelism, KV block sizing, and context length are discovered from the
 //! engine's gRPC metadata RPCs.
 //!
-//! The crate never depends on the SGLang engine. It uses `sglang-api-types`,
-//! `dynamo-backend-common`, `dynamo-llm`, `dynamo-runtime`, `tonic`, `clap`,
-//! and tokio.
+//! The crate never depends on `sglang` or any engine crate. It uses
+//! `dynamo-backend-common`, `dynamo-llm`, `dynamo-runtime`, `tonic`/`prost`,
+//! `clap`, and tokio.
 
 use std::sync::Arc;
 
@@ -27,8 +27,8 @@ mod discovery;
 pub mod engine;
 mod native_http;
 
-/// SGLang's `sglang.api.v1` types from the `sglang-api-types` crate, re-exported
-/// for the Mocker server.
+/// Generated SGLang gRPC types, temporarily exposed for the Mocker server
+/// until SGLang publishes its upstream protocol package.
 #[doc(hidden)]
 pub mod proto;
 mod protocol;
