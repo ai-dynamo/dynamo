@@ -127,7 +127,9 @@ A 1.7 worker checks its own pair when it registers the model. It exits with an e
 - **Setting:** `--router-mode power-of-two` on a worker.
 - **Affected pairing:** 1.7 frontend with 1.5.x or 1.6.x workers.
 
-The mode is removed in 1.7. The frontend routes that WorkerSet with `least-loaded` and logs a warning. Change `--router-mode` when you upgrade the workers, because 1.7 workers reject `power-of-two` at startup.
+A 1.5.x or 1.6.x frontend routes those workers. The mode is removed in 1.7, so a 1.7 frontend does not: the model does not become ready, and the frontend logs `the power-of-two router mode was removed in Dynamo v1.7`.
+
+Before upgrading the frontend, restart those workers with `--router-mode least-loaded`, which picks on the same in-flight request counts. 1.5.x and 1.6.x workers accept it.
 
 ### Rolling Update Behavior
 
