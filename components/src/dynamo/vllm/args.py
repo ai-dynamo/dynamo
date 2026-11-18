@@ -100,6 +100,13 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
         super()._validate_systemone_serial()
         if not self.systemone_serial:
             return
+        if _forward_pass_metrics_enabled(self):
+            setting = (
+                "DYN_FORWARDPASS_METRIC_PORT"
+                if envs.is_set("DYN_FORWARDPASS_METRIC_PORT")
+                else "--fpm-trace/DYN_FPM_TRACE"
+            )
+            raise ValueError(f"--systemone-serial is incompatible with {setting}")
         engine = self.engine_args
         for name, expected in (
             ("max_num_seqs", 1),

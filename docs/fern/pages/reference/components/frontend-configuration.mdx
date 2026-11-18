@@ -15,9 +15,11 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
 
 ## Decision APIs
 
-**Experimental.** `--enable-systemone-api` (environment variable `DYN_ENABLE_SYSTEMONE_API`, default `false`) enables both OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. Supported causal backends are aggregated, single-rank SGLang and vLLM CUDA workers using their serialized scoring profiles. See [Decision Models with SGLang](../../use-cases/decision-model/sglang.md) for SGLang launch commands and [Decision API Reference](../api/decision-apis.md) for wire contracts, usage accounting, and errors.
+**Experimental.** `--enable-systemone-api` (environment variable `DYN_ENABLE_SYSTEMONE_API`, default `false`) enables both OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. Supported causal backends are aggregated, single-rank SGLang and vLLM workers using their qualified serialized scoring profiles. See [Decision Models with SGLang](../../use-cases/decision-model/sglang.md) for SGLang launch commands and [Decision API Reference](../api/decision-apis.md) for wire contracts, usage accounting, and errors.
 
 For a qualified vLLM 0.33.0 causal worker, enable `--systemone-serial` or set `DYN_VLLM_SYSTEMONE_SERIAL=true`, together with `--max-num-seqs=1` and `--logprobs-mode=raw_logprobs`. The worker opt-in defaults to `false`; `--no-systemone-serial` overrides an enabled environment setting. It does not change engine scheduling settings, and incompatible profiles fail worker startup. Without the opt-in, ordinary vLLM workers do not advertise decision capability or change model-discovery checksums for decision support. The frontend flag remains independently required to expose the APIs.
+
+The vLLM profile rejects forward-pass instrumentation enabled by `DYN_FORWARDPASS_METRIC_PORT`, `--fpm-trace`, or `DYN_FPM_TRACE`, including operator-injected settings. Startup also verifies installed cache-accounting source files against the qualified vLLM 0.33.0 release; patches to those files require requalification. Each question generates one internal engine token, so `usage.output_tokens` equals the question count in either public contract. SGLang's non-generating profile reports zero output tokens.
 
 | Environment variable | Default | Maximum | Meaning |
 | --- | --- | --- | --- |
@@ -31,7 +33,7 @@ Decision capacity rejections carry `Retry-After: 1` and the `rate_limit_exceeded
 
 Raising the input-token limit does not raise every execution limit. Model context capacity, input bytes, tokenization work, and the fixed **16 MiB cumulative encoded-text budget** remain independent. Each question charges its rendered prompt bytes once for initial encoding, once for round-trip validation, and once per candidate label. For 26 labels, this budget permits approximately `16 MiB / 28` rendered bytes summed across questions, regardless of the configured token limit. Higher-byte-per-token text reaches this budget sooner. Rejections identify the encoded-text budget; they use HTTP 422 for Jev and HTTP 400 for OpenAI.
 
-The protocol ceiling of 255 candidates is not a guarantee that every tokenizer supports that many choices. Scoring requires distinct single-token labels at the answer position; the effective limit depends on the tokenizer and rendered prompt. Reduce the candidate count or select another model if label validation fails. Request shape and context checks run before scoring inference.
+The protocol ceiling of 255 candidates is not a guarantee that every backend or tokenizer supports that many choices. The vLLM causal profile is limited to 26 candidates using single-letter A–Z labels. Scoring requires distinct single-token labels at the answer position; the effective limit also depends on the tokenizer and rendered prompt. Reduce the candidate count or select another model if label validation fails. Request shape and context checks run before scoring inference.
 
 Question branches in one request share a cache namespace and are pinned to the first branch's worker. Separate API calls receive different random cache namespaces, so repeated inputs do not reuse another request's cached prefixes. Trusted tenant-scoped cross-request reuse is not supported by this profile.
 

@@ -34,21 +34,29 @@ def verify_installed_sources(
     blobs: Iterable[tuple[str, str]], *, root: Path | None = None
 ) -> bool:
     """Inspect installed source without loading scheduler or inference modules."""
+    relative = "vllm/__init__.py"
     try:
         if root is None:
             filename = import_module("vllm").__file__
             if filename is None:
+                logger.warning(
+                    "vLLM decision qualification failed: cache source unavailable: %s",
+                    relative,
+                )
                 return False
             root = Path(filename).resolve().parent.parent
         for relative, expected in blobs:
             if git_blob_id((root / relative).read_bytes()) != expected:
                 logger.warning(
-                    "vLLM decisions disabled: cache source differs from qualified release"
+                    "vLLM decision qualification failed: cache source differs from qualified release: %s",
+                    relative,
                 )
                 return False
         return True
     except (ImportError, OSError, RuntimeError, AttributeError, TypeError, ValueError):
-        logger.warning("vLLM decisions disabled: cache source unavailable")
+        logger.warning(
+            "vLLM decision qualification failed: cache source unavailable: %s", relative
+        )
         return False
 
 
