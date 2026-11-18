@@ -91,7 +91,7 @@ func TestSetupDiscoveryDefault(t *testing.T) {
 				object                  runtime.Object
 			}{
 				{
-					kind: "DynamoGraphDeployment", path: "/validate-nvidia-com-v1beta1-dynamographdeployment",
+					kind: "DynamoGraphDeployment", path: "/validate/nvidia.com/v1beta1/dynamographdeployments",
 					field: "spec.components[0].name",
 					object: &nvidiacomv1beta1.DynamoGraphDeployment{
 						Name: "70b-worker", Namespace: "default",
@@ -102,7 +102,7 @@ func TestSetupDiscoveryDefault(t *testing.T) {
 					},
 				},
 				{
-					kind: "DynamoComponentDeployment", path: "/validate-nvidia-com-v1beta1-dynamocomponentdeployment",
+					kind: "DynamoComponentDeployment", path: "/validate/nvidia.com/v1beta1/dynamocomponentdeployments",
 					field: "metadata.name",
 					object: &nvidiacomv1beta1.DynamoComponentDeployment{
 						Name: "70b-worker", Namespace: "default",
@@ -113,7 +113,7 @@ func TestSetupDiscoveryDefault(t *testing.T) {
 				},
 				{
 					kind: "DynamoGraphDeployment", name: " role templates with opposite metadata override",
-					path: "/validate-nvidia-com-v1beta1-dynamographdeployment", field: "spec.components[0].name",
+					path: "/validate/nvidia.com/v1beta1/dynamographdeployments", field: "spec.components[0].name",
 					object: &nvidiacomv1beta1.DynamoGraphDeployment{
 						Name: "70b-worker", Namespace: "default",
 						Annotations: map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: override},
