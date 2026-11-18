@@ -784,9 +784,10 @@ fn coordinator_with(settings: super::PlacementSettings) -> AffinityCoordinator {
     )
 }
 
-fn balanced() -> AffinityCoordinator {
+fn balanced(rebalance_delta: usize) -> AffinityCoordinator {
     coordinator_with(super::PlacementSettings {
         placement: super::SessionPlacement::Balanced,
+        rebalance_delta: std::num::NonZeroUsize::new(rebalance_delta),
         active_within: Some(Duration::from_secs(super::DEFAULT_SESSION_ACTIVE_SECS)),
     })
 }
@@ -810,7 +811,7 @@ async fn new_session(coordinator: &AffinityCoordinator, id: String) -> Hold {
 #[test]
 fn placement_settings_come_from_the_environment() {
     use super::{PlacementSettings, SessionPlacement};
-    use std::{collections::HashMap, env::VarError};
+    use std::{collections::HashMap, env::VarError, num::NonZeroUsize};
 
     fn parse(vars: &[(&str, &str)]) -> Result<PlacementSettings, anyhow::Error> {
         let vars: HashMap<String, String> = vars
@@ -820,11 +821,12 @@ fn placement_settings_come_from_the_environment() {
         super::placement_settings_from(|name| vars.get(name).cloned().ok_or(VarError::NotPresent))
     }
 
-    // Unset: normal selection, a 60 s activity window.
+    // Unset: normal selection, no re-binding, a 60 s activity window.
     assert_eq!(
         parse(&[]).unwrap(),
         PlacementSettings {
             placement: SessionPlacement::Kv,
+            rebalance_delta: None,
             active_within: Some(Duration::from_secs(60)),
         }
     );
@@ -832,6 +834,7 @@ fn placement_settings_come_from_the_environment() {
     assert_eq!(
         parse(&[
             ("DYN_ROUTER_SESSION_AFFINITY_PLACEMENT", "kv"),
+            ("DYN_ROUTER_SESSION_AFFINITY_REBALANCE_DELTA", "0"),
             ("DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS", "60"),
         ])
         .unwrap(),
@@ -840,16 +843,19 @@ fn placement_settings_come_from_the_environment() {
     assert_eq!(
         parse(&[
             ("DYN_ROUTER_SESSION_AFFINITY_PLACEMENT", " balanced "),
+            ("DYN_ROUTER_SESSION_AFFINITY_REBALANCE_DELTA", "2"),
             ("DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS", "0"),
         ])
         .unwrap(),
         PlacementSettings {
             placement: SessionPlacement::Balanced,
+            rebalance_delta: NonZeroUsize::new(2),
             active_within: None,
         }
     );
     for (name, value) in [
         ("DYN_ROUTER_SESSION_AFFINITY_PLACEMENT", "random"),
+        ("DYN_ROUTER_SESSION_AFFINITY_REBALANCE_DELTA", "-1"),
         ("DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS", "1.5"),
     ] {
         let error = parse(&[(name, value)]).unwrap_err();
@@ -863,7 +869,7 @@ fn placement_settings_come_from_the_environment() {
 async fn balanced_placement_counts_planned_sessions_before_they_commit() {
     use std::collections::HashMap;
 
-    let coordinator = balanced();
+    let coordinator = balanced(0);
     let idle = idle_workers(&[1, 2, 3]);
     let mut holds = Vec::new();
     let mut placed: HashMap<u64, usize> = HashMap::new();
@@ -909,7 +915,7 @@ async fn balanced_placement_counts_planned_sessions_before_they_commit() {
 async fn balanced_placement_spreads_concurrent_new_sessions() {
     use std::collections::HashMap;
 
-    let coordinator = balanced();
+    let coordinator = balanced(0);
     let idle = idle_workers(&[1, 2, 3]);
     let tasks = (0..30).map(|i| {
         let coordinator = coordinator.clone();
@@ -937,6 +943,7 @@ async fn live_sessions_follow_the_activity_window() {
     let coordinator = coordinator_with(super::PlacementSettings {
         placement: super::SessionPlacement::Balanced,
         active_within: Some(Duration::from_secs(2)),
+        ..Default::default()
     });
     let idle = new_session(&coordinator, "idle".into()).await;
     drop(coordinator.commit(idle, target(1, Some(0))).unwrap());
@@ -953,4 +960,44 @@ async fn live_sessions_follow_the_activity_window() {
             .unwrap(),
         Some(target(1, Some(0)))
     );
+}
+
+/// A bound session moves only when its worker, not counting it, has at least
+/// `delta` more live sessions than the least-loaded other eligible worker.
+#[tokio::test(start_paused = true)]
+async fn rebind_only_past_the_delta() {
+    async fn bind_live(
+        coordinator: &AffinityCoordinator,
+        workers: &[u64],
+    ) -> Vec<dynamo_session_affinity::host::AffinityLease> {
+        let mut leases = Vec::new();
+        for (i, worker) in workers.iter().enumerate() {
+            let hold = new_session(coordinator, format!("live-{i}")).await;
+            leases.push(coordinator.commit(hold, target(*worker, Some(0))).unwrap());
+        }
+        leases
+    }
+
+    let loads = idle_workers(&[1, 2, 3]);
+    // 3 / 1 / 1 live sessions: a session on worker 1 sees 2 others vs 1.
+    let off = balanced(0);
+    let _off = bind_live(&off, &[1, 1, 1, 2, 3]).await;
+    assert!(!off.should_rebind(1, &loads), "0 disables re-binding");
+
+    let on = balanced(1);
+    let _on = bind_live(&on, &[1, 1, 1, 2, 3]).await;
+    assert!(on.should_rebind(1, &loads));
+    assert!(!on.should_rebind(2, &loads), "no other session on worker 2");
+    assert!(
+        !on.should_rebind(9, &loads),
+        "an ineligible worker is left alone"
+    );
+    assert!(
+        !on.should_rebind(1, &idle_workers(&[1])),
+        "no other eligible worker"
+    );
+
+    let strict = balanced(2);
+    let _strict = bind_live(&strict, &[1, 1, 1, 2, 3]).await;
+    assert!(!strict.should_rebind(1, &loads));
 }

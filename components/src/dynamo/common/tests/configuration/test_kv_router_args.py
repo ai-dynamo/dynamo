@@ -1003,6 +1003,7 @@ def test_session_affinity_max_entries_cli_and_environment(
 
 _PLACEMENT_ENV = (
     "DYN_ROUTER_SESSION_AFFINITY_PLACEMENT",
+    "DYN_ROUTER_SESSION_AFFINITY_REBALANCE_DELTA",
     "DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS",
 )
 
@@ -1020,30 +1021,37 @@ def test_session_affinity_placement_cli_and_environment(
         monkeypatch.delenv(name, raising=False)
     config = _parse_frontend([])
     config.validate()
-    # Defaults keep today's behavior: normal selection.
+    # Defaults keep today's behavior: normal selection, no re-binding.
     assert config.session_affinity_placement == "kv"
+    assert config.session_affinity_rebalance_delta == 0
     assert config.session_affinity_active_secs == 60
 
     monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_PLACEMENT", "balanced")
+    monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_REBALANCE_DELTA", "2")
     monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS", "0")
     config = _parse_frontend([])
     assert config.session_affinity_placement == "balanced"
+    assert config.session_affinity_rebalance_delta == 2
     assert config.session_affinity_active_secs == 0
 
     config = _parse_frontend(
         [
             "--router-session-affinity-placement",
             "kv",
+            "--router-session-affinity-rebalance-delta",
+            "1",
             "--router-session-affinity-active-secs",
             "30",
         ]
     )
     config.validate()
     assert config.session_affinity_placement == "kv"
+    assert config.session_affinity_rebalance_delta == 1
     assert config.session_affinity_active_secs == 30
     # Exported to the environment by the frontend, not advertised on worker cards.
     for field in (
         "session_affinity_placement",
+        "session_affinity_rebalance_delta",
         "session_affinity_active_secs",
     ):
         assert field not in config.router_kwargs()
@@ -1056,9 +1064,13 @@ def test_session_affinity_placement_rejects_invalid_values(
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(SystemExit):
         _parse_frontend(["--router-session-affinity-placement", "random"])
-    config = _parse_frontend(["--router-session-affinity-active-secs", "-1"])
-    with pytest.raises(ValueError, match="router-session-affinity-active-secs"):
-        config.validate()
+    for flag in (
+        "--router-session-affinity-rebalance-delta",
+        "--router-session-affinity-active-secs",
+    ):
+        config = _parse_frontend([flag, "-1"])
+        with pytest.raises(ValueError, match=flag.lstrip("-")):
+            config.validate()
 
 
 @pytest.mark.parametrize("ttl", [0, 31_536_001])

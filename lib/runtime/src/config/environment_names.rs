@@ -910,6 +910,13 @@ pub mod router {
     /// `--router-session-affinity-placement` here.
     pub const DYN_ROUTER_SESSION_AFFINITY_PLACEMENT: &str = "DYN_ROUTER_SESSION_AFFINITY_PLACEMENT";
 
+    /// Re-bind a bound session at a new decode or aggregated turn when its worker, not
+    /// counting the session, has at least this many more live sessions than the
+    /// least-loaded eligible worker; unset or 0 keeps every binding. The Python frontend
+    /// exports `--router-session-affinity-rebalance-delta` here.
+    pub const DYN_ROUTER_SESSION_AFFINITY_REBALANCE_DELTA: &str =
+        "DYN_ROUTER_SESSION_AFFINITY_REBALANCE_DELTA";
+
     /// Session placement counts a binding as a live session while a request holds it or
     /// for this many seconds after its last request (default 60; 0 = every unexpired
     /// binding). The Python frontend exports `--router-session-affinity-active-secs` here.

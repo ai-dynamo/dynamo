@@ -105,6 +105,7 @@ class RouterConfigBase(ConfigBase):
     session_affinity_mode: str
     session_affinity_max_entries: int
     session_affinity_placement: str
+    session_affinity_rebalance_delta: int
     session_affinity_active_secs: int
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
@@ -345,11 +346,31 @@ class RouterArgGroup(ArgGroup):
             )
             add_argument(
                 g,
+                flag_name="--router-session-affinity-rebalance-delta",
+                env_var="DYN_ROUTER_SESSION_AFFINITY_REBALANCE_DELTA",
+                default=0,
+                help=(
+                    "Re-bind sessions at turn boundaries in KV routing: when a bound "
+                    "session's next decode or aggregated turn arrives and its worker, "
+                    "not counting the session, has at least this many more live "
+                    "sessions than the least-loaded eligible worker, the session moves "
+                    "to the worker with the fewest live sessions. The moved turn does "
+                    "not reuse the old worker's prefix cache. 0 (default) keeps every "
+                    "binding. Has no effect unless --router-session-affinity-ttl-secs "
+                    "is set. This is exported as "
+                    "DYN_ROUTER_SESSION_AFFINITY_REBALANCE_DELTA."
+                ),
+                arg_type=int,
+                dest="session_affinity_rebalance_delta",
+                env=self.env,
+            )
+            add_argument(
+                g,
                 flag_name="--router-session-affinity-active-secs",
                 env_var="DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS",
                 default=DEFAULT_SESSION_AFFINITY_ACTIVE_SECS,
                 help=(
-                    "For balanced placement, a session binding counts as "
+                    "For balanced placement and re-binding, a session binding counts as "
                     "a live session while a request holds it or for this many seconds "
                     "after its last request; 0 counts every unexpired binding. This is "
                     "exported as DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS."
@@ -441,6 +462,7 @@ class WorkerRouterConfig(RouterConfigBase, KvRouterConfigBase):
     enforce_disagg: bool = False
     session_affinity_max_entries: int = DEFAULT_SESSION_AFFINITY_MAX_ENTRIES
     session_affinity_placement: str = DEFAULT_SESSION_AFFINITY_PLACEMENT
+    session_affinity_rebalance_delta: int = 0
     session_affinity_active_secs: int = DEFAULT_SESSION_AFFINITY_ACTIVE_SECS
 
 

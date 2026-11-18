@@ -576,16 +576,17 @@ A session binds to the worker its first request is dispatched to, and by default
 normal selection picks that worker. Normal selection sees only requests in flight, so it cannot
 see sessions that are between turns. When many sessions start together, one worker can receive
 a large share of them, for example a worker that is slow to finish its first requests, and the
-bindings keep that skew for the rest of each session. An opt-in KV-mode setting addresses this
+bindings keep that skew for the rest of each session. Two opt-in KV-mode settings address this
 with router-local state only:
 
 | Option | Behavior |
 |---|---|
 | `--router-session-affinity-placement balanced` | A session with no binding starts on the eligible worker with the fewest live sessions, then the fewest active requests, then the fewest active blocks; ties are random. Sessions that are planned but not yet dispatched count, so a concurrent burst spreads evenly. Selection still picks the data-parallel rank. |
+| `--router-session-affinity-rebalance-delta N` | At a bound session's next decode or aggregated turn, if its worker, not counting the session, has at least `N` more live sessions than the least-loaded eligible worker, the binding is dropped and the session moves to the worker with the fewest live sessions. The moved turn loses the old worker's prefix cache: a disaggregated decode receives the full prefix from prefill, and an aggregated worker recomputes it. Prefill turns keep their binding. |
 
 A live session is a binding with a request in flight or one released within
 `--router-session-affinity-active-secs` (default `60`; `0` counts every unexpired binding).
-The default, `kv`, keeps the behavior described above. Requests with an explicit worker,
+The defaults, `kv` and `0`, keep the behavior described above. Requests with an explicit worker,
 routes that already carry a previewed worker, and requests with their own worker policy (LoRA)
 keep normal selection. Each frontend counts the bindings it holds, including replicated ones, and
 its own planned sessions.

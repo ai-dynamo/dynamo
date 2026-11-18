@@ -563,7 +563,7 @@ impl RoutingHost {
         (start..end).contains(&dp_rank)
     }
 
-    /// The workers a placement decision may pick for `request`, with
+    /// The workers a placement or re-binding decision may pick for `request`, with
     /// this router's booked `(active requests, active blocks)` on each. `None` keeps
     /// normal selection: the host has no KV load signal, or the request carries its
     /// own worker policy (e.g. LoRA).
@@ -735,13 +735,28 @@ impl RoutingHost {
             operation = reacquire().await?;
         }
         let mut target = operation.target().map(from_table);
-        if place_new_sessions
-            && explicit.is_none()
-            && target.is_none()
-            && affinity.placement().placement == SessionPlacement::Balanced
-            && let Some(loads) = self.placement_loads(request.content())
-        {
-            target = affinity.place_by_live_sessions(&operation, &loads);
+        if place_new_sessions && explicit.is_none() {
+            let settings = affinity.placement();
+            if settings.rebalance_delta.is_some()
+                && phase != RequestPhase::Prefill
+                && let Some(bound) = target
+                && let Some(loads) = self.placement_loads(request.content())
+                && affinity.should_rebind(bound.worker_id, &loads)
+            {
+                // Turn-boundary re-binding: drop the binding and place the session again;
+                // dispatch commits the new binding.
+                operation.invalidate();
+                operation = reacquire().await?;
+                target = operation.target().map(from_table);
+                if target.is_none() {
+                    target = affinity.place_by_live_sessions(&operation, &loads);
+                }
+            } else if target.is_none()
+                && settings.placement == SessionPlacement::Balanced
+                && let Some(loads) = self.placement_loads(request.content())
+            {
+                target = affinity.place_by_live_sessions(&operation, &loads);
+            }
         }
         match select(target).await {
             Ok(selection) => Ok((selection, Some(operation))),

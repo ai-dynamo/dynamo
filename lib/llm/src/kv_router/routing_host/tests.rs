@@ -6157,6 +6157,7 @@ async fn balanced_placement_starts_new_sessions_on_the_fewest_live_sessions() {
     let settings = crate::session_affinity::PlacementSettings {
         placement: SessionPlacement::Balanced,
         active_within: Some(Duration::from_secs(60)),
+        ..Default::default()
     };
     let (router, runtime) = router_with_placement(&[1, 2, 3], settings).await;
     // Idle between turns: invisible to load, but live sessions.
@@ -6204,6 +6205,51 @@ async fn default_placement_leaves_new_sessions_to_normal_selection() {
     );
 
     drop(hold);
+    drop(router);
+    runtime.shutdown();
+}
+
+/// A bound session moves at a decode turn only when its worker has at least
+/// `delta` more other live sessions than the least-loaded worker; prefill turns
+/// keep the binding, and the move is committed by the new dispatch.
+#[rstest::rstest]
+#[case::off(0, false)]
+#[case::past_the_delta(1, true)]
+#[case::below_the_delta(2, false)]
+#[tokio::test]
+#[serial_test::serial]
+async fn rebinding_moves_a_bound_session_only_past_the_delta(
+    #[case] delta: usize,
+    #[case] moves: bool,
+) {
+    let settings = crate::session_affinity::PlacementSettings {
+        rebalance_delta: std::num::NonZeroUsize::new(delta),
+        active_within: Some(Duration::from_secs(60)),
+        ..Default::default()
+    };
+    let (router, runtime) = router_with_placement(&[1, 2, 3], settings).await;
+    // Worker 1 holds s0 and two other live sessions; workers 2 and 3 one each.
+    bind_sessions(
+        &router,
+        &[("s0", 1), ("s1", 1), ("s2", 1), ("s3", 2), ("s4", 3)],
+    )
+    .await;
+
+    let (prefill, prefill_hold) = select_turn(&router, "s0", RequestPhase::Prefill).await;
+    assert_eq!(prefill, 1, "prefill never re-binds");
+    assert!(matches!(prefill_hold, Some(Hold::Bound { .. })));
+    drop(prefill_hold);
+
+    let (decode, decode_hold) = select_turn(&router, "s0", RequestPhase::Decode).await;
+    if moves {
+        assert!([2, 3].contains(&decode), "{decode}");
+        assert!(matches!(decode_hold, Some(Hold::Initialize(_))));
+    } else {
+        assert_eq!(decode, 1);
+        assert!(matches!(decode_hold, Some(Hold::Bound { .. })));
+    }
+
+    drop(decode_hold);
     drop(router);
     runtime.shutdown();
 }

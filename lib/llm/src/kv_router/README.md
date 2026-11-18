@@ -57,7 +57,8 @@ What a KV request does in `RoutingHost::generate` (call order):
 1. validate request-supplied worker pins against discovery
 2. decode or aggregated: start, or resume after migration, the classifier lifecycle
 3. affinity: acquire the session's slot (hard mode pins the worker; soft mode prefers it);
-   balanced placement plans a new session's worker
+   balanced placement plans a new session's worker, and turn-boundary re-binding may move a
+   bound session first
 4. KvRouter → SelectionCore: select and book the worker (Lease admission)
 5. track: RequestGuard takes ownership of the booking and records the routing decision
 6. PushRouter: dispatch to the worker, stamped with `elapsed_since_arrival_ms` (time since the

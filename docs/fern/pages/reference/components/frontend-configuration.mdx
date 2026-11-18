@@ -166,9 +166,17 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
   Environment variable: `DYN_ROUTER_SESSION_AFFINITY_PLACEMENT`
 </ParamField>
 
+<ParamField path="--router-session-affinity-rebalance-delta" type="integer" default="0">
+  Re-bind a bound session at its next decode or aggregated turn when its worker, not counting the
+  session, has at least this many more live sessions than the least-loaded eligible worker. `0`
+  keeps every binding. Has no effect unless `--router-session-affinity-ttl-secs` is set.
+
+  Environment variable: `DYN_ROUTER_SESSION_AFFINITY_REBALANCE_DELTA`
+</ParamField>
+
 <ParamField path="--router-session-affinity-active-secs" type="integer" default="60">
-  For balanced placement, count a binding as a live session while a request holds it or for
-  this many seconds after its last request. `0` counts every unexpired binding.
+  For balanced placement and re-binding, count a binding as a live session while a request holds
+  it or for this many seconds after its last request. `0` counts every unexpired binding.
 
   Environment variable: `DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS`
 </ParamField>

@@ -8,7 +8,7 @@
 //! stream), and the runtime event plane that replicates bindings between
 //! frontends.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, num::NonZeroUsize, sync::Arc, time::Duration};
 
 #[cfg(test)]
 use super::replica_sync::SessionAffinityUpdate;
@@ -96,11 +96,15 @@ impl std::str::FromStr for SessionPlacement {
     }
 }
 
-/// Where new sessions start. The default changes nothing: normal selection
-/// places new sessions.
+/// Where new sessions start and when bound sessions move. The default changes
+/// nothing: normal selection places new sessions and bindings never move.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PlacementSettings {
     pub placement: SessionPlacement,
+    /// Re-bind a bound session at a new turn when its worker, not counting the
+    /// session, has at least this many more live sessions than the least-loaded
+    /// eligible worker. `None` keeps every live binding.
+    pub rebalance_delta: Option<NonZeroUsize>,
     /// A binding counts as a live session while a request holds it or for this
     /// long after its last request; `None` counts every unexpired binding.
     pub active_within: Option<Duration>,
@@ -188,6 +192,45 @@ impl AffinityCoordinator {
             "session affinity: placed a session by live sessions"
         );
         Some(target)
+    }
+
+    /// Whether a session bound to `bound_worker` should move at this turn: its
+    /// worker, not counting the session, has at least the configured delta more live
+    /// sessions than the least-loaded other eligible worker. In-flight requests alone
+    /// are not a stable signal here: a session in prefill or in a KV handoff has no
+    /// decode request, so comparing them re-binds a large share of turns. A bound
+    /// worker that is not eligible is left to the normal invalid-target handling.
+    pub(crate) fn should_rebind(&self, bound_worker: u64, loads: &WorkerLoads) -> bool {
+        let Some(delta) = self.inner.placement.rebalance_delta else {
+            return false;
+        };
+        if !loads.contains_key(&bound_worker) {
+            return false;
+        }
+        let sessions = {
+            let _placing = self.inner.placement_lock.lock();
+            self.live_sessions()
+        };
+        let live = |worker_id: &u64| sessions.get(worker_id).copied().unwrap_or(0);
+        let Some(least) = loads
+            .keys()
+            .filter(|worker_id| **worker_id != bound_worker)
+            .map(live)
+            .min()
+        else {
+            return false;
+        };
+        let bound = live(&bound_worker).saturating_sub(1);
+        let rebind = bound >= least.saturating_add(delta.get());
+        if rebind {
+            tracing::debug!(
+                bound_worker,
+                bound_live_sessions = bound,
+                least_live_sessions = least,
+                "session affinity: re-binding a session at a turn boundary"
+            );
+        }
+        rebind
     }
 
     /// Live sessions per worker: bindings with a request in flight or released

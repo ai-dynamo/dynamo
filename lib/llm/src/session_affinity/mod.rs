@@ -10,7 +10,7 @@ use dynamo_runtime::{
     component::Client,
     config::environment_names::router::{
         DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS, DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES,
-        DYN_ROUTER_SESSION_AFFINITY_PLACEMENT,
+        DYN_ROUTER_SESSION_AFFINITY_PLACEMENT, DYN_ROUTER_SESSION_AFFINITY_REBALANCE_DELTA,
     },
     pipeline::Error,
 };
@@ -42,8 +42,8 @@ pub(crate) fn affinity_config(
 /// Default activity window for counting live sessions (`--router-session-affinity-active-secs`).
 pub(crate) const DEFAULT_SESSION_ACTIVE_SECS: u64 = 60;
 
-/// Placement settings from `DYN_ROUTER_SESSION_AFFINITY_PLACEMENT` and
-/// `DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS`.
+/// Placement settings from `DYN_ROUTER_SESSION_AFFINITY_PLACEMENT`,
+/// `DYN_ROUTER_SESSION_AFFINITY_REBALANCE_DELTA` and `DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS`.
 pub(crate) fn placement_settings_from_env() -> Result<PlacementSettings, Error> {
     placement_settings_from(|name| std::env::var(name))
 }
@@ -57,10 +57,13 @@ fn placement_settings_from(
         })?,
         None => SessionPlacement::default(),
     };
+    let rebalance_delta = env_count::<usize>(&var, DYN_ROUTER_SESSION_AFFINITY_REBALANCE_DELTA)?
+        .and_then(NonZeroUsize::new);
     let active_secs = env_count::<u64>(&var, DYN_ROUTER_SESSION_AFFINITY_ACTIVE_SECS)?
         .unwrap_or(DEFAULT_SESSION_ACTIVE_SECS);
     Ok(PlacementSettings {
         placement,
+        rebalance_delta,
         active_within: (active_secs > 0).then(|| Duration::from_secs(active_secs)),
     })
 }
