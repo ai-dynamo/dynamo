@@ -19,9 +19,10 @@
 //! `services::selection`, and `test_utils` still exist and mount their blocks from their own
 //! files.
 //!
-//! Gone with no replacement here: the dummy shared-cache server (`services::shared_cache`) and
+//! Gone with no replacement here: the dummy shared-cache server (`services::shared_cache`);
 //! `protocols::ActiveLoad`, which lives in `dynamo_llm::kv_router::ActiveLoad` (this crate cannot
-//! depend on `dynamo-llm`).
+//! depend on `dynamo-llm`); and `protocols::RouterRequest` and `protocols::RouterResponse`, the
+//! wire of the removed `AsyncEngine` impl on `dynamo_llm::kv_router::KvRouter`.
 
 /// Pre-split `dynamo_kv_router::conditional_disagg`; its items live in `dynamo_worker_selection` now.
 pub mod conditional_disagg {
@@ -378,7 +379,6 @@ pub mod indexer {
     pub type ApproximateLruTask = dynamo_kv_indexer::ApproximateLruTask;
     pub use dynamo_kv_indexer::ApproximateRetentionConfig;
     pub use dynamo_kv_indexer::BranchShardedIndexer;
-    pub use dynamo_kv_indexer::CkfMutationKind;
     #[deprecated(
         since = "1.8.0",
         note = "moved to dynamo_kv_indexer::ContainsWorkerBlockRequest; removed in 1.10.0"
@@ -513,8 +513,6 @@ pub mod indexer {
         note = "moved to dynamo_kv_indexer::LowerTierQueryOptions; removed in 1.10.0"
     )]
     pub type LowerTierQueryOptions = dynamo_kv_indexer::LowerTierQueryOptions;
-    pub use dynamo_kv_indexer::METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED;
-    pub use dynamo_kv_indexer::METRIC_CKF_MUTATION_UNKNOWN_REMOVE;
     pub use dynamo_kv_indexer::METRIC_EVENT_CLEARED;
     pub use dynamo_kv_indexer::METRIC_EVENT_REMOVED;
     pub use dynamo_kv_indexer::METRIC_EVENT_STORED;
@@ -543,7 +541,6 @@ pub mod indexer {
         note = "moved to dynamo_kv_indexer::MatchRequest; removed in 1.10.0"
     )]
     pub type MatchRequest = dynamo_kv_indexer::MatchRequest;
-    pub use dynamo_kv_indexer::MaybeError;
     #[cfg(feature = "bench")]
     pub use dynamo_kv_indexer::ObservationError;
     #[cfg(feature = "bench")]
@@ -712,13 +709,7 @@ pub mod kv_hints {
 
 /// Pre-split `dynamo_kv_router::protocols`; its items live in `dynamo_kv_events`, `dynamo_kv_hashing`, `dynamo_slot_tracker`, `dynamo_scheduler`, `dynamo_kv_indexer`, `dynamo_worker_selection`, `dynamo_router_protocol`, `dynamo_kv_hints` and `dynamo_session_affinity` now.
 pub mod protocols {
-    // Owner: dynamo_kv_events (18), dynamo_kv_hashing (17), dynamo_slot_tracker (12), dynamo_scheduler (8), dynamo_kv_indexer (7), dynamo_worker_selection (4), dynamo_router_protocol (3), dynamo_kv_hints (2), dynamo_session_affinity (1)
-    #[deprecated(
-        since = "1.8.0",
-        note = "moved to dynamo_slot_tracker::ActiveBlockEvent; removed in 1.10.0"
-    )]
-    pub type ActiveBlockEvent = dynamo_slot_tracker::ActiveBlockEvent;
-    pub use dynamo_slot_tracker::ActiveBlockEventData;
+    // Owner: dynamo_kv_events (18), dynamo_kv_hashing (17), dynamo_slot_tracker (12), dynamo_scheduler (6), dynamo_kv_indexer (7), dynamo_worker_selection (4), dynamo_router_protocol (3), dynamo_kv_hints (2), dynamo_session_affinity (1)
     #[deprecated(
         since = "1.8.0",
         note = "moved to dynamo_slot_tracker::ActiveSequenceEvent; removed in 1.10.0"
@@ -801,12 +792,6 @@ pub mod protocols {
     pub type PotentialLoad = dynamo_scheduler::PotentialLoad;
     #[deprecated(
         since = "1.8.0",
-        note = "moved to dynamo_slot_tracker::PrefillEvent; removed in 1.10.0"
-    )]
-    pub type PrefillEvent = dynamo_slot_tracker::PrefillEvent;
-    pub use dynamo_slot_tracker::PrefillEventData;
-    #[deprecated(
-        since = "1.8.0",
         note = "moved to dynamo_slot_tracker::PrefillLoadHint; removed in 1.10.0"
     )]
     pub type PrefillLoadHint = dynamo_slot_tracker::PrefillLoadHint;
@@ -851,8 +836,6 @@ pub mod protocols {
         note = "moved to dynamo_kv_indexer::RouterHintSourceMetadata; removed in 1.10.0"
     )]
     pub type RouterHintSourceMetadata = dynamo_kv_indexer::RouterHintSourceMetadata;
-    pub use dynamo_scheduler::RouterRequest;
-    pub use dynamo_scheduler::RouterResponse;
     #[deprecated(
         since = "1.8.0",
         note = "moved to dynamo_scheduler::RoutingConstraints; removed in 1.10.0"
@@ -966,12 +949,6 @@ pub mod sequences {
     /// Pre-split `dynamo_kv_router::sequences::single`; its items live in `dynamo_slot_tracker` now.
     pub mod single {
         // Owner: dynamo_slot_tracker (3)
-        #[deprecated(
-            since = "1.8.0",
-            note = "moved to dynamo_slot_tracker::ActiveSequences; removed in 1.10.0"
-        )]
-        pub type ActiveSequences = dynamo_slot_tracker::ActiveSequences;
-        pub use dynamo_slot_tracker::DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
         pub use dynamo_slot_tracker::RequestId;
     }
 
@@ -987,13 +964,7 @@ pub mod sequences {
         pub use dynamo_slot_tracker::WorkerTopologyError;
     }
 
-    #[deprecated(
-        since = "1.8.0",
-        note = "moved to dynamo_slot_tracker::ActiveSequences; removed in 1.10.0"
-    )]
-    pub type ActiveSequences = dynamo_slot_tracker::ActiveSequences;
     pub use dynamo_slot_tracker::ActiveSequencesMultiWorker;
-    pub use dynamo_slot_tracker::DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
     pub use dynamo_slot_tracker::LifecycleMutationOutcome;
     #[deprecated(
         since = "1.8.0",
@@ -1109,11 +1080,6 @@ pub use sequences::{multi_worker as multi_worker_sequence, single as sequence};
 
 // Root re-exports of the pre-split lib.rs.
 // Owner: dynamo_scheduler (22), dynamo_kv_indexer (20), dynamo_slot_tracker (11), dynamo_router_protocol (8), dynamo_worker_selection (5), dynamo_kv_events (2), dynamo_kv_hashing (2), dynamo_admission (1), dynamo_kv_hints (1), dynamo_kv_router (1)
-#[deprecated(
-    since = "1.8.0",
-    note = "moved to dynamo_slot_tracker::ActiveSequences; removed in 1.10.0"
-)]
-pub type ActiveSequences = dynamo_slot_tracker::ActiveSequences;
 #[allow(deprecated)]
 pub use dynamo_kv_indexer::AnchorAwareBranchShardedIndexer;
 pub use dynamo_slot_tracker::ActiveSequencesMultiWorker;
@@ -1169,7 +1135,6 @@ pub type LowerTierContinuation = dynamo_kv_indexer::LowerTierContinuation;
     note = "moved to dynamo_kv_indexer::LowerTierIndexer; removed in 1.10.0"
 )]
 pub type LowerTierIndexer = dynamo_kv_indexer::LowerTierIndexer;
-pub use dynamo_kv_indexer::MaybeError;
 pub use dynamo_kv_indexer::NodeId;
 pub use dynamo_slot_tracker::NoopSequencePublisher;
 #[deprecated(

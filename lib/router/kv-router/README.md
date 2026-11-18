@@ -80,7 +80,6 @@ Other features:
 
 - `metrics`: Prometheus metrics for router internals
 - `bench`: internal benchmarking helpers
-- `profile`: keeps hot indexer functions un-inlined for profiling
 - `testing`: test-only hooks consumed by dependent crates' tests; never enable in release
 
 ## Testing the Services
