@@ -686,7 +686,6 @@ impl Discovery for KVStoreDiscovery {
         };
 
         // The identity record goes first, so other workers' conflict checks see this card.
-        // `created_identity_record` is set only when this call created it, for cleanup.
         let mut created_identity_record = None;
         if let Some((record_key, identity)) = Self::model_identity_record(&instance)? {
             let identities = self
