@@ -465,16 +465,9 @@ func generatedDynamoGraphDeploymentNameViolations(
 		})
 	}
 
-	// Provider controllers create headless Services even without Kubernetes discovery.
-	if grovePathway {
-		pcsName := dynamo.PCSNameForDGD(dgd, (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController)
-		violations = append(violations, generatedHeadlessServiceNameViolations(field.NewPath("metadata", "name"), pcsName+"-0", "Grove PodCliqueSet headless Service name")...)
-	}
 	disaggregatedSet := dgd.Annotations[consts.KubeAnnotationWorkloadProvider] == consts.WorkloadProviderDisaggregatedSet ||
 		(!grovePathway && dgd.Annotations[consts.KubeAnnotationWorkloadProvider] == "" && strings.EqualFold(dgd.Annotations[consts.KubeAnnotationEnableDisaggregatedSet], "true"))
-	if disaggregatedSet {
-		violations = append(violations, generatedHeadlessServiceNameViolations(field.NewPath("metadata", "name"), dynamo.DisaggregatedSetName(dgd), "DisaggregatedSet child Service prefix")...)
-	}
+	violations = append(violations, generatedProviderHeadlessServiceNameViolations(dgd, grovePathway, disaggregatedSet)...)
 
 	// A stable placeholder compares name budgets without treating every new worker hash as a new rule.
 	workerHashPlaceholder := strings.Repeat("0", dynamo.WorkerHashLength)
@@ -533,6 +526,20 @@ func generatedDynamoGraphDeploymentNameViolations(
 				})
 			}
 		}
+	}
+	return violations
+}
+
+// generatedProviderHeadlessServiceNameViolations checks names created independently of discovery.
+// dgd must not be nil.
+func generatedProviderHeadlessServiceNameViolations(dgd *nvidiacomv1beta1.DynamoGraphDeployment, grovePathway, disaggregatedSet bool) []generatedNameViolation {
+	var violations []generatedNameViolation
+	if grovePathway {
+		pcsName := dynamo.PCSNameForDGD(dgd, (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController)
+		violations = append(violations, generatedHeadlessServiceNameViolations(field.NewPath("metadata", "name"), pcsName+"-0", "Grove PodCliqueSet headless Service name")...)
+	}
+	if disaggregatedSet {
+		violations = append(violations, generatedHeadlessServiceNameViolations(field.NewPath("metadata", "name"), dynamo.DisaggregatedSetName(dgd), "DisaggregatedSet child Service prefix")...)
 	}
 	return violations
 }

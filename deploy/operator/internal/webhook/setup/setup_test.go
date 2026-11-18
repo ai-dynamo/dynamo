@@ -130,14 +130,16 @@ func TestSetupDiscoveryDefault(t *testing.T) {
 					tc.object.GetObjectKind().SetGroupVersionKind(gvk)
 					raw, err := json.Marshal(tc.object)
 					require.NoError(t, err)
-					body, err := json.Marshal(admissionv1.AdmissionReview{
-						TypeMeta: metav1.TypeMeta{APIVersion: "admission.k8s.io/v1", Kind: "AdmissionReview"},
+					reviewRequest := admissionv1.AdmissionReview{
 						Request: &admissionv1.AdmissionRequest{
 							UID: "discovery-default", Operation: admissionv1.Create, Namespace: "default",
 							Kind:   metav1.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind},
 							Object: runtime.RawExtension{Raw: raw},
 						},
-					})
+					}
+					reviewRequest.APIVersion = "admission.k8s.io/v1"
+					reviewRequest.Kind = "AdmissionReview"
+					body, err := json.Marshal(reviewRequest)
 					require.NoError(t, err)
 					request := httptest.NewRequest(http.MethodPost, tc.path, bytes.NewReader(body))
 					request.Header.Set("Content-Type", "application/json")

@@ -18,9 +18,10 @@
 package validation
 
 import (
+	"strings"
+
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"strings"
 )
 
 // validateDynamoGraphDeploymentV1alpha1 validates dgd. dgd must not be nil; oldDGD is nil on create.
