@@ -36,7 +36,10 @@ import (
 )
 
 func TestDynamoGraphDeploymentHandlerValidateCreate(t *testing.T) {
-	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "system:serviceaccount:dynamo:dynamo-operator")
+	handler := NewDynamoGraphDeploymentHandler(
+		newGroveTopologyTestManager(t),
+		"system:serviceaccount:dynamo:dynamo-operator",
+	)
 	dgd := newBetaDGDForValidation()
 
 	warnings, err := handler.ValidateCreate(dgdAdmissionContext(admissionv1.Create, nvidiacomv1beta1.DynamoGraphDeploymentGVK), dgd)
@@ -63,7 +66,10 @@ func TestDynamoGraphDeploymentHandlerValidateCreate(t *testing.T) {
 }
 
 func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
-	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "system:serviceaccount:dynamo:dynamo-operator")
+	handler := NewDynamoGraphDeploymentHandler(
+		newGroveTopologyTestManager(t),
+		"system:serviceaccount:dynamo:dynamo-operator",
+	)
 	ctx := dgdAdmissionContext(admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
 
 	t.Run("valid", func(t *testing.T) {
@@ -179,14 +185,12 @@ func dgdAdmissionContextWithUserInfo(
 		requestUserInfo = *userInfo.DeepCopy()
 	}
 	ctx := admission.NewContextWithRequest(context.Background(), admission.Request{
-		AdmissionRequest: admissionv1.AdmissionRequest{
-			Operation: operation,
-			UserInfo:  requestUserInfo,
-			Kind: metav1.GroupVersionKind{
-				Group:   gvk.Group,
-				Version: gvk.Version,
-				Kind:    gvk.Kind,
-			},
+		Operation: operation,
+		UserInfo:  requestUserInfo,
+		Kind: metav1.GroupVersionKind{
+			Group:   gvk.Group,
+			Version: gvk.Version,
+			Kind:    gvk.Kind,
 		},
 	})
 	return features.WithGate(ctx, features.Defaults())

@@ -135,6 +135,10 @@ pub trait Store: Send + Sync {
     fn connection_id(&self) -> u64;
 
     fn shutdown(&self);
+
+    async fn check_connection(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -252,6 +256,15 @@ impl KeyValueStoreEnum {
             File(x) => x.shutdown(),
         }
     }
+
+    async fn check_connection(&self) -> Result<(), StoreError> {
+        use KeyValueStoreEnum::*;
+        match self {
+            Memory(_) | File(_) => Ok(()),
+            Etcd(x) => x.check_connection().await,
+            Nats(x) => x.check_connection().await,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -301,6 +314,10 @@ impl Manager {
         self.0.connection_id()
     }
 
+    pub async fn check_connection(&self) -> Result<(), StoreError> {
+        self.0.check_connection().await
+    }
+
     pub async fn load<T: for<'a> Deserialize<'a>>(
         &self,
         bucket: &str,
@@ -348,6 +365,10 @@ impl Manager {
     /// bucket is empty. The NATS store is the exception: it sends no initial `Resync` and replays
     /// existing keys as [`WatchEvent::Put`] events.
     ///
+    /// A non-empty `sub` scopes the watch to the keys under that path, as
+    /// [`Bucket::watch_under`] does: the receiver gets at least those keys, and a backend that
+    /// cannot scope its watch sends the whole bucket. An empty `sub` watches the whole bucket.
+    ///
     /// This method establishes the watch before it returns: [`Bucket::watch`] has captured the
     /// initial snapshot, so every change that follows reaches the receiver, as its own event or
     /// inside a later [`WatchEvent::Resync`] that replaces all earlier state. A caller that also
@@ -365,6 +386,7 @@ impl Manager {
     pub async fn watch(
         self: Arc<Self>,
         bucket_name: &str,
+        sub: &str,
         bucket_ttl: Option<Duration>,
         cancel_token: CancellationToken,
     ) -> Result<
@@ -375,6 +397,7 @@ impl Manager {
         StoreError,
     > {
         let bucket_name = bucket_name.to_string();
+        let sub = sub.to_string();
         // Backpressure is intentional: discovery state events must never be dropped.
         let (tx, rx) = tokio::sync::mpsc::channel(16384);
         let (established_tx, established_rx) = tokio::sync::oneshot::channel();
@@ -395,7 +418,7 @@ impl Manager {
                 // Bucket::watch atomically establishes its initial snapshot and incremental
                 // stream. A separate entries() read here could replay an older buffered update
                 // after a newer snapshot.
-                let mut stream = match bucket.watch().await {
+                let mut stream = match bucket.watch_under(&sub).await {
                     Ok(stream) => stream,
                     Err(error) => {
                         let _ = established_tx.send(Err(error));
@@ -523,6 +546,23 @@ pub trait Bucket: Send + Sync {
     /// The Key includes the full path including the bucket name.
     /// That means you cannot directory get a Key from `entries` and pass it to `get` or `delete`.
     async fn entries(&self) -> Result<HashMap<Key, bytes::Bytes>, StoreError>;
+
+    /// [`Bucket::entries`] for the keys under `sub`, a path inside the bucket with no leading
+    /// or trailing `/`. An empty `sub` is the whole bucket.
+    ///
+    /// Returns at least every entry under `sub`, so callers still filter. The default reads the
+    /// whole bucket. A backend whose bucket is a key prefix (etcd) reads only `sub`.
+    async fn entries_under(&self, _sub: &str) -> Result<HashMap<Key, bytes::Bytes>, StoreError> {
+        self.entries().await
+    }
+
+    /// [`Bucket::watch`] for the keys under `sub`, scoped as [`Bucket::entries_under`] is.
+    async fn watch_under(
+        &self,
+        _sub: &str,
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + '_>>, StoreError> {
+        self.watch().await
+    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -639,7 +679,7 @@ mod tests {
         let cancel_token = CancellationToken::new();
         let (watch_task, mut rx) = manager
             .clone()
-            .watch(BUCKET_NAME, None, cancel_token.clone())
+            .watch(BUCKET_NAME, "", None, cancel_token.clone())
             .await
             .unwrap();
 
@@ -686,7 +726,7 @@ mod tests {
         let cancel_token = CancellationToken::new();
         let (watch_task, mut rx) = manager
             .clone()
-            .watch(BUCKET_NAME, None, cancel_token.clone())
+            .watch(BUCKET_NAME, "", None, cancel_token.clone())
             .await
             .unwrap();
         bucket.delete(&key).await.unwrap();
@@ -725,7 +765,7 @@ mod tests {
         let manager = Arc::new(Manager::file(cancel_token.clone(), root.path()));
 
         let error = manager
-            .watch(BUCKET_NAME, None, cancel_token.clone())
+            .watch(BUCKET_NAME, "", None, cancel_token.clone())
             .await
             .expect_err("a bucket under a file cannot be created");
 
@@ -744,7 +784,7 @@ mod tests {
 
         let error = manager
             .clone()
-            .watch(BUCKET_NAME, None, cancel_token)
+            .watch(BUCKET_NAME, "", None, cancel_token)
             .await
             .expect_err("a cancelled watch establishes no snapshot");
 
@@ -766,7 +806,7 @@ mod tests {
 
         let watch = manager
             .clone()
-            .watch(BUCKET_NAME, None, CancellationToken::new());
+            .watch(BUCKET_NAME, "", None, CancellationToken::new());
         assert!(
             watch.now_or_never().is_none(),
             "the watch completed on its first poll, before its setup task could run"
@@ -783,7 +823,7 @@ mod tests {
     async fn manager_watch_task_ends_when_its_receiver_drops() {
         let manager = Arc::new(Manager::memory());
         let (watch_task, rx) = manager
-            .watch(BUCKET_NAME, None, CancellationToken::new())
+            .watch(BUCKET_NAME, "", None, CancellationToken::new())
             .await
             .unwrap();
 

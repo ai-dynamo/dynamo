@@ -29,9 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -45,15 +43,13 @@ const (
 
 func newFailoverPod(name string, phase corev1.PodPhase, replicaIdx, podIdx string) *corev1.Pod {
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: cascadeTestNamespace,
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoFailoverEngineGroupMember: commonconsts.KubeLabelValueTrue,
-				groveLabelPCSG:             cascadeTestPCSG,
-				groveLabelPCSGReplicaIndex: replicaIdx,
-				groveLabelPodIndex:         podIdx,
-			},
+		Name:      name,
+		Namespace: cascadeTestNamespace,
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoFailoverEngineGroupMember: commonconsts.KubeLabelValueTrue,
+			groveLabelPCSG:             cascadeTestPCSG,
+			groveLabelPCSGReplicaIndex: replicaIdx,
+			groveLabelPodIndex:         podIdx,
 		},
 		Status: corev1.PodStatus{Phase: phase},
 	}
@@ -84,7 +80,7 @@ func TestFailoverCascade_FailedPodDeletesEntireGroup(t *testing.T) {
 	r, c := newCascadeReconciler(failedPod, sibling1, sibling2)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
+		Name: "ldr-0", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -102,7 +98,7 @@ func TestFailoverCascade_SucceededPodDeletesEntireGroup(t *testing.T) {
 	r, c := newCascadeReconciler(succeededPod, sibling)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
+		Name: "ldr-0", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -186,7 +182,7 @@ func TestFailoverCascade_MultipleFailedPodsAllDeleted(t *testing.T) {
 	r, c := newCascadeReconciler(failedPod, alsoFailed, running)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
+		Name: "ldr-0", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 
@@ -198,17 +194,15 @@ func TestFailoverCascade_MultipleFailedPodsAllDeleted(t *testing.T) {
 func TestFailoverCascade_PodWithoutLabelIgnored(t *testing.T) {
 
 	unlabeled := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "random-pod",
-			Namespace: cascadeTestNamespace,
-		},
-		Status: corev1.PodStatus{Phase: corev1.PodFailed},
+		Name:      "random-pod",
+		Namespace: cascadeTestNamespace,
+		Status:    corev1.PodStatus{Phase: corev1.PodFailed},
 	}
 
 	r, _ := newCascadeReconciler(unlabeled)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "random-pod", Namespace: cascadeTestNamespace},
+		Name: "random-pod", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -222,7 +216,7 @@ func TestFailoverCascade_NonFailedPodIsNoop(t *testing.T) {
 	r, c := newCascadeReconciler(runningPod, sibling)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
+		Name: "ldr-0", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 
@@ -235,7 +229,7 @@ func TestFailoverCascade_NotFoundPodIsNoop(t *testing.T) {
 	r, _ := newCascadeReconciler()
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "gone", Namespace: cascadeTestNamespace},
+		Name: "gone", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -244,13 +238,11 @@ func TestFailoverCascade_NotFoundPodIsNoop(t *testing.T) {
 func TestFailoverCascade_MissingGroveLabelsIsNoop(t *testing.T) {
 
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "partial-labels",
-			Namespace: cascadeTestNamespace,
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoFailoverEngineGroupMember: commonconsts.KubeLabelValueTrue,
-				groveLabelPCSG: cascadeTestPCSG,
-			},
+		Name:      "partial-labels",
+		Namespace: cascadeTestNamespace,
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoFailoverEngineGroupMember: commonconsts.KubeLabelValueTrue,
+			groveLabelPCSG: cascadeTestPCSG,
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodFailed},
 	}
@@ -258,7 +250,7 @@ func TestFailoverCascade_MissingGroveLabelsIsNoop(t *testing.T) {
 	r, _ := newCascadeReconciler(pod)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "partial-labels", Namespace: cascadeTestNamespace},
+		Name: "partial-labels", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -272,7 +264,7 @@ func TestFailoverCascade_DifferentPCSGReplicaUnaffected(t *testing.T) {
 	r, c := newCascadeReconciler(failedPod, differentReplica)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
+		Name: "ldr-0", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 
@@ -288,14 +280,14 @@ func TestFailoverCascade_DeletingPodIsSkipped(t *testing.T) {
 
 	failedPod := newFailoverPod("ldr-0", corev1.PodFailed, "0", "0")
 	failedPod.DeletionTimestamp = &now
-	failedPod.DeletionGracePeriodSeconds = ptr.To(int64(0))
+	failedPod.DeletionGracePeriodSeconds = new(int64(0))
 	failedPod.Finalizers = []string{"test-finalizer"}
 	sibling := newFailoverPod("gms-0-0", corev1.PodRunning, "0", "0")
 
 	r, c := newCascadeReconciler(failedPod, sibling)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
+		Name: "ldr-0", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -313,13 +305,13 @@ func TestFailoverCascade_ConcurrentReconcileIsIdempotent(t *testing.T) {
 	r, c := newCascadeReconciler(pod1, pod2)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
+		Name: "ldr-0", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 
 	// Second reconcile for the other pod — it's already gone (NotFound).
 	_, err = r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "wkr-1-0", Namespace: cascadeTestNamespace},
+		Name: "wkr-1-0", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 

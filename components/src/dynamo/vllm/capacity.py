@@ -21,7 +21,8 @@ def publish_vllm_token_budget(runtime_config: Any, max_model_len: int | None) ->
         TokenBudget(
             combined_limit=max_model_len,
             reject_prompt_overflow=True,
-            reject_total_overflow=True,
+            # vLLM caps oversized output budgets instead of rejecting them.
+            reject_total_overflow=False,
         ),
     )
 

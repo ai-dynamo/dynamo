@@ -25,6 +25,7 @@ import sys
 import tempfile
 import urllib.request
 import wave
+from contextlib import suppress
 
 import aiohttp
 import numpy as np
@@ -159,6 +160,8 @@ async def run(args: argparse.Namespace) -> int:
     transcript = ""
     response_id = None
     status = None
+    committed = False
+    incremental = False
 
     async with aiohttp.ClientSession() as session:
         async with session.ws_connect(args.url, max_msg_size=64 * 1024 * 1024) as ws:
@@ -167,79 +170,98 @@ async def run(args: argparse.Namespace) -> int:
                 json.dumps({"type": "session.update", "session": _session_block(args)})
             )
 
-            for offset in range(0, len(pcm16), chunk_bytes):
-                chunk = pcm16[offset : offset + chunk_bytes]
-                await ws.send_str(
-                    json.dumps(
-                        {
-                            "type": "input_audio_buffer.append",
-                            "audio": base64.b64encode(chunk).decode(),
-                        }
+            async def send_audio() -> None:
+                nonlocal committed
+                for offset in range(0, len(pcm16), chunk_bytes):
+                    chunk = pcm16[offset : offset + chunk_bytes]
+                    await ws.send_str(
+                        json.dumps(
+                            {
+                                "type": "input_audio_buffer.append",
+                                "audio": base64.b64encode(chunk).decode(),
+                            }
+                        )
                     )
-                )
-                print(
-                    f"[client] sent {min(offset + len(chunk), len(pcm16))} "
-                    "bytes of audio"
-                )
-                await asyncio.sleep(args.chunk_ms / 1000)
-
-            await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
-            print("[client] committed audio")
-
-            while True:
-                message = await asyncio.wait_for(ws.receive(), timeout=args.timeout)
-                if message.type in (
-                    aiohttp.WSMsgType.CLOSE,
-                    aiohttp.WSMsgType.CLOSED,
-                ):
                     print(
-                        f"[client] socket closed: {message.data!r} "
-                        f"{message.extra!r}"
+                        f"[client] sent {min(offset + len(chunk), len(pcm16))} "
+                        "bytes of audio"
                     )
-                    break
-                if message.type is not aiohttp.WSMsgType.TEXT:
-                    continue
+                    await asyncio.sleep(args.chunk_ms / 1000)
 
-                event = json.loads(message.data)
-                event_type = event.get("type")
-                if event_type == "response.output_audio.delta":
-                    delta = base64.b64decode(event.get("delta", ""))
-                    if delta:
-                        audio_delta_count += 1
-                        audio_out.extend(delta)
-                        chunk_path = os.path.join(
-                            args.output_dir, f"chunk_{audio_delta_count:04d}.wav"
-                        )
-                        _write_wav(chunk_path, delta, args.output_sample_rate)
+                committed = True
+                await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
+                print("[client] committed audio")
+
+            sender = asyncio.create_task(send_audio())
+            try:
+                while True:
+                    message = await asyncio.wait_for(ws.receive(), timeout=args.timeout)
+                    if message.type in (
+                        aiohttp.WSMsgType.CLOSE,
+                        aiohttp.WSMsgType.CLOSED,
+                    ):
                         print(
-                            f"<- {event_type} ({len(delta)} bytes) -> "
-                            f"{os.path.basename(chunk_path)}"
+                            f"[client] socket closed: {message.data!r} "
+                            f"{message.extra!r}"
                         )
-                elif event_type in (
-                    "response.output_audio_transcript.delta",
-                    "conversation.item.input_audio_transcription.delta",
-                ):
-                    transcript_parts.append(event.get("delta", ""))
-                    print(f"<- {event_type}: {event.get('delta')!r}")
-                elif event_type == (
-                    "conversation.item.input_audio_transcription.completed"
-                ):
-                    transcript = event.get("transcript", "")
-                    status = "completed"
-                    print(f"<- {event_type}: {transcript!r}")
-                    break
-                elif event_type == "response.created":
-                    response_id = event["response"]["id"]
-                    print(f"<- response.created (id={response_id})")
-                elif event_type == "response.done":
-                    status = event["response"]["status"]
-                    print(f"<- response.done (status={status})")
-                    break
-                elif event_type == "error":
-                    print(f"<- ERROR: {json.dumps(event.get('error'), indent=2)}")
-                    break
-                else:
-                    print(f"<- {event_type}")
+                        break
+                    if message.type is not aiohttp.WSMsgType.TEXT:
+                        continue
+
+                    event = json.loads(message.data)
+                    event_type = event.get("type")
+                    if event_type == "response.output_audio.delta":
+                        delta = base64.b64decode(event.get("delta", ""))
+                        if delta:
+                            audio_delta_count += 1
+                            audio_out.extend(delta)
+                            chunk_path = os.path.join(
+                                args.output_dir, f"chunk_{audio_delta_count:04d}.wav"
+                            )
+                            _write_wav(chunk_path, delta, args.output_sample_rate)
+                            print(
+                                f"<- {event_type} ({len(delta)} bytes) -> "
+                                f"{os.path.basename(chunk_path)}"
+                            )
+                    elif event_type in (
+                        "response.output_audio_transcript.delta",
+                        "conversation.item.input_audio_transcription.delta",
+                    ):
+                        if (
+                            event_type
+                            == "conversation.item.input_audio_transcription.delta"
+                            and event.get("delta")
+                            and not committed
+                        ):
+                            incremental = True
+                        transcript_parts.append(event.get("delta", ""))
+                        print(f"<- {event_type}: {event.get('delta')!r}")
+                    elif event_type == (
+                        "conversation.item.input_audio_transcription.completed"
+                    ):
+                        transcript = event.get("transcript", "")
+                        status = "completed"
+                        print(f"<- {event_type}: {transcript!r}")
+                        break
+                    elif event_type == "response.created":
+                        response_id = event["response"]["id"]
+                        print(f"<- response.created (id={response_id})")
+                    elif event_type == "response.done":
+                        status = event["response"]["status"]
+                        print(f"<- response.done (status={status})")
+                        break
+                    elif event_type in (
+                        "error",
+                        "conversation.item.input_audio_transcription.failed",
+                    ):
+                        print(f"<- ERROR: {json.dumps(event.get('error'), indent=2)}")
+                        break
+                    else:
+                        print(f"<- {event_type}")
+            finally:
+                sender.cancel()
+                with suppress(asyncio.CancelledError):
+                    await sender
 
     transcript = transcript or "".join(transcript_parts)
     print("\n[client] === summary ===")
@@ -260,6 +282,11 @@ async def run(args: argparse.Namespace) -> int:
         else:
             print("  saved audio : none")
 
+    if args.session_type == "transcription":
+        print(f"  delta before commit: {incremental}")
+    if args.require_incremental and not incremental:
+        print("[client] expected a nonempty transcription delta before commit")
+        return 1
     return 0 if status == "completed" else 1
 
 
@@ -306,7 +333,14 @@ def main() -> None:
     parser.add_argument(
         "--timeout", type=float, default=120.0, help="per-frame receive timeout"
     )
+    parser.add_argument(
+        "--require-incremental",
+        action="store_true",
+        help="fail unless a transcription delta arrives before audio is committed",
+    )
     args = parser.parse_args()
+    if args.require_incremental and args.session_type != "transcription":
+        parser.error("--require-incremental requires --session-type transcription")
     sys.exit(asyncio.run(run(args)))
 
 

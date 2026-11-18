@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, future::Future, time::Duration};
 
 use anyhow::Result;
 use dynamo_runtime::{
@@ -14,7 +14,7 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
     transports::event_plane::{ValidatedEnvelope, ValidatedZmqSource, ValidatedZmqSourceError},
 };
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -156,6 +156,44 @@ where
     H: Fn(ValidatedEnvelope) -> Result<()> + Clone + Send + Sync + 'static,
     O: Fn(FanInObservation) + Clone + Send + Sync + 'static,
 {
+    start_direct_zmq_fan_in_async(
+        component,
+        endpoint_id,
+        topic,
+        rcvhwm,
+        excluded_publisher_id,
+        continuity_mode,
+        false,
+        cancellation_token,
+        move |envelope| std::future::ready(handler(envelope)),
+        observer,
+    )
+    .await
+}
+
+/// Like [`start_direct_zmq_fan_in_for_endpoint_id`], for a handler that awaits,
+/// such as indexer admission. Each source awaits its handler before taking its
+/// next envelope, so one source's batches stay ordered while sources run
+/// concurrently. `shared_endpoints` expects several publishers behind one PUB
+/// endpoint (see [`DirectZmqSubPool::with_shared_endpoints`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn start_direct_zmq_fan_in_async<H, F, O>(
+    component: Component,
+    endpoint_id: EndpointId,
+    topic: &'static str,
+    rcvhwm: i32,
+    excluded_publisher_id: Option<u64>,
+    continuity_mode: ContinuityMode,
+    shared_endpoints: bool,
+    cancellation_token: CancellationToken,
+    handler: H,
+    observer: O,
+) -> Result<JoinHandle<()>>
+where
+    H: Fn(ValidatedEnvelope) -> F + Clone + Send + Sync + 'static,
+    F: Future<Output = Result<()>> + Send + 'static,
+    O: Fn(FanInObservation) + Clone + Send + Sync + 'static,
+{
     let endpoints_per_sub = endpoints_per_sub_from_env()?;
     let query = DiscoveryQuery::EventChannels(EventChannelQuery::endpoint_topic(
         endpoint_id.clone(),
@@ -167,12 +205,15 @@ where
         .discovery()
         .list_and_watch(query.clone(), Some(watch_cancel.clone()))
         .await?;
-    let group_pool = DirectZmqSubPool::new(
+    let mut group_pool = DirectZmqSubPool::new(
         topic,
         endpoints_per_sub,
         rcvhwm,
         cancellation_token.child_token(),
     )?;
+    if shared_endpoints {
+        group_pool = group_pool.with_shared_endpoints();
+    }
 
     Ok(tokio::spawn(run_supervisor(
         component,
@@ -190,7 +231,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_supervisor<H, O>(
+async fn run_supervisor<H, F, O>(
     component: Component,
     endpoint_id: EndpointId,
     topic: &'static str,
@@ -206,7 +247,8 @@ async fn run_supervisor<H, O>(
         CancellationToken,
     )>,
 ) where
-    H: Fn(ValidatedEnvelope) -> Result<()> + Clone + Send + Sync + 'static,
+    H: Fn(ValidatedEnvelope) -> F + Clone + Send + Sync + 'static,
+    F: Future<Output = Result<()>> + Send + 'static,
     O: Fn(FanInObservation) + Clone + Send + Sync + 'static,
 {
     let expected_scope = EventScope::Endpoint {
@@ -242,9 +284,14 @@ async fn run_supervisor<H, O>(
         retry_delay = INITIAL_BACKOFF;
         let mut sources = HashMap::<u64, SourceTask>::new();
         let mut restart_watch = true;
+        // Sources wait until their whole batch of discovery events is applied, so
+        // the pool places a shared endpoint knowing every publisher behind it. The
+        // initial snapshot arrives as one batch.
+        let (applied_tx, _) = tokio::sync::watch::channel(0_u64);
+        let mut batch = 0_u64;
 
-        loop {
-            let event = tokio::select! {
+        'watch: loop {
+            let first = tokio::select! {
                 biased;
                 _ = cancellation_token.cancelled() => {
                     restart_watch = false;
@@ -252,84 +299,100 @@ async fn run_supervisor<H, O>(
                 }
                 event = watch.next() => event,
             };
-            let Some(event) = event else {
-                tracing::warn!(topic, "direct-ZMQ discovery watch ended");
-                break;
-            };
+            batch += 1;
+            let mut events = vec![first];
+            while events.last().is_some_and(Option::is_some)
+                && let Some(event) = watch.next().now_or_never()
+            {
+                events.push(event);
+            }
 
-            match event {
-                Ok(DiscoveryEvent::Added(DiscoveryInstance::EventChannel {
-                    scope,
-                    topic: discovered_topic,
-                    instance_id,
-                    transport,
-                })) if scope == expected_scope && discovered_topic == topic => {
-                    if excluded_publisher_id == Some(instance_id) {
-                        continue;
-                    }
-                    let EventTransport::Zmq { endpoint } = transport else {
-                        tracing::warn!(
-                            publisher_id = instance_id,
-                            topic,
-                            "ignoring non-ZMQ event channel in direct fan-in"
-                        );
-                        continue;
-                    };
-                    if let Some(source) = sources.get(&instance_id)
-                        && source.endpoint == endpoint
-                    {
-                        continue;
-                    }
+            for event in events {
+                let Some(event) = event else {
+                    tracing::warn!(topic, "direct-ZMQ discovery watch ended");
+                    break 'watch;
+                };
 
-                    let high_watermark = if let Some(existing) = sources.remove(&instance_id) {
-                        observe(
-                            &observer,
-                            instance_id,
-                            existing.generation,
-                            FanInEvent::Replacement,
-                        );
-                        stop_source(existing, &observer).await
-                    } else {
-                        resume_cursors.remove(&instance_id)
-                    };
-                    let generation = next_generation;
-                    next_generation = next_generation.wrapping_add(1);
-                    sources.insert(
-                        instance_id,
-                        spawn_source(
-                            instance_id,
-                            endpoint,
-                            generation,
-                            high_watermark,
-                            group_pool.clone(),
-                            continuity_mode,
-                            handler.clone(),
-                            observer.clone(),
-                            cancellation_token.child_token(),
-                        ),
-                    );
-                }
-                Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::EventChannel(
-                    EventChannelInstanceId {
+                match event {
+                    Ok(DiscoveryEvent::Added(DiscoveryInstance::EventChannel {
                         scope,
                         topic: discovered_topic,
                         instance_id,
-                    },
-                ))) if scope == expected_scope && discovered_topic == topic => {
-                    resume_cursors.remove(&instance_id);
-                    if let Some(source) = sources.remove(&instance_id) {
-                        stop_source(source, &observer).await;
+                        transport,
+                    })) if scope == expected_scope && discovered_topic == topic => {
+                        if excluded_publisher_id == Some(instance_id) {
+                            continue;
+                        }
+                        let EventTransport::Zmq { endpoint } = transport else {
+                            tracing::warn!(
+                                publisher_id = instance_id,
+                                topic,
+                                "ignoring non-ZMQ event channel in direct fan-in"
+                            );
+                            continue;
+                        };
+                        if let Some(source) = sources.get(&instance_id)
+                            && source.endpoint == endpoint
+                        {
+                            continue;
+                        }
+
+                        let high_watermark = if let Some(existing) = sources.remove(&instance_id) {
+                            group_pool.forget_publisher(&existing.endpoint);
+                            observe(
+                                &observer,
+                                instance_id,
+                                existing.generation,
+                                FanInEvent::Replacement,
+                            );
+                            stop_source(existing, &observer).await
+                        } else {
+                            resume_cursors.remove(&instance_id)
+                        };
+                        let generation = next_generation;
+                        next_generation = next_generation.wrapping_add(1);
+                        group_pool.expect_publisher(&endpoint);
+                        sources.insert(
+                            instance_id,
+                            spawn_source(
+                                instance_id,
+                                endpoint,
+                                generation,
+                                high_watermark,
+                                group_pool.clone(),
+                                continuity_mode,
+                                handler.clone(),
+                                observer.clone(),
+                                cancellation_token.child_token(),
+                                applied_tx.subscribe(),
+                                batch,
+                            ),
+                        );
+                    }
+                    Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::EventChannel(
+                        EventChannelInstanceId {
+                            scope,
+                            topic: discovered_topic,
+                            instance_id,
+                        },
+                    ))) if scope == expected_scope && discovered_topic == topic => {
+                        resume_cursors.remove(&instance_id);
+                        if let Some(source) = sources.remove(&instance_id) {
+                            group_pool.forget_publisher(&source.endpoint);
+                            stop_source(source, &observer).await;
+                        }
+                    }
+                    Ok(DiscoveryEvent::Added(_))
+                    | Ok(DiscoveryEvent::ModelTaintsUpdated(_))
+                    | Ok(DiscoveryEvent::Removed(_))
+                    | Ok(DiscoveryEvent::Resync(_)) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, topic, "direct-ZMQ discovery watch failed");
+                        break 'watch;
                     }
                 }
-                Ok(DiscoveryEvent::Added(_))
-                | Ok(DiscoveryEvent::ModelTaintsUpdated(_))
-                | Ok(DiscoveryEvent::Removed(_))
-                | Ok(DiscoveryEvent::Resync(_)) => {}
-                Err(error) => {
-                    tracing::warn!(%error, topic, "direct-ZMQ discovery watch failed");
-                    break;
-                }
             }
+            applied_tx.send_replace(batch);
         }
 
         watch_cancel.cancel();
@@ -342,6 +405,9 @@ async fn run_supervisor<H, O>(
                     FanInEvent::DiscoveryReset,
                 );
             }
+        }
+        for source in sources.values() {
+            group_pool.forget_publisher(&source.endpoint);
         }
         for (publisher_id, high_watermark) in stop_sources(sources, &observer).await {
             resume_cursors.insert(publisher_id, high_watermark);
@@ -358,7 +424,7 @@ async fn run_supervisor<H, O>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn spawn_source<H, O>(
+fn spawn_source<H, F, O>(
     publisher_id: u64,
     endpoint: String,
     generation: u64,
@@ -368,9 +434,12 @@ fn spawn_source<H, O>(
     handler: H,
     observer: O,
     cancel: CancellationToken,
+    mut applied: tokio::sync::watch::Receiver<u64>,
+    batch: u64,
 ) -> SourceTask
 where
-    H: Fn(ValidatedEnvelope) -> Result<()> + Clone + Send + Sync + 'static,
+    H: Fn(ValidatedEnvelope) -> F + Clone + Send + Sync + 'static,
+    F: Future<Output = Result<()>> + Send + 'static,
     O: Fn(FanInObservation) + Clone + Send + Sync + 'static,
 {
     let task_endpoint = endpoint.clone();
@@ -382,6 +451,11 @@ where
         FanInEvent::SourceStarted,
     );
     let handle = tokio::spawn(async move {
+        // Connect once the discovery batch that started this source is applied.
+        tokio::select! {
+            _ = task_cancel.cancelled() => {}
+            _ = applied.wait_for(|applied| *applied >= batch) => {}
+        }
         run_source(
             publisher_id,
             task_endpoint,
@@ -405,7 +479,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_source<H, O>(
+async fn run_source<H, F, O>(
     publisher_id: u64,
     endpoint: String,
     generation: u64,
@@ -417,7 +491,8 @@ async fn run_source<H, O>(
     cancel: CancellationToken,
 ) -> Option<u64>
 where
-    H: Fn(ValidatedEnvelope) -> Result<()> + Clone + Send + Sync + 'static,
+    H: Fn(ValidatedEnvelope) -> F + Clone + Send + Sync + 'static,
+    F: Future<Output = Result<()>> + Send + 'static,
     O: Fn(FanInObservation) + Clone + Send + Sync + 'static,
 {
     let mut cursor = SequenceCursor::new(continuity_mode, high_watermark);
@@ -496,7 +571,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn consume_grouped_connection<H, O>(
+async fn consume_grouped_connection<H, F, O>(
     publisher_id: u64,
     generation: u64,
     receiver: &mut mpsc::Receiver<DirectZmqSubItem>,
@@ -507,7 +582,8 @@ async fn consume_grouped_connection<H, O>(
     cancel: &CancellationToken,
 ) -> bool
 where
-    H: Fn(ValidatedEnvelope) -> Result<()> + Send + Sync,
+    H: Fn(ValidatedEnvelope) -> F + Send + Sync,
+    F: Future<Output = Result<()>> + Send,
     O: Fn(FanInObservation) + Send + Sync,
 {
     loop {
@@ -555,13 +631,13 @@ where
                 observe(observer, publisher_id, generation, FanInEvent::OutOfOrder)
             }
         }
-        if let Err(error) = handler(envelope) {
+        if let Err(error) = handler(envelope).await {
             tracing::warn!(%error, publisher_id, generation, "direct-ZMQ source handler rejected an envelope");
         }
     }
 }
 
-async fn consume_dedicated_connection<H, O>(
+async fn consume_dedicated_connection<H, F, O>(
     publisher_id: u64,
     generation: u64,
     source: &mut ValidatedZmqSource,
@@ -571,7 +647,8 @@ async fn consume_dedicated_connection<H, O>(
     cancel: &CancellationToken,
 ) -> bool
 where
-    H: Fn(ValidatedEnvelope) -> Result<()> + Send + Sync,
+    H: Fn(ValidatedEnvelope) -> F + Send + Sync,
+    F: Future<Output = Result<()>> + Send,
     O: Fn(FanInObservation) + Send + Sync,
 {
     loop {
@@ -623,7 +700,7 @@ where
                 observe(observer, publisher_id, generation, FanInEvent::OutOfOrder)
             }
         }
-        if let Err(error) = handler(envelope) {
+        if let Err(error) = handler(envelope).await {
             tracing::warn!(%error, publisher_id, generation, "direct-ZMQ source handler rejected an envelope");
         }
         tokio::task::consume_budget().await;
@@ -722,7 +799,7 @@ mod tests {
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         distributed::DistributedConfig,
-        transports::event_plane::{EventPublisher, EventTransportKind},
+        transports::event_plane::{EventPublisher, EventTransportKind, SharedZmqPublisherSocket},
     };
 
     use super::*;
@@ -794,7 +871,7 @@ mod tests {
             if previous == 0 {
                 first_seen_tx.send(()).unwrap();
             }
-            Ok(())
+            std::future::ready(Ok(()))
         };
         let mut cursor = SequenceCursor::new(ContinuityMode::Disabled, None);
 
@@ -877,6 +954,77 @@ mod tests {
             .expect("fan-in supervisor should not panic");
         assert!(active.is_empty());
         drop(local);
+        distributed.shutdown();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn co_located_publishers_on_one_socket_are_routed_by_publisher_id() -> Result<()> {
+        const TOPIC: &str = "direct-zmq-fan-in-shared-socket";
+
+        let runtime = Runtime::from_current()?;
+        let distributed =
+            DistributedRuntime::new(runtime, DistributedConfig::process_local()).await?;
+        let endpoint = distributed
+            .namespace(format!("direct-zmq-shared-{}", uuid::Uuid::new_v4()))?
+            .component("frontend")?
+            .endpoint("generate");
+        let socket = SharedZmqPublisherSocket::bind(TOPIC)?;
+        let publishers = [
+            EventPublisher::for_endpoint_id_on_shared_socket(&distributed, &endpoint.id(), &socket)
+                .await?,
+            EventPublisher::for_endpoint_id_on_shared_socket(&distributed, &endpoint.id(), &socket)
+                .await?,
+        ];
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let supervisor = start_direct_zmq_fan_in_async(
+            endpoint.component().clone(),
+            endpoint.id(),
+            TOPIC,
+            32,
+            None,
+            ContinuityMode::Disabled,
+            true,
+            cancel.clone(),
+            move |envelope: ValidatedEnvelope| {
+                let _ = seen_tx.send(envelope.publisher_id);
+                std::future::ready(Ok(()))
+            },
+            |_| {},
+        )
+        .await?;
+
+        let mut seen = HashSet::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while seen.len() < publishers.len() {
+                for publisher in &publishers {
+                    publisher.publish(&()).await.unwrap();
+                }
+                while let Ok(Some(publisher_id)) =
+                    tokio::time::timeout(Duration::from_millis(20), seen_rx.recv()).await
+                {
+                    seen.insert(publisher_id);
+                }
+            }
+        })
+        .await
+        .expect("both co-located publishers should be routed");
+        assert_eq!(
+            seen,
+            publishers
+                .iter()
+                .map(EventPublisher::publisher_id)
+                .collect::<HashSet<_>>()
+        );
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), supervisor)
+            .await
+            .expect("fan-in supervisor should stop after cancellation")
+            .expect("fan-in supervisor should not panic");
+        drop(publishers);
         distributed.shutdown();
         Ok(())
     }

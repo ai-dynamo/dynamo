@@ -47,6 +47,10 @@ These arguments are passed to the **frontend** (not the worker) when using `--dy
 | `--tool-call-parser` | `None` | Tool call parser name (any vLLM-supported parser) |
 | `--reasoning-parser` | `None` | Reasoning parser name (any vLLM-supported parser) |
 | `--enable-auto-tool-choice` | `False` | Allow the model to emit tool calls without an explicit `tool_choice` in the request |
+| `--renderer-num-workers` | vLLM default | Number of renderer workers used by the vLLM frontend |
+| `--mm-processor-cache-gb` | vLLM default | Multimodal processor cache size in GiB in the vLLM frontend; `0` disables the cache |
+
+The frontend forwards these renderer and cache settings to vLLM, including an explicit zero cache size. Omitted options retain the installed vLLM version's defaults. The installed version also validates supported combinations; some versions reject multiple renderer workers while multimodal processor caching is enabled. Increasing the worker count does not guarantee higher throughput. Measure throughput and latency with representative inputs before adopting a change.
 
 ### Environment Variables
 

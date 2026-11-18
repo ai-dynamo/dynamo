@@ -16,6 +16,43 @@ const (
 	mpiRunSecretName = "mpi-run-ssh-secret"
 )
 
+func TestTRTLLMBackend_RoleTemplatePreservesLaunchAndRetainsPodWiring(t *testing.T) {
+	backend := &TRTLLMBackend{
+		MpiRunSecretName:    mpiRunSecretName,
+		roleLaunchOwnership: roleLaunchOwnedByPodTemplate,
+	}
+	container := &corev1.Container{
+		Command:        []string{"python3"},
+		Args:           []string{"-m", "dynamo.trtllm", "--user-owned-multinode"},
+		LivenessProbe:  &corev1.Probe{},
+		ReadinessProbe: &corev1.Probe{},
+		StartupProbe:   &corev1.Probe{},
+	}
+	wantCommand := append([]string(nil), container.Command...)
+	wantArgs := append([]string(nil), container.Args...)
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
+	})
+
+	containerGPUCount := func() (int64, error) {
+		t.Fatal("role-authored TRT-LLM launch must not derive MPI ranks from a role GPU count")
+		return 0, nil
+	}
+	require.NoError(t, backend.UpdateContainer(container, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{}, containerGPUCount))
+	require.Equal(t, wantCommand, container.Command)
+	require.Equal(t, wantArgs, container.Args)
+	require.Nil(t, container.LivenessProbe)
+	require.NotNil(t, container.ReadinessProbe)
+	require.Nil(t, container.StartupProbe)
+	require.Len(t, container.VolumeMounts, 1)
+	require.Equal(t, mpiRunSecretName, container.VolumeMounts[0].Name)
+
+	podSpec := &corev1.PodSpec{Containers: []corev1.Container{*container}}
+	backend.UpdatePodSpec(podSpec, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{})
+	require.Len(t, podSpec.Volumes, 1)
+	require.Equal(t, mpiRunSecretName, podSpec.Volumes[0].Name)
+}
+
 func TestShellQuoteForBashC(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -90,7 +127,7 @@ func TestShellQuoteForBashC_InLeaderCommand(t *testing.T) {
 		},
 	}
 
-	backend.setupLeaderContainer(container, 2, "dec", &GroveMultinodeDeployer{}, resolveTestContainerGPUs(t, betaComponent(t, component)))
+	backend.setupLeaderContainer(container, 2, "dec", &GroveMultinodeDeployer{}, resolveTestContainerGPUs(t, betaComponent(t, component)), false)
 
 	if len(container.Args) != 1 {
 		t.Fatalf("expected 1 arg, got %d", len(container.Args))
@@ -189,10 +226,8 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 			expectReadinessRemoved: false,
 			expectStartupRemoved:   true,
 			expectedReadinessProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					TCPSocket: &corev1.TCPSocketAction{
-						Port: intstr.FromInt(commonconsts.MpiRunSshPort),
-					},
+				TCPSocket: &corev1.TCPSocketAction{
+					Port: intstr.FromInt(commonconsts.MpiRunSshPort),
 				},
 				InitialDelaySeconds: 20,
 				PeriodSeconds:       20,
@@ -223,6 +258,31 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 			expectLivenessRemoved:  false,
 			expectReadinessRemoved: false,
 			expectStartupRemoved:   false,
+			expectedReadinessProbe: nil,
+		},
+		{
+			name:              "Multinode leader created by operator 1.7.0 places GPUs-per-pod ranks on each node",
+			numberOfNodes:     2,
+			role:              RoleLeader,
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0",
+				},
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{
+						GPU: "4",
+					},
+				},
+			},
+			expectedVolumeMounts: []corev1.VolumeMount{
+				{Name: mpiRunSecretName, MountPath: "/ssh-pk", ReadOnly: true},
+			},
+			expectedCommand: []string{"/bin/sh", "-c"},
+			expectedArgs:    []string{"mkdir -p $HOME/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key $HOME/.ssh/id_rsa && cp /ssh-pk/private.key.pub $HOME/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub $HOME/.ssh/authorized_keys && chmod 600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys && chmod 644 $HOME/.ssh/id_rsa.pub && printf 'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > $HOME/.ssh/config && TIMEOUT=300; START_TIME=$(date +%s); for worker in $(echo \"$LWS_LEADER_ADDRESS\" | sed 's/\\./-1\\./'); do echo \"Waiting for DNS: $worker\"; until getent hosts $worker >/dev/null 2>&1; do CURRENT_TIME=$(date +%s); if [ $((CURRENT_TIME - START_TIME)) -gt $TIMEOUT ]; then echo \"ERROR: Timeout waiting for DNS: $worker\"; exit 1; fi; echo \"DNS not ready for $worker, retrying...\"; sleep 2; done; echo \"✓ DNS resolved: $worker\"; done; echo \"All workers DNS ready\" && mpirun $([ \"$(id -u)\" = \"0\" ] && echo --allow-run-as-root) --oversubscribe -n 8 -H $(LWS_LEADER_ADDRESS),$(echo \"$LWS_LEADER_ADDRESS\" | sed 's/\\./-1\\./') --map-by ppr:4:node --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i $HOME/.ssh/id_rsa\" -x CPATH -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_ENDPOINT -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x OMPI_MCA_orte_keep_fqdn_hostnames -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x TRITON_PTXAS_PATH -x TRTLLM_USE_UCX_KVCACHE -x USER bash -c 'trtllm-llmapi-launch python3 --model test'"},
+			expectedEnv: []corev1.EnvVar{
+				{Name: "OMPI_MCA_orte_keep_fqdn_hostnames", Value: "1"},
+			},
 			expectedReadinessProbe: nil,
 		},
 	}
@@ -786,6 +846,7 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 				tt.serviceName,
 				tt.multinodeDeployer,
 				resolveTestContainerGPUs(t, component),
+				false,
 			)
 
 			// Check that command is set correctly

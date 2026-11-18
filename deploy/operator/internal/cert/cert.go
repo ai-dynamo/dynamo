@@ -23,7 +23,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -274,14 +273,12 @@ func (cm *CertManager) createPlaceholderSecretIfNotExists(ctx context.Context) e
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: cm.namespace,
-			Name:      cm.cfg.SecretName,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "dynamo-operator",
-				"app.kubernetes.io/component":  "webhook",
-				partOfLabel:                    partOfValue,
-			},
+		Namespace: cm.namespace,
+		Name:      cm.cfg.SecretName,
+		Labels: map[string]string{
+			"app.kubernetes.io/managed-by": "dynamo-operator",
+			"app.kubernetes.io/component":  "webhook",
+			partOfLabel:                    partOfValue,
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{

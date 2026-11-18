@@ -22,6 +22,7 @@ spec:
     - ReadWriteMany
   resources:
     requests:
-      storage: 600Gi
+      # Shared capacity for A.X-K2 FP8, NVFP4, EAGLE3, and runtime caches.
+      storage: 1500Gi
   # Edit this to a ReadWriteMany storage class available on the target cluster.
   storageClassName: "your-storage-class-name"

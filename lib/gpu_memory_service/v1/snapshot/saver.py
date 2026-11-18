@@ -13,7 +13,7 @@ from gpu_memory_service.snapshot.backends.sharded_ssd import (
     device_sharded_ssd_roots,
     parse_sharded_ssd_roots,
 )
-from gpu_memory_service.v1.device import get_socket_path
+from gpu_memory_service.v1 import device as device_identity
 from gpu_memory_service.v1.snapshot.weight_artifact import save_weights
 
 
@@ -37,6 +37,7 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--save-lock-timeout-ms must be a positive integer")
 
     init_vmm(VMMDeviceType.CUDA)
+    gpu_uuid = device_identity.gpu_uuid(args.device)
     roots = device_sharded_ssd_roots(
         args.checkpoint_dir,
         args.device,
@@ -44,8 +45,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     save_weights(
         os.path.join(args.checkpoint_dir, f"device-{args.device}"),
-        get_socket_path(args.device, "weights"),
-        args.device,
+        device_identity.get_socket_path(gpu_uuid, "weights"),
+        device_identity.cuda_ordinal(gpu_uuid),
         shard_size_bytes=args.shard_size_bytes,
         max_workers=args.max_workers,
         admission_timeout=args.save_lock_timeout_ms / 1000,

@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+ARG TASK_IMAGE=swebench/sweb.eval.x86_64.astropy_1776_astropy-12907@sha256:7485c1e3c8861efd0c6a4a78b952857592e541031039000d25e9481f045dc4a3
+FROM ${TASK_IMAGE}
+ARG TARGETARCH
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG NODE_VERSION=22.23.4
+ARG PI_VERSION=0.72.1
+ENV NVM_DIR=/root/.nvm
+RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates stunnel4 ripgrep \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | bash \
+    && source "$NVM_DIR/nvm.sh" && nvm install "$NODE_VERSION" && nvm alias default "$NODE_VERSION" \
+    && npm install -g "@mariozechner/pi-coding-agent@$PI_VERSION" \
+    && npm cache clean --force
+COPY pi-plugin /root/pi-dynamo-provider
+RUN source "$NVM_DIR/nvm.sh" && cd /root/pi-dynamo-provider && npm ci && npm run build \
+    && node --input-type=module -e 'import fs from "node:fs"; const p=JSON.parse(fs.readFileSync("package.json")); p.pi.extensions=["./dist/index.js"]; fs.writeFileSync("package.json",JSON.stringify(p,null,2)+"\n");' \
+    && pi install /root/pi-dynamo-provider && npm cache clean --force \
+    && node --input-type=module -e 'import fs from "node:fs"; import {createRequire} from "node:module"; const require=createRequire(import.meta.url); const pi=require(process.env.NVM_BIN+"/../lib/node_modules/@mariozechner/pi-coding-agent/package.json"); fs.writeFileSync("/opt/pi-runtime.json",JSON.stringify({node:process.version,pi:pi.version,provider:"/root/pi-dynamo-provider",extension:"/root/pi-dynamo-provider/dist/index.js"})+"\n");' \
+    && sha256sum dist/*.js > /opt/pi-provider.sha256
+RUN case "$TARGETARCH" in \
+      amd64) UV_ARCH=x86_64 ;; \
+      arm64) UV_ARCH=aarch64 ;; \
+      *) echo "Unsupported target architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://github.com/astral-sh/uv/releases/download/0.7.13/uv-${UV_ARCH}-unknown-linux-gnu.tar.gz" \
+    | tar -xz --strip-components=1 -C /usr/local/bin "uv-${UV_ARCH}-unknown-linux-gnu/uv" \
+    && mkdir -p /logs/agent /logs/verifier /logs/artifacts /installed-agent
+# Verifier dependencies, so the unchanged test script needs no registry access:
+# the repository's build requirements as wheels, and the SWE-bench grader's
+# packages in the uv cache. The Harbor job sets PIP_NO_INDEX, PIP_FIND_LINKS,
+# and UV_OFFLINE for the verifier.
+RUN source /opt/miniconda3/bin/activate && conda activate testbed && cd /testbed \
+    && printf '%s\n' \
+        'import pathlib' \
+        'try:' \
+        '    import tomllib' \
+        'except ModuleNotFoundError:' \
+        '    from pip._vendor import tomli as tomllib' \
+        'path = pathlib.Path("pyproject.toml")' \
+        'data = tomllib.loads(path.read_text()) if path.exists() else {}' \
+        'print("\n".join(data.get("build-system", {}).get("requires", ["setuptools>=40.8.0", "wheel"])))' \
+        | python - > /tmp/build-requires.txt \
+    && mkdir -p /opt/wheels && pip download -q --dest /opt/wheels -r /tmp/build-requires.txt \
+    && rm /tmp/build-requires.txt
+RUN printf '%s\n' '# /// script' '# requires-python = ">=3.11"' \
+        '# dependencies = ["swebench==4.0.3", "datasets==2.16.1", "fastcore<1.11"]' '# ///' > /tmp/grader-seed.py \
+    && (uv python find '>=3.11' >/dev/null 2>&1 || uv python install 3.11) \
+    && uv run /tmp/grader-seed.py && rm /tmp/grader-seed.py
+# Keep login shells cheap: retain task Conda activation but do not auto-load NVM.
+RUN source "$NVM_DIR/nvm.sh" \
+    && for binary in node npm npx pi; do ln -s "$NVM_BIN/$binary" "/usr/local/bin/$binary"; done \
+    && sed -i '/NVM_DIR/d' /root/.bashrc
+WORKDIR /testbed

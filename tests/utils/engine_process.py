@@ -228,7 +228,7 @@ class EngineProcess(ManagedProcess):
                 check_models_api,
             ),
             (
-                f"http://localhost:{config.frontend_port}/health",
+                f"http://localhost:{config.frontend_port}/health?instances=true",
                 check_health_generate,
             ),
         ]

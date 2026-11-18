@@ -213,3 +213,8 @@ data:
     gpu:
       discoveryEnabled: {{ .Values.gpuDiscovery.enabled }}
     {{- end }}
+    lpx:
+      enabled: {{ .Values.lpx.enabled }}
+      {{- with .Values.lpx.modelRegistryURL }}
+      modelRegistryURL: {{ . | quote }}
+      {{- end }}

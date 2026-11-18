@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: switchyard-preproc
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: switchyard-preproc
+  template:
+    metadata:
+      labels:
+        app: switchyard-preproc
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 130
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: preproc
+        image: switchyard-preproc:example
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: ROUTES_CONFIG
+          value: /etc/switchyard/routes.toml
+        - name: MAX_ACTIVE_STREAMS
+          value: "16"
+        volumeMounts:
+        - name: routing-config
+          mountPath: /etc/switchyard
+          readOnly: true
+        ports:
+        - name: grpc
+          containerPort: 9002
+        - name: admin
+          containerPort: 9003
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: '2'
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: admin
+          periodSeconds: 2
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: admin
+          periodSeconds: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: admin
+          periodSeconds: 3
+          timeoutSeconds: 1
+          failureThreshold: 3
+          terminationGracePeriodSeconds: 5
+      volumes:
+      - name: routing-config
+        configMap:
+          name: switchyard-preproc-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: switchyard-preproc
+spec:
+  selector:
+    app: switchyard-preproc
+  ports:
+  - name: grpc
+    port: 9002
+    targetPort: grpc
+    appProtocol: kubernetes.io/h2c
+  - name: admin
+    port: 9003
+    targetPort: admin

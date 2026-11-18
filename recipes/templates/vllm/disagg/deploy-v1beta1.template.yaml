@@ -109,7 +109,7 @@ spec:
                 - harmony
               env:
                 - name: KV_TRANSFER_CONFIG
-                  value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}'
+                  value: '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda"}'
                 - name: MODEL_NAME
                   value: openai/gpt-oss-120b
                 - name: SERVED_MODEL_NAME
@@ -191,7 +191,7 @@ spec:
                 - harmony
               env:
                 - name: KV_TRANSFER_CONFIG
-                  value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}'
+                  value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda"}'
                 - name: MODEL_NAME
                   value: openai/gpt-oss-120b
                 - name: SERVED_MODEL_NAME
