@@ -814,6 +814,7 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
         additional_config={},
         cache_config=SimpleNamespace(block_size=None),
         model_config=FakeModelConfig(),
+        structured_outputs_config=SimpleNamespace(backend="xgrammar"),
     )
 
     class FakeEngineArgs:
