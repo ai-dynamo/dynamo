@@ -5267,9 +5267,8 @@ func checkpointWorkerDGDForAdmission(
 	})
 }
 
-// setRequestVLLMExecutorBackends sets the vLLM distributed executor backend in
-// the request's metadata.annotations and spec.annotations, after any fixture
-// annotations are in place.
+// setRequestVLLMExecutorBackends sets the vLLM executor backend in the request's metadata and
+// spec annotations, after fixture annotations are applied.
 func setRequestVLLMExecutorBackends(metadataValue, specValue string) func(*testing.T, map[string]any) {
 	return func(t *testing.T, request map[string]any) {
 		t.Helper()

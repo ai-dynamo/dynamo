@@ -1758,10 +1758,7 @@ type preparedMainContainer struct {
 	frontendSidecarMounts []corev1.VolumeMount
 }
 
-// prepareMainContainer builds the main container's final launch: component
-// defaults, the authored main container, and backend launch rewrites such as
-// the vLLM Ray shell wrapper. Pod rendering and admission both use it so they
-// cannot disagree about the command a Pod runs.
+// prepareMainContainer builds the main container's final launch for both Pod rendering and admission.
 // component and operatorConfig must be non-nil.
 func prepareMainContainer(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
@@ -2429,16 +2426,8 @@ type RoleMainContainer struct {
 	Container corev1.Container
 }
 
-// PrepareDGDComponentMainContainers prepares the main container of every
-// engine Pod role that a DGD component renders, through the same launch
-// preparation as Pod rendering, without building the rest of the Pod.
-// Admission uses it to check the launch that a restore destination runs.
-// multinodeDeploymentType selects the workload provider's input sequence:
-// Grove renders each role from the DGD component, while the component and
-// DisaggregatedSet providers, which use LWS, render from the normalized
-// component that DCD generation produces.
-// ctx, reader, dgd, component, and operatorConfig must be non-nil. reader
-// resolves DRA-backed GPU counts in dgd.Namespace.
+// PrepareDGDComponentMainContainers prepares each engine role's main container as its workload provider renders it.
+// ctx, reader, dgd, component, and operatorConfig must be non-nil.
 func PrepareDGDComponentMainContainers(
 	ctx context.Context,
 	reader ctrlclient.Reader,
@@ -2836,9 +2825,7 @@ type cliqueParams struct {
 	containerGPUs               ContainerGPUCount
 }
 
-// lowerGroveComponentForRole selects the component a Grove role renders from
-// and applies DGD metadata annotations before the remaining DGD defaults, so
-// they take precedence over spec.annotations on the Grove path.
+// lowerGroveComponentForRole selects a Grove role's component; DGD metadata annotations take precedence over spec.annotations.
 // component and dgd must not be nil. The returned component is an independent copy.
 func lowerGroveComponentForRole(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,

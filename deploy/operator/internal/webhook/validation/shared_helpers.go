@@ -505,19 +505,15 @@ func inputJSONPointer(location []string) string {
 	return "/" + strings.Join(tokens, "/")
 }
 
-// restoreLaunch is the rendered launch of one restore destination container.
-// The destination is identified by role and container name, never by list
-// position, so an update that reorders containers keeps its identity.
+// restoreLaunch is one restore destination's rendered launch, keyed by role and container name
+// rather than list position, so reordering containers keeps its identity.
 type restoreLaunch struct {
 	role      dynamo.Role
 	container corev1.Container
 	authored  *corev1.Container
 }
 
-// renderRestoreLaunches returns the launch that each restore destination of a
-// checkpoint-enabled DGD component runs, in role order. Main containers come
-// from the production launch preparation; intra-pod failover engines are
-// clones of main, and any other target container keeps its authored launch.
+// renderRestoreLaunches returns each restore destination's launch, in role order, as the operator renders it.
 // ctx, reader, operatorConfig, dgd, and component must be non-nil.
 func renderRestoreLaunches(
 	ctx context.Context,
@@ -584,8 +580,7 @@ func hasUnchangedRestoreLaunch(old []restoreLaunch, launch restoreLaunch) bool {
 	})
 }
 
-// restoreLaunchPath returns the authored field that owns a restore destination's
-// launch: the target container's command in the role's PodTemplate, or the
+// restoreLaunchPath returns the target container's command in the role's PodTemplate, or the
 // PodTemplate itself when the container is not authored. fldPath is the component path.
 func restoreLaunchPath(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,

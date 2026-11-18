@@ -46,9 +46,8 @@ type DynamoGraphDeploymentHandler struct {
 }
 
 // NewDynamoGraphDeploymentHandler creates a new handler for DynamoGraphDeployment Webhook.
-// mgr and operatorConfig must not be nil; operatorConfig renders the restore
-// launch of checkpoint-enabled components. operatorPrincipal is the full
-// Kubernetes SA username used to authorize operator-owned updates.
+// mgr and operatorConfig must not be nil. operatorPrincipal is the full Kubernetes SA
+// username used to authorize operator-owned updates.
 func NewDynamoGraphDeploymentHandler(
 	mgr manager.Manager,
 	operatorConfig *configv1alpha1.OperatorConfiguration,

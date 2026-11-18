@@ -354,9 +354,8 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 
 	allErrs = append(allErrs, v.validateSharedExperimentalSpec(spec, fldPath, options.grovePathway)...)
 
-	// Restore admission accepts only a direct python -m launch, so reject a
-	// checkpoint-enabled DGD whose rendered restore launch is not one. An update
-	// keeps an existing violation only when its rendered launch is unchanged.
+	// Reject a checkpoint-enabled DGD whose rendered restore launch is not a direct python -m.
+	// An update keeps an existing violation only when its rendered launch is unchanged.
 	if options.restoreLaunchDGD != nil && dynamo.GetCheckpoint(spec) != nil && !spec.IsLPX() {
 		reader := v.mgr.GetAPIReader()
 		launches, err := renderRestoreLaunches(v.ctx, reader, v.operatorConfig, options.restoreLaunchDGD, spec, options.grovePathway)
@@ -367,9 +366,8 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			oldLaunches, oldErr = renderRestoreLaunches(v.ctx, reader, v.operatorConfig, options.oldRestoreLaunchDGD, options.oldComponent, options.grovePathway)
 		}
 		if err != nil {
-			// An underivable launch never passes. Rendering requires a structurally valid
-			// component, so an earlier error already explains the failure; otherwise
-			// only the same failure on the old object is kept.
+			// An underivable launch never passes; report it unless an earlier error explains it
+			// or the old object failed the same way.
 			if len(allErrs) == 0 && (!hasOld || oldErr == nil || oldErr.Error() != err.Error()) {
 				allErrs = append(allErrs, field.Forbidden(
 					fldPath.Child("experimental", "checkpoint"),
