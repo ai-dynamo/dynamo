@@ -1671,7 +1671,7 @@ impl Metrics {
         let model_migration_total = IntCounterVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::MODEL_MIGRATION_TOTAL),
-                "Total number of requests accepted by a replacement worker after a worker failure",
+                "Total number of permitted request migration attempts after a worker failure",
             ),
             &["model", frontend_service::MIGRATION_TYPE_LABEL],
         )
@@ -2038,7 +2038,7 @@ impl Metrics {
         Ok(())
     }
 
-    /// Increment the migration counter when a replacement worker accepts a request.
+    /// Increment the migration counter when a permitted retry begins.
     /// `migration_type` names the failure that caused the replacement.
     pub fn inc_migration(&self, model: &str, migration_type: &str) {
         self.model_migration_total

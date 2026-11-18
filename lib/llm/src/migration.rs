@@ -483,7 +483,7 @@ where
 #[derive(Debug, Clone, Copy)]
 struct MigrationCause {
     reason: ErrorType,
-    /// `migration_type` label for the replacement dispatch: which kind of failure caused it.
+    /// `migration_type` label for the retry: which kind of failure caused it.
     migration_type: &'static str,
     from_worker_id: Option<u64>,
     /// The attempt that *failed*, not the retry it may schedule. `attempts.next()`
@@ -702,6 +702,11 @@ where
             return Err(error);
         }
         while let Some(attempt) = self.attempts.take() {
+            let migration = self.pending_migration.take();
+            if let Some(cause) = migration {
+                self.metrics
+                    .inc_migration(&self.model_name, cause.migration_type);
+            }
             // Once any chunks have arrived from a previous attempt, stamp
             // that worker's span as `migration_link` so the next worker's
             // span renders an OTel Link back to it. Guarded so the initial
@@ -714,7 +719,6 @@ where
                 self.context.id().to_string(),
                 self.metadata.clone(),
             );
-            let migration = self.pending_migration.take();
             let route_trace = attach_route_trace_context(
                 &mut request,
                 RouteTraceContext::new(
@@ -806,12 +810,6 @@ where
                     } else {
                         frontend_service::migration_outcome::SUCCESS
                     };
-                    if let Some(cause) = migration
-                        && outcome == frontend_service::migration_outcome::SUCCESS
-                    {
-                        self.metrics
-                            .inc_migration(&self.model_name, cause.migration_type);
-                    }
                     self.record_migration_outcome(migration_event.as_ref(), outcome);
                     self.active_route_trace = Some(route_trace);
                     self.next_stream = Some(next_stream);
@@ -879,7 +877,7 @@ where
         route_trace.map_or_else(|| self.attempts.last(), RouteTraceContext::attempt)
     }
 
-    /// Save the failed attempt and its metric label for the next replacement dispatch.
+    /// Save the failed attempt and its metric label for the next retry.
     fn queue_migration(
         &mut self,
         reason: ErrorType,
@@ -2058,7 +2056,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_rejected_before_dispatch_does_not_count_migration() {
+    async fn retry_rejected_before_dispatch_counts_permitted_attempts() {
         struct NoWorkers;
 
         #[async_trait]
@@ -2092,7 +2090,7 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 3);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
     }
 
@@ -2640,8 +2638,8 @@ mod tests {
             assert!(error.to_string().contains("no responders"));
         }
 
-        // Every replacement is rejected, so none counts as a migration.
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
+        // Three retries start; the initial request is not a migration.
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 3);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
         assert_eq!(
             migration_duration_count(
@@ -2710,9 +2708,9 @@ mod tests {
         let err = error_response.err().expect("expected error response");
         assert_eq!(err.error_type(), ErrorType::Disconnected);
 
-        // Every replacement is rejected after the original stream fails.
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
-        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+        // The stream failure starts one retry; its connection failure starts two more.
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 2);
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
         assert_eq!(
             migration_duration_count(
                 &metrics,
@@ -2781,7 +2779,7 @@ mod tests {
         assert_eq!(err.error_type(), ErrorType::Disconnected);
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
-        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 3); // 3 replacement dispatches
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 3); // 3 permitted retries
         assert_eq!(
             migration_duration_count(
                 &metrics,
@@ -2860,7 +2858,7 @@ mod tests {
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
     }
 
-    /// Cancellation before replacement dispatch leaves the counter at zero.
+    /// A retry that starts before cancellation is checked counts once.
     #[tokio::test]
     async fn test_retry_manager_cancelled_during_migration() {
         dynamo_runtime::logging::init();
@@ -2900,7 +2898,7 @@ mod tests {
             .downcast_ref::<DynamoError>()
             .expect("error should be a DynamoError");
         assert_eq!(dynamo_error.error_type(), ErrorType::Cancelled);
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 1);
         assert_eq!(
             migration_duration_count(
                 &metrics,
@@ -2955,7 +2953,7 @@ mod tests {
             .downcast_ref::<DynamoError>()
             .expect("error should be a DynamoError");
         assert_eq!(dynamo_error.error_type(), ErrorType::Cancelled);
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 1);
         assert_eq!(
             migration_duration_count(
                 &metrics,
@@ -3044,6 +3042,14 @@ mod tests {
             }
             dispatched.notified().await;
             assert_eq!(
+                metrics.get_migration_new_request_count(TEST_MODEL),
+                u64::from(!mid_stream)
+            );
+            assert_eq!(
+                metrics.get_migration_ongoing_request_count(TEST_MODEL),
+                u64::from(mid_stream)
+            );
+            assert_eq!(
                 duration_counts(&metrics),
                 [0, 0, 0],
                 "no outcome may be recorded while the handshake is pending"
@@ -3071,8 +3077,14 @@ mod tests {
         }
         // [success, failure, cancelled]: exactly one terminal outcome.
         assert_eq!(duration_counts(&metrics), [0, 0, 1]);
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
-        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+        assert_eq!(
+            metrics.get_migration_new_request_count(TEST_MODEL),
+            u64::from(!mid_stream)
+        );
+        assert_eq!(
+            metrics.get_migration_ongoing_request_count(TEST_MODEL),
+            u64::from(mid_stream)
+        );
     }
 
     #[tokio::test]

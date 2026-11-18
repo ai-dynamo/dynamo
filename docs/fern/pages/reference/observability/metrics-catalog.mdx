@@ -132,7 +132,7 @@ Metrics for [request migration](../../kubernetes/fault-tolerance/request-migrati
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_frontend_model_migration_total` | counter | [`migration_type`](metric-labels.mdx#metric-specific-labels) | Requests accepted by a replacement worker after a worker failure. Counted when its response stream is established. Failed or cancelled replacement attempts are not counted. `migration_type` names the failure that caused the replacement: `new_request` for a failed connection, `ongoing_request` for a mid-stream disconnection. | |
+| `dynamo_frontend_model_migration_total` | counter | [`migration_type`](metric-labels.mdx#metric-specific-labels) | Permitted migration attempts after a worker failure, counted once when each retry begins regardless of later failure or cancellation. The initial request and retries blocked by the migration limit or sequence-length cap do not count. `migration_type` names the failure that caused the retry: `new_request` for a failed connection, `ongoing_request` for a mid-stream disconnection. | |
 | `dynamo_frontend_model_migration_duration_seconds` | histogram | [`migration_type`](metric-labels.mdx#metric-specific-labels), [`outcome`](metric-labels.mdx#metric-specific-labels) | Time from detecting a migratable worker failure until the replacement response stream is established, migration ends without recovery, or the request is cancelled. | |
 | `dynamo_frontend_model_migration_max_seq_len_exceeded_total` | counter | — | Times migration was disabled for a request because its sequence length exceeded `--migration-max-seq-len`. A rising value may indicate the limit needs adjustment. | |
 
