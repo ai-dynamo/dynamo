@@ -394,10 +394,10 @@ pool. It finds the frontends by a Service name suffix, `-frontend` by default, w
 frontend component named `Frontend`. The operator does not know that suffix, so a frontend component
 with another name is exported but not found until the suffix matches it.
 
-The operator exports a Service only while it exists and the pool controls it: the relay controls the
-PoolRelay Service, and the DGD, or one of the DGD's `DynamoComponentDeployment`s, controls each
-frontend's Service. A Service that does not exist yet is exported once it does, and a Service of such
-a name that someone else created is not exported.
+The operator exports a Service only while it exists, and a Service that does not exist yet is
+exported once it does. It finds a frontend's Service by its name alone, whichever workload path
+created it, so it also exports a Service of that name that someone else created in the DGD's
+namespace. It exports the PoolRelay Service only while the relay controls it.
 
 The `DynamoPoolRelay` owns these exports, so deleting it deletes them. They follow the relay's own
 Service: the operator withdraws them whenever it withdraws that Service, for example when the DGD is
@@ -426,7 +426,7 @@ shows both.
 
 | Reason | Meaning |
 | --- | --- |
-| `ServiceNotOwned` | A Service of a name that the pool needs exists, but neither the relay nor the DGD, or one of its `DynamoComponentDeployment`s, controls it, so it is not exported. |
+| `ServiceNotOwned` | A Service named `<dgd>-pool-relay` exists, but the relay does not control it, so it is not exported. |
 | `InvalidServiceName` | No Service can have a name that the pool needs, so that Service is not exported. For example, a frontend component's Service name, `<dgd>-<component name>`, is longer than 63 characters. |
 | `ServiceNameTooLong` | With `karmada`, a Service name is longer than 55 characters, which Karmada cannot import, so that Service is not exported. |
 | `NoFrontend` | The DGD has no frontend component, so the Global Router has nowhere to send the pool's requests. |

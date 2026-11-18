@@ -46,7 +46,6 @@ import (
 
 // +kubebuilder:rbac:groups=multicluster.x-k8s.io,resources=serviceexports,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=about.k8s.io,resources=clusterproperties,verbs=get;list;watch
-// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments,verbs=get;list;watch
 
 // exportFieldManager is the field manager of the controller's writes to
 // ServiceExports, as of its other writes.
@@ -87,10 +86,6 @@ const (
 
 // relayGroupKind is the kind that controls a pool's exports.
 var relayGroupKind = v1alpha1.GroupVersion.WithKind("DynamoPoolRelay").GroupKind()
-
-// dcdGroupKind is the kind that controls a frontend's Service on the DCD path; a
-// DGD controls each of its DCDs.
-var dcdGroupKind = v1beta1.GroupVersion.WithKind("DynamoComponentDeployment").GroupKind()
 
 // exportSettings configures the pool's exports, which the controller maintains
 // when the multiClusterExport gate is on.
@@ -273,10 +268,9 @@ type unexportedService struct {
 }
 
 // convergeExports exports each Service of the pool that the implementation can
-// export and that the pool controls, and withdraws the Relay's other exports. It
-// returns the names exported, those whose Service does not exist yet, the pool's
-// problems, and every failed read and write: one failure does not hold back the
-// others.
+// export, and withdraws the Relay's other exports. It returns the names exported,
+// those whose Service does not exist yet, the pool's problems, and every failed
+// read and write: one failure does not hold back the others.
 func (r *reconciler) convergeExports(
 	ctx context.Context,
 	relay *v1alpha1.DynamoPoolRelay,
@@ -288,12 +282,9 @@ func (r *reconciler) convergeExports(
 		return nil, nil, nil, err
 	}
 
-	// The pool exports each of its Services that the implementation can export and
-	// that the pool controls: a missing export is created, and one that the Relay
-	// controls is repaired. A user's export, or one being deleted, stays as it is.
-	// A Service that does not exist, or that the pool does not control, is not
-	// exported, so a Service of the same name that someone else created is never
-	// exported in the pool's name.
+	// The pool exports each of its Services that exists and that the implementation
+	// can export: a missing export is created, and one that the Relay controls is
+	// repaired. A user's export, or one being deleted, stays as it is.
 	var errs []error
 	var unexported []unexportedService
 	var notControlled []string
@@ -303,7 +294,7 @@ func (r *reconciler) convergeExports(
 			unexported = append(unexported, unexportedService{name: name, problem: problem, detail: detail})
 			continue
 		}
-		found, controlled, err := r.poolControlsService(ctx, relay, dgd, name)
+		found, exportable, err := r.resolvePoolService(ctx, relay, dgd, name)
 		switch {
 		case err != nil:
 			// Keep the export until the Service can be read again.
@@ -313,7 +304,7 @@ func (r *reconciler) convergeExports(
 		case !found:
 			missing = append(missing, name)
 			continue
-		case !controlled:
+		case !exportable:
 			notControlled = append(notControlled, name)
 			continue
 		}
@@ -333,8 +324,8 @@ func (r *reconciler) convergeExports(
 	}
 
 	// Withdraw the Relay's exports of Services that the pool does not export, such
-	// as a renamed or removed frontend's, or one that someone else's Service took
-	// over.
+	// as a renamed or removed frontend's, or the PoolRelay Service's while another
+	// owner controls that Service.
 	for _, name := range slices.Sorted(maps.Keys(existing)) {
 		if keep[name] {
 			continue
@@ -347,16 +338,18 @@ func (r *reconciler) convergeExports(
 	return exported, missing, problems, errors.Join(append(errs, err)...)
 }
 
-// poolControlsService reads the Service named name in the Relay's namespace, and
-// reports whether it exists and whether the pool controls it: the Relay controls
-// its PoolRelay Service, and the DGD, or on the DCD path one of its DCDs, a
-// frontend's.
-func (r *reconciler) poolControlsService(
+// resolvePoolService reads the Service named name in the Relay's namespace, and
+// reports whether it exists and whether the pool exports it. A frontend's Service
+// is the Service of the name that the DGD gives it: its owners, which differ
+// between the workload paths that create it, play no part. The PoolRelay Service
+// is the Relay's own, so the pool exports it only while the Relay controls it, as
+// the Relay publishes it.
+func (r *reconciler) resolvePoolService(
 	ctx context.Context,
 	relay *v1alpha1.DynamoPoolRelay,
 	dgd *v1beta1.DynamoGraphDeployment,
 	name string,
-) (found, controlled bool, err error) {
+) (found, exportable bool, err error) {
 	service := &corev1.Service{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: relay.Namespace, Name: name}, service); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -364,23 +357,10 @@ func (r *reconciler) poolControlsService(
 		}
 		return false, false, fmt.Errorf("failed to read Service %s: %w", name, err)
 	}
-	controller := metav1.GetControllerOf(service)
-	switch {
-	case controller == nil:
-		return true, false, nil
-	case controller.UID == relay.UID || controller.UID == dgd.UID:
-		return true, true, nil
-	case schema.FromAPIVersionAndKind(controller.APIVersion, controller.Kind).GroupKind() != dcdGroupKind:
-		return true, false, nil
+	if name == multicluster.PoolRelayServiceName(dgd.Name) {
+		return true, metav1.IsControlledBy(service, relay), nil
 	}
-	dcd := &v1beta1.DynamoComponentDeployment{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: relay.Namespace, Name: controller.Name}, dcd); err != nil {
-		if apierrors.IsNotFound(err) {
-			return true, false, nil
-		}
-		return true, false, fmt.Errorf("failed to read DynamoComponentDeployment %s: %w", controller.Name, err)
-	}
-	return true, dcd.UID == controller.UID && metav1.IsControlledBy(dcd, dgd), nil
+	return true, true, nil
 }
 
 func (r *reconciler) withdrawAllExports(ctx context.Context, relay *v1alpha1.DynamoPoolRelay) error {
@@ -529,7 +509,7 @@ func (r *reconciler) withdrawExport(ctx context.Context, relay *v1alpha1.DynamoP
 }
 
 // exportProblems returns the problems of the pool that only the operator can
-// see: a Service that the pool does not control, a Service that the
+// see: a PoolRelay Service that the Relay does not control, a Service that the
 // implementation cannot export, a DGD without a frontend, and a cluster ID that
 // differs from the cluster's ID in its ClusterSet. A failed read of that ID is an
 // error.
@@ -542,8 +522,8 @@ func (r *reconciler) exportProblems(
 ) ([]exportProblem, error) {
 	var problems []exportProblem
 	if len(notControlled) > 0 {
-		problems = append(problems, exportProblem{reason: reasonServiceNotOwned, related: dgd, message: fmt.Sprintf(
-			"Neither the Relay nor DGD %s controls %s, so it is not exported", dgd.Name, serviceList(notControlled))})
+		problems = append(problems, exportProblem{reason: reasonServiceNotOwned, message: fmt.Sprintf(
+			"The Relay does not control %s, so it is not exported", serviceList(notControlled))})
 	}
 	if names, detail := unexportedNames(unexported, multicluster.NameInvalid); len(names) > 0 {
 		problems = append(problems, exportProblem{reason: reasonInvalidServiceName, related: dgd, message: fmt.Sprintf(
@@ -635,8 +615,8 @@ func (r *reconciler) mapServiceExportToRelays(ctx context.Context, export client
 }
 
 // mapServiceToRelays requeues each Relay whose DGD exports a Service of the
-// Service's name: the pool exports a Service only while it exists and the pool
-// controls it.
+// Service's name: the pool exports a Service only while it exists, and its
+// PoolRelay Service only while the Relay controls it.
 func (r *reconciler) mapServiceToRelays(ctx context.Context, service client.Object) []ctrl.Request {
 	return r.relaysExportingService(ctx, service.GetNamespace(), service.GetName())
 }
@@ -692,7 +672,8 @@ var serviceExportChanged = predicate.Funcs{UpdateFunc: func(update event.UpdateE
 
 // serviceControllerChanged passes the creation and deletion of a Service, and an
 // update that changes its controller: whether the pool exports a Service depends
-// only on whether it exists and who controls it.
+// only on whether it exists and, for the PoolRelay Service, whether the Relay
+// controls it.
 var serviceControllerChanged = predicate.Funcs{UpdateFunc: func(update event.UpdateEvent) bool {
 	return !equality.Semantic.DeepEqual(metav1.GetControllerOf(update.ObjectOld), metav1.GetControllerOf(update.ObjectNew))
 }}

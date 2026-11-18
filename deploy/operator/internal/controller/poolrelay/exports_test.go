@@ -253,16 +253,10 @@ func TestReconcileExports(t *testing.T) {
 		// elsewhere are a user's exports in namespace other.
 		elsewhere []string
 		// foreignServices are Services of the pool's names that no one controls,
-		// missingServices do not exist, and dcdServices are controlled by a DCD
-		// that the DGD controls.
+		// and missingServices do not exist.
 		foreignServices []string
 		missingServices []string
-		dcdServices     []string
-		// otherServices are controlled by another DGD, and otherDCDServices by a
-		// DCD of another DGD.
-		otherServices    []string
-		otherDCDServices []string
-		wantOwned        []string
+		wantOwned       []string
 		// wantReasons are the reasons of the events of the first reconcile. The
 		// second changes nothing, so it records none.
 		wantReasons []string
@@ -356,41 +350,23 @@ func TestReconcileExports(t *testing.T) {
 			wantCondition:  reasonServiceNameTooLong,
 		},
 		{
-			name:    "a Service that the pool does not control is not exported",
+			name:    "a PoolRelay Service that the Relay does not control is not exported",
 			dgdName: "green", frontends: []string{"Frontend"},
 			implementation:  configv1alpha1.MCSImplementationStandard,
-			foreignServices: []string{"green-frontend"},
-			wantOwned:       []string{"green-pool-relay"},
+			foreignServices: []string{"green-pool-relay"},
+			wantOwned:       []string{"green-frontend"},
 			wantReasons:     []string{"CreateServiceExport", reasonServiceNotOwned},
 			wantCondition:   reasonServiceNotOwned,
 		},
 		{
-			name:    "the Relay withdraws its export of a Service that the pool no longer controls",
+			name:    "the Relay withdraws its export of a PoolRelay Service that it no longer controls",
 			dgdName: "green", frontends: []string{"Frontend"},
 			implementation:  configv1alpha1.MCSImplementationKarmada,
 			ownedBefore:     []string{"green-pool-relay", "green-frontend"},
-			foreignServices: []string{"green-frontend"},
-			wantOwned:       []string{"green-pool-relay"},
+			foreignServices: []string{"green-pool-relay"},
+			wantOwned:       []string{"green-frontend"},
 			wantReasons:     []string{"DeleteServiceExport", reasonServiceNotOwned},
 			wantCondition:   reasonServiceNotOwned,
-		},
-		{
-			name:    "a Service that another DGD controls is not exported",
-			dgdName: "green", frontends: []string{"Frontend"},
-			implementation: configv1alpha1.MCSImplementationStandard,
-			otherServices:  []string{"green-frontend"},
-			wantOwned:      []string{"green-pool-relay"},
-			wantReasons:    []string{"CreateServiceExport", reasonServiceNotOwned},
-			wantCondition:  reasonServiceNotOwned,
-		},
-		{
-			name:    "a Service that a DCD of another DGD controls is not exported",
-			dgdName: "green", frontends: []string{"Frontend"},
-			implementation:   configv1alpha1.MCSImplementationStandard,
-			otherDCDServices: []string{"green-frontend"},
-			wantOwned:        []string{"green-pool-relay"},
-			wantReasons:      []string{"CreateServiceExport", reasonServiceNotOwned},
-			wantCondition:    reasonServiceNotOwned,
 		},
 		{
 			name:    "a Service that does not exist yet is not exported",
@@ -400,15 +376,6 @@ func TestReconcileExports(t *testing.T) {
 			wantOwned:       []string{"green-pool-relay"},
 			wantReasons:     []string{"CreateServiceExport"},
 			wantCondition:   reasonExported,
-		},
-		{
-			name:    "a frontend Service that a DCD of the DGD controls is exported",
-			dgdName: "green", frontends: []string{"Frontend"},
-			implementation: configv1alpha1.MCSImplementationKarmada,
-			dcdServices:    []string{"green-frontend"},
-			wantOwned:      []string{"green-pool-relay", "green-frontend"},
-			wantReasons:    []string{"CreateServiceExport", "CreateServiceExport"},
-			wantCondition:  reasonExported,
 		},
 		{
 			name:    "exports of the same names in another namespace do not count",
@@ -429,27 +396,10 @@ func TestReconcileExports(t *testing.T) {
 			dgd := newExportTestDGD(tc.dgdName, tc.frontends...)
 			relay := newExportTestRelay(dgd)
 			objects := []client.Object{relay, dgd}
-			skip := slices.Concat(tc.foreignServices, tc.missingServices, tc.dcdServices, tc.otherServices, tc.otherDCDServices)
+			skip := slices.Concat(tc.foreignServices, tc.missingServices)
 			objects = append(objects, poolServices(t, scheme, relay, dgd, skip...)...)
 			for _, name := range tc.foreignServices {
 				objects = append(objects, &corev1.Service{Name: name, Namespace: dgd.Namespace})
-			}
-			other := newExportTestDGD("other")
-			for _, name := range tc.otherServices {
-				service := &corev1.Service{Name: name, Namespace: dgd.Namespace}
-				g.Expect(controllerutil.SetControllerReference(other, service, scheme)).To(gomega.Succeed())
-				objects = append(objects, service)
-			}
-			for _, name := range slices.Concat(tc.dcdServices, tc.otherDCDServices) {
-				parent := dgd
-				if slices.Contains(tc.otherDCDServices, name) {
-					parent = other
-				}
-				dcd := &v1beta1.DynamoComponentDeployment{Name: name, Namespace: dgd.Namespace, UID: uuid.NewUUID()}
-				service := &corev1.Service{Name: name, Namespace: dgd.Namespace}
-				g.Expect(controllerutil.SetControllerReference(parent, dcd, scheme)).To(gomega.Succeed())
-				g.Expect(controllerutil.SetControllerReference(dcd, service, scheme)).To(gomega.Succeed())
-				objects = append(objects, dcd, service)
 			}
 			for _, name := range tc.ownedBefore {
 				objects = append(objects, ownedExport(t, scheme, exportTestVersion, relay, name))
@@ -507,6 +457,116 @@ func TestReconcileExports(t *testing.T) {
 				g.Expect(metav1.GetControllerOf(&export)).To(gomega.BeNil(), i)
 			}
 			g.Expect(elsewhere).To(gomega.ConsistOf(tc.elsewhere))
+		})
+	}
+}
+
+func TestFrontendServicesAreExportedByName(t *testing.T) {
+	// Each workload path creates a frontend's Service under the name that the DGD
+	// gives it, with its own owners above the Service. owner names the Service's
+	// controller: none, the DGD, a DCD of the DGD, a DCD that no longer exists, a
+	// DCD of another DGD, another DGD, a Grove PodCliqueSet, or a DisaggregatedSet.
+	for _, tc := range []struct {
+		name  string
+		owner string
+	}{
+		{name: "a Service without an owner", owner: "none"},
+		{name: "a Service that the DGD controls", owner: "DGD"},
+		{name: "a Service that a DCD of the DGD controls", owner: "DCD"},
+		{name: "a Service whose DCD no longer exists", owner: "deleted DCD"},
+		{name: "a Service that a DCD of another DGD controls", owner: "DCD of another DGD"},
+		{name: "a Service that another DGD controls", owner: "another DGD"},
+		{name: "a Service that a Grove PodCliqueSet controls", owner: "PodCliqueSet"},
+		{name: "a Service that a DisaggregatedSet controls", owner: "DisaggregatedSet"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+			ctx := context.Background()
+
+			t.Log("Create the pool, and its frontend's Service with the controller of this workload path")
+			scheme := newExportTestScheme(t)
+			dgd := newExportTestDGD("green", "Frontend")
+			relay := newExportTestRelay(dgd)
+			other := newExportTestDGD("other")
+			frontend := &corev1.Service{Name: "green-frontend", Namespace: dgd.Namespace}
+			objects := append([]client.Object{relay, dgd}, poolServices(t, scheme, relay, dgd, frontend.Name)...)
+			dcdKind := v1beta1.GroupVersion.WithKind("DynamoComponentDeployment")
+			var controller *metav1.OwnerReference
+			switch tc.owner {
+			case "DGD":
+				controller = metav1.NewControllerRef(dgd, v1beta1.GroupVersion.WithKind("DynamoGraphDeployment"))
+			case "DCD", "DCD of another DGD":
+				dcd := &v1beta1.DynamoComponentDeployment{Name: frontend.Name, Namespace: dgd.Namespace, UID: uuid.NewUUID()}
+				parent := dgd
+				if tc.owner == "DCD of another DGD" {
+					parent = other
+				}
+				g.Expect(controllerutil.SetControllerReference(parent, dcd, scheme)).To(gomega.Succeed())
+				objects = append(objects, dcd)
+				controller = metav1.NewControllerRef(dcd, dcdKind)
+			case "deleted DCD":
+				controller = &metav1.OwnerReference{
+					APIVersion: dcdKind.GroupVersion().String(), Kind: dcdKind.Kind,
+					Name: frontend.Name, UID: uuid.NewUUID(), Controller: new(true),
+				}
+			case "another DGD":
+				controller = metav1.NewControllerRef(other, v1beta1.GroupVersion.WithKind("DynamoGraphDeployment"))
+			case "PodCliqueSet":
+				controller = &metav1.OwnerReference{
+					APIVersion: "grove.io/v1alpha1", Kind: "PodCliqueSet",
+					Name: dgd.Name, UID: uuid.NewUUID(), Controller: new(true),
+				}
+			case "DisaggregatedSet":
+				controller = &metav1.OwnerReference{
+					APIVersion: "disaggregatedset.x-k8s.io/v1", Kind: "DisaggregatedSet",
+					Name: dgd.Name, UID: uuid.NewUUID(), Controller: new(true),
+				}
+			}
+			if controller != nil {
+				frontend.OwnerReferences = []metav1.OwnerReference{*controller}
+			}
+			objects = append(objects, frontend)
+			fakeClient := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{}, objects...)
+
+			t.Log("Reconcile: the Relay exports its PoolRelay Service and the frontend's Service")
+			recorder := events.NewFakeRecorder(20)
+			r := newExportTestReconciler(fakeClient, recorder, configv1alpha1.MCSImplementationStandard, exportTestVersion)
+			g.Expect(r.reconcileExports(ctx, relay, dgd)).To(gomega.Succeed())
+			g.Expect(eventReasons(drainEvents(recorder))).To(gomega.ConsistOf("CreateServiceExport", "CreateServiceExport"))
+			before := map[string]string{}
+			for _, export := range listServiceExports(t, fakeClient, exportTestVersion, dgd.Namespace) {
+				before[export.GetName()] = string(export.GetUID())
+			}
+			g.Expect(before).To(gomega.HaveLen(2))
+			g.Expect(before).To(gomega.HaveKey("green-pool-relay"))
+			g.Expect(before).To(gomega.HaveKey("green-frontend"))
+
+			t.Log("Roll out a new revision: the workers move to a new runtime namespace, and a new object controls the Service")
+			dgd.Status.Components["decode"] = v1beta1.ComponentReplicaStatus{RuntimeNamespace: "inference-green-next"}
+			if controller != nil {
+				stored := &corev1.Service{}
+				g.Expect(fakeClient.Get(ctx, client.ObjectKeyFromObject(frontend), stored)).To(gomega.Succeed())
+				next := *controller
+				next.Name += "-next"
+				next.UID = uuid.NewUUID()
+				stored.OwnerReferences = []metav1.OwnerReference{next}
+				g.Expect(fakeClient.Update(ctx, stored)).To(gomega.Succeed())
+			}
+			g.Expect(r.reconcileExports(ctx, relay, dgd)).To(gomega.Succeed())
+
+			t.Log("Check that both exports are the objects created first, and that the Relay recorded nothing")
+			g.Expect(drainEvents(recorder)).To(gomega.BeEmpty())
+			after := map[string]string{}
+			for _, export := range listServiceExports(t, fakeClient, exportTestVersion, dgd.Namespace) {
+				after[export.GetName()] = string(export.GetUID())
+			}
+			g.Expect(after).To(gomega.Equal(before))
+			stored := &v1alpha1.DynamoPoolRelay{}
+			g.Expect(fakeClient.Get(ctx, client.ObjectKeyFromObject(relay), stored)).To(gomega.Succeed())
+			condition := meta.FindStatusCondition(stored.Status.Conditions, conditionExported)
+			g.Expect(condition).NotTo(gomega.BeNil())
+			g.Expect(condition.Status).To(gomega.Equal(metav1.ConditionTrue))
+			g.Expect(condition.Reason).To(gomega.Equal(reasonExported))
 		})
 	}
 }
