@@ -130,7 +130,13 @@ impl NodeInfo {
         infos: &[&EngineInfo],
         mode: DisaggregationMode,
     ) -> Result<Self, DynamoError> {
-        assert_eq!(infos.len(), table.len(), "one discovery per listener");
+        if infos.len() != table.len() {
+            return Err(client::protocol_error(format!(
+                "{} SGLang discoveries for a node of {} listeners",
+                infos.len(),
+                table.len()
+            )));
+        }
         let start = infos[0];
         let mut engine = start.clone();
         engine.max_total_num_tokens = min_present(infos, |info| info.max_total_num_tokens);
@@ -149,7 +155,8 @@ impl NodeInfo {
         Ok(Self {
             engine,
             start_rank: table.start_rank(),
-            size: u32::try_from(table.len()).expect("a node has few listeners"),
+            size: u32::try_from(table.len())
+                .map_err(|_| client::protocol_error("too many SGLang listeners on one node"))?,
             global_dp_size: start.dp_size,
             bootstrap_ports,
             kv_events,

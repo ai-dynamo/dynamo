@@ -257,13 +257,6 @@ impl NativeHttp {
             None => return Ok(None),
             Some(port) => port.clone()?,
         };
-        if !discovery.incremental_streaming_output {
-            tracing::warn!(
-                port,
-                "SGLang native HTTP generation is disabled because incremental streaming output is not enabled"
-            );
-            return Ok(None);
-        }
         let endpoint = HttpEndpoint::from_grpc(grpc_endpoint, port).map_err(|error| {
             client::protocol_error(format!("invalid SGLang HTTP endpoint: {error}"))
         })?;
@@ -361,7 +354,6 @@ impl NativeHttp {
                 needs_first_token: request.is_decode,
                 first_token: ctx.first_token_notifier().cloned(),
             };
-            tracing::debug!(request_id = %ctx.id(), endpoint = %self.endpoint.with_path("/generate"), "sending native request to SGLang HTTP");
             let opened = tokio::select! {
                 biased;
                 _ = &mut request_cancellation => None,

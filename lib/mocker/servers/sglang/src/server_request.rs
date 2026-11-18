@@ -10,8 +10,8 @@ use std::time::Instant;
 use dynamo_mocker::common::protocols::DirectRequest;
 use dynamo_mocker::live::{deterministic_output_tokens, stable_request_uuid};
 use dynamo_mocker::sglang::{LogprobOptions, ResponseMetadata};
-use dynamo_sglang_sidecar::proto as pb;
 use serde_json::Value;
+use sglang_api_types::api::v1 as pb;
 use tonic::Status;
 use uuid::Uuid;
 
@@ -29,6 +29,7 @@ pub(super) struct PreparedRequest {
     output_token_ids: Vec<u32>,
     stop_token: Option<u32>,
     response_metadata: ResponseMetadata,
+    return_logprob: bool,
     pub(super) context_error: Option<String>,
     started: Instant,
 }
@@ -90,6 +91,7 @@ impl PreparedRequest {
         }
 
         // An unset protobuf max_new_tokens takes SGLang's schema default.
+        let defaulted = sampling.max_new_tokens.is_none();
         let requested_max = sampling.max_new_tokens.unwrap_or(DEFAULT_MAX_NEW_TOKENS);
         if requested_max <= 0 || requested_max > MAX_NEW_TOKENS {
             return Err(Status::invalid_argument(format!(
@@ -106,10 +108,18 @@ impl PreparedRequest {
         }
         let max_output_tokens = if config.mode == ServerMode::Prefill {
             1
+        } else if defaulted {
+            // Like SGLang's scheduler, clamp a defaulted value to the room left.
+            let room = (config.context_length as usize).saturating_sub(prompt_tokens.len() + 2);
+            (requested_max as usize).min(room).max(1)
         } else {
             requested_max as usize
         };
-        let context_error = context_error(prompt_tokens.len(), max_output_tokens, config);
+        let context_error = context_error(
+            prompt_tokens.len(),
+            (!defaulted).then_some(max_output_tokens),
+            config,
+        );
 
         let has_handoff = validate_role(
             config,
@@ -131,7 +141,7 @@ impl PreparedRequest {
         .map_err(|message| Box::new(Status::invalid_argument(message)))?;
 
         let request_id = match request.rid.and_then(|rid| rid.value) {
-            Some(pb::string_or_list::Value::One(rid)) if !rid.trim().is_empty() => rid,
+            Some(pb::string_or_list::Value::One(rid)) if !rid.is_empty() => rid,
             Some(pb::string_or_list::Value::Many(_)) => return Err(batch_error("rid")),
             _ => Uuid::new_v4().to_string(),
         };
@@ -166,6 +176,7 @@ impl PreparedRequest {
             output_token_ids,
             stop_token,
             response_metadata,
+            return_logprob,
             context_error,
             started: Instant::now(),
         })
@@ -189,23 +200,28 @@ impl PreparedRequest {
         &self,
         output_tokens: &[u32],
         completion_tokens: usize,
+        cached_tokens: usize,
         is_first: bool,
         is_terminal: bool,
     ) -> pb::GenerateResponse {
-        let json = self
-            .response_metadata
-            .meta_info(output_tokens, completion_tokens, None);
         let mut meta_info = pb::GenerateMetaInfo {
             id: self.response_metadata.request_id().to_string(),
             prompt_tokens: u32::try_from(self.prompt_tokens.len()).unwrap_or(u32::MAX),
             completion_tokens: completion_tokens as u64,
-            output_token_logprobs: json.get("output_token_logprobs").map(logprob_entries),
-            output_top_logprobs: json
-                .get("output_top_logprobs")
-                .map(logprob_rows)
-                .unwrap_or_default(),
+            cached_tokens: u32::try_from(cached_tokens).unwrap_or(u32::MAX),
             ..Default::default()
         };
+        if self.return_logprob {
+            let json = self
+                .response_metadata
+                .meta_info(output_tokens, completion_tokens, None);
+            meta_info.output_token_logprobs =
+                json.get("output_token_logprobs").map(logprob_entries);
+            meta_info.output_top_logprobs = json
+                .get("output_top_logprobs")
+                .map(logprob_rows)
+                .unwrap_or_default();
+        }
         if meta_info.output_token_logprobs.is_some() {
             meta_info.input_token_logprobs = Some(pb::LogprobEntries::default());
         }
@@ -250,10 +266,11 @@ impl PreparedRequest {
 }
 
 /// SGLang's tokenizer-side context check, which fails the request inside an
-/// open stream rather than rejecting the RPC.
+/// open stream rather than rejecting the RPC. A defaulted `max_new_tokens`
+/// (`None`) skips the total check, since the scheduler clamps it instead.
 fn context_error(
     prompt_tokens: usize,
-    max_new_tokens: usize,
+    max_new_tokens: Option<usize>,
     config: &MockerServerConfig,
 ) -> Option<String> {
     let context_length = config.context_length as usize;
@@ -263,6 +280,7 @@ fn context_error(
              ({context_length} tokens)."
         ));
     }
+    let max_new_tokens = max_new_tokens?;
     let total = prompt_tokens.saturating_add(max_new_tokens);
     (total > context_length).then(|| {
         format!(

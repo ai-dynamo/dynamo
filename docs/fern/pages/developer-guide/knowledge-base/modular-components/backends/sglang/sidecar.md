@@ -40,6 +40,12 @@ listeners as one worker.
 
 Media-aware KV routing on wide-token SGLang builds is not supported by the sidecar; see the [multimodal compatibility limits](multimodal.md#wide-token-sglang-builds).
 
+> [!WARNING]
+> SGLang's Rust server downloads `http://` and `https://` media URLs itself, from
+> any host, including `127.0.0.1` and its own HTTP API. It does not support
+> `--allowed-media-domains`, so limit the engine's network access instead, for
+> example with a Kubernetes NetworkPolicy.
+
 ## Launch Locally
 
 See [`lib/sidecar/sglang/launch/`](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/sglang/launch)

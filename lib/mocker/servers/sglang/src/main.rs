@@ -11,8 +11,8 @@ use clap::Parser;
 use dynamo_mocker::common::protocols::EngineType;
 use dynamo_mocker::common::protocols::MockerConfig;
 use dynamo_sglang_mocker::{MockerServerConfig, ServerMode, SglangMockerService};
-use dynamo_sglang_sidecar::proto::sglang_service_server::SglangServiceServer;
 use serde_json::{Map, Value};
+use sglang_api_types::api::v1::sglang_service_server::SglangServiceServer;
 
 #[derive(Parser, Debug)]
 #[command(

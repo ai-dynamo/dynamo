@@ -40,6 +40,12 @@ to each.
 
 See [support notes](../SUPPORT_NOTES.md#sglang) for feature restrictions and operational limits.
 
+> [!WARNING]
+> SGLang's Rust server downloads `http://` and `https://` media URLs itself, from
+> any host, including `127.0.0.1` and its own HTTP API. It does not support
+> `--allowed-media-domains`, so limit the engine's network access instead, for
+> example with a Kubernetes NetworkPolicy.
+
 ## Run locally
 
 See [`launch/`](launch/) for all topologies. For example, aggregated serving on
@@ -90,7 +96,7 @@ later. [sgl-project/sglang#45859](https://github.com/sgl-project/sglang/pull/458
 is optional; without it, an EAGLE engine gets no token budget and the sidecar
 treats `--allow-auto-truncate` and `--skip-tokenizer-init` as off.
 SGLang can alternatively load the sidecar in-process with
-`--sidecar dynamo.sglang.sidecar`.
+`--sidecar dynamo.sglang.sidecar`, which also works with `SGLANG_RUST_SERVER=1`.
 
 Aggregated serving uses loopback between the engine and sidecar. Disaggregated
 serving binds SGLang to the pod network so decode workers can reach prefill's

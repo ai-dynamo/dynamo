@@ -107,7 +107,6 @@ pub(crate) struct EngineInfo {
     pub reasoning_parser: Option<String>,
     pub tool_call_parser: Option<String>,
     pub skip_tokenizer_init: bool,
-    pub incremental_streaming_output: bool,
     /// Native HTTP port, when the server reports one.
     pub http_port: Option<Result<u16, DynamoError>>,
     /// The DP rank this listener serves.
@@ -264,7 +263,6 @@ pub(crate) fn engine_info(discovery: Discovery) -> Result<EngineInfo, DynamoErro
         reasoning_parser: non_empty(&model_info.reasoning_parser),
         tool_call_parser: non_empty(&model_info.tool_call_parser),
         skip_tokenizer_init: server_info.skip_tokenizer_init,
-        incremental_streaming_output: server_info.incremental_streaming_output,
         http_port: http_port(server_info.port),
         dp_rank: deployment.dp_rank.unwrap_or(0),
         dp_size: deployment.dp_size.max(1),
@@ -462,5 +460,24 @@ mod tests {
         })
         .unwrap();
         assert_eq!(info.native_offloading_capacity, Some(20_000));
+    }
+
+    #[test]
+    fn replica_dp_keeps_the_launch_wide_max_num_seqs() {
+        let info = info(|server| {
+            server.port = 30_000;
+            let deployment = server.deployment_info.as_mut().unwrap();
+            deployment.dp_size = 4;
+            deployment.dp_rank = Some(0);
+            deployment.max_running_requests = Some(256);
+            deployment.node_listeners = vec![pb::NodeRustListener {
+                port_offset: 0,
+                dp_rank: 0,
+                http_port: 30_000,
+                grpc_port: Some(30_010),
+            }];
+        })
+        .unwrap();
+        assert_eq!(info.max_num_seqs, Some(256));
     }
 }

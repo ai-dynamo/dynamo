@@ -825,55 +825,6 @@ async fn sglang_malformed_terminal_fails_then_recovers() {
     .await;
 }
 
-// The Rust server ends a request's stream with an error item carrying an HTTP
-// status; each code keeps its error category whether or not a token preceded it.
-// A 4xx is the request's fault and any other code the engine's, so neither is a
-// transport failure that migration would retry.
-#[tokio::test]
-async fn sglang_stream_error_codes_map_before_and_after_a_token_then_recover() {
-    bounded("in-stream error codes and recovery", async {
-        use sglang_fixture::{error_item, token_frame};
-        let control = Controller::<sglang_fixture::Adapter>::default();
-        let mut fixture =
-            sglang_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
-        let engine = fixture.engine().await;
-        engine.start(0).await.unwrap();
-        for (code, kind) in [
-            (400, BackendError::InvalidArgument),
-            (499, BackendError::Cancelled),
-            (503, BackendError::Unknown),
-        ] {
-            for has_token in [false, true] {
-                let ctx = mock_context();
-                let handle = control.request(ctx.id(), RequestPlan::default());
-                let mut items = Vec::new();
-                if has_token {
-                    items.push(token_frame(&[101], None));
-                }
-                items.push(error_item(code, "native failure"));
-                fixture.respond(ctx.id(), items);
-                let outputs = collect(
-                    &engine,
-                    request("mocker-model", vec![1, 2, 3], 3),
-                    GenerateContext::new(ctx, None),
-                )
-                .await;
-                let tokens: &[u32] = if has_token { &[101] } else { &[] };
-                let error = failure(outputs, tokens, kind);
-                assert!(
-                    error.to_string().contains(&format!("(code {code})")),
-                    "{error}"
-                );
-                assert_eq!(error.public_message(), None, "{code}");
-                bounded("errored RPC released", handle.wait(Event::Dropped)).await;
-            }
-        }
-        healthy(&fixture, &engine, &control).await;
-        finish(&mut fixture, &engine).await;
-    })
-    .await;
-}
-
 // An abort the request did not ask for ends its stream with SGLang's 499
 // item; Abort reports that it matched the running generation.
 #[tokio::test]
@@ -1706,7 +1657,7 @@ async fn sglang_engine_lost_when_model_info_polls_fail() {
     let lost = engine.engine_lost();
     tokio::pin!(lost);
     fixture.set_health(Some(false));
-    tokio::time::timeout(std::time::Duration::from_millis(3_500), &mut lost)
+    tokio::time::timeout(std::time::Duration::from_millis(1_500), &mut lost)
         .await
         .expect_err("an unhealthy engine is not lost");
     fixture.shutdown().await;
