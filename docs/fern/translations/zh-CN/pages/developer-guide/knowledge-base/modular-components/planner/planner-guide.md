@@ -130,7 +130,7 @@ spec:
 ```
 
 > [!NOTE]
-> 当 `optimization_target: sla` 时，profiler 会把每份配置的 `model`、`system`、`backend`、`tp` 以及其他并行度相关的键与它选定的部署进行比较。没有写出的键按默认值参与比较，因此不写 `tp` 等同于 `tp: 1`。只要有差异，请求就会失败，例如 `ais_perf_model entry for prefill: tp=1 conflicts with selected deployment tp=2`。不设置 `ais_perf_model` 时，由 profiler 写入该字段。完整规则见 [DynamoGraphDeploymentRequest 参考中的 `ais_perf_model`](../../../../../../../pages/reference/kubernetes-api/dynamo-graph-deployment-request.mdx#performance-model-and-pre-deployment-sweeping)。
+> 当 `optimization_target: sla` 时，profiler 会把每份配置的 `model`、`system`、`backend`、`tp` 以及其他并行度相关的键与它选定的部署进行比较。没有写出的键按默认值参与比较，因此不写 `tp` 等同于 `tp: 1`。只要有差异，请求就会失败，例如 `ais_perf_model entry for prefill: tp=1 conflicts with selected deployment tp=2`。不设置 `ais_perf_model` 时，由 profiler 写入该字段。完整规则见 [DynamoGraphDeploymentRequest 参考中的 ais_perf_model 字段](../../../../../../../pages/reference/kubernetes-api/dynamo-graph-deployment-request.mdx#performance-model-and-pre-deployment-sweeping)。
 
 ### 基于吞吐量的扩缩容设置
 
