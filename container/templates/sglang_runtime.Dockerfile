@@ -40,6 +40,8 @@ RUN apt-get update && \
         libturbojpeg \
         libjemalloc2 && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        apt \
+        apt-utils \
         dirmngr \
         gnupg \
         gnupg-utils \
@@ -50,9 +52,21 @@ RUN apt-get update && \
         gpgsm \
         gpgv \
         keyboxd \
+        libapt-pkg6.0t64 \
         libbrotli1 \
+        libglib2.0-0t64 \
+        libgnutls30t64 \
+        libperl5.38t64 \
         libssl3t64 \
-        openssl && \
+        openssh-client \
+        openssh-server \
+        openssh-sftp-server \
+        openssl \
+        perl \
+        perl-base \
+        perl-modules-5.38 \
+        zlib1g \
+        zlib1g-dev && \
     rm -rf /var/lib/apt/lists/* && \
     ldconfig && \
     ldconfig -p | grep -q 'libturbojpeg.so.0'
