@@ -257,6 +257,22 @@ fetches, which would refresh KVCR recency; Disk/G3 tiers; the worker state
 agent's coalescing of events into chains of up to 128 blocks; and KV-aware
 placement, since sessions are partitioned across workers at random.
 
+### Router lookup mode
+
+`--router-lookup` makes every lookup through the router's `Indexer::Concurrent`
+with `find_tiered_matches_ref_with_options`, the call the scheduler makes,
+instead of calling the backend. It needs `concurrent-radix-tree-compressed` and
+works with or without the lower-tier mode.
+
+- The lookup returns match details, not only overlap scores, so its service
+  time is not comparable with a run without the flag.
+- The service time includes dropping the result, as the scheduler drops it
+  after reading it.
+- With the lower-tier mode the lookup is one call, so
+  `lower_tier.query_service` is zero.
+- `router_lookup` in the result reports the lookups that credited device blocks
+  and the blocks credited. Compare two runs only if these agree.
+
 ### Choosing a load for A/B comparisons
 
 An overloaded replay and a keep-up replay measure different things, so choose

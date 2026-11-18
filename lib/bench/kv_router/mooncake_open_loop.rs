@@ -11,8 +11,9 @@ use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
 use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_indexer::host::{
-    KvIndexerInterface, LowerTierIndexers, LowerTierMatchDetails, ObservationError, SyncIndexer,
-    ThreadPoolIndexer, ThreadPoolObservationPlan, query_lower_tiers_with_options,
+    Indexer, KvIndexerInterface, KvRouterError, LowerTierIndexers, LowerTierMatchDetails,
+    LowerTierQueryOptions, ObservationError, SyncIndexer, ThreadPoolIndexer,
+    ThreadPoolObservationPlan, TieredMatchDetails, query_lower_tiers_with_options,
 };
 use serde::Serialize;
 use tokio::sync::oneshot;
@@ -399,6 +400,28 @@ pub(crate) fn prepare_open_loop_trial(
     })
 }
 
+/// The router's own lookup over the benchmarked CRTC (`--router-lookup`): an
+/// `Indexer::Concurrent`, queried as the scheduler queries it.
+pub struct RouterRun {
+    pub indexer: Indexer,
+    /// Keep the KV transfer chain, as the router does for workers that advertise router hints.
+    pub retain_kv_transfer_chain: bool,
+}
+
+impl RouterRun {
+    async fn lookup(&self, hashes: &[LocalBlockHash]) -> Result<TieredMatchDetails, KvRouterError> {
+        self.indexer
+            .find_tiered_matches_ref_with_options(
+                hashes,
+                LowerTierQueryOptions {
+                    retain_kv_transfer_chain: self.retain_kv_transfer_chain,
+                    max_reusable_blocks: Some(hashes.len()),
+                },
+            )
+            .await
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct QueryCompletion {
     id: u32,
@@ -408,6 +431,44 @@ struct QueryCompletion {
     /// The lower-tier part of the lookup, and whether it found blocks past the device prefix.
     lower_tier_ns: u64,
     lower_tier_hit: bool,
+    /// Device blocks the router's lookup credited, summed over workers.
+    device_blocks: u64,
+}
+
+impl QueryCompletion {
+    /// A `--router-lookup` completion, without its finish time. The lookup is one call, so its
+    /// lower-tier part is not timed apart.
+    fn routed(
+        id: u32,
+        started_ns: u64,
+        tiered: &Result<TieredMatchDetails, KvRouterError>,
+    ) -> Self {
+        let Ok(tiered) = tiered else {
+            return Self {
+                id,
+                started_ns,
+                ..Self::default()
+            };
+        };
+        Self {
+            id,
+            started_ns,
+            finished_ns: 0,
+            success: true,
+            lower_tier_ns: 0,
+            lower_tier_hit: tiered
+                .lower_tier
+                .values()
+                .any(|details| details.hits.values().any(|&hits| hits > 0)),
+            device_blocks: tiered
+                .device
+                .overlap_scores
+                .scores
+                .values()
+                .map(|&blocks| u64::from(blocks))
+                .sum(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -455,6 +516,7 @@ fn lookup<T: SyncIndexer>(
 async fn query_lane_worker<T: SyncIndexer>(
     indexer: Arc<ThreadPoolIndexer<T>>,
     lower_tier: Option<Arc<LowerTierRun<T>>>,
+    router: Option<Arc<RouterRun>>,
     lane: Arc<FixedLane>,
     corpus: Arc<QueryCorpus>,
     epoch: Instant,
@@ -487,6 +549,20 @@ async fn query_lane_worker<T: SyncIndexer>(
                 break;
             };
             let started_ns = elapsed_ns(epoch);
+            if let Some(router) = &router {
+                let tiered = black_box(router.lookup(hashes).await);
+                let looked_up_ns = elapsed_ns(epoch);
+                let mut completion = QueryCompletion::routed(id, started_ns, &tiered);
+                // The scheduler drops the result once it has read it, so the lookup's time
+                // includes the drop. Reading it here is the benchmark's own work.
+                let read_ns = elapsed_ns(epoch);
+                drop(tiered);
+                completion.finished_ns =
+                    looked_up_ns.saturating_add(elapsed_ns(epoch).saturating_sub(read_ns));
+                *slot = completion;
+                consumed += 1;
+                continue;
+            }
             let lower = lookup(&indexer, lower_tier.as_deref(), hashes, epoch);
             let finished_ns = elapsed_ns(epoch);
             let (lower_tier_ns, lower_tier_hit) =
@@ -503,6 +579,7 @@ async fn query_lane_worker<T: SyncIndexer>(
                 success: true,
                 lower_tier_ns,
                 lower_tier_hit,
+                device_blocks: 0,
             };
             consumed += 1;
         }
@@ -896,6 +973,16 @@ pub struct LowerTierResult {
     pub bytes_per_membership: Option<f64>,
 }
 
+/// What the lookups returned in a `--router-lookup` run. Runs are comparable only if they
+/// credit the same work.
+#[derive(Debug, Serialize)]
+pub struct RouterLookupResult {
+    /// Lookups that credited at least one worker with device blocks.
+    pub device_hit_queries: usize,
+    /// Device blocks credited, summed over workers and lookups.
+    pub device_blocks: u64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct OpenLoopResult {
     pub schema_version: u32,
@@ -951,6 +1038,8 @@ pub struct OpenLoopResult {
     pub backend_timing_report: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lower_tier: Option<LowerTierResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub router_lookup: Option<RouterLookupResult>,
     pub provenance: Option<RunProvenance>,
 }
 
@@ -1032,16 +1121,20 @@ fn deadline_readiness(query_counts: Vec<u32>) -> Box<[AtomicBool]> {
         .into_boxed_slice()
 }
 
+/// Every lookup goes through `router` when there is one. It must wrap `indexer`, and
+/// `lower_tier`'s indexers if the run has a lower tier.
 pub async fn run_open_loop<T: SyncIndexer>(
     backend_name: &str,
     indexer: Arc<ThreadPoolIndexer<T>>,
     lower_tier: Option<LowerTierRun<T>>,
+    router: Option<RouterRun>,
     trial: PreparedOpenLoopTrial,
     config: OpenLoopConfig,
 ) -> anyhow::Result<OpenLoopResult> {
     if trial.totals.host_events() > 0 && lower_tier.is_none() {
         anyhow::bail!("the corpus has host-tier events but the run has no lower tier");
     }
+    let router = router.map(Arc::new);
     if let Some(lower) = &lower_tier
         && trial.totals.kvcr.stored_events > 0
     {
@@ -1067,12 +1160,16 @@ pub async fn run_open_loop<T: SyncIndexer>(
     {
         let start = spec.start as usize;
         let end = start + spec.len as usize;
-        black_box(lookup(
-            &indexer,
-            lower_tier.as_deref(),
-            &trial.query_corpus.hashes[start..end],
-            epoch,
-        ));
+        let hashes = &trial.query_corpus.hashes[start..end];
+        match &router {
+            Some(router) => drop(black_box(router.lookup(hashes).await)),
+            None => drop(black_box(lookup(
+                &indexer,
+                lower_tier.as_deref(),
+                hashes,
+                epoch,
+            ))),
+        }
     }
 
     let lanes = trial
@@ -1088,6 +1185,7 @@ pub async fn run_open_loop<T: SyncIndexer>(
         query_tasks.push(tokio::spawn(query_lane_worker(
             Arc::clone(&indexer),
             lower_tier.clone(),
+            router.clone(),
             Arc::clone(lane),
             Arc::clone(&trial.query_corpus),
             epoch,
@@ -1247,7 +1345,9 @@ pub async fn run_open_loop<T: SyncIndexer>(
     let issuer_analysis =
         aggregate_issuer_outputs(issuer_outputs, operation_count, producer_stop_ns);
     let backend_timing_report = KvIndexerInterface::timing_report(indexer.as_ref());
-    // The lower tier's footprint, measured with CRTC already dropped.
+    // The lower tier's footprint, measured with CRTC already dropped. The router shares both.
+    let routed = router.is_some();
+    drop(router);
     drop(indexer);
     let lower_tier = match lower_tier.map(Arc::into_inner) {
         Some(Some(lower)) => {
@@ -1275,6 +1375,7 @@ pub async fn run_open_loop<T: SyncIndexer>(
         snapshot,
         backend_timing_report,
         lower_tier,
+        routed,
     ))
 }
 
@@ -1312,6 +1413,7 @@ fn analyze_result(
     snapshot: dynamo_kv_indexer::host::ThreadPoolObservationSnapshot,
     backend_timing_report: String,
     lower_tier: Option<(Footprint, u64)>,
+    routed: bool,
 ) -> OpenLoopResult {
     let IssuerAnalysisInput {
         records,
@@ -1511,6 +1613,14 @@ fn analyze_result(
         }
     });
 
+    let router_lookup = routed.then(|| {
+        let completions = query_completions.iter().flatten();
+        RouterLookupResult {
+            device_hit_queries: completions.clone().filter(|c| c.device_blocks > 0).count(),
+            device_blocks: completions.map(|c| c.device_blocks).sum(),
+        }
+    });
+
     let maximum_query_queue_depth = maximum_depth(&mut accepted_query_edges);
     let maximum_outstanding = maximum_depth(&mut accepted_update_edges);
     let queued_queries_at_stop = records
@@ -1601,6 +1711,7 @@ fn analyze_result(
         failure_reasons,
         backend_timing_report,
         lower_tier,
+        router_lookup,
         provenance: None,
     }
 }

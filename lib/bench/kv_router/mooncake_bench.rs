@@ -16,12 +16,13 @@ use dynamo_bench::kv_router_common::replay::{
 };
 use dynamo_bench::kv_router_common::sweep::compute_sweep_durations;
 use dynamo_kv_indexer::host::{
-    ConcurrentRadixTreeCompressed, KvIndexerMetrics, PositionalIndexer, ThreadPoolIndexer,
+    ConcurrentRadixTreeCompressed, Indexer, KvIndexerMetrics, LowerTierIndexers, PositionalIndexer,
+    ThreadPoolIndexer,
 };
 use mooncake_lower_tier::LowerTierRun;
 use mooncake_open_loop::{
-    OpenLoopConfig, OpenLoopResult, RunProvenance, parse_cpu_list, prepare_mooncake_corpus,
-    prepare_open_loop_trial, run_open_loop, validate_cpu_partition,
+    OpenLoopConfig, OpenLoopResult, RouterRun, RunProvenance, parse_cpu_list,
+    prepare_mooncake_corpus, prepare_open_loop_trial, run_open_loop, validate_cpu_partition,
 };
 use mooncake_shared::{
     MooncakeBenchmarkConfig, MooncakeIndexerConfig, MooncakeIndexerKind, PreparedMooncakeBenchmark,
@@ -175,6 +176,12 @@ struct Args {
     #[clap(long)]
     resident_blocks_reader_cpu: Option<usize>,
 
+    /// Make every lookup through the router's `Indexer`, as the scheduler does
+    /// (`find_tiered_matches_ref_with_options`), instead of calling the backend
+    /// (concurrent-radix-tree-compressed only).
+    #[clap(long)]
+    router_lookup: bool,
+
     /// Indexer backend to benchmark. Defaults to concurrent-radix-tree-compressed
     /// with `--num-event-workers` event threads.
     #[clap(subcommand)]
@@ -251,6 +258,9 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
             anyhow::bail!(
                 "the lower-tier mode needs concurrent-radix-tree-compressed for device matches; got {name}"
             );
+        }
+        if args.router_lookup && config.kind != MooncakeIndexerKind::ConcurrentRadixTreeCompressed {
+            anyhow::bail!("--router-lookup needs concurrent-radix-tree-compressed; got {name}");
         }
     }
     Ok(())
@@ -342,7 +352,7 @@ async fn run_open_loop_for_config(
                 args.common.block_size,
                 Some(metrics),
             ));
-            run_backend(config.short_name(), indexer, None, trial, open_config).await
+            run_backend(config.short_name(), indexer, None, None, trial, open_config).await
         }
         MooncakeIndexerKind::ConcurrentRadixTreeCompressed => {
             let indexer = Arc::new(ThreadPoolIndexer::new_with_metrics(
@@ -356,9 +366,30 @@ async fn run_open_loop_for_config(
                 LowerTierRun::crtc(
                     config.num_event_workers,
                     args.common.block_size,
-                    Some(metrics),
+                    Some(Arc::clone(&metrics)),
                     args.lower_tier.kvcr_blocks() > 0,
                 )
+            });
+            // As the router assembles `Indexer::Concurrent`: the primary, and a lower tier that
+            // stays empty unless the run has host tiers.
+            let router = args.router_lookup.then(|| RouterRun {
+                indexer: Indexer::Concurrent {
+                    primary: Arc::clone(&indexer),
+                    lower_tier: match &lower_tier {
+                        Some(lower) => lower.indexers.clone(),
+                        None => LowerTierIndexers::new_with_metrics(
+                            config.num_event_workers,
+                            args.common.block_size,
+                            Some(metrics),
+                        ),
+                    },
+                    approx: None,
+                    primary_records_routing_decisions: false,
+                    session_updates: None,
+                },
+                retain_kv_transfer_chain: lower_tier
+                    .as_ref()
+                    .is_some_and(|lower| lower.options.retain_kv_transfer_chain),
             });
             let counts = track_resident_blocks.then(|| indexer.bench_track_resident_blocks());
             let stop = Arc::new(AtomicBool::new(false));
@@ -387,8 +418,15 @@ async fn run_open_loop_for_config(
                     anyhow::anyhow!("resident block reader exited before pinning")
                 })??;
             }
-            let result =
-                run_backend(config.short_name(), indexer, lower_tier, trial, open_config).await;
+            let result = run_backend(
+                config.short_name(),
+                indexer,
+                lower_tier,
+                router,
+                trial,
+                open_config,
+            )
+            .await;
             stop.store(true, Ordering::Relaxed);
             if let Some((handle, _)) = reader {
                 handle
@@ -423,6 +461,7 @@ async fn run_backend<T: dynamo_kv_indexer::host::SyncIndexer>(
     backend_name: &str,
     indexer: Arc<ThreadPoolIndexer<T>>,
     lower_tier: Option<LowerTierRun<T>>,
+    router: Option<RouterRun>,
     trial: mooncake_open_loop::PreparedOpenLoopTrial,
     open_config: OpenLoopConfig,
 ) -> anyhow::Result<OpenLoopResult> {
@@ -430,7 +469,15 @@ async fn run_backend<T: dynamo_kv_indexer::host::SyncIndexer>(
     if let Some(cpu) = open_config.query_issuer_cpu {
         pin_current_thread_to_cpus(&[cpu])?;
     }
-    let result = run_open_loop(backend_name, indexer, lower_tier, trial, open_config).await;
+    let result = run_open_loop(
+        backend_name,
+        indexer,
+        lower_tier,
+        router,
+        trial,
+        open_config,
+    )
+    .await;
     // Restore the coordinator mask. Otherwise blocking-pool threads spawned while the
     // next sweep or compare cell generates events inherit the single query-issuer CPU.
     let restored = pin_current_thread_to_cpus(&coordinator_cpus);
@@ -472,6 +519,12 @@ fn print_open_loop_result(result: &OpenLoopResult) {
             lower
                 .bytes_per_membership
                 .map_or("?".to_string(), |bytes| format!("{bytes:.1}")),
+        );
+    }
+    if let Some(router) = &result.router_lookup {
+        println!(
+            "Router lookup: {} of {} lookups credited device blocks | {} blocks credited",
+            router.device_hit_queries, result.total_requests, router.device_blocks,
         );
     }
     if !result.backend_timing_report.is_empty() {

@@ -1086,6 +1086,7 @@ async fn mooncake_open_loop_smoke_completes_exact_ids_and_drains() -> anyhow::Re
         "concurrent-radix-tree-compressed",
         indexer,
         None,
+        None,
         trial,
         OpenLoopConfig {
             query_lanes: 2,
@@ -1244,6 +1245,7 @@ async fn mooncake_lower_tier_open_loop_routes_both_host_streams() -> anyhow::Res
         "concurrent-radix-tree-compressed",
         indexer,
         Some(LowerTierRun::crtc(2, BLOCK_SIZE, None, true)),
+        None,
         trial,
         OpenLoopConfig {
             query_lanes: 2,
