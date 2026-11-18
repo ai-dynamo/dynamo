@@ -10,6 +10,10 @@ Slime normally launches its own SGLang engines. Here, a DynamoGraphDeployment (D
 - **Generation** goes through the Dynamo frontend, which picks an engine for each request.
 - **Control** goes straight to each engine's native SGLang API on port 30000. Slime reads `/server_info` at startup. At each weight sync, it pauses generation, calls `/update_weights_from_disk`, and resumes generation.
 
+<Warning>
+Use Dynamo 1.7.0 or earlier images with this tutorial. Later Dynamo SGLang sidecars need SGLang's Rust server (`SGLANG_RUST_SERVER=1`), which does not serve the weight-update endpoints that Slime calls, so this tutorial still runs SGLang's Python server.
+</Warning>
+
 ## Prerequisites
 
 - Complete [Installation and Setup](installation.mdx), which stages the model on the `slime-data` volume and sets `NAMESPACE`.
