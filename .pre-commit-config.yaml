@@ -286,6 +286,23 @@ repos:
       language: python
       pass_filenames: false
       always_run: true
+    - id: check-agents-md-refs
+      name: Check that paths and identifiers named in AGENTS.md exist
+      entry: python3 scripts/check_agents_md_refs.py
+      # Runs on every commit so that a code change which removes a named file
+      # or symbol fails too. Scoped to the router AGENTS.md files, which pass
+      # today. Before adding a directory, run the script with that directory
+      # and fix or mark what it reports.
+      args: [lib/router, lib/router-plugins, lib/llm/src/kv_router]
+      language: python
+      pass_filenames: false
+      always_run: true
+    - id: check-agents-md-refs-tests
+      name: Test the AGENTS.md reference checker
+      entry: python3 scripts/tests/test_check_agents_md_refs.py
+      language: python
+      files: ^scripts/(tests/test_)?check_agents_md_refs\.py$
+      pass_filenames: false
     - id: generate-media-protocols
       name: Generate the Python media protocol models from the Rust schemas
       entry: python scripts/generate_media_protocols.py

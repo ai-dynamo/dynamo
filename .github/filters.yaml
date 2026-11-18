@@ -154,6 +154,8 @@ ignore:
   - 'scripts/validate_agent_instructions.py'
   - 'scripts/validate_skills.py'
   - 'scripts/check_action_pins.py'
+  - 'scripts/check_agents_md_refs.py'
+  - 'scripts/tests/test_check_agents_md_refs.py'
   # Developer tooling for the router crate split (proves a move is a move);
   # no CI job consumes it.
   - 'scripts/router_move_diff.py'
