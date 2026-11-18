@@ -2862,16 +2862,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Name = ticketDGDName
 				dgd.Labels = map[string]string{"updated": "true"}
-			}),
-		},
-		{
-			name:               "existing DGD with invalid generated Service names remains updateable when components are reordered",
-			seedWithoutWebhook: true,
-			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Name = ticketDGDName
-			}),
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Name = ticketDGDName
+				// A reorder changes spec.components[i] but not the generated names.
 				slices.Reverse(dgd.Spec.Components)
 			}),
 		},
