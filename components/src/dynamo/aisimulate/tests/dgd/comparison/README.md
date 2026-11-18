@@ -39,6 +39,10 @@ python components/src/dynamo/aisimulate/tests/dgd/comparison/run_cases.py \
   --suite components/src/dynamo/aisimulate/tests/dgd/comparison/testsuite-issue-8469.yaml
 ```
 
+The **AI Simulate DGD comparison** Actions workflow runs the same command on demand. It can generate
+the full suite or selected cases on one hardware profile, including the `h100-sxm-2gpu` profile,
+and uploads the generated DGDs and diagnostics without the local model caches.
+
 Use `--output-dir` to write into a temporary directory instead of updating the checked-in
 `generated/<suite-name>/` tree. Individual `--hardware` runs write under the ignored
 `generated/manual/` tree unless `--output-dir` is set.

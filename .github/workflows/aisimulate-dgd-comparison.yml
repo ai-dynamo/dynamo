@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: AI Simulate DGD comparison
+
+on:
+  workflow_dispatch:
+    inputs:
+      selection:
+        description: Run the comparison suite or selected cases
+        type: choice
+        options:
+          - suite
+          - cases
+        default: suite
+      suite:
+        description: Repository-relative comparison suite used in suite mode
+        type: string
+        default: components/src/dynamo/aisimulate/tests/dgd/comparison/testsuite-issue-8469.yaml
+      hardware:
+        description: Hardware profile used in cases mode
+        type: string
+        default: h100-sxm-2gpu
+      cases:
+        description: Space-separated case names used in cases mode
+        type: string
+        default: qwen3-32b-fp8-trtllm-agg
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PLANNER_IMAGE: nvcr.io/nvidia/ai-dynamo/dynamo-planner-nightly:latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Generate DGD comparisons
+        env:
+          CASES: ${{ inputs.cases }}
+          HARDWARE: ${{ inputs.hardware }}
+          OUTPUT_DIR: components/src/dynamo/aisimulate/tests/dgd/comparison/generated/workflow-${{ github.run_id }}
+          SELECTION: ${{ inputs.selection }}
+          SUITE: ${{ inputs.suite }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${OUTPUT_DIR}"
+          if [[ "${SELECTION}" == "suite" ]]; then
+            docker run --rm \
+              --user 0:0 \
+              --volume "${GITHUB_WORKSPACE}:/workspace" \
+              --workdir /workspace \
+              "${PLANNER_IMAGE}" \
+              python components/src/dynamo/aisimulate/tests/dgd/comparison/run_cases.py \
+              --suite "${SUITE}" \
+              --output-dir "${OUTPUT_DIR}"
+          else
+            read -r -a selected_cases <<< "${CASES}"
+            if (( ${#selected_cases[@]} == 0 )); then
+              echo "At least one case is required in cases mode." >&2
+              exit 2
+            fi
+            docker run --rm \
+              --user 0:0 \
+              --volume "${GITHUB_WORKSPACE}:/workspace" \
+              --workdir /workspace \
+              "${PLANNER_IMAGE}" \
+              python components/src/dynamo/aisimulate/tests/dgd/comparison/run_cases.py \
+              --hardware "${HARDWARE}" \
+              --output-dir "${OUTPUT_DIR}" \
+              "${selected_cases[@]}"
+          fi
+      - name: Upload generated DGDs and diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: aisimulate-dgd-comparison-${{ github.run_id }}
+          path: |
+            components/src/dynamo/aisimulate/tests/dgd/comparison/generated/workflow-${{ github.run_id }}/
+            !components/src/dynamo/aisimulate/tests/dgd/comparison/generated/workflow-${{ github.run_id }}/**/.cache/**
+          if-no-files-found: warn
+          retention-days: 14
