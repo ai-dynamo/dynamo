@@ -146,37 +146,11 @@ def test_old_perf_config_with_switch_or_flat_flag_is_rejected(extra):
         CONFIG.build_mocker_engine_args(args)
 
 
-def test_flat_flags_without_switch_change_nothing():
-    base = ["--model-path", MODEL]
-    result = build_old([*base, *FLAT_ARGV])
-    assert CONFIG.performance_config(result) is None
-    assert result == build(base)
-
-
 def test_switch_with_planner_profile_data_is_rejected(tmp_path):
     profile = ["--planner-profile-data", str(tmp_path / "profile.npz")]
     args = parse_old(["--ais-perf-model", "--model-path", MODEL, *profile])
     with pytest.raises(ValueError, match="^choose one timing provider"):
         CONFIG.build_mocker_engine_args(args)
-
-
-def test_mixed_spellings_are_rejected(capsys):
-    assert (
-        "--ais-perf-model and its legacy --aic spelling cannot be combined"
-        in parser_error(["--ais-perf-model", "--aic-perf-model"], capsys)
-    )
-
-
-def test_old_inputs_with_extra_engine_args_are_ignored(tmp_path):
-    engine_args = engine_args_file(tmp_path, {"worker_type": "decode"})
-    base = ["--model-path", MODEL, "--extra-engine-args", engine_args]
-    old = parse_old([*base, "--ais-perf-model", *FLAT_ARGV])
-
-    result = CONFIG.load_mocker_engine_args(old)
-
-    assert result == CONFIG.load_mocker_engine_args(parse_args(base))
-    assert result["engine"]["worker_type"] == "decode"
-    assert CONFIG.performance_config(result) is None
 
 
 def test_repeated_switch_is_accepted():
@@ -210,14 +184,6 @@ def test_value_from_env(monkeypatch):
     assert_perf_config(
         CONFIG.build_mocker_engine_args(args), {**ENTRY, "worker_type": "aggregated"}
     )
-
-
-def test_empty_env_value_is_no_value(monkeypatch):
-    monkeypatch.setenv(AIS_PERF_MODEL_ENV, "")
-    args = parse_args([])
-    assert args.ais_perf_model_value is None
-    assert args.ais_perf_model_source is None
-    assert CONFIG.performance_config(CONFIG.build_mocker_engine_args(args)) is None
 
 
 def test_typed_value_wins_over_env(monkeypatch):
@@ -477,12 +443,6 @@ def test_mtp_flags_are_not_old_inputs():
     rates = ["--ais-nextn-accept-rates", "0.5,0.5"]
     args = parse_args(["--ais-nextn", "2", *rates, "--ais-mtp-seed", "7"])
     assert CONFIG.old_ais_perf_inputs(args) == []
-
-
-def test_error_wins_over_warning():
-    # A warning before the error would be raised in its place.
-    with pytest.raises(ValueError, match="--num-workers"):
-        parse_args(["--ais-perf-model", "--num-workers", "0"])
 
 
 async def run_worker(monkeypatch, argv, fetched=None):

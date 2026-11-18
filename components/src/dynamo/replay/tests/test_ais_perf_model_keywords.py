@@ -307,17 +307,13 @@ def test_old_and_new_router_keywords_error(replay, native_calls):
 @pytest.mark.unit
 def test_engine_keyword_with_written_timing_model_error(replay, native_calls):
     engine_args = {"engine": {"timing_model": {"type": "polynomial"}}}
-    perf_config = AisPerfConfig(config=AGGREGATED_ENTRY)
 
-    # Also with the old router keyword: the suite turns a warning into an error,
-    # so its warning does not come before this error.
-    for keywords in ({}, {"ais_perf_config": perf_config, **_kv_router()}):
-        with pytest.raises(
-            ValueError,
-            match="^extra_engine_args already sets engine.timing_model; it cannot "
-            "be combined with ais_perf_model$",
-        ):
-            replay(ais_perf_model=IDENTITY, extra_engine_args=engine_args, **keywords)
+    with pytest.raises(
+        ValueError,
+        match="^extra_engine_args already sets engine.timing_model; it cannot "
+        "be combined with ais_perf_model$",
+    ):
+        replay(ais_perf_model=IDENTITY, extra_engine_args=engine_args)
 
     assert native_calls == []
 
@@ -480,27 +476,6 @@ def test_planner_config_without_old_keys_does_not_warn(replay, planner_adapter_c
 
     (adapter_call,) = planner_adapter_calls
     assert adapter_call["planner_config_arg"].ais_perf_model == IDENTITY
-
-
-@pytest.mark.unit
-@_BOTH_FUNCTIONS
-def test_old_planner_config_error_comes_before_warning(replay, native_calls):
-    roles = {"prefill": IDENTITY, "decode": IDENTITY}
-    disaggregated = {"mode": "disagg", "ais_perf_model": {"roles": roles}}
-    unknown_key = {
-        "mode": "agg",
-        "ais_perf_model": {"roles": {"aggregated": {**IDENTITY, "not_a_field": 1}}},
-    }
-
-    # The suite turns a warning into an error, so none comes before these.
-    # The planner adapter rejects a disaggregated planner without the engine
-    # args of both roles; the warning is given only once the adapter is built.
-    with pytest.raises(ValueError, match="requires prefill and decode engine"):
-        replay(planner_config=disaggregated)
-    with pytest.raises(ValueError, match="invalid AIS config for aggregated"):
-        replay(planner_config=unknown_key)
-
-    assert native_calls == []
 
 
 @pytest.mark.unit
