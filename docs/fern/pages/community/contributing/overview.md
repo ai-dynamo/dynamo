@@ -30,8 +30,8 @@ conversation with the maintainers before investing in implementation.
   reproduction steps, expected and actual behavior, and relevant environment details.
 - [Propose a feature](https://github.com/ai-dynamo/dynamo/issues/new?template=feature_request.yml)
   before beginning implementation.
-- Browse [good first issues](https://github.com/ai-dynamo/dynamo/labels/good-first-issue) and
-  [help wanted issues](https://github.com/ai-dynamo/dynamo/labels/help-wanted).
+- Browse [good first issues](https://github.com/ai-dynamo/dynamo/labels/good%20first%20issue) and
+  [help wanted issues](https://github.com/ai-dynamo/dynamo/labels/help%20wanted).
 - Improve explanations, examples, tutorials, and API documentation.
 - Review pull requests or answer questions in the community channels.
 - For changes to public APIs or architecture, start a

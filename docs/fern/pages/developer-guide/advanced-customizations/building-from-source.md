@@ -195,4 +195,4 @@ export VLLM_USE_FLASHINFER_SAMPLER=0
 
 - [Contribution Guide](../../community/contributing/overview.md) -- Workflow for contributing code
 - [Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples) -- Explore the codebase
-- [Good First Issues](https://github.com/ai-dynamo/dynamo/labels/good-first-issue) -- Find a task to work on
+- [Good First Issues](https://github.com/ai-dynamo/dynamo/labels/good%20first%20issue) -- Find a task to work on

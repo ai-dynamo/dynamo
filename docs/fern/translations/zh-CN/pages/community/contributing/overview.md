@@ -80,8 +80,8 @@ Dynamo 拥有 200 多位外部贡献者、220 多个已合并的社区 PR，并�
 
 | Issue 类型 | 说明 |
 |------------|------|
-| [Good First Issues](https://github.com/ai-dynamo/dynamo/labels/good-first-issue) | 适合初学者，并带有指导 |
-| [Help Wanted](https://github.com/ai-dynamo/dynamo/labels/help-wanted) | 欢迎社区贡献 |
+| [Good First Issues](https://github.com/ai-dynamo/dynamo/labels/good%20first%20issue) | 适合初学者，并带有指导 |
+| [Help Wanted](https://github.com/ai-dynamo/dynamo/labels/help%20wanted) | 欢迎社区贡献 |
 
 ### Fork 并克隆
 
@@ -188,7 +188,7 @@ uv pip install pre-commit
 pre-commit install
 ```
 
-你已经设置好了！保持好奇 -- 探索代码库，试用[示例](https://github.com/ai-dynamo/dynamo/tree/main/examples)，看看各个部分如何协同工作。准备好后，可以从 [Good First Issues](https://github.com/ai-dynamo/dynamo/labels/good-first-issue) 看板中挑选一个 issue，或继续阅读完整贡献流程。
+你已经设置好了！保持好奇 -- 探索代码库，试用[示例](https://github.com/ai-dynamo/dynamo/tree/main/examples)，看看各个部分如何协同工作。准备好后，可以从 [Good First Issues](https://github.com/ai-dynamo/dynamo/labels/good%20first%20issue) 看板中挑选一个 issue，或继续阅读完整贡献流程。
 
 ---
 
@@ -370,7 +370,7 @@ act -j pre-merge-rust
 
 ### Good First Issues
 
-标记为 `good-first-issue` 的 issue 适合新贡献者。我们会为这些 issue 提供额外指导 -- 请在 issue 描述中查找清晰的验收标准和建议方案。
+标记为 `good first issue` 的 issue 适合新贡献者。我们会为这些 issue 提供额外指导 -- 请在 issue 描述中查找清晰的验收标准和建议方案。
 
 ---
 

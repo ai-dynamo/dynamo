@@ -27,8 +27,8 @@ Or view the source: [`docs/contribution-guide.md`](docs/fern/pages/community/con
 
 ## Quick Links
 
-- [Good first issues](https://github.com/ai-dynamo/dynamo/labels/good-first-issue)
-- [Help wanted](https://github.com/ai-dynamo/dynamo/labels/help-wanted)
+- [Good first issues](https://github.com/ai-dynamo/dynamo/labels/good%20first%20issue)
+- [Help wanted](https://github.com/ai-dynamo/dynamo/labels/help%20wanted)
 - [Code ownership](.github/codeowners/README.md) -- who reviews my PR, fixing the `codeowners` check, earning area ownership
 - [Open a bug report](https://github.com/ai-dynamo/dynamo/issues/new?template=bug_report.yml)
 - [Propose a feature](https://github.com/ai-dynamo/dynamo/issues/new?template=feature_request.yml)
