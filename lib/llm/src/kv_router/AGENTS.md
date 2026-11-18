@@ -66,6 +66,9 @@ and the booking lifecycle these rules protect.
 
 ## Performance
 
+PR numbers point to worked examples; open one only when you need to see how a rule was
+applied.
+
 The selection path's rules are in `lib/router/scheduler/AGENTS.md` and the index's in
 `lib/router/kv-indexer/AGENTS.md`. These cover the host's ingest and sync paths.
 

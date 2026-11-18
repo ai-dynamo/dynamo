@@ -4,6 +4,8 @@
 
 ## Performance
 
+PR numbers point to worked examples; open one only when you need to see how a rule was applied.
+
 The index holds an entry per (block, worker), tens of millions at fleet scale, and every KV event from every worker passes through it. The `dynamo-perf-best-practices` skill has the general rules; `src/concurrent_radix_tree_compressed/AGENTS.md` adds the CRTC ones.
 
 - **Adding a field or variant to anything stored per block, per edge, or per (block, worker).** Work out the new `size_of` first. Box the rare case, intern wide ids, and keep or add a `const` size assert, as `lane_lookup.rs` does for its 12-byte slot (#17109, #17143).

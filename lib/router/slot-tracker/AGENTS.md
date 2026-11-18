@@ -9,6 +9,9 @@ costing or queued readiness needs current host-reject fullness.
 
 ## Performance
 
+PR numbers point to worked examples; open one only when you need to see how a
+rule was applied.
+
 - **Changing `project_worker_loads_into`.** It visits every rank on every
   admission. Don't add a lock, another lookup by id, or an allocation per rank, and
   keep writing into the caller's storage instead of returning a new map

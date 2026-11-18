@@ -34,6 +34,8 @@ pass. Ordinary requests retain `NoEndpoints` when no allowed endpoint is availab
 
 ## Performance
 
+PR numbers point to worked examples; open one only when you need to see how a rule was applied.
+
 One `SchedulerQueueActor` task per partition admits every request, so its time per admission caps that partition's request rate. Check a change against the cases below; the `dynamo-perf-best-practices` skill has the general rules and the evidence a PR needs.
 
 - **Adding work to an admission.** If it depends only on the request and worker configuration, do it on the caller's task in `prepare_candidates`. If it depends on load the actor books, the caller may compute it, but the actor must re-read the ranks it wrote since (`ActorWriteLog`, `adopt_prepared_load`). Either way keep the actor-side path: pinned requests and policies with filters get no prepared rows, reject thresholds allow no prepared load, and prepared rows last only the actor turn that received the request (#17465, #18540).

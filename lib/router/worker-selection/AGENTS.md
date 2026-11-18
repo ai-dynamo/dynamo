@@ -18,6 +18,8 @@
 
 ## Performance
 
+PR numbers point to worked examples; open one only when you need to see how a rule was applied.
+
 On the KV path, filters, scorers, and pickers run at selection on the scheduler's queue actor, over every candidate row of every admission. `lib/router/scheduler/AGENTS.md` covers the actor; these cover rows and policies.
 
 - **Writing or changing a filter, scorer, or picker.** Compute per-request values once, before the row loop. Inside the loop, don't allocate, lock, look a worker up by id, or emit a log event.

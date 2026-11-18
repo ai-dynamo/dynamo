@@ -7,4 +7,6 @@
 
 ## Performance
 
+PR numbers point to worked examples; open one only when you need to see how a rule was applied.
+
 - **Adding or changing a shipped policy.** `required_worker_inputs` decides how much the scheduler computes for every admission, so declare the narrowest set. Gate an optional group on the setting that reads it, as the default scorer does for `CACHE`, so a config that leaves it off doesn't pay. For the default policy, run `cargo bench -p dynamo-router-policies --bench default_selection` and `--bench default_lifecycle`. Those benches build only the default policy, so for any other shipped policy add a case for it or measure it another way, and say how in the PR. The row and input rules are in `lib/router/worker-selection/AGENTS.md` (#18528).
