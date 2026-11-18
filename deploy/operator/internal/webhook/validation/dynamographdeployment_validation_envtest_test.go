@@ -2880,6 +2880,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			seedWithoutWebhook: true,
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Name = ticketDGDName
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "kubernetes"}
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Name = ticketDGDName
@@ -2895,6 +2896,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Name = ticketDGDName
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "kubernetes"}
 			}),
 			wantWebhookErrs: []string{
 				generatedNameErr("spec.components[1].name", ticketDGDName+"-worker", shortenDGDOrComponent, tooLongServiceName),
