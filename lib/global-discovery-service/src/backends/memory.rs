@@ -71,14 +71,12 @@ struct Registered {
 }
 
 impl Registered {
-    /// When the pool's registration may have lapsed everywhere, and an
-    /// instance that no one lists has said whether it took it over. A copy
-    /// lapses up to [`answer_timeout`], the longest the other instance had to
-    /// answer, before its original. A PoolRelay that renews with an instance
-    /// that held no registration makes it say so within one more: it asks
-    /// the others once per [`answer_timeout`].
+    /// When the registration may have lapsed everywhere, and an instance that
+    /// no one lists and that took it over has said so: it asks once per
+    /// [`answer_timeout`], and its request may take as long again to arrive.
+    /// A copy lapses up to one [`answer_timeout`] before its original.
     fn lapsed_at(&self, lease: Lease) -> Instant {
-        let said = self.expires_at + answer_timeout(lease);
+        let said = self.expires_at + answer_timeout(lease) * 2;
         if self.local {
             said
         } else {
@@ -785,10 +783,11 @@ mod tests {
             matches!(next_event(&mut watch).await, WatchEvent::Removed(k) if k == key("copied"))
         );
 
-        // Answers to requests sent before the lapse settle nothing, and nor
-        // do ones sent within twice the answer timeout after it: a copy lapses
-        // up to one before its original, and an instance that no one lists,
-        // with which its PoolRelay renewed it, may take another to say so.
+        // Answers to requests sent before the lapse settle nothing, nor do
+        // ones sent within three answer timeouts after it: a copy lapses up to
+        // one before its original, and an instance that no one lists, with
+        // which its PoolRelay renewed it, may take one more to ask and another
+        // for its request to arrive.
         for sent in [asked + Duration::from_secs(4), Instant::now()] {
             store.end_round(round(sent));
             assert_eq!(
@@ -796,12 +795,14 @@ mod tests {
                 Completeness::Estimated
             );
         }
-        tokio::time::advance(answer_timeout(lease())).await;
-        store.end_round(round(Instant::now()));
-        assert_eq!(
-            store.list().await.unwrap().completeness,
-            Completeness::Estimated
-        );
+        for _ in 0..2 {
+            tokio::time::advance(answer_timeout(lease())).await;
+            store.end_round(round(Instant::now()));
+            assert_eq!(
+                store.list().await.unwrap().completeness,
+                Completeness::Estimated
+            );
+        }
         // A later round brings the renewed pool back, and since every
         // instance was asked after that, the lists are complete again.
         tokio::time::advance(answer_timeout(lease())).await;
@@ -814,16 +815,18 @@ mod tests {
 
         // So does a registration made here: its PoolRelay may have renewed it
         // late with another instance. Its lapse is known exactly, so a round
-        // the answer timeout after it settles it.
-        tokio::time::advance(Duration::from_secs(5)).await;
+        // two answer timeouts after it settles it.
+        tokio::time::sleep_until(asked + lease().duration()).await;
         assert!(find(&store, "local").await.is_none());
         assert_eq!(next_resync(&mut watch).await, Completeness::Estimated);
-        store.end_round(round(Instant::now()));
-        assert_eq!(
-            store.list().await.unwrap().completeness,
-            Completeness::Estimated
-        );
-        tokio::time::advance(answer_timeout(lease())).await;
+        for _ in 0..2 {
+            store.end_round(round(Instant::now()));
+            assert_eq!(
+                store.list().await.unwrap().completeness,
+                Completeness::Estimated
+            );
+            tokio::time::advance(answer_timeout(lease())).await;
+        }
         store.end_round(round(Instant::now()));
         assert_eq!(
             store.list().await.unwrap().completeness,

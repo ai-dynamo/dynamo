@@ -50,9 +50,10 @@
 //! from when a registration lapses here, a copy or one made here, until
 //! every instance has answered completely again, since its PoolRelay may
 //! have renewed it late, with any of them, as it does after a failed
-//! heartbeat. A lapse waits one round more, so that an instance that no one
-//! lists and that took the registration over has said so, and a copy's
-//! another, since it can lapse up to one request's time before its original.
+//! heartbeat. A lapse waits two rounds more, so that an instance that no one
+//! lists and that took the registration over has asked and its request has
+//! arrived, and a copy's another, since it can lapse up to one request's time
+//! before its original.
 //! The store keeps these times, so lists turn `Estimated` on time
 //! even if the rounds stop. An instance that stays listed but cannot be
 //! reached keeps lists `Estimated` until it answers: the pools its PoolRelays
@@ -738,15 +739,17 @@ mod tests {
         }
     }
 
-    /// Instances in one process, reached by name, without HTTP. Each answers
-    /// with [`Sharing::reply`], as `GET /registrations` does, read when it is
-    /// asked and sent `delay` later. One that is down never answers.
+    /// Instances in one process, reached by name, without HTTP. A request
+    /// reaches an instance `request_delay` after it is sent, and the instance
+    /// answers with [`Sharing::reply`], as `GET /registrations` does, read
+    /// then and sent `delay` later. One that is down never answers.
     #[derive(Clone, Default)]
     struct Network(Arc<Mutex<HashMap<RouterReplicaId, Node>>>);
 
     #[derive(Clone)]
     struct Node {
         sharing: Sharing,
+        request_delay: Duration,
         delay: Duration,
         down: bool,
     }
@@ -761,6 +764,7 @@ mod tests {
             let node = self.0.lock().unwrap().get(&instance.replica).cloned();
             match node {
                 Some(node) if !node.down => {
+                    tokio::time::sleep(node.request_delay).await;
                     node.sharing.asked_by(asker);
                     let reply = node.sharing.reply();
                     tokio::time::sleep(node.delay).await;
@@ -802,6 +806,7 @@ mod tests {
                 PeerSync::new(list.clone(), Arc::new(self.clone()), store.clone(), lease).unwrap();
             let node = Node {
                 sharing,
+                request_delay: Duration::ZERO,
                 delay: Duration::ZERO,
                 down: false,
             };
@@ -870,18 +875,19 @@ mod tests {
         at(start, 3100).await;
         assert_eq!(view(&b).await, "[m2] complete");
         // With no more heartbeats, the registration lapses at A at 3.25 s, and
-        // the copy at B with it. Each list stays incomplete until every other
-        // instance has been asked after the pool may have lapsed there, and an
-        // instance that no one lists has had a round to say that it took the
-        // pool over: at A, until 4 s, and at B, where a copy may lapse half a
-        // heartbeat interval before its original, until 4.5 s.
+        // the copy at B with it. Lists stay incomplete until every instance is
+        // asked two answer timeouts after the lapse, for an unlisted instance
+        // that took the pool over to ask and its request to arrive: at A until
+        // 4.5 s, and at B, whose copy may lapse one earlier, until 5 s.
         at(start, 3300).await;
         assert_eq!(view(&a).await, "[] incomplete");
         assert_eq!(view(&b).await, "[] incomplete");
         at(start, 4100).await;
+        assert_eq!(view(&a).await, "[] incomplete");
+        at(start, 4600).await;
         assert_eq!(view(&a).await, "[] complete");
         assert_eq!(view(&b).await, "[] incomplete");
-        at(start, 4600).await;
+        at(start, 5100).await;
         assert_eq!(view(&b).await, "[] complete");
     }
 
@@ -1160,6 +1166,32 @@ mod tests {
         at(start, 5520).await;
         assert_eq!(view(&b).await, "[] incomplete");
         at(start, 6100).await;
+        assert_eq!(view(&b).await, "[] incomplete");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_takeover_reported_by_a_slow_request_keeps_lists_incomplete() {
+        // As above, but each request takes 490 ms to reach B: C's at 5.55 s,
+        // the first to say that it holds the pool, arrives at 6.04 s, after
+        // B's round at 6 s. That round must not make B's lists complete.
+        let network = Network::default();
+        let start = Instant::now();
+        let _ = network.start("a", lease(), &["a", "b"]);
+        let (b, _, _) = network.start("b", lease(), &["a", "b"]);
+        network.change("b", |node| node.request_delay = Duration::from_millis(490));
+        at(start, 50).await;
+        let (c, _, _) = network.start("c", lease(), &["b", "c"]);
+        for beat in 0..3 {
+            at(start, 1000 * beat + 100).await;
+            let _ = b.register(pool("m1")).await.unwrap();
+        }
+        at(start, 5000).await;
+        assert_eq!(view(&b).await, "[m1] complete");
+        at(start, 5070).await;
+        let _ = c.register(pool("m1")).await.unwrap();
+        at(start, 6020).await;
+        assert_eq!(view(&b).await, "[] incomplete");
+        at(start, 6600).await;
         assert_eq!(view(&b).await, "[] incomplete");
     }
 

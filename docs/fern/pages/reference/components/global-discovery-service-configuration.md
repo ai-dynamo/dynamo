@@ -79,7 +79,7 @@ itself in the import; for a lease after an instance leaves the import; once a li
 answered completely for the lease minus two heartbeat intervals; while an instance holding
 registrations that has not answered asks this one, or an instance that this one reads, and for about a
 lease and a heartbeat interval after it last does, as when this cluster's import lags behind; and after
-a registration lapses here, until every instance has answered again, a round later.
+a registration lapses here, until every instance has answered again, two rounds later.
 
 ### With `--registration-storage dynamodb`
 
