@@ -564,11 +564,11 @@ func inputJSONPointer(location []string) string {
 
 // alphaIngressBackendNameErrors checks enabled alpha Ingress backend names and ratchets unchanged errors.
 // newIngress and oldIngress may be nil when the optional ingress is absent. fldPath is non-nil.
-func alphaIngressBackendNameErrors(newIngress, oldIngress *nvidiacomv1alpha1.IngressSpec, name string, fldPath *field.Path) field.ErrorList {
+func alphaIngressBackendNameErrors(newIngress, oldIngress *nvidiacomv1alpha1.IngressSpec, name, oldName string, fldPath *field.Path) field.ErrorList {
 	if newIngress == nil || !newIngress.Enabled || newIngress.IngressControllerClassName == nil {
 		return nil
 	}
-	if oldIngress != nil && oldIngress.Enabled && oldIngress.IngressControllerClassName != nil {
+	if oldIngress != nil && oldIngress.Enabled && oldIngress.IngressControllerClassName != nil && dynamo.NormalizeKubeResourceName(oldName) == dynamo.NormalizeKubeResourceName(name) {
 		return nil
 	}
 	name = dynamo.NormalizeKubeResourceName(name)

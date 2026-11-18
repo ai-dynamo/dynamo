@@ -116,7 +116,7 @@ func (v *DynamoGraphDeploymentValidator) validate(
 			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
 		}
 	}
-	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha, oldAlpha)...)
+	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha, oldAlpha, deployment, oldDeployment)...)
 
 	return validation.warnings, invalidDynamoGraphDeploymentError(deployment, allErrs)
 }

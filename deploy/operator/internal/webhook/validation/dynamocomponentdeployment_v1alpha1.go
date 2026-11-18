@@ -37,10 +37,12 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentV
 		dcd.GetDynamoNamespace(),
 	)
 	var oldIngress *nvidiacomv1alpha1.IngressSpec
+	var oldName string
 	if oldDCD != nil {
 		oldIngress = oldDCD.Spec.Ingress
+		oldName = oldDCD.Name
 	}
-	return append(allErrs, alphaIngressBackendNameErrors(dcd.Spec.Ingress, oldIngress, dcd.Name, field.NewPath("metadata", "name"))...)
+	return append(allErrs, alphaIngressBackendNameErrors(dcd.Spec.Ingress, oldIngress, dcd.Name, oldName, field.NewPath("metadata", "name"))...)
 }
 
 // validateDynamoComponentDeploymentSpecV1alpha1 validates spec. spec and fldPath must not be nil.

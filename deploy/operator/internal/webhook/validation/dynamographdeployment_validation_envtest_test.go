@@ -3045,6 +3045,23 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 
+		{
+			name:          "alpha LWS worker Ingress checks the full hash-suffixed backend name",
+			groveDisabled: true, lwsEnabled: true,
+			deployment:      alphaDGDWithLongWorkerIngressForAdmission(true),
+			wantWebhookErrs: []string{fmt.Sprintf("spec.services[worker].ingress: Invalid value: %q: generated Ingress backend Service name is invalid: must be no more than 63 characters; choose a shorter name starting with a letter; worker hash is shown as zeros", strings.Repeat("a", 56)+"-worker-00000000")},
+		},
+		{
+			name:          "existing alpha LWS worker Ingress with an invalid backend remains editable",
+			groveDisabled: true, lwsEnabled: true, seedWithoutWebhook: true,
+			oldDeployment: alphaDGDWithLongWorkerIngressForAdmission(true),
+			deployment:    dgdAdmissionWithLabel(t, alphaDGDWithLongWorkerIngressForAdmission(true)),
+		},
+		{
+			name:       "Grove does not check an alpha Ingress that only a worker DCD would render",
+			deployment: alphaDGDWithLongWorkerIngressForAdmission(false),
+		},
+
 		// Provider names and workload selectors follow the resources each pathway renders.
 		{
 			name:               "operator adoption preserves an existing component worker name violation",
@@ -4877,6 +4894,21 @@ func alphaDGDForAdmission(
 		mutate(dgd)
 	}
 	return dgd
+}
+
+// alphaDGDWithLongWorkerIngressForAdmission gives the base name 63 characters and the DCD name 72.
+func alphaDGDWithLongWorkerIngressForAdmission(multinode bool) *nvidiacomv1alpha1.DynamoGraphDeployment {
+	return alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+		dgd.Name = strings.Repeat("a", 56)
+		worker := dgd.Spec.Services["worker"]
+		worker.RuntimeVersionOverride = "1.6.0"
+		worker.ExtraPodSpec.MainContainer.Image = "runtime:1.6.0"
+		worker.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		worker.Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "worker.example.com", IngressControllerClassName: new("nginx")}
+		if multinode {
+			worker.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2}
+		}
+	})
 }
 
 func alphaDGDForAdmissionWithServiceNames(names ...string) *nvidiacomv1alpha1.DynamoGraphDeployment {

@@ -21,13 +21,19 @@ import (
 	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
-// validateDynamoGraphDeploymentV1alpha1 validates dgd. dgd must not be nil; oldDGD is nil on create.
+// validateDynamoGraphDeploymentV1alpha1 validates dgd using renderedDGD for child names.
+// dgd and renderedDGD must not be nil; both old objects are nil on create.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentV1alpha1(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 	oldDGD *nvidiacomv1alpha1.DynamoGraphDeployment,
+	renderedDGD, oldRenderedDGD *nvidiacomv1beta1.DynamoGraphDeployment,
 ) field.ErrorList {
 	if !hasV1Alpha1CompatibilityFields(dgd) &&
 		!v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
@@ -39,16 +45,35 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentV1alpha1(
 		dgd.Name,
 		dgd.Namespace,
 	)
+	grovePathway, _ := grovePathwayForDynamoGraphDeployment(features.MustGateFrom(v.ctx).Enabled(features.Grove), renderedDGD)
+	// Only DCDs render preserved alpha Ingress resources.
+	if grovePathway {
+		return allErrs
+	}
+	disaggregatedSet := renderedDGD.Annotations[consts.KubeAnnotationWorkloadProvider] == consts.WorkloadProviderDisaggregatedSet ||
+		(renderedDGD.Annotations[consts.KubeAnnotationWorkloadProvider] == "" && strings.EqualFold(renderedDGD.Annotations[consts.KubeAnnotationEnableDisaggregatedSet], "true"))
+	workerHash := strings.Repeat("0", dynamo.WorkerHashLength)
 	for _, name := range sortedV1Alpha1ServiceNames(dgd.Spec.Services) {
 		service := dgd.Spec.Services[name]
-		if service == nil {
+		component := renderedDGD.GetComponentByName(name)
+		if service == nil || component == nil || component.ManagedByExternalController() ||
+			(disaggregatedSet && component.IsMultinode() && dynamo.IsWorkerComponent(string(component.ComponentType))) {
 			continue
 		}
 		var oldIngress *nvidiacomv1alpha1.IngressSpec
+		var oldName string
 		if oldDGD != nil && oldDGD.Spec.Services[name] != nil {
 			oldIngress = oldDGD.Spec.Services[name].Ingress
+			oldName = dynamo.GetDCDResourceName(oldRenderedDGD, name, workerHash)
 		}
-		allErrs = append(allErrs, alphaIngressBackendNameErrors(service.Ingress, oldIngress, dgd.Name+"-"+strings.ToLower(name), field.NewPath("spec", "services").Key(name).Child("ingress"))...)
+		backendName := dynamo.GetDCDResourceName(renderedDGD, name, workerHash)
+		ingressErrs := alphaIngressBackendNameErrors(service.Ingress, oldIngress, backendName, oldName, field.NewPath("spec", "services").Key(name).Child("ingress"))
+		if dynamo.IsWorkerComponent(string(component.ComponentType)) {
+			for _, err := range ingressErrs {
+				err.Detail += "; worker hash is shown as zeros"
+			}
+		}
+		allErrs = append(allErrs, ingressErrs...)
 	}
 	return allErrs
 }
