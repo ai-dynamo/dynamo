@@ -614,8 +614,6 @@ func restoreLaunchPath(
 	return templatePath.Child("spec", "containers").Index(i).Child("command")
 }
 
-// unsupportedRestoreLaunchDetail describes a rejected restore launch in the
-// restore Pod webhook's terms, and says when the operator rewrote it.
 func unsupportedRestoreLaunchDetail(launch restoreLaunch) string {
 	detail := fmt.Sprintf(
 		"checkpoint restore destination container %q (role %s) must directly invoke python -m <module>, "+
