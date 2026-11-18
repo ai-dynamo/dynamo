@@ -58,7 +58,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Optional
 
-from dynamo.common.ais_perf_model import WORKER_TYPE_ENV_VAR
+from dynamo.common.ais_perf_model import ROUTER_WORKER_TYPE_ENV
 from dynamo.common.configuration.groups.kv_router_args import (
     _KV_ROUTER_FIELDS,
     KvRouterConfigBase,
@@ -185,7 +185,7 @@ _TRANSPORT_ROUTER_ENV = frozenset(
 )
 # Router env that only chooses the entry of an AIS perf model. It cannot change
 # a result here: live retune already requires the load model 'none'.
-_IGNORED_ROUTER_ENV = frozenset({WORKER_TYPE_ENV_VAR})
+_IGNORED_ROUTER_ENV = frozenset({ROUTER_WORKER_TYPE_ENV})
 # The deprecated overlap_score_weight: KvRouterArgGroup reads the first name
 # when it is set and the second otherwise.
 _OVERLAP_WEIGHT_ENV = ("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "DYN_OVERLAP_SCORE_WEIGHT")

@@ -26,7 +26,7 @@ import numpy as np
 import yaml
 from aisim_core.sdk.perf_database import get_latest_database_version
 
-from dynamo.common.ais_perf_model import REMOVE_IN, load_document
+from dynamo.common.ais_perf_model import AIS_OLD_INPUTS_REMOVE_IN, load_document
 from dynamo.common.configuration.utils import join_names
 from dynamo.common.utils.paths import get_workspace_dir
 from dynamo.mocker.args import build_mocker_parser, set_ais_perf_model_attributes
@@ -336,7 +336,7 @@ def generate_mocker_config(
                 "this, write --ais-perf-model VALUE in the override and remove its "
                 "old --ais-* arguments",
                 join_names(names),
-                REMOVE_IN,
+                AIS_OLD_INPUTS_REMOVE_IN,
             )
             inject_ais_args = _inject_mocker_ais_args_old_form
     for worker_name in _mocker_worker_names():

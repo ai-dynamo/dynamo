@@ -8,7 +8,11 @@ import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
-from dynamo.common.ais_perf_model import ENV_VAR, REMOVE_IN, env_value
+from dynamo.common.ais_perf_model import (
+    AIS_OLD_INPUTS_REMOVE_IN,
+    AIS_PERF_MODEL_ENV,
+    env_value,
+)
 from dynamo.common.configuration.groups.ais_perf_args import parse_ais_perf_config
 from dynamo.common.configuration.groups.router_args import (
     WorkerRouterConfig,
@@ -193,7 +197,7 @@ def set_ais_perf_model_attributes(
         )
     if bare and env is not None:
         parser.error(
-            f"--ais-perf-model without a value cannot be combined with {ENV_VAR}"
+            f"--ais-perf-model without a value cannot be combined with {AIS_PERF_MODEL_ENV}"
         )
     args.ais_perf_model_without_value = bool(bare)
     if valued:
@@ -202,12 +206,14 @@ def set_ais_perf_model_attributes(
         args.ais_perf_model_source = "--ais-perf-model"
     else:
         args.ais_perf_model_value = env
-        args.ais_perf_model_source = None if env is None else ENV_VAR
+        args.ais_perf_model_source = None if env is None else AIS_PERF_MODEL_ENV
 
 
 def _old_ais_help(flag: str, text: str) -> str:
     """Return the help of an old AIS input: the deprecation sentence, then ``text``."""
-    deprecated = Deprecated("--ais-perf-model VALUE", remove_in=REMOVE_IN)
+    deprecated = Deprecated(
+        "--ais-perf-model VALUE", remove_in=AIS_OLD_INPUTS_REMOVE_IN
+    )
     return deprecated.message(flag) + " " + text
 
 
@@ -355,7 +361,7 @@ def _add_mocker_arguments(parser: argparse.ArgumentParser, env: ArgEnv | None) -
         metavar="VALUE",
         help="Use AISimulate's perf model for latency prediction. VALUE is a "
         "JSON/YAML file or inline JSON: one perf model config, or a list of "
-        f"configs with one worker_type each (env: {ENV_VAR}). The config of "
+        f"configs with one worker_type each (env: {AIS_PERF_MODEL_ENV}). The config of "
         "this worker's type is used. Requires aisim installed. Without "
         "VALUE (deprecated) the perf model is built from --model-path, "
         "--engine-type and the flat --ais-* flags.",
@@ -810,7 +816,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 )
             spellings[canonical] = flag
     args = parser.parse_args(argv)
-    set_ais_perf_model_attributes(parser, args, env_value(ENV_VAR))
+    set_ais_perf_model_attributes(parser, args, env_value(AIS_PERF_MODEL_ENV))
     old_ais_perf = old_ais_perf_inputs(args)
     if args.ais_perf_model_value is not None and old_ais_perf:
         parser.error(
@@ -898,7 +904,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             logger.debug(f"Using default endpoint: {args.endpoint}")
     # Last, so that an error above is reported without a warning before it.
     if old_ais_perf:
-        Deprecated("--ais-perf-model VALUE", remove_in=REMOVE_IN).warn(
+        Deprecated("--ais-perf-model VALUE", remove_in=AIS_OLD_INPUTS_REMOVE_IN).warn(
             old_ais_perf, stacklevel=2
         )
     return args

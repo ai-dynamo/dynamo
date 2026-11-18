@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 import yaml
 
-from dynamo.common.ais_perf_model import ENV_VAR
+from dynamo.common.ais_perf_model import AIS_PERF_MODEL_ENV
 from dynamo.mocker.args import parse_args
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.parallelization import PickedParallelConfig
@@ -1151,7 +1151,7 @@ def test_override_without_a_value_keeps_old_arguments_for_every_worker(
 
 def test_variable_of_the_profiler_process_is_not_read(mocker_inputs, monkeypatch):
     # The variable would be a value, and a value keeps the new arguments.
-    monkeypatch.setenv(ENV_VAR, "perf_model.yaml")
+    monkeypatch.setenv(AIS_PERF_MODEL_ENV, "perf_model.yaml")
 
     workers = _mocker_workers(_args_override(OLD_FLAG))
 

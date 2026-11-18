@@ -14,7 +14,7 @@ from dynamo.mocker.args import (
     set_ais_perf_model_attributes,
 )
 from dynamo.mocker.config import old_ais_perf_inputs
-from tests.utils.ais_perf_model import ENV_VAR
+from tests.utils.ais_perf_model import AIS_PERF_MODEL_ENV
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -80,7 +80,7 @@ def test_reads_only_the_given_env(monkeypatch):
 
 def test_reads_the_argument_list_of_another_mocker(monkeypatch):
     # The variable of the process that reads is not the other mocker's.
-    monkeypatch.setenv(ENV_VAR, "ours.yaml")
+    monkeypatch.setenv(AIS_PERF_MODEL_ENV, "ours.yaml")
     parser = build_mocker_parser({})
 
     namespace, rest = parser.parse_known_args(

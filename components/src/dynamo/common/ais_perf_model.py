@@ -27,10 +27,10 @@ from typing import TYPE_CHECKING, Any, cast
 if TYPE_CHECKING:
     from aisim_core.ais_perf_model import AisPerfModelDocument
 
-ENV_VAR = "DYN_AIS_PERF_MODEL"
-WORKER_TYPE_ENV_VAR = "DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE"
+AIS_PERF_MODEL_ENV = "DYN_AIS_PERF_MODEL"
+ROUTER_WORKER_TYPE_ENV = "DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE"
 # The release that removes the old inputs. Every warning names it.
-REMOVE_IN = "v1.9"
+AIS_OLD_INPUTS_REMOVE_IN = "v1.9"
 # The worker types a router can estimate prefill load for.
 ROUTER_WORKER_TYPES = ("prefill", "aggregated")
 # The keys every resolved config must set to a non-empty value.
@@ -72,7 +72,7 @@ def _dataset_workspace() -> str:
     return _dataset_workspaces[pid]
 
 
-def env_value(name: str = ENV_VAR) -> str | None:
+def env_value(name: str = AIS_PERF_MODEL_ENV) -> str | None:
     """Return the variable ``name``, or ``None`` when it is unset or empty."""
     return os.environ.get(name) or None
 
@@ -227,7 +227,7 @@ def normalized_config(resolved: Mapping[str, Any]) -> dict[str, Any]:
     return config.to_dict()
 
 
-def uses_relative_paths(value: Any) -> bool:
+def has_relative_paths(value: Any) -> bool:
     """Return whether a mapping or list value holds a relative path.
 
     Not meant for a string value: a file path is opened.

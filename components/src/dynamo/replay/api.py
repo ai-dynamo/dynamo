@@ -21,7 +21,7 @@ from dynamo._core import (
 )
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
 from dynamo.common.ais_perf_model import (
-    REMOVE_IN,
+    AIS_OLD_INPUTS_REMOVE_IN,
     engine_perf_config,
     normalized_config,
     router_perf_config,
@@ -134,7 +134,7 @@ def _normalize_trace_files(trace_files):
     return list(trace_files)
 
 
-def _uses_ais_load_model(router_config: KvRouterConfig) -> bool:
+def _has_ais_load_model(router_config: KvRouterConfig) -> bool:
     """Return whether the router config selects the AIS prefill load model."""
     # The object has no attribute for it; its JSON form spells ais as "aic".
     load_model = json.loads(router_config.to_json())["router_prefill_load_model"]
@@ -186,7 +186,7 @@ def _perf_model_inputs(
     ais_load_model = (
         router_mode == "kv_router"
         and isinstance(router_config, KvRouterConfig)
-        and _uses_ais_load_model(router_config)
+        and _has_ais_load_model(router_config)
     )
     if router_ais_perf_model is not None:
         if router_mode != "kv_router":
@@ -242,7 +242,7 @@ def _perf_model_inputs(
         prefill_engine_args = engine_args["prefill_engine_args"]
         decode_engine_args = engine_args["decode_engine_args"]
     if ais_perf_config is not None and not _OLD_INPUTS_WARNED.get():
-        Deprecated("router_ais_perf_model=", remove_in=REMOVE_IN).warn(
+        Deprecated("router_ais_perf_model=", remove_in=AIS_OLD_INPUTS_REMOVE_IN).warn(
             "ais_perf_config=", stacklevel=3
         )
     return (
@@ -428,7 +428,9 @@ def _warn_old_planner_config(config: "PlannerConfig") -> None:
 
     old = ais_perf_model_old_form_names(config.ais_perf_model)
     if old:
-        Deprecated(AIS_PERF_MODEL_NEW_FORM, remove_in=REMOVE_IN).warn(old, stacklevel=3)
+        Deprecated(AIS_PERF_MODEL_NEW_FORM, remove_in=AIS_OLD_INPUTS_REMOVE_IN).warn(
+            old, stacklevel=3
+        )
 
 
 @contextmanager

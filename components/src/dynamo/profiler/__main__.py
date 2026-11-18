@@ -34,7 +34,7 @@ from pathlib import Path
 
 import yaml
 
-from dynamo.common.ais_perf_model import REMOVE_IN
+from dynamo.common.ais_perf_model import AIS_OLD_INPUTS_REMOVE_IN
 from dynamo.common.configuration.utils import Deprecated
 from dynamo.planner.config.planner_config import (
     AIS_PERF_MODEL_NEW_FORM,
@@ -226,7 +226,9 @@ def main() -> None:
         planner.ais_perf_model if planner is not None else None
     )
     if old:
-        Deprecated(AIS_PERF_MODEL_NEW_FORM, remove_in=REMOVE_IN).warn(old, stacklevel=1)
+        Deprecated(AIS_PERF_MODEL_NEW_FORM, remove_in=AIS_OLD_INPUTS_REMOVE_IN).warn(
+            old, stacklevel=1
+        )
     asyncio.run(run_profile(dgdr, ops))
 
 

@@ -12,10 +12,10 @@ import yaml
 
 from dynamo._internal.ais import _pad_nextn_accept_rates
 from dynamo.common.ais_perf_model import (
-    ENV_VAR,
-    REMOVE_IN,
+    AIS_OLD_INPUTS_REMOVE_IN,
+    AIS_PERF_MODEL_ENV,
+    ROUTER_WORKER_TYPE_ENV,
     ROUTER_WORKER_TYPES,
-    WORKER_TYPE_ENV_VAR,
     env_value,
     router_perf_config,
 )
@@ -90,9 +90,9 @@ class AisPerfConfigBase(ConfigBase):
         """
         if self.ais_perf_model is not None:
             return self.ais_perf_model, "--ais-perf-model"
-        value = env_value(ENV_VAR)
+        value = env_value(AIS_PERF_MODEL_ENV)
         if value is not None:
-            return value, ENV_VAR
+            return value, AIS_PERF_MODEL_ENV
         return None, None
 
     def old_ais_perf_inputs(self) -> list[str]:
@@ -128,10 +128,10 @@ class AisPerfConfigBase(ConfigBase):
         """
         if self.router_prefill_load_worker_type is not None:
             return self.router_prefill_load_worker_type
-        value = env_value(WORKER_TYPE_ENV_VAR)
+        value = env_value(ROUTER_WORKER_TYPE_ENV)
         if value is not None and value not in ROUTER_WORKER_TYPES:
             raise ValueError(
-                f"{WORKER_TYPE_ENV_VAR} is {value!r}; use prefill or aggregated"
+                f"{ROUTER_WORKER_TYPE_ENV} is {value!r}; use prefill or aggregated"
             )
         return value
 
@@ -175,7 +175,7 @@ class AisPerfConfigBase(ConfigBase):
             self.router_worker_type()
         # Last statement: every error above is raised before the warning.
         if old:
-            Deprecated(replacement, remove_in=REMOVE_IN).warn(
+            Deprecated(replacement, remove_in=AIS_OLD_INPUTS_REMOVE_IN).warn(
                 old, stacklevel=stacklevel
             )
 
@@ -237,7 +237,7 @@ class AisPerfConfigBase(ConfigBase):
             if authored is None and not shorthand:
                 raise ValueError(
                     "--router-prefill-load-model=ais requires an AIS perf model: "
-                    f"set --ais-perf-model or {ENV_VAR}"
+                    f"set --ais-perf-model or {AIS_PERF_MODEL_ENV}"
                 )
             raise ValueError("AIS perf config requires " + ", ".join(missing))
         # The upstream class preserves estimator_config, ordered roots and policy.
@@ -262,12 +262,12 @@ class AisPerfArgGroup(ArgGroup):
             new_input_help = (
                 "AIS perf model for --router-prefill-load-model=ais: a file path "
                 "or inline JSON, holding one perf model config or a list of "
-                f"configs with one worker_type each; {ENV_VAR}."
+                f"configs with one worker_type each; {AIS_PERF_MODEL_ENV}."
             )
         else:
             new_input = self.replacement
             new_input_help = f"Not read here; write {new_input}."
-        deprecated = Deprecated(new_input, remove_in=REMOVE_IN)
+        deprecated = Deprecated(new_input, remove_in=AIS_OLD_INPUTS_REMOVE_IN)
         # The two environment variables are read when the config is validated.
         group.add_argument(
             "--ais-perf-model",
@@ -284,7 +284,7 @@ class AisPerfArgGroup(ArgGroup):
             help=(
                 f"Worker type whose config the router takes from {new_input}; "
                 "needed when the value has both or names none; "
-                f"{WORKER_TYPE_ENV_VAR}."
+                f"{ROUTER_WORKER_TYPE_ENV}."
             ),
         )
         group.add_argument(

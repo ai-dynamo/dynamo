@@ -16,7 +16,7 @@ import yaml
 from aisim.config.cli import CorePredictionConfig
 from aisim.config.common import split_config_sections
 
-from dynamo.common.ais_perf_model import REMOVE_IN
+from dynamo.common.ais_perf_model import AIS_OLD_INPUTS_REMOVE_IN
 
 pytestmark = [
     # Release-gating CPU smoke for plugin discovery, replay composition, and
@@ -111,7 +111,8 @@ def test_dynamo_predict_cli_cases(config_path: Path, tmp_path: Path) -> None:
     if config_path.name == "07-synthetic-ais-router.yaml":
         # This case writes router.ais_perf_model, so no old AIS input is left.
         assert (
-            f" deprecated and will be removed in {REMOVE_IN}; use " not in result.stderr
+            f" deprecated and will be removed in {AIS_OLD_INPUTS_REMOVE_IN}; use "
+            not in result.stderr
         )
 
 

@@ -23,7 +23,7 @@ from aisim.sweeper.provider import (
 )
 
 from dynamo.aisimulate.domains import ContinuousDomain, expand_domain
-from dynamo.common.ais_perf_model import REMOVE_IN, router_perf_config
+from dynamo.common.ais_perf_model import AIS_OLD_INPUTS_REMOVE_IN, router_perf_config
 from dynamo.common.configuration.utils import Deprecated
 
 from .config import (
@@ -70,7 +70,7 @@ def _deployment_modes(
     return [str(mode) for mode in raw_modes]
 
 
-def _may_select_ais(public: RouterRecommendationConfig) -> bool:
+def _can_select_ais(public: RouterRecommendationConfig) -> bool:
     """Return whether a search can pick the KV router with the AIS load model."""
     policies = (
         public.policy.choices if isinstance(public.policy, Choices) else [public.policy]
@@ -82,7 +82,7 @@ def _may_select_ais(public: RouterRecommendationConfig) -> bool:
     return "kv_router" in policies and "ais" in load_models
 
 
-def _writes_load_model_type(public: RouterRecommendationConfig) -> bool:
+def _has_explicit_load_model_type(public: RouterRecommendationConfig) -> bool:
     """Return whether the section writes ``prefill_load_model.type``.
 
     A section that does not write it searches the default load models.
@@ -307,7 +307,7 @@ class DynamoRouterSweepConfigProvider:
         if old_form and not self._warned_old_router_section:
             # The flag is set after the call: a warning that a filter turns
             # into an error was not shown, and the next compile raises it again.
-            Deprecated(_NEW_ROUTER_SECTION, remove_in=REMOVE_IN).warn(
+            Deprecated(_NEW_ROUTER_SECTION, remove_in=AIS_OLD_INPUTS_REMOVE_IN).warn(
                 _OLD_ROUTER_SECTION, stacklevel=2
             )
             self._warned_old_router_section = True
@@ -325,12 +325,12 @@ class DynamoRouterSweepConfigProvider:
         # perf model of their engine.
         old_form = (
             public.ais_perf_model is None
-            and _writes_load_model_type(public)
-            and _may_select_ais(public)
+            and _has_explicit_load_model_type(public)
+            and _can_select_ais(public)
         )
         if old_form and not self._warned_old_router_section:
             # Set after the call, as in compile_prediction.
-            Deprecated(_NEW_ROUTER_SECTION, remove_in=REMOVE_IN).warn(
+            Deprecated(_NEW_ROUTER_SECTION, remove_in=AIS_OLD_INPUTS_REMOVE_IN).warn(
                 _OLD_ROUTER_SECTION, stacklevel=2
             )
             self._warned_old_router_section = True
@@ -368,7 +368,7 @@ class DynamoRouterSweepConfigProvider:
             )
         # A section that writes neither the key nor the load model type
         # searches ais as a default choice, as if it wrote {use: engine}.
-        by_default = written is None and not _writes_load_model_type(public)
+        by_default = written is None and not _has_explicit_load_model_type(public)
         if by_default:
             written = USE_ENGINE_PERF_MODEL
         # A written value is read here, once per searched worker type, and

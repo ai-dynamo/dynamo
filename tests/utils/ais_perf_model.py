@@ -13,7 +13,7 @@ import importlib
 import re
 from typing import Any
 
-ENV_VAR = "DYN_AIS_PERF_MODEL"
+AIS_PERF_MODEL_ENV = "DYN_AIS_PERF_MODEL"
 MODEL = "Qwen/Qwen3-0.6B"
 IDENTITY = {"model": MODEL, "system": "h200_sxm", "backend": "vllm"}
 PREFILL_ENTRY = {**IDENTITY, "worker_type": "prefill", "backend_version": "0.11.0"}

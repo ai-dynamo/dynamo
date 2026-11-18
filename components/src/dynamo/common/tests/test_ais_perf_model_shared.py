@@ -118,7 +118,7 @@ def test_env_value_empty_is_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ais_perf_model.env_value() == "cfg.yaml"
 
     monkeypatch.setenv("DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE", "prefill")
-    assert ais_perf_model.env_value(ais_perf_model.WORKER_TYPE_ENV_VAR) == "prefill"
+    assert ais_perf_model.env_value(ais_perf_model.ROUTER_WORKER_TYPE_ENV) == "prefill"
 
 
 @pytest.mark.timeout(60)  # one interpreter start, about 1s
@@ -440,7 +440,7 @@ def test_router_perf_config_requires_a_written_model() -> None:
     ],
 )
 def test_uses_relative_paths(value: Any, relative: bool) -> None:
-    assert ais_perf_model.uses_relative_paths(value) is relative
+    assert ais_perf_model.has_relative_paths(value) is relative
 
 
 def test_relative_file_value_starts_at_base_dir(

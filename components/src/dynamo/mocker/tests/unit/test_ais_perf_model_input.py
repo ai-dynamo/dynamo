@@ -11,7 +11,7 @@ import pytest
 
 from dynamo.mocker import config as CONFIG
 from dynamo.mocker.args import parse_args
-from tests.utils.ais_perf_model import ENV_VAR
+from tests.utils.ais_perf_model import AIS_PERF_MODEL_ENV
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -109,8 +109,8 @@ def engine_args_file(tmp_path, engine):
 
 def value_argv(source, monkeypatch):
     """Return the arguments that give ``ENTRY`` through the flag or the variable."""
-    if source == ENV_VAR:
-        monkeypatch.setenv(ENV_VAR, json.dumps(ENTRY))
+    if source == AIS_PERF_MODEL_ENV:
+        monkeypatch.setenv(AIS_PERF_MODEL_ENV, json.dumps(ENTRY))
         return []
     return [source, json.dumps(ENTRY)]
 
@@ -202,18 +202,18 @@ def test_value_as_inline_json(mode, worker_type):
 
 
 def test_value_from_env(monkeypatch):
-    monkeypatch.setenv(ENV_VAR, json.dumps(ENTRY))
+    monkeypatch.setenv(AIS_PERF_MODEL_ENV, json.dumps(ENTRY))
     args = parse_args([])
     assert args.ais_perf_model_without_value is False
     assert args.ais_perf_model_value == json.dumps(ENTRY)
-    assert args.ais_perf_model_source == ENV_VAR
+    assert args.ais_perf_model_source == AIS_PERF_MODEL_ENV
     assert_perf_config(
         CONFIG.build_mocker_engine_args(args), {**ENTRY, "worker_type": "aggregated"}
     )
 
 
 def test_empty_env_value_is_no_value(monkeypatch):
-    monkeypatch.setenv(ENV_VAR, "")
+    monkeypatch.setenv(AIS_PERF_MODEL_ENV, "")
     args = parse_args([])
     assert args.ais_perf_model_value is None
     assert args.ais_perf_model_source is None
@@ -221,7 +221,7 @@ def test_empty_env_value_is_no_value(monkeypatch):
 
 
 def test_typed_value_wins_over_env(monkeypatch):
-    monkeypatch.setenv(ENV_VAR, json.dumps(ENTRIES["decode"]))
+    monkeypatch.setenv(AIS_PERF_MODEL_ENV, json.dumps(ENTRIES["decode"]))
     args = parse_args(["--ais-perf-model", json.dumps(ENTRY)])
     assert args.ais_perf_model_value == json.dumps(ENTRY)
     assert args.ais_perf_model_source == "--ais-perf-model"
@@ -323,8 +323,8 @@ def test_extra_engine_args_with_timing_model_is_rejected(tmp_path, monkeypatch):
     )
 
     # A value from the variable is named as the variable.
-    monkeypatch.setenv(ENV_VAR, json.dumps(ENTRY))
-    with pytest.raises(ValueError, match=f"{ENV_VAR}$"):
+    monkeypatch.setenv(AIS_PERF_MODEL_ENV, json.dumps(ENTRY))
+    with pytest.raises(ValueError, match=f"{AIS_PERF_MODEL_ENV}$"):
         CONFIG.load_mocker_engine_args(parse_args(argv))
 
 
@@ -347,7 +347,7 @@ def test_new_equals_old_for_same_identity(mode, worker_type):
         # The two sentences the documentation gives as examples.
         ("--ais-perf-model", ["--ais-system", "h100_sxm"], "--ais-system"),
         ("--ais-perf-model", ["--ais-tp-size", "2"], "--ais-tp-size"),
-        (ENV_VAR, ["--ais-backend", "vllm"], "--ais-backend"),
+        (AIS_PERF_MODEL_ENV, ["--ais-backend", "vllm"], "--ais-backend"),
         (
             "--ais-perf-model",
             ["--ais-tp-size", "2", "--ais-system", "h100_sxm", "--ais-backend", "vllm"],
@@ -418,10 +418,10 @@ def test_bare_and_valued_is_rejected(argv, capsys):
 
 
 def test_bare_with_env_is_rejected(monkeypatch, capsys):
-    monkeypatch.setenv(ENV_VAR, json.dumps(ENTRY))
+    monkeypatch.setenv(AIS_PERF_MODEL_ENV, json.dumps(ENTRY))
     assert (
         parser_error(["--ais-perf-model"], capsys)
-        == f"--ais-perf-model without a value cannot be combined with {ENV_VAR}"
+        == f"--ais-perf-model without a value cannot be combined with {AIS_PERF_MODEL_ENV}"
     )
 
 
@@ -536,7 +536,7 @@ async def test_worker_entry_takes_value_without_warning(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["--ais-perf-model", ENV_VAR])
+@pytest.mark.parametrize("source", ["--ais-perf-model", AIS_PERF_MODEL_ENV])
 async def test_worker_entry_rejects_planner_profile_data_before_model_lookup(
     source, tmp_path, monkeypatch, capsys
 ):

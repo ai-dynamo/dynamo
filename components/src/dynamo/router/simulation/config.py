@@ -27,7 +27,7 @@ from dynamo.aisimulate.domains import (
     SCALAR,
     stepped_numeric_values,
 )
-from dynamo.common.ais_perf_model import uses_relative_paths
+from dynamo.common.ais_perf_model import has_relative_paths
 
 MODES = frozenset({"kv_router", "round_robin"})
 OVERLAP_SCORE_CREDIT_DEFAULTS = (0.0, 0.5, 1.0)
@@ -139,7 +139,7 @@ def _check_ais_perf_model(value: Any) -> Any:
         )
     # The adapter does not know the folder of the config file, so a relative
     # path has no folder to start at.
-    if uses_relative_paths(value):
+    if has_relative_paths(value):
         raise ValueError(
             "router.ais_perf_model: relative paths are not allowed here; write "
             "absolute paths"
