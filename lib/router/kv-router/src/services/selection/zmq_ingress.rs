@@ -33,7 +33,8 @@ impl std::fmt::Debug for ZmqDirectIngress {
 
 impl ZmqDirectIngress {
     /// The listener registry; `None` until the core attaches this ingress.
-    pub fn listeners(&self) -> Option<&Arc<WorkerRegistry>> {
+    #[cfg(test)]
+    pub(crate) fn listeners(&self) -> Option<&Arc<WorkerRegistry>> {
         self.listeners.get()
     }
 

@@ -28,7 +28,7 @@ use dashmap::{DashMap, DashSet};
 use rustc_hash::{FxBuildHasher, FxHashSet};
 
 #[cfg(feature = "bench")]
-use super::ShardedIndexerMetrics;
+use super::metrics::ShardedIndexerMetrics;
 use super::shard_handle::AsyncShardHandle;
 use super::{
     AnchorRef, AnchorTask, KvIndexerInterface, KvRouterError, ShardSizeSnapshot, ThreadPoolIndexer,
@@ -926,16 +926,6 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
         }
         sizes.sort_by_key(|s| s.shard_idx);
         sizes
-    }
-
-    fn node_edge_lengths(&self) -> Vec<usize> {
-        // Collect per-node edge lengths from each shard backend.
-        // In-process `ThreadPoolIndexer` shards delegate to the underlying
-        // trie; remote shard handles return an empty `Vec` for this call.
-        self.shards
-            .iter()
-            .flat_map(|shard| shard.as_ref().node_edge_lengths())
-            .collect()
     }
 
     fn timing_report(&self) -> String {
