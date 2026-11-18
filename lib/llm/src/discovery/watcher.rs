@@ -161,15 +161,10 @@ fn supports_generate_capability(card: &ModelDeploymentCard, capability: &str) ->
     )
 }
 
-fn needs_generate_pipeline(
-    card: &ModelDeploymentCard,
-    capabilities: &[&str],
-    systemone_enabled: bool,
-) -> bool {
-    (systemone_enabled && card.is_systemone_serial_eligible())
-        || capabilities
-            .iter()
-            .any(|capability| supports_generate_capability(card, capability))
+fn supports_enabled_engine_generate(card: &ModelDeploymentCard, capabilities: &[&str]) -> bool {
+    capabilities
+        .iter()
+        .any(|capability| supports_generate_capability(card, capability))
 }
 
 // Generate's opaque request state is not yet verified for migration replay.
@@ -600,11 +595,8 @@ impl ModelWatcher {
             // tokenizer.is_some() implies a local chat or completions pipeline will be built.
             let needs_factory_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
-            let needs_generate_pipeline = needs_generate_pipeline(
-                card,
-                &self.generate_engine_capabilities,
-                self.systemone_enabled,
-            );
+            let needs_generate_pipeline = needs_systemone_preprocessor
+                || supports_enabled_engine_generate(card, &self.generate_engine_capabilities);
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
@@ -2337,50 +2329,15 @@ mod tests {
             .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, true)
             .unwrap();
 
-        assert!(needs_generate_pipeline(
+        assert!(supports_enabled_engine_generate(
             &card,
             &[VLLM_INFERENCE_V1_GENERATE_CAPABILITY],
-            false,
         ));
-        assert!(!needs_generate_pipeline(&card, &[], false));
-        assert!(!needs_generate_pipeline(
+        assert!(!supports_enabled_engine_generate(&card, &[]));
+        assert!(!supports_enabled_engine_generate(
             &card,
             &[OTHER_GENERATE_CAPABILITY],
-            false,
         ));
-    }
-
-    #[test]
-    fn private_decision_generate_is_limited_to_eligible_cards() {
-        use crate::local_model::runtime_config::{
-            SGLANG_GENERATE_CAPABILITY, SGLANG_SYSTEMONE_SERIAL_V1, VLLM_CAUSAL_DECISION_V1,
-        };
-
-        for (generate, scoring) in [
-            (
-                VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-                VLLM_CAUSAL_DECISION_V1,
-            ),
-            (SGLANG_GENERATE_CAPABILITY, SGLANG_SYSTEMONE_SERIAL_V1),
-        ] {
-            let mut card = ModelDeploymentCard::with_name_only("model");
-            card.worker_type = Some(WorkerType::Aggregated);
-            card.runtime_config.max_num_seqs = Some(1);
-            card.runtime_config
-                .set_engine_specific(generate, true)
-                .unwrap();
-            assert!(!needs_generate_pipeline(&card, &[], true));
-
-            card.runtime_config
-                .set_engine_specific(scoring, true)
-                .unwrap();
-            assert!(!needs_generate_pipeline(&card, &[], false));
-            assert!(needs_generate_pipeline(&card, &[], true));
-
-            card.worker_type = Some(WorkerType::Decode);
-            assert!(!needs_generate_pipeline(&card, &[], true));
-            assert!(needs_generate_pipeline(&card, &[generate], true));
-        }
     }
 
     #[tokio::test]
