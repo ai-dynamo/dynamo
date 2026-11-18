@@ -163,11 +163,16 @@ async def test_snapshot_prepare_failure_leaves_controller_unpaused():
     assert controller.is_paused is False
 
 
-def _lifecycle_controller(*states):
-    """An engine with vLLM's process checkpoint lifecycle and its controller."""
+def _lifecycle_controller(*states, asleep=False):
+    """An engine with vLLM's process checkpoint lifecycle and its controller.
+
+    vLLM's is_sleeping() is true once generation is paused, so it is answered
+    only once, for the call before the pause.
+    """
     engine_client = AsyncMock()
     engine_client.checkpoint_prepare.return_value = None
     engine_client.checkpoint_state.side_effect = list(states)
+    engine_client.is_sleeping.side_effect = [asleep]
     controller = VllmEnginePauseController(
         engine_client,
         prepare_for_process_checkpoint=True,
@@ -191,6 +196,7 @@ async def test_snapshot_with_checkpoint_lifecycle_neither_sleeps_nor_wakes(
     assert await controller.resume() is True
 
     assert engine_client.mock_calls == [
+        call.is_sleeping(),
         call.pause_generation(),
         call.checkpoint_prepare(),
         call.checkpoint_state(),
@@ -202,8 +208,50 @@ async def test_snapshot_with_checkpoint_lifecycle_neither_sleeps_nor_wakes(
 
 @pytest.mark.asyncio
 async def test_snapshot_with_checkpoint_lifecycle_prepare_refusal_is_raised():
-    """A refused prepare changes nothing in vLLM, so generation resumes."""
-    engine_client, controller = _lifecycle_controller()
+    """A refused prepare of a running, awake engine changes nothing in vLLM,
+    so generation resumes."""
+    engine_client, controller = _lifecycle_controller(("running", None))
+    engine_client.checkpoint_prepare.return_value = (
+        "NixlConnector does not support process checkpoints"
+    )
+
+    with pytest.raises(RuntimeError, match="does not support process checkpoints"):
+        await controller.pause(None)
+
+    engine_client.checkpoint_state.assert_awaited_once()
+    engine_client.resume_generation.assert_awaited_once()
+    assert controller.is_paused is False
+    assert controller.needs_resume_recovery is False
+
+
+async def _assert_prepare_failure_keeps_generation_paused(engine_client, controller):
+    """Memory may be released, so generation must not resume, not even
+    through a later generation-only resume."""
+    engine_client.resume_generation.assert_not_awaited()
+    assert controller.is_paused is False
+    assert controller.needs_resume_recovery is True
+
+    with pytest.raises(RuntimeError, match="Cannot resume"):
+        await controller.resume()
+    engine_client.resume_generation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_with_checkpoint_lifecycle_failed_prepare_is_raised():
+    engine_client, controller = _lifecycle_controller(
+        ("failed", "discard failed"), ("failed", "discard failed")
+    )
+
+    with pytest.raises(RuntimeError, match="failed: discard failed"):
+        await controller.pause(None)
+
+    engine_client.sleep.assert_not_awaited()
+    await _assert_prepare_failure_keeps_generation_paused(engine_client, controller)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_with_checkpoint_lifecycle_refusal_of_sleeping_engine():
+    engine_client, controller = _lifecycle_controller(asleep=True)
     engine_client.checkpoint_prepare.return_value = (
         "Preparing for a checkpoint requires an awake engine"
     )
@@ -211,22 +259,53 @@ async def test_snapshot_with_checkpoint_lifecycle_prepare_refusal_is_raised():
     with pytest.raises(RuntimeError, match="requires an awake engine"):
         await controller.pause(None)
 
-    engine_client.checkpoint_state.assert_not_awaited()
-    engine_client.resume_generation.assert_awaited_once()
-    assert controller.is_paused is False
-    assert controller.needs_resume_recovery is False
+    await _assert_prepare_failure_keeps_generation_paused(engine_client, controller)
 
 
 @pytest.mark.asyncio
-async def test_snapshot_with_checkpoint_lifecycle_failed_prepare_is_raised():
-    engine_client, controller = _lifecycle_controller(("failed", "discard failed"))
+async def test_snapshot_with_checkpoint_lifecycle_refusal_with_diverged_dp_ranks():
+    """vLLM reports mixed data-parallel states, e.g. one rank prepared and
+    another still running, as restoring."""
+    engine_client, controller = _lifecycle_controller(("restoring", None))
+    engine_client.checkpoint_prepare.return_value = (
+        "Preparing for a checkpoint requires an awake engine"
+    )
 
-    with pytest.raises(RuntimeError, match="failed: discard failed"):
+    with pytest.raises(RuntimeError, match="requires an awake engine"):
         await controller.pause(None)
 
-    engine_client.sleep.assert_not_awaited()
-    engine_client.resume_generation.assert_awaited_once()
-    assert controller.is_paused is False
+    await _assert_prepare_failure_keeps_generation_paused(engine_client, controller)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_with_checkpoint_lifecycle_unknown_sleep_state():
+    """vLLM raises when data-parallel ranks report different sleep states."""
+    engine_client, controller = _lifecycle_controller(("running", None))
+    engine_client.is_sleeping.side_effect = RuntimeError(
+        "Engines returned different is_sleeping results"
+    )
+    engine_client.checkpoint_prepare.return_value = (
+        "Preparing for a checkpoint requires an awake engine"
+    )
+
+    with pytest.raises(RuntimeError, match="requires an awake engine"):
+        await controller.pause(None)
+
+    await _assert_prepare_failure_keeps_generation_paused(engine_client, controller)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_with_checkpoint_lifecycle_prepare_times_out(monkeypatch):
+    monkeypatch.setattr("dynamo.vllm.handlers._CHECKPOINT_STATE_POLL_INTERVAL_SEC", 0)
+    monkeypatch.setattr("dynamo.vllm.handlers._CHECKPOINT_PREPARE_TIMEOUT_SEC", 0)
+    engine_client, controller = _lifecycle_controller(
+        ("preparing", None), ("preparing", None)
+    )
+
+    with pytest.raises(TimeoutError, match="did not finish"):
+        await controller.pause(None)
+
+    await _assert_prepare_failure_keeps_generation_paused(engine_client, controller)
 
 
 @pytest.mark.asyncio
