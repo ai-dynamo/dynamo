@@ -290,6 +290,35 @@ func reconcileDGDStableServiceMetadata(
 	return labels, annotations, nil
 }
 
+// syncManagedServiceMetadata converges the labels and annotations of a Service that
+// SyncResource already reconciled. SyncResource hashes and copies only the spec, so
+// without this step authored metadata edits never reach the Service. Keys recorded in
+// the managed-metadata inventory but no longer desired are removed; keys written by
+// anyone else are kept. desired must be captured before SyncResource runs, because
+// SyncResource stamps its hash and generation annotations into the desired object on
+// create, and those keys must stay out of the inventory. It reports whether it wrote.
+func syncManagedServiceMetadata(
+	ctx context.Context,
+	writer client.Writer,
+	synced *corev1.Service,
+	desired *corev1.Service,
+) (bool, error) {
+	labels, annotations, err := reconcileDGDStableServiceMetadata(synced, desired)
+	if err != nil {
+		return false, err
+	}
+	if equality.Semantic.DeepEqual(synced.Labels, labels) &&
+		equality.Semantic.DeepEqual(synced.Annotations, annotations) {
+		return false, nil
+	}
+	synced.Labels = labels
+	synced.Annotations = annotations
+	if err := writer.Update(ctx, synced); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func sortedMetadataKeys(metadata map[string]string) []string {
 	keys := make([]string, 0, len(metadata))
 	for key := range metadata {

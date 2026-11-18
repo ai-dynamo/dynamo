@@ -553,6 +553,7 @@ apiVersion: v1
 kind: Service
 metadata:
   annotations:
+    nvidia.com/dynamo-managed-service-metadata: '{"labels":["nvidia.com/dynamo-discovery-backend","nvidia.com/dynamo-discovery-enabled","nvidia.com/dynamo-worker-hash"]}'
     nvidia.com/last-applied-generation: '1'
     nvidia.com/last-applied-hash: f8ee59ddec425d17b9c4ac6734ecda436afdc1615937775baa4858698e0e4735
   creationTimestamp: $ignore
@@ -597,6 +598,7 @@ apiVersion: v1
 kind: Service
 metadata:
   annotations:
+    nvidia.com/dynamo-managed-service-metadata: '{"labels":["nvidia.com/dynamo-discovery-backend","nvidia.com/dynamo-discovery-enabled"]}'
     nvidia.com/last-applied-generation: '1'
     nvidia.com/last-applied-hash: 7c6510441079ae1acec8559210e64f946c52ef03f95b42bc5f85a3a64b1fcc16
   creationTimestamp: $ignore
@@ -640,6 +642,7 @@ apiVersion: v1
 kind: Service
 metadata:
   annotations:
+    nvidia.com/dynamo-managed-service-metadata: '{"labels":["nvidia.com/dynamo-discovery-backend","nvidia.com/dynamo-discovery-enabled","nvidia.com/dynamo-worker-hash"]}'
     nvidia.com/last-applied-generation: '1'
     nvidia.com/last-applied-hash: bc1b8ee72fe74a66f35389987321275641c2181c0a3b97ba6f5cfe02f991ce79
   creationTimestamp: $ignore

@@ -853,13 +853,28 @@ func getResourceAnnotations(dynamoComponentDeployment *nvidiacomv1beta1.DynamoCo
 }
 
 func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx context.Context, opt generateResourceOption) (bool, error) {
-	modified, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
-		return r.generateService(ctx, opt)
+	service, toDelete, err := r.generateService(ctx, opt)
+	if err != nil {
+		return false, err
+	}
+
+	// Snapshot the rendered metadata before SyncResource stamps its bookkeeping annotations into it.
+	desiredService := service.DeepCopy()
+	modified, syncedService, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(context.Context) (*corev1.Service, bool, error) {
+		return service, toDelete, nil
 	})
 	if err != nil {
 		return false, err
 	}
-	return modified, nil
+	if toDelete || syncedService == nil {
+		return modified, nil
+	}
+
+	metadataModified, err := syncManagedServiceMetadata(ctx, r, syncedService, desiredService)
+	if err != nil {
+		return false, fmt.Errorf("failed to update metadata of Service %s: %w", syncedService.Name, err)
+	}
+	return modified || metadataModified, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx context.Context, opt generateResourceOption) (bool, error) {

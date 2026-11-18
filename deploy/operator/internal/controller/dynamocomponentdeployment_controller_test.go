@@ -735,6 +735,80 @@ func TestStandaloneDCDServiceRenderingCharacterization(t *testing.T) {
 	require.Equal(t, dynamo.GetDCDKubeAnnotations(dcd), service.Annotations)
 }
 
+func TestStandaloneDCDServiceMetadataConverges(t *testing.T) {
+	t.Log("Arrange a standalone frontend DCD with authored labels and pod-template annotations")
+	ctx := context.Background()
+	dcd := &v1beta1.DynamoComponentDeployment{
+		Name:      "frontend",
+		Namespace: "default",
+		UID:       "frontend-uid",
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoComponent: "frontend",
+			commonconsts.KubeLabelDynamoNamespace: "dynamo-graph",
+			"example.com/old-label":               "old",
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "frontend",
+				ComponentType: v1beta1.ComponentTypeFrontend,
+				PodTemplate:   &corev1.PodTemplateSpec{},
+			},
+		},
+	}
+	dcd.Spec.PodTemplate.Annotations = map[string]string{"example.com/old-note": "old"}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(dcd).Build()
+	r := &DynamoComponentDeploymentReconciler{
+		Client:   kubeClient,
+		Recorder: events.NewFakeRecorder(10),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+	}
+	opt := generateResourceOption{dynamoComponentDeployment: dcd}
+	key := client.ObjectKey{Namespace: dcd.Namespace, Name: "frontend"}
+
+	t.Log("Create the Service and add external metadata to it")
+	modified, err := r.createOrUpdateOrDeleteServices(ctx, opt)
+	require.NoError(t, err)
+	require.True(t, modified)
+	service := &corev1.Service{}
+	require.NoError(t, kubeClient.Get(ctx, key, service))
+	require.Equal(t, "old", service.Labels["example.com/old-label"])
+	require.Equal(t, "old", service.Annotations["example.com/old-note"])
+	selector := service.Spec.Selector
+	service.Labels["external.example.com/keep"] = "label"
+	service.Annotations["external.example.com/keep"] = "annotation"
+	require.NoError(t, kubeClient.Update(ctx, service))
+
+	t.Log("Replace the authored metadata and reconcile the Service again")
+	delete(dcd.Labels, "example.com/old-label")
+	dcd.Labels["example.com/new-label"] = "new"
+	dcd.Spec.PodTemplate.Annotations = map[string]string{"example.com/new-note": "new"}
+	modified, err = r.createOrUpdateOrDeleteServices(ctx, opt)
+	require.NoError(t, err)
+	require.True(t, modified)
+
+	t.Log("Verify managed metadata converged, removed keys are pruned, and external and bookkeeping keys survive")
+	service = &corev1.Service{}
+	require.NoError(t, kubeClient.Get(ctx, key, service))
+	require.NotContains(t, service.Labels, "example.com/old-label")
+	require.NotContains(t, service.Annotations, "example.com/old-note")
+	require.Equal(t, "new", service.Labels["example.com/new-label"])
+	require.Equal(t, "new", service.Annotations["example.com/new-note"])
+	require.Equal(t, "label", service.Labels["external.example.com/keep"])
+	require.Equal(t, "annotation", service.Annotations["external.example.com/keep"])
+	require.NotEmpty(t, service.Annotations[managedServiceMetadataAnnotation])
+	require.NotEmpty(t, service.Annotations[controller_common.NvidiaAnnotationHashKey])
+	require.Equal(t, selector, service.Spec.Selector)
+	resourceVersion := service.ResourceVersion
+
+	t.Log("Verify a steady-state reconcile writes nothing")
+	modified, err = r.createOrUpdateOrDeleteServices(ctx, opt)
+	require.NoError(t, err)
+	require.False(t, modified)
+	service = &corev1.Service{}
+	require.NoError(t, kubeClient.Get(ctx, key, service))
+	require.Equal(t, resourceVersion, service.ResourceVersion)
+}
+
 func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentService(t *testing.T) {
 	t.Log("Build a multinode DCD and the dependencies shared by reconciliation and rendering")
 	s := scheme.Scheme
