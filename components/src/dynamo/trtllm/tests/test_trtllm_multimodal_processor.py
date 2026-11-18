@@ -474,6 +474,12 @@ async def test_image_next_to_float_video_is_handed_over_as_a_float_tensor(
     assert image.dtype == torch.float32 and image.shape == (3, 4, 5)
     assert torch.equal(image, expected)
     assert mm_data["video"][0] is source
+    if path == "nvdec":
+        mmp._nvdec_video_data.assert_called_once()
+        mmp.async_load_video.assert_not_awaited()
+    else:
+        mmp._nvdec_video_data.assert_not_called()
+        mmp.async_load_video.assert_awaited_once()
     order = [("image", 0), ("video", 0)]
     assert [(e["modality"], e["index"]) for e in processed["mm_item_order"]] == (
         order[::-1] if video_first else order

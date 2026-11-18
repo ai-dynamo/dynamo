@@ -581,6 +581,8 @@ module = [
     "diffusers.*",
     "torch",
     "torch.*",
+    "torchvision",
+    "torchvision.*",
     "transformers",
     "transformers.*",
     "cupy",
