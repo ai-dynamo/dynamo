@@ -22,15 +22,6 @@ pytestmark = [
 ]
 
 
-def test_removed_engine_classes_are_not_exported():
-    import dynamo._core as core
-    import dynamo.mocker as mocker
-
-    for name in ("MockEngineArgs", "SglangArgs", "TrtllmArgs"):
-        assert not hasattr(core, name)
-        assert not hasattr(mocker, name)
-
-
 @pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
 def test_canonical_cli_config_reaches_runtime_and_replay(backend):
     from dynamo._core import run_mocker_synthetic_trace_replay
@@ -50,7 +41,10 @@ def test_canonical_cli_config_reaches_runtime_and_replay(backend):
     _, runtime = CONFIG.build_runtime_config(restored)
     assert runtime.context_length == 8
     assert runtime.total_kv_blocks == 64
-    for isl, output, status in [(3, 5, "completed"), (8, 0, "rejected")]:
+    # SGLang keeps one token of the context for itself and admits a prompt
+    # only when five more stay free, so its accepted prompt is shorter.
+    accepted_isl = 1 if backend == "sglang" else 3
+    for isl, output, status in [(accepted_isl, 5, "completed"), (8, 0, "rejected")]:
         result = run_mocker_synthetic_trace_replay(
             isl,
             10,

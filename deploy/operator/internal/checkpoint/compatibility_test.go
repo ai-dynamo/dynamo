@@ -215,7 +215,7 @@ func TestComputeSnapshotCompatibilityHashIsPortableAcrossGraphIdentity(t *testin
 	secondHash, err := ComputeSnapshotCompatibilityHash(&second, "main", "vllm", "disabled", "")
 	require.NoError(t, err)
 
-	t.Log("Then graph, Pod, worker-generation, and helper-sidecar identity do not make the artifact incompatible")
+	t.Log("Then graph, Pod, worker-generation, served-name, and helper-sidecar identity do not make the artifact incompatible")
 	assert.Equal(t, firstHash, secondHash)
 	assert.Len(t, firstHash, 64)
 }
@@ -259,6 +259,14 @@ func TestComputeSnapshotCompatibilityHashRejectsProcessContractChanges(t *testin
 			name: "model environment",
 			mutate: func(template *corev1.PodTemplateSpec) {
 				template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env, corev1.EnvVar{Name: "MODEL_PATH", Value: "/models/other"})
+			},
+			backend: "vllm",
+			gmsMode: "disabled",
+		},
+		{
+			name: "offline policy",
+			mutate: func(template *corev1.PodTemplateSpec) {
+				template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env, corev1.EnvVar{Name: "HF_HUB_OFFLINE", Value: "1"})
 			},
 			backend: "vllm",
 			gmsMode: "disabled",
@@ -399,8 +407,11 @@ func TestSnapshotRestoreEnvironmentNamesMatchPythonRuntime(t *testing.T) {
 		}
 	}
 
+	// Refresh the offline policy without changing the persisted v2 hash contract.
+	require.Contains(t, pythonNames, "HF_HUB_OFFLINE")
+	delete(pythonNames, "HF_HUB_OFFLINE")
 	assert.Equal(t, pythonNames, snapshotRestoreEnvironmentNames,
-		"Go compatibility filtering must track the Python restore-context allowlist")
+		"Go compatibility filtering must track Python restore env except HF_HUB_OFFLINE, retained in v2")
 }
 
 func snapshotCompatibilityTestPodTemplate(dgdName, namespace, workerSuffix string) corev1.PodTemplateSpec {
@@ -418,6 +429,7 @@ func snapshotCompatibilityTestPodTemplate(dgdName, namespace, workerSuffix strin
 					{Name: "DYN_NAMESPACE", Value: namespace + "-runtime"},
 					{Name: "DYN_NAMESPACE_WORKER_SUFFIX", Value: workerSuffix},
 					{Name: "POD_NAME", Value: dgdName + "-pod"},
+					{Name: "DYN_SERVED_MODEL_NAME", Value: dgdName + "/model"},
 				},
 			}},
 		},

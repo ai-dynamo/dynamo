@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -32,7 +33,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -153,7 +156,7 @@ func dgdrV1beta2Request(withHardware bool) *nvidiacomv1beta2.DynamoGraphDeployme
 		Name: "search", Namespace: "default", UID: "request-uid", Generation: 1,
 	}
 	request.Spec.Model = &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"}
-	request.Spec.AISimulate = &nvidiacomv1beta2.AISimulateSpec{
+	request.Spec.AISim = &nvidiacomv1beta2.AISimSpec{
 		InputOverrides: &runtime.RawExtension{Raw: []byte(`{"optimizer":{"max_trials":7}}`)},
 	}
 	if withHardware {
@@ -190,8 +193,8 @@ func TestV1beta2RequestControllerCreatesTheRunOfTheCurrentGeneration(t *testing.
 	if !apiequality.Semantic.DeepEqual(run.Spec.NativeSearchInput, *requestInput) {
 		t.Fatalf("run input = %#v, want the admitted Request snapshot %#v", run.Spec.NativeSearchInput, *requestInput)
 	}
-	if run.Status.AISimulate != nil {
-		t.Fatalf("status.aisimulate = %#v, want the Run controller to lower and record it", run.Status.AISimulate)
+	if run.Status.AISim != nil {
+		t.Fatalf("status.aisim = %#v, want the Run controller to lower and record it", run.Status.AISim)
 	}
 
 	t.Log("The status records the accepted generation and the active Run")
@@ -722,21 +725,93 @@ func TestV1beta2RequestControllerDoesNotAdoptARunOfAnotherOwner(t *testing.T) {
 func TestV1beta2RequestControllerPreservesInputOverridesForRunLowering(t *testing.T) {
 	request := dgdrV1beta2Request(true)
 	const overrides = `{"traffic":{"source":{"input_tokens":null}},"optimizer":{"max_trials":null}}`
-	request.Spec.AISimulate.InputOverrides = &runtime.RawExtension{Raw: []byte(overrides)}
+	request.Spec.AISim.InputOverrides = &runtime.RawExtension{Raw: []byte(overrides)}
+	const dgdOverrides = `{"apiVersion":"nvidia.com/v1beta1","kind":"DynamoGraphDeployment","spec":{"components":[{"name":"worker","replicas":2}]}}`
+	request.Spec.Overrides = &nvidiacomv1beta2.OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(dgdOverrides)}}
 	f := newDGDRV1beta2Fixture(t, request)
 
 	run, err := f.reconciler.buildRun(request)
 	if err != nil {
 		t.Fatalf("build run: %v", err)
 	}
-	if run.Spec.AISimulate == nil || run.Spec.AISimulate.InputOverrides == nil {
-		t.Fatal("Run lost spec.aisimulate.inputOverrides")
+	if run.Spec.AISim == nil || run.Spec.AISim.InputOverrides == nil {
+		t.Fatal("Run lost spec.aisim.inputOverrides")
 	}
-	if got := string(run.Spec.AISimulate.InputOverrides.Raw); got != overrides {
+	if got := string(run.Spec.AISim.InputOverrides.Raw); got != overrides {
 		t.Fatalf("Run inputOverrides = %s, want %s", got, overrides)
 	}
-	request.Spec.AISimulate.InputOverrides.Raw[0] = '['
-	if got := string(run.Spec.AISimulate.InputOverrides.Raw); got != overrides {
+	request.Spec.AISim.InputOverrides.Raw[0] = '['
+	if got := string(run.Spec.AISim.InputOverrides.Raw); got != overrides {
 		t.Fatalf("Run inputOverrides changed with the Request: %s", got)
+	}
+	if run.Spec.Overrides == nil || run.Spec.Overrides.DGD == nil {
+		t.Fatal("Run lost spec.overrides.dgd")
+	}
+	request.Spec.Overrides.DGD.Raw[0] = '['
+	if got := string(run.Spec.Overrides.DGD.Raw); got != dgdOverrides {
+		t.Fatalf("Run DGD override changed with the Request: %s", got)
+	}
+}
+
+func TestV1beta2RequestControllerReportsARunTheCRDRejectsInsteadOfRetryingIt(t *testing.T) {
+	invalid := apierrors.NewInvalid(
+		schema.GroupKind{Group: nvidiacomv1beta2.GroupVersion.Group, Kind: "DynamoGraphDeploymentRun"}, "search-1",
+		field.ErrorList{field.Invalid(field.NewPath("spec", "workload", "trace", "source", "persistentVolumeClaim", "subPath"), "../escape.jsonl",
+			"subPath must be relative to the claim root without empty, '.' or '..' segments")},
+	)
+	tests := []struct {
+		name        string
+		createErr   error
+		wantRuns    []string
+		wantReason  string
+		wantMessage string
+	}{
+		{
+			name:       "a Run the API server accepts is created",
+			wantRuns:   []string{"search-1"},
+			wantReason: dgdrReasonRunCreated,
+		},
+		{
+			name:        "a Run the CRD rejects is reported once as an invalid spec",
+			createErr:   invalid,
+			wantReason:  dgdrReasonInvalidSpec,
+			wantMessage: invalid.Error(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			creates := 0
+			f := newDGDRV1beta2FixtureWithInterceptor(t, interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					if _, ok := obj.(*nvidiacomv1beta2.DynamoGraphDeploymentRun); ok {
+						creates++
+						if tt.createErr != nil {
+							return tt.createErr
+						}
+					}
+					return c.Create(ctx, obj, opts...)
+				},
+			}, dgdrV1beta2Request(true))
+
+			t.Log("Reconcile twice: an invalid spec is a condition for this generation, not a create to retry")
+			f.reconcile()
+			f.reconcile()
+			if names := f.runNames(); !slices.Equal(names, tt.wantRuns) {
+				t.Fatalf("runs = %v, want %v", names, tt.wantRuns)
+			}
+			if creates != 1 {
+				t.Fatalf("Run creates = %d, want 1", creates)
+			}
+			if request := f.request(); tt.createErr != nil && request.Status.ActiveRunRef != nil {
+				t.Fatalf("activeRunRef = %+v, want the reservation released", request.Status.ActiveRunRef)
+			}
+			condition := dgdrV1beta2AcceptedCondition(t, f.request())
+			if condition.Reason != tt.wantReason {
+				t.Fatalf("Accepted = %+v, want reason %s", condition, tt.wantReason)
+			}
+			if tt.wantMessage != "" && condition.Message != tt.wantMessage {
+				t.Fatalf("Accepted message = %q, want %q", condition.Message, tt.wantMessage)
+			}
+		})
 	}
 }

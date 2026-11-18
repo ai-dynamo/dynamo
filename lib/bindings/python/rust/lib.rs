@@ -39,9 +39,10 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
+use dynamo_kv_router::config::KvRouterConfig;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::plugins::RouterPluginRegistry;
-use dynamo_kv_router::{KvRouterConfig, plugins::RouterPlugins};
+use dynamo_kv_router::plugins::RouterPlugins;
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::{self as llm_rs};
 
@@ -55,7 +56,6 @@ use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 pub enum RouterMode {
     RoundRobin,
     Random,
-    PowerOfTwoChoices,
     KV,
     /// Direct routing - reads worker ID from each request's routing hints.
     /// Used when an external orchestrator (e.g., EPP) handles worker selection.
@@ -69,7 +69,6 @@ impl From<RouterMode> for RsRouterMode {
         match mode {
             RouterMode::RoundRobin => Self::RoundRobin,
             RouterMode::Random => Self::Random,
-            RouterMode::PowerOfTwoChoices => Self::PowerOfTwoChoices,
             RouterMode::KV => Self::KV,
             RouterMode::Direct => Self::Direct,
             RouterMode::LeastLoaded => Self::LeastLoaded,
@@ -78,6 +77,12 @@ impl From<RouterMode> for RsRouterMode {
     }
 }
 
+#[cfg(all(
+    feature = "jemalloc",
+    not(target_env = "msvc"),
+    not(target_env = "musl")
+))]
+mod allocator;
 mod backend;
 mod context;
 mod engine;
@@ -400,6 +405,11 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::LoadThresholdConfig>()?;
     m.add_class::<llm::replay::ReasoningConfig>()?;
     m.add_function(wrap_pyfunction!(llm::replay::_normalize_mocker_config, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        llm::routed_engine::_convert_preprocessed_request,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(errors::_raise_routed_http_error, m)?)?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
     #[cfg(feature = "select-service")]
@@ -492,10 +502,10 @@ pub(crate) fn linked_worker_selection_policy_registry() -> RouterPluginRegistry 
 
 #[cfg(feature = "custom-policy")]
 fn register_core_with_router_plugins(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    let mut registry = dynamo_kv_router::plugins::RouterPluginRegistry::default();
+    let mut registry = dynamo_router_policies::default_registry();
     // The policies Dynamo ships register first, so a replaced catalog that reuses one of their
     // type names fails here instead of silently overriding it.
-    dynamo_custom_policy_builtin::register(&mut registry)
+    dynamo_router_policies::register(&mut registry)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     dynamo_worker_selection_policy_catalog::register(&mut registry)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
@@ -1556,7 +1566,8 @@ impl DistributedRuntime {
             .map(|info| format!("http://{}", info.advertised_socket_addr()))
     }
 
-    /// Register a component handler under `/engine/{name}/...` on the system listener.
+    /// Register a status-aware handler at `/engine/{name}` on the system listener.
+    /// Single-segment names also handle paths below that prefix.
     /// The callback receives `{method, path, body}` and returns `{status, body}`.
     fn register_engine_http_handler(
         &self,
@@ -1718,7 +1729,7 @@ impl Endpoint {
         })
     }
 
-    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
+    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None, *, track_response_completion = false))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
@@ -1726,6 +1737,7 @@ impl Endpoint {
         graceful_shutdown: Option<bool>,
         metrics_labels: Option<Vec<(String, String)>>,
         health_check_payload: Option<&Bound<'p, PyDict>>,
+        track_response_completion: bool,
     ) -> PyResult<Bound<'p, PyAny>> {
         // The network engines read the role per request, so one recorded later
         // by `register_model` takes effect from then on, through the gate of
@@ -1820,8 +1832,12 @@ impl Endpoint {
             ));
         }
 
-        let mut builder = self
-            .inner
+        let endpoint = if track_response_completion {
+            self.inner.clone().track_response_completion()
+        } else {
+            self.inner.clone()
+        };
+        let mut builder = endpoint
             .endpoint_builder()
             .metrics_labels(metrics_labels)
             .handler(ingress);
@@ -1934,9 +1950,10 @@ impl Endpoint {
         crate::future_into_py(py, async move {
             let client = inner.client().await.map_err(to_pyerr)?;
             let push_router =
-                rs::pipeline::PushRouter::<rmpv::Value, RsAnnotated<rmpv::Value>>::from_client(
+                rs::pipeline::PushRouter::<rmpv::Value, RsAnnotated<rmpv::Value>>::from_client_with_options(
                     client,
                     router_mode.into(),
+                    dynamo_llm::kv_router::plugins::push_router_options(),
                 )
                 .await
                 .map_err(to_pyerr)?;
@@ -1956,6 +1973,11 @@ impl Endpoint {
     #[getter]
     fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
         prometheus_metrics::RuntimeMetrics::from_endpoint(self.inner.clone())
+    }
+
+    /// Active requests on an endpoint configured to track response completion.
+    fn inflight_requests(&self) -> Option<i64> {
+        self.inner.inflight_requests()
     }
 
     /// Unregister this endpoint instance from discovery.
@@ -2372,6 +2394,8 @@ async fn process_stream(
 pub(crate) struct AsyncResponseStream {
     rx: Arc<Mutex<tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>>>,
     annotated: bool,
+    /// The stream of a `RoutedEngine`, whose errors raise `RoutedEngineError`.
+    routed_engine: bool,
 }
 
 impl AsyncResponseStream {
@@ -2382,6 +2406,15 @@ impl AsyncResponseStream {
         Self {
             rx: Arc::new(Mutex::new(rx)),
             annotated,
+            routed_engine: false,
+        }
+    }
+
+    /// The annotated response stream of a `RoutedEngine`.
+    pub(crate) fn routed_engine(rx: tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>) -> Self {
+        Self {
+            routed_engine: true,
+            ..Self::new(rx, true)
         }
     }
 }
@@ -2398,13 +2431,14 @@ impl AsyncResponseStream {
     fn next<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let rx = self.rx.clone();
         let annotated = self.annotated;
+        let routed_engine = self.routed_engine;
 
         crate::future_into_py(py, async move {
             loop {
                 let value = rx.lock().await.recv().await;
                 match value {
                     Some(pyobj) => {
-                        let pyobj = crate::errors::check_response_error(pyobj)?;
+                        let pyobj = crate::errors::check_response_error(pyobj, routed_engine)?;
 
                         if annotated {
                             let object = Annotated { inner: pyobj };

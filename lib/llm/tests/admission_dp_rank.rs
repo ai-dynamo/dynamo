@@ -363,36 +363,51 @@ async fn admission_applies_only_at_the_typed_backend_boundary() {
         .unwrap(),
     )
     .await;
-    let backend = PushRouter::<Ranked, Token>::from_client(backend, RouterMode::RoundRobin)
-        .await
-        .unwrap();
+    let backend = PushRouter::<Ranked, Token>::from_client_with_options(
+        backend,
+        RouterMode::RoundRobin,
+        dynamo_llm::kv_router::plugins::push_router_options(),
+    )
+    .await
+    .unwrap();
 
     let plain = serve(
         endpoint(&drt, "plain"),
         Ingress::<SingleIn<Plain>, ManyOut<Reply>>::for_engine(Arc::new(Answer)).unwrap(),
     )
     .await;
-    let plain = PushRouter::<Plain, Reply>::from_client(plain, RouterMode::RoundRobin)
-        .await
-        .unwrap();
+    let plain = PushRouter::<Plain, Reply>::from_client_with_options(
+        plain,
+        RouterMode::RoundRobin,
+        dynamo_llm::kv_router::plugins::push_router_options(),
+    )
+    .await
+    .unwrap();
     let generic = serve(
         endpoint(&drt, "generic"),
         Ingress::<SingleIn<serde_json::Value>, ManyOut<Reply>>::for_engine(Arc::new(Answer))
             .unwrap(),
     )
     .await;
-    let generic =
-        PushRouter::<serde_json::Value, Reply>::from_client(generic, RouterMode::RoundRobin)
-            .await
-            .unwrap();
+    let generic = PushRouter::<serde_json::Value, Reply>::from_client_with_options(
+        generic,
+        RouterMode::RoundRobin,
+        dynamo_llm::kv_router::plugins::push_router_options(),
+    )
+    .await
+    .unwrap();
     let stream = serve(
         endpoint(&drt, "stream"),
         Ingress::<ManyIn<Plain>, ManyOut<Reply>>::for_engine(Arc::new(Answer)).unwrap(),
     )
     .await;
-    let stream = PushRouter::<Plain, Reply>::from_client(stream, RouterMode::RoundRobin)
-        .await
-        .unwrap();
+    let stream = PushRouter::<Plain, Reply>::from_client_with_options(
+        stream,
+        RouterMode::RoundRobin,
+        dynamo_llm::kv_router::plugins::push_router_options(),
+    )
+    .await
+    .unwrap();
 
     // Ranked admission through the typed wrapper: under the rank the body
     // names, when the worker serves it.

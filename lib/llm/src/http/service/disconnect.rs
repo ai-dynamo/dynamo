@@ -152,6 +152,7 @@ impl StreamErrorSignal {
             ErrorType::Cancelled => return,
             ErrorType::ResponseTimeout => ErrorClass::DeadlineExceeded,
             ErrorType::NotImplemented => ErrorClass::NotImplemented,
+            ErrorType::UnsupportedModality => ErrorClass::UnsupportedMedia,
             ErrorType::None | ErrorType::Internal => ErrorClass::Internal,
         };
         crate::http::service::metrics::record_failure(&DynamoError::builder().class(class).build());
@@ -1331,6 +1332,42 @@ mod tests {
         assert_eq!(
             body["error"]["code"],
             crate::http::service::error::overload_status_code().as_u16()
+        );
+    }
+
+    #[test]
+    fn unsupported_video_public_message_reaches_the_sse_body() {
+        let error = DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic(r#"{"message":"Unsupported video media","code":415}"#)
+            .public_message("Unsupported video media")
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["message"], "Unsupported video media");
+        assert_eq!(body["error"]["code"], 415);
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+    }
+
+    #[test]
+    fn unsupported_media_without_public_message_uses_catalog_text_in_sse() {
+        let error = DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic("private fetch https://example.com/?sig=secret")
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["message"], "Unsupported media type");
+        assert_eq!(body["error"]["code"], 415);
+        assert!(
+            !body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("secret")
         );
     }
 

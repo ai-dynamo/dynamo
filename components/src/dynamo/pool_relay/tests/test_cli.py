@@ -29,7 +29,123 @@ def test_default_config() -> None:
     assert config.namespaces == ()
     assert config.endpoint_prefixes == ()
     assert config.bind is None
+    assert config.global_discovery_url is None
     assert config.tuning == ()
+    assert config.routing_pool is None
+    assert config.routing_pool_region is None
+    assert config.routing_pool_frontends == ()
+
+
+def test_routing_pool_reaches_startup_from_environment() -> None:
+    config = parse_args(
+        [],
+        {
+            "DYN_CLUSTER_ID": "east",
+            "DYN_RELAY_BIND": "127.0.0.1:0",
+            "DYN_RELAY_GLOBAL_DISCOVERY_URL": "http://discovery:8080",
+            "DYN_RELAY_ROUTING_POOL": "east/dynamo/blue",
+            "DYN_RELAY_ROUTING_POOL_REGION": "us-east-1",
+            "DYN_RELAY_ROUTING_POOL_FRONTENDS": "http://blue-a:8000,http://blue-b:8000",
+        },
+    )
+    assert config.routing_pool == "east/dynamo/blue"
+    assert config.routing_pool_region == "us-east-1"
+    assert config.routing_pool_frontends == ("http://blue-a:8000", "http://blue-b:8000")
+
+
+@pytest.mark.parametrize(
+    "pool", ["east/blue", "east//blue", "west/dynamo/blue", "east/dynamo/ blue"]
+)
+def test_routing_pool_rejects_ambiguous_or_mismatched_identity(
+    pool: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert_cli_error(
+        [
+            "--cluster-id",
+            "east",
+            "--bind",
+            "127.0.0.1:0",
+            "--global-discovery-url",
+            "http://discovery:8080",
+            "--routing-pool",
+            pool,
+            "--routing-pool-region",
+            "us-east-1",
+        ],
+        {},
+        capsys,
+        "--routing-pool",
+    )
+
+
+def test_routing_pool_requires_transport_and_discovery(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert_cli_error(
+        ["--cluster-id", "east", "--routing-pool", "east/dynamo/blue"],
+        {},
+        capsys,
+        "requires --global-discovery-url and --bind",
+    )
+
+
+ROUTING_POOL_ARGS = [
+    "--cluster-id",
+    "east",
+    "--bind",
+    "127.0.0.1:0",
+    "--global-discovery-url",
+    "http://discovery:8080",
+    "--routing-pool",
+    "east/dynamo/blue",
+]
+
+
+@pytest.mark.parametrize("region", [[], ["--routing-pool-region", " us-east-1"]])
+def test_routing_pool_requires_a_region(
+    region: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert_cli_error(
+        ROUTING_POOL_ARGS + region,
+        {},
+        capsys,
+        "--routing-pool requires a --routing-pool-region",
+    )
+
+
+@pytest.mark.parametrize(
+    "registration",
+    [
+        ["--routing-pool-region", "us-east-1"],
+        ["--routing-pool-frontends", "http://blue:8000"],
+    ],
+)
+def test_routing_pool_registration_requires_a_routing_pool(
+    registration: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert_cli_error(
+        ["--cluster-id", "east", *registration],
+        {},
+        capsys,
+        "require --routing-pool",
+    )
+
+
+def test_routing_pool_frontends_reject_an_empty_entry(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert_cli_error(
+        ROUTING_POOL_ARGS
+        + [
+            "--routing-pool-region",
+            "us-east-1",
+            "--routing-pool-frontends",
+            "http://blue:8000,",
+        ],
+        {},
+        capsys,
+        "--routing-pool-frontends",
+    )
 
 
 def test_namespace_filter_selects_one_namespace() -> None:
@@ -56,6 +172,8 @@ def test_cli_overrides_environment() -> None:
             "[::1]:0",
             "--expected-unique-blocks",
             "128",
+            "--global-discovery-url",
+            "http://cli-discovery:8080/",
         ],
         {
             "DYN_CLUSTER_ID": "environment-dc",
@@ -63,6 +181,7 @@ def test_cli_overrides_environment() -> None:
             "DYN_RELAY_ENDPOINT_PREFIXES": "environment-a.backend",
             "DYN_RELAY_BIND": "127.0.0.1:0",
             "DYN_RELAY_EXPECTED_UNIQUE_BLOCKS": "64",
+            "DYN_RELAY_GLOBAL_DISCOVERY_URL": "http://environment-discovery:8080/",
         },
     )
 
@@ -72,6 +191,7 @@ def test_cli_overrides_environment() -> None:
     assert config.endpoint_prefixes == ("cli-a.backend", "cli-b.backend")
     assert config.bind == "[::1]:0"
     assert config.expected_unique_blocks == 128
+    assert config.global_discovery_url == "http://cli-discovery:8080/"
 
 
 def test_config_from_environment() -> None:
@@ -83,6 +203,7 @@ def test_config_from_environment() -> None:
             "DYN_RELAY_ENDPOINT_PREFIXES": "prod-a.backend, prod-b.backend",
             "DYN_RELAY_BIND": "127.0.0.1:0",
             "DYN_RELAY_EXPECTED_UNIQUE_BLOCKS": "64",
+            "DYN_RELAY_GLOBAL_DISCOVERY_URL": "http://discovery:8080/",
         },
     )
 
@@ -92,6 +213,7 @@ def test_config_from_environment() -> None:
     assert config.watch_all is False
     assert config.bind == "127.0.0.1:0"
     assert config.expected_unique_blocks == 64
+    assert config.global_discovery_url == "http://discovery:8080/"
 
 
 @pytest.mark.parametrize(
@@ -361,6 +483,24 @@ def test_expected_unique_blocks_rejects_invalid_numbers(
         environment = {name: value}
     assert_cli_error(
         ["--cluster-id", "dc-a", *argv], environment, capsys, name, diagnostic
+    )
+
+
+@pytest.mark.parametrize("source", ["cli", "environment"])
+def test_global_discovery_url_rejects_empty(
+    source: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    if source == "cli":
+        argv = ["--global-discovery-url", " "]
+        environment = {}
+    else:
+        argv = []
+        environment = {"DYN_RELAY_GLOBAL_DISCOVERY_URL": " "}
+    assert_cli_error(
+        ["--cluster-id", "dc-a", *argv],
+        environment,
+        capsys,
+        "--global-discovery-url must not be empty",
     )
 
 

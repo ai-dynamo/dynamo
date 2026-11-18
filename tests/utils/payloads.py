@@ -31,6 +31,7 @@ from fractions import Fraction
 from io import BytesIO
 from typing import Any, Callable, Dict, List, Optional, cast
 
+import psutil
 import requests
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
@@ -242,6 +243,129 @@ class HttpCancellationPayload(BasePayload):
                 before=self._before, completion_progress=self._completion_progress
             )
         return content
+
+
+def _listener_pid(port: int) -> int:
+    for conn in psutil.net_connections(kind="tcp"):
+        if (
+            conn.status == psutil.CONN_LISTEN
+            and conn.laddr
+            and conn.laddr.port == port
+            and conn.pid is not None
+        ):
+            return conn.pid
+    raise AssertionError(f"No process listens on port {port}")
+
+
+def _kill_tree(pid: int) -> None:
+    try:
+        parent = psutil.Process(pid)
+        processes = [parent, *parent.children(recursive=True)]
+    except psutil.NoSuchProcess:
+        return
+    for process in processes:
+        try:
+            process.kill()
+        except psutil.NoSuchProcess:
+            pass
+
+
+@dataclass
+class EngineFailurePayload(BasePayload):
+    """Kill the engine serving a chat stream; migration must finish the stream.
+
+    `workers` are launch-script worker indices N. The worker whose sidecar
+    (DYN_SYSTEM_PORT{N}) reports the in-flight request loses its engine
+    (DYN_ENGINE_GRPC_PORT{N}) to SIGKILL, and the sidecar stays up. The
+    deployment needs DYN_MIGRATION_LIMIT > 0, and DYN_LAUNCH_WAIT_ALL=1 so the
+    launch script outlives the engine. It loses that worker, so run it last.
+    """
+
+    workers: tuple[int, ...] = field(kw_only=True)
+    endpoint: str = "/v1/chat/completions"
+    http_stream: bool = True
+    timeout: int = 180
+    chunks_before_fault: int = 5
+    _system_ports: dict[int, int] = field(default_factory=dict, init=False)
+    _engine_ports: dict[int, int] = field(default_factory=dict, init=False)
+    _frontend_port: int = field(default=0, init=False)
+    _migrations_before: float = field(default=0, init=False)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        self._frontend_port = int(env["DYN_HTTP_PORT"])
+        for index in self.workers:
+            self._system_ports[index] = int(env[f"DYN_SYSTEM_PORT{index}"])
+            self._engine_ports[index] = int(env[f"DYN_ENGINE_GRPC_PORT{index}"])
+
+    def _scrape(self, port: int, name: str, labels: dict[str, str]) -> float:
+        with requests.get(f"http://127.0.0.1:{port}/metrics", timeout=2) as response:
+            response.raise_for_status()
+            return sum_metric_samples(response.text, name, labels)
+
+    def _migrations(self) -> float:
+        return self._scrape(
+            self._frontend_port,
+            "dynamo_frontend_model_migration_total",
+            {"migration_type": "ongoing_request"},
+        )
+
+    def before_request(self) -> None:
+        self._migrations_before = self._migrations()
+
+    def _serving_worker(self) -> int:
+        deadline = time.monotonic() + 10
+        while True:
+            for index, port in self._system_ports.items():
+                inflight = self._scrape(
+                    port,
+                    "dynamo_component_inflight_requests",
+                    {"dynamo_endpoint": "generate"},
+                )
+                if inflight > 0:
+                    return index
+            assert time.monotonic() < deadline, "No worker reports the request"
+            time.sleep(0.05)
+
+    def response_handler(self, response: requests.Response) -> str:
+        try:
+            response.raise_for_status()
+            deadline = time.monotonic() + self.timeout
+            parts: list[str] = []
+            chunks = 0
+            finish_reason = None
+            usage = None
+            faulted = False
+            for line in response.iter_lines(chunk_size=1):
+                assert time.monotonic() < deadline, "Stream exceeded its deadline"
+                if not line.startswith(b"data:"):
+                    continue
+                data = line[5:].strip()
+                if data == b"[DONE]":
+                    break
+                chunk = json.loads(data)
+                assert "error" not in chunk, ("Stream failed after fault", chunk)
+                usage = chunk.get("usage") or usage
+                for choice in chunk.get("choices", []):
+                    delta = choice.get("delta") or {}
+                    content = delta.get("content") or delta.get("reasoning_content")
+                    if content:
+                        parts.append(content)
+                        chunks += 1
+                    finish_reason = choice.get("finish_reason") or finish_reason
+                if not faulted and chunks >= self.chunks_before_fault:
+                    engine_port = self._engine_ports[self._serving_worker()]
+                    _kill_tree(_listener_pid(engine_port))
+                    faulted = True
+        finally:
+            response.close()
+        assert faulted, "Stream ended before the fault was injected"
+        assert finish_reason == "length", f"Unexpected finish: {finish_reason}"
+        assert usage is not None, "Missing usage"
+        assert usage["completion_tokens"] == self.body["max_tokens"], usage
+        # The router may first retry the faulted worker, which is still
+        # registered, so more than one migration is fine.
+        assert self._migrations() > self._migrations_before, "Request did not migrate"
+        return "".join(parts)
 
 
 @dataclass
@@ -1350,6 +1474,9 @@ class CachedTokensChatPayload(ChatPayload):
         # block-count, etc.), move into a RouterMetricsAssertion
         # mixin/subclass.
         self.min_avg_kv_hit_rate = min_avg_kv_hit_rate
+        # Require new router_kv_hit_rate observations on R2+. A subclass may
+        # drop the floor at run time and keep this check.
+        self.require_kv_hit_rate_observations = min_avg_kv_hit_rate > 0
         self._metrics_baseline: Optional[tuple[float, float]] = None
 
     def validate(self, response: Any, content: str) -> None:
@@ -1404,7 +1531,7 @@ class CachedTokensChatPayload(ChatPayload):
         if (
             self._metrics_baseline is None
             and self._request_count == 1
-            and self.min_avg_kv_hit_rate > 0
+            and self.require_kv_hit_rate_observations
         ):
             self._metrics_baseline = self._scrape_router_kv_hit_rate()
 
@@ -1440,8 +1567,8 @@ class CachedTokensChatPayload(ChatPayload):
 
     def final_validation(self) -> None:
         """Assert cached_tokens >= min_cached_tokens on at least one repeat
-        (only when min_cached_tokens > 0), and (if set) router_kv_hit_rate
-        post-R1 mean >= min_avg_kv_hit_rate.
+        (only when min_cached_tokens > 0), and (if set) new router_kv_hit_rate
+        observations with a post-R1 mean >= min_avg_kv_hit_rate.
         """
         # Only assert cached tokens when a positive threshold is set; a caller
         # validating purely via the router metric passes min_cached_tokens=0.
@@ -1457,11 +1584,11 @@ class CachedTokensChatPayload(ChatPayload):
                 "✓ Final validation PASSED: cached_tokens found in repeated requests"
             )
 
-        if self.min_avg_kv_hit_rate <= 0:
+        if not self.require_kv_hit_rate_observations:
             return
         if self._metrics_baseline is None:
             raise AssertionError(
-                "min_avg_kv_hit_rate set but no metrics baseline captured "
+                "router_kv_hit_rate check set but no metrics baseline captured "
                 "(R1 validate() didn't run or /metrics was unreachable)."
             )
         after = self._scrape_router_kv_hit_rate()
@@ -1480,6 +1607,12 @@ class CachedTokensChatPayload(ChatPayload):
                 f"MM-routing likely not engaging on repeat requests."
             )
         avg = d_sum / d_count
+        if self.min_avg_kv_hit_rate <= 0:
+            logger.info(
+                f"✓ router_kv_hit_rate: {d_count} new observations over R2+ "
+                f"(mean {avg:.3f}, no floor)"
+            )
+            return
         if avg < self.min_avg_kv_hit_rate:
             raise AssertionError(
                 f"router_kv_hit_rate: mean over R2+ ({avg:.3f}) below required "
@@ -2031,6 +2164,116 @@ class ResponsesStreamPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return ResponsesStreamPayload.extract_content(response)
+
+
+def _validate_responses_logprobs(entries: Any, top_logprobs: int) -> None:
+    """Check `output_text.logprobs` entries from the Responses API."""
+    assert entries, "Expected output_text logprobs when include requests them"
+    for entry in entries:
+        assert isinstance(entry["token"], str), f"Invalid token: {entry!r}"
+        value = entry["logprob"]
+        assert math.isfinite(value) and value <= 0, f"Invalid logprob: {entry!r}"
+        # Output parts carry `bytes`; the text stream events do not.
+        if "bytes" in entry:
+            assert isinstance(entry["bytes"], list), f"Invalid token bytes: {entry!r}"
+        assert (
+            len(entry["top_logprobs"]) <= top_logprobs
+        ), f"More alternatives than requested: {entry!r}"
+        for top in entry["top_logprobs"]:
+            assert isinstance(top["token"], str), f"Invalid top token: {top!r}"
+            assert math.isfinite(top["logprob"]) and top["logprob"] <= 0
+
+
+@dataclass
+class ResponsesPayloadWithLogprobs(ResponsesPayload):
+    """Non-streaming Responses payload that requests and validates output logprobs.
+
+    One score per generated token must reach `output_text.logprobs`, so the entry
+    count is checked against `usage.output_tokens`.
+    """
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        result = response.json()
+        top_logprobs = self.body.get("top_logprobs") or 0
+        assert (
+            result.get("top_logprobs") == top_logprobs
+        ), f"top_logprobs echo mismatch: {result.get('top_logprobs')} != {top_logprobs}"
+        text_part = result["output"][0]["content"][0]
+        entries = text_part.get("logprobs")
+        _validate_responses_logprobs(entries, top_logprobs)
+        output_tokens = result["usage"]["output_tokens"]
+        assert (
+            len(entries) == output_tokens
+        ), f"Expected {output_tokens} logprob entries, got {len(entries)}"
+        logger.info(
+            "Responses logprobs validation passed: %d entries, top_logprobs=%d",
+            len(entries),
+            top_logprobs,
+        )
+
+
+@dataclass
+class ResponsesStreamPayloadWithLogprobs(ResponsesStreamPayload):
+    """Streaming Responses payload that validates logprobs on text events.
+
+    Every `output_text.delta` carries a logprobs array; `output_text.done` and the
+    completed output carry the full record, which starts with the concatenated delta
+    scores and may end with scores that arrived after the last delta (hidden EOS).
+    """
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        events: list[tuple[str, Any]] = []
+        event_type = ""
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            if line.startswith("event: "):
+                event_type = line[len("event: ") :]
+            elif line.startswith("data: "):
+                data_str = line[len("data: ") :]
+                if data_str != "[DONE]":
+                    events.append((event_type, json.loads(data_str)))
+
+        top_logprobs = self.body.get("top_logprobs") or 0
+        deltas = [e for t, e in events if t == "response.output_text.delta"]
+        assert deltas, "Missing output_text.delta events"
+        assert all(
+            isinstance(d.get("logprobs"), list) for d in deltas
+        ), "Every output_text.delta must carry a logprobs array"
+        delta_tokens = [lp["token"] for d in deltas for lp in d["logprobs"]]
+        assert delta_tokens, "No logprobs on any output_text.delta"
+
+        done_events = [e for t, e in events if t == "response.output_text.done"]
+        assert (
+            len(done_events) == 1
+        ), f"Expected 1 output_text.done, got {len(done_events)}"
+        done_entries = done_events[0]["logprobs"]
+        _validate_responses_logprobs(done_entries, top_logprobs)
+        done_tokens = [lp["token"] for lp in done_entries]
+        assert (
+            done_tokens[: len(delta_tokens)] == delta_tokens
+        ), "output_text.done logprobs must start with the delta logprobs"
+
+        completed = [e for t, e in events if t == "response.completed"]
+        assert (
+            len(completed) == 1
+        ), f"Expected 1 response.completed, got {len(completed)}"
+        final = completed[0]["response"]
+        assert final.get("top_logprobs") == top_logprobs, "top_logprobs echo mismatch"
+        final_entries = final["output"][0]["content"][0]["logprobs"]
+        assert [lp["token"] for lp in final_entries] == done_tokens
+        output_tokens = final["usage"]["output_tokens"]
+        assert (
+            len(done_tokens) == output_tokens
+        ), f"Expected {output_tokens} logprob entries, got {len(done_tokens)}"
+        logger.info(
+            "Responses stream logprobs validation passed: %d on deltas, %d total",
+            len(delta_tokens),
+            len(done_tokens),
+        )
+        return "".join(d["delta"] for d in deltas)
 
 
 @dataclass

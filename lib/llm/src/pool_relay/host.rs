@@ -23,20 +23,27 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "ckf-diagnostics")]
 use std::sync::atomic::Ordering;
 
-use dynamo_kv_router::identity::PoolId;
-use dynamo_kv_router::indexer::cuckoo::{CkfConfig, CkfFailureAction};
-use dynamo_kv_router::protocols::{DpRank, KvCacheEventError, SchedulerLoad, WorkerId};
+use dynamo_global_common::PoolLocation;
+use dynamo_global_discovery_client::{
+    Freshness, GlobalDiscoveryClient, RouterCache, RouterReplica,
+};
+use dynamo_kv_events::event::KvCacheEventError;
+use dynamo_kv_indexer::cuckoo::{CkfConfig, CkfFailureAction};
+use dynamo_router_protocol::identity::PoolId;
+use dynamo_router_protocol::worker::{DpRank, WorkerId};
 use dynamo_runtime::component::Component;
 use dynamo_runtime::component::{Client, Instance};
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{Codec, EventSubscriber};
+use dynamo_slot_tracker::host::SchedulerLoad;
 use parking_lot::Mutex;
 use rand::TryRngCore;
 use serde::Serialize;
 use tokio::sync::{RwLock, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
+use url::Url;
 
 use super::actor::{ActorFault, DEFAULT_FAULT_CAPACITY, PoolRelayHandle, PoolRelayRecoveryTarget};
 use super::discovery::{
@@ -61,6 +68,7 @@ use super::publication::{
     RelayPublicationSource,
 };
 use super::resolution::stable_cluster_id;
+use super::routing_pool::RoutingPoolRegistration;
 use super::serving_load::ServingLoadAggregator;
 use super::topology::{TopologyPublisher, TopologySnapshot};
 use super::wan::grpc::{GrpcTransport, PoolRelayGrpcConfig};
@@ -82,6 +90,8 @@ pub const DEFAULT_EXPECTED_UNIQUE_BLOCKS: usize = 1_048_576;
 const DEFAULT_RECOVERY_FETCH_CONCURRENCY: usize = 16;
 const DEFAULT_PUBLICATION_THRESHOLD: usize = 16;
 const DEFAULT_PUBLICATION_DELAY: Duration = Duration::from_millis(1);
+const GLOBAL_ROUTERS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const GLOBAL_DISCOVERY_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn validate_publication_capacity(expected_unique_blocks: usize) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -115,7 +125,7 @@ pub enum PoolRelayError {
         message: String,
     },
     #[error(transparent)]
-    Build(#[from] dynamo_kv_router::indexer::cuckoo::CkfBuildError),
+    Build(#[from] dynamo_kv_indexer::cuckoo::CkfBuildError),
     #[error(transparent)]
     Event(#[from] KvCacheEventError),
     #[error("Pool Relay publisher requires a replacement snapshot: {0}")]
@@ -152,6 +162,17 @@ pub struct PoolRelayConfig {
     pub sources: PoolRelaySources,
     pub producer: PoolRelayProducerConfig,
     pub transport: Option<PoolRelayGrpcConfig>,
+    /// Root of the Global Discovery Service to read the Global Router
+    /// replicas from. `None` reads none.
+    pub global_discovery_url: Option<Url>,
+    /// DGD coordinates published to the Global Routers. Requires global discovery and WAN transport.
+    /// The Relay also registers the pool with Global Discovery under the one model it serves.
+    pub routing_pool: Option<dynamo_global_common::PoolKey>,
+    /// Region the routing pool is registered in. Required with `routing_pool`.
+    pub routing_pool_region: Option<String>,
+    /// Frontends the Global Routers send the routing pool's requests to. In MCS mode, Global
+    /// Discovery takes them from MCS instead.
+    pub routing_pool_frontends: Vec<Url>,
 }
 
 impl Default for PoolRelayConfig {
@@ -163,6 +184,10 @@ impl Default for PoolRelayConfig {
             }),
             producer: PoolRelayProducerConfig::default(),
             transport: None,
+            global_discovery_url: None,
+            routing_pool: None,
+            routing_pool_region: None,
+            routing_pool_frontends: Vec::new(),
         }
     }
 }
@@ -311,6 +336,16 @@ pub struct PoolRelayHealth {
     pub wan_serving: bool,
     pub wan_bound_address: Option<String>,
     pub wan_last_error: Option<String>,
+    pub global_discovery_enabled: bool,
+    /// Why the Global Router list may be out of date. The Relay keeps the
+    /// last list and its router connections, so this does not affect
+    /// `healthy` or readiness.
+    pub global_routers_stale_reason: Option<String>,
+    /// Why the routing pool is not registered with Global Discovery: no
+    /// single model to register, or the last call failed. Global Routers send
+    /// an unregistered pool nothing, but the Relay keeps serving and retrying,
+    /// so this does not affect `healthy` or readiness.
+    pub routing_pool_unregistered_reason: Option<String>,
 }
 
 #[cfg(feature = "ckf-diagnostics")]
@@ -635,6 +670,8 @@ pub struct PoolRelay {
     transport: Option<GrpcTransport>,
     /// Serving-load aggregator feeding the transport; runs only with it.
     serving_load_aggregator: Mutex<Option<JoinHandle<()>>>,
+    global_routers: Option<RouterCache>,
+    routing_pool_registration: Option<RoutingPoolRegistration>,
 }
 
 impl PoolRelay {
@@ -668,9 +705,48 @@ impl PoolRelay {
             "Pool Relay recovery_attempt_timeout_ms must be positive"
         );
         let transport_config = config.transport.clone();
+        let routing_pool_location = if let Some(pool) = &config.routing_pool {
+            anyhow::ensure!(
+                pool.cluster_id() == cluster_id,
+                "routing pool cluster must match the Relay cluster"
+            );
+            let region = config
+                .routing_pool_region
+                .clone()
+                .filter(|region| !region.is_empty() && region.trim() == region);
+            anyhow::ensure!(
+                region.is_some(),
+                "routing_pool requires a routing_pool_region without surrounding whitespace"
+            );
+            for frontend in &config.routing_pool_frontends {
+                anyhow::ensure!(
+                    matches!(frontend.scheme(), "http" | "https") && frontend.host_str().is_some(),
+                    "routing_pool_frontends must be HTTP(S) URLs: {frontend}"
+                );
+            }
+            anyhow::ensure!(
+                config.global_discovery_url.is_some() && transport_config.is_some(),
+                "routing_pool requires global_discovery_url and WAN transport"
+            );
+            region.map(|region| PoolLocation {
+                region,
+                availability_zone: None,
+                datacenter: None,
+            })
+        } else {
+            anyhow::ensure!(
+                config.routing_pool_region.is_none() && config.routing_pool_frontends.is_empty(),
+                "routing_pool_region and routing_pool_frontends require routing_pool"
+            );
+            None
+        };
         if let Some(transport) = transport_config.as_ref() {
             transport.validate()?;
         }
+        let discovery_client = config
+            .global_discovery_url
+            .map(|url| GlobalDiscoveryClient::new(url, GLOBAL_DISCOVERY_REQUEST_TIMEOUT))
+            .transpose()?;
         let publication = ActorPublicationConfig {
             threshold: config.producer.publication_threshold,
             delay: Duration::from_millis(config.producer.publication_delay_ms),
@@ -801,6 +877,36 @@ impl PoolRelay {
             topology.clone(),
             supervisor_complete.clone(),
         );
+        // Validation above makes all three present together.
+        let routing_pool_registration = match (
+            config.routing_pool.clone(),
+            routing_pool_location,
+            discovery_client.clone(),
+        ) {
+            (Some(pool), Some(location), Some(client)) => Some(RoutingPoolRegistration::spawn(
+                client,
+                pool,
+                location,
+                config.routing_pool_frontends,
+                topology.watch(),
+                cancel.child_token(),
+            )),
+            _ => None,
+        };
+        let global_routers = discovery_client.map(|client| {
+            RouterCache::spawn(
+                client,
+                GLOBAL_ROUTERS_REFRESH_INTERVAL,
+                cancel.child_token(),
+            )
+        });
+        if let (Some(pool), Some(transport), Some(routers)) = (
+            config.routing_pool,
+            transport.as_ref(),
+            global_routers.as_ref(),
+        ) {
+            transport.broadcast_global_views(pool, routers.subscribe());
+        }
         Ok(Self {
             #[cfg(feature = "ckf-diagnostics")]
             cluster_id,
@@ -816,7 +922,15 @@ impl PoolRelay {
             publication_source,
             transport,
             serving_load_aggregator: Mutex::new(serving_load_aggregator),
+            global_routers,
+            routing_pool_registration,
         })
+    }
+
+    /// The Global Router replicas listed by the Global Discovery Service, or
+    /// `None` without a Global Discovery URL.
+    pub fn subscribe_global_routers(&self) -> Option<watch::Receiver<HashSet<RouterReplica>>> {
+        self.global_routers.as_ref().map(RouterCache::subscribe)
     }
 
     pub fn pool_catalog(&self) -> PoolCatalogSnapshot {
@@ -975,6 +1089,18 @@ impl PoolRelay {
                 .bound_address
                 .map(|address| address.to_string()),
             wan_last_error: transport_health.last_error,
+            global_discovery_enabled: self.global_routers.is_some(),
+            global_routers_stale_reason: self.global_routers.as_ref().and_then(|routers| {
+                match routers.freshness() {
+                    Freshness::Unread => Some("no successful read yet".to_owned()),
+                    Freshness::Current => None,
+                    Freshness::Stale(reason) => Some(reason),
+                }
+            }),
+            routing_pool_unregistered_reason: self
+                .routing_pool_registration
+                .as_ref()
+                .and_then(RoutingPoolRegistration::unregistered_reason),
         }
     }
 
@@ -1025,7 +1151,7 @@ fn new_relay_incarnation() -> anyhow::Result<u64> {
 #[allow(clippy::too_many_arguments)]
 async fn run_host_supervisor(
     component: Component,
-    ckf_cluster_id: dynamo_kv_router::ClusterId,
+    ckf_cluster_id: dynamo_router_protocol::identity::ClusterId,
     mut membership_rx: watch::Receiver<DcMembershipView>,
     statuses: Arc<RwLock<HashMap<EndpointId, SharedEndpointStatus>>>,
     pools: Arc<PoolRegistry>,
@@ -1256,7 +1382,7 @@ fn record_host_failure(cancel: &CancellationToken, terminal: &HostTerminalState,
 
 fn reject_duplicate_live_pools(
     view: &mut DcMembershipView,
-    cluster_id: dynamo_kv_router::ClusterId,
+    cluster_id: dynamo_router_protocol::identity::ClusterId,
 ) {
     let mut owners: HashMap<PoolId, Vec<EndpointId>> = HashMap::new();
     for (endpoint, membership) in view.endpoints.iter() {
@@ -1416,7 +1542,7 @@ fn report_producer_fence_trigger(endpoint: &EndpointId, trigger: &ProducerFenceT
 #[allow(clippy::too_many_arguments)]
 async fn run_endpoint_slot(
     component: Component,
-    ckf_cluster_id: dynamo_kv_router::ClusterId,
+    ckf_cluster_id: dynamo_router_protocol::identity::ClusterId,
     endpoint: EndpointId,
     mut metadata_rx: watch::Receiver<Option<EndpointMembership>>,
     status: SharedEndpointStatus,
@@ -1960,7 +2086,7 @@ async fn diagnostic_tick() {
 #[allow(clippy::too_many_arguments)]
 async fn start_endpoint_pool(
     component: Component,
-    ckf_cluster_id: dynamo_kv_router::ClusterId,
+    ckf_cluster_id: dynamo_router_protocol::identity::ClusterId,
     endpoint: EndpointId,
     binding: ActorBinding,
     registrations: Vec<CanonicalModelRegistration>,
@@ -2622,11 +2748,12 @@ mod tests {
         assert_eq!(workers.len(), 1);
     }
 
-    use dynamo_kv_router::{
-        identity::{CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, RoutingScopeId},
-        indexer::cuckoo::{CkfFailureDisposition, CkfFailurePoint},
-        protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank},
+    use dynamo_kv_events::event::KV_EVENT_SUBJECT;
+    use dynamo_kv_indexer::cuckoo::{CkfFailureDisposition, CkfFailurePoint};
+    use dynamo_router_protocol::identity::{
+        CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, RoutingScopeId,
     };
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         discovery::{DiscoveryInstance, DiscoverySpec, EventTransportKind},
@@ -3115,6 +3242,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn global_discovery_url_starts_the_router_poller() {
+        let component = test_component("global-routers").await;
+        let error = PoolRelay::start(
+            component.clone(),
+            "test-dc".to_string(),
+            PoolRelayConfig {
+                global_discovery_url: Some("global-discovery:8080".parse().unwrap()),
+                ..PoolRelayConfig::default()
+            },
+        )
+        .await
+        .err()
+        .expect("a Global Discovery URL that cannot be a base must fail start");
+        assert!(format!("{error:#}").contains("global-discovery:8080 cannot be a base URL"));
+
+        // Nothing serves this URL, so the first read fails and the router list
+        // stays empty.
+        let unused = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let relay = PoolRelay::start(
+            component,
+            "test-dc".to_string(),
+            PoolRelayConfig {
+                global_discovery_url: Some(format!("http://{unused}/").parse().unwrap()),
+                ..PoolRelayConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let failed = format!("request to http://{unused}/routers failed: ");
+        let health = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let health = relay.health().await;
+                if health
+                    .global_routers_stale_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("/routers"))
+                {
+                    return health;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the first read did not finish");
+        assert!(health.global_discovery_enabled);
+        // The reason carries the cause, not only the failed request.
+        let reason = health.global_routers_stale_reason.as_deref().unwrap();
+        assert!(
+            reason.starts_with(&failed) && reason.len() > failed.len(),
+            "{reason}"
+        );
+        assert!(health.healthy);
+        let mut routers = relay.subscribe_global_routers().unwrap();
+        assert!(routers.borrow().is_empty());
+
+        relay.shutdown().await.unwrap();
+        let closed = tokio::time::timeout(Duration::from_secs(1), routers.changed()).await;
+        assert!(closed.expect("the router channel did not close").is_err());
+    }
+
+    #[tokio::test]
+    async fn routing_pool_registration_settings_are_checked() {
+        let component = test_component("routing-pool-registration").await;
+        let pool = dynamo_global_common::PoolKey::new("test-dc", "dynamo", "blue").unwrap();
+        for (config, expected) in [
+            (
+                PoolRelayConfig {
+                    routing_pool: Some(pool.clone()),
+                    ..PoolRelayConfig::default()
+                },
+                "routing_pool requires a routing_pool_region",
+            ),
+            (
+                // `blue:8000` parses as a URL with scheme `blue`.
+                PoolRelayConfig {
+                    routing_pool: Some(pool),
+                    routing_pool_region: Some("us-east-1".to_owned()),
+                    routing_pool_frontends: vec!["blue:8000".parse().unwrap()],
+                    ..PoolRelayConfig::default()
+                },
+                "routing_pool_frontends must be HTTP(S) URLs: blue:8000",
+            ),
+            (
+                PoolRelayConfig {
+                    routing_pool_region: Some("us-east-1".to_owned()),
+                    ..PoolRelayConfig::default()
+                },
+                "routing_pool_region and routing_pool_frontends require routing_pool",
+            ),
+        ] {
+            let error = PoolRelay::start(component.clone(), "test-dc".to_string(), config)
+                .await
+                .err()
+                .expect("the configuration must fail start");
+            assert!(format!("{error:#}").contains(expected), "{error:#}");
+        }
+    }
+
+    #[tokio::test]
     async fn unexpected_host_return_cancels_relay_and_records_terminal_error() {
         let cancel = CancellationToken::new();
         let terminal = Arc::new(HostTerminalState::default());
@@ -3147,6 +3376,8 @@ mod tests {
             publication_source,
             transport: None,
             serving_load_aggregator: Mutex::new(None),
+            global_routers: None,
+            routing_pool_registration: None,
         };
         tokio::time::timeout(Duration::from_millis(100), relay.wait_for_shutdown())
             .await
@@ -3241,6 +3472,8 @@ mod tests {
             publication_source,
             transport: None,
             serving_load_aggregator: Mutex::new(None),
+            global_routers: None,
+            routing_pool_registration: None,
         };
 
         cancel.cancel();
@@ -3359,6 +3592,8 @@ mod tests {
             publication_source,
             transport: None,
             serving_load_aggregator: Mutex::new(None),
+            global_routers: None,
+            routing_pool_registration: None,
         };
 
         let health = relay.health().await;

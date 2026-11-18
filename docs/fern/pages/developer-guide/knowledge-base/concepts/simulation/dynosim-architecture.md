@@ -106,16 +106,15 @@ The router observes request admission, prefill completion, and sequence release.
 prompt-side load from token counts or an AIConfigurator timing model. These estimates influence
 worker selection but do not replace the engine scheduler's own queue and KV-cache behavior.
 
-Policy-class replay uses the same policy-family and cache-bucket model as the live router:
+Policy-class replay resolves classes the same way as the live router:
 
 ```mermaid
 flowchart LR
     R["Replay request"] --> C{"policy_class"}
-    C -->|Exact explicit class| Q["Physical policy queue"]
-    C -->|Known family| B["Observed uncached-ISL bucket"]
-    C -->|Missing or unknown| F["default_policy_family"]
-    F --> B
-    B --> Q
+    C -->|Configured class name| Q["Policy class queue"]
+    C -->|Missing| F["default_policy_class"]
+    C -->|Unknown| X["Request fails"]
+    F --> Q
     Q --> D["Deficit round-robin dispatch"]
 ```
 
@@ -155,7 +154,7 @@ timing from `engine.workers.<role>.timing`. The timing model predicts prefill an
 The Mocker engine still owns batching, KV-cache state, prefix reuse, preemption, and request
 progression.
 
-AIConfigurator compatibility APIs from the `aisimulate` wheel are used in two distinct places:
+AIConfigurator compatibility APIs from the `aisim` wheel are used in two distinct places:
 
 - `engine.workers.<role>.timing.type: default` configures the Mocker forward-pass timing model
 - `router.prefill_load_model.type: aic` configures router-side prompt-load estimation

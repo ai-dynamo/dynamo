@@ -4,16 +4,19 @@
 use std::collections::{HashMap, HashSet};
 use std::env::var;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock};
+use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes, HttpBody};
 use axum::http::{Response, Version, header};
 use axum::response::IntoResponse;
+use http_body::{Frame, SizeHint};
 
 use super::Metrics;
 use super::RouteDoc;
@@ -21,7 +24,10 @@ use super::frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
 };
 use super::metrics;
-use super::metrics::{register_lora_allocation_metrics, register_model_ready_metric};
+use super::metrics::{
+    register_frontend_metrics_start_time_metric, register_lora_allocation_metrics,
+    register_model_ready_metric,
+};
 use super::worker_metrics::register_worker_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
@@ -49,7 +55,8 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 use crate::frontend_config::{
-    DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, FrontendApiConfig, MetricsConfig,
+    ChatTemplateDefaults, DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, FrontendApiConfig,
+    MediaRejectionConfig, MetricsConfig,
 };
 
 /// Middleware that echoes `x-request-id` from request to response headers.
@@ -120,29 +127,47 @@ fn close_draining_connection(
     response
 }
 
+/// Error protocol of a mounted inference route, used when the readiness gate
+/// rejects a request before the route's own error handling runs.
+#[derive(Clone, Copy)]
+enum MountedProtocol {
+    Decision(dynamo_decisions::Dialect),
+    Anthropic,
+}
+
 struct InferenceReadinessState {
     state: Arc<State>,
-    decision_dialects: HashMap<String, dynamo_decisions::Dialect>,
+    mounted_protocols: HashMap<String, MountedProtocol>,
 }
 
 impl InferenceReadinessState {
     fn rejection(&self, request: &axum::extract::Request) -> axum::response::Response {
-        let unavailable = super::openai::ErrorMessage::_service_unavailable();
-        let dialect = request
+        // Records the unavailable failure once; the protocol bodies below must not record again.
+        let (status, axum::Json(error)) = super::openai::ErrorMessage::_service_unavailable();
+        let protocol = request
             .extensions()
             .get::<axum::extract::MatchedPath>()
             .filter(|_| request.method() == axum::http::Method::POST)
-            .and_then(|path| self.decision_dialects.get(path.as_str()));
-        let Some(&dialect) = dialect else {
-            return draining_inference_response(request.version());
+            .and_then(|path| self.mounted_protocols.get(path.as_str()));
+        let dialect = match protocol {
+            Some(&MountedProtocol::Decision(dialect)) => dialect,
+            Some(MountedProtocol::Anthropic) => {
+                let response = super::anthropic::readiness_rejection_response(
+                    request.headers(),
+                    status,
+                    error.message(),
+                );
+                return close_draining_connection(response, request.version());
+            }
+            None => return draining_inference_response(request.version()),
         };
-        let error = dynamo_decisions::DecisionError::new(
+        let decision_error = dynamo_decisions::DecisionError::new(
             dialect,
-            unavailable.0.as_u16(),
+            status.as_u16(),
             "server_error",
-            unavailable.1.0.message(),
+            error.message(),
         );
-        let mut response = (unavailable.0, axum::Json(error.response_body())).into_response();
+        let mut response = (status, axum::Json(decision_error.response_body())).into_response();
         let request_id = super::openai::get_or_create_request_id(request.headers());
         super::systemone::attach_request_ids(&mut response, &request_id);
         close_draining_connection(response, request.version())
@@ -154,7 +179,6 @@ async fn track_inflight_inference(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use futures::StreamExt;
     let state = &readiness.state;
 
     // Requests rejected during draining should not extend the drain window.
@@ -174,11 +198,39 @@ async fn track_inflight_inference(
     let (parts, body) = response.into_parts();
     // Keep the permit alive until the full response body, including streams,
     // finishes or is dropped.
-    let stream = body.into_data_stream().map(move |result| {
-        let _permit = &permit;
-        result
-    });
-    Response::from_parts(parts, Body::from_stream(stream))
+    Response::from_parts(
+        parts,
+        Body::new(InflightResponseBody {
+            body,
+            _permit: permit,
+        }),
+    )
+}
+
+/// Preserve framing metadata and trailers while holding the response's admission.
+struct InflightResponseBody {
+    body: Body,
+    _permit: InflightPermit,
+}
+
+impl HttpBody for InflightResponseBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.get_mut().body).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.body.size_hint()
+    }
 }
 
 /// HTTP service shared state
@@ -897,6 +949,14 @@ impl State {
     pub fn reasoning_field(&self) -> ReasoningField {
         self.frontend_api_config.reasoning_field()
     }
+
+    pub fn media_rejection(&self) -> MediaRejectionConfig {
+        self.frontend_api_config.media_rejection()
+    }
+
+    pub fn chat_template_defaults(&self) -> &ChatTemplateDefaults {
+        self.frontend_api_config.chat_template_defaults()
+    }
 }
 
 #[derive(Clone)]
@@ -1582,7 +1642,7 @@ impl HttpServiceConfigBuilder {
         }
 
         let model_manager = Arc::new(ModelManager::new());
-        let cancel_token = config.cancel_token.unwrap_or_default();
+        let cancel_token = config.cancel_token.unwrap_or_default().child_token();
         // Use the provided discovery client, or fall back to a no-op memory-backed one
         // (for in-process modes that don't need discovery)
         let discovery_client = config.discovery.unwrap_or_else(|| {
@@ -1638,6 +1698,7 @@ impl HttpServiceConfigBuilder {
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
+        register_frontend_metrics_start_time_metric(&registry)?;
         state
             .metrics_clone()
             .register_with_model_manager(&registry, Some(state.manager_clone()))?;
@@ -1736,17 +1797,22 @@ impl HttpServiceConfigBuilder {
             systemone_enabled,
             config.enable_batch_endpoints && config.batch_gateway_url.is_none(),
         )?;
-        let decision_dialects = endpoint_routes
+        // Route docs carry the resolved paths, including custom Anthropic bases.
+        let mounted_protocols = endpoint_routes
             .iter()
-            .filter(|(endpoint, _, _)| *endpoint == EndpointType::SystemOne)
-            .flat_map(|(_, docs, _)| docs)
-            .map(|doc| {
-                let dialect = if doc.path() == super::systemone::DECISIONS_PATH {
-                    dynamo_decisions::Dialect::OpenAi
-                } else {
-                    dynamo_decisions::Dialect::Jev
+            .flat_map(|(endpoint, docs, _)| docs.iter().map(move |doc| (*endpoint, doc)))
+            .filter_map(|(endpoint, doc)| {
+                let protocol = match endpoint {
+                    EndpointType::SystemOne if doc.path() == super::systemone::DECISIONS_PATH => {
+                        MountedProtocol::Decision(dynamo_decisions::Dialect::OpenAi)
+                    }
+                    EndpointType::SystemOne => {
+                        MountedProtocol::Decision(dynamo_decisions::Dialect::Jev)
+                    }
+                    EndpointType::AnthropicMessages => MountedProtocol::Anthropic,
+                    _ => return None,
                 };
-                (doc.path().to_owned(), dialect)
+                Some((doc.path().to_owned(), protocol))
             })
             .collect();
         let mut inference_router = axum::Router::new();
@@ -1762,7 +1828,7 @@ impl HttpServiceConfigBuilder {
         inference_router = inference_router.layer(axum::middleware::from_fn_with_state(
             Arc::new(InferenceReadinessState {
                 state: state.clone(),
-                decision_dialects,
+                mounted_protocols,
             }),
             track_inflight_inference,
         ));
@@ -1928,6 +1994,13 @@ impl HttpServiceConfigBuilder {
         self.frontend_api_config
             .get_or_insert_with(FrontendApiConfig::default)
             .set_reasoning_field(reasoning_field);
+        self
+    }
+
+    pub fn media_rejection(mut self, media_rejection: MediaRejectionConfig) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .set_media_rejection(media_rejection);
         self
     }
 
@@ -3027,6 +3100,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inflight_body_preserves_trailers_and_holds_admission() {
+        use http_body_util::{BodyExt, StreamBody};
+
+        let observer = Arc::new(ServiceObserver::default());
+        let trailers = axum::http::HeaderMap::from_iter([(
+            header::HeaderName::from_static("x-checksum"),
+            header::HeaderValue::from_static("done"),
+        )]);
+        let frames = futures::stream::iter([
+            Ok::<_, std::convert::Infallible>(Frame::data(Bytes::from_static(b"data"))),
+            Ok(Frame::trailers(trailers.clone())),
+        ]);
+        let mut body = InflightResponseBody {
+            body: Body::new(StreamBody::new(frames)),
+            _permit: observer.acquire_inflight(),
+        };
+
+        assert_eq!(body.size_hint().exact(), None);
+        assert!(!body.is_end_stream());
+        assert_eq!(observer.inflight_count(), 1);
+        let frame = body.frame().await.unwrap().unwrap();
+        assert_eq!(frame.into_data().unwrap(), "data");
+        assert_eq!(observer.inflight_count(), 1);
+        let frame = body.frame().await.unwrap().unwrap();
+        assert_eq!(frame.into_trailers().unwrap(), trailers);
+        assert!(body.frame().await.is_none());
+        assert_eq!(observer.inflight_count(), 1);
+        drop(body);
+        assert_eq!(observer.inflight_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn track_inflight_inference_preserves_length() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let service = HttpService::builder().build().unwrap();
+        let router = axum::Router::new()
+            .route("/", axum::routing::get(|| async { Body::from("data") }))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(InferenceReadinessState {
+                    state: service.state_clone(),
+                    mounted_protocols: HashMap::new(),
+                }),
+                track_inflight_inference,
+            ));
+
+        let response = router
+            .oneshot(axum::http::Request::new(Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = response.into_body();
+        assert_eq!(body.size_hint().exact(), Some(4));
+        assert_eq!(body.collect().await.unwrap().to_bytes(), "data");
+    }
+
+    #[tokio::test]
     async fn test_admin_routes_only_on_admin_listener() {
         // Off by default, and bound to loopback when enabled.
         assert!(HttpService::builder().build().unwrap().admin.is_none());
@@ -3337,6 +3468,76 @@ mod tests {
         .unwrap();
     }
 
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn shutdown_deadline_interrupts_handlers_and_response_bodies() {
+        temp_env::async_with_vars(
+            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1"))],
+            async {
+                for (tls, before_headers) in [(false, false), (true, true)] {
+                        let certificates = make_mtls_test_certificates();
+                        let parent = CancellationToken::new();
+                        let mut service = HttpService::builder()
+                            .host("127.0.0.1").port(0).enable_tls(tls)
+                            .cancel_token(Some(parent.clone()))
+                            .tls_cert_path(tls.then(|| certificates.server_cert.path().to_path_buf()))
+                            .tls_key_path(tls.then(|| certificates.server_key.path().to_path_buf()))
+                            .build().unwrap();
+                        let state = service.state_clone();
+                        let entered = CancellationToken::new();
+                        let released = CancellationToken::new();
+                        let handler_entered = entered.clone();
+                        let handler_released = released.clone();
+                        service.router = axum::Router::new().route("/blocked", axum::routing::get(move || {
+                            let entered = handler_entered.clone();
+                            let guard = handler_released.clone().drop_guard();
+                            async move {
+                                entered.cancel();
+                                if before_headers { std::future::pending::<()>().await; }
+                                Body::from_stream(async_stream::stream! {
+                                    let _guard = guard;
+                                    yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"first"));
+                                    std::future::pending::<()>().await;
+                                })
+                            }
+                        })).layer(axum::middleware::from_fn_with_state(
+                            Arc::new(InferenceReadinessState {
+                                state: state.clone(),
+                                mounted_protocols: HashMap::new(),
+                            }),
+                            track_inflight_inference,
+                        ));
+                        let cancel = CancellationToken::new();
+                        let server_cancel = cancel.clone();
+                        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                        let address = listener.local_addr().unwrap();
+                        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                            service.run_with_listener(server_cancel, listener).await
+                        }));
+                        let client = reqwest::Client::builder().no_proxy().danger_accept_invalid_certs(true)
+                            .timeout(Duration::from_secs(4)).build().unwrap();
+                        let request = client.get(format!("{}://{address}/blocked", if tls { "https" } else { "http" })).send();
+                        let mut request = Some(tokio::spawn(request));
+                        tokio::time::timeout(Duration::from_secs(2), entered.cancelled()).await.unwrap();
+                        let response = if before_headers { None } else { Some(request.take().unwrap().await.unwrap().unwrap()) };
+                        cancel.cancel();
+                        if let Some(response) = response {
+                            assert!(response.bytes().await.is_err(), "interruption must not look like EOF");
+                        }
+                        tokio::time::timeout(Duration::from_secs(3), task).await.unwrap().unwrap().unwrap();
+                        tokio::time::timeout(Duration::from_secs(1), released.cancelled()).await.unwrap();
+                        if let Some(request) = request
+                            && let Ok(response) = request.await.unwrap()
+                        {
+                            assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+                        }
+                        assert_eq!(state.inflight_count(), 0);
+                        assert!(!parent.is_cancelled(), "local deadline must not cancel the runtime");
+                }
+            },
+        ).await;
+    }
+
     /// Verifies that an unsupported content type returns the standard JSON error
     /// envelope instead of Axum's default plain-text rejection.
     #[tokio::test]
@@ -3517,6 +3718,8 @@ mod tests {
     /// Verifies that unmatched routes under the Anthropic Messages API path return
     /// the Anthropic error envelope.
     #[tokio::test]
+    // Serial because other tests set `DYN_HTTP_SVC_ANTHROPIC_PATH`.
+    #[serial_test::serial]
     async fn test_unmatched_anthropic_route_returns_anthropic_envelope() {
         let (port, _state, handle) =
             spawn_service(|builder| builder.enable_anthropic_endpoints(true)).await;
@@ -4238,6 +4441,88 @@ mod tests {
                         .await
                         .unwrap();
                     assert_eq!(unmatched.status(), axum::http::StatusCode::NOT_FOUND);
+                    assert_eq!(service.state().inflight_count(), 0);
+                },
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn anthropic_readiness_rejections_preserve_envelope_and_request_ids() {
+        use tower::ServiceExt;
+
+        for configured_path in [None, Some("/custom/messages")] {
+            temp_env::async_with_vars(
+                [(HTTP_SVC_ANTHROPIC_PATH_ENV, configured_path)],
+                async move {
+                    let service = HttpService::builder()
+                        .enable_anthropic_endpoints(true)
+                        .build()
+                        .unwrap();
+                    service.state().start_draining();
+                    let base = configured_path.unwrap_or("/v1/messages");
+                    let count_tokens = format!("{base}/count_tokens");
+                    for path in [base, count_tokens.as_str()] {
+                        let response = service
+                            .router
+                            .clone()
+                            .oneshot(
+                                axum::http::Request::post(path)
+                                    .header("content-type", "application/json")
+                                    .header("anthropic-version", "2023-06-01")
+                                    .header("x-request-id", "anthropic-readiness")
+                                    .body(Body::from("{}"))
+                                    .unwrap(),
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            response.status(),
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            "{path}"
+                        );
+                        assert_eq!(response.headers()[header::CONNECTION], "close");
+                        let request_id = response.headers()["request-id"]
+                            .to_str()
+                            .unwrap()
+                            .to_owned();
+                        // The server owns `request-id`; clients correlate with `x-request-id`.
+                        assert!(uuid::Uuid::parse_str(&request_id).is_ok());
+                        assert_eq!(response.headers()["x-request-id"], "anthropic-readiness");
+                        let body = axum::body::to_bytes(response.into_body(), 4096)
+                            .await
+                            .unwrap();
+                        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        assert_eq!(body["type"], "error", "{path}: {body}");
+                        assert_eq!(body["error"]["type"], "overloaded_error");
+                        assert_eq!(body["error"]["message"], "Service is not ready");
+                        assert_eq!(body["request_id"], request_id.as_str());
+                    }
+
+                    // Other inference routes keep the OpenAI body.
+                    let control = service
+                        .router
+                        .clone()
+                        .oneshot(
+                            axum::http::Request::post("/v1/chat/completions")
+                                .header("content-type", "application/json")
+                                .body(Body::from("{}"))
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        control.status(),
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    );
+                    let body = axum::body::to_bytes(control.into_body(), 4096)
+                        .await
+                        .unwrap();
+                    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(body["code"], 503);
+                    assert_ne!(body["type"], "error");
                     assert_eq!(service.state().inflight_count(), 0);
                 },
             )

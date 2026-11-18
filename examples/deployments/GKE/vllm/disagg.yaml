@@ -21,8 +21,8 @@ spec:
         containers:
         - args:
           - |
-            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
-            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+            export LD_LIBRARY_PATH="/usr/local/nvidia/lib64:$LD_LIBRARY_PATH"
+            export PATH="$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64"
             /sbin/ldconfig
             exec python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode decode
           command:
@@ -45,8 +45,8 @@ spec:
         containers:
         - args:
           - |
-            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
-            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+            export LD_LIBRARY_PATH="/usr/local/nvidia/lib64:$LD_LIBRARY_PATH"
+            export PATH="$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64"
             /sbin/ldconfig
             exec python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode prefill
           command:
