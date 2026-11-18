@@ -168,7 +168,7 @@ def _chat_choice_logprobs(
 
     Each record has ``token_id``, ``logprob``, and ``top``. ``top`` is the
     raw per-position list of ``{rank, token_id, token, logprob, bytes}``,
-    including the sampled token. The content entry keeps the sampled token.
+    which may omit the sampled token. The content entry keeps the sampled token.
     ``top_logprobs`` on the entry is the rank-sorted prefix of length
     ``top_count``. ``0`` is an empty list. ``token_id`` is omitted.
     ``return_tokens_as_token_ids`` formats every token and its bytes as
