@@ -595,11 +595,11 @@ class Context:
 
         Call it before the engine's first yield, or before it raises. Returns
         ``False`` when this request's response cannot carry the header: the
-        response is already committed (streaming with
-        ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS=0``, or streaming after the first normal
-        event or the pre-commit deadline), or the request is not a ``/v1/chat/completions``
-        request. Otherwise raises ``ValueError`` for a name or value that is
-        not a valid header, or for a header the HTTP layer owns
+        response is already committed (streaming with pre-commit checking
+        disabled, or after the first normal event or the pre-commit deadline),
+        or the request is not a ``/v1/chat/completions`` request. Otherwise raises
+        ``ValueError`` for a name or value that is not a valid header, or for a
+        header the HTTP layer owns
         (``content-type``, ``content-length``, ``content-encoding``,
         ``x-request-id``, hop-by-hop headers)."""
         ...
@@ -1601,11 +1601,11 @@ class HttpService:
                 raised by an engine generator before its first ``yield`` maps to
                 the same HTTP error response as it does for a non-streaming
                 request. When False (the default), the service inherits
-                ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`` (100 ms by default).
-                A positive value bounds the wait; ``0`` commits HTTP 200 without
-                waiting. Errors after the first normal event or the deadline
-                arrive as SSE error frames. True overrides the variable with
-                an unbounded wait.
+                ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``: unset or ``0`` commits
+                HTTP 200 without waiting. A positive value bounds the wait in
+                milliseconds. Errors after the first normal event or the
+                deadline arrive as SSE error frames. True overrides the
+                variable with an unbounded wait.
         """
         ...
 

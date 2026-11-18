@@ -1553,7 +1553,7 @@ async fn test_request_id_annotation() {
         "stream": true,
         "max_tokens": 50,
         "nvext": {
-            "annotations": vec!["request_id"; 32]
+            "annotations": ["request_id"]
         }
     });
 
@@ -1584,7 +1584,7 @@ async fn test_request_id_annotation() {
     let annotated_stream = convert_sse_stream::<NvCreateChatCompletionStreamResponse>(framed);
 
     // Look for the annotation in the stream
-    let mut request_id_annotation_count = 0;
+    let mut found_request_id_annotation = false;
     let mut received_request_id = None;
 
     // Process the annotated stream and look for the request_id annotation
@@ -1594,7 +1594,7 @@ async fn test_request_id_annotation() {
         if let Some(event) = &annotated_response.event
             && event == "request_id"
         {
-            request_id_annotation_count += 1;
+            found_request_id_annotation = true;
             // Extract the request ID from the annotation
             if let Some(comments) = &annotated_response.comment
                 && let Some(comment) = comments.first()
@@ -1607,13 +1607,14 @@ async fn test_request_id_annotation() {
                     received_request_id = Some(comment.trim_matches('"').to_string());
                 }
             }
+            break;
         }
     }
 
     // Verify we found the annotation
-    assert_eq!(
-        request_id_annotation_count, 1,
-        "Repeated requests for an annotation must emit it only once"
+    assert!(
+        found_request_id_annotation,
+        "Should have received request_id annotation in the stream"
     );
 
     // Verify the request ID matches what we sent
@@ -2255,34 +2256,6 @@ async fn test_streaming_chat_until_first_event_holds_status_for_first_item() {
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();
-}
-
-#[tokio::test]
-async fn test_default_peek_rejects_before_repeated_annotations_commit_headers() {
-    let service = http_harness::HarnessService::start_with_backend_error(
-        vec![],
-        DynamoError::builder()
-            .error_type(DynamoErrorType::InvalidArgument)
-            .public_message(INVALID_ARGUMENT_MESSAGE)
-            .build(),
-    )
-    .await;
-    let response = service
-        .client
-        .post(format!("{}/v1/chat/completions", service.base_url))
-        .json(&serde_json::json!({
-            "model": http_harness::MODEL,
-            "messages": [{"role": "user", "content": "hi"}],
-            "stream": true,
-            "nvext": {"annotations": vec!["request_id"; 32]},
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(body["message"], INVALID_ARGUMENT_MESSAGE);
-    service.shutdown().await;
 }
 
 /// A backend error that arrives after any bounded peek window still maps to

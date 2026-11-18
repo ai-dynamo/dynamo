@@ -329,10 +329,11 @@ async def test_http_status_error_propagated(loader: ImageLoader, status: int) ->
         with pytest.raises(HttpStatusError) as exc_info:
             await loader.load_image(url)
     raised = exc_info.value
-    assert raised.status == status
     if status == 503:
+        assert raised.status == status
         assert raised is error
     else:
+        assert raised.status == 400
         assert raised.__cause__ is error
         assert raised.url == url
         assert raised.message.startswith(f"Image download returned HTTP {status}.")

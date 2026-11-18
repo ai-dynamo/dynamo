@@ -103,8 +103,10 @@ An exception your engine raises becomes the HTTP error response:
   logged, not returned.
 - A worker's error reaches your engine from `routed_engine` as `InvalidArgument` for a rejected
   request, and as `dynamo.llm.exceptions.RoutedEngineError`, a `ValueError`, for any other
-  classified error. Re-raise it, or let it escape, and the client gets the status the worker's
-  error maps to.
+  classified error. Re-raise it unchanged, or let it escape, to retain the worker's classification
+  and any approved public message. This includes unavailable-worker errors (503), deadlines (504),
+  and overload (529 by default). Before streaming headers are committed, the classification sets
+  the HTTP status; afterward, it is reported as a stream error under the committed HTTP status.
 
 ## Response headers
 
@@ -123,12 +125,12 @@ async def generate(request, context):
 
 The header is on the response, error responses included, when the Frontend reads your engine's
 stream before it commits the response. That is every non-streaming `/v1/chat/completions` request,
-and a streaming one while its pre-commit wait is enabled (100 ms by default,
-configured by `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`).
+and a streaming one only while a configured pre-commit wait is active. The wait is disabled by
+default; set `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS` to a positive number of milliseconds to enable it.
 
 Otherwise the call returns `False` and sets nothing. That covers a streaming request with the
-wait disabled (`0`), a call made after a streaming response has started, and every `/v1/responses` and
-`/v1/messages` request.
+wait disabled or already expired, a call made after a streaming response has started, and every
+`/v1/responses` and `/v1/messages` request.
 
 When the response can carry the header, the call raises `ValueError` for a name or value that is
 not a valid header, and for a header that the HTTP layer owns (`content-type`, `content-length`,

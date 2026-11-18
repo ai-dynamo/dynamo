@@ -2163,7 +2163,7 @@ class TestRoutedEnginePath:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "status,from_stream", [(None, False), (403, False), (404, True)]
+        "status,from_stream", [(None, False), (403, False), (404, True), (503, True)]
     )
     async def test_routed_error_is_raised_not_enveloped(
         self, vllm_processor_module, status, from_stream
@@ -2171,8 +2171,9 @@ class TestRoutedEnginePath:
         if status is None:
             rejection = WorkerUnavailable("prefill routing is still activating")
         else:
+            message = IMAGE_FETCH_ERROR_MESSAGES.get(status, "worker unavailable")
             with pytest.raises(RoutedEngineError) as backend:
-                _raise_routed_http_error(status, IMAGE_FETCH_ERROR_MESSAGES[status])
+                _raise_routed_http_error(status, message)
             rejection = backend.value
 
         class _RejectingRoutedEngine(_FakeRoutedEngine):

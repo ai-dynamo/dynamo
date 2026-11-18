@@ -175,7 +175,8 @@ async def load_image_edit_references(
                 )
                 message = (
                     error.message
-                    if IMAGE_FETCH_ERROR_MESSAGES.get(error.status) == error.message
+                    if error.status == 400
+                    and error.message in IMAGE_FETCH_ERROR_MESSAGES.values()
                     else f"{field} {detail}"
                 )
                 raise HttpStatusError(error.status, message, "image edit") from error

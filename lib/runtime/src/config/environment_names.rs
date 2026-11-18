@@ -577,14 +577,15 @@ pub mod llm {
     /// completions, responses, and Anthropic messages paths. Controls how long
     /// the frontend polls the engine stream for a synchronous backend error
     /// before committing HTTP 200.
-    /// Delays initial headers until the first normal event or the deadline,
-    /// allowing request-validation errors to become HTTP 4xx responses
-    /// instead of SSE error frames.
+    /// Trades a small first-token latency budget
+    /// for the ability to surface `Backend(InvalidArgument)` and other
+    /// request-validation errors as HTTP 4xx instead of an SSE error frame.
     ///
-    /// Default: 100 ms. Set to a value ≥ observed request-parse / admission
-    /// p99 latency to cover slower validation. Errors within the window surface
-    /// as HTTP 4xx; anything past the window stays as an SSE error frame.
-    /// Setting to `0` disables the peek. Invalid values retain the default.
+    /// Default: unset → peek disabled (matches pre-fix behavior; all errors
+    /// surface as SSE frames post-HTTP-200). Set to a value ≥ observed
+    /// request-parse / admission p99 latency to opt in — request-validation
+    /// errors within the window surface as HTTP 4xx; anything past the window
+    /// stays as an SSE error frame. Setting to `0` also disables the peek.
     ///
     /// Read once when the HTTP service is built. A policy supplied through
     /// `HttpServiceConfigBuilder::streaming_backend_error_check` replaces it.

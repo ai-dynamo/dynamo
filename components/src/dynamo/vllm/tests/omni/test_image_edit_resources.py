@@ -4,7 +4,6 @@
 import asyncio
 import base64
 import io
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -15,7 +14,7 @@ from dynamo._core import _raise_routed_http_error
 from dynamo.common.constants import IMAGE_FETCH_ERROR_MESSAGES
 from dynamo.common.http import HttpStatusError
 from dynamo.common.multimodal import ImageLoader
-from dynamo.llm.exceptions import RoutedEngineError
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm.omni import image_edit
 
 pytestmark = [
@@ -149,15 +148,15 @@ async def test_cancelled_edit_cancels_fetch_and_does_not_start_next(monkeypatch)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status,approved", [(403, True), (404, True), (404, False)])
-async def test_remote_error_preserves_status_but_not_url(status, approved):
-    """Origin status survives sanitization while URL credentials stay private."""
+async def test_remote_error_preserves_recovery_advice_but_not_url(status, approved):
+    """Image-fetch failures stay API 400 with only approved recovery advice."""
     message = IMAGE_FETCH_ERROR_MESSAGES[status]
     if not approved:
         message += " private signed URL"
     loader = SimpleNamespace(
         load_image=AsyncMock(
             side_effect=HttpStatusError(
-                status, message, "https://example.com/?secret=token"
+                400, message, "https://example.com/?secret=token"
             )
         )
     )
@@ -165,7 +164,7 @@ async def test_remote_error_preserves_status_but_not_url(status, approved):
         await image_edit.load_image_edit_references(
             ["reference"], image_loader=loader, model_class_name="Flux2KleinPipeline"
         )
-    assert caught.value.status == status
+    assert caught.value.status == 400
     expected = (
         IMAGE_FETCH_ERROR_MESSAGES[status]
         if approved
@@ -174,10 +173,6 @@ async def test_remote_error_preserves_status_but_not_url(status, approved):
     assert caught.value.message == expected
     assert caught.value.url == "image edit"
     assert "secret" not in str(caught.value)
-    with pytest.raises(RoutedEngineError) as bridged:
-        _raise_routed_http_error(status, caught.value.message)
-    semantic = json.loads(bridged.value._dynamo_error)
-    if approved:
-        assert semantic["public"]["message"] == expected
-    else:
-        assert "public" not in semantic
+    with pytest.raises(InvalidArgument) as bridged:
+        _raise_routed_http_error(400, caught.value.message)
+    assert str(bridged.value) == (expected if approved else "Invalid request")

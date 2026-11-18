@@ -345,7 +345,7 @@ class ImageLoader:
                 describe_media_source(image_url),
             )
             if message := IMAGE_FETCH_ERROR_MESSAGES.get(e.status):
-                raise HttpStatusError(e.status, message, image_url) from e
+                raise HttpStatusError(400, message, image_url) from e
             raise
         except HttpTimeoutError as e:
             logger.error(

@@ -920,9 +920,9 @@ class HandlerBase(BaseGenerativeHandler):
             # to a sanitized 500 that reads as a server fault; this maps to
             # Backend(InvalidArgument), which the frontend answers 4xx.
             #
-            # Streaming refusals can also return 4xx during the frontend's
-            # pre-commit peek (100 ms by default). After headers are committed,
-            # they arrive as SSE errors behind HTTP 200.
+            # That 4xx reaches a non-streaming client. A streaming client still
+            # sees 200 then an SSE error frame unless the operator sets
+            # DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, which is unset by default.
             raise InvalidArgument(
                 "Multimodal input received but worker started without --modality multimodal. "
                 "Restart the worker with --modality multimodal or remove image_url content."

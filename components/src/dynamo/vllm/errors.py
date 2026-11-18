@@ -49,7 +49,7 @@ def uuid_image_cache_miss_error(
     return InvalidArgument(
         "Cached image is unavailable on this worker. Resend the request with the "
         "image URL or inline image data and the same UUID; UUID-only reuse "
-        "requires the image to be cached on the selected worker."
+        "requires the image to be cached on every worker that processes the image."
     )
 
 

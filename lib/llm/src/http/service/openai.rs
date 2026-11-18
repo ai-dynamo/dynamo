@@ -1496,7 +1496,6 @@ async fn completions_single(
                     None
                 }
             })
-            .take(1)
             .collect::<Vec<_>>()
     });
 
@@ -1890,7 +1889,6 @@ async fn completions_batch(
                     None
                 }
             })
-            .take(1)
             .collect::<Vec<_>>()
     });
 
@@ -4349,7 +4347,6 @@ async fn chat_completions(
                     None
                 }
             })
-            .take(1)
             .collect::<Vec<_>>()
     });
 

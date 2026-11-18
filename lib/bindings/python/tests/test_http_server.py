@@ -537,7 +537,7 @@ def test_video_public_message_matches_binding_allowlist():
 )
 @pytest.mark.parametrize(
     "http_server,origin_status,after_commit",
-    [({"wait_for_first_item": True}, 403, False), ({}, 404, True)],
+    [({"wait_for_first_item": True}, 403, False), ({"peek_ms": 20}, 404, True)],
     indirect=["http_server"],
 )
 @pytest.mark.timeout(60)
@@ -586,12 +586,12 @@ async def test_image_fetch_recovery_advice_survives_http_and_sse(
             async with session.post(
                 f"{base_url}/v1/chat/completions", json=data
             ) as response:
-                assert response.status == (200 if after_commit else origin_status)
+                assert response.status == (200 if after_commit else 400)
                 # The origin cannot fail until HTTP 200 has been committed.
                 release_origin.set()
                 raw = await response.text()
         error = _sse_error(raw) if after_commit else json.loads(raw)
-        assert error["code"] == origin_status
+        assert error["code"] == 400
         assert error["message"].startswith(
             f"Image download returned HTTP {origin_status}."
         )
@@ -634,11 +634,10 @@ async def test_streaming_chat_completion_http_error_waits_for_first_item(http_se
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("http_server", [{"peek_ms": 0}], indirect=True)
 @pytest.mark.timeout(60)
 @pytest.mark.forked
-async def test_streaming_chat_completion_http_error_with_peek_disabled(http_server):
-    """Disabling the peek preserves HTTP 200 with an in-stream error."""
+async def test_streaming_chat_completion_http_error_default_commits_200(http_server):
+    """The default streaming service reports backend errors inside HTTP 200."""
     base_url, model_name = http_server
     url = f"{base_url}/v1/chat/completions"
     data = {
@@ -680,8 +679,8 @@ async def test_streaming_chat_completion_http_error_with_peek_disabled(http_serv
             True,
             id="stream_wait_for_first_item",
         ),
-        pytest.param({}, True, "", 200, True, id="stream_default"),
-        pytest.param({"peek_ms": 0}, True, "", 200, False, id="stream_peek_disabled"),
+        pytest.param({}, True, "", 200, False, id="stream_default"),
+        pytest.param({"peek_ms": 1000}, True, "", 200, True, id="stream_peek_enabled"),
     ],
     indirect=["http_server"],
 )

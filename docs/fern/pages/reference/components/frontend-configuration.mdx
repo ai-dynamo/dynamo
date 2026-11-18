@@ -15,39 +15,28 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
 
 ## Streaming errors
 
-The frontend waits briefly for the first backend event before committing a
-streaming response. An error received during this wait can return its HTTP error
-status instead of HTTP 200.
+By default, the frontend can commit HTTP 200 before receiving the first backend
+event. Enable a [bounded pre-commit wait](#http-and-networking) to let early
+failures return an HTTP error status. Once headers are committed, later failures
+arrive as error events in the stream, even when the HTTP status is 200. Clients
+must check these events rather than treating HTTP 200 as successful completion.
+An error ends the current stream; any retry is a new request.
 
-| Environment variable | Default | Meaning |
-| --- | --- | --- |
-| `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS` | `100` | Maximum pre-commit wait in milliseconds. `0` disables the wait. Invalid values retain the default. |
-
-Set this variable on the frontend before starting it; it is read once when the
-HTTP service is created. Increase it if media fetching or request validation
-regularly takes longer than the default, for example to `500`. If the first normal
-event arrives sooner, it is forwarded immediately without waiting for the rest
-of the window. Request-ID annotations do not end the wait.
-
-This applies to streaming chat completions, completions, Responses, and Anthropic
-messages. Once a normal event arrives or the window expires, HTTP headers are
-committed. Later failures arrive as error events in the stream, even when the
-HTTP status is 200. Clients must check these events rather than treating HTTP 200
-as successful completion. An error ends the current stream; any retry is a new
-request.
-
-Known image errors include recovery advice in both HTTP and stream error
-messages:
+Image-fetch failures caused by an origin HTTP 403 or 404 return API HTTP 400
+before headers are committed. In OpenAI chat-completion and completion streams,
+late failures carry error code 400 under HTTP 200; other streaming APIs use their
+own error-event formats. The fixed public message identifies the origin status
+and gives recovery advice without exposing the origin response or URL credentials:
 
 | Error | Recovery |
 | --- | --- |
 | Image download returned 404 | Verify the URL or resend the image data before retrying. |
 | Image download returned 403 | Refresh the URL or access permissions, or resend the image data before retrying. |
-| UUID-only image is missing from the selected worker's cache | Resend the URL or inline image data with the same UUID. Retrying only the UUID does not reliably restore the missing entry. |
+| UUID-only image is missing from a worker's processor cache | Resend the URL or inline image data with the same UUID. Every worker that processes the media needs its own cache entry; retrying only the UUID does not restore a missing entry. |
 
 An ordinary URL-based image-cache miss is handled internally by downloading the
-image again. UUID-only reuse requires an existing entry on the selected worker;
-see [vLLM multimodal cache reuse](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#reuse-vllm-multimodal-processor-cache-entries).
+image again. UUID-only reuse requires an existing entry on every worker that
+processes the request's media. See [vLLM multimodal cache reuse](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#reuse-vllm-multimodal-processor-cache-entries).
 
 ## Decision APIs
 
@@ -149,6 +138,19 @@ The Rust HTTP server also reads these environment variables, which are not expos
 <ParamField path="DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS" type="integer" default="0">
   Interval in milliseconds between SSE comment frames while a streaming response has no data.
   Unset, `0`, invalid, or unrepresentable values disable keep-alive comments.
+</ParamField>
+
+<ParamField path="DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS" type="integer" default="0">
+  Maximum pre-commit wait in milliseconds for streaming chat completions, completions, Responses,
+  and Anthropic messages. Unset, `0`, or invalid values disable the wait. Set a positive value,
+  for example `500`, to let early backend errors return an HTTP error status before HTTP 200 is
+  committed. The value is read once when the HTTP service is created; set it before startup and
+  restart the frontend to change it.
+
+  The wait ends when the first normal backend event arrives or the window expires. Leading
+  request-ID annotations do not normally end the wait, but only 16 leading annotation frames are
+  buffered; additional annotations can end it before the deadline. After headers are committed,
+  failures arrive as stream error events even under HTTP 200. Clients must inspect those events.
 </ParamField>
 
 ## Router

@@ -178,28 +178,16 @@ fn media_input_error(public: &'static str, error: anyhow::Error) -> anyhow::Erro
 }
 
 fn image_fetch_error(error: anyhow::Error) -> anyhow::Error {
-    if error.downcast_ref::<DynamoError>().is_some() {
-        return error;
-    }
     let status = error
         .chain()
         .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
         .find_map(reqwest::Error::status);
-    let (class, public) = match status {
-        Some(reqwest::StatusCode::FORBIDDEN) => {
-            (ErrorType::PermissionDenied, IMAGE_FETCH_FORBIDDEN_MESSAGE)
-        }
-        Some(reqwest::StatusCode::NOT_FOUND) => {
-            (ErrorType::NotFound, IMAGE_FETCH_NOT_FOUND_MESSAGE)
-        }
-        _ => return media_input_error(IMAGE_FETCH_FAILED, error),
+    let public = match status {
+        Some(reqwest::StatusCode::FORBIDDEN) => IMAGE_FETCH_FORBIDDEN_MESSAGE,
+        Some(reqwest::StatusCode::NOT_FOUND) => IMAGE_FETCH_NOT_FOUND_MESSAGE,
+        _ => IMAGE_FETCH_FAILED,
     };
-    DynamoError::builder()
-        .class(class)
-        .diagnostic(format!("{IMAGE_FETCH_FAILED}: {error:#}"))
-        .public_message(public)
-        .build()
-        .into()
+    media_input_error(public, error)
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -1291,13 +1279,10 @@ mod tests_non_nixl {
     }
 
     #[tokio::test]
-    async fn image_fetch_errors_preserve_status_and_safe_recovery_message() {
+    async fn image_fetch_errors_are_bad_requests_with_safe_recovery_message() {
         let mut server = mockito::Server::new_async().await;
         let client = reqwest::Client::new();
-        for (status, class) in [
-            (403, ErrorType::PermissionDenied),
-            (404, ErrorType::NotFound),
-        ] {
+        for status in [403, 404] {
             let origin = server
                 .mock("GET", "/image?token=SECRET")
                 .with_status(status)
@@ -1312,7 +1297,7 @@ mod tests_non_nixl {
                 .expect_err("origin refused the image");
             let error = image_fetch_error(error);
             let error = error.downcast_ref::<DynamoError>().unwrap();
-            assert_eq!(error.class(), class);
+            assert_eq!(error.error_type(), ErrorType::InvalidArgument);
             let public = error.public_message().unwrap();
             assert!(public.starts_with(&format!("Image download returned HTTP {status}.")));
             assert!(public.contains("resend the image data before retrying"));

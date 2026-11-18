@@ -13,8 +13,14 @@ from PIL import Image
 from vllm import SamplingParams
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.media.image import ImageMediaIO
-from vllm.multimodal.parse import MultiModalDataItems, VisionChunkProcessorItems
+from vllm.multimodal.parse import (
+    MultiModalDataItems,
+    VisionChunkProcessorItems,
+    parse_mm_uuids,
+)
+from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.processing.processor import BaseMultiModalProcessor
+from vllm.renderers.base import BaseRenderer
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineGenerateError
 
@@ -835,6 +841,42 @@ def test_build_tokens_prompt_forwards_opaque_uuid_for_unified_vision_chunk():
 
     assert prompt["multi_modal_data"] is mm_data
     assert prompt["multi_modal_uuids"] == {"vision_chunk": ["catalog/image:v2"]}
+
+
+def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
+    data_items = MultiModalDataItems(
+        {"vision_chunk": VisionChunkProcessorItems([None])}
+    )
+    uuid_items = parse_mm_uuids({"vision_chunk": ["catalog/image:v2"]})
+
+    BaseRenderer._validate_mm_uuids(
+        None,
+        {"vision_chunk": [None]},
+        data_items,
+        uuid_items,
+    )
+    processor_inputs = ProcessorInputs([], data_items, uuid_items)
+    mm_hashes = processor_inputs.get_mm_hashes("test-model", "blake3")
+
+    assert mm_hashes == {"vision_chunk": ["catalog/image:v2"]}
+
+    empty_items = MultiModalDataItems()
+    parse_mm_data = MagicMock(return_value=empty_items)
+    processor = SimpleNamespace(info=SimpleNamespace(parse_mm_data=parse_mm_data))
+    cache = SimpleNamespace(is_cached=MagicMock(return_value=[True]))
+
+    is_cached, missing_items = BaseMultiModalProcessor._get_cache_missing_items(
+        processor,
+        cache,
+        data_items,
+        mm_hashes,
+    )
+
+    assert is_cached == {"vision_chunk": [True]}
+    assert missing_items is empty_items
+    parse_mm_data.assert_called_once()
+    assert parse_mm_data.call_args.args[0] in ({}, {"vision_chunk": []})
+    assert parse_mm_data.call_args.kwargs == {"validate": False}
 
 
 @pytest.mark.asyncio
