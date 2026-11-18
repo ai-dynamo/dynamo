@@ -624,3 +624,146 @@ fn generate_projects_training_text_controls() {
     );
     assert_eq!(preprocessed.output_options.skip_special_tokens, Some(false));
 }
+
+fn exchange(body: Value) -> Box<dyn GenerateExchange> {
+    let body = body.to_string();
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("content-type", "application/json".parse().unwrap());
+    let opened = VllmFormat
+        .open(ClientRequest {
+            body: body.as_bytes(),
+            headers: &headers,
+            default_request_id: "default-id",
+        })
+        .unwrap();
+    assert!(opened.stream);
+    opened.validation.unwrap();
+    (opened.bind)(&routing_metadata(16, false, None))
+        .unwrap()
+        .exchange
+}
+
+fn stream_events(
+    exchange: &mut dyn GenerateExchange,
+    outputs: Vec<LLMEngineOutput>,
+) -> Result<Vec<Value>, DynamoError> {
+    let mut events = Vec::new();
+    for output in outputs {
+        exchange.chunk(output, false, &mut |event| events.push(event.clone()))?;
+    }
+    events.extend(exchange.finish()?);
+    Ok(events)
+}
+
+fn delta(token_ids: Vec<u32>, finish: Option<FinishReason>) -> LLMEngineOutput {
+    LLMEngineOutput {
+        log_probs: Some(token_ids.iter().map(|_| -0.5).collect()),
+        token_ids,
+        finish_reason: finish,
+        ..Default::default()
+    }
+}
+
+use dynamo_llm::protocols::common::FinishReason;
+
+#[test]
+fn streaming_emits_one_event_per_delta_and_final_usage() {
+    let mut exchange = exchange(serde_json::json!({
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"logprobs": 0, "max_tokens": 3},
+        "request_id": "body-id",
+        "stream": true,
+        "stream_options": {"include_usage": true, "continuous_usage_stats": true},
+    }));
+    let events = stream_events(
+        exchange.as_mut(),
+        vec![
+            delta(vec![7, 8], None),
+            delta(vec![], None),
+            delta(vec![9], Some(FinishReason::Length)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(events.len(), 3, "{events:?}");
+    for (event, tokens, finish, completion) in [
+        (&events[0], serde_json::json!([7, 8]), Value::Null, 2),
+        (
+            &events[1],
+            serde_json::json!([9]),
+            serde_json::json!("length"),
+            3,
+        ),
+    ] {
+        assert_eq!(event["request_id"], "body-id");
+        let choice = &event["choices"][0];
+        assert_eq!(choice["index"], 0);
+        assert_eq!(choice["token_ids"], tokens);
+        assert_eq!(choice["finish_reason"], finish);
+        assert_eq!(
+            choice["logprobs"]["content"].as_array().unwrap().len(),
+            tokens.as_array().unwrap().len()
+        );
+        assert_eq!(event["usage"]["completion_tokens"], completion);
+        assert_eq!(event["usage"]["prompt_tokens"], 3);
+    }
+    assert_eq!(events[2]["choices"], serde_json::json!([]));
+    assert_eq!(
+        events[2]["usage"],
+        serde_json::json!({"prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6})
+    );
+}
+
+#[test]
+fn streaming_without_usage_options_has_no_usage_and_requires_a_finish() {
+    let body = serde_json::json!({"token_ids": [1], "sampling_params": {}, "stream": true});
+    let events = stream_events(
+        exchange(body.clone()).as_mut(),
+        vec![
+            delta(vec![7], None),
+            delta(vec![], Some(FinishReason::Stop)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert!(events.iter().all(|event| event.get("usage").is_none()));
+    assert_eq!(events[0]["choices"][0]["logprobs"], Value::Null);
+    assert_eq!(events[1]["choices"][0]["token_ids"], serde_json::json!([]));
+    assert_eq!(events[1]["choices"][0]["finish_reason"], "stop");
+
+    let error = stream_events(exchange(body.clone()).as_mut(), vec![delta(vec![7], None)])
+        .expect_err("a stream without a finish reason is incomplete");
+    assert!(
+        error.to_string().contains("without a finish reason"),
+        "{error}"
+    );
+
+    let error = stream_events(
+        exchange(body).as_mut(),
+        vec![delta(
+            vec![7],
+            Some(FinishReason::Error("engine detail".into())),
+        )],
+    )
+    .expect_err("backend errors fail the stream");
+    assert!(error.to_string().contains("engine detail"), "{error}");
+}
+
+#[test]
+fn streaming_rejects_logprob_less_deltas_and_prompt_logprobs() {
+    let mut output = delta(vec![7], Some(FinishReason::Stop));
+    output.log_probs = None;
+    stream_events(
+        exchange(serde_json::json!({
+            "token_ids": [1], "sampling_params": {"logprobs": 1}, "stream": true,
+        }))
+        .as_mut(),
+        vec![output],
+    )
+    .expect_err("requested logprobs must be present");
+
+    let request: generate::GenerateRequest = serde_json::from_value(serde_json::json!({
+        "token_ids": [1], "sampling_params": {"prompt_logprobs": 1}, "stream": true,
+    }))
+    .unwrap();
+    assert!(request.validate().unwrap_err().contains("prompt_logprobs"));
+}
