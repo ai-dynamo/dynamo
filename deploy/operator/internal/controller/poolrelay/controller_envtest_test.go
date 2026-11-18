@@ -9,8 +9,10 @@ package poolrelay
 
 import (
 	"context"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -178,7 +180,8 @@ func TestControllerPublishesAndWithdrawsOneDGDService(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := Setup(manager, &configv1alpha1.OperatorConfiguration{
-		Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+		Discovery:       configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+		GlobalDiscovery: configv1alpha1.GlobalDiscoveryConfiguration{URL: "http://discovery:8080/", Region: "us-east-1"},
 	}, &commoncontroller.RuntimeConfig{}); err != nil {
 		t.Fatal(err)
 	}
@@ -216,6 +219,15 @@ func TestControllerPublishesAndWithdrawsOneDGDService(t *testing.T) {
 	invalidRelay.Spec.ClusterID = "\u00a0east"
 	if err := apiClient.Create(ctx, invalidRelay); !apierrors.IsInvalid(err) {
 		t.Fatalf("expected invalid cluster ID to be rejected, got %v", err)
+	}
+	t.Log("Reject a repeated frontend at API admission")
+	repeatedFrontend := relay.DeepCopy()
+	repeatedFrontend.Name = "repeated-frontend"
+	repeatedFrontend.Spec.GlobalDiscovery = &v1alpha1.DynamoPoolRelayGlobalDiscovery{
+		Frontends: []string{"http://green:8000", "http://green:8000"},
+	}
+	if err := apiClient.Create(ctx, repeatedFrontend); !apierrors.IsInvalid(err) {
+		t.Fatalf("expected a repeated frontend to be rejected, got %v", err)
 	}
 	dgdMeta := metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}
 	dgd := &v1beta1.DynamoGraphDeployment{
@@ -263,6 +275,37 @@ func TestControllerPublishesAndWithdrawsOneDGDService(t *testing.T) {
 		len(deployment.Spec.Template.Spec.Containers) != 1 ||
 		deployment.Spec.Template.Spec.Containers[0].Image != relay.Spec.PodTemplate.Spec.Containers[0].Image {
 		t.Fatalf("Relay Deployment does not match the sample: %+v", deployment.Spec)
+	}
+	t.Log("An empty globalDiscovery block registers the pool with the operator's defaults")
+	unregistered := relay.DeepCopy()
+	relay.Spec.GlobalDiscovery = &v1alpha1.DynamoPoolRelayGlobalDiscovery{}
+	if err := apiClient.Patch(ctx, &relay, client.MergeFrom(unregistered)); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"DYN_RELAY_GLOBAL_DISCOVERY_URL": "http://discovery:8080/",
+		"DYN_RELAY_ROUTING_POOL":         relay.Spec.ClusterID + "/" + key.Namespace + "/" + key.Name,
+		"DYN_RELAY_ROUTING_POOL_REGION":  "us-east-1",
+	}
+	registered := map[string]string{}
+	deadline = time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := apiClient.Get(ctx, serviceKey, &deployment); err != nil {
+			t.Fatal(err)
+		}
+		clear(registered)
+		for _, item := range deployment.Spec.Template.Spec.Containers[0].Env {
+			if slices.Contains(registrationEnvNames, item.Name) {
+				registered[item.Name] = item.Value
+			}
+		}
+		if maps.Equal(registered, want) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !maps.Equal(registered, want) {
+		t.Fatalf("Relay registers with %v, want %v", registered, want)
 	}
 	if err := apiClient.Delete(ctx, dgd); err != nil {
 		t.Fatal(err)
