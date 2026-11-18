@@ -292,15 +292,13 @@ def generate_mocker_config(
     """Load the mocker DGD template and apply DGDR images and model paths.
 
     When ``aic_spec`` is provided (planner-rapid with an AIC-supported backend),
-    inject ``--ais-perf-model`` with an inline perf model config onto the
-    prefill/decode workers so each mocker pod pulls its latency model directly
-    from the AIConfigurator SDK at runtime — no NPZ round-trip through the
-    profiler.
+    inject ``--ais-perf-model`` with an inline config onto the prefill/decode
+    workers so each mocker pod pulls its latency model directly from the
+    AIConfigurator SDK at runtime — no NPZ round-trip through the profiler.
 
-    When ``overrides.dgd`` adds an argument that only the old AIS worker
-    arguments work with (see :func:`_old_ais_override_arguments`), every
-    worker keeps those old arguments instead. An override that gives
-    ``--ais-perf-model`` a value never has this effect.
+    When ``overrides.dgd`` adds an argument that needs the old AIS worker
+    arguments, every worker keeps those instead, unless the override gives
+    ``--ais-perf-model`` a value.
 
     Returns:
         The mocker DGD config dict (no planner, no ConfigMaps).
@@ -460,11 +458,8 @@ def _perf_model_config(
 ) -> dict[str, Any]:
     """Return the perf model config of a worker deployed with ``pick``.
 
-    The mocker arguments and the Planner config are both built from it, so
-    the two describe the same deployment. ``backend_version`` and
-    ``worker_type`` are written when given. A key that would only repeat
-    AISimulate's default is left out: ``pp`` of 1, the MoE sizes of a dense
-    pick and ``cp_size`` of 1.
+    A key that would only repeat AISimulate's default is left out: ``pp`` of 1,
+    the MoE sizes of a dense pick and ``cp_size`` of 1.
     """
     config: dict[str, Any] = {"model": model, "system": system, "backend": backend}
     if backend_version is not None:
@@ -494,8 +489,7 @@ def _inject_mocker_ais_args(
     """Set ``--ais-perf-model`` to an inline config on one mocker worker's args list.
 
     The mocker simulates vllm/sglang scheduling; for trtllm AIC data we keep
-    the default ``--engine-type`` and only name trtllm as the config's
-    ``backend`` so the perf-model lookups point at the correct database.
+    the default ``--engine-type`` and only name trtllm as the config's ``backend``.
     """
     config = _perf_model_config(
         pick,
@@ -561,9 +555,7 @@ def _inject_mocker_ais_args_old_form(
 class _OverrideArguments(argparse.ArgumentParser):
     """A parser for an argument list that a deployment override writes.
 
-    An error is a ``ValueError``, not an exit. A value is kept as typed: a
-    file it names or a ``$(VAR)`` in it cannot be read where the profiler
-    runs.
+    An error is a ``ValueError``, not an exit. A value is kept as written.
     """
 
     def error(self, message: str) -> NoReturn:
@@ -588,10 +580,7 @@ def _mocker_parser() -> argparse.ArgumentParser:
 def _read_as_mocker(args: list[str]) -> Optional[argparse.Namespace]:
     """Return what a mocker reads from ``args``, or ``None`` when it rejects them.
 
-    The mocker's parser reads the list, so an abbreviation or an ``--aic-``
-    spelling means what it means to a worker, and what is not a mocker
-    argument is skipped. A worker that gets a rejected list does not start,
-    with the old generated arguments or the new one.
+    What is not a mocker argument is skipped.
     """
     parser = _mocker_parser()
     try:
@@ -617,17 +606,8 @@ def _override_argument_lists(
 ) -> list[list[str]]:
     """Return every argument list a DGD override writes for a service or component.
 
-    Both override versions are read:
-    ``spec.services.<name>.extraPodSpec.mainContainer.args`` and
-    ``spec.components[*].podTemplate.spec.containers[*].args``. Names are not
-    matched with the generated workers: the override engine translates target
-    names and that is not repeated here. A value of another shape is skipped;
-    the override engine reports it.
-
-    The ``command`` list of each of these containers is returned as well,
-    before its ``args``: a worker's arguments may be written there. A shell
-    script inside a list item is not taken apart. ``keys`` limits the result
-    to the lists under those container keys.
+    Both override versions are read; any other shape is skipped. Names are not
+    matched with the generated workers. ``keys`` are the container keys read.
     """
     containers: list[Any] = []
     services = _nested_value(override, "spec", "services")
@@ -654,13 +634,7 @@ def _override_argument_lists(
 
 
 def _refuse_ais_perf_model_value_in_command(override: Any) -> None:
-    """Raise when an override gives ``--ais-perf-model`` a value in a ``command`` list.
-
-    The override engine keeps a worker's generated ``args`` after the
-    override's ``command``, and the mocker takes the last value typed: the
-    worker would start with the generated value and report nothing. A value
-    in ``args`` comes after the generated one, or replaces the whole list.
-    """
+    """Raise when an override's ``command`` list gives ``--ais-perf-model`` a value."""
     for command in _override_argument_lists(override, keys=("command",)):
         read = _read_as_mocker(command)
         if read is not None and read.ais_perf_model_value is not None:
@@ -675,18 +649,8 @@ def _refuse_ais_perf_model_value_in_command(override: Any) -> None:
 def _old_ais_override_arguments(override: Any) -> list[str]:
     """Return the override arguments that need the old AIS worker arguments.
 
-    An old AIS input of the mocker (``old_ais_perf_inputs``: an old
-    ``--ais-*`` flag or ``--ais-perf-model`` without a value) stops a worker
-    that also gets a generated ``--ais-perf-model`` value. With
-    ``--extra-engine-args`` the old arguments are not used, and
-    ``--model-path`` names the model they use; a generated value would be
-    used in the first case and keep the request's model in the second. Each
-    list is read as a mocker reads it (``_read_as_mocker``); the names are
-    the full ``--ais-`` names, each once.
-
-    An override that gives ``--ais-perf-model`` a value in any of its
-    argument lists needs none of this, whatever else it holds: no name is
-    returned.
+    They are an old ``--ais-*`` flag, ``--extra-engine-args``, ``--model-path``
+    and a ``--ais-perf-model`` without a value; none if any list gives it one.
     """
     names: list[str] = []
     for args in _override_argument_lists(override):
@@ -991,11 +955,8 @@ def _stated_configs(
 ) -> dict[str, dict[str, Any]]:
     """Return what a user's ``ais_perf_model`` value states for each role.
 
-    A config that is complete comes checked and with every default
-    (``ais_perf_model_role_config``, as the Planner reads it). A config that
-    takes keys from a source (``from``, or a dataset profile of the old
-    form) comes with the keys written next to it only: the Planner reads the
-    source, which need not exist where the profiler runs.
+    A complete config comes checked and with every default. A config that
+    takes keys from a source comes with only the keys written next to it.
     """
     if isinstance(value, AISPerfModelSpec):
         # A dataset profile is written under its worker type and nothing else.
@@ -1026,9 +987,8 @@ def build_ais_perf_model_spec(
 
     The result is a list with one perf model config per worker type of the
     Planner mode. A value the user wrote is checked against the selected
-    deployment and returned in the form it was written in. The fields a
-    config takes from a source are not compared, since the source is not
-    read here; one warning names them.
+    deployment and returned as written. Fields a config takes from a source
+    are not compared; one warning names them.
     """
     planner = (
         dgdr.features.planner  # type: ignore[union-attr]

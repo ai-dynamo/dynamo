@@ -4,8 +4,7 @@
 """The one AIS perf model input, shared by every Dynamo component that takes it.
 
 A value is a file path, inline JSON, one perf model config (a mapping) or a
-list of configs with one ``worker_type`` each. AISimulate reads and resolves
-it; this module is the only place in Dynamo that calls that code.
+list of configs with one ``worker_type`` each.
 
 AISimulate is an optional dependency: importing this module does not import
 it. The functions that read or resolve a value import it on first use and
@@ -60,10 +59,7 @@ def _remove_dataset_workspace(pid: int, folder: str) -> None:
 
 
 def _dataset_workspace() -> str:
-    """Return the folder this process prepares datasets in.
-
-    The folder is created on first use and removed when this process exits.
-    """
+    """Return this process's dataset folder, made on first use and removed at exit."""
     pid = os.getpid()
     if pid not in _dataset_workspaces:
         folder = tempfile.mkdtemp(prefix="dynamo-ais-perf-model-")
@@ -83,14 +79,9 @@ def load_document(
     """Read an AIS perf model value without following ``from``.
 
     ``value`` is a file path, inline JSON (text that starts with ``{`` or
-    ``[``), one config or a list of configs. A relative file path, and
-    relative paths inside inline JSON, a mapping or a list, start at
-    ``base_dir`` (the working directory when it is ``None``). Relative paths
-    inside a file start at that file's folder.
-
-    No template file, dataset or state snapshot is opened here;
-    ``resolve_entry`` does that. A wrong value raises the loader's error, a
-    ``ValueError``.
+    ``[``), one config or a list of configs. Relative paths start at
+    ``base_dir`` (the working directory when ``None``); those inside a file
+    start at that file's folder. A wrong value raises ``ValueError``.
     """
     return _loader().load(value, base_dir=base_dir)
 
@@ -100,10 +91,9 @@ def select_router_entry(
 ) -> dict[str, Any]:
     """Return the entry a router uses, as written.
 
-    ``worker_type`` is ``"prefill"``, ``"aggregated"`` or ``None`` when the
-    user did not choose one. Without a choice the document must name exactly
-    one of the two. Pass the same ``worker_type`` to ``resolve_entry``: it
-    fills a missing ``worker_type`` and rejects a different written one.
+    ``worker_type`` is ``"prefill"``, ``"aggregated"`` or ``None``; with
+    ``None`` the document must name exactly one of the two. Pass the same
+    ``worker_type`` to ``resolve_entry``.
     """
     if worker_type is not None and worker_type not in ROUTER_WORKER_TYPES:
         raise ValueError(
@@ -152,11 +142,11 @@ def resolve_entry(
 ) -> dict[str, Any]:
     """Return the config one entry stands for, ready for ``ForwardPassPerfModelConfig``.
 
-    This is the step that reads template files, state snapshots and datasets.
-    ``worker_type`` is the worker type the caller runs as: it fills a missing
-    ``worker_type`` and must equal a written one. ``fill`` holds values the
-    caller requires: a missing key is added and a written key must be equal.
-    ``defaults`` are used only for keys the entry does not write.
+    Reads template files, state snapshots and datasets. ``worker_type`` and
+    each ``fill`` key are added when missing and must equal a written value.
+    ``defaults`` are used only for keys the entry does not write. With a
+    dataset or state snapshot ``from``, ``worker_type`` and ``fill`` are only
+    compared and ``defaults`` are ignored.
     """
     loader = _loader()
     # An entry that is not a mapping goes on to the loader, which reports it.
@@ -184,9 +174,7 @@ def router_perf_config(
 ) -> dict[str, Any]:
     """Return the ``AisPerfConfig(config=...)`` mapping for an AIS perf model value.
 
-    The value is read, the router's entry is selected and resolved, and the
-    result is normalized as the old router inputs are. Raises the errors of
-    ``normalized_config``.
+    Raises the errors of ``normalized_config``.
     """
     document = load_document(value, base_dir=base_dir)
     resolved = resolve_entry(
@@ -200,10 +188,8 @@ def engine_perf_config(
 ) -> dict[str, Any]:
     """Return the config of an engine that runs as ``worker_type``.
 
-    The value is read and the entry of ``worker_type`` is selected and
-    resolved; ``fill`` is passed to ``resolve_entry``. The result is the
-    config as resolved: unlike ``router_perf_config`` it is not normalized,
-    so no default is added for a key the value does not give.
+    ``fill`` is passed to ``resolve_entry``. No default is added for a key the
+    value does not give.
     """
     return resolve_entry(
         load_document(value).select(worker_type), worker_type=worker_type, fill=fill
@@ -258,9 +244,8 @@ def engine_args_as_written(
     """Return a copy of the engine args the user wrote, as a ``dict``.
 
     ``engine_args`` is JSON text, a mapping or ``None`` (an empty ``dict``).
-    Engine args that already write ``engine.timing_model`` are an error: the
-    AIS perf model input ``perf_model_name`` would replace it. Both names
-    appear in the error as the user wrote them.
+    Engine args that already write ``engine.timing_model`` are an error that
+    names ``engine_args_name`` and ``perf_model_name`` as the user wrote them.
     """
     not_an_object = f"{engine_args_name} must be a JSON object"
     if engine_args is None:

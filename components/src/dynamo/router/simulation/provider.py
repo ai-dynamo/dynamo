@@ -83,10 +83,7 @@ def _can_select_ais(public: RouterRecommendationConfig) -> bool:
 
 
 def _has_explicit_load_model_type(public: RouterRecommendationConfig) -> bool:
-    """Return whether the section writes ``prefill_load_model.type``.
-
-    A section that does not write it searches the default load models.
-    """
+    """Return whether the section writes ``prefill_load_model.type``."""
     return (
         "prefill_load_model" in public.model_fields_set
         and "type" in public.prefill_load_model.model_fields_set

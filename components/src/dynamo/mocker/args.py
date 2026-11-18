@@ -159,10 +159,7 @@ def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
 class _AisPerfModelOccurrence(argparse.Action):
     """Record every use of ``--ais-perf-model`` as ``(option string, value)``.
 
-    The option takes a perf model value and, without one, is still the switch
-    it used to be. ``set_ais_perf_model_attributes`` needs each use, with the
-    spelling typed, to tell the two apart. The value is ``None`` when none was
-    given.
+    The value is ``None`` when none was given.
     """
 
     def __call__(self, parser, namespace, values, option_string=None):
@@ -175,13 +172,11 @@ def set_ais_perf_model_attributes(
 ) -> None:
     """Replace the recorded uses of ``--ais-perf-model`` by three attributes.
 
-    ``args`` is what a parser with the mocker's arguments returned and ``env``
-    the value of ``DYN_AIS_PERF_MODEL`` for that mocker, ``None`` when it is
-    unset; an empty value counts as unset. ``ais_perf_model_without_value`` is
-    whether the option was given without a value, ``ais_perf_model_value`` the
-    value typed last, else ``env``, and ``ais_perf_model_source`` the name of
-    what gave the value. A combination that has no single meaning is an error
-    of ``parser``.
+    ``env`` is ``DYN_AIS_PERF_MODEL`` of the mocker ``args`` was parsed for;
+    ``None`` or empty is unset. Sets ``ais_perf_model_without_value``,
+    ``ais_perf_model_value`` (the value typed last, else ``env``) and
+    ``ais_perf_model_source`` (the name of what gave the value). A
+    combination with no single meaning is an error of ``parser``.
     """
     env = env or None
     occurrences = args.ais_perf_model_occurrences or []
@@ -220,8 +215,7 @@ def _old_ais_help(flag: str, text: str) -> str:
 def _add_mocker_arguments(parser: argparse.ArgumentParser, env: ArgEnv | None) -> None:
     """Register every mocker argument but ``--version`` on ``parser``.
 
-    ``env`` is another process's env (see ``ArgEnv``). With ``None`` the env
-    defaults come from ``os.environ``.
+    When ``env`` is ``None`` the env defaults come from ``os.environ``.
     """
     environ = os.environ if env is None else env.environ
     engine_defaults = normalize_mocker_config()["engine"]
@@ -769,17 +763,12 @@ def build_mocker_parser(
 ) -> argparse.ArgumentParser:
     """The argument parser of a mocker that runs with ``env``.
 
-    For a process that reads another mocker's command line (the profiler reads
-    the argument lists of a deployment it generates): env defaults come from
-    ``env`` only, never ``os.environ``. Registers what ``parse_args``
-    registers, without ``--help`` and ``--version``, on ``parser`` when given,
-    else on a new ``ArgumentParser(add_help=False)``.
-
-    A value is converted when it is parsed, and ``--ais-perf-config`` then
-    reads its file; a caller that must not read local files gives a parser
-    that keeps values as typed. Nothing ``parse_args`` does after parsing is
-    done here: call ``set_ais_perf_model_attributes`` on the parsed namespace
-    before ``old_ais_perf_inputs`` reads it.
+    Env defaults come from ``env`` only, never ``os.environ``. Registers what
+    ``parse_args`` registers, without ``--help`` and ``--version``. Parsing
+    ``--ais-perf-config`` reads its file; to read no local file, give a
+    ``parser`` that keeps values as typed. Nothing ``parse_args`` does after
+    parsing is done here: call ``set_ais_perf_model_attributes`` on the parsed
+    namespace before ``old_ais_perf_inputs`` reads it.
     """
     if parser is None:
         parser = argparse.ArgumentParser(add_help=False)

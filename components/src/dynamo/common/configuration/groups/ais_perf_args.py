@@ -98,9 +98,8 @@ class AisPerfConfigBase(ConfigBase):
     def old_ais_perf_inputs(self) -> list[str]:
         """Return the names of the old AIS inputs that are set.
 
-        An input is named as the user gave it: the flag when it was typed, the
-        environment variable when the value came from it. The acceptance rates
-        and the seed are not old inputs.
+        Each is named as the user gave it: the typed flag or the environment
+        variable. The acceptance rates and the seed are not old inputs.
         """
         names = []
         if self.ais_perf_config is not None:
@@ -140,10 +139,9 @@ class AisPerfConfigBase(ConfigBase):
     ) -> None:
         """Check which AIS perf model inputs are given together.
 
-        ``replacement`` is what the component reads instead of the old inputs;
-        the one deprecation warning for old inputs names it. ``stacklevel=3``
-        is the caller of the ``validate()`` that calls this method. No value
-        is read here: ``ais_perf_kwargs()`` does that.
+        Old inputs get one deprecation warning that names ``replacement``,
+        what the component reads instead. ``stacklevel=3`` is the caller of
+        this method's caller. No input's value is read here.
         """
         ais = getattr(self, "router_prefill_load_model", None) == "ais"
         value, name = self.new_ais_perf_input()

@@ -154,16 +154,8 @@ def _perf_model_inputs(
 ) -> tuple[Any, Any, Any, Any]:
     """Return the router perf config object and the three engine args to run with.
 
-    ``router_ais_perf_model`` becomes the object the native replay takes as
-    ``ais_perf_config``. ``ais_perf_model`` becomes the AIS timing model of the
-    engine args of each role the replay runs; the caller's engine args are
-    copied, not changed. A replay is disaggregated when prefill or decode
-    engine args are given. A KV router whose ``router_config`` selects the
-    AIS load model without a router perf model is an error here, so that the
-    error names ``router_ais_perf_model``; the mistakes of the deprecated
-    ``ais_perf_config`` are left to the native replay, whose errors name it.
-    Called by the public replay functions only: the deprecation warning
-    names the line that called them.
+    The caller's engine args are not changed. The warning for a deprecated
+    ``ais_perf_config`` names the line that called the caller.
     """
     for keyword, value in (
         ("router_ais_perf_model", router_ais_perf_model),
@@ -410,12 +402,10 @@ def _read_planner_config(planner_config) -> "PlannerConfig":
 
 
 def _warn_old_planner_config(config: "PlannerConfig") -> None:
-    """Warn about a planner config that writes ``ais_perf_model`` with the
-    deprecated keys.
+    """Warn about a planner config with deprecated ``ais_perf_model`` keys.
 
-    Called by the public replay functions only, once the planner adapter is
-    built: no error of the config follows the warning, and the warning names
-    the line that called them.
+    Call it once the planner adapter is built, so no config error follows the
+    warning. The warning names the line that called the caller.
     """
     if _OLD_INPUTS_WARNED.get():
         return
@@ -435,14 +425,7 @@ def _warn_old_planner_config(config: "PlannerConfig") -> None:
 
 @contextmanager
 def _old_inputs_already_warned() -> Iterator[None]:
-    """Replay without the warnings for a deprecated planner config or keyword.
-
-    For the retune sweep only: a candidate replays the planner config and the
-    router perf config of the replay or Planner that runs the sweep, which
-    already warned about them.
-    The warning filters are not touched: a filter that is set and reset for
-    every candidate makes Python show every other warning again each time.
-    """
+    """Replay without the warnings for a deprecated planner config or keyword."""
     token = _OLD_INPUTS_WARNED.set(True)
     try:
         yield
@@ -648,14 +631,12 @@ def run_trace_replay(
     ``router_ais_perf_model`` gives the KV router the one its ``ais`` prefill
     load model reads. Each takes a file path, inline JSON, one config or a
     list of configs with one ``worker_type`` each. ``ais_perf_model`` sets
-    ``engine.timing_model`` in the engine args of every role the replay runs:
-    ``prefill`` and ``decode`` when prefill or decode engine args are given,
-    ``aggregated`` otherwise. It creates aggregated engine args when none are
-    given, is an error with engine args that already write
-    ``engine.timing_model``, and does not configure the router. For a
+    ``engine.timing_model`` for every role the replay runs: ``prefill`` and
+    ``decode`` when prefill or decode engine args are given, ``aggregated``
+    otherwise. It creates aggregated engine args when none are given and is an
+    error with engine args that already write ``engine.timing_model``. For a
     disaggregated replay pass both ``prefill_engine_args`` and
-    ``decode_engine_args`` together with ``ais_perf_model``: engine args are
-    not created for a role that has none.
+    ``decode_engine_args``: neither is created.
     ``router_ais_perf_model`` requires ``router_mode="kv_router"`` and a
     ``router_config`` with ``router_prefill_load_model="ais"``, and a KV
     router with that load model requires ``router_ais_perf_model``; it reads
@@ -910,10 +891,7 @@ def run_synthetic_trace_replay(
 
     ``ais_perf_model``, ``router_ais_perf_model``, the deprecated
     ``ais_perf_config`` and the warning for a deprecated ``planner_config``
-    work as in :func:`run_trace_replay`. For a
-    disaggregated replay pass both ``prefill_engine_args`` and
-    ``decode_engine_args`` together with ``ais_perf_model``: engine args are
-    not created for a role that has none.
+    work as in :func:`run_trace_replay`.
     """
     (
         ais_perf_config,

@@ -48,8 +48,7 @@ class Deprecated:
         """Emit one ``FutureWarning`` that names every item of ``names``.
 
         ``stacklevel=1`` is the line that calls this method, ``2`` the caller
-        of that function, and so on. Earlier calls are not remembered: a
-        component collects what is in use and calls this once.
+        of that function, and so on. Earlier calls are not remembered.
         """
         warnings.warn(self.message(names), FutureWarning, stacklevel=stacklevel + 1)
 

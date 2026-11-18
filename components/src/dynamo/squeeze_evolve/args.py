@@ -79,11 +79,7 @@ class SqueezeEvolveRunConfig(KvRouterConfigBase, AisPerfConfigBase):
         )
 
     def new_ais_perf_input(self) -> tuple[None, None]:
-        """Return no value: ``--ais-perf-model`` and its variable are not read.
-
-        ``validate()`` rejects the typed flag. ``DYN_AIS_PERF_MODEL`` is
-        ignored: it may be set for other processes in the same environment.
-        """
+        """Return no value: ``--ais-perf-model`` and its variable are not read."""
         return None, None
 
     def _tiers_with_ais_perf_model(self) -> list[int]:
@@ -97,10 +93,9 @@ class SqueezeEvolveRunConfig(KvRouterConfigBase, AisPerfConfigBase):
     def ais_perf_kwargs_by_tier(self) -> list[Optional[dict]]:
         """Return the ``AisPerfConfig`` arguments of each tier, in ``--tiers`` order.
 
-        Every item is ``None`` when the load model is not ``ais``. A tier gets
-        the config of its own ``ais_perf_model``; old AIS inputs give one
-        config that every tier shares. An error in the value of tier ``i``
-        starts with ``--tiers[i]:``.
+        Every item is ``None`` when the load model is not ``ais``. Old AIS
+        inputs give one config that every tier shares. An error in the
+        ``ais_perf_model`` of tier ``i`` starts with ``--tiers[i]:``.
         """
         tiers = self.tiers or []
         if self.router_prefill_load_model != "ais":

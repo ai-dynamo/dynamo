@@ -153,9 +153,6 @@ def ais_perf_model_role_config(
     ``from``. A ``worker_type`` it writes must be ``worker_type``. AISimulate
     checks the values and reads the paths the config names, so those must
     exist where this is called. A wrong config is a ``ValueError``.
-
-    This is the one check of a complete config: loading a Planner config,
-    the Planner's perf model adapter and the profiler all call it.
     """
     # Operator schema generation imports this module without the optional
     # estimator runtime. Require AIS only when validating an AIS config.
@@ -258,10 +255,8 @@ def _ais_perf_model_config_keys() -> set[str]:
 def _reject_unknown_config_keys(value: Any, config_keys: set[str]) -> None:
     """Raise ``ValueError`` for keys that no perf model config has.
 
-    ``value`` is one config or a list of configs that the loader accepted,
-    ``config_keys`` the result of ``_ais_perf_model_config_keys``. The first
-    config with such keys is reported. A key written without a value is not
-    looked at: the loader drops it.
+    ``value`` is one config or a list of configs that the loader accepted; a
+    key written without a value is not looked at.
     """
     if not config_keys:
         # Without the estimator runtime no key can be told apart.
@@ -887,12 +882,11 @@ class RetuneEngineSpec(BaseModel):
         """Return ``run_trace_replay`` engine kwargs for one candidate.
 
         ``router_config`` is ``KvRouterConfig.from_json`` of the startup
-        snapshot merged with ``router_overrides``; the pinned
-        ``ais_perf_config`` is returned as ``router_ais_perf_model``, the
-        keyword that reads the mapping. A pinned config of another worker
-        type than the replay's router reads is returned as the deprecated
-        ``ais_perf_config`` instead, as the native object. Called inside
-        sweep worker processes, because the native objects cannot be pickled.
+        snapshot merged with ``router_overrides``; ``ais_perf_config`` is
+        returned as ``router_ais_perf_model``, or as the deprecated
+        ``ais_perf_config`` (the native object) when its worker type is not the
+        one the replay's router reads. Called inside sweep worker processes,
+        because the native objects cannot be pickled.
         """
 
         # Planner config validation and schema generation must not load the

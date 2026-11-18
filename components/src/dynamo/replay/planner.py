@@ -211,8 +211,7 @@ def prepare_planner_replay(
 ):
     """Create and bootstrap the scaling component for an offline replay.
 
-    ``planner_config_arg`` is a file path, inline JSON or a config that is
-    already read.
+    ``planner_config_arg`` is a file path, inline JSON or a parsed config.
     ``retune_inputs_factory`` builds the retune inputs (trace, time axis and
     pinned engine) from the parsed planner config. It is required when the
     config sets ``retune``; only trace replay entry points that support

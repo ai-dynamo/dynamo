@@ -3,10 +3,8 @@
 
 """AIS perf model inputs that the tests of several components share.
 
-The frontend, the routers and squeeze_evolve take the same AIS arguments; the
-router section of a simulation config and the replay keywords take the same
-configs. Importing this module does not import AISimulate, so a test module
-that is collected without AISimulate can import it.
+Importing this module does not import AISimulate, so a test module that is
+collected without AISimulate can import it.
 """
 
 import importlib
@@ -34,8 +32,7 @@ OLD_FLAT = [
 def normalized(config: dict[str, Any]) -> dict[str, Any]:
     """Return ``config`` as a router's perf config holds it.
 
-    ``config`` is written out by the test. The defaults come from the
-    AISimulate config class, not from the code under test.
+    Defaults come from the AISimulate config class, not the code under test.
     """
     # Loaded on first use, as dynamo.common.ais_perf_model loads it: test
     # modules that are collected without AISimulate import this module.
