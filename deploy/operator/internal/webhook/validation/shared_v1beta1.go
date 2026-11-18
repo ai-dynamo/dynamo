@@ -171,8 +171,7 @@ type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 	groveStrategyChanged              bool
 	// restoreLaunchDGD is the DGD that renders this component. It enables the
 	// restore launch rule, which applies only to DGD components; DCDs leave it nil.
-	restoreLaunchDGD *nvidiacomv1beta1.DynamoGraphDeployment
-	// oldRestoreLaunchDGD is the DGD that rendered oldComponent on update.
+	restoreLaunchDGD    *nvidiacomv1beta1.DynamoGraphDeployment
 	oldRestoreLaunchDGD *nvidiacomv1beta1.DynamoGraphDeployment
 }
 

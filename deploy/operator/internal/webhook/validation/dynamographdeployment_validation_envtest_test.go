@@ -5472,7 +5472,6 @@ func unsupportedRestoreLaunchError(path, container, role, note string) string {
 	)
 }
 
-// checkpointTRTLLMDGDForAdmission selects the MPI backend and optionally authors each role's launch.
 func checkpointTRTLLMDGDForAdmission(nodeCount int32, scale, roleTemplates, groveDisabled bool) *nvidiacomv1beta1.DynamoGraphDeployment {
 	dgd := checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.trtllm"}, nil, nil)
 	dgd.Spec.BackendFramework = "trtllm"
