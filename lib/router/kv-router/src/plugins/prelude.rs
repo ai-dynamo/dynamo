@@ -23,9 +23,10 @@ pub use crate::plugins::worker_selection::{
 // Request-classifier contracts and the request they classify.
 pub use crate::plugins::request_classifier::{
     AbortCause, ClassifierError, ClassifyEvent, ClassifyRequest, DispatchDecision, DispatchGate,
-    DispatchHead, DispatchRecheck, NoWorkers, RequestClassifier, RequestClassifierContext,
+    DispatchHead, DispatchRecheck, RequestClassifier, RequestClassifierContext,
     RequestClassifierFactory, RequestClassifierParameters, RequestClassifierProvider,
-    RequestClassifierProviderError, RequestClassifierRegistryError, RequestProgress, WorkerView,
+    RequestClassifierProviderError, RequestClassifierRegistryError, RequestProgress,
+    WorkerCacheView, WorkerLoadView, WorkerView,
 };
 
 // Experimental hint-policy contracts, their registration, and the KV copies they send.

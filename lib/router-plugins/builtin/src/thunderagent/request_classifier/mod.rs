@@ -264,6 +264,27 @@ mod tests {
 
     use super::*;
 
+    /// A worker view with no rows: ThunderAgent's `classify` never reads the worker table.
+    struct NoWorkers;
+
+    impl WorkerView for NoWorkers {
+        fn len(&self) -> usize {
+            0
+        }
+
+        fn info(&self, _row: usize) -> Option<WorkerInfo> {
+            None
+        }
+
+        fn load(&self, _row: usize) -> Option<WorkerLoadView> {
+            None
+        }
+
+        fn cache(&self, _row: usize) -> Option<WorkerCacheView> {
+            None
+        }
+    }
+
     fn config() -> ThunderAgentConfig {
         ThunderAgentConfig {
             buffer_per_program: 100,

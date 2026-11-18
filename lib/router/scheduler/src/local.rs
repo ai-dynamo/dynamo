@@ -442,7 +442,7 @@ where
             return Ok(None);
         };
         // A tracked admission with no registered lifecycle (Python bindings
-        // `best_worker`, `RouterRequest::New`) never emits lifecycle events, so
+        // `best_worker`) never emits lifecycle events, so
         // classifying it would corrupt plugin bookkeeping. It uses the default
         // queue inputs, exactly as if no classifier were installed.
         let Some(overrides_cached) = classifier.cached_overrides(request_id) else {

@@ -57,21 +57,17 @@ pub use policy::{
 };
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 pub use reference_picker::{DefaultPick, DefaultWorkerPicker};
-pub(crate) use runtime::RuntimePolicyState;
 pub use runtime::{
     RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };
 pub use selection_config::{
-    OVERLAP_SCORE_CREDIT_RANGE_ERROR, SelectionConfig, SharedCacheType,
-    default_decode_active_request_weight, default_disk_cache_hit_weight,
-    default_host_cache_hit_weight, default_overlap_score_credit_decay, default_prefill_load_scale,
-    overlap_score_credit_error_message, validate_finite_non_negative,
+    SelectionConfig, SharedCacheType, default_decode_active_request_weight,
+    default_disk_cache_hit_weight, default_host_cache_hit_weight,
+    default_overlap_score_credit_decay, default_prefill_load_scale, validate_finite_non_negative,
     validate_overlap_score_credit, validate_range,
 };
 pub use shared_cache::SharedCacheHits;
 pub use trace::{SelectionTrace, SelectionTraceRow, SelectionTraceSpec};
-
-pub use dynamo_router_protocol::session::SessionContext;
 
 /// Adds one finite cost contribution to each eligible worker.
 ///

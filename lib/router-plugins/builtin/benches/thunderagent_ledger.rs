@@ -31,6 +31,27 @@ const ISL: usize = 1_000;
 const HELD: usize = 1_000;
 const RETENTION: Duration = Duration::from_secs(3_600);
 
+/// A worker view with no rows: ThunderAgent's `classify` never reads the worker table.
+struct NoWorkers;
+
+impl WorkerView for NoWorkers {
+    fn len(&self) -> usize {
+        0
+    }
+
+    fn info(&self, _row: usize) -> Option<WorkerInfo> {
+        None
+    }
+
+    fn load(&self, _row: usize) -> Option<WorkerLoadView> {
+        None
+    }
+
+    fn cache(&self, _row: usize) -> Option<WorkerCacheView> {
+        None
+    }
+}
+
 fn worker(index: u64) -> WorkerWithDpRank {
     WorkerWithDpRank::new(index, 0)
 }
