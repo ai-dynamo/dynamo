@@ -27,6 +27,7 @@ from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tool_parsers import ToolParser, ToolParserManager
 
+from dynamo._core import _raise_routed_http_error
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.frontend import prepost as prepost_module
 from dynamo.frontend.prepost import (
@@ -38,6 +39,7 @@ from dynamo.llm.exceptions import (
     Cancelled,
     HttpError,
     InvalidArgument,
+    RoutedEngineError,
     WorkerUnavailable,
 )
 
@@ -2180,6 +2182,40 @@ class TestRoutedEnginePath:
         processor = _make_processor(vllm_processor_module, _RejectingRoutedEngine([]))
 
         with pytest.raises(type(rejection)) as caught:
+            await _run_generate(processor, _base_preproc())
+        assert caught.value is rejection
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("http_status", [499, 529])
+    @pytest.mark.parametrize("rejected_after_frames", [None, 1])
+    async def test_routed_engine_error_is_raised_not_enveloped(
+        self, vllm_processor_module, rejected_after_frames, http_status
+    ):
+        # Keep cancellation (499) and capacity (529) errors before or during a stream.
+        expected = Cancelled if http_status == 499 else RoutedEngineError
+        with pytest.raises(expected) as raised:
+            _raise_routed_http_error(http_status, "worker rejected request")
+        rejection = raised.value
+
+        class _RejectingRoutedEngine(_FakeRoutedEngine):
+            async def generate(self, preprocessed, **kwargs):
+                if rejected_after_frames is None:
+                    raise rejection
+                stream = await super().generate(preprocessed, **kwargs)
+
+                async def _stream():
+                    async for item in stream:
+                        yield item
+                    raise rejection
+
+                return _stream()
+
+        routed_engine = _RejectingRoutedEngine(
+            [{"token_ids": [101], "index": 0}] * (rejected_after_frames or 0)
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+
+        with pytest.raises(expected) as caught:
             await _run_generate(processor, _base_preproc())
         assert caught.value is rejection
 

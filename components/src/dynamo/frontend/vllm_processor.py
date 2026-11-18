@@ -45,6 +45,7 @@ from dynamo.llm.exceptions import (
     Cancelled,
     HttpError,
     InvalidArgument,
+    RoutedEngineError,
     WorkerUnavailable,
 )
 from dynamo.vllm.errors import vllm_client_error_to_public_error
@@ -1591,6 +1592,10 @@ class VllmProcessor:
         except Cancelled:
             # A cancelled request is HTTP 499, not a server fault; an error
             # envelope would turn it into a 500.
+            raise
+        except RoutedEngineError:
+            # Keep the worker's error class (for example CapacityExhausted, HTTP 529);
+            # an error envelope would turn it into a 500.
             raise
         except Exception as e:
             backend_error = backend_invalid_argument_to_http_error(e)

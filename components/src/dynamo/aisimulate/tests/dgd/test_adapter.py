@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-from aisimulate.output_adapter import validate_output_adapter
-from aisimulate.sweeper.result import SweepResult
+from aisim.output_adapter import validate_output_adapter
+from aisim.sweeper.result import SweepResult
 from pydantic import ValidationError
 
 from dynamo.aisimulate.output.dgd import adapter as adapter_module

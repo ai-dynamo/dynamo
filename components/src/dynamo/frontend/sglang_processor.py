@@ -24,7 +24,13 @@ from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uu
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import Cancelled, InvalidArgument, Unknown, WorkerUnavailable
+from dynamo.llm.exceptions import (
+    Cancelled,
+    InvalidArgument,
+    RoutedEngineError,
+    Unknown,
+    WorkerUnavailable,
+)
 
 from .responses_history import responses_tools_request
 from .sglang_prepost import (
@@ -1187,7 +1193,13 @@ class SglangProcessor:
             else:
                 if pending_terminal is not None:
                     yield finalize_terminal(pending_terminal)
-        except (Cancelled, InvalidArgument, Unknown, WorkerUnavailable):
+        except (
+            Cancelled,
+            InvalidArgument,
+            RoutedEngineError,
+            Unknown,
+            WorkerUnavailable,
+        ):
             # Cancelled keeps HTTP 499; wrapping it in Unknown would make it a 500.
             raise
         except Exception as e:
