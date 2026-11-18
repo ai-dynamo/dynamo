@@ -20,7 +20,7 @@ use crate::engine::discovery_bootstrap_port;
 use crate::proto as pb;
 
 /// The node's listener table as one listener reports it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct NodeTable {
     /// Every listener of the node, by DP rank: contiguous, unique, and below
     /// the deployment's DP size.
