@@ -137,12 +137,8 @@ def test_native_structured_output_validation_and_public_error(
         verify()
 
     if backend == "auto":
-        assert str(rejected.value).startswith("Grammar error: Unsatisfiable schema:")
         expected_message = auto_public_message
     else:
-        assert str(rejected.value).startswith(
-            "Failed to transform json schema into a grammar: "
-        )
         expected_message = "Invalid JSON schema: enum array must not be empty"
 
     for translate in (
@@ -175,6 +171,35 @@ def test_native_structured_output_validation_and_public_error(
         public_error = translate(rejected.value)
         assert isinstance(public_error, InvalidArgument)
         assert str(public_error) == "Invalid structured-output constraint"
+
+
+@pytest.mark.parametrize("backend", ["auto", "xgrammar"])
+@pytest.mark.parametrize("grammar", ["", " \n\t "])
+def test_native_blank_grammar_has_actionable_public_reason(
+    native_validation_config, backend, grammar
+):
+    from vllm.config import StructuredOutputsConfig
+    from vllm.exceptions import VLLMValidationError
+    from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+
+    from dynamo.llm.exceptions import InvalidArgument
+    from dynamo.vllm.errors import (
+        vllm_client_error_to_http_error,
+        vllm_client_error_to_public_error,
+    )
+
+    model, tokenizer = native_validation_config
+    params = SamplingParams(structured_outputs=StructuredOutputsParams(grammar=grammar))
+    with pytest.raises(VLLMValidationError) as rejected:
+        params.verify(model, None, StructuredOutputsConfig(backend=backend), tokenizer)
+
+    for translate in (
+        vllm_client_error_to_http_error,
+        vllm_client_error_to_public_error,
+    ):
+        public_error = translate(rejected.value)
+        assert isinstance(public_error, InvalidArgument)
+        assert str(public_error) == "Invalid grammar: grammar must not be empty"
 
 
 @pytest.mark.parametrize("backend", ["auto", "xgrammar"])

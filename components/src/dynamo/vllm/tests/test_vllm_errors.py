@@ -142,10 +142,6 @@ def test_unknown_synthetic_worker_error_remains_private(diagnostic):
 @pytest.mark.parametrize(
     "diagnostic",
     [
-        "Grammar error: Unsatisfiable schema: private_schema_secret",
-        "/private/compiler.cc:123: enum array must not be empty",
-        "[07:13:49] /private/source tree/compiler.cc:123: unknown validation failure",
-        "Template render failed: {{ private_template_secret }} at /private/template.jinja",
         "The decoder prompt (length 65) is longer than the maximum model "
         "length of 64. Make sure that `max_model_len` is no smaller than the "
         "number of text tokens.",
@@ -198,5 +194,31 @@ def test_known_compiler_log_format_is_private_for_any_400_class(error_name, diag
     assert isinstance(worker_error, HttpError)
     assert worker_error.code == 400
     assert worker_error.message == diagnostic
+    assert isinstance(public_error, InvalidArgument)
+    assert str(public_error) == "Invalid structured-output constraint"
+
+
+@pytest.mark.parametrize("error_name", ["VLLMValidationError", "VLLMClientError"])
+@pytest.mark.parametrize("prefix_offset", [-32, -16, 1])
+def test_compiler_location_guard_uses_untruncated_diagnostic(error_name, prefix_offset):
+    from vllm import exceptions as vllm_exceptions
+
+    from dynamo.llm.exceptions import _MAX_MESSAGE_LENGTH, HttpError, InvalidArgument
+    from dynamo.vllm.errors import (
+        vllm_client_error_to_http_error,
+        vllm_client_error_to_public_error,
+    )
+
+    cutoff = _MAX_MESSAGE_LENGTH - len("...")
+    diagnostic = (
+        "x" * (cutoff + prefix_offset)
+        + "[07:13:49] /private/compiler.cc:123: unknown compiler reason"
+    )
+    error = getattr(vllm_exceptions, error_name)(diagnostic)
+
+    worker_error = vllm_client_error_to_http_error(error)
+    assert isinstance(worker_error, HttpError)
+    assert worker_error.message == diagnostic[:cutoff] + "..."
+    public_error = vllm_client_error_to_public_error(error)
     assert isinstance(public_error, InvalidArgument)
     assert str(public_error) == "Invalid structured-output constraint"

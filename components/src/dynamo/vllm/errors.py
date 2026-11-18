@@ -43,6 +43,11 @@ def _structured_output_message(exc: VLLMValidationError) -> str | None:
     # publish the remaining arbitrary diagnostic.
     diagnostic = _XGRAMMAR_LOG_PREFIX.sub("", str(exc)).strip()
     structured = _from_structured_output_validation(exc)
+    if (
+        structured
+        and diagnostic == "structured_outputs.grammar cannot be an empty string"
+    ):
+        return "Invalid grammar: grammar must not be empty"
     if structured or diagnostic.startswith(
         "Failed to transform json schema into a grammar: "
     ):
@@ -103,7 +108,8 @@ def vllm_client_error_to_public_error(
     if isinstance(error, InvalidArgument):
         return error
     if error.code == 400:
-        if _XGRAMMAR_LOG_PREFIX.search(error.message):
+        # HttpError caps its message and can cut a compiler location in half.
+        if _XGRAMMAR_LOG_PREFIX.search(str(exc)):
             return InvalidArgument("Invalid structured-output constraint")
         return InvalidArgument(error.message)
     return error

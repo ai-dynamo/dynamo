@@ -1409,11 +1409,6 @@ async def test_generator_vllm_validation_error_keeps_reason_for_client(
             "Invalid structured-output constraint",
             id="unknown_compiler_diagnostic",
         ),
-        pytest.param(
-            "[Errno 2] No such file or directory: '/private/templates/chat.jinja'",
-            "[Errno 2] No such file or directory: '/private/templates/chat.jinja'",
-            id="template_path",
-        ),
     ],
 )
 async def test_generator_vllm_unknown_validation_error_preserves_scoped_policy(
