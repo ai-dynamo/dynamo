@@ -341,7 +341,8 @@ pub(super) struct Stats {
 
 pub(super) struct Predictor {
     sessions: SessionTable,
-    median: RunningMedian,
+    // Dropped at the ridge's first fit: no prediction falls back to it after that.
+    median: Option<RunningMedian>,
     ridge: OnlineRidge,
     next_refit: Option<Instant>,
     tree_rows: Vec<trees::Row>,
@@ -353,6 +354,19 @@ pub(super) struct Predictor {
     next_tree_refit: Option<Instant>,
     stats: Stats,
 }
+
+// A fit keeps one core busy for seconds. At the lowest priority it runs in the CPU time the
+// threads that serve requests leave free.
+#[cfg(target_os = "linux")]
+fn yield_to_serving_threads() {
+    // SAFETY: a plain syscall. On Linux `who == 0` is the calling thread, not the process.
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 19);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn yield_to_serving_threads() {}
 
 // The next boundary after `now` on a clock that ticks every `period` from `due`.
 fn next_boundary(due: Instant, period: Duration, now: Instant) -> Instant {
@@ -368,7 +382,7 @@ impl Predictor {
     fn with_limits(max_sessions: usize, median_window: usize) -> Self {
         Self {
             sessions: SessionTable::new(max_sessions),
-            median: RunningMedian::new(median_window),
+            median: Some(RunningMedian::new(median_window)),
             ridge: OnlineRidge::new(),
             next_refit: None,
             tree_rows: Vec::new(),
@@ -393,6 +407,9 @@ impl Predictor {
             if self.ridge.rows >= RIDGE_MIN_ROWS {
                 self.ridge.fit();
                 self.stats.ridge_fits += 1;
+                if self.ridge.model.is_some() {
+                    self.median = None;
+                }
             }
             self.next_refit = Some(next_boundary(next_refit, RIDGE_REFIT, now));
         }
@@ -405,7 +422,10 @@ impl Predictor {
                 let rows = self.tree_rows.clone();
                 self.tree_fit = std::thread::Builder::new()
                     .name("output-length-trees".to_owned())
-                    .spawn(move || trees::fit(&rows))
+                    .spawn(move || {
+                        yield_to_serving_threads();
+                        trees::fit(&rows)
+                    })
                     .ok();
             }
             self.next_tree_refit = Some(next_boundary(next_tree_refit, TREES_REFIT, now));
@@ -437,7 +457,7 @@ impl Predictor {
             (tokens_of(log_tokens), Source::Ridge)
         } else if let Some(history) = history {
             (history.smoothed_out, Source::Session)
-        } else if let Some(median) = self.median.value() {
+        } else if let Some(median) = self.median.as_ref().and_then(RunningMedian::value) {
             (median, Source::Median)
         } else {
             (PRIOR_TOKENS, Source::Prior)
@@ -480,7 +500,9 @@ impl Predictor {
         if let Some(session) = session {
             self.sessions.record(session, isl, out);
         }
-        self.median.add(out);
+        if let Some(median) = &mut self.median {
+            median.add(out);
+        }
         self.ridge.add(&ridge_row(features), out.ln_1p());
         let mut row = [0.0; FEATURES + 1];
         for (cell, feature) in row.iter_mut().zip(features) {
@@ -538,9 +560,13 @@ mod tests {
         }
         let before_refit = predictor.predict(Some(3), 9_000, start + RIDGE_REFIT / 2);
         assert_eq!(before_refit.source, Source::Session);
+        assert!(predictor.median.is_some());
         let after_refit = predictor.predict(Some(3), 9_000, start + RIDGE_REFIT);
         assert_eq!(after_refit.source, Source::Ridge);
         assert_eq!(predictor.stats().ridge_fits, 1);
+        assert!(predictor.median.is_none());
+        let stranger = predictor.predict(Some(4), 1_000, start + RIDGE_REFIT);
+        assert_eq!(stranger.source, Source::Ridge);
     }
 
     #[test]
@@ -578,6 +604,20 @@ mod tests {
         assert!(short.tokens < 120.0, "{}", short.tokens);
         assert!(long.tokens > 2_000.0, "{}", long.tokens);
         assert_eq!(predictor.stats().tree_fits, 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_the_fit_thread_gives_up_its_priority() {
+        // SAFETY: a plain syscall that reads the calling thread's nice value.
+        let nice = || unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
+        let before = nice();
+        let fit_thread = std::thread::spawn(move || {
+            yield_to_serving_threads();
+            nice()
+        });
+        assert_eq!(fit_thread.join().unwrap(), 19);
+        assert_eq!(nice(), before);
     }
 
     #[test]

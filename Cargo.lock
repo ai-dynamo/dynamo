@@ -3266,6 +3266,7 @@ dependencies = [
  "dynamo-kv-router",
  "dynamo-scheduler",
  "fastrand",
+ "libc",
  "parking_lot",
  "rustc-hash 2.1.2",
  "serde",
