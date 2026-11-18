@@ -25,6 +25,7 @@ pub mod args;
 pub mod client;
 pub mod engine;
 mod headless;
+mod kv_hints;
 mod native_http;
 
 /// Generated SGLang gRPC types, temporarily exposed for the Mocker server
