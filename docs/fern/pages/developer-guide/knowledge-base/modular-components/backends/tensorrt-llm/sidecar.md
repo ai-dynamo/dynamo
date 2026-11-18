@@ -102,8 +102,10 @@ need 1.4.0rc1 or later. Worker `main` containers run `sshd` for the MPI launch a
 no probes: the leader waits for `sshd`, and losing `sshd` or a rank aborts `mpirun` and
 restarts the leader. The release images ship no `sshd`, so the examples install
 `openssh-server` at start. The worker runs `sshd` as the container user on port `2222`
-with its config and host key under `$HOME`, so the examples work with both the root
-release image and the non-root Dynamo runtime image. The examples export the container
+with its config and host key under `$HOME`. Root workers use PAM account and session
+checks; non-root workers disable PAM. Both accept only public-key authentication.
+The leader preserves full Kubernetes hostnames when launching MPI ranks.
+The examples export the container
 environment to `sshd` sessions so Triton JIT on the worker finds CUDA. TensorRT-LLM
 attention DP requires untied input and output embeddings; the DP example serves
 `TinyLlama/TinyLlama-1.1B-Chat-v1.0`.

@@ -138,7 +138,8 @@ spec:
               SSH_ARGS="-p 2222 -i $HOME/.ssh/id_rsa -o StrictHostKeyChecking=no"
               until ssh $SSH_ARGS "$WORKER" true; do echo "waiting for sshd on $WORKER"; sleep 3; done
               exec mpirun --bind-to none -n 4 -H "$DYNAMO_LEADER_ADDRESS:2,$WORKER:2" \
-                --mca pml ob1 --mca plm_rsh_args "$SSH_ARGS" ${HF_TOKEN:+-x HF_TOKEN} \
+                --mca pml ob1 --mca orte_keep_fqdn_hostnames 1 \
+                --mca plm_rsh_args "$SSH_ARGS" ${HF_TOKEN:+-x HF_TOKEN} \
                 bash -c 'trtllm-llmapi-launch trtllm-serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
                   --grpc --grpc-protocol openengine --openengine-enable-load-metrics \
                   --host 0.0.0.0 --port 30001 --max_seq_len 2048 \
@@ -190,11 +191,13 @@ spec:
               command -v sshd >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server; }
               install -Dm600 /ssh-pk/private.key.pub "$HOME/.ssh/authorized_keys"
               ssh-keygen -q -t ed25519 -N '' -f "$HOME/.ssh/ssh_host_ed25519_key"
-              # Only an sshd started as root needs the privilege separation directory.
-              if [ "$(id -u)" = 0 ]; then mkdir -p /run/sshd; fi
+              # Root needs PAM for locked accounts; non-root sshd cannot use PAM.
+              SSH_USE_PAM=no
+              if [ "$(id -u)" = 0 ]; then mkdir -p /run/sshd; SSH_USE_PAM=yes; fi
               # StrictModes no: the Dynamo runtime image's home is group 0 and may be group-writable.
               printf '%s\n' 'Port 2222' "HostKey $HOME/.ssh/ssh_host_ed25519_key" "PidFile $HOME/.ssh/sshd.pid" \
                 "AuthorizedKeysFile $HOME/.ssh/authorized_keys" 'PasswordAuthentication no' \
+                'KbdInteractiveAuthentication no' "UsePAM $SSH_USE_PAM" \
                 'StrictModes no' 'PermitUserEnvironment yes' > "$HOME/.ssh/sshd_config"
               env | grep -vE '^(HF_TOKEN|HUGGING_FACE_HUB_TOKEN|HF_HUB_TOKEN)=' > "$HOME/.ssh/environment"
               exec /usr/sbin/sshd -D -e -f "$HOME/.ssh/sshd_config"
