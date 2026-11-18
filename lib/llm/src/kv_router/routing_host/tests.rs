@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::builder::hosted_picker;
+use super::builder::{check_hint_policies_route_on_kv_path, hosted_picker};
 use crate::kv_router::SelectionPolicySource;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::request_classifier::{
@@ -398,6 +398,7 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
 struct CompletedBuiltinDispatch {
     worker_ids: Mutex<Vec<u64>>,
     dp_ranks: Mutex<Vec<Option<u32>>>,
+    elapsed_since_arrival_ms: Mutex<Vec<Option<f64>>>,
     fails: AtomicBool,
     unfinished: AtomicBool,
 }
@@ -416,6 +417,10 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
             .lock()
             .unwrap()
             .push(content.routing.as_ref().and_then(|routing| routing.dp_rank));
+        self.elapsed_since_arrival_ms
+            .lock()
+            .unwrap()
+            .push(content.elapsed_since_arrival_ms);
         self.worker_ids
             .lock()
             .unwrap()
@@ -1319,12 +1324,12 @@ async fn run_kv_hit_attempt(final_frame: LLMEngineOutput) -> (KvHitSnapshot, KvH
 async fn kv_cache_hit_complete_attempt_records_every_stage_once() {
     let (before, after) = run_kv_hit_attempt(LLMEngineOutput {
         finish_reason: Some(FinishReason::Stop),
-        engine_data: Some(serde_json::json!({
+        engine_data: Some(Box::new(serde_json::json!({
             "kv_cache_hit": {
                 "prompt_tokens": 100,
                 "reused_tokens": 85,
             }
-        })),
+        }))),
         ..Default::default()
     })
     .await;
@@ -1351,12 +1356,12 @@ async fn kv_cache_hit_attempt_without_worker_report_contributes_zero() {
 async fn kv_cache_hit_cancelled_attempt_keeps_reported_reuse() {
     let (before, after) = run_kv_hit_attempt(LLMEngineOutput {
         finish_reason: Some(FinishReason::Cancelled),
-        engine_data: Some(serde_json::json!({
+        engine_data: Some(Box::new(serde_json::json!({
             "kv_cache_hit": {
                 "prompt_tokens": 100,
                 "reused_tokens": 85,
             }
-        })),
+        }))),
         ..Default::default()
     })
     .await;
@@ -1407,9 +1412,9 @@ async fn kv_cache_hit_counts_immediately_once_in_selection_phase(#[case] reused:
     let _permit = tracker.set_phase(RequestPhase::Decode).await;
     guard
         .on_item(&Annotated::from_data(LLMEngineOutput {
-            engine_data: Some(serde_json::json!({"kv_cache_hit": {
+            engine_data: Some(Box::new(serde_json::json!({"kv_cache_hit": {
                 "prompt_tokens": 1, "reused_tokens": reused
-            }})),
+            }}))),
             ..Default::default()
         }))
         .await;
@@ -1422,9 +1427,9 @@ async fn kv_cache_hit_counts_immediately_once_in_selection_phase(#[case] reused:
     );
     guard
         .on_item(&Annotated::from_data(LLMEngineOutput {
-            engine_data: Some(serde_json::json!({"kv_cache_hit": {
+            engine_data: Some(Box::new(serde_json::json!({"kv_cache_hit": {
                 "prompt_tokens": 1, "reused_tokens": 9
-            }})),
+            }}))),
             ..Default::default()
         }))
         .await;
@@ -2163,11 +2168,152 @@ async fn router_with_config_and_classifier(
     (router, runtime)
 }
 
+#[tokio::test]
+#[serial_test::serial]
+async fn aggregated_prompt_logprobs_deny_cache_credit_in_selection_and_booking() {
+    let (host, runtime) = router_with_config(
+        None,
+        HashMap::from([
+            (7, ModelRuntimeConfig::default()),
+            (8, ModelRuntimeConfig::default()),
+        ]),
+        KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            router_track_prefill_tokens: true,
+            router_temperature: 0.0,
+            overlap_score_credit: 1.0,
+            overlap_score_credit_decay: 0.0,
+            decode_active_request_weight: 0.0,
+            ..Default::default()
+        },
+    )
+    .await;
+    let tokens = (0..32).collect::<Vec<_>>();
+    host.kv_router()
+        .record_routing_decision(
+            TokensWithHashes::new(tokens.clone(), 16),
+            WorkerWithDpRank::new(7, 0),
+        )
+        .await
+        .unwrap();
+    let mut warm = request();
+    warm.token_ids = tokens.clone().into();
+    let warm = Context::new(warm);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (selection, _) = host
+                .select_with_affinity(
+                    &warm,
+                    RequestPhase::Aggregated,
+                    true,
+                    &CleanupBudget::default(),
+                )
+                .await
+                .unwrap();
+            if selection.cached_tokens == 32 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("recorded prefix becomes visible");
+
+    let mut held = request();
+    held.token_ids = (100..116).collect::<Vec<_>>().into();
+    held.routing_mut().backend_instance_id = Some(7);
+    let held_request = Context::new(held);
+    let (mut held, _) = host
+        .select_with_affinity(
+            &held_request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+
+    for (phase, prompt, extra, pinned, query, worker, cached) in [
+        (RequestPhase::Aggregated, Some(0), None, false, true, 8, 0),
+        (RequestPhase::Aggregated, Some(1), None, false, false, 8, 0),
+        (
+            RequestPhase::Aggregated,
+            Some(0),
+            Some(serde_json::json!({"sampling_options": {"skip_reading_prefix_cache": false}})),
+            true,
+            false,
+            7,
+            0,
+        ),
+        (RequestPhase::Aggregated, None, None, false, false, 7, 32),
+        (
+            RequestPhase::Aggregated,
+            None,
+            Some(serde_json::json!({"sampling_options": {"skip_reading_prefix_cache": true}})),
+            false,
+            false,
+            7,
+            32,
+        ),
+        (RequestPhase::Decode, Some(1), None, false, false, 7, 32),
+        (RequestPhase::Prefill, Some(1), None, false, false, 7, 32),
+    ] {
+        let mut input = request();
+        input.token_ids = tokens.clone().into();
+        input.output_options.prompt_logprobs = prompt;
+        input.output_options.logprobs = Some(1);
+        input.extra_args = extra;
+        if pinned {
+            input.routing_mut().backend_instance_id = Some(7);
+        }
+        let input = Context::new(input);
+        let (mut selection, _) = host
+            .select_with_affinity(&input, phase, query, &CleanupBudget::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            selection.worker.worker_id, worker,
+            "{phase:?}, prompt={prompt:?}"
+        );
+        assert_eq!(
+            selection.cached_tokens, cached,
+            "{phase:?}, prompt={prompt:?}"
+        );
+        let loads = potential_loads(&host).await;
+        assert_eq!(
+            loads.iter().map(|load| load.active_requests).sum::<usize>(),
+            1 + usize::from(!query)
+        );
+        assert_eq!(
+            loads
+                .iter()
+                .map(|load| load.potential_prefill_tokens)
+                .sum::<usize>(),
+            16 + if query { 0 } else { 32 - cached }
+        );
+        if let Some(booking) = selection.booking.take() {
+            booking.release().await.unwrap();
+        }
+    }
+    held.booking.take().unwrap().release().await.unwrap();
+    assert!(
+        potential_loads(&host)
+            .await
+            .iter()
+            .all(|load| load.active_requests == 0)
+    );
+    drop(host);
+    runtime.shutdown();
+}
+
 /// A dispatch plane that yields before completing, unlike [`CompletedBuiltinDispatch`].
 /// A recorded worker id therefore means the dispatch survived, not merely started.
 #[derive(Default)]
 struct PendingThenCompletedDispatch {
     worker_ids: Mutex<Vec<u64>>,
+    elapsed_since_arrival_ms: Mutex<Vec<Option<f64>>>,
 }
 
 #[async_trait]
@@ -2180,7 +2326,11 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         tokio::task::yield_now().await;
         let (addressed, context) = request.transfer(());
-        let (_, _, instance) = addressed.into_parts();
+        let (content, _, instance) = addressed.into_parts();
+        self.elapsed_since_arrival_ms
+            .lock()
+            .unwrap()
+            .push(content.elapsed_since_arrival_ms);
         self.worker_ids
             .lock()
             .unwrap()
@@ -2231,6 +2381,72 @@ async fn kv_rejects_partial_runtime_metadata_before_dispatch() {
         serde_json::from_value(serde_json::to_value(input).unwrap()).unwrap();
     assert!(router.generate(Context::new(input)).await.is_err());
     assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+    drop(router);
+    runtime.shutdown();
+}
+
+/// The router stamps how long the frontend has held a request as it dispatches it, so a backend
+/// can order admission by the original arrival. A request without a tracker, one this process
+/// did not receive from a client, keeps the stamp it arrived with.
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_dispatch_stamps_elapsed_since_arrival() {
+    let (router, dispatch, _, runtime) =
+        router_with_recorded_dispatch("kv-elapsed-since-arrival").await;
+    let tracker = Arc::new(RequestTracker::new());
+    let mut received = request();
+    received.tracker = Some(Arc::clone(&tracker));
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let mut forwarded = request();
+    forwarded.elapsed_since_arrival_ms = Some(1234.5);
+    for input in [received, forwarded] {
+        let mut stream = router.generate(Context::new(input)).await.unwrap();
+        while stream.next().await.is_some() {}
+    }
+    let age_ms = tracker.elapsed_since_arrival().as_secs_f64() * 1000.0;
+
+    let stamps = dispatch.elapsed_since_arrival_ms.lock().unwrap().clone();
+    assert_eq!(stamps.len(), 2, "{stamps:?}");
+    assert!(
+        stamps[0].is_some_and(|ms| (5.0..=age_ms).contains(&ms)),
+        "{stamps:?}, tracker age {age_ms} ms"
+    );
+    assert_eq!(stamps[1], Some(1234.5));
+    drop(router);
+    runtime.shutdown();
+}
+
+/// A request another router stamped crosses the wire without its tracker, and the receiving
+/// process gives it a new one. A dispatch then reports the upstream age plus the time spent
+/// here, and a retry of the stamped request does not count the first stamp again.
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_dispatch_adds_local_time_to_an_upstream_stamp() {
+    let (router, dispatch, _, runtime) =
+        router_with_recorded_dispatch("kv-elapsed-upstream-stamp").await;
+    let mut upstream = request();
+    upstream.elapsed_since_arrival_ms = Some(1500.0);
+    let mut relayed: PreprocessedRequest =
+        serde_json::from_value(serde_json::to_value(upstream).unwrap()).unwrap();
+    assert!(relayed.tracker.is_none());
+    let tracker = Arc::clone(relayed.ensure_tracker());
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let mut retried = relayed.clone();
+    retried.stamp_elapsed_since_arrival();
+    for input in [relayed, retried] {
+        let mut stream = router.generate(Context::new(input)).await.unwrap();
+        while stream.next().await.is_some() {}
+    }
+    let age_ms = tracker.elapsed_since_arrival().as_secs_f64() * 1000.0;
+
+    let stamps = dispatch.elapsed_since_arrival_ms.lock().unwrap().clone();
+    assert_eq!(stamps.len(), 2, "{stamps:?}");
+    for stamp in &stamps {
+        assert!(
+            stamp.is_some_and(|ms| (1505.0..=age_ms).contains(&ms)),
+            "{stamps:?}, tracker age {age_ms} ms"
+        );
+    }
     drop(router);
     runtime.shutdown();
 }
@@ -3024,9 +3240,9 @@ async fn tracked_admission_without_lifecycle_bypasses_classifier() {
 
     // `find_best_match_details_with_policy_class` with `update_states` is a tracked admission
     // that never calls `begin_request_lifecycle` — the same funnel as the
-    // Python bindings `best_worker` and the standalone `RouterRequest::New`
-    // path. The plugin would receive no lifecycle events for it, so admission
-    // must use the default queue inputs instead of the classifier.
+    // Python bindings `best_worker`. The plugin would receive no lifecycle
+    // events for it, so admission must use the default queue inputs instead of
+    // the classifier.
     let outcome = router
         .kv_router()
         .find_best_match_details_with_policy_class(
@@ -5051,6 +5267,49 @@ async fn unknown_explicit_workers_are_rejected_before_builtin_dispatch() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
+async fn builtin_dispatch_stamps_elapsed_since_arrival() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-elapsed-since-arrival")
+        .unwrap()
+        .component("workers")
+        .unwrap()
+        .endpoint("generate");
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    endpoint.register_endpoint_instance().await.unwrap();
+    client.wait_for_instances().await.unwrap();
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let host = RoutingHost::builder(client, RouterMode::RoundRobin)
+        .load_context(load_context)
+        .dispatch(Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>)
+        .build()
+        .await
+        .unwrap();
+    let tracker = Arc::new(RequestTracker::new());
+    let mut input = request();
+    input.tracker = Some(Arc::clone(&tracker));
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    let mut stream = host.generate(Context::new(input)).await.unwrap();
+    while stream.next().await.is_some() {}
+    let age_ms = tracker.elapsed_since_arrival().as_secs_f64() * 1000.0;
+
+    let stamps = dispatch.elapsed_since_arrival_ms.lock().unwrap().clone();
+    assert_eq!(stamps.len(), 1, "{stamps:?}");
+    assert!(
+        stamps[0].is_some_and(|ms| (5.0..=age_ms).contains(&ms)),
+        "{stamps:?}, tracker age {age_ms} ms"
+    );
+    drop(host);
+    runtime.shutdown();
+}
+
+#[tokio::test]
 async fn unknown_explicit_workers_are_rejected_before_kv_admission() {
     let (host, dispatch, worker_id, runtime) =
         router_with_recorded_dispatch("unknown-kv-worker").await;
@@ -5776,4 +6035,55 @@ async fn committed_session_lease_lives_as_long_as_the_response_stream() {
     assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
     drop(router);
     runtime.shutdown();
+}
+
+#[test]
+fn listed_hints_reject_every_non_kv_mode() {
+    use dynamo_kv_router::WorkerType;
+
+    let policy_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        policy_file.path(),
+        r#"
+worker_selection:
+  aggregated:
+    type: dynamo-default-cost-fn
+    hints:
+      - type: some_hint
+  prefill:
+    type: dynamo-default-cost-fn
+    hints: []
+  decode: dynamo-default-cost-fn
+"#,
+    )
+    .unwrap();
+    let config = KvRouterConfig {
+        router_policy_config: Some(policy_file.path().display().to_string()),
+        ..Default::default()
+    };
+    for mode in [
+        RouterMode::RoundRobin,
+        RouterMode::Random,
+        RouterMode::LeastLoaded,
+        RouterMode::Direct,
+        RouterMode::DeviceAwareWeighted,
+    ] {
+        let error = check_hint_policies_route_on_kv_path(mode, &config, &[WorkerType::Aggregated])
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("the hints in worker_selection.aggregated run only on the KV path"),
+            "{mode:?}: {error}"
+        );
+    }
+    check_hint_policies_route_on_kv_path(RouterMode::KV, &config, &[WorkerType::Aggregated])
+        .unwrap();
+    // An empty list, a bare entry and an unlisted role run only the passive defaults.
+    check_hint_policies_route_on_kv_path(
+        RouterMode::RoundRobin,
+        &config,
+        &[WorkerType::Prefill, WorkerType::Decode, WorkerType::Encode],
+    )
+    .unwrap();
 }

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import pytest
-from aisimulate_core.sdk.engine import compile_engine
+from aisim_core.sdk.engine import compile_engine
 
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,

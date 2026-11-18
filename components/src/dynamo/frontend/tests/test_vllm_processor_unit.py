@@ -27,6 +27,7 @@ from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tool_parsers import ToolParser, ToolParserManager
 
+from dynamo._core import _raise_routed_http_error
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.frontend import prepost as prepost_module
 from dynamo.frontend.prepost import (
@@ -34,7 +35,12 @@ from dynamo.frontend.prepost import (
     _prepare_request,
     build_tool_call_guided_decoding,
 )
-from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
+from dynamo.llm.exceptions import (
+    HttpError,
+    InvalidArgument,
+    RoutedEngineError,
+    WorkerUnavailable,
+)
 
 # NOTE: dynamo.frontend.vllm_processor is imported lazily inside the tests that
 # need it (and via the real_vllm_processor_module fixture). Importing it at module
@@ -1372,6 +1378,51 @@ async def test_generator_rejects_top_logprobs_without_logprobs(
 
 
 @pytest.mark.asyncio
+async def test_generator_vllm_validation_error_keeps_reason_for_client(
+    vllm_processor_module,
+):
+    from vllm.exceptions import VLLMValidationError
+
+    message = "The decoder prompt is longer than the maximum model length."
+
+    async def _inner(request, context=None):
+        raise VLLMValidationError(message)
+        yield  # pragma: no cover
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor._generator_inner = _inner
+
+    with pytest.raises(InvalidArgument, match="longer than the maximum model length"):
+        await anext(processor.generator({"model": "test"}))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_type", "expected_status"),
+    [("VLLMNotFoundError", 404), ("VLLMUnprocessableEntityError", 422)],
+)
+async def test_generator_vllm_non_400_client_error_keeps_status(
+    vllm_processor_module, error_type, expected_status
+):
+    from vllm import exceptions as vllm_exceptions
+
+    async def _inner(request, context=None):
+        raise getattr(vllm_exceptions, error_type)("rejected")
+        yield  # pragma: no cover
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor._generator_inner = _inner
+
+    with pytest.raises(HttpError) as excinfo:
+        await anext(processor.generator({"model": "test"}))
+    assert excinfo.value.code == expected_status
+
+
+@pytest.mark.asyncio
 async def test_generator_rejects_integer_chat_logprobs_before_preprocess(
     vllm_processor_module,
     monkeypatch,
@@ -2122,6 +2173,39 @@ class TestRoutedEnginePath:
         processor = _make_processor(vllm_processor_module, _RejectingRoutedEngine([]))
 
         with pytest.raises(WorkerUnavailable) as caught:
+            await _run_generate(processor, _base_preproc())
+        assert caught.value is rejection
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("http_status", [499, 529])
+    @pytest.mark.parametrize("rejected_after_frames", [None, 1])
+    async def test_routed_engine_error_is_raised_not_enveloped(
+        self, vllm_processor_module, rejected_after_frames, http_status
+    ):
+        # Keep cancellation (499) and capacity (529) errors before or during a stream.
+        with pytest.raises(RoutedEngineError) as raised:
+            _raise_routed_http_error(http_status, "worker rejected request")
+        rejection = raised.value
+
+        class _RejectingRoutedEngine(_FakeRoutedEngine):
+            async def generate(self, preprocessed, **kwargs):
+                if rejected_after_frames is None:
+                    raise rejection
+                stream = await super().generate(preprocessed, **kwargs)
+
+                async def _stream():
+                    async for item in stream:
+                        yield item
+                    raise rejection
+
+                return _stream()
+
+        routed_engine = _RejectingRoutedEngine(
+            [{"token_ids": [101], "index": 0}] * (rejected_after_frames or 0)
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+
+        with pytest.raises(RoutedEngineError) as caught:
             await _run_generate(processor, _base_preproc())
         assert caught.value is rejection
 

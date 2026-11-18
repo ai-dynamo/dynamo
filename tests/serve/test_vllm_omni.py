@@ -5,8 +5,10 @@ import dataclasses
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
+import yaml
 
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from tests.utils.vllm_omni import vllm_omni_skip_reason
@@ -18,6 +20,8 @@ try:
     from dynamo.vllm.omni.args import OmniConfig  # noqa: F401
 except (ImportError, OSError, NotImplementedError):
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
+
+import vllm_omni
 
 from tests.serve.common import (
     WORKSPACE_DIR,
@@ -241,6 +245,31 @@ vllm_omni_configs = {
             ),
         ],
     ),
+    # vLLM defaults to FlashInfer only on B200/GB200, which CI does not have.
+    "omni_audio_flashinfer": VLLMOmniConfig(
+        name="omni_audio_flashinfer",
+        directory=vllm_dir,
+        script_name="agg_omni_audio.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(1200),
+        ],
+        model="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        request_payloads=[
+            AudioSpeechPayload(
+                body={
+                    "input": "Hello, this is a test of Dynamo audio generation.",
+                    "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+                    "voice": "vivian",
+                    "language": "English",
+                },
+                repeat_count=1,
+                expected_response=[],
+                expected_log=[r"Warming up FlashInfer attention"],
+            ),
+        ],
+    ),
     "omni_audex": VLLMOmniConfig(
         name="omni_audex",
         directory=vllm_dir,
@@ -343,6 +372,16 @@ vllm_omni_configs = {
 }
 
 
+def _write_flashinfer_qwen3_tts_stage_config(tmp_path: Path) -> str:
+    source = Path(vllm_omni.__file__).parent / "deploy" / "qwen3_tts.yaml"
+    config = yaml.safe_load(source.read_text())
+    for stage in config["stages"]:
+        stage["attention_config"] = {"backend": "FLASHINFER"}
+    path = tmp_path / "qwen3_tts_flashinfer.yaml"
+    path.write_text(yaml.safe_dump(config, sort_keys=False))
+    return str(path)
+
+
 @pytest.fixture(params=params_with_model_mark(vllm_omni_configs))
 def vllm_omni_config_test(request):
     """Fixture that provides different vLLM-Omni test configurations."""
@@ -358,6 +397,7 @@ def test_omni_serve_deployment(
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
     predownload_models,
+    tmp_path,
 ):
     """Test dynamo serve deployments with vLLM-Omni configurations."""
     config = dataclasses.replace(
@@ -368,6 +408,12 @@ def test_omni_serve_deployment(
         if config.name == "omni_audio" and detect_target_device() == "xpu"
         else None
     )
+    if config.name == "omni_audio_flashinfer":
+        extra_env = {
+            "DYN_OMNI_STAGE_CONFIGS_PATH": _write_flashinfer_qwen3_tts_stage_config(
+                tmp_path
+            )
+        }
     run_serve_deployment(
         config, request, ports=dynamo_dynamic_ports, extra_env=extra_env
     )

@@ -19,7 +19,7 @@ use super::queue::{
     BookingHandle, ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor,
     SchedulerQueue,
 };
-use super::selector::{WorkerInputs, WorkerSelector, log_selection};
+use super::selector::{WorkerSelector, log_selection};
 use super::types::{
     AdmissionAttempt, AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId,
     KvSchedulerError, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad,
@@ -33,11 +33,12 @@ use crate::types::RejectThresholdsProvider;
 use dynamo_admission::PolicyProfile;
 #[cfg(test)]
 use dynamo_admission::RouterQueuePolicy;
-use dynamo_admission::classifier::{ClassifyRequest, RequestClassifier};
-use dynamo_admission::classifier::{RequestClassifierRuntime, RequestLifecycle};
+use dynamo_admission::{ClassifyRequest, RequestClassifier};
+use dynamo_admission::{RequestClassifierRuntime, RequestLifecycle};
 use dynamo_kv_hashing::LocalBlockHash;
+use dynamo_kv_indexer::ResidentBlockCountsHandle;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
-use dynamo_slot_tracker::topology::WorkerDpRange;
+use dynamo_slot_tracker::WorkerDpRange;
 use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, PrefillCompletion, PrefillTokenDeltas,
     SequenceError, SequencePublisher, SequenceRequest,
@@ -45,6 +46,7 @@ use dynamo_slot_tracker::{
 use dynamo_tokens::SequenceHash;
 use dynamo_worker_selection::SelectionTraceSpec;
 use dynamo_worker_selection::WorkerCapacity;
+use dynamo_worker_selection::WorkerInputs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkerConfigReconcileOutcome {
@@ -440,7 +442,7 @@ where
             return Ok(None);
         };
         // A tracked admission with no registered lifecycle (Python bindings
-        // `best_worker`, `RouterRequest::New`) never emits lifecycle events, so
+        // `best_worker`) never emits lifecycle events, so
         // classifying it would corrupt plugin bookkeeping. It uses the default
         // queue inputs, exactly as if no classifier were installed.
         let Some(overrides_cached) = classifier.cached_overrides(request_id) else {
@@ -531,6 +533,14 @@ where
     /// Returns `false` when a spec is already installed.
     pub fn set_selection_trace(&self, spec: SelectionTraceSpec) -> bool {
         self.queue.set_selection_trace(spec)
+    }
+
+    /// Lend the partition's live resident block counts to every selection, for a policy that
+    /// declared [`WorkerInputs::RESIDENT_BLOCKS`].
+    ///
+    /// Returns `false` when counts are already installed.
+    pub fn set_resident_block_counts(&self, counts: ResidentBlockCountsHandle) -> bool {
+        self.queue.set_resident_block_counts(counts)
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -981,11 +991,11 @@ mod tests {
     use crate::PrefillLoadEstimator;
     use crate::selector::DefaultWorkerSelector;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
-    use dynamo_admission::classifier::ClassifyFuture;
-    use dynamo_admission::classifier::WorkerView;
+    use dynamo_admission::ClassifyFuture;
+    use dynamo_admission::WorkerView;
+    use dynamo_slot_tracker::BusyThresholds;
     use dynamo_slot_tracker::SequenceSubscriber;
-    use dynamo_slot_tracker::busy::BusyThresholds;
-    use dynamo_slot_tracker::wire::{ActiveSequenceEvent, ActiveSequenceEventData};
+    use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
 
     struct TestSequenceSubscriber {
         rx: mpsc::UnboundedReceiver<ActiveSequenceEvent>,
@@ -1021,7 +1031,7 @@ mod tests {
                     token_sequence: None,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
-                    prefill_load_hint: Some(dynamo_slot_tracker::wire::PrefillLoadHint {
+                    prefill_load_hint: Some(dynamo_slot_tracker::PrefillLoadHint {
                         initial_effective_prefill_tokens: 64,
                         expected_prefill_duration: None,
                     }),
@@ -1581,7 +1591,7 @@ mod tests {
                 token_sequence: None,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
-                prefill_load_hint: Some(dynamo_slot_tracker::wire::PrefillLoadHint {
+                prefill_load_hint: Some(dynamo_slot_tracker::PrefillLoadHint {
                     initial_effective_prefill_tokens: 64,
                     expected_prefill_duration: None,
                 }),

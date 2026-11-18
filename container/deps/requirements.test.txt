@@ -20,7 +20,7 @@ datasets==4.4.1
 # Datadog Test Optimization pytest plugin (--ddtrace). Pre-installed rather than
 # letting Datadog's CI action pip-install it at run time: that installer needs
 # `pip` on PATH, and it pulls its own coverage version over the coverage pin.
-ddtrace==4.14.0
+ddtrace==4.15.6
 # Execute Planner's production Redis Lua scripts in unit tests.
 fakeredis[lua]==2.39.0
 filelock==3.25.1

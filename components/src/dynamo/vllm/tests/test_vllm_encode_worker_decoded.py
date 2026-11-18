@@ -3,13 +3,16 @@
 
 """Unit tests for encode-worker multimodal helpers."""
 
+import base64
 import importlib.util
 import logging
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
 import torch
 from PIL import Image
+from vllm.multimodal.media.image import ImageMediaIO
 
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
@@ -119,6 +122,22 @@ async def test_encode_worker_image_cache_capacity_follows_env(
     finally:
         handler.cleanup()
         await handler.send_complete_checker_task
+
+
+@pytest.mark.asyncio
+async def test_encode_worker_image_matches_vllm_loader(monkeypatch):
+    handler = _encode_handler_with_cache_env(monkeypatch, "8")
+    image = Image.new("RGBA", (4, 2))
+    image.putpixel((0, 0), (0, 0, 0, 255))
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    content = buf.getvalue()
+    url = "data:image/png;base64," + base64.b64encode(content).decode()
+
+    loaded = await handler.image_loader.load_image(url)
+
+    expected = ImageMediaIO(image_mode="RGB").load_bytes(content).media
+    assert (loaded.mode, loaded.tobytes()) == (expected.mode, expected.tobytes())
 
 
 def test_prepare_embedding_transfers_coalesces_uneven_images():

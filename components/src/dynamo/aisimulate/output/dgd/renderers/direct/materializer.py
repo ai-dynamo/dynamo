@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from aisimulate.capacity import (
+from aisim.capacity import (
     DEFAULT_FREE_GPU_MEMORY_FRACTION,
     DEFAULT_GPU_MEMORY_UTILIZATION,
     DEFAULT_MEM_FRACTION_STATIC,
@@ -38,7 +38,7 @@ _DEFAULT_MEMORY_FRACTIONS = {
 
 # Candidate.config's key names for one worker's shape/kv-cache/scheduler/
 # replica/attention-dp fields, by deployment mode. Confirmed against
-# aisimulate.sweeper.sample.unroll_sample/_unroll_parallel: agg mode uses a
+# aisim.sweeper.sample.unroll_sample/_unroll_parallel: agg mode uses a
 # mix of bare keys (tp, replicas, strategy, attention_dp, moe_tp, moe_ep) and
 # "agg_"-prefixed keys (agg_block_size, agg_max_num_seqs, ...) -- NOT a
 # uniform prefix. Disagg mode uses a uniform "{role}_" prefix for every one
@@ -213,7 +213,7 @@ def materialize_dgd_from_candidate(
     standard DECODE lookup, then fall back to any non-Frontend/Planner
     service"). Disagg mode ignores it: both PREFILL and DECODE are always
     materialized, using their own role-prefixed fields from
-    candidate_config (confirmed via aisimulate.sweeper.sample.py: a disagg
+    candidate_config (confirmed via aisim.sweeper.sample.py: a disagg
     Candidate.config has no bare tp/strategy/replicas/agg_* keys at all --
     everything is prefill_*/decode_*-prefixed).
 
