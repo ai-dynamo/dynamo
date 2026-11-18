@@ -792,6 +792,18 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		},
 
 		{
+			name:    "v1beta2 null sentinels survive admission and delete lowered fields",
+			request: beta2SchemaDGDRForAdmission(`{"engine":{"mode":"aggregated","workers":{"prefill":{"$null":true},"decode":{"$null":true}}},"traffic":{"stop":{"requests":{"$null":true},"requests_per_load_unit":10}}}`, nil),
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				for _, role := range []string{"prefill", "decode"} {
+					value, found, err := unstructured.NestedBool(result.Object, "spec", "aisim", "inputOverrides", "engine", "workers", role, "$null")
+					if err != nil || !found || !value {
+						t.Fatalf("stored %s sentinel = %v, found=%v err=%v", role, value, found, err)
+					}
+				}
+			},
+		},
+		{
 			name: "v1beta2 public input overrides may configure non-reserved dgdr run fields",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				setV1beta2InputOverrides(spec, map[string]any{"dgdr_run": map[string]any{
@@ -841,6 +853,13 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			}),
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
+			wantWebhook: []string{
+				"spec.aisim.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
+			},
+		},
+		{
+			name:    "v1beta2 dgdr run input cannot be deleted by a null sentinel",
+			request: beta2SchemaDGDRForAdmission(`{"dgdr_run":{"$null":true}}`, nil),
 			wantWebhook: []string{
 				"spec.aisim.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
 			},

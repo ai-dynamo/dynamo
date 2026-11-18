@@ -47,6 +47,7 @@ from dynamo.planner.retune.live.contracts import (
     KubeNotFound,
     PodInfo,
 )
+from dynamo.planner.retune.live.input_overrides import expand_input_override_nulls
 
 # Operator constants (deploy/operator/internal/controller at #17483).
 REQUEST_GENERATION_ANNOTATION = "nvidia.com/dgdr-request-generation"
@@ -255,7 +256,9 @@ def lower_request_input(
         nested_get(underlay, "optimization", "strict_sla") is None
     ):
         _nested_set(underlay, ("optimization", "strict_sla"), True)
-    overrides = nested_get(spec, "aisim", "inputOverrides", default={}) or {}
+    overrides = (
+        expand_input_override_nulls(nested_get(spec, "aisim", "inputOverrides")) or {}
+    )
     effective = merge_patch(underlay, overrides)
     is_pareto = objective.get("mode") == "Pareto"
     reserved = {
