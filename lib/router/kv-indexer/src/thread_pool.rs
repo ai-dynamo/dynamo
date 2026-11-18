@@ -1221,8 +1221,6 @@ impl<'a, T: SyncIndexer> ThreadPoolObservationSession<'a, T> {
     }
 }
 
-/// [`await_lane_reply`] for an observation task: a lane exit is `WorkerOffline`, and a dropped
-/// reply is the step's own `canceled` error.
 #[cfg(feature = "bench")]
 async fn await_observation_reply<R>(
     reply: oneshot::Receiver<R>,
