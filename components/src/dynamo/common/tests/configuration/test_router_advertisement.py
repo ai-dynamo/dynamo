@@ -146,6 +146,69 @@ def test_unknown_mode_is_rejected():
         build_router_config(config)
 
 
+def _policy_config(tmp_path, worker_selection: str) -> str:
+    path = tmp_path / "router-policy.yaml"
+    path.write_text(f"worker_selection:\n{worker_selection}")
+    return str(path)
+
+
+@pytest.mark.parametrize("mode", ["round-robin", "least-loaded", "direct"])
+def test_hints_off_the_kv_path_are_rejected(tmp_path, mode):
+    """Only the KV path runs hints, so another mode would drop them silently."""
+    policy = _policy_config(
+        tmp_path,
+        "  aggregated:\n    type: dynamo-default-cost-fn\n"
+        "    hints:\n      - type: kv_fetch\n",
+    )
+    config, _ = parse_worker_router_config(
+        ["--router-mode", mode, "--router-policy-config", policy]
+    )
+    with pytest.raises(
+        ValueError,
+        match="the hints in worker_selection for aggregated run only on the KV path",
+    ):
+        build_router_config(config)
+
+
+@pytest.mark.parametrize(
+    "worker_selection",
+    [
+        "  aggregated:\n    type: dynamo-default-cost-fn\n    hints: []\n",
+        "  aggregated: dynamo-default-cost-fn\n",
+    ],
+)
+def test_default_hints_are_allowed_off_the_kv_path(tmp_path, worker_selection):
+    """An empty list, or an entry without hints, runs no hints that need the KV path."""
+    policy = _policy_config(tmp_path, worker_selection)
+    config, _ = parse_worker_router_config(
+        ["--router-mode", "round-robin", "--router-policy-config", policy]
+    )
+    assert build_router_config(config) is not None
+
+
+@pytest.mark.parametrize(
+    "document, message",
+    [
+        ("- type: kv_fetch\n", "--router-policy-config must contain a YAML mapping"),
+        (
+            "worker_selection:\n  - type: kv_fetch\n",
+            "worker_selection must contain a YAML mapping",
+        ),
+    ],
+)
+def test_malformed_policy_config_is_rejected_off_the_kv_path(
+    tmp_path, document, message
+):
+    """Off the KV path nothing else reads the file, so a bad shape would go unnoticed."""
+    path = tmp_path / "router-policy.yaml"
+    path.write_text(document)
+    config, _ = parse_worker_router_config(
+        ["--router-mode", "round-robin", "--router-policy-config", str(path)]
+    )
+    with pytest.raises(ValueError, match=message):
+        build_router_config(config)
+
+
 @pytest.mark.parametrize("backend", ["vllm", "trtllm", "sglang"])
 def test_router_flags_do_not_collide_with_backend_flags(backend):
     """Guard against a backend later adding a flag the router group owns.

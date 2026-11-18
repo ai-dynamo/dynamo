@@ -47,6 +47,7 @@ pub struct Metrics {
     in_flight: IntGaugeVec,
     /// Present only with `--router-policy affinity`.
     affinity: Option<AffinityCounters>,
+    selection: Histogram,
     /// A scrape resets and refills the gauges, so scrapes must not overlap.
     scrape: Mutex<()>,
 }
@@ -255,6 +256,18 @@ impl Metrics {
                 &POOL_LABELS,
             ),
         );
+        // Mirrors the local router's `dynamo_router_overhead_*_ms`. Unlabelled:
+        // compare selection paths across runs.
+        let selection = register(
+            &registry,
+            Histogram::with_opts(
+                HistogramOpts::new(
+                    name("overhead_selection_ms"),
+                    "Time to select a pool for a request, in milliseconds",
+                )
+                .buckets(prometheus::exponential_buckets(0.01, 3.0, 17).expect("valid buckets")),
+            ),
+        );
         Self {
             registry,
             region,
@@ -266,6 +279,7 @@ impl Metrics {
             duration,
             in_flight,
             affinity: None,
+            selection,
             scrape: Mutex::new(()),
         }
     }
@@ -301,6 +315,11 @@ impl Metrics {
             reported: Mutex::new(vec![0; series]),
         });
         self
+    }
+
+    pub(crate) fn selected(&self, started: Instant) {
+        self.selection
+            .observe(started.elapsed().as_secs_f64() * 1000.0);
     }
 
     /// Counts a request answered without a pool. `error_type` is one of
