@@ -1759,7 +1759,10 @@ async def test_translate_vllm_client_errors_processor_rejection(
             allocation_error: BaseException = MemoryError()
         else:
             # PyTorch's CPU allocator raises a plain RuntimeError.
-            with pytest.raises(RuntimeError, match="can't allocate memory") as alloc:
+            with pytest.raises(
+                RuntimeError,
+                match="DefaultCPUAllocator: (can't allocate memory|not enough memory)",
+            ) as alloc:
                 torch.empty(2**62, dtype=torch.uint8)
             allocation_error = alloc.value
         processor_error = ValueError("Unable to convert output 'pixel_values'")
