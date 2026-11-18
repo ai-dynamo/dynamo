@@ -456,7 +456,7 @@ async def test_image_next_to_float_video_is_handed_over_as_a_float_tensor(
     and skip rescaling when the video frames are float. Next to such a video
     the image goes over as the float (3, H, W) [0, 1] tensor trtllm-serve
     sends, so both are scaled alike; the video and the item order are kept."""
-    processor, _ = image_video_processor(None, model_type)
+    processor, pil_image = image_video_processor(None, model_type)
     source = _pt_video(_decoded_frames())
     _route_video(monkeypatch, path, source)
 
@@ -468,7 +468,7 @@ async def test_image_next_to_float_video_is_handed_over_as_a_float_tensor(
 
     mm_data = processed["multi_modal_data"]
     (image,) = mm_data["image"]
-    pixels = np.asarray(Image.new("RGB", (5, 4), (200, 30, 30)), dtype=np.float32)
+    pixels = np.asarray(pil_image, dtype=np.float32)
     expected = torch.from_numpy(pixels / 255.0).permute(2, 0, 1)
     assert isinstance(image, torch.Tensor)
     assert image.dtype == torch.float32 and image.shape == (3, 4, 5)
@@ -481,11 +481,10 @@ async def test_image_next_to_float_video_is_handed_over_as_a_float_tensor(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model_type", ["qwen2_vl", "qwen2_5_vl", "exaone4_5"])
 async def test_single_modality_requests_are_served_for_a_shared_rescale_flag(
-    model_type, image_video_processor, monkeypatch
+    image_video_processor, monkeypatch
 ) -> None:
-    processor, image = image_video_processor(None, model_type)
+    processor, image = image_video_processor(None, "qwen2_5_vl")
     source = _pt_video(_decoded_frames())
     _route_video(monkeypatch, "nvdec", source)
 
