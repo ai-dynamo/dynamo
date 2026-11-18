@@ -612,6 +612,30 @@ where
     }
 }
 
+/// `GetServerInfo` reports no capabilities; `ContinueGeneration` is a no-op unless paused.
+pub(crate) async fn generation_controls_supported(
+    client: &mut Client,
+    timeout: Duration,
+) -> Result<bool, DynamoError> {
+    let request = client.continue_generation(pb::ContinueGenerationRequest {
+        torch_empty_cache: None,
+    });
+    match timeout_at(Instant::now() + timeout, request).await {
+        Ok(Ok(_)) => Ok(true),
+        Ok(Err(status)) if status.code() == tonic::Code::Unimplemented => {
+            tracing::warn!(
+                %status,
+                "SGLang has no ContinueGeneration; pause/resume controls are not advertised"
+            );
+            Ok(false)
+        }
+        Ok(Err(status)) => Err(status_to_dynamo("ContinueGeneration", status)),
+        Err(_) => Err(connection_timeout(
+            "ContinueGeneration exceeded the configured deadline",
+        )),
+    }
+}
+
 fn deadline_result<T>(
     rpc: &str,
     result: Result<Result<T, tonic::Status>, Elapsed>,

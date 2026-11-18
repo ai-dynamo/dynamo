@@ -490,6 +490,26 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
         Ok(Response::new(pb::AbortResponse { success }))
     }
 
+    // The Mocker has no scheduler to stop, so it answers like an SGLang older
+    // than these RPCs and the sidecar advertises no generation controls.
+    async fn pause_generation(
+        &self,
+        _request: Request<pb::PauseGenerationRequest>,
+    ) -> Result<Response<pb::GenerationPauseResponse>, Status> {
+        Err(Status::unimplemented(
+            "pause_generation is not supported by the Mocker server",
+        ))
+    }
+
+    async fn continue_generation(
+        &self,
+        _request: Request<pb::ContinueGenerationRequest>,
+    ) -> Result<Response<pb::GenerationPauseResponse>, Status> {
+        Err(Status::unimplemented(
+            "continue_generation is not supported by the Mocker server",
+        ))
+    }
+
     async fn get_hi_cache_storage(
         &self,
         _request: Request<pb::GetHiCacheStorageRequest>,

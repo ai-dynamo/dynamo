@@ -54,6 +54,7 @@ struct StartedState {
     listeners: NodeListeners,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
     combined_token_limit: Option<u32>,
+    generation_controls: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -370,6 +371,11 @@ impl LLMEngine for SglangSidecarEngine {
                 .runtime_data
                 .insert("sglang_generate".into(), true.into());
         }
+        let generation_controls = client::generation_controls_supported(
+            &mut started[0].0.control_client(),
+            self.transport.connect_attempt_timeout,
+        )
+        .await?;
         let mut native_http = native_http.map(Vec::into_iter);
         let listeners = started
             .into_iter()
@@ -407,6 +413,7 @@ impl LLMEngine for SglangSidecarEngine {
                 listeners,
                 kv_event_sources,
                 combined_token_limit,
+                generation_controls,
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
         tracing::info!(
@@ -612,9 +619,15 @@ impl LLMEngine for SglangSidecarEngine {
     }
 
     async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
-        // SGLang answers both; a server that does not returns UNIMPLEMENTED to
-        // the caller. Memory occupation stays off the control surface: releasing
-        // it must not re-register the endpoint before weights are refreshed.
+        // Memory occupation stays off the control surface: releasing it must not
+        // re-register the endpoint before weights are refreshed.
+        let supported = self
+            .state
+            .get()
+            .is_some_and(|state| state.generation_controls);
+        if !supported {
+            return Ok(Vec::new());
+        }
         Ok(vec![
             "pause_generation".to_string(),
             "resume_generation".to_string(),
