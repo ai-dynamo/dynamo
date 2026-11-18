@@ -674,10 +674,12 @@ where
         Some(self.direct.get_or_init(|| dispatch).clone())
     }
 
+    /// A missing registration is a process misconfiguration, not a worker
+    /// fault: `Internal` fails the request without reporting the worker down.
     fn direct(&self, instance_id: u64) -> Result<Arc<dyn StreamingDispatch<T, U>>, Error> {
         self.registered_direct().ok_or_else(|| {
             DynamoError::builder()
-                .error_type(ErrorType::CannotConnect)
+                .error_type(ErrorType::Internal)
                 .message(format!(
                     "instance {instance_id} is reached directly, but no direct dispatch is registered"
                 ))
@@ -4000,9 +4002,10 @@ mod tests {
         rt.shutdown();
     }
 
-    /// A direct instance with no registered direct dispatch cannot be reached.
+    /// A direct instance with no registered direct dispatch fails the request
+    /// as `Internal` and is not reported down.
     #[tokio::test]
-    async fn direct_instances_without_a_registered_dispatch_cannot_connect() {
+    async fn direct_instances_without_a_registered_dispatch_fail_internal() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
             .await
@@ -4018,7 +4021,7 @@ mod tests {
         client.wait_for_instances().await.unwrap();
 
         let router = PushRouter::<u64, TestResponse>::from_client_with_options(
-            client,
+            client.clone(),
             RouterMode::RoundRobin,
             PushRouterOptions {
                 selectors: Some(test_selectors()),
@@ -4031,8 +4034,14 @@ mod tests {
             panic!("no dispatch is registered for direct instances");
         };
         assert!(
-            match_error_chain(error.as_ref(), &[ErrorType::CannotConnect], &[]),
+            match_error_chain(error.as_ref(), &[ErrorType::Internal], &[]),
             "{error}"
+        );
+        assert!(!is_inhibited(error.as_ref()), "{error}");
+        assert_eq!(
+            client.instance_ids_avail().len(),
+            1,
+            "a missing registration must not report the worker down"
         );
 
         rt.shutdown();
