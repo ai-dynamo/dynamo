@@ -119,7 +119,9 @@ later. DynamoComponentDeployments are not checked.
 **Affected:** Checkpoint-enabled DGD components whose `main` container omits `command`, sets a shell
 wrapper such as `/bin/sh -c`, or uses a vLLM launch that the operator wraps in a shell for Ray, for
 example `--enable-elastic-ep --data-parallel-backend ray` or multinode tensor parallelism with the
-Ray executor backend. These components could not be restored before this change either.
+Ray executor backend. These components could not be restored before this change either. A
+checkpoint-enabled DGD is also rejected when admission cannot render the launch, for example when its
+GPU `ResourceClaimTemplate` does not exist yet.
 
 **Action:** Set `command` to a direct `python -m <module>` launch, or disable checkpointing for the
 component.

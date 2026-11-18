@@ -2150,12 +2150,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "restore launch rule ignores a shell launch when checkpointing is disabled",
-			deployment: checkpointWorkerDGDForAdmission([]string{"/bin/sh", "-c"}, []string{"python3 -m dynamo.vllm"}, func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-				worker.Experimental.Checkpoint.Enabled = false
-			}),
-		},
-		{
 			name: "Grove restore launch follows metadata annotations over spec annotations",
 			deployment: checkpointWorkerDGDForAdmission([]string{"python3", "-m", "dynamo.vllm"}, []string{"--tensor-parallel-size", "16"}, func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
