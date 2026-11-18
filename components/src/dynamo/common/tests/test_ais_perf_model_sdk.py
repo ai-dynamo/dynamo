@@ -15,11 +15,11 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip(
-    "aisimulate_core.sdk",
+    "aisim_core.sdk",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from aisimulate_core.sdk import ForwardPassPerfModelConfig
+from aisim_core.sdk import ForwardPassPerfModelConfig
 
 from dynamo.common import ais_perf_model
 from tests.utils.ais_perf_model import IDENTITY

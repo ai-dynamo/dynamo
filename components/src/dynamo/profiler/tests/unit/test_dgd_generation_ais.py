@@ -444,8 +444,16 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         )
 
         assert spec is not None
-        assert spec.roles["prefill"]["cp_size"] == 4
-        assert spec.roles["decode"]["cp_size"] is None
+        entries = {entry["worker_type"]: entry for entry in spec}
+        assert entries["prefill"]["cp_size"] == 4
+        assert "cp_size" not in entries["decode"]
+        # AISimulate accepts both configs, checked as the Planner checks them.
+        checked = {
+            role: dgd_generation.ais_perf_model_role_config(role, entry)
+            for role, entry in entries.items()
+        }
+        assert checked["prefill"]["cp_size"] == 4
+        assert checked["decode"]["cp_size"] is None
 
     def test_ais_perf_model_falls_back_when_database_is_unavailable(self, monkeypatch):
         monkeypatch.setattr(
@@ -875,6 +883,11 @@ def _checked_value(planner: PlannerConfig, prefill_pick=None, decode_pick=None):
             "moe_ep_size=8 conflicts with selected deployment moe_ep_size=1",
             id="moe-ep-size",
         ),
+        pytest.param(
+            {"cp_size": 4},
+            "cp_size=4 conflicts with selected deployment cp_size=1",
+            id="cp-size",
+        ),
     ],
 )
 def test_entry_with_from_is_refused_for_a_key_it_writes(tmp_path, written, conflict):
@@ -974,7 +987,8 @@ _TEMPLATE = "/missing/template.yaml"
 _DATASET_PROFILE = {"root": "/not-mounted-yet/dataset", "manifest": "profile.json"}
 _COMPLETE = {"model": "Qwen/Qwen3-32B", "system": "h200_sxm", "backend": "vllm"}
 _EVERY_FIELD = (
-    "model, system, backend, tp, pp, attention_dp, moe_tp_size and moe_ep_size"
+    "model, system, backend, tp, pp, attention_dp, moe_tp_size, moe_ep_size "
+    "and cp_size"
 )
 
 
@@ -996,7 +1010,8 @@ def _generation_warnings(caplog) -> list[str]:
         pytest.param(
             "decode",
             {"from": _TEMPLATE, "model": "Qwen/Qwen3-32B", "tp": 2},
-            "decode: system, backend, pp, attention_dp, moe_tp_size and moe_ep_size",
+            "decode: system, backend, pp, attention_dp, moe_tp_size, moe_ep_size "
+            "and cp_size",
             id="from-next-to-two-fields",
         ),
         pytest.param(
@@ -1011,8 +1026,8 @@ def _generation_warnings(caplog) -> list[str]:
                 {"worker_type": "prefill", "from": _TEMPLATE, "pp": 1},
                 {**_COMPLETE, "worker_type": "decode", "tp": 2},
             ],
-            "prefill: model, system, backend, tp, attention_dp, moe_tp_size and "
-            "moe_ep_size",
+            "prefill: model, system, backend, tp, attention_dp, moe_tp_size, "
+            "moe_ep_size and cp_size",
             id="list-with-one-from-entry",
         ),
         pytest.param(
@@ -1070,6 +1085,7 @@ def test_fields_taken_from_a_source_are_named_in_one_warning(
                 "attention_dp": 1,
                 "moe_tp_size": 1,
                 "moe_ep_size": 1,
+                "cp_size": 1,
             },
             id="from-next-to-every-field",
         ),

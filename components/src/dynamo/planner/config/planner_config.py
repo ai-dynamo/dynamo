@@ -161,8 +161,8 @@ def ais_perf_model_role_config(
     # estimator runtime. Require AIS only when validating an AIS config.
     # The package root loads native APIs lazily and types them as object;
     # import the typed native module directly.
-    from aisimulate_core._native import RustForwardPassPerfModel
-    from aisimulate_core.sdk import ForwardPassPerfModelConfig
+    from aisim_core._native import RustForwardPassPerfModel
+    from aisim_core.sdk import ForwardPassPerfModelConfig
 
     written = deepcopy(dict(config))
     if written.get("worker_type", worker_type) != worker_type:

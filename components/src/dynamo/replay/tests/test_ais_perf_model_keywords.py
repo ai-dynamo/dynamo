@@ -16,11 +16,11 @@ from copy import deepcopy
 import pytest
 
 pytest.importorskip(
-    "aisimulate_core.sdk",
+    "aisim_core.sdk",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from aisimulate_core.sdk import ForwardPassPerfModelConfig
+from aisim_core.sdk import ForwardPassPerfModelConfig
 
 from dynamo.common.ais_perf_model import router_perf_config, timing_model
 from dynamo.llm import AisPerfConfig, KvRouterConfig

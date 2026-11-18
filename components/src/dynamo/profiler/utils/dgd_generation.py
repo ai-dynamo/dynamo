@@ -24,7 +24,7 @@ from typing import Any, NoReturn, Optional
 
 import numpy as np
 import yaml
-from aisimulate_core.sdk.perf_database import get_latest_database_version
+from aisim_core.sdk.perf_database import get_latest_database_version
 
 from dynamo.common.ais_perf_model import REMOVE_IN, load_document
 from dynamo.common.configuration.utils import join_names
@@ -463,8 +463,8 @@ def _perf_model_config(
     The mocker arguments and the Planner config are both built from it, so
     the two describe the same deployment. ``backend_version`` and
     ``worker_type`` are written when given. A key that would only repeat
-    AISimulate's default is left out: ``pp`` of 1 and the MoE sizes of a
-    dense pick.
+    AISimulate's default is left out: ``pp`` of 1, the MoE sizes of a dense
+    pick and ``cp_size`` of 1.
     """
     config: dict[str, Any] = {"model": model, "system": system, "backend": backend}
     if backend_version is not None:
@@ -479,6 +479,10 @@ def _perf_model_config(
     if (pick.moe_tp, pick.moe_ep) != (1, 1):
         config["moe_tp_size"] = pick.moe_tp
         config["moe_ep_size"] = pick.moe_ep
+    # Like AIS's own compiler, spell CP out only above one so CP1
+    # identities stay byte-identical to configs written before CP.
+    if pick.cp > 1:
+        config["cp_size"] = pick.cp
     return config
 
 
@@ -976,9 +980,10 @@ _IDENTITY_FIELDS = (
     "attention_dp",
     "moe_tp_size",
     "moe_ep_size",
+    "cp_size",
 )
 # Of these, the ones that mean 1 where a config has no value for them.
-_ONE_WHEN_UNSET = ("pp", "moe_tp_size", "moe_ep_size")
+_ONE_WHEN_UNSET = ("pp", "moe_tp_size", "moe_ep_size", "cp_size")
 
 
 def _stated_configs(

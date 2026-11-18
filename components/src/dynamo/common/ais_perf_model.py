@@ -25,7 +25,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    from aisimulate_core.ais_perf_model import AisPerfModelDocument
+    from aisim_core.ais_perf_model import AisPerfModelDocument
 
 ENV_VAR = "DYN_AIS_PERF_MODEL"
 WORKER_TYPE_ENV_VAR = "DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE"
@@ -45,12 +45,12 @@ _dataset_workspaces: dict[int, str] = {}
 
 def _loader() -> Any:
     # Loaded on first use: Dynamo must import without AISimulate installed.
-    return importlib.import_module("aisimulate_core.ais_perf_model")
+    return importlib.import_module("aisim_core.ais_perf_model")
 
 
 def _sdk() -> Any:
     # Loaded on first use, as the loader is.
-    return importlib.import_module("aisimulate_core.sdk")
+    return importlib.import_module("aisim_core.sdk")
 
 
 def _remove_dataset_workspace(pid: int, folder: str) -> None:

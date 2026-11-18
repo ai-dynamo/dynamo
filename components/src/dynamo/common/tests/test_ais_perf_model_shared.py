@@ -180,7 +180,7 @@ def test_import_does_not_load_aisimulate() -> None:
         import dynamo.common.ais_perf_model as module
 
         print(module.__file__)
-        print(sorted(name for name in sys.modules if name.startswith("aisimulate")))
+        print(sorted(name for name in sys.modules if name.startswith("aisim")))
         """
     )
 
@@ -200,7 +200,7 @@ def test_functions_without_a_value_work_when_aisimulate_is_missing() -> None:
 
         class WithoutAISimulate(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):
-                if fullname.split(".")[0] in {"aisimulate", "aisimulate_core"}:
+                if fullname.split(".")[0] in {"aisim", "aisim_core"}:
                     raise ModuleNotFoundError(
                         f"No module named {fullname!r}", name=fullname
                     )
@@ -252,12 +252,12 @@ def test_functions_without_a_value_work_when_aisimulate_is_missing() -> None:
         "set_timing_model": {"engine": {"timing_model": timing}},
         # The functions that read a value fail with the import error itself.
         "import_errors": {
-            "load_document": "aisimulate_core",
-            "resolve_entry": "aisimulate_core",
-            "router_perf_config": "aisimulate_core",
-            "engine_perf_config": "aisimulate_core",
-            "normalized_config": "aisimulate_core",
-            "uses_relative_paths": "aisimulate_core",
+            "load_document": "aisim_core",
+            "resolve_entry": "aisim_core",
+            "router_perf_config": "aisim_core",
+            "engine_perf_config": "aisim_core",
+            "normalized_config": "aisim_core",
+            "uses_relative_paths": "aisim_core",
         },
     }
 
@@ -266,9 +266,9 @@ def test_functions_without_a_value_work_when_aisimulate_is_missing() -> None:
 def test_aisimulate_build_without_the_loader_is_an_import_error(
     tmp_path: Path,
 ) -> None:
-    # An aisimulate_core package that has no ais_perf_model module.
-    (tmp_path / "aisimulate_core").mkdir()
-    (tmp_path / "aisimulate_core" / "__init__.py").write_text("")
+    # An aisim_core package that has no ais_perf_model module.
+    (tmp_path / "aisim_core").mkdir()
+    (tmp_path / "aisim_core" / "__init__.py").write_text("")
 
     output = _run_child(
         """
@@ -287,7 +287,7 @@ def test_aisimulate_build_without_the_loader_is_an_import_error(
         PACKAGES_WITHOUT_LOADER=str(tmp_path),
     )
 
-    assert output.split() == ["ModuleNotFoundError", "aisimulate_core.ais_perf_model"]
+    assert output.split() == ["ModuleNotFoundError", "aisim_core.ais_perf_model"]
 
 
 def test_dataset_workspace_only_for_dataset_entries(

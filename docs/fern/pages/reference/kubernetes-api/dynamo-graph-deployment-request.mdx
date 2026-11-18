@@ -589,16 +589,17 @@ service.
   When the field is unset, the profiler writes a list with one config per worker type of
   the Planner mode into the generated Planner config. Each generated config holds
   `model`, `system`, `backend`, `backend_version`, `worker_type`, `tp`, and
-  `attention_dp`, plus `pp` when it is not 1 and `moe_tp_size` and `moe_ep_size` for an
-  MoE deployment. The profiler writes the list only for a vLLM, SGLang, or TensorRT-LLM
-  backend for which AISimulate has performance data on the selected system. Otherwise
-  the field stays unset and the Planner uses FPM regression.
+  `attention_dp`, plus `pp` when it is not 1, `moe_tp_size` and `moe_ep_size` for an
+  MoE deployment, and `cp_size` when it is above 1. The profiler writes the list only
+  for a vLLM, SGLang, or TensorRT-LLM backend for which AISimulate has performance data
+  on the selected system. Otherwise the field stays unset and the Planner uses FPM
+  regression.
 
   A value you write is kept as written. The profiler compares `model`, `system`,
-  `backend`, `worker_type`, `tp`, `pp`, `attention_dp`, `moe_tp_size`, and `moe_ep_size`
-  of each config with the deployment it selects. A key that a config without `from`
-  leaves out counts with its default, so no `tp` means `tp: 1`. A difference is an error,
-  for example
+  `backend`, `worker_type`, `tp`, `pp`, `attention_dp`, `moe_tp_size`, `moe_ep_size`,
+  and `cp_size` of each config with the deployment it selects. A key that a config
+  without `from` leaves out counts with its default, so no `tp` means `tp: 1`. A
+  difference is an error, for example
   `ais_perf_model entry for decode: tp=4 conflicts with selected deployment tp=2`.
 
   For a config with `from`, the profiler compares only the keys the config writes itself.
@@ -606,7 +607,7 @@ service.
   that come from there are not compared, and the Planner does not compare them with the
   deployment either. The profiler logs one warning that names these fields for each
   worker type, for example
-  `ais_perf_model: the profiler does not read the source a config takes keys from, so it did not compare these fields with the selected deployment: decode: model, system, backend, tp, pp, attention_dp, moe_tp_size and moe_ep_size. The Planner takes them from the source without a comparison.`
+  `ais_perf_model: the profiler does not read the source a config takes keys from, so it did not compare these fields with the selected deployment: decode: model, system, backend, tp, pp, attention_dp, moe_tp_size, moe_ep_size and cp_size. The Planner takes them from the source without a comparison.`
   Make sure that the source describes the selected deployment.
 
   Constructs each model through

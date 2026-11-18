@@ -16,20 +16,13 @@ import pytest
 from pydantic import ValidationError
 
 pytest.importorskip(
-    "aisimulate.sweeper",
+    "aisim.sweeper",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from aisimulate.config_adapter import (
-    PredictionAdapterContext,
-    RecommendationAdapterContext,
-)
-from aisimulate.sweeper.provider import (
-    CandidateContext,
-    InfeasibleCandidate,
-    SweepContext,
-)
-from aisimulate.sweeper.replay import BackendDeploymentSpec
+from aisim.config_adapter import PredictionAdapterContext, RecommendationAdapterContext
+from aisim.sweeper.provider import CandidateContext, InfeasibleCandidate, SweepContext
+from aisim.sweeper.replay import BackendDeploymentSpec
 
 from dynamo.router.simulation import create_provider
 from dynamo.router.simulation.config import RouterPredictionConfig

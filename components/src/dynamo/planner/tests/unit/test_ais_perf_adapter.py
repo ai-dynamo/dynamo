@@ -6,7 +6,7 @@
 from dataclasses import asdict
 
 import pytest
-from aisimulate_core.sdk import ForwardPassPerfModelConfig
+from aisim_core.sdk import ForwardPassPerfModelConfig
 
 try:
     from dynamo.common.forward_pass_metrics import (

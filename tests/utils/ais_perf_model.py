@@ -42,7 +42,7 @@ def normalized(config: dict[str, Any]) -> dict[str, Any]:
     """
     # Loaded on first use, as dynamo.common.ais_perf_model loads it: test
     # modules that are collected without AISimulate import this module.
-    sdk = importlib.import_module("aisimulate_core.sdk")
+    sdk = importlib.import_module("aisim_core.sdk")
     return sdk.ForwardPassPerfModelConfig(**config).to_dict()
 
 

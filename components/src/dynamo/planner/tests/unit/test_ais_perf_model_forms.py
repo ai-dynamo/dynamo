@@ -16,7 +16,7 @@ from dataclasses import asdict, fields
 
 import pytest
 import yaml
-from aisimulate_core.sdk import ForwardPassPerfModelConfig
+from aisim_core.sdk import ForwardPassPerfModelConfig
 from pydantic import ValidationError
 
 from dynamo.planner import __main__ as planner_main

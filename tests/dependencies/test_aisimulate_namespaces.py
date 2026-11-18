@@ -91,7 +91,7 @@ def test_operator_schemas_do_not_load_aisimulate_runtime() -> None:
                 },
             )
         except ModuleNotFoundError as error:
-            assert error.name == 'aisimulate_core'
+            assert error.name == 'aisim_core'
         else:
             raise AssertionError('A perf model config requires the AIS runtime')
         """
