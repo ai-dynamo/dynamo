@@ -52,7 +52,6 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
-	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -797,7 +796,7 @@ func TestStandaloneDCDServiceMetadataConverges(t *testing.T) {
 	require.Equal(t, "new", service.Annotations["example.com/new-note"])
 	require.Equal(t, "label", service.Labels["external.example.com/keep"])
 	require.Equal(t, "annotation", service.Annotations["external.example.com/keep"])
-	require.NotEmpty(t, service.Annotations[managedServiceMetadataAnnotation])
+	require.NotEmpty(t, service.Annotations[controller_common.ManagedServiceMetadataAnnotation])
 	require.NotEmpty(t, service.Annotations[controller_common.NvidiaAnnotationHashKey])
 	require.Equal(t, selector, service.Spec.Selector)
 	resourceVersion := service.ResourceVersion
@@ -858,47 +857,6 @@ func TestComponentDGDServicePrunesLabelsRemovedFromParent(t *testing.T) {
 	require.Equal(t, dgd.Name, service.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
 }
 
-func TestServiceMetadataInventoryRespectsAnnotationSizeLimit(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		existing bool
-	}{
-		{"create", false}, {"existing", true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Arrange valid annotations that leave no room for the managed-key inventory")
-			annotations := map[string]string{
-				"example.com/large":                             strings.Repeat("x", 256*1024-200),
-				controller_common.NvidiaAnnotationHashKey:       strings.Repeat("a", 64),
-				controller_common.NvidiaAnnotationGenerationKey: "1",
-			}
-			require.NoError(t, apivalidation.ValidateAnnotationsSize(annotations))
-			desired := &corev1.Service{Annotations: annotations, Labels: map[string]string{"example.com/team": "blue"}}
-			var existing *corev1.Service
-			if test.existing {
-				existing = desired.DeepCopy()
-			}
-
-			t.Log("Prepare metadata and verify the inventory cannot make the Service unwritable")
-			labels, got, err := managedServiceMetadataFor(existing, desired)
-			require.NoError(t, err)
-			require.NotContains(t, got, managedServiceMetadataAnnotation)
-			require.NoError(t, apivalidation.ValidateAnnotationsSize(got))
-			require.Equal(t, desired.Labels, labels)
-			require.Equal(t, annotations["example.com/large"], got["example.com/large"])
-
-			t.Log("Free annotation space and verify the inventory is recorded on the next reconcile")
-			delete(desired.Annotations, "example.com/large")
-			if existing != nil {
-				delete(existing.Annotations, "example.com/large")
-			}
-			_, got, err = managedServiceMetadataFor(existing, desired)
-			require.NoError(t, err)
-			require.Contains(t, got[managedServiceMetadataAnnotation], "example.com/team")
-		})
-	}
-}
-
 func TestStandaloneDCDServiceInventoryIsWrittenOnCreate(t *testing.T) {
 	t.Log("Arrange a standalone frontend DCD whose Service updates fail")
 	ctx := context.Background()
@@ -943,7 +901,7 @@ func TestStandaloneDCDServiceInventoryIsWrittenOnCreate(t *testing.T) {
 	require.True(t, modified)
 	service := &corev1.Service{}
 	require.NoError(t, kubeClient.Get(ctx, key, service))
-	require.Contains(t, service.Annotations[managedServiceMetadataAnnotation], "example.com/old-label")
+	require.Contains(t, service.Annotations[controller_common.ManagedServiceMetadataAnnotation], "example.com/old-label")
 
 	t.Log("Remove the authored label, allow updates, and verify the retry prunes it")
 	failServiceUpdates = false
@@ -994,7 +952,7 @@ func TestStandaloneDCDServiceMetadataKeepsOperatorBookkeeping(t *testing.T) {
 	require.NoError(t, kubeClient.Get(ctx, key, service))
 	require.NotEqual(t, "authored", service.Annotations[controller_common.NvidiaAnnotationHashKey])
 	require.Equal(t, "1", service.Annotations[controller_common.NvidiaAnnotationGenerationKey])
-	require.NotContains(t, service.Annotations[managedServiceMetadataAnnotation], controller_common.NvidiaAnnotationHashKey)
+	require.NotContains(t, service.Annotations[controller_common.ManagedServiceMetadataAnnotation], controller_common.NvidiaAnnotationHashKey)
 	resourceVersion := service.ResourceVersion
 
 	t.Log("Verify a steady-state reconcile writes nothing")
@@ -1007,7 +965,7 @@ func TestStandaloneDCDServiceMetadataKeepsOperatorBookkeeping(t *testing.T) {
 
 	t.Log("Corrupt the inventory and verify the next reconcile rewrites it without pruning")
 	service.Labels["external.example.com/keep"] = "label"
-	service.Annotations[managedServiceMetadataAnnotation] = "not-json"
+	service.Annotations[controller_common.ManagedServiceMetadataAnnotation] = "not-json"
 	require.NoError(t, kubeClient.Update(ctx, service))
 	modified, err = r.createOrUpdateOrDeleteServices(ctx, opt)
 	require.NoError(t, err)
@@ -1015,7 +973,7 @@ func TestStandaloneDCDServiceMetadataKeepsOperatorBookkeeping(t *testing.T) {
 	service = &corev1.Service{}
 	require.NoError(t, kubeClient.Get(ctx, key, service))
 	require.Equal(t, "label", service.Labels["external.example.com/keep"])
-	require.True(t, json.Valid([]byte(service.Annotations[managedServiceMetadataAnnotation])))
+	require.True(t, json.Valid([]byte(service.Annotations[controller_common.ManagedServiceMetadataAnnotation])))
 }
 
 func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentService(t *testing.T) {

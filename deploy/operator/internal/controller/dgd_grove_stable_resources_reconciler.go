@@ -183,7 +183,7 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 		return nil, fmt.Errorf("failed to generate the main component service: %w", err)
 	}
 	desiredService := service.DeepCopy()
-	if err := stampManagedServiceMetadata(service); err != nil {
+	if err := commoncontroller.StampManagedServiceMetadata(service); err != nil {
 		return nil, err
 	}
 	_, syncedService, err := commoncontroller.SyncResource(
@@ -224,7 +224,7 @@ func (r *groveStableResourcesReconciler) syncServiceMetadata(
 	desired *corev1.Service,
 	componentName string,
 ) error {
-	if _, err := syncManagedServiceMetadata(ctx, r, service, desired); err != nil {
+	if _, err := commoncontroller.SyncManagedServiceMetadata(ctx, r, service, desired); err != nil {
 		if r.GetRecorder() != nil {
 			r.GetRecorder().Eventf(
 				dgd,
@@ -287,7 +287,7 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 	}
 
 	desiredService := service.DeepCopy()
-	if err := stampManagedServiceMetadata(service); err != nil {
+	if err := commoncontroller.StampManagedServiceMetadata(service); err != nil {
 		return nil, err
 	}
 	_, syncedService, err := commoncontroller.SyncResource(

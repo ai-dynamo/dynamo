@@ -462,7 +462,7 @@ func TestGroveStableResourcesReconcilerConvergesServiceMetadata(t *testing.T) {
 		require.Equal(t, "after", service.Annotations["example.com/note"], name)
 		require.Equal(t, "label", service.Labels["external.example.com/keep"], name)
 		require.Equal(t, "annotation", service.Annotations["external.example.com/keep"], name)
-		require.NotEmpty(t, service.Annotations[managedServiceMetadataAnnotation], name)
+		require.NotEmpty(t, service.Annotations[commoncontroller.ManagedServiceMetadataAnnotation], name)
 		require.NotEmpty(t, service.Annotations[commoncontroller.NvidiaAnnotationHashKey], name)
 		require.Equal(t, selectors[name], service.Spec.Selector, name)
 		resourceVersions[name] = service.ResourceVersion

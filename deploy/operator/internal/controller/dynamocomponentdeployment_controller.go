@@ -861,7 +861,7 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 	// Snapshot the rendered metadata before SyncResource stamps its bookkeeping annotations into it.
 	desiredService := service.DeepCopy()
 	if !toDelete {
-		if err := stampManagedServiceMetadata(service); err != nil {
+		if err := commonController.StampManagedServiceMetadata(service); err != nil {
 			return false, err
 		}
 	}
@@ -875,7 +875,7 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 		return modified, nil
 	}
 
-	metadataModified, err := syncManagedServiceMetadata(ctx, r, syncedService, desiredService)
+	metadataModified, err := commonController.SyncManagedServiceMetadata(ctx, r, syncedService, desiredService)
 	if err != nil {
 		return false, fmt.Errorf("failed to update metadata of Service %s: %w", syncedService.Name, err)
 	}

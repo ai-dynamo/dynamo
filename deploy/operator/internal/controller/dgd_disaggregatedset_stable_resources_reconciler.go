@@ -19,10 +19,7 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"maps"
-	"sort"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -41,13 +38,6 @@ import (
 type disaggregatedSetStableResourcesReconciler struct {
 	client   client.Client
 	renderer *dcdWorkloadRenderer
-}
-
-const managedServiceMetadataAnnotation = "nvidia.com/dynamo-managed-service-metadata"
-
-type managedServiceMetadata struct {
-	Labels      []string `json:"labels,omitempty"`
-	Annotations []string `json:"annotations,omitempty"`
 }
 
 func newDisaggregatedSetStableResourcesReconciler(
@@ -207,7 +197,7 @@ func (r *disaggregatedSetStableResourcesReconciler) syncDGDStableService(
 		}
 		created := desired.DeepCopy()
 		var metadataErr error
-		created.Labels, created.Annotations, metadataErr = reconcileDGDStableServiceMetadata(nil, desired)
+		created.Labels, created.Annotations, metadataErr = commoncontroller.ReconcileServiceMetadata(nil, desired)
 		if metadataErr != nil {
 			return metadataErr
 		}
@@ -232,7 +222,7 @@ func (r *disaggregatedSetStableResourcesReconciler) syncDGDStableService(
 	updated.Spec = *desired.Spec.DeepCopy()
 	normalizeDGDStableServiceSpec(&updated.Spec)
 	var metadataErr error
-	updated.Labels, updated.Annotations, metadataErr = reconcileDGDStableServiceMetadata(existing, desired)
+	updated.Labels, updated.Annotations, metadataErr = commoncontroller.ReconcileServiceMetadata(existing, desired)
 	if metadataErr != nil {
 		return metadataErr
 	}
@@ -249,159 +239,6 @@ func (r *disaggregatedSetStableResourcesReconciler) syncDGDStableService(
 		return nil
 	}
 	return r.client.Update(ctx, updated)
-}
-
-func reconcileDGDStableServiceMetadata(
-	existing *corev1.Service,
-	desired *corev1.Service,
-) (map[string]string, map[string]string, error) {
-	labels := map[string]string{}
-	annotations := map[string]string{}
-	previous := managedServiceMetadata{}
-	if existing != nil {
-		maps.Copy(labels, existing.Labels)
-		maps.Copy(annotations, existing.Annotations)
-		// An unreadable inventory prunes nothing; it is rewritten from desired below.
-		if raw := existing.Annotations[managedServiceMetadataAnnotation]; raw != "" {
-			if err := json.Unmarshal([]byte(raw), &previous); err != nil {
-				previous = managedServiceMetadata{}
-			}
-		}
-	}
-	for _, key := range previous.Labels {
-		delete(labels, key)
-	}
-	for _, key := range previous.Annotations {
-		delete(annotations, key)
-	}
-
-	desiredAnnotations := maps.Clone(desired.Annotations)
-	delete(desiredAnnotations, managedServiceMetadataAnnotation)
-	maps.Copy(labels, desired.Labels)
-	maps.Copy(annotations, desiredAnnotations)
-
-	next := managedServiceMetadata{
-		Labels:      sortedMetadataKeys(desired.Labels),
-		Annotations: sortedMetadataKeys(desiredAnnotations),
-	}
-	raw, err := json.Marshal(next)
-	if err != nil {
-		return nil, nil, fmt.Errorf("encode managed Service metadata inventory: %w", err)
-	}
-	annotations[managedServiceMetadataAnnotation] = string(raw)
-	labels, annotations = serviceMetadataWithinAnnotationLimit(existing, labels, annotations, 0)
-	return labels, annotations, nil
-}
-
-// syncResourceBookkeepingAnnotations are owned by SyncResource. Authored values never replace them.
-var syncResourceBookkeepingAnnotations = []string{
-	commoncontroller.NvidiaAnnotationHashKey,
-	commoncontroller.NvidiaAnnotationGenerationKey,
-}
-
-// stampManagedServiceMetadata gives a Service rendered for SyncResource its managed-key inventory,
-// so the inventory is written in the create request.
-func stampManagedServiceMetadata(service *corev1.Service) error {
-	labels, annotations, err := managedServiceMetadataFor(nil, service)
-	if err != nil {
-		return err
-	}
-	service.Labels = labels
-	service.Annotations = annotations
-	return nil
-}
-
-// syncManagedServiceMetadata converges a synced Service's labels and annotations, pruning only
-// keys it recorded. Copy desired before SyncResource, which stamps bookkeeping annotations into it.
-func syncManagedServiceMetadata(
-	ctx context.Context,
-	writer client.Writer,
-	synced *corev1.Service,
-	desired *corev1.Service,
-) (bool, error) {
-	labels, annotations, err := managedServiceMetadataFor(synced, desired)
-	if err != nil {
-		return false, err
-	}
-	if equality.Semantic.DeepEqual(synced.Labels, labels) &&
-		equality.Semantic.DeepEqual(synced.Annotations, annotations) {
-		return false, nil
-	}
-	synced.Labels = labels
-	synced.Annotations = annotations
-	if err := writer.Update(ctx, synced); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// managedServiceMetadataFor is reconcileDGDStableServiceMetadata for Services synced by
-// SyncResource, which owns the bookkeeping annotations: desired copies of them are ignored and
-// existing values are kept. existing is nil for a Service that does not exist yet.
-func managedServiceMetadataFor(existing, desired *corev1.Service) (map[string]string, map[string]string, error) {
-	// Keep authored bookkeeping keys out of the desired metadata and the inventory.
-	desired = desired.DeepCopy()
-	for _, key := range syncResourceBookkeepingAnnotations {
-		delete(desired.Annotations, key)
-	}
-	labels, annotations, err := reconcileDGDStableServiceMetadata(existing, desired)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// Restore the stamped values, which an older inventory may have pruned.
-	for _, key := range syncResourceBookkeepingAnnotations {
-		delete(annotations, key)
-		if existing == nil {
-			continue
-		}
-		if value, ok := existing.Annotations[key]; ok {
-			annotations[key] = value
-		}
-	}
-
-	// A create request will also receive a SHA-256 hash and an int64 generation from SyncResource.
-	reservedBytes := 0
-	if existing == nil {
-		reservedBytes = len(commoncontroller.NvidiaAnnotationHashKey) + 64 +
-			len(commoncontroller.NvidiaAnnotationGenerationKey) + 20
-	}
-	labels, annotations = serviceMetadataWithinAnnotationLimit(existing, labels, annotations, reservedBytes)
-	return labels, annotations, nil
-}
-
-// serviceMetadataWithinAnnotationLimit defers existing metadata edits when the inventory
-// would exceed Kubernetes' annotation limit. Creates omit the inventory until space is available.
-// existing is nil when preparing a create request.
-func serviceMetadataWithinAnnotationLimit(
-	existing *corev1.Service,
-	labels, annotations map[string]string,
-	reservedBytes int,
-) (map[string]string, map[string]string) {
-	// Kubernetes counts the byte lengths of every annotation key and value.
-	size := reservedBytes
-	for key, value := range annotations {
-		size += len(key) + len(value)
-	}
-	if size <= 256*1024 {
-		return labels, annotations
-	}
-
-	// Keep the prior inventory and metadata intact so a later retry can still prune recorded keys.
-	if existing != nil {
-		return maps.Clone(existing.Labels), maps.Clone(existing.Annotations)
-	}
-	delete(annotations, managedServiceMetadataAnnotation)
-	return labels, annotations
-}
-
-func sortedMetadataKeys(metadata map[string]string) []string {
-	keys := make([]string, 0, len(metadata))
-	for key := range metadata {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 func normalizeDGDStableServiceSpec(spec *corev1.ServiceSpec) {
