@@ -176,6 +176,6 @@ strip = false
 # its own workspace's dynamo-protocols, so that crate has to come from the same commit.
 # Remove this section, in every workspace that carries it, once both are published.
 [patch.crates-io]
-dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "df699be6110c961e9ec63f5770eb41fc11088477" }
-dynamo-renderer = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "df699be6110c961e9ec63f5770eb41fc11088477" }
-dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "df699be6110c961e9ec63f5770eb41fc11088477" }
+dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "008e8bfe2c7e608c55ca4ee53009b88e981236aa" }
+dynamo-renderer = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "008e8bfe2c7e608c55ca4ee53009b88e981236aa" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "008e8bfe2c7e608c55ca4ee53009b88e981236aa" }
