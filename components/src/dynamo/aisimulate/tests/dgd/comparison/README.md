@@ -41,7 +41,9 @@ python components/src/dynamo/aisimulate/tests/dgd/comparison/run_cases.py \
 
 The **AI Simulate DGD comparison** Actions workflow runs the same command on demand. It can generate
 the full suite or selected cases on one hardware profile, including the `h100-sxm-2gpu` profile,
-and uploads the generated DGDs and diagnostics without the local model caches.
+and uploads the generated DGDs and diagnostics without the local model caches. Dispatch it from
+`main`; it uses the exact-SHA planner image produced by post-merge CI so the source, Dynamo runtime,
+and pinned AISimulate version stay aligned.
 
 Use `--output-dir` to write into a temporary directory instead of updating the checked-in
 `generated/<suite-name>/` tree. Individual `--hardware` runs write under the ignored
@@ -69,3 +71,6 @@ kubectl apply -f \
 
 Composed inputs, the selected Candidate, caches, and error files are local ignored diagnostics.
 The suite intentionally defines no custom report format.
+
+This corpus does not exercise DGDR v1beta2 Request, Run, Candidate, or Job orchestration. The
+Kubernetes smoke coverage for that integration lives in `tests/deploy/test_dgdr_v1beta2.py`.
