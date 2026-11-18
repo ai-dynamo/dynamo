@@ -16,9 +16,12 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+import torch
+from vllm.v1.engine.exceptions import EngineGenerateError
 
 import dynamo.llm as dynamo_llm
-from dynamo.vllm import envs
+from dynamo.llm.exceptions import InvalidArgument
+from dynamo.vllm import envs, errors
 from dynamo.vllm.args import (
     _connector_to_kv_transfer_json,
     _is_routable,
@@ -31,6 +34,7 @@ from dynamo.vllm.args import (
     update_engine_config_with_dynamo,
 )
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.handlers import _translate_vllm_client_errors
 from dynamo.vllm.headless import build_headless_namespace
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
@@ -1746,12 +1750,6 @@ def test_vllm_validation_error_public_message_is_truncated():
 async def test_translate_vllm_client_errors_processor_rejection(
     processor_error, expect_client_error
 ):
-    from vllm.v1.engine.exceptions import EngineGenerateError
-
-    from dynamo.llm.exceptions import InvalidArgument
-    from dynamo.vllm import errors
-    from dynamo.vllm.handlers import _translate_vllm_client_errors
-
     # vLLM's chain: EngineGenerateError wraps ValueError("Failed to apply ..."),
     # which wraps the processor error and embeds the request data in its text.
     if processor_error in ("memory_error", "cpu_allocation_error"):
@@ -1760,8 +1758,6 @@ async def test_translate_vllm_client_errors_processor_rejection(
         if processor_error == "memory_error":
             allocation_error: BaseException = MemoryError()
         else:
-            import torch
-
             # PyTorch's CPU allocator raises a plain RuntimeError.
             with pytest.raises(RuntimeError, match="can't allocate memory") as alloc:
                 torch.empty(2**62, dtype=torch.uint8)

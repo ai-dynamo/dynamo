@@ -38,6 +38,7 @@ import torch
 from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.exceptions import VLLMClientError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -47,7 +48,7 @@ from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
 )
-from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
@@ -116,6 +117,7 @@ from .engine_generate import (
     publish_json_multimodal_capability,
 )
 from .engine_monitor import VllmEngineMonitor
+from .errors import processor_input_error, vllm_client_error_to_http_error
 from .lora_state import LoRAState
 from .multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
@@ -1241,11 +1243,6 @@ async def _translate_vllm_client_errors(
     request_id: str,
 ) -> AsyncIterator[ResponseT]:
     """Keep request-side vLLM errors client-visible on worker endpoints."""
-    from vllm.exceptions import VLLMClientError
-    from vllm.v1.engine.exceptions import EngineGenerateError
-
-    from .errors import processor_input_error, vllm_client_error_to_http_error
-
     try:
         async for chunk in generator:
             yield chunk
