@@ -20,6 +20,7 @@ package validation_test
 import (
 	"fmt"
 	"maps"
+	"strings"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -61,6 +62,10 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		}
 	)
 
+	const digitLeadingDCDName = "70b-llama-production"
+	const shortenDCD = "choose a shorter or letter-leading DynamoComponentDeployment name"
+	boundaryDCDName := "d" + strings.Repeat("x", 62)
+
 	type dcdAdmissionTestCase struct {
 		name               string
 		deployment         runtime.Object
@@ -91,6 +96,30 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionSGLangBackend)
 			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
 			dcd.Spec.Experimental.Checkpoint.CheckpointRef = new("existing-snapshot")
+		})},
+		// A standalone DCD name is its Service name and pod selector label value.
+		{name: "standalone DCD with a digit-leading name is rejected on create", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = digitLeadingDCDName
+			dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (Service name: a DNS-1035 label must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character (e.g. 'my-name',  or 'abc-123', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?')); %s", digitLeadingDCDName, shortenDCD)}},
+		{name: "standalone DCD name accepts 63 characters", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName
+		})},
+		{name: "standalone DCD name rejects 64 characters", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (Service name: must be no more than 63 characters; nvidia.com/selector label value: must be no more than 63 bytes); %s", boundaryDCDName+"x", shortenDCD)}},
+		{name: "existing standalone DCD with an invalid generated name remains updateable", seedWithoutWebhook: true, oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = digitLeadingDCDName
+			dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+		}), deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = digitLeadingDCDName
+			dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+			dcd.Labels = map[string]string{"updated": "true"}
+		})},
+		// The DGD webhook checks these names; rollouts of older DGDs create new worker DCDs.
+		{name: "DGD-owned worker DCD name is not checked on create", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
 		})},
 		{name: "TRT-LLM snapshot failover is rejected at admission", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Spec.BackendFramework = admissionTRTLLMBackend

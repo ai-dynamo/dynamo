@@ -25,7 +25,6 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -137,12 +136,8 @@ func (v *dynamoComponentDeploymentValidation) validateWorkerClassCheckpointRefOw
 		return nil
 	}
 
-	controller := metav1.GetControllerOf(dcd)
-	if controller != nil && controller.Kind == nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind {
-		groupVersion, err := schema.ParseGroupVersion(controller.APIVersion)
-		if err == nil && groupVersion.Group == nvidiacomv1beta1.GroupVersion.Group {
-			return nil
-		}
+	if controlledByDynamoGraphDeployment(dcd) {
+		return nil
 	}
 
 	checkpointRefPath := field.NewPath("spec", "experimental", "checkpoint", "checkpointRef")
@@ -167,6 +162,19 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 		oldMeta = &oldDCD.ObjectMeta
 	}
 	allErrs := v.validateObjectMeta(&dcd.ObjectMeta, oldMeta, field.NewPath("metadata"))
+	// A standalone DCD's name is its Service name and pod selector value. It is
+	// checked on create only because metadata.name is immutable. DGD-owned DCDs
+	// are checked by the DGD webhook when the DGD is created; the controller
+	// also creates new worker DCDs during rollouts of DGDs that predate this rule.
+	if oldDCD == nil && !controlledByDynamoGraphDeployment(dcd) {
+		if err := generatedNameError(
+			field.NewPath("metadata", "name"),
+			dcd.Name,
+			"choose a shorter or letter-leading DynamoComponentDeployment name",
+		); err != nil {
+			allErrs = append(allErrs, err)
+		}
+	}
 	return append(allErrs, v.validateDynamoComponentDeploymentSpec(&dcd.Spec, oldSpec, field.NewPath("spec"))...)
 }
 

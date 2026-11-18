@@ -29,12 +29,14 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -432,4 +434,67 @@ func difference(a, b map[string]struct{}) []string {
 		}
 	}
 	return result
+}
+
+// generatedDynamoGraphDeploymentNameErrors reports names derived from the DGD
+// name that Kubernetes would reject: the DGD name label value and, for each
+// component, the Service name and nvidia.com/selector label value
+// <dgd>-<component>. Outside Grove, worker DCD names also end with the worker
+// hash, and that name is the pods' selector value and, under Kubernetes
+// discovery, a Service name. dgd must not be nil.
+func generatedDynamoGraphDeploymentNameErrors(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	grovePathway bool,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if msgs := k8svalidation.IsValidLabelValue(dgd.Name); len(msgs) > 0 {
+		allErrs = append(allErrs, field.Invalid(
+			field.NewPath("metadata", "name"),
+			dgd.Name,
+			fmt.Sprintf(
+				"invalid as the %s label value (%s); choose a shorter DynamoGraphDeployment name",
+				consts.KubeLabelDynamoGraphDeploymentName,
+				strings.Join(msgs, "; "),
+			),
+		))
+	}
+
+	// Only the length matters; the hash itself is computed by the controller.
+	workerHashPlaceholder := strings.Repeat("0", dynamo.WorkerHashLength)
+	componentsPath := field.NewPath("spec", "components")
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		// Externally managed components validate their generated names in their own controller.
+		if component.ManagedByExternalController() {
+			continue
+		}
+		namePath := componentsPath.Index(i).Child("name")
+		serviceName := dynamo.GetDCDResourceName(dgd, component.ComponentName, "")
+		if err := generatedNameError(
+			namePath,
+			serviceName,
+			"choose a shorter or letter-leading DynamoGraphDeployment name, or a shorter component name",
+		); err != nil {
+			allErrs = append(allErrs, err)
+			continue
+		}
+		if grovePathway {
+			continue
+		}
+		workerName := dynamo.GetDCDResourceName(dgd, component.ComponentName, workerHashPlaceholder)
+		if workerName == serviceName {
+			continue
+		}
+		if err := generatedNameError(
+			namePath,
+			workerName,
+			fmt.Sprintf(
+				"worker DynamoComponentDeployment names end with a %d-character worker hash; choose a shorter DynamoGraphDeployment or component name",
+				dynamo.WorkerHashLength,
+			),
+		); err != nil {
+			allErrs = append(allErrs, err)
+		}
+	}
+	return allErrs
 }

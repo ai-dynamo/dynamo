@@ -238,6 +238,14 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 	}
 	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpec(&dgd.Spec, field.NewPath("spec"), specOpts)...)
 
+	// Generated names are checked on create only. The DGD name, its component
+	// set, and each componentType are immutable, so an update cannot change
+	// them; an update check would only block edits of objects created before
+	// this rule.
+	if oldDGD == nil {
+		allErrs = append(allErrs, generatedDynamoGraphDeploymentNameErrors(dgd, grovePathway)...)
+	}
+
 	// LPX children require the Grove route for materialization.
 	if dgd.HasLPXComponent() && !grovePathway {
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec", "components"), grovePathwayRequirement))

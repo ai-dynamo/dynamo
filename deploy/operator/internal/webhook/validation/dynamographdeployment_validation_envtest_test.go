@@ -26,6 +26,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	corev1 "k8s.io/api/core/v1"
@@ -82,9 +83,26 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	const customSidecarImage = "runtime:custom"
 	const trtllmBackendFramework = "trtllm"
 
-	longDGDName := "test-graph-" + strings.Repeat("x", 50)
+	// Longer than the PodCliqueSet name budget, but short enough for the
+	// generated Service names.
+	longDGDName := "test-graph-xxx"
 	boundaryComponentName := "w" + strings.Repeat("x", 36)
 	tooLongComponentName := boundaryComponentName + "x"
+
+	// Generated Service names and selector label values must satisfy Kubernetes.
+	const ticketDGDName = "dsv41-flash-vllm-gb200-disagg-agentic-production-us-east-1"
+	const digitLeadingDGDName = "70b-llama-production"
+	const tooLongServiceName = "Service name: must be no more than 63 characters"
+	const tooLongSelectorValue = "nvidia.com/selector label value: must be no more than 63 bytes"
+	const invalidDNS1035ServiceName = "Service name: a DNS-1035 label must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character (e.g. 'my-name',  or 'abc-123', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?')"
+	const shortenDGDOrComponent = "choose a shorter or letter-leading DynamoGraphDeployment name, or a shorter component name"
+	shortenWorkerDGDOrComponent := fmt.Sprintf("worker DynamoComponentDeployment names end with a %d-character worker hash; choose a shorter DynamoGraphDeployment or component name", dynamo.WorkerHashLength)
+	generatedNameErr := func(path, value, action string, problems ...string) string {
+		return fmt.Sprintf("%s: Invalid value: %q: generated name is invalid (%s); %s", path, value, strings.Join(problems, "; "), action)
+	}
+	// <dgd>-frontend is 63 characters at the boundary; <dgd>-worker-<hash> is 63 outside Grove.
+	frontendBoundaryDGDName := "f" + strings.Repeat("x", 53)
+	workerBoundaryDGDName := "w" + strings.Repeat("x", 46)
 
 	tests := []dgdAdmissionTestCase{
 		{name: "vLLM multi-GPU snapshot failover is admitted", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
@@ -922,8 +940,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantSchemaErr: `spec.components[1].name: Invalid value: "": spec.components[1].name in body should be at least 1 chars long`,
 		},
 		{
-			name:       "v1alpha1 converted empty service map key is accepted",
+			name:       "v1alpha1 converted empty service map key is rejected by its generated Service name",
 			deployment: alphaDGDForAdmissionWithServiceNames(""),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[0].name", "test-graph-", shortenDGDOrComponent, invalidDNS1035ServiceName, "nvidia.com/selector label value: a valid label must be an empty string or consist of alphanumeric characters, '-', '_' or '.', and must start and end with an alphanumeric character (e.g. 'MyValue',  or 'my_value',  or '12345', regex used for validation is '(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?')"),
+			},
 		},
 		{
 			name: "v1beta1 component names are unique case-insensitively in CEL",
@@ -951,9 +972,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment:    dgdAdmissionWithLabel(t, alphaDGDForAdmissionWithServiceNames(dgdAdmissionWorkerName, dgdAdmissionUpperWorkerName)),
 		},
 		{
-			name:          "v1alpha1 empty service name remains updateable",
-			oldDeployment: alphaDGDForAdmissionWithServiceNames(""),
-			deployment:    dgdAdmissionWithLabel(t, alphaDGDForAdmissionWithServiceNames("")),
+			name:               "v1alpha1 empty service name remains updateable",
+			seedWithoutWebhook: true,
+			oldDeployment:      alphaDGDForAdmissionWithServiceNames(""),
+			deployment:         dgdAdmissionWithLabel(t, alphaDGDForAdmissionWithServiceNames("")),
 		},
 		{
 			name: "v1beta1 compilation cache mount requires a PVC name in the schema",
@@ -2748,6 +2770,84 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Name = longDGDName
 				betaWorkerComponent(dgd).ComponentName = tooLongComponentName
+			}),
+		},
+		{
+			name: "generated Service names longer than 63 characters are rejected on create",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = ticketDGDName
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[0].name", ticketDGDName+"-frontend", shortenDGDOrComponent, tooLongServiceName, tooLongSelectorValue),
+				generatedNameErr("spec.components[1].name", ticketDGDName+"-worker", shortenDGDOrComponent, tooLongServiceName, tooLongSelectorValue),
+			},
+		},
+		{
+			name: "digit-leading generated Service names are rejected on create",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[0].name", digitLeadingDGDName+"-frontend", shortenDGDOrComponent, invalidDNS1035ServiceName),
+				generatedNameErr("spec.components[1].name", digitLeadingDGDName+"-worker", shortenDGDOrComponent, invalidDNS1035ServiceName),
+			},
+		},
+		{
+			name: "generated frontend Service name accepts 63 characters",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = frontendBoundaryDGDName
+			}),
+		},
+		{
+			name: "generated frontend Service name rejects 64 characters",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = frontendBoundaryDGDName + "x"
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[0].name", frontendBoundaryDGDName+"x-frontend", shortenDGDOrComponent, tooLongServiceName, tooLongSelectorValue),
+			},
+		},
+		{
+			name: "generated worker DCD name accepts 63 characters outside Grove",
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = workerBoundaryDGDName
+			}),
+		},
+		{
+			name: "generated worker DCD name rejects 64 characters outside Grove",
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = workerBoundaryDGDName + "x"
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[1].name", workerBoundaryDGDName+"x-worker-00000000", shortenWorkerDGDOrComponent, tooLongServiceName, tooLongSelectorValue),
+			},
+		},
+		{
+			name: "generated worker name has no hash suffix on Grove",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = workerBoundaryDGDName + "x"
+			}),
+		},
+		{
+			name: "DGD name label value longer than 63 characters is rejected on create",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = "g" + strings.Repeat("x", 63)
+			}),
+			wantWebhookErrs: []string{
+				fmt.Sprintf("metadata.name: Invalid value: %q: invalid as the nvidia.com/dynamo-graph-deployment-name label value (must be no more than 63 bytes); choose a shorter DynamoGraphDeployment name", "g"+strings.Repeat("x", 63)),
+				generatedNameErr("spec.components[0].name", "g"+strings.Repeat("x", 63)+"-frontend", shortenDGDOrComponent, tooLongServiceName, tooLongSelectorValue),
+				generatedNameErr("spec.components[1].name", "g"+strings.Repeat("x", 63)+"-worker", shortenDGDOrComponent, tooLongServiceName, tooLongSelectorValue),
+			},
+		},
+		{
+			name:               "existing DGD with invalid generated Service names remains updateable",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = ticketDGDName
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = ticketDGDName
+				dgd.Labels = map[string]string{"updated": "true"}
 			}),
 		},
 

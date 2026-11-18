@@ -36,6 +36,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6/kind"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -230,6 +231,30 @@ func eppRuntimeCompatibilityError(contract eppRuntimeContract, eppConfigPath *fi
 		)
 	}
 	return nil
+}
+
+// generatedNameError reports a name the operator generates and uses both as a
+// Service name and as the nvidia.com/selector label value when Kubernetes would
+// reject it as either. fldPath is the user-chosen name it is derived from, and
+// action tells the user which name to change.
+func generatedNameError(fldPath *field.Path, generatedName, action string) *field.Error {
+	serviceNameErrs := k8svalidation.IsDNS1035Label(dynamo.NormalizeKubeResourceName(generatedName))
+	labelValueErrs := k8svalidation.IsValidLabelValue(generatedName)
+	problems := make([]string, 0, len(serviceNameErrs)+len(labelValueErrs))
+	for _, msg := range serviceNameErrs {
+		problems = append(problems, "Service name: "+msg)
+	}
+	for _, msg := range labelValueErrs {
+		problems = append(problems, consts.KubeLabelDynamoSelector+" label value: "+msg)
+	}
+	if len(problems) == 0 {
+		return nil
+	}
+	return field.Invalid(
+		fldPath,
+		generatedName,
+		fmt.Sprintf("generated name is invalid (%s); %s", strings.Join(problems, "; "), action),
+	)
 }
 
 // eppRuntimeCompatibilityUpdateError ratchets only an identical pre-existing contract violation.

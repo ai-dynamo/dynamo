@@ -23,6 +23,8 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -67,4 +69,15 @@ func hasDynamoComponentDeploymentV1alpha1CompatibilityFields(
 		spec.EPPConfig != nil ||
 		spec.FrontendSidecar != nil ||
 		spec.Failover != nil
+}
+
+// controlledByDynamoGraphDeployment reports whether dcd's controller owner
+// reference names a DynamoGraphDeployment. dcd must not be nil.
+func controlledByDynamoGraphDeployment(dcd *nvidiacomv1beta1.DynamoComponentDeployment) bool {
+	controller := metav1.GetControllerOf(dcd)
+	if controller == nil || controller.Kind != nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind {
+		return false
+	}
+	groupVersion, err := schema.ParseGroupVersion(controller.APIVersion)
+	return err == nil && groupVersion.Group == nvidiacomv1beta1.GroupVersion.Group
 }
