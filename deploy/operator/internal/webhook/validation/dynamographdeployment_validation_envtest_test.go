@@ -948,7 +948,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name:       "v1alpha1 converted empty service map key is rejected by its generated Service name",
 			deployment: alphaDGDForAdmissionWithServiceNames(""),
 			wantWebhookErrs: []string{
-				generatedNameErr("spec.components[0].name", "test-graph-", shortenDGDOrComponent, invalidDCDName, invalidDNS1035ServiceName, "nvidia.com/selector label value: a valid label must be an empty string or consist of alphanumeric characters, '-', '_' or '.', and must start and end with an alphanumeric character (e.g. 'MyValue',  or 'my_value',  or '12345', regex used for validation is '(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?')"),
+				generatedNameErr("spec.components[0].name", "test-graph-", shortenDGDOrComponent, invalidDCDName),
+				generatedNameErr("spec.components[0].name", "test-graph-", shortenDGDOrComponent, invalidDNS1035ServiceName),
+				generatedNameErr("spec.components[0].name", "test-graph-", shortenDGDOrComponent, "nvidia.com/selector label value: a valid label must be an empty string or consist of alphanumeric characters, '-', '_' or '.', and must start and end with an alphanumeric character (e.g. 'MyValue',  or 'my_value',  or '12345', regex used for validation is '(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?')"),
 			},
 		},
 		{
@@ -2783,8 +2785,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				dgd.Name = ticketDGDName
 			}),
 			wantWebhookErrs: []string{
-				generatedNameErr("spec.components[0].name", ticketDGDName+"-frontend", shortenDGDOrComponent, tooLongServiceName, tooLongSelectorValue),
-				generatedNameErr("spec.components[1].name", ticketDGDName+"-worker", shortenDGDOrComponent, tooLongServiceName, tooLongSelectorValue),
+				generatedNameErr("spec.components[0].name", ticketDGDName+"-frontend", shortenDGDOrComponent, tooLongServiceName),
+				generatedNameErr("spec.components[0].name", ticketDGDName+"-frontend", shortenDGDOrComponent, tooLongSelectorValue),
+				generatedNameErr("spec.components[1].name", ticketDGDName+"-worker", shortenDGDOrComponent, tooLongServiceName),
+				generatedNameErr("spec.components[1].name", ticketDGDName+"-worker", shortenDGDOrComponent, tooLongSelectorValue),
 			},
 		},
 		{
@@ -2810,7 +2814,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				dgd.Name = frontendBoundaryDGDName + "x"
 			}),
 			wantWebhookErrs: []string{
-				generatedNameErr("spec.components[0].name", frontendBoundaryDGDName+"x-frontend", shortenDGDOrComponent, tooLongServiceName, tooLongSelectorValue),
+				generatedNameErr("spec.components[0].name", frontendBoundaryDGDName+"x-frontend", shortenDGDOrComponent, tooLongServiceName),
+				generatedNameErr("spec.components[0].name", frontendBoundaryDGDName+"x-frontend", shortenDGDOrComponent, tooLongSelectorValue),
 			},
 		},
 		{
@@ -2825,7 +2830,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				dgd.Name = workerBoundaryDGDName + "x"
 			}),
 			wantWebhookErrs: []string{
-				generatedNameErr("spec.components[1].name", workerBoundaryDGDName+"x-worker-00000000", shortenWorkerDGDOrComponent, tooLongServiceName, tooLongSelectorValue),
+				generatedNameErr("spec.components[1].name", workerBoundaryDGDName+"x-worker-00000000", shortenWorkerDGDOrComponent, tooLongServiceName),
+				generatedNameErr("spec.components[1].name", workerBoundaryDGDName+"x-worker-00000000", shortenWorkerDGDOrComponent, tooLongSelectorValue),
 			},
 		},
 		{
@@ -2838,7 +2844,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				dgd.Name = workerBoundaryDGDName + "x"
 			}),
 			wantWebhookErrs: []string{
-				generatedNameErr("spec.components[1].name", workerBoundaryDGDName+"x-worker-00000000", shortenWorkerDGDOrComponent, tooLongServiceName, tooLongSelectorValue),
+				generatedNameErr("spec.components[1].name", workerBoundaryDGDName+"x-worker-00000000", shortenWorkerDGDOrComponent, tooLongServiceName),
+				generatedNameErr("spec.components[1].name", workerBoundaryDGDName+"x-worker-00000000", shortenWorkerDGDOrComponent, tooLongSelectorValue),
 			},
 		},
 		{
@@ -2848,8 +2855,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				fmt.Sprintf("metadata.name: Invalid value: %q: invalid as the nvidia.com/dynamo-graph-deployment-name label value (must be no more than 63 bytes); choose a shorter DynamoGraphDeployment name", "g"+strings.Repeat("x", 63)),
-				generatedNameErr("spec.components[0].name", "g"+strings.Repeat("x", 63)+"-frontend", shortenDGDOrComponent, tooLongServiceName, tooLongSelectorValue),
-				generatedNameErr("spec.components[1].name", "g"+strings.Repeat("x", 63)+"-worker", shortenDGDOrComponent, tooLongServiceName, tooLongSelectorValue),
+				generatedNameErr("spec.components[0].name", "g"+strings.Repeat("x", 63)+"-frontend", shortenDGDOrComponent, tooLongServiceName),
+				generatedNameErr("spec.components[0].name", "g"+strings.Repeat("x", 63)+"-frontend", shortenDGDOrComponent, tooLongSelectorValue),
+				generatedNameErr("spec.components[1].name", "g"+strings.Repeat("x", 63)+"-worker", shortenDGDOrComponent, tooLongServiceName),
+				generatedNameErr("spec.components[1].name", "g"+strings.Repeat("x", 63)+"-worker", shortenDGDOrComponent, tooLongSelectorValue),
 			},
 		},
 		{
@@ -2864,6 +2873,32 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				// A reorder changes spec.components[i] but not the generated names.
 				slices.Reverse(dgd.Spec.Components)
 			}),
+		},
+		// Service decisions must not change whether an unchanged selector error is grandfathered.
+		{
+			name:               "disabling Kubernetes discovery preserves an existing DGD selector error",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = ticketDGDName
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = ticketDGDName
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+			}),
+		},
+		{
+			name:               "enabling Kubernetes discovery adds a Service error to an existing DGD selector error",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = ticketDGDName
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = ticketDGDName
+			}),
+			wantWebhookErrs: []string{
+				generatedNameErr("spec.components[1].name", ticketDGDName+"-worker", shortenDGDOrComponent, tooLongServiceName),
+			},
 		},
 		{
 			name: "components without a Service accept digit-leading generated names",
@@ -2943,7 +2978,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				dgd.Name = ticketDGDName
 			}),
 			wantWebhookErrs: []string{
-				generatedNameErr("spec.components[1].name", ticketDGDName+"-worker-00000000", shortenWorkerDGDOrComponent, tooLongServiceName, tooLongSelectorValue),
+				generatedNameErr("spec.components[1].name", ticketDGDName+"-worker-00000000", shortenWorkerDGDOrComponent, tooLongServiceName),
+				generatedNameErr("spec.components[1].name", ticketDGDName+"-worker-00000000", shortenWorkerDGDOrComponent, tooLongSelectorValue),
 			},
 		},
 		{
@@ -2959,7 +2995,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				dgd.Spec.Components[0].ComponentName = "worker-00000000"
 			}),
 			wantWebhookErrs: []string{
-				generatedNameErr("spec.components[1].name", collisionDGDName+"-worker-00000000", shortenWorkerDGDOrComponent, tooLongServiceName, tooLongSelectorValue),
+				generatedNameErr("spec.components[1].name", collisionDGDName+"-worker-00000000", shortenWorkerDGDOrComponent, tooLongServiceName),
+				generatedNameErr("spec.components[1].name", collisionDGDName+"-worker-00000000", shortenWorkerDGDOrComponent, tooLongSelectorValue),
 			},
 		},
 

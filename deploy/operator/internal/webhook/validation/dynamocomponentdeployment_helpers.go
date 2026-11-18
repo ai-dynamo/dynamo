@@ -85,16 +85,16 @@ func controlledByDynamoGraphDeployment(dcd *nvidiacomv1beta1.DynamoComponentDepl
 	return err == nil && groupVersion.Group == nvidiacomv1beta1.GroupVersion.Group
 }
 
-// standaloneDCDNameError reports a standalone DCD name that is invalid as its selector label value
-// or, when the DCD gets a Service, its Service name. dcd must not be nil.
-func standaloneDCDNameError(
+// standaloneDCDNameViolations reports each failing naming rule for a standalone DCD.
+// Service names are checked only when the DCD gets a Service. dcd must not be nil.
+func standaloneDCDNameViolations(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	discoveryBackend configv1alpha1.DiscoveryBackend,
-) *field.Error {
+) []generatedNameViolation {
 	// The controller renders a Service only for a frontend or under Kubernetes discovery.
 	hasService := dcd.IsFrontendComponent() ||
 		commoncontroller.IsK8sDiscoveryEnabled(discoveryBackend, dynamo.GetDCDKubeAnnotations(dcd))
-	return generatedNameError(
+	return generatedNameViolations(
 		field.NewPath("metadata", "name"),
 		dcd.Name,
 		hasService,

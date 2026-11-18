@@ -107,7 +107,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		})},
 		{name: "standalone DCD name rejects 64 characters", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Name = boundaryDCDName + "x"
-		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (Service name: must be no more than 63 characters; nvidia.com/selector label value: must be no more than 63 bytes); %s", boundaryDCDName+"x", shortenDCD)}},
+		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (Service name: must be no more than 63 characters); %s", boundaryDCDName+"x", shortenDCD), fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (nvidia.com/selector label value: must be no more than 63 bytes); %s", boundaryDCDName+"x", shortenDCD)}},
 		{name: "existing standalone DCD with an invalid generated name remains updateable", seedWithoutWebhook: true, oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Name = digitLeadingDCDName
 			dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
@@ -126,6 +126,19 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		}), deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Name = digitLeadingDCDName
 		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (Service name: a DNS-1035 label must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character (e.g. 'my-name',  or 'abc-123', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?')); %s", digitLeadingDCDName, shortenDCD)}},
+		// Removing a Service preserves old selector errors; adding one must still report a new Service error.
+		{name: "disabling Kubernetes discovery preserves an existing standalone DCD selector error", seedWithoutWebhook: true, oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+		}), deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		})},
+		{name: "enabling Kubernetes discovery adds a Service error to an existing standalone DCD selector error", seedWithoutWebhook: true, oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		}), deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = boundaryDCDName + "x"
+		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (Service name: must be no more than 63 characters); %s", boundaryDCDName+"x", shortenDCD)}},
 		// The DGD webhook checks these names; rollouts of older DGDs create new worker DCDs.
 		{name: "DGD-owned worker DCD name is not checked on create", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Name = boundaryDCDName + "x"

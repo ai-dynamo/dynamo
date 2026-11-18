@@ -171,13 +171,15 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 	// DGD-owned DCDs are left to the DGD webhook; older DGDs' rollouts still create them.
 	// An update reports only a violation the old object did not have, so existing objects stay editable.
 	if !controlledByDynamoGraphDeployment(dcd) {
-		if err := standaloneDCDNameError(dcd, v.discoveryBackend); err != nil {
-			var oldErr *field.Error
-			if oldDCD != nil {
-				oldErr = standaloneDCDNameError(oldDCD, v.discoveryBackend)
+		existing := map[generatedNameViolationKey]bool{}
+		if oldDCD != nil {
+			for _, violation := range standaloneDCDNameViolations(oldDCD, v.discoveryBackend) {
+				existing[violation.key] = true
 			}
-			if oldErr == nil || *oldErr != *err {
-				allErrs = append(allErrs, err)
+		}
+		for _, violation := range standaloneDCDNameViolations(dcd, v.discoveryBackend) {
+			if !existing[violation.key] {
+				allErrs = append(allErrs, violation.err)
 			}
 		}
 	}

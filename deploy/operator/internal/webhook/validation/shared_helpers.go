@@ -233,31 +233,49 @@ func eppRuntimeCompatibilityError(contract eppRuntimeContract, eppConfigPath *fi
 	return nil
 }
 
-// generatedNameError reports generatedName if invalid as a DCD name, a selector label value, or,
-// when hasService, a Service name. fldPath is the user-chosen name it derives from; action says
-// which name to change.
-func generatedNameError(fldPath *field.Path, generatedName string, hasService bool, action string) *field.Error {
-	var problems []string
-	for _, msg := range k8svalidation.IsDNS1123Subdomain(generatedName) {
-		problems = append(problems, "DynamoComponentDeployment name: "+msg)
+// generatedNameViolationKey matches one failing rule for the same component and generated name.
+// component is empty for standalone DCDs and the DGD name label value.
+type generatedNameViolationKey struct {
+	component     string
+	generatedName string
+	rule          string
+}
+
+type generatedNameViolation struct {
+	key generatedNameViolationKey
+	err *field.Error
+}
+
+// generatedNameViolations reports each rule that generatedName fails independently, so an
+// update can remove a Service error without making an existing selector error look new.
+// fldPath is non-nil and names the user-chosen field; action says which name to change.
+func generatedNameViolations(fldPath *field.Path, generatedName string, hasService bool, action string) []generatedNameViolation {
+	rules := []struct {
+		name     string
+		messages []string
+	}{
+		{"DynamoComponentDeployment name", k8svalidation.IsDNS1123Subdomain(generatedName)},
+		{"Service name", nil},
+		{consts.KubeLabelDynamoSelector + " label value", k8svalidation.IsValidLabelValue(generatedName)},
 	}
 	if hasService {
-		for _, msg := range k8svalidation.IsDNS1035Label(dynamo.NormalizeKubeResourceName(generatedName)) {
-			problems = append(problems, "Service name: "+msg)
+		rules[1].messages = k8svalidation.IsDNS1035Label(dynamo.NormalizeKubeResourceName(generatedName))
+	}
+
+	// Keep one error per failing rule, in DCD, Service, then selector order.
+	var violations []generatedNameViolation
+	for _, rule := range rules {
+		if len(rule.messages) == 0 {
+			continue
 		}
+		violations = append(violations, generatedNameViolation{
+			key: generatedNameViolationKey{generatedName: generatedName, rule: rule.name},
+			err: field.Invalid(fldPath, generatedName, fmt.Sprintf(
+				"generated name is invalid (%s: %s); %s", rule.name, strings.Join(rule.messages, "; "), action,
+			)),
+		})
 	}
-	labelValueErrs := k8svalidation.IsValidLabelValue(generatedName)
-	for _, msg := range labelValueErrs {
-		problems = append(problems, consts.KubeLabelDynamoSelector+" label value: "+msg)
-	}
-	if len(problems) == 0 {
-		return nil
-	}
-	return field.Invalid(
-		fldPath,
-		generatedName,
-		fmt.Sprintf("generated name is invalid (%s); %s", strings.Join(problems, "; "), action),
-	)
+	return violations
 }
 
 // eppRuntimeCompatibilityUpdateError ratchets only an identical pre-existing contract violation.

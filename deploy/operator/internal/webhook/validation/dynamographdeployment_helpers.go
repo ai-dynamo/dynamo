@@ -439,20 +439,6 @@ func difference(a, b map[string]struct{}) []string {
 	return result
 }
 
-// generatedNameViolationKey holds the inputs of one generated-name rule. An update skips a
-// violation whose key the old object also produced.
-type generatedNameViolationKey struct {
-	// component is the component name, or empty for the DGD name label value.
-	component     string
-	generatedName string
-	hasService    bool
-}
-
-type generatedNameViolation struct {
-	key generatedNameViolationKey
-	err *field.Error
-}
-
 type generatedComponentName struct {
 	value  string
 	action string
@@ -469,7 +455,7 @@ func generatedDynamoGraphDeploymentNameViolations(
 	var violations []generatedNameViolation
 	if msgs := k8svalidation.IsValidLabelValue(dgd.Name); len(msgs) > 0 {
 		violations = append(violations, generatedNameViolation{
-			key: generatedNameViolationKey{generatedName: dgd.Name},
+			key: generatedNameViolationKey{generatedName: dgd.Name, rule: consts.KubeLabelDynamoGraphDeploymentName},
 			err: field.Invalid(
 				field.NewPath("metadata", "name"),
 				dgd.Name,
@@ -511,15 +497,9 @@ func generatedDynamoGraphDeploymentNameViolations(
 			})
 		}
 		for _, name := range names {
-			if err := generatedNameError(namePath, name.value, hasService, name.action); err != nil {
-				violations = append(violations, generatedNameViolation{
-					key: generatedNameViolationKey{
-						component:     component.ComponentName,
-						generatedName: name.value,
-						hasService:    hasService,
-					},
-					err: err,
-				})
+			for _, violation := range generatedNameViolations(namePath, name.value, hasService, name.action) {
+				violation.key.component = component.ComponentName
+				violations = append(violations, violation)
 			}
 		}
 	}
