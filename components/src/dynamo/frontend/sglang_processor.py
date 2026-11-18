@@ -190,6 +190,16 @@ def _routing_from_agent_hints(nvext: dict[str, Any]) -> dict[str, Any] | None:
     return routing or None
 
 
+def _request_cache_salt(request: dict[str, Any]) -> str | None:
+    """Match the public precedence of Rust's ``request_cache_salt``."""
+    nvext = request.get("nvext")
+    salt = nvext.get("cache_salt") if isinstance(nvext, dict) else None
+    if isinstance(salt, str) and salt:
+        return salt
+    salt = request.get("cache_salt")
+    return salt if isinstance(salt, str) and salt else None
+
+
 def _request_stop_strings(request: dict[str, Any]) -> set[str]:
     stop = request.get("stop")
     if isinstance(stop, str):
@@ -592,6 +602,11 @@ def _build_dynamo_preproc(
             routing = {**nvext_routing, **routing}
     else:
         routing = nvext_routing
+    cache_salt = _request_cache_salt(request)
+    if cache_salt is not None:
+        # The router and worker must use the same public namespace. Build a new
+        # dict so the caller's routing hints are not mutated.
+        routing = {**(routing or {}), "cache_salt": cache_salt}
 
     # PreprocessedRequest.logit_bias is HashMap<u32, f32>, so JSON's str keys must
     # become int; the HTTP layer has already validated the keys and values.
@@ -659,6 +674,8 @@ def _build_dynamo_preproc(
     nvext_passthrough = {
         key: nvext[key] for key in ("metadata_upload", "extra_fields") if key in nvext
     }
+    if cache_salt is not None:
+        nvext_passthrough["cache_salt"] = cache_salt
     if nvext_passthrough:
         preproc["extra_args"] = {"nvext": nvext_passthrough}
 
