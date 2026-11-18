@@ -566,7 +566,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .record_worker(worker_id, Some(3), "decode");
         self.started.notify_one();
         if let EngineBehavior::Vllm(outcome) = self.behavior {
-            let output = vllm::terminal(&label_ids, request.token_ids.len(), outcome);
+            let output = vllm::terminal(&label_ids, request.token_ids.len(), index + 1, outcome);
             let outputs = stream::iter([Annotated::from_data(output)]);
             if matches!(outcome, vllm::Outcome::Cancelled | vllm::Outcome::Error) {
                 return Ok(ResponseStream::new(

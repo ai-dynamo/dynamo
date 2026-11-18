@@ -12,7 +12,12 @@ pub(super) enum Outcome {
     Error,
 }
 
-pub(super) fn terminal(ids: &[u32], tokens: usize, outcome: Outcome) -> LLMEngineOutput {
+pub(super) fn terminal(
+    ids: &[u32],
+    tokens: usize,
+    cached_tokens: usize,
+    outcome: Outcome,
+) -> LLMEngineOutput {
     let mut output: LLMEngineOutput = serde_json::from_value(json!({
         "token_ids": [99], "index": 0, "finish_reason": "length",
         "top_logprobs": [[
@@ -21,7 +26,7 @@ pub(super) fn terminal(ids: &[u32], tokens: usize, outcome: Outcome) -> LLMEngin
             {"rank": 1, "token_id": 99, "logprob": -0.5}
         ]],
         "completion_usage": {"prompt_tokens": tokens, "completion_tokens": 1,
-            "total_tokens": tokens + 1, "prompt_tokens_details": {"cached_tokens": 0}}
+            "total_tokens": tokens + 1, "prompt_tokens_details": {"cached_tokens": cached_tokens}}
     }))
     .unwrap();
     match outcome {
@@ -77,6 +82,7 @@ async fn run_causal(
     let branches = (0..3)
         .map(|index| {
             let mut branch = prepared_noul_branch(index);
+            branch.prompt_ids.push(3);
             branch.native = Some(
                 super::super::causal_scoring_request(
                     branch.prompt_ids.clone(),
@@ -113,7 +119,17 @@ async fn causal_dispatch_preserves_both_contracts_usage_and_pinned_placement() {
         let (response, engine) = run_causal(dialect, Outcome::Success).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_body(response).await;
-        assert_eq!(body["usage"]["output_tokens"], 3);
+        let expected_usage = match dialect {
+            dynamo_decisions::Dialect::OpenAi => json!({
+                "input_tokens": 9,
+                "output_tokens": 3,
+                "total_tokens": 12,
+                "input_tokens_details": {"cached_tokens": 6, "cache_write_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0}
+            }),
+            dynamo_decisions::Dialect::Jev => json!({"input_tokens": 9, "output_tokens": 3}),
+        };
+        assert_eq!(body["usage"], expected_usage);
         let observations = engine.observations.lock().unwrap();
         assert_eq!(observations.len(), 3);
         for observation in observations.iter() {
@@ -183,6 +199,7 @@ async fn causal_worker_failure_retains_private_detail_for_server_logging() {
     let output = terminal(
         &prepared.label_ids,
         prepared.prompt_ids.len(),
+        1,
         Outcome::Error,
     );
     let stream = ResponseStream::new(

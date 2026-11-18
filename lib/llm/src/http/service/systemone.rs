@@ -146,6 +146,16 @@ impl DispatchError {
             is_capacity_exhausted: false,
         }
     }
+
+    fn worker_failed(detail: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            public_message: "scoring worker failed",
+            detail: detail.into(),
+            retry_after: false,
+            is_capacity_exhausted: false,
+        }
+    }
 }
 
 fn acquire_admission(
@@ -845,9 +855,9 @@ async fn read_sglang_branch(
     if let Some(frame) = exchange.finish().map_err(stream_error)? {
         accept_frame(frame, &mut terminal)?;
     }
-    let placement = branch_placement(&tracker, data_parallel_start_rank, data_parallel_size)?;
     let terminal = terminal
         .ok_or_else(|| DispatchError::malformed("missing terminal SGLang scoring frame"))?;
+    let placement = branch_placement(&tracker, data_parallel_start_rank, data_parallel_size)?;
     let scores = parse_candidate_scores(&terminal, &prepared.label_ids)
         .map_err(|cause| DispatchError::malformed(cause.to_string()))?;
     let answer = QuestionOutcome::Answer(
@@ -887,13 +897,7 @@ async fn read_vllm_branch(
                     ));
                 }
                 Some(FinishReason::Error(detail)) => {
-                    return Err(DispatchError {
-                        status: StatusCode::INTERNAL_SERVER_ERROR,
-                        public_message: "scoring worker failed",
-                        detail: detail.clone(),
-                        retry_after: false,
-                        is_capacity_exhausted: false,
-                    });
+                    return Err(DispatchError::worker_failed(detail.clone()));
                 }
                 _ => {}
             }
