@@ -91,7 +91,6 @@ func standaloneDCDNameViolations(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	discoveryBackend configv1alpha1.DiscoveryBackend,
 ) []generatedNameViolation {
-	// The controller renders a Service only for a frontend or under Kubernetes discovery.
 	hasService := dcd.IsFrontendComponent() ||
 		commoncontroller.IsK8sDiscoveryEnabled(discoveryBackend, dynamo.GetDCDKubeAnnotations(dcd))
 	return generatedNameViolations(
