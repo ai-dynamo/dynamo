@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use crate::protocols::systemone::ScoringBackend;
 use async_trait::async_trait;
 use axum::{body::to_bytes, http::StatusCode, response::Response};
 use base64::Engine as _;
@@ -24,6 +25,8 @@ mod backend_failure;
 mod native_abort;
 #[path = "tests/preflight.rs"]
 mod preflight;
+#[path = "tests/vllm.rs"]
+mod vllm;
 
 #[tokio::test]
 async fn empty_canonical_questions_are_rejected_before_admission() {
@@ -317,9 +320,15 @@ async fn unavailable_with_retry_after_does_not_claim_capacity() {
 fn placement_pin_sets_both_worker_and_rank() {
     crate::generate_format::test_formats::install();
     let native = build_native_score_request(&[1], &[2], "test-salt").unwrap();
-    let mut preprocessed = bind_native("test-model", 16, &native, "request-1")
-        .unwrap()
-        .request;
+    let mut preprocessed = bind_native(
+        ScoringBackend::Sglang,
+        "test-model",
+        16,
+        &native,
+        "request-1",
+    )
+    .unwrap()
+    .request;
     pin_to_placement(
         &mut preprocessed,
         Placement {
@@ -352,10 +361,17 @@ fn started_branch(
 ) -> StartedBranch {
     crate::generate_format::test_formats::install();
     let native = build_native_score_request(&prepared.prompt_ids, &prepared.label_ids, "salt");
-    let exchange = bind_native("test-model", 16, &native.unwrap(), "branch-0")
-        .unwrap()
-        .exchange;
+    let exchange = bind_native(
+        ScoringBackend::Sglang,
+        "test-model",
+        16,
+        &native.unwrap(),
+        "branch-0",
+    )
+    .unwrap()
+    .exchange;
     StartedBranch {
+        backend: ScoringBackend::Sglang,
         prepared,
         tracker,
         stream,
@@ -413,56 +429,53 @@ async fn finish_branch_parses_terminal_scores_and_tracker_placement() {
 
 #[tokio::test]
 async fn finish_branch_stops_when_parent_is_cancelled() {
-    let tracker = Arc::new(RequestTracker::new());
-    tracker.record_worker(41, Some(0), "decode");
-    let stream = ResponseStream::new(
-        Box::pin(stream::pending::<Annotated<LLMEngineOutput>>()),
-        Context::new(()).context(),
-    );
-    let parent = Context::new(());
-    let parent_context = parent.context();
-    parent_context.kill();
-    let result = finish_branch(
-        started_branch(prepared_noul_branch(0), tracker, stream),
-        0,
-        1,
-        parent_context,
-    )
-    .await;
-    let Err(error) = result else {
-        panic!("cancelled parent should stop branch completion")
-    };
-    assert_eq!(error.status.as_u16(), 499);
+    for backend in [ScoringBackend::Sglang, ScoringBackend::Vllm] {
+        let tracker = Arc::new(RequestTracker::new());
+        tracker.record_worker(41, Some(0), "decode");
+        let stream = ResponseStream::new(
+            Box::pin(stream::pending::<Annotated<LLMEngineOutput>>()),
+            Context::new(()).context(),
+        );
+        let parent = Context::new(());
+        let parent_context = parent.context();
+        parent_context.kill();
+        let mut started = started_branch(prepared_noul_branch(0), tracker, stream);
+        started.backend = backend;
+        let result = finish_branch(started, 0, 1, parent_context).await;
+        let Err(error) = result else {
+            panic!("cancelled parent should stop branch completion")
+        };
+        assert_eq!(error.status.as_u16(), 499);
+    }
 }
 
 #[tokio::test]
 async fn cancelled_stream_completion_is_not_a_malformed_response() {
-    let parent = Context::new(()).context();
-    let stream_parent = parent.clone();
-    let stream = stream::poll_fn(move |_| {
-        stream_parent.kill();
-        std::task::Poll::Ready(None::<Annotated<LLMEngineOutput>>)
-    });
-    let result = finish_branch(
-        started_branch(
+    for backend in [ScoringBackend::Sglang, ScoringBackend::Vllm] {
+        let parent = Context::new(()).context();
+        let stream_parent = parent.clone();
+        let stream = stream::poll_fn(move |_| {
+            stream_parent.kill();
+            std::task::Poll::Ready(None::<Annotated<LLMEngineOutput>>)
+        });
+        let mut started = started_branch(
             prepared_noul_branch(0),
             Arc::new(RequestTracker::new()),
             ResponseStream::new(Box::pin(stream), Context::new(()).context()),
-        ),
-        0,
-        1,
-        parent,
-    )
-    .await;
-    let Err(error) = result else {
-        panic!("cancelled stream must not produce an answer")
-    };
-    assert_eq!(error.status.as_u16(), 499);
+        );
+        started.backend = backend;
+        let result = finish_branch(started, 0, 1, parent).await;
+        let Err(error) = result else {
+            panic!("cancelled stream must not produce an answer")
+        };
+        assert_eq!(error.status.as_u16(), 499);
+    }
 }
 
 #[derive(Clone, Copy)]
 enum EngineBehavior {
     Success,
+    Vllm(vllm::Outcome),
     PlacementMismatch,
     MalformedWithPendingSibling,
     PendingGenerate,
@@ -520,9 +533,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let index: usize = request.id().rsplit('-').next().unwrap().parse().unwrap();
-        let native = request.extra_args.as_ref().unwrap()["sglang_tito"].clone();
-        let label_ids: Vec<u32> =
-            serde_json::from_value(native["token_ids_logprob"].clone()).unwrap();
+        let (native, label_ids): (Value, Vec<u32>) =
+            if matches!(self.behavior, EngineBehavior::Vllm(_)) {
+                let native = request.extra_args.as_ref().unwrap()["vllm_tito"].clone();
+                let ids =
+                    serde_json::from_value(native["sampling_params"]["logprob_token_ids"].clone())
+                        .unwrap();
+                (native, ids)
+            } else {
+                let native = request.extra_args.as_ref().unwrap()["sglang_tito"].clone();
+                let ids = serde_json::from_value(native["token_ids_logprob"].clone()).unwrap();
+                (native, ids)
+            };
         let stream_context = Context::new(()).context();
         self.observations.lock().unwrap().push(ObservedBranch {
             index,
@@ -543,6 +565,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .unwrap()
             .record_worker(worker_id, Some(3), "decode");
         self.started.notify_one();
+        if let EngineBehavior::Vllm(outcome) = self.behavior {
+            let output = vllm::terminal(&label_ids, request.token_ids.len(), outcome);
+            let outputs = stream::iter([Annotated::from_data(output)]);
+            if matches!(outcome, vllm::Outcome::Cancelled | vllm::Outcome::Error) {
+                return Ok(ResponseStream::new(
+                    Box::pin(outputs.chain(stream::pending())),
+                    stream_context,
+                ));
+            }
+            return Ok(ResponseStream::new(Box::pin(outputs), stream_context));
+        }
         if let EngineBehavior::RejectRequest {
             class,
             branch,
@@ -694,6 +727,7 @@ fn selection(engine: Arc<TestEngine>) -> SystemOneExecutionSelection {
     card.runtime_config.data_parallel_size = 4;
     let preprocessor = OpenAIPreprocessor::new(card.clone()).unwrap();
     SystemOneExecutionSelection {
+        backend: ScoringBackend::Sglang,
         canonical_model: "test-model".to_string(),
         engine,
         card,
@@ -888,7 +922,7 @@ async fn placement_mismatch_fails_with_unavailable_without_answers() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = response_body(response).await;
     assert!(body.get("answers").is_none());
-    assert_eq!(body["detail"], "SGLang scoring worker is unavailable");
+    assert_eq!(body["detail"], "scoring worker is unavailable");
     assert!(parent.is_killed());
     assert_eq!(semaphore.available_permits(), 2);
 }
