@@ -51,6 +51,9 @@ impl fmt::Display for ServerMode {
     }
 }
 
+/// TensorRT-LLM release this mocker matches, checked by `tests/sidecar.rs::parity_with_live_engine`.
+pub const ENGINE_VERSION: &str = "1.4.0rc3";
+
 #[derive(Clone, Debug)]
 pub struct MockerServerConfig {
     pub model: String,
@@ -191,7 +194,7 @@ impl TrtllmMockerService {
         };
         let server_info = pb::ServerInfo {
             engine_name: "tensorrt_llm".to_string(),
-            engine_version: env!("CARGO_PKG_VERSION").to_string(),
+            engine_version: ENGINE_VERSION.to_string(),
             engine_role: match config.mode {
                 ServerMode::Aggregated => pb::EngineRole::Aggregated,
                 ServerMode::Prefill => pb::EngineRole::Prefill,
@@ -569,17 +572,20 @@ impl pb::inference_server::Inference for TrtllmMockerService {
                 let Some(token_id) = signal.token_id else {
                     break Exit::MissingToken;
                 };
-                if prepared.is_stop_token(token_id, generated) {
+                let stopped = prepared.is_stop_token(token_id, generated);
+                if !stopped || prepared.streams_stop_token() {
+                    // Position before the increment: the first output token is 0,
+                    // which is the one a decode request replays from the handoff.
+                    let position = generated;
+                    generated += 1;
+                    yield response(
+                        request_id,
+                        pb::generate_response::Event::Token(prepared.token_output(token_id, position)),
+                    );
+                }
+                if stopped {
                     break Exit::Stopped(token_id);
                 }
-                // Position before the increment: the first output token is 0,
-                // which is the one a decode request replays from the handoff.
-                let position = generated;
-                generated += 1;
-                yield response(
-                    request_id,
-                    pb::generate_response::Event::Token(prepared.token_output(token_id, position)),
-                );
                 if signal.completed {
                     break Exit::Completed;
                 }

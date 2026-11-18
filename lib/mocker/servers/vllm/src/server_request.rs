@@ -298,6 +298,7 @@ impl PreparedRequest {
         token_ids: &[u32],
         total_output_tokens: usize,
         terminal: bool,
+        cached_tokens: Option<usize>,
     ) -> pb::SequenceOutput {
         let stop_token = self
             .stop_token
@@ -348,16 +349,17 @@ impl PreparedRequest {
                     pb::finish_info::FinishReason::Length
                 } as i32,
                 stop_reason: stop_token.map(pb::finish_info::StopReason::StopTokenId),
-                kv_transfer_params: (self.mode == ServerMode::Prefill).then(|| self.handoff()),
+                kv_transfer_params: (self.mode == ServerMode::Prefill)
+                    .then(|| self.handoff(cached_tokens)),
                 ec_transfer_params: None,
-                num_cached_tokens: None,
+                num_cached_tokens: cached_tokens.map(|count| count as u32),
             }),
             ..Default::default()
         }
     }
 
     pub(super) fn aborted_output(&self, token_ids: &[u32]) -> pb::SequenceOutput {
-        let mut output = self.sequence_output(token_ids, token_ids.len(), false);
+        let mut output = self.sequence_output(token_ids, token_ids.len(), false, None);
         output.finish_info = Some(pb::FinishInfo {
             num_output_tokens: token_ids.len() as u32,
             finish_reason: pb::finish_info::FinishReason::Aborted as i32,
@@ -366,7 +368,7 @@ impl PreparedRequest {
         output
     }
 
-    pub(super) fn handoff(&self) -> Struct {
+    pub(super) fn handoff(&self, cached_tokens: Option<usize>) -> Struct {
         let remote_block_ids = self
             .prompt_tokens
             .chunks(self.block_size)
@@ -375,7 +377,7 @@ impl PreparedRequest {
                 kind: Some(Kind::NumberValue(index as f64)),
             })
             .collect();
-        Struct {
+        let mut handoff = Struct {
             fields: BTreeMap::from([
                 ("do_remote_decode".to_string(), bool_value(false)),
                 ("do_remote_prefill".to_string(), bool_value(true)),
@@ -389,6 +391,18 @@ impl PreparedRequest {
                 ),
                 ("remote_host".to_string(), string_value("127.0.0.1")),
                 ("remote_port".to_string(), number_value(0.0)),
+                ("tp_size".to_string(), number_value(1.0)),
+                ("dcp_size".to_string(), number_value(1.0)),
+                ("pp_size".to_string(), number_value(1.0)),
+                (
+                    "remote_num_tokens".to_string(),
+                    number_value(self.prompt_tokens.len() as f64),
+                ),
+                (
+                    "remote_registration_generation".to_string(),
+                    number_value(0.0),
+                ),
+                ("transfer_mode".to_string(), string_value("pull")),
                 (
                     "remote_block_ids".to_string(),
                     Value {
@@ -406,7 +420,14 @@ impl PreparedRequest {
                     string_value(self.request_id.clone()),
                 ),
             ]),
+        };
+        if let Some(cached_tokens) = cached_tokens {
+            handoff.fields.insert(
+                "remote_prefill_cached_tokens".to_string(),
+                number_value(cached_tokens as f64),
+            );
         }
+        handoff
     }
 }
 

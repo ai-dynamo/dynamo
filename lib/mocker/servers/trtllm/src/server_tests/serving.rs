@@ -125,12 +125,12 @@ async fn output_budget_is_clamped_to_the_remaining_context_window() {
         ));
         assert_eq!(terminal.usage.as_ref().unwrap().completion_tokens, 4);
 
-        for prompt_len in [8, 9] {
+        for (prompt_len, code) in [(8, Code::InvalidArgument), (9, Code::Internal)] {
             clamped.input = Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
                 ids: vec![1; prompt_len],
             }));
             let error = generate_error(&service, clamped.clone()).await;
-            assert_eq!(error.code(), Code::InvalidArgument);
+            assert_eq!(error.code(), code);
             assert!(error.message().contains("context length"), "{error}");
         }
     }

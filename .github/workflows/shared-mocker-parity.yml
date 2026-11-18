@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Compares each mocker with its engine's pinned upstream image when that pin or
+# the mocker changes. See lib/mocker/servers/parity/run.py.
+name: Mocker Engine Parity
+
+on:
+  workflow_call:
+    inputs:
+      base_sha:
+        required: true
+        type: string
+      builder_name:
+        required: true
+        type: string
+    secrets:
+      HF_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  plan:
+    name: Select engines
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Select engines
+        id: plan
+        env:
+          BASE_SHA: ${{ inputs.base_sha }}
+          ECR_HOSTNAME: ${{ vars.ECR_REGISTRY }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          python3 -m pip install 'PyYAML==6.0.3'
+          python3 lib/mocker/servers/parity/plan.py --base "$BASE_SHA" \
+            --dockerhub-mirror "${ECR_HOSTNAME}/dockerhub/" \
+            --github-output "$GITHUB_OUTPUT"
+
+  build:
+    name: Build parity tests
+    needs: plan
+    if: needs.plan.outputs.matrix != '[]'
+    runs-on: prod-builder-v3
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Refresh BuildKit builder
+        uses: $/.github/actions/builder-refresher
+        with:
+          builder_name: ${{ inputs.builder_name }}
+          flavor: general
+          arch: linux/amd64,linux/arm64
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+      - name: Build test executables
+        run: >-
+          docker buildx build --target mocker-parity-tests
+          --platform linux/amd64 -f lib/sidecar/Dockerfile
+          --output type=local,dest=mocker-parity-tests .
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: mocker-parity-tests-${{ github.sha }}
+          path: mocker-parity-tests/
+          if-no-files-found: error
+          retention-days: 7
+
+  test:
+    name: ${{ matrix.engine }} mocker parity (1 GPU)
+    needs: [plan, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: [gpu-1, amd64, v2, us-west-2]
+    timeout-minutes: 30
+    container:
+      image: ${{ matrix.image }}
+      env:
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+        PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: upb
+        PRTE_ALLOW_RUN_AS_ROOT: '1'
+        PRTE_ALLOW_RUN_AS_ROOT_CONFIRM: '1'
+        PMIX_HOSTNAME: mpi-node0
+        TRTLLM_NO_USAGE_STATS: '1'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          name: mocker-parity-tests-${{ github.sha }}
+          path: mocker-parity-tests
+      - name: Install pinned OpenEngine bindings
+        if: matrix.engine == 'trtllm'
+        shell: bash
+        run: |
+          set -euo pipefail
+          source lib/sidecar/trtllm/launch/common.sh
+          trtllm_ensure_openengine_bindings python3
+      - name: Compare the mocker with the engine
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          ENGINE: ${{ matrix.engine }}
+        run: |
+          chmod +x "mocker-parity-tests/${ENGINE}-parity"
+          python3 lib/mocker/servers/parity/run.py --engine "$ENGINE" \
+            --binary "mocker-parity-tests/${ENGINE}-parity"
+      - name: Upload engine log
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: mocker-parity-${{ matrix.engine }}-${{ github.sha }}
+          path: test-results/mocker-parity/
+          if-no-files-found: warn
+          retention-days: 7

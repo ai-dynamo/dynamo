@@ -131,6 +131,7 @@ jobs:
       - operator-integration
       - helm-chart-tests
       - power-agent
+      - mocker-parity
       - sidecar-build
       - sidecar-trtllm-nightly-config-test
       - vllm-build
@@ -361,6 +362,19 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Test nightly selection
         run: python3 -m unittest discover -s lib/sidecar/trtllm/ci/tests -v
+
+  mocker-parity:
+    name: mocker-parity
+    needs: changed-files
+    permissions:
+      actions: read
+      contents: read
+    uses: $/.github/workflows/shared-mocker-parity.yml
+    with:
+      base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
   sidecar-build:
     name: dynamo-sidecar

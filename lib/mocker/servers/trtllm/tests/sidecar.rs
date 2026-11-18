@@ -102,12 +102,16 @@ fn fast_engine_args() -> MockerConfig {
 /// refused -- so this matches the server's name to keep registration and
 /// routing readable, not to get the request served.
 async fn sidecar(endpoint: &str, mode: DisaggregationMode) -> TrtllmSidecarEngine {
+    sidecar_for(endpoint, MODEL, mode).await
+}
+
+async fn sidecar_for(endpoint: &str, model: &str, mode: DisaggregationMode) -> TrtllmSidecarEngine {
     let mut argv = vec![
         "dynamo-trtllm-sidecar".to_string(),
         "--grpc-endpoint".to_string(),
         endpoint.to_string(),
         "--model-path".to_string(),
-        MODEL.to_string(),
+        model.to_string(),
         "--grpc-connections".to_string(),
         "1".to_string(),
         "--grpc-startup-deadline-secs".to_string(),
@@ -484,5 +488,61 @@ async fn sidecar_abort_cancels_the_mocker_request() {
             "abort must release the request"
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[path = "../../tests/common/parity.rs"]
+mod parity;
+
+#[tokio::test]
+#[ignore = "needs a live TensorRT-LLM engine; run lib/mocker/servers/parity/run.py"]
+async fn parity_with_live_engine() {
+    let live = parity::LiveEngine::from_env();
+    live.assert_version(dynamo_trtllm_mocker::ENGINE_VERSION);
+    let engine = sidecar_for(&live.endpoint, &live.model, DisaggregationMode::Aggregated).await;
+    let config = engine.start(0).await.unwrap();
+    let args = MockerConfig::from_value(parity::mocker_engine_args("trtllm", &config)).unwrap();
+    let context_length = config.llm.as_ref().unwrap().context_length.unwrap();
+    let mocker_server = |mode| {
+        RunningServer::start_with(
+            MockerServerConfig {
+                mode,
+                model: MODEL.to_string(),
+                context_length,
+                ..Default::default()
+            },
+            args.clone(),
+        )
+    };
+    let server = mocker_server(ServerMode::Aggregated).await;
+    let mocker = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+    let mocker_config = mocker.start(0).await.unwrap();
+
+    assert_eq!(
+        parity::registration(&mocker_config),
+        parity::registration(&config)
+    );
+    assert_eq!(
+        mocker.kv_event_sources().await.unwrap().len(),
+        engine.kv_event_sources().await.unwrap().len()
+    );
+    parity::assert_same(
+        &parity::aggregated(&live.model, &engine, context_length).await,
+        &parity::aggregated(MODEL, &mocker, context_length).await,
+    );
+
+    // The engine runs a cache transceiver, so the same process serves a context leg.
+    let prefill_server = mocker_server(ServerMode::Prefill).await;
+    let engine_prefill =
+        sidecar_for(&live.endpoint, &live.model, DisaggregationMode::Prefill).await;
+    let mocker_prefill = sidecar(&prefill_server.endpoint, DisaggregationMode::Prefill).await;
+    engine_prefill.start(1).await.unwrap();
+    mocker_prefill.start(1).await.unwrap();
+    assert_eq!(
+        parity::prefill(MODEL, &mocker_prefill).await,
+        parity::prefill(&live.model, &engine_prefill).await,
+    );
+    for backend in [&engine, &mocker, &engine_prefill, &mocker_prefill] {
+        backend.cleanup().await.unwrap();
     }
 }

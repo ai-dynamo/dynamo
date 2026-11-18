@@ -56,6 +56,13 @@ pub(super) fn build_session(
     first_token: &pb::TokenInfo,
 ) -> pb::KvSessionRef {
     let mut attributes = vec![
+        // Location and identity fields TensorRT-LLM's context server stamps.
+        ("ctx_dp_rank", number_value(f64::from(DP_RANK))),
+        (
+            "ctx_info_endpoint",
+            string_value(&format!("tcp://{}:{}", config.kv_host, config.kv_port)),
+        ),
+        ("disagg_request_id", string_value(request_id)),
         (ATTR_REQUEST_ID, string_value(request_id)),
         (ATTR_PROMPT_TOKENS, number_value(prompt_tokens as f64)),
         (ATTR_TTFT_MS, number_value(TTFT_MS)),
