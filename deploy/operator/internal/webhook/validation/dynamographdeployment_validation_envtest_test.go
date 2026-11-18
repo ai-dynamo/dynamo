@@ -2308,10 +2308,13 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 
 		// Bound MPI host generation without changing authored role launches or replica-only updates.
 		{
-			name:            "Grove restore launch rejects an oversized MPI hostname list",
-			groveDisabled:   false,
-			deployment:      checkpointTRTLLMDGDForAdmission(2147483647, false, false, false),
-			wantWebhookErrs: []string{`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: restore launch rendering supports at most 1024 MPI hosts for an operator-managed multinode TensorRT-LLM leader`},
+			name:          "Grove restore launch rejects an oversized MPI hostname list",
+			groveDisabled: false,
+			deployment:    checkpointTRTLLMDGDForAdmission(2147483647, false, false, false),
+			wantWebhookErrs: []string{
+				`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: restore launch rendering supports at most 1024 MPI hosts for an operator-managed multinode TensorRT-LLM leader`,
+				unsupportedRestoreLaunchError("spec.components[1].podTemplate.spec.containers[0].command", "main", "worker", restoreLaunchRewriteNote),
+			},
 		},
 		{
 			name:               "Grove restore launch keeps an oversized MPI launch during a replica update",
@@ -2334,10 +2337,13 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment:    checkpointTRTLLMDGDForAdmission(2147483647, false, true, false),
 		},
 		{
-			name:            "component restore launch rejects an oversized MPI hostname list",
-			groveDisabled:   true,
-			deployment:      checkpointTRTLLMDGDForAdmission(2147483647, false, false, true),
-			wantWebhookErrs: []string{`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: restore launch rendering supports at most 1024 MPI hosts for an operator-managed multinode TensorRT-LLM leader`},
+			name:          "component restore launch rejects an oversized MPI hostname list",
+			groveDisabled: true,
+			deployment:    checkpointTRTLLMDGDForAdmission(2147483647, false, false, true),
+			wantWebhookErrs: []string{
+				`spec.components[1].experimental.checkpoint: Forbidden: cannot determine the rendered restore launch: restore launch rendering supports at most 1024 MPI hosts for an operator-managed multinode TensorRT-LLM leader`,
+				unsupportedRestoreLaunchError("spec.components[1].podTemplate.spec.containers[0].command", "main", "worker", restoreLaunchRewriteNote),
+			},
 		},
 		{
 			name:               "component restore launch keeps an oversized MPI launch during a replica update",
