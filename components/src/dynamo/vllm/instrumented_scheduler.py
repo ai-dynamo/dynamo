@@ -1508,7 +1508,7 @@ class _BenchmarkSynchronizer:
         protocol timeout it raises TimeoutError; a protocol violation or a
         peer abort raises RuntimeError, like the other phases.
 
-        The prefill sweep's real-seed shots (``_bench_realseed_round``) use
+        The prefill sweep's real-seed shots (``_bench_realseed_wait_for_peers``) use
         the same rounds once per PREFILL_SWEEP step, with the point's
         ``benchmark_id`` as ``batch``, while a real-seed point is parked
         between its staging shot and its measured shot.
@@ -4106,7 +4106,7 @@ class InstrumentedScheduler(AsyncScheduler):
         Mamba "align" mode never reports a hit on them: every past-KV prefill
         point would be skipped and the run rejected. Under attention-DP the
         ranks agree on each measured shot's hit before any of them admits it
-        (``_bench_realseed_round``).
+        (``_bench_realseed_wait_for_peers``).
 
         Off: a point that reads past KV gets synthetic prefix blocks that are
         registered in the prefix cache but never computed (see
@@ -5378,7 +5378,7 @@ class InstrumentedScheduler(AsyncScheduler):
         scheduler memory while the blocks live in vLLM's LRU prefix cache,
         so an evicted chain is healed by recomputing it) and skipped only on
         a second miss. Under attention-DP the hit is a group decision
-        (``_bench_realseed_round``): the shot is admitted only when every rank
+        (``_bench_realseed_wait_for_peers``): the shot is admitted only when every rank
         hits, and otherwise every rank re-stages or skips. Returns True when a
         shot was issued (or the point was skipped) and the caller must not
         start a new point.
@@ -5423,11 +5423,11 @@ class InstrumentedScheduler(AsyncScheduler):
                 return True
             self._bench_realseed_stage = "measure"
             return True
-        # Under attention-DP, ``_bench_realseed_round`` already agreed whether
+        # Under attention-DP, ``_bench_realseed_wait_for_peers`` already agreed whether
         # every rank hits, so all ranks admit, re-stage or skip together.
         group_hit = self._bench_realseed_group_hit
         self._bench_realseed_group_hit = None
-        if getattr(self, "_bench_synchronizer", None) is not None and group_hit is None:
+        if self._bench_synchronizer is not None and group_hit is None:
             raise RuntimeError(
                 f"benchmark_id={point.benchmark_id}: attention-DP real-seed "
                 "measured shot reached without a group verdict"
@@ -5556,7 +5556,7 @@ class InstrumentedScheduler(AsyncScheduler):
             "prompt_token_ids_list": prompts,
         }
 
-    def _bench_realseed_round(self) -> bool:
+    def _bench_realseed_wait_for_peers(self) -> bool:
         """Attention-DP only: one round per prefill pass while a real-seed
         point is parked, so every rank admits, re-stages or skips the
         measured shot in the same step.
@@ -5580,8 +5580,8 @@ class InstrumentedScheduler(AsyncScheduler):
         in ``_bench_realseed_group_hit`` and the pass continues into
         ``_bench_realseed_pending_step``, which applies it.
         """
-        synchronizer = getattr(self, "_bench_synchronizer", None)
-        pending = getattr(self, "_bench_realseed_ready", None)
+        synchronizer = self._bench_synchronizer
+        pending = self._bench_realseed_ready
         if synchronizer is None or pending is None:
             return False
         point, kv_read_lengths, new_token_lengths = pending
@@ -5630,7 +5630,7 @@ class InstrumentedScheduler(AsyncScheduler):
         return False
 
     def _bench_step_prefill(self) -> SchedulerOutput | None:
-        if self._bench_realseed_round():
+        if self._bench_realseed_wait_for_peers():
             return None  # done here; peers are still draining their shots
         if self._bench_drain_if_pending():
             pass  # fall through to inject next point
@@ -5819,8 +5819,6 @@ class InstrumentedScheduler(AsyncScheduler):
     _bench_realseed_stage: str = "warm"
     _bench_realseed_staged: bool = False
     _bench_realseed_retried: bool = False
-    # Attention-DP real-seed rounds (``_bench_realseed_round``): this rank's
-    # measured-shot hit, the group verdict, and the round counter.
     _bench_realseed_local_hit: bool | None = None
     _bench_realseed_group_hit: bool | None = None
     _bench_realseed_round_seq: int = 0

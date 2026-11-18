@@ -3623,6 +3623,7 @@ def test_prefill_kv_read_uses_fake_cache_and_measures_immediately():
     stub._schedule_times = deque()
     stub.requests = {}
     stub._bench_sync_pending = False
+    stub._bench_synchronizer = None
     stub.kv_cache_manager = SimpleNamespace(new_step_starts=MagicMock())
 
     calls = []
@@ -3683,6 +3684,7 @@ def _realseed_prefill_stub(point, monkeypatch, seq=0, drop=0, points=None):
     stub._bench_skipped_points = []
     stub._bench_results = []
     stub._bench_sync_pending = False
+    stub._bench_synchronizer = None
     stub.requests = {}
     stub.kv_cache_manager = SimpleNamespace(new_step_starts=MagicMock())
     stub._bench_eagle_cache_drop_tokens = lambda: drop
@@ -4380,6 +4382,7 @@ def test_prefill_fake_cache_validation_miss_skips_measured_point():
     stub._bench_hash_block_size = 8
     stub._schedule_times = deque()
     stub._bench_skipped_points = []
+    stub._bench_synchronizer = None
     stub.kv_cache_manager = SimpleNamespace(new_step_starts=MagicMock())
     stub._bench_cache_fake_prefixes = MagicMock(return_value=True)
     stub._bench_inject_prefill = MagicMock(return_value=0)
@@ -9773,6 +9776,7 @@ def _measurement_injection_stub(seq: int, dp_rank: int = 0):
     stub._bench_seq = seq
     stub._bench_grid_digest = f"grid-{seq}"
     stub._bench_block_hasher = None
+    stub._bench_synchronizer = None
     stub._bench_active_req_ids = set()
     stub._bench_config = BenchmarkConfig()
     stub.requests = {}
