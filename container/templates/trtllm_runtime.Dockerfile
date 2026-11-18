@@ -536,15 +536,22 @@ RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m, sys; from p
 # datasets below 4.8.0, and tensorrt_llm does not import torchtitan. The filelock
 # floor matches the one upstream TensorRT-LLM sets for Python 3.11 and newer, and
 # the pyasn1 cap stays inside the range that pyasn1-modules declares.
+# soupsieve, onnx, multidict and werkzeug move to their current releases in the
+# same step. soupsieve 4 needs Python 3.11.5 or newer and no other package;
+# beautifulsoup4 needs soupsieve 1.6.1 or newer and tensorrt-llm 2.8.4 or newer.
+# requirements.trtllm.txt also refreshes soupsieve, but only the venv copy. onnx
+# 1.22.0 needs typing_extensions 4.15.0 and ml_dtypes 0.5.4 or newer, which the
+# base already ships, and aiohttp caps multidict below 7.
 # Fail if the solve changes another distribution: its package paths must be added
 # to the pre_runtime whiteout first. Mirrored by that whiteout, and checked again
 # after the overlay.
 RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade \
         --report /tmp/system-site-refresh.json \
-        "datasets==5.1.0" "fsspec[http]==2026.7.0" "filelock>=4.2.1,<5" "pyasn1>=0.6.5,<0.7" && \
-    /usr/bin/python3 -c 'import json; d = json.load(open("/tmp/system-site-refresh.json")); changed = {p["metadata"]["name"].lower().replace("_", "-") for p in d["install"]}; print("upgraded system distributions:", sorted(changed)); assert changed <= {"datasets", "fsspec", "filelock", "pyasn1"}, "Add whiteouts for upgraded transitive distributions"' && \
+        "datasets==5.1.0" "fsspec[http]==2026.7.0" "filelock>=4.2.1,<5" "pyasn1>=0.6.5,<0.7" \
+        "soupsieve==4.1.1" "onnx==1.22.0" "multidict==6.9.1" "werkzeug==3.1.9" && \
+    /usr/bin/python3 -c 'import json; d = json.load(open("/tmp/system-site-refresh.json")); changed = {p["metadata"]["name"].lower().replace("_", "-") for p in d["install"]}; print("upgraded system distributions:", sorted(changed)); assert changed <= {"datasets", "fsspec", "filelock", "pyasn1", "soupsieve", "onnx", "multidict", "werkzeug"}, "Add whiteouts for upgraded transitive distributions"' && \
     rm /tmp/system-site-refresh.json && \
-    /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"datasets": ("5.1.0", "5.1.1"), "fsspec": ("2026.7.0", "2026.7.1"), "filelock": ("4.2.1", "5"), "pyasn1": ("0.6.5", "0.7")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import datasets, fsspec, filelock, pyasn1'
+    /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"datasets": ("5.1.0", "5.1.1"), "fsspec": ("2026.7.0", "2026.7.1"), "filelock": ("4.2.1", "5"), "pyasn1": ("0.6.5", "0.7"), "soupsieve": ("4.1.1", "4.1.2"), "onnx": ("1.22.0", "1.22.1"), "multidict": ("6.9.1", "6.9.2"), "werkzeug": ("3.1.9", "3.1.10")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import datasets, fsspec, filelock, pyasn1, soupsieve, onnx, multidict, werkzeug'
 
 # Pull /workspace_src (incl. LICENSE) from the transport stage and
 # wire up the launch screen in a single RUN — saves the standalone workspace COPY layer.
@@ -607,6 +614,8 @@ RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 # has the same doubling problem. Dropping them here is free: the overlay restores
 # whatever runtime_full holds, so listing one that did not move costs nothing and
 # omitting one that did would leave stale metadata behind.
+# soupsieve, onnx and werkzeug are here for the datasets reason below. multidict,
+# which the same step raises, is already listed with aiohttp's dependencies above.
 # datasets, fsspec, filelock and pyasn1 are here for the aiohttp reason: runtime_full
 # raises them in system site, and each upgrade renames a version-stamped dist-info
 # directory. The pyasn1 pattern names the dist-info suffix so it cannot match
@@ -662,6 +671,12 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/PIL \
     /usr/local/lib/python3.12/dist-packages/pillow-* \
     /usr/local/lib/python3.12/dist-packages/pillow.libs \
+    /usr/local/lib/python3.12/dist-packages/soupsieve \
+    /usr/local/lib/python3.12/dist-packages/soupsieve-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/onnx \
+    /usr/local/lib/python3.12/dist-packages/onnx-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/werkzeug \
+    /usr/local/lib/python3.12/dist-packages/werkzeug-*.dist-info \
     /usr/local/lib/python3.12/dist-packages/datasets \
     /usr/local/lib/python3.12/dist-packages/datasets-*.dist-info \
     /usr/local/lib/python3.12/dist-packages/fsspec \
@@ -679,10 +694,12 @@ COPY --from=runtime_full / /
 RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n.replace("-", "_") + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3'
 RUN /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/certifi-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("certifi dist-info after overlay:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and tv(vs[0]) >= (2026, 10, 23) else 1)'
 RUN /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/pillow-*.dist-info"); vs = [os.path.basename(p)[7:-10] for p in d]; print("pillow dist-info after overlay:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (13, 0, 0) <= tv(vs[0]) < (14, 0, 0) else 1)'
+RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"soupsieve": ("4.1.1", "4.1.2"), "onnx": ("1.22.0", "1.22.1"), "multidict": ("6.9.1", "6.9.2"), "werkzeug": ("3.1.9", "3.1.10")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions after overlay:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items())'
 RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"datasets": ("5.1.0", "5.1.1"), "fsspec": ("2026.7.0", "2026.7.1"), "filelock": ("4.2.1", "5"), "pyasn1": ("0.6.5", "0.7")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions after overlay:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items())'
 
 {% if target not in ("dev", "local-dev") %}
 RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m, sys; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3; print("runtime import paths:", sys.modules[ServerApp.__module__].__file__, sys.modules[LabApp.__module__].__file__, sys.modules[JupyterNotebookApp.__module__].__file__, urllib3.__file__)'
+RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m; from packaging.version import Version; bounds = {"onnx": ("1.22.0", "1.22.1"), "multidict": ("6.9.1", "6.9.2"), "werkzeug": ("3.1.9", "3.1.10")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import onnx, multidict, werkzeug; paths = [onnx.__file__, multidict.__file__, werkzeug.__file__]; print("runtime import paths:", paths); assert all(p.startswith("/usr/local/lib/python3.12/dist-packages/") for p in paths)'
 RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m; from packaging.version import Version; bounds = {"datasets": ("5.1.0", "5.1.1"), "fsspec": ("2026.7.0", "2026.7.1"), "filelock": ("4.2.1", "5"), "pyasn1": ("0.6.5", "0.7")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import datasets, fsspec, filelock, pyasn1; print("runtime import paths:", datasets.__file__, fsspec.__file__, filelock.__file__, pyasn1.__file__)'
 {% endif %}
 
@@ -778,6 +795,25 @@ RUN rm -rf /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/plugins/efa_metr
         echo "ERROR: an efa_metrics plugin directory survived removal; the glob no" >&2; \
         echo "       longer matches the base image's Nsight layout." >&2; \
         find /usr/local -type d -name efa_metrics >&2; \
+        exit 1; \
+    fi
+
+# The same Nsight Systems CLI carries its own Python. On x86_64 that Python has
+# pip installed in its site-packages, and nothing in the image runs it. The
+# PyTorch source tree in the base keeps an onnx.egg-info from its own build, and
+# nothing imports from it: no .pth file or sys.path entry points into
+# /opt/pytorch/pytorch/third_party/onnx. Remove both after the overlay, for the
+# efa_metrics reason above, and fail if either survives a base layout change.
+RUN rm -rf /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/python/lib/python3.12/site-packages/pip \
+        /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/python/lib/python3.12/site-packages/pip-*.dist-info \
+        /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/python/bin/pip3* \
+        /opt/pytorch/pytorch/third_party/onnx/onnx.egg-info; \
+    left=$(find /usr/local -path '*/NsightSystems-cli-*/site-packages/pip*' 2>/dev/null; \
+        find /opt/pytorch -name onnx.egg-info 2>/dev/null); \
+    if [ -n "$left" ]; then \
+        echo "ERROR: the Nsight Systems pip or the PyTorch tree's onnx.egg-info" >&2; \
+        echo "       survived removal; the globs no longer match the base layout:" >&2; \
+        echo "$left" >&2; \
         exit 1; \
     fi
 
