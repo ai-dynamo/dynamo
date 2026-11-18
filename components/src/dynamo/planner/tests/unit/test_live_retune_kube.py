@@ -269,12 +269,20 @@ def _pod(
             "containers": containers
             if containers is not None
             else [
-                {"name": "sidecar", "ports": [{"name": "http", "containerPort": 9999}]},
+                {
+                    "name": "sidecar",
+                    "env": [
+                        {"name": "DYN_ENABLE_FRONTEND_ADMIN_API", "value": "1"},
+                        {"name": "DYN_FRONTEND_ADMIN_PORT", "value": "9999"},
+                    ],
+                },
                 {
                     "name": "main",
-                    "ports": [
-                        {"name": "metrics", "containerPort": 9090},
-                        {"name": "http", "containerPort": 8000},
+                    "ports": [{"name": "http", "containerPort": 8000}],
+                    "env": [
+                        {"name": "DYN_ENABLE_FRONTEND_ADMIN_API", "value": "1"},
+                        {"name": "DYN_FRONTEND_ADMIN_HOST", "value": "0.0.0.0"},
+                        {"name": "DYN_FRONTEND_ADMIN_PORT", "value": "9100"},
                     ],
                 },
             ]
@@ -307,16 +315,7 @@ def test_list_pods_builds_pod_info(kube):
             "items": [
                 _pod("a"),
                 _pod("b", ready=False, deleting=True, ip=None),
-                _pod(
-                    "c",
-                    containers=[
-                        {
-                            "name": "other",
-                            "ports": [{"name": "http", "containerPort": 8080}],
-                        }
-                    ],
-                ),
-                _pod("d", containers=[{"name": "main"}]),
+                _pod("c", containers=[{"name": "main"}]),
             ],
         }
     )
@@ -332,12 +331,41 @@ def test_list_pods_builds_pod_info(kube):
         ready=True,
         terminating=False,
         labels={"nvidia.com/dynamo-component-type": "frontend"},
-        http_port=8000,  # the main container's port wins
+        admin_port=9100,  # the main container's env, not the sidecar's
         restarts=2,  # the main container's
     )
     assert (pods[1].ready, pods[1].terminating, pods[1].ip) == (False, True, None)
-    assert pods[2].http_port == 8080
-    assert pods[3].http_port is None
+    assert pods[2].admin_port is None  # no admin API
+
+
+def _admin_pod(*env: dict) -> dict:
+    return _pod("p", containers=[{"name": "main", "env": list(env)}])
+
+
+ENABLED = {"name": "DYN_ENABLE_FRONTEND_ADMIN_API", "value": "true"}
+
+
+@pytest.mark.parametrize(
+    "env, port",
+    [
+        ((ENABLED,), 8002),  # the frontend's default port
+        ((ENABLED, {"name": "DYN_FRONTEND_ADMIN_PORT", "value": "9100"}), 9100),
+        (({"name": "DYN_ENABLE_FRONTEND_ADMIN_API", "value": "0"},), None),
+        # The pod spec holds $(VAR) unexpanded: the port is unknown.
+        ((ENABLED, {"name": "DYN_FRONTEND_ADMIN_PORT", "value": "$(PORT)"}), None),
+    ],
+)
+def test_list_pods_reads_the_admin_port_from_the_main_env(kube, env, port):
+    retune_kube, transport = kube
+    transport.reply(
+        {
+            "kind": "PodList",
+            "apiVersion": "v1",
+            "metadata": {},
+            "items": [_admin_pod(*env)],
+        }
+    )
+    assert retune_kube.list_pods("x=y").pop().admin_port == port
 
 
 def test_leases_round_trip_raw_json(kube):

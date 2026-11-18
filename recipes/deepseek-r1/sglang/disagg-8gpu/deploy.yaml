@@ -63,7 +63,6 @@ spec:
             - "0.75"
             - --host
             - 0.0.0.0
-            - --prefill-round-robin-balance
             - --watchdog-timeout
             - "3600"
     prefill:

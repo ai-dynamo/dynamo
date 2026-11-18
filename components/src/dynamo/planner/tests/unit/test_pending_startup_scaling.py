@@ -270,7 +270,7 @@ def _connector(deployment, pods):
             "apiVersion": "nvidia.com/v1beta1",
             "kind": "DynamoGraphDeploymentScalingAdapter",
             "metadata": {
-                "name": f"qwen-{name}",
+                "name": KubernetesAPI.scaling_adapter_name("qwen", name),
                 "uid": f"adapter-{name}-uid",
                 "resourceVersion": "101",
                 "ownerReferences": [
@@ -655,6 +655,44 @@ async def test_environment_passes_startup_inventory_to_observer_and_clears_it_on
     pods[0].metadata.deletion_timestamp = datetime.now(timezone.utc)
     await environment._refresh_replica_counts()
     assert not observer._collect_worker_counts().startup_in_progress
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["disagg", "agg"])
+async def test_startup_wait_sees_pending_capacity_under_dgd_component_names(mode):
+    deployment, pods = _deployment(), _pods()
+    if mode == "agg":
+        worker = deployment["spec"]["components"][1]
+        worker.update(name="worker", type="worker")
+        deployment["spec"]["components"] = [worker]
+        deployment["status"]["components"] = {
+            "worker": deployment["status"]["components"]["d"]
+        }
+        pods = pods[1:]
+        for pod in pods:
+            pod.metadata.labels["nvidia.com/dynamo-component"] = "worker"
+    environment = PlannerEnvironmentImpl(
+        config=_config(mode),
+        controller=_connector(deployment, pods),
+        require_prefill=mode == "disagg",
+        require_decode=True,
+    )
+    assert await environment._startup_blocked_only_by_pending()
+
+
+def test_pending_lookup_resolves_untyped_component_by_explicit_name():
+    deployment, pods = _deployment(), _pods()
+    prefill, decode = deployment["spec"]["components"]
+    prefill["replicas"] = 2
+    decode.update(type="", replicas=1)
+    deployment["status"]["components"] = {
+        "p": {"replicas": 2, "updatedReplicas": 2, "readyReplicas": 1},
+        "d": {"replicas": 1, "updatedReplicas": 1, "readyReplicas": 1},
+    }
+    pods[2].metadata.name = "p1"
+    pods[2].metadata.labels["nvidia.com/dynamo-component"] = "p"
+    inventory = _connector(deployment, pods)._get_worker_inventory_sync("p", "d")
+    assert (inventory.pending_num_prefill, inventory.pending_num_decode) == (1, 0)
 
 
 @pytest.mark.parametrize("mode", ["disagg", "decode", "agg"])

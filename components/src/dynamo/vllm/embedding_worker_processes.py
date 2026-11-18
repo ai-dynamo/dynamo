@@ -68,7 +68,7 @@ _LISTENER_FDS_ENV = "DYN_VLLM_EMBEDDING_LISTENER_FDS"
 _CHILD_ROLE = "child"
 _RPC_BASE_PATH_ENV = "VLLM_RPC_BASE_PATH"
 # Re-check the launch shape when the supported pin moves.
-_VERIFIED_VLLM_VERSIONS = ("0.32.0",)
+_VERIFIED_VLLM_VERSIONS = ("0.33.0",)
 
 
 def is_embedding_process_child() -> bool:

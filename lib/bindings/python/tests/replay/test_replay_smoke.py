@@ -29,6 +29,7 @@ from .replay_utils import (
 )
 
 pytestmark = [
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.parallel,
     pytest.mark.pre_merge,
@@ -853,6 +854,64 @@ def test_run_synthetic_trace_replay_supports_multiturn_workloads(tmp_path, repla
         input_tokens=64,
         output_tokens=2,
     )
+
+
+@pytest.mark.parametrize("accumulate_session_deltas", [False, True])
+@pytest.mark.parametrize("replay_concurrency", [None, 1])
+@pytest.mark.parametrize("serving_mode", ["agg", "disagg"])
+def test_run_synthetic_trace_replay_accumulates_session_turns(
+    serving_mode, replay_concurrency, accumulate_session_deltas
+):
+    if serving_mode == "disagg":
+        workers = {
+            "prefill_engine_args": _prefill_args(),
+            "decode_engine_args": _decode_args(),
+            "num_prefill_workers": 2,
+            "num_decode_workers": 2,
+        }
+    else:
+        workers = {"extra_engine_args": _vllm_args(), "num_workers": 2}
+    report = run_synthetic_trace_replay(
+        64,
+        8,
+        2,
+        **workers,
+        replay_mode="offline",
+        router_mode="kv_router",
+        replay_concurrency=replay_concurrency,
+        arrival_interval_ms=None if replay_concurrency else 1.0,
+        turns_per_session=3,
+        accumulate_session_deltas=accumulate_session_deltas,
+        capture_per_request=True,
+    )
+
+    # With accumulation, each later prompt carries the previous prompt and its
+    # 8 output tokens; without it, turns are independent.
+    turns: dict[str, dict[int, int]] = {}
+    for record in report.per_request:
+        session = turns.setdefault(record["session_id"], {})
+        session[record["turn_index"]] = record["input_length"]
+    lengths = [
+        [session[turn] for turn in sorted(session)] for session in turns.values()
+    ]
+    expected = [64, 136, 208] if accumulate_session_deltas else [64, 64, 64]
+    assert lengths == [expected, expected]
+    reused = report.summary["prefix_cache_reused_ratio"]
+    assert (reused > 0.0) is accumulate_session_deltas
+
+
+def test_run_synthetic_trace_replay_rejects_online_session_accumulation():
+    with pytest.raises(ValueError, match="accumulate_session_deltas"):
+        run_synthetic_trace_replay(
+            64,
+            8,
+            2,
+            extra_engine_args=_vllm_args(),
+            replay_mode="online",
+            arrival_interval_ms=1.0,
+            turns_per_session=3,
+            accumulate_session_deltas=True,
+        )
 
 
 @pytest.mark.parametrize(
