@@ -135,7 +135,7 @@ def parse_prometheus_text(path: Path) -> Optional[PrometheusSnapshot]:
     poll_times = get_gauge_by_label("dynamo_tokio_worker_mean_poll_time_ns", "worker")
     snap.tokio_worker_mean_poll_time_ns = list(poll_times.values())
     # Stalls are timer delays above 5 ms: the delay histogram's count minus its
-    # le="0.005" bucket. This replaces dynamo_frontend_event_loop_stall_total.
+    # le="0.005" bucket.
     delay_count = get_gauge("dynamo_frontend_event_loop_delay_seconds_count") or 0
     delay_le_5ms = re.search(
         r'^dynamo_frontend_event_loop_delay_seconds_bucket\{le="0\.005"\}\s+(\S+)',
