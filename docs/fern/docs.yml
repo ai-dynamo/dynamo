@@ -2129,6 +2129,19 @@ redirects:
     destination: "/dynamo/dev/reference/api/kubernetes/full-api-reference#rollingupdatestatus"
   - source: "/dynamo/dev/kubernetes/operations/cold-start-optimizations/dynamo-snapshot"
     destination: "/dynamo/dev/reference/api/kubernetes/full-api-reference#componentcheckpointconfig"
+  # The Snapshotting GPU Workers page last shipped in v1.4.2 and is absent from
+  # Latest and from v1.5.1 and later. The page that replaced it exists in each
+  # of those. v1.5.0 has no replacement page, so it gets no redirect.
+  - source: "/dynamo/kubernetes/operations/cold-start-optimizations/dynamo-snapshot"
+    destination: "/dynamo/kubernetes/model-deployment/model-loading/dynamo-snapshot-experimental"
+  - source: "/dynamo/latest/kubernetes/operations/cold-start-optimizations/dynamo-snapshot"
+    destination: "/dynamo/latest/kubernetes/model-deployment/model-loading/dynamo-snapshot-experimental"
+  - source: "/dynamo/v1.5.1/kubernetes/operations/cold-start-optimizations/dynamo-snapshot"
+    destination: "/dynamo/v1.5.1/kubernetes/model-deployment/model-loading/dynamo-snapshot-experimental"
+  - source: "/dynamo/v1.6.0/kubernetes/operations/cold-start-optimizations/dynamo-snapshot"
+    destination: "/dynamo/v1.6.0/kubernetes/model-deployment/model-loading/dynamo-snapshot-experimental"
+  - source: "/dynamo/v1.6.1/kubernetes/operations/cold-start-optimizations/dynamo-snapshot"
+    destination: "/dynamo/v1.6.1/kubernetes/model-deployment/model-loading/dynamo-snapshot-experimental"
   - source: "/dynamo/dev/kubernetes/fault-tolerance/shadow-engine-failover"
     destination: "/dynamo/dev/kubernetes/fault-tolerance/introduction"
   - source: "/dynamo/dev/kubernetes/disaggregated-serving/disaggregated-communication"
