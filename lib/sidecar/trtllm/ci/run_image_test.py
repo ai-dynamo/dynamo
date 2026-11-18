@@ -190,6 +190,7 @@ def run_rust_test(binary, env, test, results):
 
 
 def routing_fixture():
+    """Return the base image URI, its mirror, and a same-pixel URI alias."""
     # Keep CPU harness tests importable without model-processing dependencies.
     from PIL import Image, ImageOps, PngImagePlugin
 
@@ -201,10 +202,11 @@ def routing_fixture():
     image.save(alias, format="PNG", pnginfo=metadata)
     changed = BytesIO()
     ImageOps.mirror(image).save(changed, format="PNG")
-    return tuple(
+    alias_uri, changed_uri = tuple(
         "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
         for buffer in (alias, changed)
     )
+    return f"data:image/png;base64,{encoded}", changed_uri, alias_uri
 
 
 def run(args, results):
@@ -292,7 +294,7 @@ def run(args, results):
         if routing:
             import zmq
 
-            alias, changed = routing_fixture()
+            _, changed, alias = routing_fixture()
             env_extra = {
                 "TRTLLM_E2E_IMAGE_ROUTING": "1",
                 "TRTLLM_E2E_ALIAS_IMAGE": alias,

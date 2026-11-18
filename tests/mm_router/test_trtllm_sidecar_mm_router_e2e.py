@@ -20,16 +20,13 @@ image hash: text-only routing would score both workers the same.
 
 from __future__ import annotations
 
-import base64
 import os
 import time
-from io import BytesIO
-from typing import Any
 
 import pytest
 import requests
-from PIL import Image, ImageOps, PngImagePlugin
 
+from lib.sidecar.trtllm.ci.run_image_test import routing_fixture
 from tests.router.helper import generate_random_suffix
 from tests.serve.common import managed_serve_deployment
 from tests.serve.test_sidecar import (
@@ -65,8 +62,6 @@ pytestmark = [
     ),
 ]
 
-# 28x28 PNG, red left and blue right: `IMAGE_URI` in lib/sidecar/trtllm/src/tests/e2e.rs.
-_IMAGE_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAIAAAD9b0jDAAAAK0lEQVR4nGP8z0AsYGQgVi0T0WaSAEYNHTV01NBRQ0cNHTV01NBRQwefoQBvcAI3xbX7+QAAAABJRU5ErkJggg=="
 # The native routing test's text: complete blocks after the image.
 _PROMPT = (
     "Inspect the image carefully and answer only with the two colors in order. " * 8
@@ -74,29 +69,6 @@ _PROMPT = (
 )
 # A warm image prefix covers most of the prompt; a cold one covers none of it.
 _WARM_HIT_RATE = 0.5
-
-
-def _data_uri(image: Image.Image, **save_args: Any) -> str:
-    buffer = BytesIO()
-    image.save(buffer, format="PNG", **save_args)
-    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
-
-
-def _routing_images() -> tuple[str, str, str]:
-    """The base image, its mirror and a same-pixel alias.
-
-    Built as `routing_fixture()` in lib/sidecar/trtllm/ci/run_image_test.py
-    builds them; the alias gets a different URI and so a different hash.
-    """
-    base_uri = f"data:image/png;base64,{_IMAGE_PNG_BASE64}"
-    image = Image.open(BytesIO(base64.b64decode(_IMAGE_PNG_BASE64))).convert("RGB")
-    metadata = PngImagePlugin.PngInfo()
-    metadata.add_text("cache-alias", "same pixels, different URI")
-    return (
-        base_uri,
-        _data_uri(ImageOps.mirror(image)),
-        _data_uri(image, pnginfo=metadata),
-    )
 
 
 def _generate_instances(frontend_port: int, namespace: str) -> list[int]:
@@ -194,7 +166,7 @@ def test_trtllm_sidecar_image_cache_selection_across_two_workers(
         health_check_worker_count=2,
         env={**KV_ROUTING_ENV, **TRTLLM_MULTI_ENGINE_ENV},
     )
-    image_x, image_y, image_alias = _routing_images()
+    image_x, image_y, image_alias = routing_fixture()
     frontend_port = dynamo_dynamic_ports.frontend_port
 
     with managed_serve_deployment(config, request, ports=dynamo_dynamic_ports):
