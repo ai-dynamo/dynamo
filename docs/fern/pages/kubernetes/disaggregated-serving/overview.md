@@ -178,7 +178,8 @@ transfer step.)
 The decode worker continues generation after prefill hands off the KV cache. It
 mirrors the prefill worker with `subComponentType: decode` and
 `--disaggregation-mode decode`, and its replica count is sized for concurrency
-rather than prompt load.
+rather than prompt load. Its `--kv-transfer-config` uses the `kv_consumer` role
+so it can receive the KV cache from the prefill worker.
 
 ```yaml
     decode:
@@ -201,6 +202,8 @@ rather than prompt load.
             - Qwen/Qwen3-32B
             - --disaggregation-mode
             - decode
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
 ```
 
 > [!WARNING]
@@ -383,6 +386,8 @@ device plugin:
             - Qwen/Qwen3-32B
             - --disaggregation-mode
             - decode
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
 ```
 
 Apply the same change to the prefill worker, and keep its own `replicas` and
