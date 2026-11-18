@@ -1692,14 +1692,24 @@ def test_build_vllm_kv_hints_rejects_structural_breaks_as_internal_errors():
     with pytest.raises(RuntimeError, match="kv_hint must be an object"):
         _build_vllm_kv_hints({"kv_hint": "not-an-object"})
 
-    with pytest.raises(RuntimeError, match="kv_hint.actions must be a list"):
-        _build_vllm_kv_hints({"kv_hint": {"actions": {}}})
+    action_type = Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs))
+    envelope_type = Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs))
+    with patch(
+        "dynamo.vllm.handlers._vllm_kv_hints_types",
+        return_value=(action_type, envelope_type),
+    ):
+        with pytest.raises(RuntimeError, match="kv_hint.actions must be a list"):
+            _build_vllm_kv_hints({"kv_hint": {"actions": {}}})
 
-    with pytest.raises(RuntimeError, match="each kv_hint action must be an object"):
-        _build_vllm_kv_hints({"kv_hint": {"actions": ["not-an-object"]}})
+        with pytest.raises(RuntimeError, match="each kv_hint action must be an object"):
+            _build_vllm_kv_hints({"kv_hint": {"actions": ["not-an-object"]}})
 
-    with pytest.raises(RuntimeError, match="kv_hint action payload must be an object"):
-        _build_vllm_kv_hints({"kv_hint": {"actions": [{"payload": "not-an-object"}]}})
+        with pytest.raises(
+            RuntimeError, match="kv_hint action payload must be an object"
+        ):
+            _build_vllm_kv_hints(
+                {"kv_hint": {"actions": [{"payload": "not-an-object"}]}}
+            )
 
 
 def test_update_kv_transfer_params_copies_extra_args_before_mutating():
