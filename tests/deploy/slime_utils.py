@@ -37,6 +37,10 @@ from tests.deploy.kubectl_utils import (
 
 logger = logging.getLogger(__name__)
 
+# TODO(#18569): once the Slime tutorial is on main, add a GPU-free test that
+# parses the manifests on its pages, fills in their placeholders, and checks
+# that they match these copies, so that a tutorial edit fails CI until this
+# directory changes too.
 MANIFEST_DIR = Path(__file__).resolve().parent / "slime"
 
 # Names that the tutorial's manifests and commands use.
