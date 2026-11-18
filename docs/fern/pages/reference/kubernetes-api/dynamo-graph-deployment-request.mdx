@@ -77,6 +77,45 @@ spec:
           max_candidate_gpus: 8
 ```
 
+### v1beta2 AISimulate Input Overrides
+
+`spec.aisim.inputOverrides` is one atomic document for Kubernetes Server-Side Apply.
+An apply manager owns the complete document; a different manager cannot independently
+change another subtree without an ownership conflict. Submit the complete override
+document on each apply. For example:
+
+```yaml
+apiVersion: nvidia.com/v1beta2
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: bounded-search
+spec:
+  model:
+    name: Qwen/Qwen3-0.6B
+  hardware:
+    gpu:
+      sku: h100_sxm
+      budget: 4
+    numGpusPerNode: 4
+  aisim:
+    inputOverrides:
+      optimizer:
+        max_trials: 4
+```
+
+If the same manager later applies an override document containing only
+`optimizer.parallelism: 2`, the stored override no longer contains `max_trials`.
+The operator then supplies its normal trial-budget default when it lowers the input.
+A different manager must explicitly take ownership before replacing this document.
+After upgrading from granular ownership, coordinate existing managers to use one
+complete document and resolve any ownership conflicts before further applies.
+
+Atomic ownership does not change the operator's RFC 7386 JSON Merge Patch over the
+lowered input: overrides still apply last, and a stored nested `null` deletes a
+lowered field. Use `kubectl create` or `kubectl apply --server-side` to preserve
+literal nested nulls. Client-Side Apply uses different patch semantics and can
+remove them before they reach the operator. Run snapshots remain immutable.
+
 ### v1beta2 DGD Overrides
 
 **Experimental; for development only.** Enable `dynamo-operator.dgdrV1Beta2.enabled`

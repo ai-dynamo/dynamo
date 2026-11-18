@@ -106,6 +106,28 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ### Unreleased
 
+#### Kubernetes API breaking changes
+
+##### Atomic DGDR v1beta2 AISimulate input overrides
+
+**Change:** Server-Side Apply treats `spec.aisim.inputOverrides` as one atomic document
+on v1beta2 Requests and Runs. Managers can no longer independently own its subfields.
+Replacing the document removes omitted override entries; the operator's final
+JSON Merge Patch over the lowered input is unchanged.
+
+**Affected:** Users of the experimental DGDR v1beta2 API who manage input overrides
+with Server-Side Apply, particularly with several field managers.
+
+**Action:** Use one field manager to submit the complete override document. Existing
+subfield owners become owners of the atomic document after the CRD upgrade, so a
+subsequent apply can conflict. Coordinate those managers and explicitly transfer
+ownership when replacing the document; do not resolve conflicts by blindly forcing
+unrelated field changes. This marker does not preserve literal nulls sent through
+Client-Side Apply; use `kubectl create` or `kubectl apply --server-side` for them.
+
+**Existing deployments:** Installing the CRDs does not rewrite stored override values
+or roll workloads. Run snapshots remain immutable.
+
 #### Operator behavior breaking changes
 
 ##### LPX units-only deployment contract
