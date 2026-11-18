@@ -71,9 +71,13 @@ def test_request_memory_patch_accepts_upstream_signature(monkeypatch):
     original = worker_utils.request_memory
     monkeypatch.setattr(worker_utils, "request_memory", original)
     monkeypatch.setattr(patches, "_request_memory_patched", False)
+    # A worker module that imported request_memory by name before patching.
+    worker_module = ModuleType("worker_module")
+    worker_module.request_memory = original
 
-    patches.patch_request_memory()
+    patches.patch_request_memory(worker_module)
 
     patched = worker_utils.request_memory
     assert patched is not original
+    assert worker_module.request_memory is patched
     inspect.signature(patched).bind(*inspect.signature(original).parameters)

@@ -10,8 +10,10 @@ processes import from GMS metadata (RO).
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
+from types import ModuleType
 from typing import TYPE_CHECKING
 
 import torch
@@ -35,20 +37,6 @@ from gpu_memory_service.integrations.common.utils import (
     strip_gms_model_loader_config,
     torch_device,
 )
-
-if os.environ.get("MX_ENABLED", "0") == "1":
-    try:
-        from modelexpress.engines.vllm.adapter import build_vllm_load_context
-        from modelexpress.load_strategy import (
-            LoadStrategyChain,
-            publish_metadata,
-            register_tensors,
-        )
-    except ImportError as e:
-        raise ImportError(
-            "MX_ENABLED=1 but modelexpress is not installed. "
-            "Install with: pip install modelexpress"
-        ) from e
 
 if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
@@ -162,6 +150,35 @@ def abort_pending_gms_write() -> bool:
 _mx_ctx = None  # type: LoadContext | None
 
 
+def mx_enabled() -> bool:
+    """Whether ModelExpress P2P weight transfer is on (``MX_ENABLED=1``)."""
+    return os.environ.get("MX_ENABLED", "0") == "1"
+
+
+def import_modelexpress(module: str, *required: str) -> ModuleType:
+    """Import a module of the optional modelexpress package.
+
+    Called only when MX is enabled, so importing this integration neither
+    requires modelexpress nor loads it (and NIXL with it) for engines that do
+    not use it. ``required``: names the caller uses later; an install whose
+    module lacks one fails here, like a missing package.
+    """
+    try:
+        imported = importlib.import_module(module)
+    except ImportError as e:
+        raise ImportError(
+            "MX_ENABLED=1 but modelexpress is not installed. "
+            "Install with: pip install modelexpress"
+        ) from e
+    missing = [name for name in required if not hasattr(imported, name)]
+    if missing:
+        raise ImportError(
+            f"MX_ENABLED=1 but {module} has no {', '.join(missing)}; "
+            "the installed modelexpress is not compatible"
+        )
+    return imported
+
+
 def get_mx_load_context(
     vllm_config=None,
     model_config=None,
@@ -180,10 +197,11 @@ def get_mx_load_context(
     if vllm_config is None or model_config is None:
         return None
 
-    if os.environ.get("MX_ENABLED", "0") != "1":
+    if not mx_enabled():
         return None
 
-    _mx_ctx = build_vllm_load_context(vllm_config, model_config)
+    adapter = import_modelexpress("modelexpress.engines.vllm.adapter")
+    _mx_ctx = adapter.build_vllm_load_context(vllm_config, model_config)
     logger.info(
         "[GMS-MX] Created MX context (rank=%d, device=%d)",
         _mx_ctx.global_rank,
@@ -267,8 +285,9 @@ def _load_read_mode(
         # MX: register materialized tensors (available for P2P transfer)
         mx_ctx = get_mx_load_context(vllm_config, model_config)
         if mx_ctx is not None:
-            register_tensors(model, mx_ctx)
-            publish_metadata(mx_ctx)
+            load_strategy = import_modelexpress("modelexpress.load_strategy")
+            load_strategy.register_tensors(model, mx_ctx)
+            load_strategy.publish_metadata(mx_ctx)
 
         _last_imported_weights_bytes = gms_client.total_bytes
         _last_model_memory_usage_offset_bytes = 0
@@ -322,7 +341,8 @@ def _load_write_mode(
 
             if mx_ctx is not None:
                 # Full MX load strategy chain: RDMA -> ModelStreamer -> GDS -> Default
-                LoadStrategyChain.run(model, mx_ctx)
+                load_strategy = import_modelexpress("modelexpress.load_strategy")
+                load_strategy.LoadStrategyChain.run(model, mx_ctx)
             else:
                 default_loader.load_weights(model, model_config)
                 process_weights_after_loading(model, model_config, target_device)

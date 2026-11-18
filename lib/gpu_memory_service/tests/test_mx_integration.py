@@ -9,7 +9,8 @@ module level) and are skipped when torch is not available.
 """
 
 import os
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from _deps import HAS_GMS, HAS_TORCH
@@ -68,6 +69,9 @@ if HAS_TORCH:
     )
 
 
+_MX_ADAPTER = "modelexpress.engines.vllm.adapter"
+
+
 @pytest.mark.skipif(not HAS_TORCH, reason="torch required for model_loader")
 class TestGetMxLoadContext:
     """Tests for get_mx_load_context() guard logic."""
@@ -91,3 +95,20 @@ class TestGetMxLoadContext:
         sentinel = object()
         monkeypatch.setitem(get_mx_load_context.__globals__, "_mx_ctx", sentinel)
         assert get_mx_load_context() is sentinel
+
+    def test_builds_context_when_enabled_after_import(self, monkeypatch):
+        """MX switched on after model_loader was imported is still honoured."""
+        ctx = SimpleNamespace(global_rank=0, device_id=0)
+        adapter = ModuleType(_MX_ADAPTER)
+        adapter.build_vllm_load_context = lambda vllm_config, model_config: ctx
+        monkeypatch.setitem(sys.modules, _MX_ADAPTER, adapter)
+        monkeypatch.setenv("MX_ENABLED", "1")
+
+        assert get_mx_load_context(vllm_config=object(), model_config=object()) is ctx
+
+    def test_missing_modelexpress_fails_when_mx_is_used(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, _MX_ADAPTER, None)
+        monkeypatch.setenv("MX_ENABLED", "1")
+
+        with pytest.raises(ImportError, match="modelexpress is not installed"):
+            get_mx_load_context(vllm_config=object(), model_config=object())
