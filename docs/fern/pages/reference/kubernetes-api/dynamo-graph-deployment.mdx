@@ -50,16 +50,20 @@ spec:
 
 ## Name limits
 
-The operator names each component's Service `<dgd>-<component>` and uses the same value as the
-`nvidia.com/selector` label. Outside Grove, worker DCDs are named `<dgd>-<component>-<hash>`,
-where the hash has 8 characters, and that name is also a selector value. Admission rejects a
-DGD when one of these names is not a DNS-1035 label: at most 63 characters, starting
-with a letter, after dots are replaced by hyphens. The DGD name itself is the
-`nvidia.com/dynamo-graph-deployment-name` label value and allows at most 63 characters. The
-error is reported on `metadata.name` or `spec.components[*].name`. On update, only generated
-names that the old object did not already have are rejected, such as a worker DCD name that
-appears when an unset component `type` is set to a worker type. Existing DGDs with invalid names
-stay updatable and deletable.
+For each component that Dynamo manages, the operator uses `<dgd>-<component>` as the
+`nvidia.com/selector` label value. When the component has a Service, the Service name is that
+value with dots replaced by hyphens: for DGD `model.v1` and component `frontend`, the selector
+value is `model.v1-frontend` and the Service is `model-v1-frontend`. A frontend always gets a
+Service; other components get one only with Kubernetes discovery, the default. Outside Grove,
+worker DCDs are named `<dgd>-<component>-<hash>`, where the hash has 8 characters, and that name
+is also a selector value. Admission rejects a DGD when a selector value is longer than 63
+characters, or when a Service name is not a DNS-1035 label: at most 63 characters, starting
+with a letter. The DGD name itself is the `nvidia.com/dynamo-graph-deployment-name` label value
+and allows at most 63 characters. The error is reported on `metadata.name` or
+`spec.components[*].name`. On update, only problems that the old object did not already have
+for the same component are rejected, such as a worker DCD name that appears when an unset
+component `type` is set to a worker type. Existing DGDs with invalid names stay updatable and
+deletable.
 
 ## Grove update strategy
 

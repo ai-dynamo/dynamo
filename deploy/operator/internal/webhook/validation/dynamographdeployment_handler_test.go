@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -39,6 +40,7 @@ func TestDynamoGraphDeploymentHandlerValidateCreate(t *testing.T) {
 	handler := NewDynamoGraphDeploymentHandler(
 		newGroveTopologyTestManager(t),
 		"system:serviceaccount:dynamo:dynamo-operator",
+		configv1alpha1.DiscoveryBackendKubernetes,
 	)
 	dgd := newBetaDGDForValidation()
 
@@ -69,6 +71,7 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 	handler := NewDynamoGraphDeploymentHandler(
 		newGroveTopologyTestManager(t),
 		"system:serviceaccount:dynamo:dynamo-operator",
+		configv1alpha1.DiscoveryBackendKubernetes,
 	)
 	ctx := dgdAdmissionContext(admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
 
@@ -122,7 +125,7 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 		newDGD.Annotations = map[string]string{
 			consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent,
 		}
-		unconfiguredHandler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "")
+		unconfiguredHandler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "", configv1alpha1.DiscoveryBackendKubernetes)
 		if _, err := unconfiguredHandler.ValidateUpdate(ctx, oldDGD, newDGD); err != nil {
 			t.Fatalf("ValidateUpdate() error = %v, want optional operator identity to remain permissive", err)
 		}
@@ -130,7 +133,7 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 }
 
 func TestDynamoGraphDeploymentHandlerValidateDelete(t *testing.T) {
-	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "")
+	handler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "", configv1alpha1.DiscoveryBackendKubernetes)
 	ctx := dgdAdmissionContext(admissionv1.Delete, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
 
 	warnings, err := handler.ValidateDelete(ctx, newBetaDGDForValidation())
@@ -151,7 +154,7 @@ func TestDynamoGraphDeploymentHandlerRegisterWithManager(t *testing.T) {
 
 	server := ctrlwebhook.NewServer(ctrlwebhook.Options{})
 	mgr := &fakeManager{scheme: scheme, webhookServer: server}
-	handler := NewDynamoGraphDeploymentHandler(mgr, "")
+	handler := NewDynamoGraphDeploymentHandler(mgr, "", configv1alpha1.DiscoveryBackendKubernetes)
 	if err := handler.RegisterWithManager(mgr, features.Defaults()); err != nil {
 		t.Fatalf("RegisterWithManager() error = %v", err)
 	}

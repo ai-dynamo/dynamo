@@ -116,6 +116,16 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
 			dcd.Labels = map[string]string{"updated": "true"}
 		})},
+		{name: "standalone DCD without a Service accepts a digit-leading name", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = digitLeadingDCDName
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		})},
+		{name: "enabling Kubernetes discovery rejects a digit-leading standalone DCD name", oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = digitLeadingDCDName
+			dcd.Spec.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}
+		}), deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Name = digitLeadingDCDName
+		}), wantWebhookErrs: []string{fmt.Sprintf("metadata.name: Invalid value: %q: generated name is invalid (Service name: a DNS-1035 label must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character (e.g. 'my-name',  or 'abc-123', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?')); %s", digitLeadingDCDName, shortenDCD)}},
 		// The DGD webhook checks these names; rollouts of older DGDs create new worker DCDs.
 		{name: "DGD-owned worker DCD name is not checked on create", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Name = boundaryDCDName + "x"

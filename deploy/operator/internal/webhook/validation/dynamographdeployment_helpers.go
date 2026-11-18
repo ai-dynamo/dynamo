@@ -20,14 +20,17 @@ package validation
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -436,23 +439,49 @@ func difference(a, b map[string]struct{}) []string {
 	return result
 }
 
-// generatedDynamoGraphDeploymentNameErrors reports generated names Kubernetes would reject: the DGD
-// label value, <dgd>-<component>, and outside Grove the worker DCD name. dgd must not be nil.
-func generatedDynamoGraphDeploymentNameErrors(
+// generatedNameViolationKey holds the inputs of one generated-name rule. An update skips a
+// violation whose key the old object also produced.
+type generatedNameViolationKey struct {
+	// component is the component name, or empty for the DGD name label value.
+	component     string
+	generatedName string
+	hasService    bool
+}
+
+// generatedNameViolation is a generated name that Kubernetes would reject.
+type generatedNameViolation struct {
+	key generatedNameViolationKey
+	err *field.Error
+}
+
+// generatedComponentName is a name derived from a component and the fix its error suggests.
+type generatedComponentName struct {
+	value  string
+	action string
+}
+
+// generatedDynamoGraphDeploymentNameViolations reports generated names Kubernetes would reject:
+// the DGD label value, <dgd>-<component>, and outside Grove the worker DCD name. Service names
+// are checked only for components that get a Service. dgd must not be nil.
+func generatedDynamoGraphDeploymentNameViolations(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	grovePathway bool,
-) field.ErrorList {
-	allErrs := field.ErrorList{}
+	discoveryBackend configv1alpha1.DiscoveryBackend,
+) []generatedNameViolation {
+	var violations []generatedNameViolation
 	if msgs := k8svalidation.IsValidLabelValue(dgd.Name); len(msgs) > 0 {
-		allErrs = append(allErrs, field.Invalid(
-			field.NewPath("metadata", "name"),
-			dgd.Name,
-			fmt.Sprintf(
-				"invalid as the %s label value (%s); choose a shorter DynamoGraphDeployment name",
-				consts.KubeLabelDynamoGraphDeploymentName,
-				strings.Join(msgs, "; "),
+		violations = append(violations, generatedNameViolation{
+			key: generatedNameViolationKey{generatedName: dgd.Name},
+			err: field.Invalid(
+				field.NewPath("metadata", "name"),
+				dgd.Name,
+				fmt.Sprintf(
+					"invalid as the %s label value (%s); choose a shorter DynamoGraphDeployment name",
+					consts.KubeLabelDynamoGraphDeploymentName,
+					strings.Join(msgs, "; "),
+				),
 			),
-		))
+		})
 	}
 
 	// Only the length matters; the hash itself is computed by the controller.
@@ -465,32 +494,59 @@ func generatedDynamoGraphDeploymentNameErrors(
 			continue
 		}
 		namePath := componentsPath.Index(i).Child("name")
-		serviceName := dynamo.GetDCDResourceName(dgd, component.ComponentName, "")
-		if err := generatedNameError(
-			namePath,
-			serviceName,
-			"choose a shorter or letter-leading DynamoGraphDeployment name, or a shorter component name",
-		); err != nil {
-			allErrs = append(allErrs, err)
-			continue
-		}
-		if grovePathway {
-			continue
-		}
+		hasService := dynamoGraphDeploymentComponentHasService(dgd, component, grovePathway, discoveryBackend)
+
+		// Check the worker name even when the base name fails: an update can add the hash.
+		baseName := dynamo.GetDCDResourceName(dgd, component.ComponentName, "")
+		names := []generatedComponentName{{
+			value:  baseName,
+			action: "choose a shorter or letter-leading DynamoGraphDeployment name, or a shorter component name",
+		}}
 		workerName := dynamo.GetDCDResourceName(dgd, component.ComponentName, workerHashPlaceholder)
-		if workerName == serviceName {
-			continue
+		if !grovePathway && workerName != baseName {
+			names = append(names, generatedComponentName{
+				value: workerName,
+				action: fmt.Sprintf(
+					"worker DynamoComponentDeployment names end with an %d-character worker hash; choose a shorter DynamoGraphDeployment or component name",
+					dynamo.WorkerHashLength,
+				),
+			})
 		}
-		if err := generatedNameError(
-			namePath,
-			workerName,
-			fmt.Sprintf(
-				"worker DynamoComponentDeployment names end with an %d-character worker hash; choose a shorter DynamoGraphDeployment or component name",
-				dynamo.WorkerHashLength,
-			),
-		); err != nil {
-			allErrs = append(allErrs, err)
+		for _, name := range names {
+			if err := generatedNameError(namePath, name.value, hasService, name.action); err != nil {
+				violations = append(violations, generatedNameViolation{
+					key: generatedNameViolationKey{
+						component:     component.ComponentName,
+						generatedName: name.value,
+						hasService:    hasService,
+					},
+					err: err,
+				})
+			}
 		}
 	}
-	return allErrs
+	return violations
+}
+
+// dynamoGraphDeploymentComponentHasService reports whether the controller renders a Service for
+// component: a frontend always gets one, other components only under Kubernetes discovery.
+// dgd and component must not be nil.
+func dynamoGraphDeploymentComponentHasService(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	grovePathway bool,
+	discoveryBackend configv1alpha1.DiscoveryBackend,
+) bool {
+	if component.ComponentType == nvidiacomv1beta1.ComponentTypeFrontend {
+		return true
+	}
+	// Grove reads the DGD annotation; child DCDs inherit it unless the component overrides it.
+	annotations := map[string]string{}
+	if backend, ok := dgd.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend]; ok {
+		annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = backend
+	}
+	if !grovePathway {
+		maps.Copy(annotations, dynamo.GetDGDComponentResourceAnnotations(dgd, component.ComponentName, component))
+	}
+	return commoncontroller.IsK8sDiscoveryEnabled(discoveryBackend, annotations)
 }

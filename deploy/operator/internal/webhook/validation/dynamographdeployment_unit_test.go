@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -115,7 +116,7 @@ func (m *fakeManager) GetWebhookServer() ctrlwebhook.Server { return m.webhookSe
 
 func newDynamoGraphDeploymentTestValidator(t *testing.T) *DynamoGraphDeploymentValidator {
 	t.Helper()
-	return NewDynamoGraphDeploymentValidator(newGroveTopologyTestManager(t))
+	return NewDynamoGraphDeploymentValidator(newGroveTopologyTestManager(t), configv1alpha1.DiscoveryBackendKubernetes)
 }
 
 func newGroveTopologyTestManager(t *testing.T) ctrl.Manager {

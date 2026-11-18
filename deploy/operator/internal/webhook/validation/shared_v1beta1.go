@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	semver "github.com/Masterminds/semver/v3"
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -148,6 +149,8 @@ type sharedValidation struct {
 	runtimeVersionSource               runtimeVersionValidationSource
 	ratchetRuntimeVersion              bool
 	allowMissingRuntimeVersionOverride bool
+	// discoveryBackend is the operator default; it decides which components get a Service.
+	discoveryBackend configv1alpha1.DiscoveryBackend
 }
 
 func (v *sharedValidation) warn(message string) {

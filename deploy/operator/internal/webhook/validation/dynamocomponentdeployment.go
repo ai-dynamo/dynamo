@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,11 +31,14 @@ import (
 )
 
 // DynamoComponentDeploymentValidator validates v1beta1 DynamoComponentDeployment resources.
-type DynamoComponentDeploymentValidator struct{}
+type DynamoComponentDeploymentValidator struct {
+	discoveryBackend configv1alpha1.DiscoveryBackend
+}
 
 // NewDynamoComponentDeploymentValidator creates a validator for v1beta1 DynamoComponentDeployment.
-func NewDynamoComponentDeploymentValidator() *DynamoComponentDeploymentValidator {
-	return &DynamoComponentDeploymentValidator{}
+// discoveryBackend is the operator's configured default discovery backend.
+func NewDynamoComponentDeploymentValidator(discoveryBackend configv1alpha1.DiscoveryBackend) *DynamoComponentDeploymentValidator {
+	return &DynamoComponentDeploymentValidator{discoveryBackend: discoveryBackend}
 }
 
 // dynamoComponentDeploymentValidation carries DCD-specific request state.
@@ -61,6 +65,7 @@ func (v *DynamoComponentDeploymentValidator) validate(
 		ctx:                                ctx,
 		runtimeVersionSource:               runtimeVersionSource,
 		allowMissingRuntimeVersionOverride: true,
+		discoveryBackend:                   v.discoveryBackend,
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(dcd, nil)
@@ -88,6 +93,7 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 		runtimeVersionSource:               runtimeVersionSource,
 		ratchetRuntimeVersion:              true,
 		allowMissingRuntimeVersionOverride: true,
+		discoveryBackend:                   v.discoveryBackend,
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(newDCD, oldDCD)
@@ -162,15 +168,17 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 		oldMeta = &oldDCD.ObjectMeta
 	}
 	allErrs := v.validateObjectMeta(&dcd.ObjectMeta, oldMeta, field.NewPath("metadata"))
-	// A standalone DCD name is its Service and selector value; immutable, so checked on create.
 	// DGD-owned DCDs are left to the DGD webhook; older DGDs' rollouts still create them.
-	if oldDCD == nil && !controlledByDynamoGraphDeployment(dcd) {
-		if err := generatedNameError(
-			field.NewPath("metadata", "name"),
-			dcd.Name,
-			"choose a shorter or letter-leading DynamoComponentDeployment name",
-		); err != nil {
-			allErrs = append(allErrs, err)
+	// An update reports only a violation the old object did not have, so existing objects stay editable.
+	if !controlledByDynamoGraphDeployment(dcd) {
+		if err := standaloneDCDNameError(dcd, v.discoveryBackend); err != nil {
+			var oldErr *field.Error
+			if oldDCD != nil {
+				oldErr = standaloneDCDNameError(oldDCD, v.discoveryBackend)
+			}
+			if oldErr == nil || *oldErr != *err {
+				allErrs = append(allErrs, err)
+			}
 		}
 	}
 	return append(allErrs, v.validateDynamoComponentDeploymentSpec(&dcd.Spec, oldSpec, field.NewPath("spec"))...)

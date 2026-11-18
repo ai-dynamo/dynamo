@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strings"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -46,13 +47,17 @@ import (
 
 // DynamoGraphDeploymentValidator validates v1beta1 DynamoGraphDeployment resources.
 type DynamoGraphDeploymentValidator struct {
-	mgr ctrl.Manager
+	mgr              ctrl.Manager
+	discoveryBackend configv1alpha1.DiscoveryBackend
 }
 
 // NewDynamoGraphDeploymentValidator creates a validator for v1beta1 DynamoGraphDeployment.
-// mgr must not be nil.
-func NewDynamoGraphDeploymentValidator(mgr ctrl.Manager) *DynamoGraphDeploymentValidator {
-	return &DynamoGraphDeploymentValidator{mgr: mgr}
+// mgr must not be nil. discoveryBackend is the operator's configured default discovery backend.
+func NewDynamoGraphDeploymentValidator(
+	mgr ctrl.Manager,
+	discoveryBackend configv1alpha1.DiscoveryBackend,
+) *DynamoGraphDeploymentValidator {
+	return &DynamoGraphDeploymentValidator{mgr: mgr, discoveryBackend: discoveryBackend}
 }
 
 // dynamoGraphDeploymentValidation carries DGD-specific request state.
@@ -96,6 +101,7 @@ func (v *DynamoGraphDeploymentValidator) validate(
 		mgr:                   v.mgr,
 		runtimeVersionSource:  runtimeVersionSource,
 		ratchetRuntimeVersion: ratchetRuntimeVersion,
+		discoveryBackend:      v.discoveryBackend,
 	}
 
 	allErrs := validation.validateDynamoGraphDeployment(deployment, oldDeployment)
@@ -124,6 +130,7 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 		mgr:                   v.mgr,
 		runtimeVersionSource:  runtimeVersionSource,
 		ratchetRuntimeVersion: true,
+		discoveryBackend:      v.discoveryBackend,
 		userInfo:              userInfo,
 		operatorPrincipal:     operatorPrincipal,
 	}
@@ -239,17 +246,22 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 	}
 	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpec(&dgd.Spec, field.NewPath("spec"), specOpts)...)
 
-	// Check on update too: an unset componentType can become a worker type, adding the hash.
-	// Skip names the old object had, keyed by name because reordering changes field paths.
-	nameErrs := generatedDynamoGraphDeploymentNameErrors(dgd, grovePathway)
-	if oldDGD != nil && len(nameErrs) > 0 {
-		existing := map[any]bool{}
-		for _, err := range generatedDynamoGraphDeploymentNameErrors(oldDGD, grovePathway) {
-			existing[err.BadValue] = true
+	// Check on update too: a component can gain a worker hash or a Service.
+	// Skip violations the old object had; components are matched by name, not list index.
+	nameViolations := generatedDynamoGraphDeploymentNameViolations(dgd, grovePathway, v.discoveryBackend)
+	if oldDGD != nil && len(nameViolations) > 0 {
+		oldGrovePathway, _ := grovePathwayForDynamoGraphDeployment(groveEnabled, oldDGD)
+		existing := map[generatedNameViolationKey]bool{}
+		for _, violation := range generatedDynamoGraphDeploymentNameViolations(oldDGD, oldGrovePathway, v.discoveryBackend) {
+			existing[violation.key] = true
 		}
-		nameErrs = slices.DeleteFunc(nameErrs, func(err *field.Error) bool { return existing[err.BadValue] })
+		nameViolations = slices.DeleteFunc(nameViolations, func(violation generatedNameViolation) bool {
+			return existing[violation.key]
+		})
 	}
-	allErrs = append(allErrs, nameErrs...)
+	for _, violation := range nameViolations {
+		allErrs = append(allErrs, violation.err)
+	}
 
 	// LPX children require the Grove route for materialization.
 	if dgd.HasLPXComponent() && !grovePathway {

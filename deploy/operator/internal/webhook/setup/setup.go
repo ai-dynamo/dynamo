@@ -59,12 +59,12 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		internalwebhook.SetExcludedNamespaces(nil)
 	}
 
-	dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler()
+	dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler(cfg.Discovery.Backend)
 	if err := dcdHandler.RegisterWithManager(mgr, gate); err != nil {
 		return fmt.Errorf("unable to register DynamoComponentDeployment webhook: %w", err)
 	}
 
-	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr, opts.OperatorPrincipal)
+	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr, opts.OperatorPrincipal, cfg.Discovery.Backend)
 	if err := dgdHandler.RegisterWithManager(mgr, gate); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeployment webhook: %w", err)
 	}

@@ -20,8 +20,11 @@ package validation
 import (
 	"fmt"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -80,4 +83,21 @@ func controlledByDynamoGraphDeployment(dcd *nvidiacomv1beta1.DynamoComponentDepl
 	}
 	groupVersion, err := schema.ParseGroupVersion(controller.APIVersion)
 	return err == nil && groupVersion.Group == nvidiacomv1beta1.GroupVersion.Group
+}
+
+// standaloneDCDNameError reports a standalone DCD name that is invalid as its selector label value
+// or, when the DCD gets a Service, its Service name. dcd must not be nil.
+func standaloneDCDNameError(
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	discoveryBackend configv1alpha1.DiscoveryBackend,
+) *field.Error {
+	// The controller renders a Service only for a frontend or under Kubernetes discovery.
+	hasService := dcd.IsFrontendComponent() ||
+		commoncontroller.IsK8sDiscoveryEnabled(discoveryBackend, dynamo.GetDCDKubeAnnotations(dcd))
+	return generatedNameError(
+		field.NewPath("metadata", "name"),
+		dcd.Name,
+		hasService,
+		"choose a shorter or letter-leading DynamoComponentDeployment name",
+	)
 }

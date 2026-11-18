@@ -233,15 +233,20 @@ func eppRuntimeCompatibilityError(contract eppRuntimeContract, eppConfigPath *fi
 	return nil
 }
 
-// generatedNameError reports generatedName if invalid as a Service name or selector label value.
-// fldPath is the user-chosen name it derives from; action says which name to change.
-func generatedNameError(fldPath *field.Path, generatedName, action string) *field.Error {
-	serviceNameErrs := k8svalidation.IsDNS1035Label(dynamo.NormalizeKubeResourceName(generatedName))
-	labelValueErrs := k8svalidation.IsValidLabelValue(generatedName)
-	problems := make([]string, 0, len(serviceNameErrs)+len(labelValueErrs))
-	for _, msg := range serviceNameErrs {
-		problems = append(problems, "Service name: "+msg)
+// generatedNameError reports generatedName if invalid as a DCD name, a selector label value, or,
+// when hasService, a Service name. fldPath is the user-chosen name it derives from; action says
+// which name to change.
+func generatedNameError(fldPath *field.Path, generatedName string, hasService bool, action string) *field.Error {
+	var problems []string
+	for _, msg := range k8svalidation.IsDNS1123Subdomain(generatedName) {
+		problems = append(problems, "DynamoComponentDeployment name: "+msg)
 	}
+	if hasService {
+		for _, msg := range k8svalidation.IsDNS1035Label(dynamo.NormalizeKubeResourceName(generatedName)) {
+			problems = append(problems, "Service name: "+msg)
+		}
+	}
+	labelValueErrs := k8svalidation.IsValidLabelValue(generatedName)
 	for _, msg := range labelValueErrs {
 		problems = append(problems, consts.KubeLabelDynamoSelector+" label value: "+msg)
 	}
