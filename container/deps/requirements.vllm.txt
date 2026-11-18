@@ -22,6 +22,10 @@ certifi==2026.10.23
 # it so the --no-deps install refreshes the bundled copy to the current release
 # line.
 cryptography>=50.0.0
+# The upstream vllm-openai base bundles dnspython, which email-validator
+# requires, at an older patch release. Pin it so the --no-deps install moves it
+# to the current patch release. dnspython has no required dependencies.
+dnspython==2.9.2
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
 # Hold lmcache below the vLLM 0.34 image's 0.5.7.post1, which moved the
 # lmcache.integration.vllm.vllm_v1_adapter module that vLLM's LMCacheConnectorV1

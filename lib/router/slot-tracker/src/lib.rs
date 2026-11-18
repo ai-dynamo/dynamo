@@ -20,7 +20,6 @@ mod compressed_path_arena;
 pub mod host;
 mod multi_worker;
 mod prefill_tracker;
-mod prelude;
 mod prompt_membership_trie;
 mod prompt_registry;
 mod replica_sync;
@@ -41,12 +40,10 @@ pub use multi_worker::{
 pub use prefill_tracker::PrefillTokenDeltas;
 pub use prompt_registry::WorkerLoadReader;
 pub use prompt_registry::{PotentialLoadMaps, WorkerLoadProjection};
-pub use single::{
-    ActiveSequences, DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION, PrefillCompletion, RequestId,
-};
+pub use single::{PrefillCompletion, RequestId};
 pub use topology::{MAX_DATA_PARALLEL_RANKS_PER_WORKER, WorkerDpRange, WorkerTopologyError};
 pub use wire::{
-    ActiveBlockEvent, ActiveBlockEventData, ActiveSequenceEvent, ActiveSequenceEventBatch,
-    ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION, MAX_REPLICA_BATCH_EVENTS, PrefillEvent,
-    PrefillEventData, PrefillLoadHint, SchedulerGroup, SchedulerLoad,
+    ActiveSequenceEvent, ActiveSequenceEventBatch, ActiveSequenceEventData,
+    MAX_REPLICA_BATCH_DURATION, MAX_REPLICA_BATCH_EVENTS, PrefillLoadHint, SchedulerGroup,
+    SchedulerLoad,
 };

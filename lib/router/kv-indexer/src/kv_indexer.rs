@@ -54,12 +54,38 @@ fn apply_routing_decision_with_prune_tracking(
         return;
     };
 
+    let Ok(block_entries) = apply_routing_decision(
+        trie,
+        routing_req.worker,
+        &routing_req.local_hashes,
+        &routing_req.sequence_hashes,
+        event_id_counter,
+    ) else {
+        return;
+    };
+
+    // NOTE: For the TTL approximate indexer, reinserting the same block in another routing
+    // decision makes PruneManager reset its expiry to now + TTL. This is TTL since the latest
+    // predicted insertion, not since first sighting. Output progress, request-liveness leases,
+    // and active request references do not refresh it; this lifecycle is also independent from
+    // approximate-LRU ref/deref tracking.
+    pm.insert_block_entries(block_entries);
+}
+
+/// Stores a routing decision's blocks on `worker` in `trie`, as the TTL approximate index
+/// predicts them, and returns the entries whose expiry timers the caller starts.
+/// `local_hashes` and `sequence_hashes` are parallel, one entry per block. The event id
+/// advances even when the store fails, and then no entries are returned.
+pub fn apply_routing_decision(
+    trie: &mut RadixTree,
+    worker: WorkerWithDpRank,
+    local_hashes: &[LocalBlockHash],
+    sequence_hashes: &[SequenceHash],
+    event_id_counter: &mut u64,
+) -> Result<Vec<BlockEntry>, KvCacheEventError> {
     *event_id_counter += 1;
 
-    let hashes = routing_req
-        .local_hashes
-        .iter()
-        .zip(routing_req.sequence_hashes.iter());
+    let hashes = local_hashes.iter().zip(sequence_hashes.iter());
     let stored_event = KvCacheEventData::Stored(KvCacheStoreData {
         parent_hash: None,
         start_position: None,
@@ -73,37 +99,33 @@ fn apply_routing_decision_with_prune_tracking(
     });
 
     let event = RouterEvent::new(
-        routing_req.worker.worker_id,
+        worker.worker_id,
         KvCacheEvent {
             event_id: *event_id_counter,
             data: stored_event,
-            dp_rank: routing_req.worker.dp_rank,
+            dp_rank: worker.dp_rank,
         },
     );
+    trie.apply_event(event)?;
 
-    if trie.apply_event(event).is_err() {
-        return;
-    }
-
-    // NOTE: For the TTL approximate indexer, reinserting the same block in another routing
-    // decision makes PruneManager reset its expiry to now + TTL. This is TTL since the latest
-    // predicted insertion, not since first sighting. Output progress, request-liveness leases,
-    // and active request references do not refresh it; this lifecycle is also independent from
-    // approximate-LRU ref/deref tracking.
-    let block_entries = routing_req
-        .sequence_hashes
+    Ok(sequence_hashes
         .iter()
         .enumerate()
         .map(|(idx, h)| BlockEntry {
             key: ExternalSequenceBlockHash(*h),
-            worker: routing_req.worker,
+            worker,
             seq_position: idx,
         })
-        .collect();
-    pm.insert_block_entries(block_entries);
+        .collect())
 }
 
-fn apply_prune_removes(trie: &mut RadixTree, entries: Vec<BlockEntry>, event_id_counter: &mut u64) {
+/// Removes expired approximate-index entries from `trie`: one remove event per worker rank,
+/// in prefix order.
+pub fn apply_prune_removes(
+    trie: &mut RadixTree,
+    entries: Vec<BlockEntry>,
+    event_id_counter: &mut u64,
+) {
     let mut entries_by_worker = BTreeMap::<WorkerWithDpRank, Vec<BlockEntry>>::new();
     for entry in entries {
         entries_by_worker
@@ -154,6 +176,8 @@ enum MutationRequest {
 
 struct DirectLruSink {
     sender: flume::Sender<ApproximateLruTask>,
+    /// Cancelled when the indexer thread exits.
+    lane_exited: CancellationToken,
 }
 
 impl ApproximateLruCommandSink for DirectLruSink {
@@ -162,6 +186,10 @@ impl ApproximateLruCommandSink for DirectLruSink {
         self.sender
             .send(task)
             .map_err(|_| KvRouterError::IndexerOffline)
+    }
+
+    fn lane_exited(&self) -> &CancellationToken {
+        &self.lane_exited
     }
 }
 
@@ -457,15 +485,18 @@ impl KvIndexer {
         let (approximate_lru_tx, approximate_lru_rx) = approximate_lru_enabled
             .then(flume::unbounded::<ApproximateLruTask>)
             .map_or((None, None), |(tx, rx)| (Some(tx), Some(rx)));
+        let thread_exited = CancellationToken::new();
         let approximate_lru = approximate_lru_tx.as_ref().map(|sender| {
             ApproximateLruClient::new(Arc::new(DirectLruSink {
                 sender: sender.clone(),
+                lane_exited: thread_exited.clone(),
             }))
         });
 
         let cancel_clone = token.clone();
 
         std::thread::spawn(move || {
+            let _exited = thread_exited.drop_guard();
             let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -1138,24 +1169,58 @@ mod fifo_reset_tests {
     /// Until release, mutations only queue up, so the test fixes their order. Only
     /// enqueue-only calls are safe before release; `flush` or `find_matches` would deadlock.
     async fn parked_indexer() -> (KvIndexer, std::sync::mpsc::Sender<()>) {
+        parked_indexer_with(CancellationToken::new(), None).await
+    }
+
+    async fn parked_indexer_with(
+        token: CancellationToken,
+        retention: Option<ApproximateRetentionConfig>,
+    ) -> (KvIndexer, std::sync::mpsc::Sender<()>) {
         let (entered_tx, entered_rx) = oneshot::channel();
         let (open_tx, open_rx) = std::sync::mpsc::channel();
         let gate = Arc::new(Gate {
             entered: Mutex::new(Some(entered_tx)),
             open: Mutex::new(open_rx),
         });
-        let indexer = KvIndexer::builder(
-            CancellationToken::new(),
-            32,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-        )
-        .delegate(gate)
-        .build();
+        let mut builder =
+            KvIndexer::builder(token, 32, Arc::new(KvIndexerMetrics::new_unregistered()))
+                .delegate(gate);
+        builder.retention = retention;
+        let indexer = builder.build();
         indexer
             .apply_event(create_store_event(99, 0, vec![1], None))
             .await;
         entered_rx.await.unwrap();
         (indexer, open_tx)
+    }
+
+    /// The thread shuts down with an acknowledged LRU task still queued. The client's sender
+    /// keeps that task and its reply alive, so the wait must observe the thread's exit.
+    #[tokio::test]
+    async fn lru_wait_fails_when_indexer_thread_exits_with_it_queued() {
+        let token = CancellationToken::new();
+        let retention = ApproximateRetentionConfig::Lru {
+            fallback_ttl: PruneConfig {
+                ttl: std::time::Duration::from_secs(120),
+            },
+        };
+        let (indexer, release) = parked_indexer_with(token.clone(), Some(retention)).await;
+        let (result, ()) = tokio::join!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                indexer.approximate_lru_stats()
+            ),
+            async {
+                tokio::task::yield_now().await;
+                token.cancel();
+                release.send(()).unwrap();
+            },
+        );
+        let result = result.expect("LRU wait hung after the indexer thread exited");
+        assert!(
+            matches!(result, Err(KvRouterError::IndexerOffline)),
+            "returned {result:?}"
+        );
     }
 
     /// Removing one dp_rank must apply after already-queued stores and keep sibling ranks.

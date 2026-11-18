@@ -70,6 +70,8 @@ class SnapshotConfig:
             # Stay paused so backends can refresh restore env, create the
             # runtime, then call elect_and_wake().
             logger.info("Restore sentinel detected; returning application-paused")
+            # Drop the capture override. The subsequent restore-context refresh
+            # applies the destination policy, if supplied, before registration.
             os.environ.pop("HF_HUB_OFFLINE", None)
             return True
 
