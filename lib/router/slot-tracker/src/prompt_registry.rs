@@ -653,8 +653,7 @@ mod tests {
                     expected_prefill_duration,
                     anchored_since,
                 }),
-                total_modeled_prefill_time_ms: expected_prefill_duration
-                    .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64),
+                all_prefills_modeled: expected_prefill_duration.is_some(),
             },
         }
     }
