@@ -13,6 +13,11 @@
 //!   passed. Built on a paused clock so every program expires at once: the first check settles
 //!   them all, the rest size room from the settled charges.
 //! - `turn`: `dispatched` for a continuing turn, then its `Completed` event.
+//! - `turn_with_paused`: the same turn while programs are paused and every rank has a sliver of
+//!   room under the resume ceiling that fits none of them, so resume has nothing to do.
+//!
+//! Groups run at 4 workers, and a 1,024-program group at 64, since a check for a new or
+//! paused program sizes room across ranks.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,7 +27,6 @@ use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_mai
 use dynamo_kv_router::plugins::prelude::*;
 
 const BLOCK_SIZE: u32 = 64;
-const WORKERS: u64 = 4;
 const ISL: usize = 1_000;
 const HELD: usize = 1_000;
 const RETENTION: Duration = Duration::from_secs(3_600);
@@ -35,8 +39,27 @@ fn session(index: usize) -> SessionContext {
     SessionContext::new(format!("session-{index}"), None, Some(false), None)
 }
 
-fn classifier(programs: usize) -> Box<dyn RequestClassifier> {
+/// How the ranks are filled relative to the pause threshold.
+#[derive(Clone, Copy)]
+enum Fill {
+    /// Ranks exactly full at a pause threshold of 1.0: nothing pauses, a new session holds.
+    Exact,
+    /// Ranks over the default threshold, so setup pauses programs down to a target that leaves
+    /// room under the resume ceiling smaller than one program.
+    OverThreshold,
+}
+
+fn classifier(programs: usize, workers: u64, fill: Fill) -> Box<dyn RequestClassifier> {
     let policy = tempfile::NamedTempFile::new().unwrap();
+    let thresholds = match fill {
+        Fill::Exact => {
+            "    pause_threshold: 1.0\n    pause_target: 1.0\n    resume_hysteresis: 0.0\n"
+        }
+        // Ceiling 0.85, target 0.848: 0.2% of a rank is free under the ceiling.
+        Fill::OverThreshold => {
+            "    pause_threshold: 0.95\n    pause_target: 0.848\n    resume_hysteresis: 0.10\n"
+        }
+    };
     std::fs::write(
         policy.path(),
         format!(
@@ -48,13 +71,14 @@ request_classifier:
     resume_timeout_seconds: 600
     session_retention_seconds: {}
     max_tracked_requests: 1000000
-worker_selection:
+{}worker_selection:
   aggregated: thunderagent
   instances:
     - name: thunderagent
       type: thunderagent
 "#,
-            RETENTION.as_secs()
+            RETENTION.as_secs(),
+            thresholds
         ),
     )
     .unwrap();
@@ -66,11 +90,16 @@ worker_selection:
             ..Default::default()
         })
         .unwrap();
-    // Every worker holds exactly its share of the programs, so a new program has no room.
-    let per_worker_tokens = programs.div_ceil(WORKERS as usize) * ISL;
+    // Every worker holds exactly its share of the programs: at an exact fill a new program has
+    // no room; over the threshold the programs exceed the rank by a ninth.
+    let per_worker_tokens = programs.div_ceil(workers as usize) * ISL;
+    let per_worker_tokens = match fill {
+        Fill::Exact => per_worker_tokens,
+        Fill::OverThreshold => per_worker_tokens * 9 / 10,
+    };
     let kv_blocks = (per_worker_tokens as u64).div_ceil(u64::from(BLOCK_SIZE));
     let context = RequestClassifierContext::new(BLOCK_SIZE, move || {
-        (0..WORKERS)
+        (0..workers)
             .map(|index| {
                 WorkerInfo::new(
                     worker(index),
@@ -106,17 +135,23 @@ fn dispatch_turn(
     gate: &dyn DispatchGate,
     request_id: &str,
     session_index: usize,
+    workers: u64,
 ) {
     let session = session(session_index);
     classify(classifier, request_id, &session);
     gate.dispatched(
         &head(request_id, &session),
-        Some(worker(session_index as u64 % WORKERS)),
+        Some(worker(session_index as u64 % workers)),
     );
 }
 
-async fn complete(classifier: &mut dyn RequestClassifier, request_id: &str, session_index: usize) {
-    let worker = worker(session_index as u64 % WORKERS);
+async fn complete(
+    classifier: &mut dyn RequestClassifier,
+    request_id: &str,
+    session_index: usize,
+    workers: u64,
+) {
+    let worker = worker(session_index as u64 % workers);
     classifier
         .on_event(ClassifyEvent::Sent {
             request_id: request_id.to_owned(),
@@ -153,12 +188,13 @@ struct Ledger {
     classifier: Box<dyn RequestClassifier>,
     gate: Arc<dyn DispatchGate>,
     runtime: tokio::runtime::Runtime,
+    workers: u64,
     next_request: usize,
 }
 
 impl Ledger {
-    fn new(programs: usize) -> Self {
-        let classifier = classifier(programs);
+    fn new(programs: usize, workers: u64, fill: Fill) -> Self {
+        let classifier = classifier(programs, workers, fill);
         let gate = classifier
             .dispatch_gate()
             .expect("ThunderAgent returns a gate");
@@ -170,12 +206,26 @@ impl Ledger {
             classifier,
             gate,
             runtime,
+            workers,
             next_request: 0,
         };
         for index in 0..programs {
             ledger.turn(index);
         }
         hold_new_sessions(ledger.classifier.as_mut(), programs);
+        if matches!(fill, Fill::Exact) {
+            // The state the module doc describes: every rank is exactly full, so a new
+            // session's first turn is held, not admitted.
+            let id = "held-0";
+            let session = session(programs);
+            assert!(
+                matches!(
+                    ledger.gate.check(&head(id, &session)),
+                    DispatchDecision::Hold { .. }
+                ),
+                "an exactly full pool must hold a new session"
+            );
+        }
         ledger
     }
 
@@ -188,9 +238,14 @@ impl Ledger {
             self.gate.as_ref(),
             &id,
             session_index,
+            self.workers,
         );
-        self.runtime
-            .block_on(complete(self.classifier.as_mut(), &id, session_index));
+        self.runtime.block_on(complete(
+            self.classifier.as_mut(),
+            &id,
+            session_index,
+            self.workers,
+        ));
     }
 }
 
@@ -204,21 +259,21 @@ struct ExpiredLedger {
 }
 
 impl ExpiredLedger {
-    fn new(programs: usize) -> Self {
+    fn new(programs: usize, workers: u64) -> Self {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .start_paused(true)
             .build()
             .unwrap();
         let (classifier, gate) = runtime.block_on(async {
-            let mut classifier = classifier(programs);
+            let mut classifier = classifier(programs, workers, Fill::Exact);
             let gate = classifier
                 .dispatch_gate()
                 .expect("ThunderAgent returns a gate");
             for index in 0..programs {
                 let id = format!("turn-{index}");
-                dispatch_turn(classifier.as_mut(), gate.as_ref(), &id, index);
-                complete(classifier.as_mut(), &id, index).await;
+                dispatch_turn(classifier.as_mut(), gate.as_ref(), &id, index, workers);
+                complete(classifier.as_mut(), &id, index, workers).await;
             }
             hold_new_sessions(classifier.as_mut(), programs);
             tokio::time::advance(RETENTION + Duration::from_secs(1)).await;
@@ -239,14 +294,16 @@ impl ExpiredLedger {
 }
 
 fn bench(c: &mut Criterion) {
-    for programs in [256usize, 1_000, 10_000] {
-        let mut group = c.benchmark_group(format!("thunderagent_ledger/{programs}_programs"));
+    for (programs, workers) in [(256usize, 4u64), (1_000, 4), (10_000, 4), (1_024, 64)] {
+        let mut group = c.benchmark_group(format!(
+            "thunderagent_ledger/{programs}_programs_{workers}_workers"
+        ));
         group
             .warm_up_time(Duration::from_millis(300))
             .measurement_time(Duration::from_secs(2))
             .sample_size(20);
 
-        let ledger = Ledger::new(programs);
+        let ledger = Ledger::new(programs, workers, Fill::Exact);
         group.bench_function("check_held", |b| {
             b.iter(|| check_held(ledger.gate.as_ref(), programs, 0))
         });
@@ -260,12 +317,12 @@ fn bench(c: &mut Criterion) {
         });
         group.throughput(Throughput::Elements(1));
 
-        let expired = ExpiredLedger::new(programs);
+        let expired = ExpiredLedger::new(programs, workers);
         group.bench_function("check_held_retention_passed", |b| {
             b.iter(|| expired.check_held(programs, 0))
         });
 
-        let mut live = Ledger::new(programs);
+        let mut live = Ledger::new(programs, workers, Fill::Exact);
         let mut cursor = 0usize;
         group.bench_function("turn", |b| {
             b.iter_batched(
@@ -274,6 +331,19 @@ fn bench(c: &mut Criterion) {
                     cursor
                 },
                 |index| live.turn(index),
+                BatchSize::PerIteration,
+            )
+        });
+
+        let mut paused = Ledger::new(programs, workers, Fill::OverThreshold);
+        let mut cursor = 0usize;
+        group.bench_function("turn_with_paused", |b| {
+            b.iter_batched(
+                || {
+                    cursor = (cursor + 1) % programs;
+                    cursor
+                },
+                |index| paused.turn(index),
                 BatchSize::PerIteration,
             )
         });

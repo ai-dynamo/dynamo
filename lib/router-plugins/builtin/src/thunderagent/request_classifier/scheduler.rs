@@ -146,6 +146,23 @@ pub(crate) struct State {
     queued: HashMap<String, usize>,
     next_retention_expiry: Option<Instant>,
     capacity_snapshot_id: Option<u64>,
+    /// Bumped by every change to a rank's charge, so a cached room answer knows it is stale.
+    usage_version: u64,
+    /// The largest free room on any live rank, under each ceiling `check` sizes against, for
+    /// the charges and capacities it was computed from. A held head whose need exceeds it is
+    /// refused without walking the ranks, so a gate wake costs O(held lanes), not O(held
+    /// lanes x ranks).
+    room_cache: Option<RoomCache>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RoomCache {
+    snapshot_id: u64,
+    usage_version: u64,
+    /// Room under the full capacity, where a new program's first turn fits.
+    new_program: usize,
+    /// Room under the resume ceiling, where a paused program resumes.
+    resume: usize,
 }
 
 impl State {
@@ -162,6 +179,8 @@ impl State {
             queued: HashMap::new(),
             next_retention_expiry: None,
             capacity_snapshot_id: None,
+            usage_version: 0,
+            room_cache: None,
         }
     }
 
@@ -237,9 +256,10 @@ impl State {
         }
         let forced_at = request.registered_at + self.config.resume_timeout();
         let forced = now >= forced_at;
+        let input_tokens = request.input_tokens;
+        let request_pin = request.pinned_worker;
         // A hold wakes at the next retention expiry: room can come from one with no turn
         // starting or ending.
-        let usage = &self.normal_usage;
         let next_expiry = self.next_retention_expiry;
         let hold = || DispatchDecision::Hold {
             until: Some(next_expiry.map_or(forced_at, |expiry| expiry.min(forced_at))),
@@ -259,7 +279,7 @@ impl State {
                 && capacities.is_live(pin)
                 && let Some(capacity) = capacities.capacity(pin)
             {
-                let used = usage.get(&pin).copied().unwrap_or(0);
+                let used = self.normal_usage.get(&pin).copied().unwrap_or(0);
                 let current_charge = (assigned == Some(pin))
                     .then(|| self.program_charge(program))
                     .flatten()
@@ -278,26 +298,35 @@ impl State {
             // No capacity cards yet: admission cannot size anything, so nothing is held.
             return go(None);
         }
-        let (required, ceiling) = match program {
+        let (required, resume) = match program {
             // A paused program resumes once a rank has room under the resume ceiling.
-            Some(program) => (
-                self.buffered_program_tokens(program),
-                (self.config.pause_threshold - self.config.resume_hysteresis).max(0.0),
-            ),
+            Some(program) => (self.buffered_program_tokens(program), true),
             // A new program fits wherever its first turn fits.
-            None => (self.request_cost(request.input_tokens), 1.0),
+            None => (self.request_cost(input_tokens), false),
         };
-        if let Some(worker) =
-            self.fit_worker(required, request.pinned_worker, capacities, ceiling, usage)
+        let ceiling = if resume {
+            (self.config.pause_threshold - self.config.resume_hysteresis).max(0.0)
+        } else {
+            1.0
+        };
+        let pinned_worker = request_pin;
+        // Most held heads are refused here, from one cached number, without a rank walk.
+        let may_fit = pinned_worker.is_some() || required <= self.largest_room(capacities, resume);
+        if may_fit
+            && let Some(worker) = self.fit_worker(
+                required,
+                pinned_worker,
+                capacities,
+                ceiling,
+                &self.normal_usage,
+            )
         {
             return go(Some(worker));
         }
         if forced {
             // Waited long enough: dispatch onto the pin, else the rank with the most room once
             // acting programs' tokens have decayed.
-            let target = request
-                .pinned_worker
-                .or_else(|| self.most_decayed_room(capacities, now));
+            let target = pinned_worker.or_else(|| self.most_decayed_room(capacities, now));
             return go(target);
         }
         hold()
@@ -540,10 +569,18 @@ impl State {
         ceiling: f64,
         usage: &HashMap<WorkerWithDpRank, usize>,
     ) -> Option<WorkerWithDpRank> {
+        if let Some(pin) = pinned {
+            let fits = capacities.is_live(pin)
+                && capacities.capacity(pin).is_some_and(|capacity| {
+                    scale_tokens(capacity, ceiling)
+                        .checked_sub(usage.get(&pin).copied().unwrap_or(0))
+                        .is_some_and(|remaining| remaining >= required)
+                });
+            return fits.then_some(pin);
+        }
         capacities
             .iter()
             .filter(|(worker, _)| capacities.is_live(*worker))
-            .filter(|(worker, _)| pinned.is_none_or(|pinned| pinned == *worker))
             .filter_map(|(worker, capacity)| {
                 let limit = scale_tokens(capacity, ceiling);
                 let used = usage.get(&worker).copied().unwrap_or(0);
@@ -615,6 +652,7 @@ impl State {
         if *used == 0 {
             self.normal_usage.remove(&worker);
         }
+        self.usage_version = self.usage_version.wrapping_add(1);
     }
 
     fn add_charge(&mut self, charge: Option<(WorkerWithDpRank, usize)>) {
@@ -623,6 +661,45 @@ impl State {
         {
             let used = self.normal_usage.entry(worker).or_default();
             *used = used.saturating_add(tokens);
+            self.usage_version = self.usage_version.wrapping_add(1);
+        }
+    }
+
+    /// The largest free room on any live rank under `ceiling`, from the cache when the charges
+    /// and capacities have not changed since it was computed.
+    fn largest_room(&mut self, capacities: &WorkerCapacitySnapshot, resume: bool) -> usize {
+        let cached = self.room_cache.filter(|cache| {
+            cache.snapshot_id == capacities.id() && cache.usage_version == self.usage_version
+        });
+        let cache = match cached {
+            Some(cache) => cache,
+            None => {
+                let resume_ceiling =
+                    (self.config.pause_threshold - self.config.resume_hysteresis).max(0.0);
+                let mut cache = RoomCache {
+                    snapshot_id: capacities.id(),
+                    usage_version: self.usage_version,
+                    new_program: 0,
+                    resume: 0,
+                };
+                for (worker, capacity) in capacities.iter() {
+                    if !capacities.is_live(worker) {
+                        continue;
+                    }
+                    let used = self.normal_usage.get(&worker).copied().unwrap_or(0);
+                    cache.new_program = cache.new_program.max(capacity.saturating_sub(used));
+                    cache.resume = cache
+                        .resume
+                        .max(scale_tokens(capacity, resume_ceiling).saturating_sub(used));
+                }
+                self.room_cache = Some(cache);
+                cache
+            }
+        };
+        if resume {
+            cache.resume
+        } else {
+            cache.new_program
         }
     }
 
@@ -731,6 +808,9 @@ impl State {
         capacities: &WorkerCapacitySnapshot,
         usage: &mut HashMap<WorkerWithDpRank, usize>,
     ) -> bool {
+        if self.paused_programs.is_empty() {
+            return false;
+        }
         let ceiling = (self.config.pause_threshold - self.config.resume_hysteresis).max(0.0);
         let mut remaining: Vec<(WorkerWithDpRank, usize)> = capacities
             .iter()
@@ -742,7 +822,17 @@ impl State {
             })
             .collect();
         sort_capacities(&mut remaining);
-        if remaining.is_empty() || self.paused_programs.is_empty() {
+        let Some(&(_, largest_room)) = remaining.first() else {
+            return false;
+        };
+        // Room that fits no paused program resumes nothing: skip the clone and sort below.
+        let smallest_paused = self
+            .paused_programs
+            .iter()
+            .filter_map(|session_id| self.programs.get(session_id))
+            .map(|program| self.buffered_program_tokens(program))
+            .min();
+        if smallest_paused.is_none_or(|smallest| smallest > largest_room) {
             return false;
         }
         let mut paused: Vec<String> = self
