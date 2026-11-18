@@ -20,6 +20,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
+	"sort"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
