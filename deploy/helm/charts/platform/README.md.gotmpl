@@ -131,7 +131,10 @@ a GPU `ResourceClaimTemplate` is missing, create the template before you apply t
 **Existing deployments:** An update that leaves the rendered restore launch unchanged is still
 accepted, for example a `replicas` change. An update is rejected when it enables checkpointing with
 an unsupported launch, changes an unsupported launch to another unsupported launch, or moves the
-restore to another unsupported container.
+restore to another unsupported container. If the launch cannot be rendered, for example while a
+GPU `ResourceClaimTemplate` is missing, an update is accepted only when it changes nothing that
+renders the launch except `replicas`, and the old launch failed to render the same way. Any other
+update to that component is rejected until the launch can be rendered.
 
 #### Operator behavior breaking changes
 
