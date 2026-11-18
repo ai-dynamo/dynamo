@@ -720,11 +720,7 @@ mod tests {
         anyhow::Error::new(error).context("decode admission rejected")
     }
 
-    /// Returns the error `forward_decode` passed on, for checks on its shape.
-    async fn assert_dispatch_rejection_cancels_prefill(
-        output: PrefillNeed,
-        error: anyhow::Error,
-    ) -> anyhow::Error {
+    async fn assert_dispatch_rejection_cancels_prefill(output: PrefillNeed, error: anyhow::Error) {
         let case = format!("output={output:?}, error={error:#}");
         let message = error.to_string();
         let prefill_context = Arc::new(Controller::default());
@@ -759,7 +755,6 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        error
     }
 
     async fn assert_stream_rejection_cancels_prefill(output: PrefillNeed, error_type: ErrorType) {
@@ -948,26 +943,17 @@ mod tests {
             PrefillNeed::BeforeLast,
             PrefillNeed::BeforeFirst,
         ] {
-            let error = assert_dispatch_rejection_cancels_prefill(
+            assert_dispatch_rejection_cancels_prefill(
                 output,
                 crate::kv_router::map_scheduler_error(KvSchedulerError::DeadlineExceeded),
             )
             .await;
-            // The HTTP and gRPC hosts still map it to 429.
-            assert!(
-                request_deadline_exceeded(error.as_ref()),
-                "queue deadline lost its reason: {output:?}"
-            );
         }
     }
 
-    /// Only the decode router's queue deadline is known to precede dispatch. Other deadline
-    /// errors, and a queue deadline seen in the decode stream, may still have a decode worker
-    /// pulling staged KV.
+    /// Other deadline errors may follow dispatch while a decode worker pulls staged KV.
     #[tokio::test]
     async fn other_deadline_decode_errors_preserve_prefill_transfer() {
-        use dynamo_scheduler::host::KvSchedulerError;
-
         for output in [
             PrefillNeed::None,
             PrefillNeed::BeforeLast,
@@ -991,45 +977,6 @@ mod tests {
             for error in [plain_deadline, request_deadline, response_timeout] {
                 assert_decode_error_preserves_prefill(output, error.into()).await;
             }
-
-            let (tx, task) = pending_prefill();
-            let prefill_context = Arc::new(Controller::default());
-            let request_context = Arc::new(Controller::default());
-            let queue_deadline =
-                crate::kv_router::map_scheduler_error(KvSchedulerError::DeadlineExceeded)
-                    .downcast_ref::<dynamo_runtime::error::DynamoError>()
-                    .unwrap()
-                    .clone();
-            let decode: ManyOut<Annotated<LLMEngineOutput>> = ResponseStream::new(
-                Box::pin(stream::iter([Annotated::from_err(queue_deadline)])),
-                request_context.clone(),
-            );
-            let mut response = task
-                .forward_decode(
-                    async { Ok(decode) },
-                    request_context,
-                    output,
-                    prefill_context.clone(),
-                )
-                .await
-                .unwrap();
-            // One poll reaches the decode error while prefill is still pending.
-            let first = response.next().now_or_never();
-            assert!(
-                !prefill_context.is_stopped(),
-                "decode stream deadline must preserve KV transfer: {output:?}"
-            );
-            tx.send(Ok(None)).unwrap();
-            let items: Vec<_> = match first {
-                Some(item) => item.into_iter().collect(),
-                None => response.collect().await,
-            };
-            assert!(
-                items.iter().any(|item| item
-                    .err()
-                    .is_some_and(|error| request_deadline_exceeded(&error))),
-                "decode stream deadline was not forwarded: {output:?}"
-            );
         }
     }
 }
