@@ -94,14 +94,9 @@ spec:
                   description: |-
                     PodTemplate configures Relay Pods. Its main container needs an image with
                     dynamo.pool_relay and --sources-file support from the operator's revision.
-                    The controller sets the main command, listener probes, source volume,
-                    service account, and Relay identity and discovery environment variables.
-                    Reserved env names: DYN_NAMESPACE, DYN_DISCOVERY_BACKEND,
-                    DYN_KUBE_DISCOVERY_MODE, DYN_SYSTEM_PORT, DYN_TCP_RESPONSE_STREAM_HOST,
-                    DYN_TCP_RESPONSE_STREAM_PORT, DYN_CLUSTER_ID, DYN_RELAY_BIND,
-                    DYN_RELAY_CONNECTION_REVISION, DYN_RELAY_NAMESPACES, DYN_RELAY_WATCH_ALL,
-                    DYN_RELAY_ENDPOINT_PREFIXES, POD_NAME, POD_NAMESPACE, and POD_UID.
-                    The main container cannot use envFrom because it could override those values.
+                    The controller sets the main command, listener probes, source volume, service
+                    account, and Relay identity, discovery and registration env. The main container
+                    cannot use envFrom or set those names; the "Deploy the Pool Relay" guide lists them.
                   properties:
                     metadata:
                       description: |-
