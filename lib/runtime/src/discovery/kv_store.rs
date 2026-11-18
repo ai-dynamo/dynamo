@@ -910,7 +910,7 @@ impl Discovery for KVStoreDiscovery {
         let key = kv::Key::new(key_path.clone());
 
         // Callers may pass a model card without its JSON (LoRA detach does), so take the
-        // identity from the stored card. A card with no readable identity was never given a record.
+        // identity from the stored card when it still exists.
         let identity_record = match Self::model_identity_record(&instance) {
             Ok(record) => record,
             Err(_) => match bucket.get(&key).await? {
@@ -921,16 +921,61 @@ impl Discovery for KVStoreDiscovery {
             },
         };
 
+        let identities = if matches!(&instance, DiscoveryInstance::Model { .. }) {
+            self.store.get_bucket(MODEL_IDENTITIES_BUCKET).await?
+        } else {
+            None
+        };
+        let mut record_keys = Vec::new();
+        if let Some((record_key, _)) = identity_record {
+            record_keys.push(record_key);
+        } else if let DiscoveryInstance::Model {
+            namespace,
+            component,
+            endpoint,
+            instance_id,
+            model_suffix,
+            ..
+        } = &instance
+            && let Some(identities) = &identities
+        {
+            // A previous detach may have deleted the card before identity deletion failed.
+            let endpoint_path = format!("{namespace}/{component}/{endpoint}");
+            let prefix = format!("{endpoint_path}/");
+            let mut card_tail = format!("{instance_id:x}");
+            if let Some(suffix) = model_suffix
+                && !suffix.is_empty()
+            {
+                card_tail = format!("{card_tail}/{suffix}");
+            }
+            for record_key in identities.entries_under(&endpoint_path).await?.into_keys() {
+                let relative =
+                    Self::strip_bucket_prefix(record_key.as_ref(), MODEL_IDENTITIES_BUCKET);
+                if relative
+                    .strip_prefix(&prefix)
+                    .and_then(|path| path.split_once('/'))
+                    .is_some_and(|(_, tail)| tail == card_tail)
+                {
+                    record_keys.push(kv::Key::new(relative.to_string()));
+                }
+            }
+        }
+
         // Delete the entry from the bucket
-        bucket.delete(&key).await?;
+        match bucket.delete(&key).await {
+            Ok(()) => {}
+            Err(kv::StoreError::MissingKey(_))
+                if matches!(&instance, DiscoveryInstance::Model { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
 
         // After the card, so the card is never visible without its identity record.
-        if let Some((record_key, _)) = identity_record
-            && let Some(identities) = self.store.get_bucket(MODEL_IDENTITIES_BUCKET).await?
-        {
-            match identities.delete(&record_key).await {
-                Ok(()) | Err(kv::StoreError::MissingKey(_)) => {}
-                Err(error) => return Err(error.into()),
+        if let Some(identities) = identities {
+            for record_key in record_keys {
+                match identities.delete(&record_key).await {
+                    Ok(()) | Err(kv::StoreError::MissingKey(_)) => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
         }
 
@@ -2057,6 +2102,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn null_card_unregister_recovers_identity_cleanup_after_card_deletion() {
+        for suffix in [None, Some("adapter")] {
+            let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
+            let mut spec = named_model_spec("a", "/models/a");
+            let DiscoverySpec::Model { model_suffix, .. } = &mut spec else {
+                unreachable!()
+            };
+            *model_suffix = suffix.map(str::to_string);
+            let mut model = client.register(spec).await.unwrap();
+            let (record_key, _) = KVStoreDiscovery::model_identity_record(&model)
+                .unwrap()
+                .unwrap();
+            let identities = client
+                .store
+                .get_bucket(MODEL_IDENTITIES_BUCKET)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut other_spec = named_model_spec("a", "/models/a");
+            let DiscoverySpec::Model { model_suffix, .. } = &mut other_spec else {
+                unreachable!()
+            };
+            *model_suffix = if suffix.is_some() {
+                None
+            } else {
+                Some("adapter".to_string())
+            };
+            let other = client.register(other_spec).await.unwrap();
+            let (other_key, _) = KVStoreDiscovery::model_identity_record(&other)
+                .unwrap()
+                .unwrap();
+
+            let cards = client
+                .store
+                .get_bucket(MODELS_BUCKET)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut card_key =
+                KVStoreDiscovery::model_key("ns", "worker", "generate", client.instance_id());
+            if let Some(suffix) = suffix {
+                card_key = format!("{card_key}/{suffix}");
+            }
+            // The earlier detach removed the card but left its identity record.
+            cards.delete(&kv::Key::new(card_key)).await.unwrap();
+            let DiscoveryInstance::Model { card_json, .. } = &mut model else {
+                unreachable!()
+            };
+            *card_json = serde_json::Value::Null;
+            client.unregister(model.clone()).await.unwrap();
+            client.unregister(model).await.unwrap();
+            assert!(identities.get(&record_key).await.unwrap().is_none());
+            assert!(identities.get(&other_key).await.unwrap().is_some());
+        }
+    }
+
+    #[tokio::test]
     async fn failed_registration_keeps_the_identity_record_of_a_written_card() {
         let store = kv::Manager::memory();
         let cards = store
@@ -2271,8 +2373,9 @@ mod etcd_tests {
                 etcd_transport::Client::new(etcd_transport::ClientOptions::default(), rt)
                     .await
                     .unwrap();
-            let client =
+            let mut client =
                 KVStoreDiscovery::new(kv::Manager::etcd(etcd_client), CancellationToken::new());
+            client.is_model_identity_index_enabled = true;
             let ns = format!(
                 "identity-{}",
                 &uuid::Uuid::new_v4().simple().to_string()[..8]
