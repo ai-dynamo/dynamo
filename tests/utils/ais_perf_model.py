@@ -9,11 +9,8 @@ configs. Importing this module does not import AISimulate, so a test module
 that is collected without AISimulate can import it.
 """
 
-import contextlib
 import importlib
 import re
-import warnings
-from collections.abc import Iterator
 from typing import Any
 
 ENV_VAR = "DYN_AIS_PERF_MODEL"
@@ -54,11 +51,3 @@ def expected(**keys: Any) -> dict[str, Any]:
 def exactly(text: str) -> str:
     """Return a pattern that matches ``text`` and nothing more."""
     return "^" + re.escape(text) + "$"
-
-
-@contextlib.contextmanager
-def no_warning() -> Iterator[None]:
-    """Turn a warning inside the block into an error."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        yield

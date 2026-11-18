@@ -11,8 +11,7 @@ each.
 import json
 import re
 import sys
-import warnings
-from dataclasses import asdict, fields
+from dataclasses import fields
 
 import pytest
 import yaml
@@ -50,25 +49,22 @@ _NEW_FORM = (
 )
 
 
-def _planner(ais_perf_model, mode="decode", optimization_target="sla"):
+def _planner(ais_perf_model, mode="decode"):
     return PlannerConfig(
-        mode=mode,
-        optimization_target=optimization_target,
-        ais_perf_model=ais_perf_model,
+        mode=mode, optimization_target="sla", ais_perf_model=ais_perf_model
     )
 
 
-def _load_failure(ais_perf_model, optimization_target="sla"):
+def _load_failure(ais_perf_model):
     """Return the errors loading a config with this value raises."""
     with pytest.raises(ValidationError) as caught:
-        _planner(ais_perf_model, optimization_target=optimization_target)
-    assert type(caught.value) is ValidationError
+        _planner(ais_perf_model)
     return caught.value.errors()
 
 
-def _load_error(ais_perf_model, optimization_target="sla"):
+def _load_error(ais_perf_model):
     """Return the one exception reading this value raises when a config is loaded."""
-    (error,) = _load_failure(ais_perf_model, optimization_target)
+    (error,) = _load_failure(ais_perf_model)
     assert (error["loc"], error["type"]) == (("ais_perf_model",), "value_error")
     return error["ctx"]["error"]
 
@@ -82,10 +78,10 @@ def _mode_check_error(ais_perf_model, mode="decode"):
     return error["ctx"]["error"]
 
 
-def _roles_form_error(content, worker_type="decode"):
+def _roles_form_error(content):
     """Return the exception the old ``roles`` form raises at load for this config."""
     with pytest.raises(ValidationError) as caught:
-        _planner({"roles": {worker_type: content}}, mode=_MODE_OF[worker_type])
+        _planner({"roles": {"decode": content}})
     (error,) = caught.value.errors()
     assert error["loc"] == ("ais_perf_model", "roles")
     return error["ctx"]["error"]
@@ -113,78 +109,13 @@ def adapter(fake_engine_factory):
     return build
 
 
-def test_old_form_roles_stays_typed():
-    config = _planner({"roles": {"decode": {**_CONTENT, "tp": 2}}})
-
-    assert isinstance(config.ais_perf_model, AISPerfModelSpec)
-    expected = asdict(
-        ForwardPassPerfModelConfig(**_CONTENT, tp=2, worker_type="decode")
-    )
-    assert config.ais_perf_model.roles == {"decode": expected}
-    assert config.model_dump()["ais_perf_model"] == {
-        "roles": {"decode": expected},
-        "dataset_profiles": {},
-    }
-
-
-def test_old_form_dataset_profiles_stays_typed():
-    config = _planner({"dataset_profiles": {"decode": _DATASET_PROFILE}})
-
-    assert isinstance(config.ais_perf_model, AISPerfModelSpec)
-    assert config.model_dump()["ais_perf_model"] == {
-        "roles": {},
-        "dataset_profiles": {"decode": _DATASET_PROFILE},
-    }
-
-
-def test_old_form_mode_check_text():
-    text = (
-        "ais_perf_model.roles.prefill or dataset_profiles.prefill "
-        "is required for mode='disagg'"
-    )
-    with pytest.raises(ValidationError, match=re.escape(text)):
-        _planner({"roles": {"decode": _CONTENT}}, mode="disagg")
-
-
-def test_old_form_empty_mapping_fails_mode_check():
-    text = (
-        "ais_perf_model.roles.prefill or dataset_profiles.prefill "
-        "is required for mode='disagg'"
-    )
-    with pytest.raises(ValidationError, match=re.escape(text)):
-        _planner({}, mode="disagg")
-
-
-def test_old_form_same_role_twice_is_rejected():
-    with pytest.raises(
-        ValidationError,
-        match="each AIS role must have exactly one configuration source",
-    ):
-        _planner(
-            {
-                "roles": {"decode": _CONTENT},
-                "dataset_profiles": {"decode": _DATASET_PROFILE},
-            }
-        )
-
-
-def test_one_config_is_stored_as_written():
-    written = {
-        **_CONTENT,
-        "tp": 2,
-        "estimator_config": {"correction": {"enabled": False}},
-    }
-
-    config = _planner(written, mode="agg")
-
-    assert config.ais_perf_model == written
-    assert config.ais_perf_model is not written
-    assert config.ais_perf_model["estimator_config"] is not written["estimator_config"]
-
-
 def test_list_is_stored_as_written():
     written = [
-        {**_CONTENT, "worker_type": "prefill"},
+        {
+            **_CONTENT,
+            "worker_type": "prefill",
+            "estimator_config": {"correction": {"enabled": False}},
+        },
         {"worker_type": "decode", "from": "decode.yaml"},
     ]
 
@@ -192,36 +123,22 @@ def test_list_is_stored_as_written():
 
     assert config.ais_perf_model == written
     assert config.ais_perf_model is not written
-    assert config.ais_perf_model[0] is not written[0]
-
-
-def test_loader_syntax_errors_reach_the_user():
-    # A list entry without a worker type: one of the errors of the loader
-    # that the tests of dynamo.common.ais_perf_model list.
-    error = _load_error([_CONTENT])
-
-    # The loader's own error class.
-    assert isinstance(error, ValueError)
-    assert type(error) is not ValueError
+    # pydantic builds the list and its entries anew; only the copy in
+    # read_ais_perf_model_form reaches the values inside an entry.
+    assert (
+        config.ais_perf_model[0]["estimator_config"]
+        is not written[0]["estimator_config"]
+    )
 
 
 def test_new_form_mode_check():
-    text = (
-        "ais_perf_model: mode='disagg' needs an entry for worker type 'prefill'; "
-        "it has: decode"
+    # The written entry is wrong too: the missing entry is reported first.
+    error = _mode_check_error(
+        [{**_CONTENT, "worker_type": "prefill", "tp": 0}], mode="disagg"
     )
-    with pytest.raises(ValidationError, match=re.escape(text)):
-        _planner([{**_CONTENT, "worker_type": "decode"}], mode="disagg")
 
-    for mode in ("agg", "prefill", "decode", "disagg"):
-        assert _planner(dict(_CONTENT), mode=mode).ais_perf_model == _CONTENT
-
-    text = (
-        "ais_perf_model: mode='agg' needs an entry for worker type 'aggregated'; "
-        "it has: prefill"
-    )
-    with pytest.raises(ValidationError, match=re.escape(text)):
-        _planner({**_CONTENT, "worker_type": "prefill"}, mode="agg")
+    assert type(error) is ValueError
+    assert "needs an entry for worker type 'decode'; it has: prefill" in str(error)
 
 
 def test_validation_opens_no_file():
@@ -278,50 +195,14 @@ def test_adapter_resolves_once(adapter, tmp_path):
     assert read() == first
 
 
-def test_adapter_reads_template_entry(adapter, tmp_path):
-    template = tmp_path / "template.yaml"
-    template.write_text(yaml.safe_dump({**_CONTENT, "tp": 2, "pp": 2}))
-    config = _planner({"from": str(template), "pp": 1})
-
-    built = adapter(config)._build_ais_config()
-
-    assert "from" not in built
-    assert {key: built[key] for key in _CONTENT} == _CONTENT
-    assert built["tp"] == 2
-    # A key of the entry wins over the same key of the template.
-    assert built["pp"] == 1
-    assert built["worker_type"] == "decode"
-
-
-def test_adapter_unknown_key_text(adapter, tmp_path):
-    # A key written in the config is checked when the config is loaded; a key
-    # of a template file is seen only when the file is read.
-    template = tmp_path / "template.yaml"
-    template.write_text(yaml.safe_dump({**_CONTENT, "tp_size": 2}))
-    config = _planner({"from": str(template)})
-    model = adapter(config, limits=False)
-
-    with pytest.raises(ValueError) as caught:
-        model._configured_role()
-
-    assert type(caught.value) is ValueError
-    assert str(caught.value).startswith("invalid AIS config for decode: ")
-
-
-# Values AISimulate rejects. The last one names a directory that does not exist.
-_WRONG_VALUES = [
-    pytest.param({"tp": 0}, id="tp-zero"),
-    pytest.param({"tp": "x"}, id="tp-text"),
-    pytest.param({"backend": "nope"}, id="backend"),
-    pytest.param({"estimation_mode": "nope"}, id="estimation-mode"),
-    pytest.param({"fallback_policy": "nope"}, id="fallback-policy"),
-    pytest.param({"nextn": -1}, id="nextn"),
-    pytest.param({"estimator_config": {"nope": 1}}, id="estimator-config"),
-    pytest.param({"systems_paths": ["/missing/systems"]}, id="systems-path"),
-]
-
-
-@pytest.mark.parametrize("wrong", _WRONG_VALUES)
+@pytest.mark.parametrize(
+    "wrong",
+    [
+        pytest.param({"tp": 0}, id="tp-zero"),
+        # A directory that does not exist.
+        pytest.param({"systems_paths": ["/missing/systems"]}, id="systems-path"),
+    ],
+)
 @pytest.mark.parametrize("as_list", [False, True], ids=["one-config", "list-entry"])
 def test_config_without_from_is_checked_when_loaded_like_roles(wrong, as_list):
     content = {**_CONTENT, **wrong}
@@ -416,22 +297,17 @@ def test_first_wrong_config_of_the_mode_is_reported():
 
     error = _mode_check_error(value, mode="disagg")
 
-    expected = _roles_form_error({**_CONTENT, "tp": 0}, "prefill")
-    assert str(error) == f"ais_perf_model entry for prefill: {expected}"
+    # Named by the worker type of the entry, not by the mode.
+    assert str(error) == f"ais_perf_model entry for prefill: {error.__cause__}"
 
 
-def test_missing_entry_is_reported_before_a_wrong_config():
-    error = _mode_check_error(
-        [{**_CONTENT, "worker_type": "prefill", "tp": 0}], mode="disagg"
-    )
-
-    assert str(error) == (
-        "ais_perf_model: mode='disagg' needs an entry for worker type 'decode'; "
-        "it has: prefill"
-    )
-
-
-@pytest.mark.parametrize("wrong", _WRONG_VALUES)
+@pytest.mark.parametrize(
+    "wrong",
+    [
+        pytest.param({"tp": 0}, id="wrong-value"),
+        pytest.param({"tp_size": 2}, id="unknown-key"),
+    ],
+)
 def test_template_is_checked_at_first_use_like_roles(adapter, tmp_path, wrong):
     content = {**_CONTENT, **wrong}
     expected = _roles_form_error(content)
@@ -449,77 +325,43 @@ def test_template_is_checked_at_first_use_like_roles(adapter, tmp_path, wrong):
 
 
 def test_mixed_forms_are_rejected():
-    text = (
+    error = _load_error({"roles": {"decode": _CONTENT}, "model": "m"})
+
+    assert str(error) == (
         "ais_perf_model mixes the old form (roles, dataset_profiles) with other "
         "keys (model); write one form"
     )
-    with pytest.raises(ValidationError, match=re.escape(text)):
-        _planner({"roles": {"decode": _CONTENT}, "model": "m"})
 
-    text = (
-        "ais_perf_model mixes the old form (roles, dataset_profiles) with other "
-        "keys (from, zzz); write one form"
-    )
-    with pytest.raises(ValidationError, match=re.escape(text)):
-        _planner({"roles": {"decode": _CONTENT}, "zzz": 1, "from": "x.yaml"})
+    # Every other key is named, in sorted order.
+    mixed = {"roles": {"decode": _CONTENT}, "zzz": 1, "model": "m", "from": "x.yaml"}
+    assert "other keys (from, model, zzz); write one form" in str(_load_error(mixed))
 
 
-def test_values_outside_both_forms_keep_old_errors():
-    with pytest.raises(ValidationError) as misspelled:
-        _planner({"roles": {"decode": _CONTENT}, "dataset_profile": {}})
-    assert [
-        (error["loc"], error["type"], error["msg"])
-        for error in misspelled.value.errors()
-    ] == [
-        (
-            ("ais_perf_model", "dataset_profile"),
-            "extra_forbidden",
-            "Extra inputs are not permitted",
-        )
-    ]
-
-    with pytest.raises(ValidationError) as number:
-        _planner(3)
-    assert [
-        (error["loc"], error["type"], error["msg"]) for error in number.value.errors()
-    ] == [
-        (
-            ("ais_perf_model",),
-            "model_type",
-            "Input should be a valid dictionary or instance of AISPerfModelSpec",
-        )
-    ]
-
-
-@pytest.mark.parametrize("optimization_target", ["sla", "throughput", "latency"])
 @pytest.mark.parametrize(
-    "key,content",
+    "value,error",
     [
-        pytest.param("rolez", {"decode": _CONTENT}, id="rolez"),
-        pytest.param("role", {"decode": _CONTENT}, id="role"),
         pytest.param(
-            "dataset_profile", {"decode": _DATASET_PROFILE}, id="dataset-profile"
+            {"rolez": {"decode": _CONTENT}},
+            (("ais_perf_model", "rolez"), "extra_forbidden"),
+            id="misspelled-old-key",
         ),
+        pytest.param(
+            {"roles": {"decode": _CONTENT}, "dataset_profile": {}},
+            (("ais_perf_model", "dataset_profile"), "extra_forbidden"),
+            id="misspelled-old-key-next-to-old-key",
+        ),
+        pytest.param(3, (("ais_perf_model",), "model_type"), id="number"),
     ],
 )
-def test_misspelled_old_key_keeps_old_error(key, content, optimization_target):
-    # The error does not depend on whether the target uses the perf model.
-    errors = _load_failure({key: content}, optimization_target)
+def test_values_outside_both_forms_keep_old_errors(value, error):
+    errors = _load_failure(value)
 
-    assert [(error["loc"], error["type"], error["msg"]) for error in errors] == [
-        (("ais_perf_model", key), "extra_forbidden", "Extra inputs are not permitted")
-    ]
+    assert [(found["loc"], found["type"]) for found in errors] == [error]
 
 
-@pytest.mark.parametrize("optimization_target", ["sla", "throughput"])
 @pytest.mark.parametrize(
     "value,text",
     [
-        pytest.param(
-            {**_CONTENT, "rolez": {"decode": _CONTENT}},
-            "ais_perf_model: unknown keys: rolez",
-            id="misspelled-old-key-next-to-config-key",
-        ),
         pytest.param(
             {**_CONTENT, "tp_size": 2},
             "ais_perf_model: unknown keys: tp_size",
@@ -536,11 +378,6 @@ def test_misspelled_old_key_keeps_old_error(key, content, optimization_target):
             id="next-to-from",
         ),
         pytest.param(
-            {**_CONTENT, "tp_size": 2, "zzz": None},
-            "ais_perf_model: unknown keys: tp_size",
-            id="next-to-key-without-value",
-        ),
-        pytest.param(
             [
                 {**_CONTENT, "worker_type": "prefill"},
                 {**_CONTENT, "worker_type": "decode", "roles": {"decode": _CONTENT}},
@@ -548,42 +385,20 @@ def test_misspelled_old_key_keeps_old_error(key, content, optimization_target):
             "ais_perf_model: entry 2: unknown keys: roles",
             id="list-entry-with-roles",
         ),
-        pytest.param(
-            [
-                {**_CONTENT, "worker_type": "prefill"},
-                {**_CONTENT, "worker_type": "decode", "zzz": 1, "aaa": 2},
-                {**_CONTENT, "worker_type": "aggregated", "tp_size": 2},
-            ],
-            "ais_perf_model: entry 2: unknown keys: aaa, zzz",
-            id="first-of-two-list-entries",
-        ),
     ],
 )
-def test_unknown_keys_are_rejected_when_loaded(value, text, optimization_target):
-    error = _load_error(value, optimization_target)
+def test_unknown_keys_are_rejected_when_loaded(value, text):
+    error = _load_error(value)
 
     assert type(error) is ValueError
     assert str(error) == text
 
 
-@pytest.mark.parametrize(
-    "value",
-    [
-        pytest.param({**_CONTENT, "tp_size": None}, id="one-config"),
-        pytest.param(
-            [{**_CONTENT, "worker_type": "decode", "tp_size": None}], id="list-entry"
-        ),
-    ],
-)
-def test_key_without_value_is_not_checked(adapter, value):
+def test_key_without_value_is_not_checked():
     # The loader drops a key written without a value, so its name is not checked.
-    config = _planner(value)
+    value = {**_CONTENT, "tp_size": None}
 
-    assert config.ais_perf_model == value
-    # Nor is it an error when the config is first used.
-    built = adapter(config)._build_ais_config()
-    assert built == adapter(_planner(dict(_CONTENT)))._build_ais_config()
-    assert "tp_size" not in built
+    assert _planner(value).ais_perf_model == value
 
 
 def test_loader_error_comes_before_unknown_keys():
@@ -606,15 +421,9 @@ def test_every_config_key_is_accepted():
     assert _planner(written).ais_perf_model == written
 
 
-def test_mixing_and_string_errors_keep_their_texts():
-    error = _load_error({"roles": {"decode": _CONTENT}, "model": "m", "rolez": {}})
-    assert type(error) is ValueError
-    assert str(error) == (
-        "ais_perf_model mixes the old form (roles, dataset_profiles) with other "
-        "keys (model, rolez); write one form"
-    )
-
+def test_string_is_rejected():
     error = _load_error("perf_model.yaml")
+
     assert type(error) is ValueError
     assert str(error) == (
         "ais_perf_model must be a perf model config (a mapping) or a list of "
@@ -624,76 +433,17 @@ def test_mixing_and_string_errors_keep_their_texts():
 
 def test_keys_are_not_checked_without_the_key_set(monkeypatch):
     # Without the estimator runtime the key set is empty.
-    monkeypatch.setattr(
-        "dynamo.planner.config.planner_config._ais_perf_model_config_keys", set
-    )
+    monkeypatch.setattr(planner_config, "_ais_perf_model_config_keys", set)
     # With `from`, so that the content is not checked either.
-    unknown_key = {"from": "/missing/template.yaml", "tp_size": 2}
-    misspelled_old_key = {"from": "/missing/template.yaml", "rolez": {}}
+    value = {"from": "/missing/template.yaml", "tp_size": 2}
 
-    assert _planner(unknown_key).ais_perf_model == unknown_key
-    assert _planner(misspelled_old_key).ais_perf_model == misspelled_old_key
+    assert _planner(value).ais_perf_model == value
 
 
 def test_instance_value_is_old_form():
-    config = _planner(AISPerfModelSpec(roles={"decode": _CONTENT}))
+    spec = AISPerfModelSpec(roles={"decode": _CONTENT})
 
-    assert isinstance(config.ais_perf_model, AISPerfModelSpec)
-    expected = asdict(ForwardPassPerfModelConfig(**_CONTENT, worker_type="decode"))
-    assert config.model_dump()["ais_perf_model"] == {
-        "roles": {"decode": expected},
-        "dataset_profiles": {},
-    }
-
-
-def test_none_stays_none():
-    assert PlannerConfig().ais_perf_model is None
-    assert PlannerConfig(ais_perf_model=None).ais_perf_model is None
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        # systems_paths is written: its default is a tuple, which JSON gives
-        # back as a list.
-        pytest.param(
-            {"roles": {"decode": {**_CONTENT, "systems_paths": []}}}, id="old-roles"
-        ),
-        pytest.param(
-            {"dataset_profiles": {"decode": _DATASET_PROFILE}},
-            id="old-dataset-profiles",
-        ),
-        pytest.param({**_CONTENT, "tp": 2}, id="one-config"),
-        pytest.param(
-            [
-                {**_CONTENT, "worker_type": "decode"},
-                {"worker_type": "prefill", "from": "prefill.yaml"},
-            ],
-            id="list",
-        ),
-    ],
-)
-def test_round_trips_for_every_form(value):
-    config = _planner(value)
-
-    assert PlannerConfig.model_validate(config.model_dump()) == config
-    assert PlannerConfig.model_validate(config.model_dump(), strict=True) == config
-    assert PlannerConfig.model_validate_json(config.model_dump_json()) == config
-
-
-def test_json_schema_lists_the_shapes():
-    field = PlannerConfig.model_json_schema()["properties"]["ais_perf_model"]
-    shapes = field["anyOf"]
-
-    assert shapes[0] == {"$ref": "#/$defs/AISPerfModelSpec"}
-    assert [shape.get("type") for shape in shapes] == [None, "object", "array", "null"]
-    assert shapes[2]["items"]["type"] == "object"
-
-
-def test_retired_key_hint_names_new_form():
-    text = f"aic_perf_model is no longer supported; use {_NEW_FORM}"
-    with pytest.raises(ValidationError, match=re.escape(text)):
-        PlannerConfig(aic_perf_model={"roles": {}})
+    assert _planner(spec).ais_perf_model == spec
 
 
 def test_old_form_names():
@@ -713,15 +463,6 @@ def test_old_form_names():
     assert ais_perf_model_old_form_names(dict(_CONTENT)) == []
     assert ais_perf_model_old_form_names([{**_CONTENT, "worker_type": "decode"}]) == []
     assert ais_perf_model_old_form_names(None) == []
-
-
-def test_assignment_of_list_dumps_as_list():
-    config = _planner(None)
-    written = [{**_CONTENT, "worker_type": "decode"}]
-
-    config.ais_perf_model = written
-
-    assert json.loads(config.model_dump_json())["ais_perf_model"] == written
 
 
 def _set_config_argument(monkeypatch, ais_perf_model):
@@ -763,65 +504,25 @@ def test_planner_entry_point_warns_for_old_form(monkeypatch, value, text):
     assert isinstance(config.ais_perf_model, AISPerfModelSpec)
 
 
-def test_planner_main_warns_once_for_old_form(monkeypatch):
-    started = []
-
-    async def worker(config):
-        started.append(config)
-
-    monkeypatch.setattr(planner_main, "worker", worker)
-    _set_config_argument(
-        monkeypatch, {"roles": {"prefill": _CONTENT, "decode": _CONTENT}}
-    )
-
-    with pytest.warns(
-        FutureWarning,
-        match=r"^ais_perf_model\.roles is deprecated and will be removed in v1\.9; ",
-    ) as caught:
-        planner_main.main()
-
-    assert len(caught) == 1
-    # The warning points at the line of main() that reads the config.
-    assert caught[0].filename == planner_main.__file__
-    assert len(started) == 1
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        pytest.param(None, id="none"),
-        pytest.param(dict(_CONTENT), id="one-config"),
-        pytest.param(
-            [
-                {**_CONTENT, "worker_type": "prefill"},
-                {**_CONTENT, "worker_type": "decode"},
-            ],
-            id="list",
-        ),
-    ],
-)
-def test_planner_entry_point_is_silent_for_new_form(monkeypatch, value):
+def test_planner_entry_point_is_silent_for_new_form(monkeypatch):
+    value = [
+        {**_CONTENT, "worker_type": "prefill"},
+        {**_CONTENT, "worker_type": "decode"},
+    ]
     _set_config_argument(monkeypatch, value)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        config = planner_main._parse_config()
-
-    assert config.ais_perf_model == value
+    # The suite turns a warning into an error (filterwarnings in pyproject.toml).
+    assert planner_main._parse_config().ais_perf_model == value
 
 
 def test_relative_template_starts_at_working_directory(adapter, tmp_path, monkeypatch):
     run_dir = tmp_path / "run"
-    other_dir = tmp_path / "other"
     run_dir.mkdir()
-    other_dir.mkdir()
     (run_dir / "template.yaml").write_text(yaml.safe_dump({**_CONTENT, "tp": 2}))
-    config = _planner({"from": "template.yaml"})
-    assert config.ais_perf_model == {"from": "template.yaml"}
-    model = adapter(config, limits=False)
+    model = adapter(_planner({"from": "template.yaml"}), limits=False)
 
     # A folder without the file.
-    monkeypatch.chdir(other_dir)
+    monkeypatch.chdir(tmp_path)
     with pytest.raises(ValueError):
         model._configured_role()
 

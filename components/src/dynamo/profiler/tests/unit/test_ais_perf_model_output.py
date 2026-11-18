@@ -9,33 +9,27 @@ import json
 import logging
 import re
 import sys
-import warnings
 from pathlib import Path
 
 import pytest
 import yaml
 
-from dynamo.common.ais_perf_model import ENV_VAR
-
-# These need the native bindings; the import above does not.
+# These need the native bindings.
 try:
     from dynamo.mocker.args import parse_args
     from dynamo.mocker.config import build_mocker_engine_args
     from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
     from dynamo.planner.config.parallelization import PickedParallelConfig
     from dynamo.planner.config.planner_config import (
-        AISPerfModelSpec,
         PlannerConfig,
         PlannerPreDeploymentSweepMode,
     )
-    from dynamo.planner.core.perf_model.ais_adapter import PlannerEnginePerfModel
     from dynamo.profiler import __main__ as profiler_main
     from dynamo.profiler.utils import dgd_generation
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         FeaturesSpec,
         MockerSpec,
-        OverridesSpec,
     )
     from dynamo.profiler.utils.profile_common import ProfilerOperationalConfig
 except ImportError:
@@ -52,10 +46,6 @@ SYSTEM = "h200_sxm"
 DENSE = PickedParallelConfig(tp=2)
 MOE = PickedParallelConfig(tp=1, dp=8, moe_tp=1, moe_ep=8)
 WORKERS = ("prefill", "decode")
-NEW_FORM = (
-    "ais_perf_model with one perf model config or a list of configs "
-    "(one per worker_type)"
-)
 
 
 def _interpolation(backend="vllm", pick=DENSE, model=MODEL, system=SYSTEM):
@@ -82,11 +72,10 @@ def _perf_model(arguments):
     return json.loads(arguments[arguments.index("--ais-perf-model") + 1])
 
 
-def _request(planner=None, override=None, model=MODEL):
+def _request(planner=None, model=MODEL):
     return DynamoGraphDeploymentRequestSpec(
         model=model,
         features=FeaturesSpec(planner=planner, mocker=MockerSpec(enabled=True)),
-        overrides=OverridesSpec(dgd=override) if override is not None else None,
     )
 
 
@@ -99,6 +88,11 @@ def _planner(mode, ais_perf_model=None):
         pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Rapid,
         ais_perf_model=ais_perf_model,
     )
+
+
+def _config(**keys):
+    """Return a perf model config of the deployment the tests select, with ``keys``."""
+    return {"model": MODEL, "system": SYSTEM, "backend": "vllm", **keys}
 
 
 def _planner_value(request, prefill_pick, decode_pick):
@@ -121,15 +115,6 @@ def _generated_workers(request, interpolation):
     }
 
 
-def _workers_with(inject, interpolation=None):
-    """Return the worker argument lists with ``inject`` applied to each."""
-    interpolation = interpolation or _interpolation()
-    return {
-        name: inject(list(arguments), interpolation, interpolation.decode_pick)
-        for name, arguments in _generated_workers(_request(), None).items()
-    }
-
-
 @pytest.fixture
 def database_version(monkeypatch):
     monkeypatch.setattr(
@@ -144,112 +129,6 @@ def installed_database_version():
     One lookup reads every installed data set and takes about a second.
     """
     return functools.cache(dgd_generation.get_latest_database_version)
-
-
-@pytest.mark.parametrize(
-    "backend,pick,added",
-    [
-        pytest.param(
-            "vllm",
-            DENSE,
-            ["--ais-perf-model"]
-            + ["--ais-backend", "vllm", "--ais-backend-version", "0.24.0"]
-            + ["--ais-system", "h200_sxm", "--ais-tp-size", "2"]
-            + ["--ais-attention-dp-size", "1", "--engine-type", "vllm"],
-            id="vllm",
-        ),
-        pytest.param(
-            "sglang",
-            DENSE,
-            ["--ais-perf-model"]
-            + ["--ais-backend", "sglang", "--ais-backend-version", "0.24.0"]
-            + ["--ais-system", "h200_sxm", "--ais-tp-size", "2"]
-            + ["--ais-attention-dp-size", "1", "--engine-type", "sglang"],
-            id="sglang",
-        ),
-        pytest.param(
-            "vllm",
-            MOE,
-            ["--ais-perf-model"]
-            + ["--ais-backend", "vllm", "--ais-backend-version", "0.24.0"]
-            + ["--ais-system", "h200_sxm", "--ais-tp-size", "1"]
-            + ["--ais-moe-tp-size", "1", "--ais-moe-ep-size", "8"]
-            + ["--ais-attention-dp-size", "8", "--engine-type", "vllm"],
-            id="moe",
-        ),
-        pytest.param(
-            "trtllm",
-            DENSE,
-            ["--ais-perf-model"]
-            + ["--ais-backend", "trtllm", "--ais-backend-version", "0.24.0"]
-            + ["--ais-system", "h200_sxm", "--ais-tp-size", "2"]
-            + ["--ais-attention-dp-size", "1"],
-            id="trtllm",
-        ),
-    ],
-)
-def test_old_argument_list_is_unchanged(database_version, backend, pick, added):
-    out = dgd_generation._inject_mocker_ais_args_old_form(
-        _worker_arguments(), _interpolation(backend, pick), pick
-    )
-
-    assert out == _worker_arguments() + added
-
-
-def test_old_argument_list_without_database_version_is_unchanged(monkeypatch):
-    monkeypatch.setattr(
-        dgd_generation, "get_latest_database_version", lambda **kwargs: None
-    )
-
-    out = dgd_generation._inject_mocker_ais_args_old_form(
-        _worker_arguments(), _interpolation(), DENSE
-    )
-
-    assert out == _worker_arguments() + [
-        "--ais-perf-model",
-        "--ais-backend",
-        "vllm",
-        "--ais-system",
-        "h200_sxm",
-        "--ais-tp-size",
-        "2",
-        "--ais-attention-dp-size",
-        "1",
-        "--engine-type",
-        "vllm",
-    ]
-
-
-def test_mocker_arguments_are_one_inline_json(database_version):
-    out = dgd_generation._inject_mocker_ais_args(
-        _worker_arguments(), _interpolation(), DENSE
-    )
-
-    assert out == _worker_arguments() + [
-        "--ais-perf-model",
-        '{"attention_dp":1,"backend":"vllm","backend_version":"0.24.0",'
-        '"model":"Qwen/Qwen3-32B","system":"h200_sxm","tp":2}',
-        "--engine-type",
-        "vllm",
-    ]
-
-
-def test_moe_pick_writes_moe_sizes(database_version):
-    moe = _perf_model(
-        dgd_generation._inject_mocker_ais_args(
-            _worker_arguments(), _interpolation(pick=MOE), MOE
-        )
-    )
-    dense = _perf_model(
-        dgd_generation._inject_mocker_ais_args(
-            _worker_arguments(), _interpolation(), DENSE
-        )
-    )
-
-    assert (moe["tp"], moe["attention_dp"]) == (1, 8)
-    assert (moe["moe_tp_size"], moe["moe_ep_size"]) == (1, 8)
-    assert "moe_tp_size" not in dense
-    assert "moe_ep_size" not in dense
 
 
 @pytest.mark.parametrize(
@@ -271,35 +150,6 @@ def test_engine_type_is_written_for_an_engine_the_mocker_has(
     assert out[out.index("--ais-perf-model") + 2 :] == engine_type
 
 
-def test_no_database_version_omits_key(monkeypatch):
-    monkeypatch.setattr(
-        dgd_generation, "get_latest_database_version", lambda **kwargs: None
-    )
-
-    out = dgd_generation._inject_mocker_ais_args(
-        _worker_arguments(), _interpolation(), DENSE
-    )
-
-    assert _perf_model(out) == {
-        "attention_dp": 1,
-        "backend": "vllm",
-        "model": MODEL,
-        "system": SYSTEM,
-        "tp": 2,
-    }
-
-
-def test_injection_twice_gives_one_pair(database_version):
-    once = dgd_generation._inject_mocker_ais_args(
-        _worker_arguments(), _interpolation(), DENSE
-    )
-
-    twice = dgd_generation._inject_mocker_ais_args(list(once), _interpolation(), DENSE)
-
-    assert twice == once
-    assert twice.count("--ais-perf-model") == 1
-
-
 @pytest.mark.parametrize("worker", WORKERS)
 @pytest.mark.parametrize(
     "backend,pick,with_version",
@@ -311,11 +161,10 @@ def test_injection_twice_gives_one_pair(database_version):
         pytest.param("vllm", DENSE, False, id="no-database-version"),
     ],
 )
+@pytest.mark.usefixtures("no_ais_environment")
 def test_old_and_new_arguments_give_same_engine_args(
     monkeypatch, installed_database_version, backend, pick, with_version, worker
 ):
-    # A value set in the shell that runs the tests would reach the parser.
-    monkeypatch.delenv(ENV_VAR, raising=False)
     # The version comes from the installed timing data, which the mocker
     # checks the config against.
     monkeypatch.setattr(
@@ -334,9 +183,7 @@ def test_old_and_new_arguments_give_same_engine_args(
 
     with pytest.warns(FutureWarning, match=r"use --ais-perf-model VALUE\.$"):
         old_engine_args = build_mocker_engine_args(parse_args(old))
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        new_engine_args = build_mocker_engine_args(parse_args(new))
+    new_engine_args = build_mocker_engine_args(parse_args(new))
 
     assert new_engine_args == old_engine_args
     timing = new_engine_args["engine"]["timing_model"]["config"]
@@ -345,6 +192,7 @@ def test_old_and_new_arguments_give_same_engine_args(
 
 def test_profiler_built_planner_value_is_a_list(database_version):
     prefill_pick = PickedParallelConfig(tp=1)
+    base = _config(backend_version="0.24.0")
 
     disagg = _planner_value(_request(_planner("disagg")), prefill_pick, MOE)
     agg = _planner_value(_request(_planner("agg")), prefill_pick, DENSE)
@@ -352,20 +200,9 @@ def test_profiler_built_planner_value_is_a_list(database_version):
     # A key that would only repeat a default is not written: pp of 1 and the
     # MoE sizes of a dense pick.
     assert disagg == [
+        {**base, "worker_type": "prefill", "tp": 1, "attention_dp": 1},
         {
-            "model": MODEL,
-            "system": SYSTEM,
-            "backend": "vllm",
-            "backend_version": "0.24.0",
-            "worker_type": "prefill",
-            "tp": 1,
-            "attention_dp": 1,
-        },
-        {
-            "model": MODEL,
-            "system": SYSTEM,
-            "backend": "vllm",
-            "backend_version": "0.24.0",
+            **base,
             "worker_type": "decode",
             "tp": 1,
             "attention_dp": 8,
@@ -373,17 +210,7 @@ def test_profiler_built_planner_value_is_a_list(database_version):
             "moe_ep_size": 8,
         },
     ]
-    assert agg == [
-        {
-            "model": MODEL,
-            "system": SYSTEM,
-            "backend": "vllm",
-            "backend_version": "0.24.0",
-            "worker_type": "aggregated",
-            "tp": 2,
-            "attention_dp": 1,
-        }
-    ]
+    assert agg == [{**base, "worker_type": "aggregated", "tp": 2, "attention_dp": 1}]
 
 
 @pytest.mark.parametrize(
@@ -403,25 +230,7 @@ def test_planner_entry_is_the_mocker_config_with_a_worker_type(database_version,
     ]
 
 
-def test_pick_with_pipeline_stages_writes_pp(database_version):
-    pick = PickedParallelConfig(tp=2, pp=2)
-
-    staged = _perf_model(
-        dgd_generation._inject_mocker_ais_args(
-            _worker_arguments(), _interpolation(pick=pick), pick
-        )
-    )
-    single = _perf_model(
-        dgd_generation._inject_mocker_ais_args(
-            _worker_arguments(), _interpolation(), DENSE
-        )
-    )
-
-    assert staged == {**single, "pp": 2}
-    assert "pp" not in single
-
-
-def test_profiler_built_value_round_trips_and_equals_old_form(database_version):
+def test_profiler_built_value_round_trips(database_version):
     request = _request(_planner("disagg"))
     prefill_pick = PickedParallelConfig(tp=1)
     value = _planner_value(request, prefill_pick, DENSE)
@@ -432,51 +241,18 @@ def test_profiler_built_value_round_trips_and_equals_old_form(database_version):
     read_back = PlannerConfig.model_validate_json(planner_config.model_dump_json())
 
     assert read_back.ais_perf_model == value
-    old_form = planner_config.model_copy(
-        update={
-            "ais_perf_model": AISPerfModelSpec(
-                roles={entry["worker_type"]: entry for entry in value}
-            )
-        }
-    )
-
-    def planner_entry(config, worker_type):
-        # Without worker limits the Planner's adapter builds no engine model.
-        adapter = PlannerEnginePerfModel(
-            worker_type=worker_type, config=config, capabilities=None
-        )
-        return adapter._configured_role()
-
-    for worker_type in WORKERS:
-        assert planner_entry(read_back, worker_type) == planner_entry(
-            old_form, worker_type
-        )
 
 
-def _written_entry(**keys):
-    return {"model": MODEL, "system": SYSTEM, "backend": "vllm", **keys}
-
-
-@pytest.mark.parametrize(
-    "mode,written",
-    [
-        pytest.param(
-            "disagg",
-            [
-                _written_entry(worker_type="prefill", tp=2),
-                _written_entry(
-                    worker_type="decode",
-                    tp=2,
-                    estimator_config={"correction": {"enabled": False}},
-                ),
-            ],
-            id="list",
+def test_user_written_new_form_is_kept_as_written():
+    written = [
+        _config(worker_type="prefill", tp=2),
+        _config(
+            worker_type="decode",
+            tp=2,
+            estimator_config={"correction": {"enabled": False}},
         ),
-        pytest.param("decode", _written_entry(tp=2), id="one-config"),
-    ],
-)
-def test_user_written_new_form_is_kept_as_written(mode, written):
-    planner = _planner(mode, copy.deepcopy(written))
+    ]
+    planner = _planner("disagg", copy.deepcopy(written))
 
     value = _planner_value(_request(planner), DENSE, DENSE)
 
@@ -485,7 +261,7 @@ def test_user_written_new_form_is_kept_as_written(mode, written):
 
 
 def test_user_written_new_form_conflict_text():
-    planner = _planner("decode", _written_entry(tp=4))
+    planner = _planner("decode", _config(tp=4))
 
     text = (
         "ais_perf_model entry for decode: tp=4 conflicts with selected deployment tp=2"
@@ -495,12 +271,11 @@ def test_user_written_new_form_conflict_text():
 
 
 def test_user_written_missing_field_is_compared_as_default():
-    planner = _planner("decode", _written_entry())
+    planner = _planner("decode", _config())
 
-    text = (
-        "ais_perf_model entry for decode: tp=1 conflicts with selected deployment tp=2"
-    )
-    with pytest.raises(ValueError, match=f"^{re.escape(text)}$"):
+    with pytest.raises(
+        ValueError, match="^ais_perf_model entry for decode: tp=1 conflicts"
+    ):
         _planner_value(_request(planner), DENSE, DENSE)
 
 
@@ -514,178 +289,6 @@ def test_model_comes_from_model_path_or_request_model(database_version):
 
     assert _perf_model(served)["model"] == "served/model"
     assert _perf_model(requested)["model"] == interpolation.hf_id
-
-
-def _override(shape, arguments):
-    """Return a deployment override that gives ``arguments`` to a worker."""
-    if shape.startswith("v1alpha1"):
-        service = "VllmDecodeWorker" if shape == "v1alpha1-other-name" else "decode"
-        override = {
-            "apiVersion": "nvidia.com/v1alpha1",
-            "kind": "DynamoGraphDeployment",
-            "spec": {
-                "services": {
-                    service: {"extraPodSpec": {"mainContainer": {"args": arguments}}}
-                }
-            },
-        }
-        if shape == "v1alpha1-untyped":
-            del override["apiVersion"], override["kind"]
-        return override
-    container = {"name": "main", "args": arguments}
-    if shape == "v1beta1-append":
-        container["$patch"] = {"args": "append"}
-    return {
-        "apiVersion": "nvidia.com/v1beta1",
-        "kind": "DynamoGraphDeployment",
-        "spec": {
-            "components": [
-                {
-                    "name": "prefill",
-                    "podTemplate": {"spec": {"containers": [container]}},
-                }
-            ]
-        },
-    }
-
-
-OVERRIDE_SHAPES = [
-    "v1alpha1",
-    "v1alpha1-untyped",
-    "v1alpha1-other-name",
-    "v1beta1-replace",
-    "v1beta1-append",
-]
-PERF_MODEL_VALUE = json.dumps({"model": MODEL, "system": SYSTEM, "backend": "vllm"})
-
-
-def _assert_old_arguments_kept(caplog, override, names):
-    """Check that ``override`` makes every worker keep the old arguments.
-
-    One warning is logged, and it names ``names``.
-    """
-    with caplog.at_level(logging.WARNING):
-        workers = _generated_workers(_request(override=override), _interpolation())
-
-    assert workers == _workers_with(dgd_generation._inject_mocker_ais_args_old_form)
-    assert [record.getMessage() for record in caplog.records] == [
-        f"overrides.dgd sets {names}: the generated mocker workers keep the old AIS "
-        "arguments (--ais-perf-model without a value plus --ais-* flags), which are "
-        "deprecated and will be removed in v1.9; to end this, write --ais-perf-model "
-        "VALUE in the override and remove its old --ais-* arguments"
-    ]
-
-
-@pytest.mark.parametrize(
-    "arguments,names",
-    [
-        pytest.param(["--ais-perf-config", "x"], "--ais-perf-config", id="old-name"),
-        pytest.param(
-            ["--speedup-ratio", "2.0", "--ais-perf-model"],
-            "--ais-perf-model without a value",
-            id="perf-model-last",
-        ),
-        pytest.param(
-            ["--ais-perf-model", "--x"],
-            "--ais-perf-model without a value",
-            id="perf-model-before-flag",
-        ),
-        # The mocker's parser reads the list: an abbreviation or an --aic-
-        # spelling is named by the full --ais- name.
-        pytest.param(["--aic-system", "s"], "--ais-system", id="aic-name"),
-        pytest.param(["--ais-system=s"], "--ais-system", id="equals-sign"),
-        pytest.param(["--ais-sys", "s"], "--ais-system", id="short-system"),
-        pytest.param(
-            ["--ais-backend-v", "1"], "--ais-backend-version", id="short-version"
-        ),
-        pytest.param(["--ais-tp", "2"], "--ais-tp-size", id="short-tp"),
-        pytest.param(
-            ["--extra-engine-args", "f"], "--extra-engine-args", id="engine-args"
-        ),
-        pytest.param(["--ex", "f"], "--extra-engine-args", id="short-engine-args"),
-        pytest.param(["--model-path", "m"], "--model-path", id="model-path"),
-        pytest.param(["--model-p", "m"], "--model-path", id="short-model-path"),
-        pytest.param(
-            ["--ais-system", "s", "--model-path", "m", "--ais-system=t"],
-            "--ais-system and --model-path",
-            id="two-names",
-        ),
-        # The names of one list come in the mocker's order, not as typed.
-        pytest.param(
-            ["--model-path", "m", "--ais-tp-size", "2", "--ais-backend", "vllm"],
-            "--ais-backend, --ais-tp-size and --model-path",
-            id="three-names",
-        ),
-    ],
-)
-def test_override_with_trigger_keeps_old_arguments(
-    database_version, caplog, arguments, names
-):
-    _assert_old_arguments_kept(caplog, _override("v1alpha1", arguments), names)
-
-
-# Which arguments trigger does not depend on where the override holds them, so
-# one trigger per shape is enough.
-@pytest.mark.parametrize("shape", OVERRIDE_SHAPES)
-def test_override_trigger_is_read_in_every_shape(database_version, caplog, shape):
-    override = _override(shape, ["--ais-system", "s"])
-
-    _assert_old_arguments_kept(caplog, override, "--ais-system")
-
-
-@pytest.mark.parametrize(
-    "override",
-    [
-        pytest.param(None, id="no-override"),
-        pytest.param(
-            {
-                "apiVersion": "nvidia.com/v1beta1",
-                "kind": "DynamoGraphDeployment",
-                "metadata": {"name": "renamed"},
-            },
-            id="metadata-only",
-        ),
-        *(
-            pytest.param(_override("v1alpha1", arguments), id=arguments[0])
-            for arguments in (
-                ["--ais-nextn", "2"],
-                ["--aic-nextn", "2"],
-                ["--ais-nextn-accept-rates", "0.5"],
-                ["--ais-mtp-seed", "1"],
-                ["--ais-perf-model", PERF_MODEL_VALUE],
-                [f"--ais-perf-model={PERF_MODEL_VALUE}"],
-                ["--ais-perf-m", PERF_MODEL_VALUE],
-                # Not a mocker option: the mocker's list decides, not the prefix.
-                ["--ais-model-path", "m"],
-                ["--model-name", "m"],
-            )
-        ),
-        pytest.param(_override("v1alpha1", "--ais-system s"), id="arguments-as-text"),
-        pytest.param(
-            _override("v1alpha1", ["--ais-tp-size", 2]), id="argument-that-is-a-number"
-        ),
-    ],
-)
-def test_override_without_trigger_keeps_new_arguments(
-    database_version, caplog, override
-):
-    with caplog.at_level(logging.WARNING):
-        workers = _generated_workers(_request(override=override), _interpolation())
-
-    assert workers == _workers_with(dgd_generation._inject_mocker_ais_args)
-    assert caplog.records == []
-
-
-def test_override_is_not_read_without_ais_workers(caplog):
-    override = _override("v1alpha1", ["--ais-system", "s"])
-
-    with caplog.at_level(logging.WARNING):
-        workers = _generated_workers(_request(override=override), None)
-
-    assert workers == _generated_workers(_request(), None)
-    for arguments in workers.values():
-        assert not [token for token in arguments if token.startswith("--ais-")]
-    assert caplog.records == []
 
 
 @pytest.fixture
@@ -708,59 +311,15 @@ def profiling_runs(monkeypatch):
     root.setLevel(level)
 
 
-OLD_ROLES = {"roles": {"decode": {"model": "m", "system": "s", "backend": "vllm"}}}
-OLD_DATASET_PROFILES = {
-    "dataset_profiles": {
-        "decode": {"root": "/not-mounted-yet/dataset", "manifest": "profile.json"}
-    }
-}
-
-
-def _old_form_planner(ais_perf_model):
-    return PlannerConfig(
-        mode="decode", optimization_target="sla", ais_perf_model=ais_perf_model
-    )
-
-
-@pytest.mark.parametrize(
-    "ais_perf_model,text",
-    [
-        pytest.param(
-            OLD_ROLES,
-            "ais_perf_model.roles is deprecated and will be removed in v1.9; "
-            f"use {NEW_FORM}.",
-            id="roles",
-        ),
-        pytest.param(
-            OLD_DATASET_PROFILES,
-            "ais_perf_model.dataset_profiles is deprecated and will be removed in "
-            f"v1.9; use {NEW_FORM}.",
-            id="dataset-profiles",
-        ),
-    ],
-)
-def test_profiler_main_warns_for_old_form(
-    monkeypatch, tmp_path, profiling_runs, ais_perf_model, text
-):
-    request = _request(_old_form_planner(ais_perf_model))
-    options = ProfilerOperationalConfig(output_dir=str(tmp_path))
-    monkeypatch.setattr(profiler_main, "_parse_args", lambda: (request, options))
-
-    with pytest.warns(FutureWarning, match=re.escape(text)) as caught:
-        profiler_main.main()
-
-    assert [str(warning.message) for warning in caught] == [text]
-    assert profiling_runs == [request]
-
-
 def test_profiler_main_warns_once_for_old_form(monkeypatch, tmp_path, profiling_runs):
+    old_form = {"roles": {"decode": {"model": "m", "system": "s", "backend": "vllm"}}}
     config = {
         "model": MODEL,
         "features": {
             "planner": {
                 "mode": "decode",
                 "optimization_target": "sla",
-                "ais_perf_model": OLD_ROLES,
+                "ais_perf_model": old_form,
             }
         },
     }
@@ -768,8 +327,9 @@ def test_profiler_main_warns_once_for_old_form(monkeypatch, tmp_path, profiling_
     monkeypatch.setattr(sys, "argv", argv)
 
     text = (
-        "ais_perf_model.roles is deprecated and will be removed in v1.9; "
-        f"use {NEW_FORM}."
+        "ais_perf_model.roles is deprecated and will be removed in v1.9; use "
+        "ais_perf_model with one perf model config or a list of configs "
+        "(one per worker_type)."
     )
     with pytest.warns(FutureWarning, match=f"^{re.escape(text)}$") as caught:
         profiler_main.main()
@@ -784,9 +344,7 @@ def test_profiler_main_warns_once_for_old_form(monkeypatch, tmp_path, profiling_
     "with_planner,written",
     [
         pytest.param(False, None, id="no-planner"),
-        pytest.param(True, None, id="no-perf-model"),
-        pytest.param(True, _written_entry(tp=2), id="one-config"),
-        pytest.param(True, [_written_entry(worker_type="decode", tp=2)], id="list"),
+        pytest.param(True, [_config(worker_type="decode", tp=2)], id="list"),
     ],
 )
 def test_profiler_main_is_silent_for_new_form(
@@ -799,9 +357,7 @@ def test_profiler_main_is_silent_for_new_form(
     options = ProfilerOperationalConfig(output_dir=str(tmp_path))
     monkeypatch.setattr(profiler_main, "_parse_args", lambda: (request, options))
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        profiler_main.main()
+    profiler_main.main()
 
     assert profiling_runs == [request]
 

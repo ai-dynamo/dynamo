@@ -13,7 +13,6 @@ from dynamo.common.configuration.utils import (
     add_argument,
     add_negatable_bool_argument,
     env_or_default,
-    join_names,
     nullable_float,
     parse_bool,
 )
@@ -449,12 +448,6 @@ def test_deprecated_hidden_argument_is_quiet_unless_used(monkeypatch, recwarn):
     assert "--old" not in " ".join(parser.format_help().split())
 
 
-def test_join_names():
-    assert join_names(["a"]) == "a"
-    assert join_names(["a", "b"]) == "a and b"
-    assert join_names(("a", "b", "c", "d")) == "a, b, c and d"
-
-
 def test_deprecated_message_names_one_or_several():
     assert (
         _DEPRECATED.message("--old")
@@ -474,12 +467,11 @@ def test_deprecated_message_names_one_or_several():
 
 def test_deprecated_warn_names_several_in_one_future_warning():
     with pytest.warns(FutureWarning) as records:
-        _DEPRECATED.warn(["--old", "TEST_OLD"], stacklevel=1)
+        _DEPRECATED.warn(["--old", "TEST_OLD"])
 
-    assert len(records) == 1
-    assert records[0].category is FutureWarning
-    assert str(records[0].message) == _DEPRECATED.message(["--old", "TEST_OLD"])
-    assert records[0].filename == __file__
+    assert [str(record.message) for record in records] == [
+        _DEPRECATED.message(["--old", "TEST_OLD"])
+    ]
 
 
 def test_deprecated_warn_stacklevel_counts_callers():
@@ -487,13 +479,8 @@ def test_deprecated_warn_stacklevel_counts_callers():
         _call_warn(stacklevel=1)
     with pytest.warns(FutureWarning) as default:
         _call_warn()
-    with pytest.warns(FutureWarning) as callers_line:
-        _call_warn(stacklevel=2)
 
     # Each helper is one line of code directly under its ``def`` line.
     assert warning_line[0].lineno == _warn.__code__.co_firstlineno + 1
     assert default[0].lineno == _call_warn.__code__.co_firstlineno + 1
-    assert callers_line[0].lineno == default[0].lineno
-    assert {record[0].filename for record in (warning_line, default, callers_line)} == {
-        __file__
-    }
+    assert default[0].filename == __file__

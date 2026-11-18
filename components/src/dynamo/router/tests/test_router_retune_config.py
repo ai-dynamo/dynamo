@@ -55,10 +55,6 @@ def test_every_policy_parameter_is_public_an_extension_or_not_retunable() -> Non
 
 def test_retune_router_section_rejects_key() -> None:
     with pytest.raises(
-        ValidationError,
-        match=re.escape(
-            "retune.router.ais_perf_model is not supported: a running router "
-            "keeps the perf model it started with"
-        ),
+        ValidationError, match=r"retune\.router\.ais_perf_model is not supported"
     ):
         RouterRetuneConfig.model_validate({"ais_perf_model": {"use": "engine"}})

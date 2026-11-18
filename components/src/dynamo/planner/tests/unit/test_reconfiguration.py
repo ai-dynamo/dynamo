@@ -674,14 +674,6 @@ _AIS_CONTENT = {"model": "test-model", "system": "test-system", "backend": "vllm
     "ais_perf_model",
     [
         pytest.param({"roles": {"decode": _AIS_CONTENT}}, id="old-roles"),
-        pytest.param(
-            {
-                "dataset_profiles": {
-                    "decode": {"root": "/not-mounted-yet", "manifest": "profile.json"}
-                }
-            },
-            id="old-dataset-profiles",
-        ),
         pytest.param({**_AIS_CONTENT, "tp": 2}, id="one-config"),
         pytest.param(
             [

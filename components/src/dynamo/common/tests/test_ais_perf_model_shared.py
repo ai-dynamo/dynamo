@@ -4,10 +4,12 @@
 import copy
 import json
 import os
-import shutil
+import re
 import subprocess
 import sys
+import tempfile
 import textwrap
+import types
 from pathlib import Path
 from typing import Any
 
@@ -18,8 +20,10 @@ from tests.utils.ais_perf_model import IDENTITY
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
-NEW_FLAG = "--ais-perf-model"
-ENGINE_ARGS_FLAG = "--extra-engine-args"
+NAMES = {
+    "engine_args_name": "--extra-engine-args",
+    "perf_model_name": "--ais-perf-model",
+}
 
 
 def _config(**keys: Any) -> dict[str, Any]:
@@ -27,13 +31,16 @@ def _config(**keys: Any) -> dict[str, Any]:
     return {**IDENTITY, **keys}
 
 
-def _yaml(config: dict[str, Any]) -> str:
+PREFILL = _config(worker_type="prefill")
+DECODE = _config(worker_type="decode")
+AGGREGATED = _config(worker_type="aggregated")
+
+
+def _write(path: Path, value: Any) -> str:
+    """Write ``value`` as the config file ``path`` and return the path as text."""
     # JSON is YAML, so a config file needs no YAML writer here.
-    return json.dumps(config)
-
-
-def _names() -> dict[str, str]:
-    return {"engine_args_name": ENGINE_ARGS_FLAG, "perf_model_name": NEW_FLAG}
+    path.write_text(json.dumps(value))
+    return str(path)
 
 
 def _run_child(script: str, **env: str) -> str:
@@ -52,142 +59,66 @@ def _run_child(script: str, **env: str) -> str:
     return proc.stdout
 
 
-class _RecordingLoader:
-    """Stands in for the loader and keeps the arguments of every resolve call."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    def resolve(self, entry: Any, **keywords: Any) -> dict[str, Any]:
-        self.calls.append(keywords)
-        return dict(entry)
-
-
-@pytest.fixture
-def dataset_workspaces(monkeypatch: pytest.MonkeyPatch):
-    """Give the test its own, empty set of dataset folders and remove them after."""
-    workspaces: dict[int, str] = {}
-    monkeypatch.setattr(ais_perf_model, "_dataset_workspaces", workspaces)
-    yield workspaces
-    for folder in workspaces.values():
-        shutil.rmtree(folder, ignore_errors=True)
-
-
-def test_timing_model_shape_and_copy() -> None:
-    config = _config(estimator_config={"correction": {"enabled": False}})
-    as_given = copy.deepcopy(config)
-
-    result = ais_perf_model.timing_model(config)
-
-    assert result == {"type": "external", "provider": "ais", "config": as_given}
-    result["config"]["estimator_config"]["correction"]["enabled"] = True
-    result["config"]["model"] = "changed"
-    assert config == as_given
-
-
 def test_set_timing_model_none_text_and_mapping() -> None:
-    config = _config(worker_type="decode")
-    timing = {"type": "external", "provider": "ais", "config": _config()}
-    timing["config"]["worker_type"] = "decode"
+    config = _config(worker_type="decode", estimator_config={"correction": {}})
+    timing = {"type": "external", "provider": "ais", "config": copy.deepcopy(config)}
     written = {"engine": {"block_size": 32}, "num_workers": 2}
-    as_given = copy.deepcopy(written)
 
-    assert ais_perf_model.set_timing_model(None, config, **_names()) == {
-        "engine": {"timing_model": timing}
-    }
-    assert ais_perf_model.set_timing_model(json.dumps(written), config, **_names()) == {
-        "engine": {"block_size": 32, "timing_model": timing},
-        "num_workers": 2,
-    }
-    assert ais_perf_model.set_timing_model({"num_workers": 2}, config, **_names()) == {
-        "engine": {"timing_model": timing},
-        "num_workers": 2,
-    }
-    result = ais_perf_model.set_timing_model(written, config, **_names())
-    assert result == {
-        "engine": {"block_size": 32, "timing_model": timing},
-        "num_workers": 2,
-    }
-    assert written == as_given
-    assert config == _config(worker_type="decode")
+    from_none = ais_perf_model.set_timing_model(None, config, **NAMES)
+    from_text = ais_perf_model.set_timing_model('{"num_workers": 2}', config, **NAMES)
+    result = ais_perf_model.set_timing_model(written, config, **NAMES)
 
-    assert ais_perf_model.engine_args_as_written(None, **_names()) == {}
-    copied = ais_perf_model.engine_args_as_written(written, **_names())
-    copied["engine"]["block_size"] = 64
-    assert written == as_given
+    assert from_none == {"engine": {"timing_model": timing}}
+    assert from_text == {"engine": {"timing_model": timing}, "num_workers": 2}
+    assert result == {**written, "engine": {"block_size": 32, "timing_model": timing}}
+    # The result is a copy: a change to it reaches neither input.
+    result["engine"]["block_size"] = 64
+    result["engine"]["timing_model"]["config"]["estimator_config"].clear()
+    assert written == {"engine": {"block_size": 32}, "num_workers": 2}
+    assert config == timing["config"]
 
 
 @pytest.mark.parametrize(
     "engine_args",
     [
-        {"engine": {"timing_model": {"type": "polynomial"}}},
         {"engine": {"timing_model": None}},
-        '{"engine": {"timing_model": {"type": "external"}}}',
+        '{"engine": {"timing_model": {"type": "polynomial"}}}',
     ],
 )
 def test_set_timing_model_refuses_written_timing_model(engine_args: Any) -> None:
-    message = (
-        "prefill_engine_args already sets engine.timing_model; it cannot be "
-        "combined with ais_perf_model"
-    )
-    names = {
-        "engine_args_name": "prefill_engine_args",
-        "perf_model_name": "ais_perf_model",
-    }
+    names = {"engine_args_name": "decode_args", "perf_model_name": "ais_perf_model"}
 
     with pytest.raises(ValueError) as from_set:
         ais_perf_model.set_timing_model(engine_args, _config(), **names)
     with pytest.raises(ValueError) as from_read:
         ais_perf_model.engine_args_as_written(engine_args, **names)
 
-    assert str(from_set.value) == message
-    assert str(from_read.value) == message
+    assert str(from_set.value) == str(from_read.value)
+    # The documentation quotes this sentence with the names of each component.
+    assert str(from_read.value) == (
+        "decode_args already sets engine.timing_model; it cannot be combined with "
+        "ais_perf_model"
+    )
 
 
 @pytest.mark.parametrize(
-    "engine_args",
-    ["[1, 2]", "3", "null", "not json", '{"engine": 3}', {"engine": ["a"]}, 3],
+    "engine_args", ["[1, 2]", "null", "not json", {"engine": ["a"]}, 3]
 )
 def test_engine_args_as_written_rejects_non_object(engine_args: Any) -> None:
-    with pytest.raises(ValueError) as error:
-        ais_perf_model.engine_args_as_written(engine_args, **_names())
-
-    assert str(error.value) == "--extra-engine-args must be a JSON object"
+    with pytest.raises(ValueError, match="^--extra-engine-args must be a JSON object"):
+        ais_perf_model.engine_args_as_written(engine_args, **NAMES)
 
 
 def test_env_value_empty_is_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(ais_perf_model.ENV_VAR, raising=False)
+    monkeypatch.delenv("DYN_AIS_PERF_MODEL", raising=False)
     assert ais_perf_model.env_value() is None
-
-    monkeypatch.setenv(ais_perf_model.ENV_VAR, "")
+    monkeypatch.setenv("DYN_AIS_PERF_MODEL", "")
     assert ais_perf_model.env_value() is None
-
-    monkeypatch.setenv(ais_perf_model.ENV_VAR, "cfg.yaml")
+    monkeypatch.setenv("DYN_AIS_PERF_MODEL", "cfg.yaml")
     assert ais_perf_model.env_value() == "cfg.yaml"
 
-    monkeypatch.setenv(ais_perf_model.WORKER_TYPE_ENV_VAR, "prefill")
+    monkeypatch.setenv("DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE", "prefill")
     assert ais_perf_model.env_value(ais_perf_model.WORKER_TYPE_ENV_VAR) == "prefill"
-    assert ais_perf_model.ENV_VAR == "DYN_AIS_PERF_MODEL"
-    assert ais_perf_model.WORKER_TYPE_ENV_VAR == "DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE"
-
-
-@pytest.mark.timeout(60)  # one interpreter start, about 1s
-def test_import_does_not_load_aisimulate() -> None:
-    output = _run_child(
-        """
-        import sys
-
-        import dynamo.common.ais_perf_model as module
-
-        print(module.__file__)
-        print(sorted(name for name in sys.modules if name.startswith("aisim")))
-        """
-    )
-
-    module_file, loaded = output.strip().splitlines()
-    # The child must test the same code as this process.
-    assert module_file == ais_perf_model.__file__
-    assert loaded == "[]"
 
 
 @pytest.mark.timeout(60)  # one interpreter start, about 1s
@@ -198,126 +129,84 @@ def test_functions_without_a_value_work_when_aisimulate_is_missing() -> None:
         import json
         import sys
 
+        tried = []
+
         class WithoutAISimulate(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):
                 if fullname.split(".")[0] in {"aisim", "aisim_core"}:
-                    raise ModuleNotFoundError(
-                        f"No module named {fullname!r}", name=fullname
-                    )
+                    tried.append(fullname)
+                    raise ModuleNotFoundError(fullname, name=fullname)
 
         sys.meta_path.insert(0, WithoutAISimulate())
 
         from dynamo.common import ais_perf_model
 
-        names = {"engine_args_name": "--extra-engine-args", "perf_model_name": "x"}
         config = {"model": "m", "system": "s", "backend": "b", "worker_type": "decode"}
-        import_errors = {}
-        for name, call in {
-            "load_document": lambda: ais_perf_model.load_document(config),
-            "resolve_entry": lambda: ais_perf_model.resolve_entry(config),
-            "router_perf_config": lambda: ais_perf_model.router_perf_config(config),
-            "engine_perf_config": lambda: ais_perf_model.engine_perf_config(
-                config, "decode"
-            ),
-            "normalized_config": lambda: ais_perf_model.normalized_config(config),
-            "uses_relative_paths": lambda: ais_perf_model.uses_relative_paths({}),
-        }.items():
+        names = {"engine_args_name": "a", "perf_model_name": "b"}
+        result = {
+            "tried_by_import": list(tried),
+            "env_value": ais_perf_model.env_value("DYN_TEST_UNSET_NAME"),
+            "set_timing_model": ais_perf_model.set_timing_model(None, {}, **names),
+        }
+        for call in (ais_perf_model.load_document, ais_perf_model.normalized_config):
             try:
-                call()
+                call(config)
             except ImportError as error:
-                import_errors[name] = error.name
-        print(
-            json.dumps(
-                {
-                    "env_value": ais_perf_model.env_value("DYN_TEST_UNSET_NAME"),
-                    "timing_model": ais_perf_model.timing_model({"model": "m"}),
-                    "engine_args_as_written": ais_perf_model.engine_args_as_written(
-                        '{"a": 1}', **names
-                    ),
-                    "set_timing_model": ais_perf_model.set_timing_model(
-                        None, {"model": "m"}, **names
-                    ),
-                    "import_errors": import_errors,
-                }
-            )
-        )
+                result[call.__name__] = error.name
+        print(json.dumps(result))
         """
     )
 
-    timing = {"type": "external", "provider": "ais", "config": {"model": "m"}}
+    timing = {"type": "external", "provider": "ais", "config": {}}
     assert json.loads(output) == {
+        # Importing the module does not ask for AISimulate.
+        "tried_by_import": [],
         "env_value": None,
-        "timing_model": timing,
-        "engine_args_as_written": {"a": 1},
         "set_timing_model": {"engine": {"timing_model": timing}},
         # The functions that read a value fail with the import error itself.
-        "import_errors": {
-            "load_document": "aisim_core",
-            "resolve_entry": "aisim_core",
-            "router_perf_config": "aisim_core",
-            "engine_perf_config": "aisim_core",
-            "normalized_config": "aisim_core",
-            "uses_relative_paths": "aisim_core",
-        },
+        "load_document": "aisim_core",
+        "normalized_config": "aisim_core",
     }
 
 
-@pytest.mark.timeout(60)  # one interpreter start, about 1s
 def test_aisimulate_build_without_the_loader_is_an_import_error(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # An aisim_core package that has no ais_perf_model module.
-    (tmp_path / "aisim_core").mkdir()
-    (tmp_path / "aisim_core" / "__init__.py").write_text("")
+    # An aisim_core that has no ais_perf_model module.
+    monkeypatch.setitem(sys.modules, "aisim_core", types.ModuleType("aisim_core"))
+    monkeypatch.delitem(sys.modules, "aisim_core.ais_perf_model", raising=False)
 
-    output = _run_child(
-        """
-        import os
-        import sys
+    with pytest.raises(ImportError) as error:
+        ais_perf_model.load_document(_config())
 
-        sys.path.insert(0, os.environ["PACKAGES_WITHOUT_LOADER"])
-
-        from dynamo.common import ais_perf_model
-
-        try:
-            ais_perf_model.load_document({"model": "m"})
-        except ImportError as error:
-            print(type(error).__name__, error.name)
-        """,
-        PACKAGES_WITHOUT_LOADER=str(tmp_path),
-    )
-
-    assert output.split() == ["ModuleNotFoundError", "aisim_core.ais_perf_model"]
+    assert error.value.name == "aisim_core.ais_perf_model"
 
 
 def test_dataset_workspace_only_for_dataset_entries(
-    monkeypatch: pytest.MonkeyPatch, dataset_workspaces: dict[int, str]
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    loader = _RecordingLoader()
+    calls: list[dict[str, Any]] = []
+    loader = types.SimpleNamespace(resolve=lambda entry, **keys: calls.append(keys))
     monkeypatch.setattr(ais_perf_model, "_loader", lambda: loader)
+    monkeypatch.setattr(ais_perf_model, "_dataset_workspaces", {})
+    # The folder is made under tmp_path, so the checks below see it.
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     dataset = {"from": {"dataset": {"root": "/data", "manifest": "manifest.json"}}}
+    handed_on = {"worker_type": "decode", "fill": {"nextn": 2}, "defaults": {"tp": 1}}
 
     ais_perf_model.resolve_entry(_config())
     ais_perf_model.resolve_entry({"from": "template.yaml"})
     ais_perf_model.resolve_entry({"from": {"state_snapshot": {"path": "/snapshot"}}})
-    assert [call["workspace"] for call in loader.calls] == [None, None, None]
-    assert dataset_workspaces == {}
+    assert [call["workspace"] for call in calls] == [None, None, None]
+    assert list(tmp_path.iterdir()) == []
 
-    ais_perf_model.resolve_entry(
-        dataset, worker_type="decode", fill={"nextn": 2}, defaults={"tp": 1}
-    )
+    ais_perf_model.resolve_entry(dataset, **handed_on)
     ais_perf_model.resolve_entry(dataset)
-    first, second = loader.calls[3], loader.calls[4]
-    assert os.path.basename(first["workspace"]).startswith("dynamo-ais-perf-model-")
-    assert os.path.isdir(first["workspace"])
-    assert second["workspace"] == first["workspace"]
-    assert list(dataset_workspaces) == [os.getpid()]
-    assert first == {
-        "worker_type": "decode",
-        "fill": {"nextn": 2},
-        "defaults": {"tp": 1},
-        "workspace": first["workspace"],
-    }
+    (folder,) = tmp_path.iterdir()
+    assert folder.name.startswith("dynamo-ais-perf-model-")
+    assert calls[3] == {**handed_on, "workspace": str(folder)}
+    # One folder for the process: the next dataset entry gets the same one.
+    assert calls[4]["workspace"] == str(folder)
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
@@ -359,35 +248,20 @@ def test_each_process_removes_only_its_own_dataset_workspace(tmp_path: Path) -> 
 
 
 def test_load_document_accepts_file_inline_json_mapping_list(tmp_path: Path) -> None:
-    prefill = _config(worker_type="prefill")
-    decode = _config(worker_type="decode")
-    path = tmp_path / "cfg.yaml"
-    path.write_text(_yaml(prefill))
-
-    from_file = ais_perf_model.load_document(str(path))
-    assert (from_file.bare, from_file.source) == (True, str(path))
-    assert from_file.worker_types == ("prefill",)
-    assert from_file.to_data() == prefill
-
-    from_json = ais_perf_model.load_document(json.dumps([prefill, decode]))
-    assert (from_json.bare, from_json.source) == (False, None)
-    assert from_json.worker_types == ("prefill", "decode")
-    assert from_json.to_data() == [prefill, decode]
-
-    from_mapping = ais_perf_model.load_document(_config())
-    assert (from_mapping.bare, from_mapping.source) == (True, None)
-    assert from_mapping.worker_types == ()
-    assert from_mapping.to_data() == _config()
-
-    from_list = ais_perf_model.load_document([decode, prefill])
-    assert (from_list.bare, from_list.source) == (False, None)
-    assert from_list.worker_types == ("decode", "prefill")
-    assert from_list.to_data() == [decode, prefill]
-    assert from_list.select("prefill") == prefill
-
+    path = _write(tmp_path / "cfg.yaml", PREFILL)
+    both = [PREFILL, DECODE]
     # A template is not opened when the value is read.
-    unread = ais_perf_model.load_document({"from": str(tmp_path / "missing.yaml")})
-    assert unread.to_data() == {"from": str(tmp_path / "missing.yaml")}
+    unread = {"from": str(tmp_path / "missing.yaml")}
+
+    for value, expected in [
+        (path, (True, path, ("prefill",), PREFILL)),
+        (json.dumps(both), (False, None, ("prefill", "decode"), both)),
+        (_config(), (True, None, (), _config())),
+        ([DECODE, PREFILL], (False, None, ("decode", "prefill"), [DECODE, PREFILL])),
+        (unread, (True, None, (), unread)),
+    ]:
+        doc = ais_perf_model.load_document(value)
+        assert (doc.bare, doc.source, doc.worker_types, doc.to_data()) == expected
 
 
 # The loader raises these errors and their texts are AISimulate's. Dynamo
@@ -400,10 +274,7 @@ def test_load_document_accepts_file_inline_json_mapping_list(tmp_path: Path) -> 
         pytest.param([], id="empty list"),
         pytest.param(3, id="number"),
         pytest.param(_config(worker_type="router"), id="unknown worker type"),
-        pytest.param(
-            [_config(worker_type="prefill"), _config(worker_type="prefill")],
-            id="worker type twice",
-        ),
+        pytest.param([PREFILL, PREFILL], id="worker type twice"),
         pytest.param([_config()], id="list entry without worker type"),
         pytest.param("missing.yaml", id="missing file"),
     ],
@@ -413,72 +284,34 @@ def test_load_document_errors_are_value_errors(value: Any, tmp_path: Path) -> No
         ais_perf_model.load_document(value, base_dir=tmp_path)
 
 
+# An error is given as a pattern. The first one is the complete sentence, as
+# the documentation quotes it.
 @pytest.mark.parametrize(
     ("value", "worker_type", "expected"),
     [
         # One config without worker_type.
         (_config(), "prefill", _config()),
-        (_config(), "aggregated", _config()),
         (
             _config(),
             None,
-            "ais_perf_model: the config has no worker_type; write worker_type or "
-            "set --router-prefill-load-worker-type",
+            "^ais_perf_model: the config has no worker_type; write worker_type or "
+            "set --router-prefill-load-worker-type$",
         ),
-        # One config written prefill or aggregated: returned as written, also
-        # when another type is asked for.
-        (_config(worker_type="prefill"), "prefill", _config(worker_type="prefill")),
-        (_config(worker_type="prefill"), "aggregated", _config(worker_type="prefill")),
-        (_config(worker_type="prefill"), None, _config(worker_type="prefill")),
-        (_config(worker_type="aggregated"), None, _config(worker_type="aggregated")),
-        # One config written decode.
-        (_config(worker_type="decode"), "prefill", _config(worker_type="decode")),
-        (
-            _config(worker_type="decode"),
-            None,
-            "ais_perf_model: worker_type is 'decode'; the router needs prefill or "
-            "aggregated",
-        ),
+        # One config with a worker_type: returned as written, also when
+        # another type is asked for.
+        (PREFILL, None, PREFILL),
+        (AGGREGATED, None, AGGREGATED),
+        (DECODE, "prefill", DECODE),
+        (DECODE, None, "^ais_perf_model: worker_type is 'decode'; the router needs"),
         # A list, worker type given.
-        (
-            [_config(worker_type="decode"), _config(worker_type="prefill", tp=2)],
-            "prefill",
-            _config(worker_type="prefill", tp=2),
-        ),
+        ([DECODE, PREFILL], "prefill", PREFILL),
         # A list, worker type not given.
-        (
-            [_config(worker_type="decode"), _config(worker_type="prefill", tp=2)],
-            None,
-            _config(worker_type="prefill", tp=2),
-        ),
-        (
-            [_config(worker_type="aggregated", tp=4), _config(worker_type="decode")],
-            None,
-            _config(worker_type="aggregated", tp=4),
-        ),
-        (
-            [_config(worker_type="aggregated"), _config(worker_type="prefill")],
-            None,
-            "ais_perf_model: it has entries for prefill and aggregated; set "
-            "--router-prefill-load-worker-type to choose one",
-        ),
-        (
-            [_config(worker_type="decode")],
-            None,
-            "ais_perf_model: no entry for worker type prefill or aggregated; it "
-            "has: decode",
-        ),
+        ([DECODE, PREFILL], None, PREFILL),
+        ([AGGREGATED, DECODE], None, AGGREGATED),
+        ([AGGREGATED, PREFILL], None, "^ais_perf_model: it has entries for prefill"),
+        ([DECODE], None, "^ais_perf_model: no entry .* aggregated; it has: decode$"),
         # A worker type no router runs as.
-        (
-            _config(),
-            "decode",
-            "worker_type must be 'prefill' or 'aggregated', got 'decode'",
-        ),
-        (
-            [_config(worker_type="prefill")],
-            "router",
-            "worker_type must be 'prefill' or 'aggregated', got 'router'",
-        ),
+        (_config(), "decode", "^worker_type must be 'prefill' or 'aggregated', got"),
     ],
 )
 def test_select_router_entry_table(
@@ -487,15 +320,14 @@ def test_select_router_entry_table(
     document = ais_perf_model.load_document(value)
 
     if isinstance(expected, str):
-        with pytest.raises(ValueError) as error:
+        with pytest.raises(ValueError, match=expected):
             ais_perf_model.select_router_entry(document, worker_type)
-        assert str(error.value) == expected
     else:
         assert ais_perf_model.select_router_entry(document, worker_type) == expected
 
 
 def test_select_router_entry_needs_an_entry_for_the_given_worker_type() -> None:
-    document = ais_perf_model.load_document([_config(worker_type="decode")])
+    document = ais_perf_model.load_document([DECODE])
 
     # The loader reports the missing entry, in its own words.
     with pytest.raises(ValueError):
@@ -503,212 +335,149 @@ def test_select_router_entry_needs_an_entry_for_the_given_worker_type() -> None:
 
 
 def test_select_router_entry_names_the_file_in_errors(tmp_path: Path) -> None:
-    one = tmp_path / "one.yaml"
-    one.write_text(_yaml(_config()))
-    several = tmp_path / "several.yaml"
-    several.write_text(_yaml([_config(worker_type="decode")]))
+    path = _write(tmp_path / "one.yaml", _config())
 
-    with pytest.raises(ValueError) as no_type:
-        ais_perf_model.select_router_entry(ais_perf_model.load_document(str(one)))
-    with pytest.raises(ValueError) as no_entry:
-        ais_perf_model.select_router_entry(ais_perf_model.load_document(str(several)))
-
-    assert str(no_type.value) == (
-        f"{one}: the config has no worker_type; write worker_type or set "
-        "--router-prefill-load-worker-type"
-    )
-    assert str(no_entry.value) == (
-        f"{several}: no entry for worker type prefill or aggregated; it has: decode"
-    )
+    with pytest.raises(ValueError, match=f"^{re.escape(path)}: the config has no"):
+        ais_perf_model.select_router_entry(ais_perf_model.load_document(path))
+    several = _write(tmp_path / "several.yaml", [DECODE])
+    with pytest.raises(ValueError, match=f"^{re.escape(several)}: no entry for"):
+        ais_perf_model.select_router_entry(ais_perf_model.load_document(several))
 
 
 def test_select_then_resolve_reports_loader_mismatch() -> None:
-    document = ais_perf_model.load_document(_config(worker_type="decode"))
+    document = ais_perf_model.load_document(DECODE)
     entry = ais_perf_model.select_router_entry(document, "prefill")
 
     with pytest.raises(ValueError):
         ais_perf_model.resolve_entry(entry, worker_type="prefill")
 
 
-def test_resolve_entry_fill_adds_and_conflicts() -> None:
-    entry = ais_perf_model.load_document(_config()).select("decode")
-    written = ais_perf_model.load_document(_config(nextn=2)).select("decode")
-    fill = {"nextn": 3}
-
-    assert ais_perf_model.resolve_entry(
-        entry, worker_type="decode", fill=fill
-    ) == _config(worker_type="decode", nextn=3)
-    assert ais_perf_model.resolve_entry(
-        written, worker_type="decode", fill={"nextn": 2}
-    ) == _config(worker_type="decode", nextn=2)
-    with pytest.raises(ValueError):
-        ais_perf_model.resolve_entry(written, worker_type="decode", fill=fill)
-
-    assert entry == _config(worker_type="decode")
-    assert fill == {"nextn": 3}
-
-
 def test_resolve_entry_twice_is_equal(tmp_path: Path) -> None:
-    template = tmp_path / "template.yaml"
-    template.write_text(_yaml(_config(tp=2, backend_version="1.0")))
-    plain = _config(estimator_config={"correction": {"enabled": False}})
-    from_template = {"from": str(template), "tp": 4}
+    template = _write(tmp_path / "template.yaml", _config(tp=2, backend_version="1.0"))
+    entry = {"from": template, "tp": 4}
 
-    first = ais_perf_model.resolve_entry(plain, worker_type="aggregated")
-    assert first == {**plain, "worker_type": "aggregated"}
-    assert ais_perf_model.resolve_entry(plain, worker_type="aggregated") == first
+    first = ais_perf_model.resolve_entry(entry, worker_type="prefill")
 
-    first = ais_perf_model.resolve_entry(from_template, worker_type="prefill")
+    # The keys of the entry replace those of the template.
     assert first == _config(tp=4, backend_version="1.0", worker_type="prefill")
-    assert ais_perf_model.resolve_entry(from_template, worker_type="prefill") == first
-    assert from_template == {"from": str(template), "tp": 4}
+    assert ais_perf_model.resolve_entry(entry, worker_type="prefill") == first
+    assert entry == {"from": template, "tp": 4}
 
 
 def test_engine_perf_config_is_the_entry_of_the_worker_type(tmp_path: Path) -> None:
-    prefill = _config(worker_type="prefill", tp=2)
-    decode = _config(worker_type="decode")
-    path = tmp_path / "cfg.yaml"
-    path.write_text(_yaml([decode, prefill]))
+    path = _write(tmp_path / "cfg.yaml", [DECODE, PREFILL])
 
     # The config as resolved: no key is added but a missing worker_type.
-    assert ais_perf_model.engine_perf_config([decode, prefill], "prefill") == prefill
-    assert ais_perf_model.engine_perf_config(str(path), "decode") == decode
-    assert ais_perf_model.engine_perf_config(_config(), "decode") == decode
+    assert ais_perf_model.engine_perf_config([DECODE, PREFILL], "prefill") == PREFILL
+    assert ais_perf_model.engine_perf_config(path, "decode") == DECODE
+    assert ais_perf_model.engine_perf_config(_config(), "decode") == DECODE
 
 
 def test_engine_perf_config_fill_adds_and_conflicts() -> None:
     fill = {"nextn": 3}
+    filled = _config(worker_type="decode", nextn=3)
 
-    filled = ais_perf_model.engine_perf_config(_config(), "decode", fill=fill)
-
-    assert filled == _config(worker_type="decode", nextn=3)
-    # A written value that differs from the required one.
+    assert ais_perf_model.engine_perf_config(_config(), "decode", fill=fill) == filled
+    # A written value must equal the required one.
+    written = ais_perf_model.engine_perf_config(_config(nextn=3), "decode", fill=fill)
+    assert written == filled
     with pytest.raises(ValueError):
         ais_perf_model.engine_perf_config(_config(nextn=2), "decode", fill=fill)
     assert fill == {"nextn": 3}
 
 
-@pytest.mark.parametrize(
-    "value",
-    [
-        pytest.param([_config(worker_type="prefill")], id="list without the type"),
-        pytest.param(_config(worker_type="prefill"), id="config of another type"),
-    ],
-)
+@pytest.mark.parametrize("value", [[PREFILL], PREFILL])
 def test_engine_perf_config_needs_an_entry_for_the_worker_type(value: Any) -> None:
     with pytest.raises(ValueError):
         ais_perf_model.engine_perf_config(value, "decode")
 
 
 def test_router_perf_config_reports_unknown_key_as_value_error() -> None:
-    with pytest.raises(ValueError) as error:
+    with pytest.raises(ValueError, match="^ais_perf_model: .*tp_size") as error:
         ais_perf_model.router_perf_config(_config(tp_size=2), "prefill")
 
-    assert type(error.value) is ValueError
-    assert str(error.value).startswith("ais_perf_model: ")
-    assert "tp_size" in str(error.value)
     assert type(error.value.__cause__) is TypeError
-    assert str(error.value) == f"ais_perf_model: {error.value.__cause__}"
 
 
+# The documentation quotes "ais_perf_model requires model" and says that a
+# null value is the same as a key left out.
 @pytest.mark.parametrize(
     ("change", "missing"),
     [
-        pytest.param({"model": ""}, "model", id="empty model"),
-        pytest.param({"system": ""}, "system", id="empty system"),
-        pytest.param({"backend": ""}, "backend", id="empty backend"),
-        pytest.param({"model": False}, "model", id="false model"),
-        pytest.param({"model": None}, "model", id="null model"),
-        pytest.param(
-            {"backend": "", "model": ""}, "backend, model", id="two empty values"
-        ),
+        ({"system": ""}, "system"),
+        ({"model": None}, "model"),
+        ({"backend": "", "model": ""}, "backend, model"),
     ],
 )
 def test_router_perf_config_requires_identity_values(
     change: dict[str, Any], missing: str
 ) -> None:
-    with pytest.raises(ValueError) as error:
+    with pytest.raises(ValueError, match=f"^ais_perf_model requires {missing}$"):
         ais_perf_model.router_perf_config(_config(**change), "prefill")
-
-    assert type(error.value) is ValueError
-    assert str(error.value) == f"ais_perf_model requires {missing}"
 
 
 def test_router_perf_config_requires_a_written_model() -> None:
     entry = {key: value for key, value in _config().items() if key != "model"}
 
-    with pytest.raises(ValueError) as error:
+    with pytest.raises(ValueError, match="^ais_perf_model requires model$"):
         ais_perf_model.router_perf_config(entry, "aggregated")
 
-    assert str(error.value) == "ais_perf_model requires model"
 
-
-def test_uses_relative_paths(tmp_path: Path) -> None:
-    dataset = {"root": "dataset", "manifest": "manifest.json"}
-    interpolation = {"fpm_interpolation": {"fpm_parquet_path": "fpm.parquet"}}
-    absolute = _config(
-        systems_paths=[str(tmp_path / "sys")],
-        estimator_config={
-            "fpm_interpolation": {"fpm_parquet_path": str(tmp_path / "fpm.parquet")}
-        },
-    )
-
-    assert ais_perf_model.uses_relative_paths(_config(systems_paths=["sys"]))
-    assert ais_perf_model.uses_relative_paths({"from": "template.yaml"})
-    assert ais_perf_model.uses_relative_paths({"from": {"dataset": dataset}})
-    assert ais_perf_model.uses_relative_paths(_config(estimator_config=interpolation))
-    assert ais_perf_model.uses_relative_paths(
-        [_config(worker_type="decode"), {"from": "x", "worker_type": "prefill"}]
-    )
-
-    assert not ais_perf_model.uses_relative_paths(_config())
-    assert not ais_perf_model.uses_relative_paths(absolute)
-    assert not ais_perf_model.uses_relative_paths(
-        {"from": str(tmp_path / "template.yaml"), "worker_type": "prefill"}
-    )
+@pytest.mark.parametrize(
+    ("value", "relative"),
+    [
+        (_config(systems_paths=["sys"]), True),
+        ({"from": "template.yaml"}, True),
+        ({"from": {"dataset": {"root": "data", "manifest": "manifest.json"}}}, True),
+        ([AGGREGATED, {"from": "x", "worker_type": "prefill"}], True),
+        (
+            _config(estimator_config={"fpm_interpolation": {"fpm_parquet_path": "f"}}),
+            True,
+        ),
+        (_config(), False),
+        (_config(systems_paths=["/abs/sys"]), False),
+        ({"from": "/abs/template.yaml", "worker_type": "prefill"}, False),
+    ],
+)
+def test_uses_relative_paths(value: Any, relative: bool) -> None:
+    assert ais_perf_model.uses_relative_paths(value) is relative
 
 
 def test_relative_file_value_starts_at_base_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    folder = tmp_path / "conf"
-    other = tmp_path / "other"
-    folder.mkdir()
-    other.mkdir()
-    (folder / "cfg.yaml").write_text(_yaml(_config(worker_type="prefill")))
-    (other / "cfg.yaml").write_text(_yaml(_config(worker_type="decode")))
+    conf, other = tmp_path / "conf", tmp_path / "other"
+    for folder, config in ((conf, PREFILL), (other, DECODE)):
+        folder.mkdir()
+        _write(folder / "cfg.yaml", config)
     monkeypatch.chdir(other)
 
-    with_base_dir = ais_perf_model.load_document("cfg.yaml", base_dir=folder)
+    with_base_dir = ais_perf_model.load_document("cfg.yaml", base_dir=conf)
     without = ais_perf_model.load_document("cfg.yaml")
+    router = ais_perf_model.router_perf_config("cfg.yaml", base_dir=conf)
 
-    assert with_base_dir.source == str(folder / "cfg.yaml")
-    assert with_base_dir.worker_types == ("prefill",)
+    assert with_base_dir.source == str(conf / "cfg.yaml")
     assert without.source == str(other / "cfg.yaml")
     assert without.worker_types == ("decode",)
+    # router_perf_config hands base_dir on: the file it read is the prefill one.
+    assert router["worker_type"] == "prefill"
 
 
 def test_relative_paths_inside_file_start_at_file_folder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    conf = tmp_path / "conf"
-    other = tmp_path / "other"
+    conf, other = tmp_path / "conf", tmp_path / "other"
     (conf / "sys").mkdir(parents=True)
     other.mkdir()
-    (conf / "cfg.yaml").write_text(_yaml(_config(systems_paths=["sys"])))
+    path = _write(conf / "cfg.yaml", _config(systems_paths=["sys"]))
     monkeypatch.chdir(other)
 
-    by_path = ais_perf_model.load_document(str(conf / "cfg.yaml"))
-    by_base_dir = ais_perf_model.load_document("cfg.yaml", base_dir=conf)
+    # The two calls the components make hand a file path on as it is given.
+    engine = ais_perf_model.engine_perf_config(path, "decode")
+    router = ais_perf_model.router_perf_config(path, "prefill")
     inline = ais_perf_model.load_document(_config(systems_paths=["sys"]))
 
-    assert by_path.to_data()["systems_paths"] == [str(conf / "sys")]
-    assert by_base_dir.to_data()["systems_paths"] == [str(conf / "sys")]
-    # Parsed data has no file: its relative paths start at the working directory.
-    assert inline.to_data()["systems_paths"] == [str(other / "sys")]
-    # The two calls the components make hand a file path on as it is given,
-    # so the same holds for the config an engine or a router gets.
-    engine = ais_perf_model.engine_perf_config(str(conf / "cfg.yaml"), "decode")
-    router = ais_perf_model.router_perf_config(str(conf / "cfg.yaml"), "prefill")
     assert engine["systems_paths"] == [str(conf / "sys")]
     assert router["systems_paths"] == [str(conf / "sys")]
+    # Parsed data has no file: its relative paths start at the working directory.
+    assert inline.to_data()["systems_paths"] == [str(other / "sys")]

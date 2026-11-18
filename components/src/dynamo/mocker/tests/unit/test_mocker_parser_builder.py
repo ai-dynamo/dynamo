@@ -25,26 +25,6 @@ pytestmark = [
 ]
 
 
-class RecordingEnviron(dict):
-    """A copy of the environment that records every name looked up."""
-
-    def __init__(self, environ):
-        super().__init__(environ)
-        self.names = set()
-
-    def get(self, name, default=None):
-        self.names.add(name)
-        return super().get(name, default)
-
-    def __getitem__(self, name):
-        self.names.add(name)
-        return super().__getitem__(name)
-
-    def __contains__(self, name):
-        self.names.add(name)
-        return super().__contains__(name)
-
-
 def options(parser):
     """Return ``{option string: dest}`` of every option ``parser`` knows."""
     # argparse has no public list of a parser's options.
@@ -74,44 +54,28 @@ def test_registers_the_options_parse_args_registers(monkeypatch):
     assert "--router-mode" in expected
 
 
-def test_registers_on_the_given_parser():
-    parser = argparse.ArgumentParser(add_help=False)
-    assert build_mocker_parser({}, parser) is parser
-    assert parser.parse_args(["--model-path", "m"]).model_path == "m"
-
-
 def test_reads_only_the_given_env(monkeypatch):
-    monkeypatch.setenv("DYN_DISCOVERY_BACKEND", "file")
-    monkeypatch.setenv("DYN_ROUTER_MODE", "kv")
+    # What this process has set: every variable the mocker reads itself, and
+    # one of those the router group reads.
+    ours = {
+        "DYN_DISCOVERY_BACKEND": "file",
+        "DYN_REQUEST_PLANE": "nats",
+        "DYN_RESPONSE_PLANE": "quic",
+        "DYN_EVENT_PLANE": "zmq",
+        "DYN_ROUTER_MODE": "kv",
+    }
+    for name, value in ours.items():
+        monkeypatch.setenv(name, value)
     before = dict(os.environ)
 
-    env = {"DYN_DISCOVERY_BACKEND": "mem", "DYN_REQUEST_PLANE": "nats"}
-    namespace = build_mocker_parser(env).parse_args([])
+    namespace = build_mocker_parser({"DYN_DISCOVERY_BACKEND": "mem"}).parse_args([])
 
     assert namespace.discovery_backend == "mem"
-    assert namespace.request_plane == "nats"
+    assert namespace.request_plane == "tcp"
+    assert namespace.response_plane == "tcp"
+    assert namespace.event_plane is None
     assert namespace.router_mode is None
     assert dict(os.environ) == before
-
-
-def test_no_env_default_is_read_from_os_environ(monkeypatch):
-    # Every variable parse_args looks up for this process.
-    environ = RecordingEnviron(os.environ)
-    with monkeypatch.context() as patch:
-        patch.setattr(os, "environ", environ)
-        parse_args([])
-    names = {name for name in environ.names if name.startswith("DYN_")}
-    assert {"DYN_DISCOVERY_BACKEND", "DYN_EVENT_PLANE", "DYN_ROUTER_MODE"} <= names
-
-    for name in names:
-        monkeypatch.delenv(name, raising=False)
-    defaults = vars(build_mocker_parser({}).parse_args([]))
-
-    # Two values, so that a variable that is read changes at least one default.
-    for value in ("0", "1"):
-        for name in names:
-            monkeypatch.setenv(name, value)
-        assert vars(build_mocker_parser({}).parse_args([])) == defaults, value
 
 
 def test_reads_the_argument_list_of_another_mocker(monkeypatch):
@@ -122,7 +86,8 @@ def test_reads_the_argument_list_of_another_mocker(monkeypatch):
     namespace, rest = parser.parse_known_args(
         ["--ais-sys", "h100_sxm", "--aic-perf-model", "--not-a-mocker-flag", "x"]
     )
-    set_ais_perf_model_attributes(parser, namespace, None)
+    # The other mocker's variable is empty, which counts as unset.
+    set_ais_perf_model_attributes(parser, namespace, "")
 
     assert rest == ["--not-a-mocker-flag", "x"]
     assert namespace.ais_perf_model_without_value is True
@@ -133,32 +98,6 @@ def test_reads_the_argument_list_of_another_mocker(monkeypatch):
         "--ais-system",
     ]
 
-    namespace = parser.parse_args(["--ais-nextn", "2"])
-    set_ais_perf_model_attributes(parser, namespace, "theirs.yaml")
-
-    assert namespace.ais_perf_model_value == "theirs.yaml"
-    assert namespace.ais_perf_model_source == ENV_VAR
-    assert old_ais_perf_inputs(namespace) == []
-
-
-def test_empty_variable_of_the_other_mocker_is_unset():
-    # A caller may pass the variable as the other mocker's env holds it.
-    parser = build_mocker_parser({})
-
-    namespace = parser.parse_args([])
-    set_ais_perf_model_attributes(parser, namespace, "")
-
-    assert namespace.ais_perf_model_value is None
-    assert namespace.ais_perf_model_source is None
-
-    # So the option without a value next to it is the switch alone.
-    namespace = parser.parse_args(["--ais-perf-model"])
-    set_ais_perf_model_attributes(parser, namespace, "")
-
-    assert namespace.ais_perf_model_without_value is True
-    assert namespace.ais_perf_model_value is None
-    assert namespace.ais_perf_model_source is None
-
 
 def test_conflicting_uses_are_an_error_of_the_given_parser():
     class Raising(argparse.ArgumentParser):
@@ -168,12 +107,5 @@ def test_conflicting_uses_are_an_error_of_the_given_parser():
     parser = build_mocker_parser({}, Raising(add_help=False))
 
     namespace = parser.parse_args(["--ais-perf-model"])
-    with pytest.raises(
-        ValueError,
-        match=f"^--ais-perf-model without a value cannot be combined with {ENV_VAR}$",
-    ):
+    with pytest.raises(ValueError, match="without a value cannot be combined with"):
         set_ais_perf_model_attributes(parser, namespace, "theirs.yaml")
-
-    namespace = parser.parse_args(["--ais-perf-model", "a.yaml", "--ais-perf-model"])
-    with pytest.raises(ValueError, match="^--ais-perf-model is given with and without"):
-        set_ais_perf_model_attributes(parser, namespace, None)

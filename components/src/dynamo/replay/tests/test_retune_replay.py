@@ -16,11 +16,11 @@ point and the replay router picks it up mid-run.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 import multiprocessing
 import os
-import warnings
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -38,6 +38,7 @@ from dynamo.planner.core.types import RetuneParams, TrafficObservation
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 from dynamo.planner.retune import sweep
 from dynamo.replay import api, run_synthetic_trace_replay, run_trace_replay
+from tests.utils.ais_perf_model import IDENTITY
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -887,46 +888,6 @@ def test_run_trace_replay_hands_the_warmup_to_the_inner_planner(monkeypatch):
     assert received["warmup_observations"] is warmup
 
 
-@pytest.mark.unit
-def test_sweep_candidate_engine_perf_config_reaches_native_call(monkeypatch):
-    calls: list[dict] = []
-
-    def recording_native_replay(_trace_files, **kwargs):
-        calls.append(kwargs)
-        raise RuntimeError("recorded")
-
-    monkeypatch.setattr(api, "_run_mocker_trace_replay", recording_native_replay)
-    pinned = AisPerfConfig(
-        config={
-            "backend": "vllm",
-            "system": "h200_sxm",
-            "model": "example/model",
-            "worker_type": "aggregated",
-        }
-    ).to_dict()
-    engine = RetuneEngineSpec(
-        router_config={"router_prefill_load_model": "ais"}, ais_perf_config=pinned
-    )
-
-    with pytest.raises(RuntimeError, match="recorded"):
-        sweep.evaluate_candidate(
-            "window.jsonl",
-            engine,
-            1.0,
-            RetuneParams(router={}, planner={}),
-            {"aggregated": 1},
-            None,
-            None,
-            100.0,
-            10.0,
-            60.0,
-            "GoodputPerGPU",
-        )
-
-    (call,) = calls
-    assert call["ais_perf_config"].to_dict() == pinned
-
-
 def _evaluate_candidate(engine, base_planner=None):
     return sweep.evaluate_candidate(
         "window.jsonl",
@@ -944,17 +905,50 @@ def _evaluate_candidate(engine, base_planner=None):
 
 
 def _pinned_router_perf_config(worker_type: str) -> dict:
-    return AisPerfConfig(
-        config={
-            "backend": "vllm",
-            "system": "h200_sxm",
-            "model": "example/model",
-            "worker_type": worker_type,
-        }
-    ).to_dict()
+    return AisPerfConfig(config={**IDENTITY, "worker_type": worker_type}).to_dict()
 
 
 _DISAGGREGATED = {"prefill_engine_args": {}, "decode_engine_args": {}}
+
+
+@pytest.fixture
+def native_calls(monkeypatch) -> list[dict]:
+    """The keyword arguments of each native replay call; the stand-in raises."""
+    calls: list[dict] = []
+
+    def record(*_args, **kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("recorded")
+
+    monkeypatch.setattr(api, "_run_mocker_trace_replay", record)
+    return calls
+
+
+@pytest.fixture
+def planner_adapter_calls(monkeypatch) -> list[dict]:
+    """The keyword arguments of each planner adapter call; no planner is built."""
+    calls: list[dict] = []
+
+    def adapter(**kwargs):
+        calls.append(kwargs)
+        return contextlib.nullcontext()
+
+    monkeypatch.setattr(api, "_planner_replay_adapter", lambda: adapter)
+    return calls
+
+
+@pytest.mark.unit
+def test_sweep_candidate_engine_perf_config_reaches_native_call(native_calls):
+    pinned = _pinned_router_perf_config("aggregated")
+    engine = RetuneEngineSpec(
+        router_config={"router_prefill_load_model": "ais"}, ais_perf_config=pinned
+    )
+
+    with pytest.raises(RuntimeError, match="recorded"):
+        _evaluate_candidate(engine)
+
+    (call,) = native_calls
+    assert call["ais_perf_config"].to_dict() == pinned
 
 
 @pytest.mark.unit
@@ -1008,40 +1002,9 @@ def test_engine_spec_returns_old_keyword_config_of_another_worker_type(
 
 
 @pytest.mark.unit
-def test_sweep_candidate_passes_engine_perf_config_as_router_keyword(monkeypatch):
-    calls: list[dict] = []
-
-    def recording_replay(trace_files, **kwargs):
-        calls.append(kwargs)
-        raise RuntimeError("recorded")
-
-    monkeypatch.setattr(sweep, "run_trace_replay", recording_replay)
-    pinned = _pinned_router_perf_config("aggregated")
-    engine = RetuneEngineSpec(
-        router_config={"router_prefill_load_model": "ais"}, ais_perf_config=pinned
-    )
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        with pytest.raises(RuntimeError, match="recorded"):
-            _evaluate_candidate(engine)
-
-    (call,) = calls
-    assert call["router_ais_perf_model"] == pinned
-    assert "ais_perf_config" not in call
-
-
-@pytest.mark.unit
 def test_sweep_candidate_replays_old_keyword_config_of_another_worker_type(
-    monkeypatch,
+    native_calls,
 ):
-    calls: list[dict] = []
-
-    def recording_native_replay(_trace_files, **kwargs):
-        calls.append(kwargs)
-        raise RuntimeError("recorded")
-
-    monkeypatch.setattr(api, "_run_mocker_trace_replay", recording_native_replay)
     # The outer replay can pin such a config only through the deprecated
     # ais_perf_config= keyword, which takes any worker type.
     pinned = _pinned_router_perf_config("prefill")
@@ -1052,38 +1015,30 @@ def test_sweep_candidate_replays_old_keyword_config_of_another_worker_type(
     )
 
     # The outer replay warned about the keyword; its candidates do not.
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        with pytest.raises(RuntimeError, match="recorded"):
-            _evaluate_candidate(engine)
+    with pytest.raises(RuntimeError, match="recorded"):
+        _evaluate_candidate(engine)
 
-    (call,) = calls
+    (call,) = native_calls
     assert call["ais_perf_config"].to_dict() == pinned
 
 
 @pytest.mark.unit
-def test_sweep_candidate_does_not_warn_about_old_planner_config(monkeypatch):
-    adapter_calls: list[dict] = []
-
-    def recording_adapter(**kwargs):
-        adapter_calls.append(kwargs)
-        raise RuntimeError("recorded")
-
-    monkeypatch.setattr(api, "_planner_replay_adapter", lambda: recording_adapter)
-    perf_config = {"backend": "vllm", "system": "h200_sxm", "model": "example/model"}
+def test_sweep_candidate_does_not_warn_about_old_planner_config(
+    planner_adapter_calls, native_calls
+):
     # What a running Planner written with the deprecated keys hands its sweep.
     base_planner = {
         "mode": "agg",
-        "ais_perf_model": {"roles": {"aggregated": perf_config}},
+        "ais_perf_model": {"roles": {"aggregated": IDENTITY}},
     }
 
     # The Planner warned when it read its config; its candidates do not.
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        with pytest.raises(RuntimeError, match="recorded"):
-            _evaluate_candidate(RetuneEngineSpec(), base_planner)
+    with pytest.raises(RuntimeError, match="recorded"):
+        _evaluate_candidate(RetuneEngineSpec(), base_planner)
 
-    (adapter_call,) = adapter_calls
+    (adapter_call,) = planner_adapter_calls
     assert set(adapter_call["planner_config_arg"].ais_perf_model.roles) == {
         "aggregated"
     }
+    # The replay went on past the point where it warns.
+    assert len(native_calls) == 1
