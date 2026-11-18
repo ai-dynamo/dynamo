@@ -1554,7 +1554,7 @@ impl<
             due_at,
             scheduling_cost_tokens,
             worker_selection_target,
-            // The host reads it from the request lifecycle at dispatch.
+            // Returned with the admitted response; the queue does not use it.
             backend_priority: _,
         } = classified_request.into_queue_inputs();
 

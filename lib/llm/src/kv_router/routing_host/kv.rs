@@ -175,7 +175,6 @@ impl RoutingHost {
         };
         if let Some(lifecycle) = lifecycle.as_mut() {
             lifecycle.selected(selection.worker);
-            selection.backend_priority = lifecycle.backend_priority();
         }
         selection.request_lifecycle = lifecycle;
         Ok((selection, affinity))

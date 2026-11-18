@@ -393,6 +393,9 @@ where
         let tracked = request.mode.is_tracked();
         let request_id = request.mode.request_id().map(str::to_owned);
         let classified_request = self.classify_request(&mut request, ingress_at).await?;
+        let backend_priority = classified_request
+            .as_ref()
+            .and_then(ClassifyRequest::backend_priority);
         let lifecycle_lease = self
             .queue
             .new_request_lifecycle_lease(request.mode.lifecycle_request_id());
@@ -427,7 +430,14 @@ where
         let booking = lifecycle_lease
             .and_then(|lease| lease.commit())
             .map(|booking| self.queue.booking_handle(booking));
-        Ok((AdmittedSchedulingResponse { response, attempt }, booking))
+        Ok((
+            AdmittedSchedulingResponse {
+                response,
+                attempt,
+                backend_priority,
+            },
+            booking,
+        ))
     }
 
     async fn classify_request(

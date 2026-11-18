@@ -198,7 +198,7 @@ impl RoutingHost {
                 routing_hashes,
                 kv_hint,
                 request_lifecycle: None,
-                backend_priority: None,
+                backend_priority: admitted.backend_priority,
             })),
             FindBestMatchOutcome::QueueRejected { rejection } => {
                 Ok(SelectionOutcome::QueueRejected(rejection))

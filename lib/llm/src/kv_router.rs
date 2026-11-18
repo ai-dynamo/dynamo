@@ -526,6 +526,8 @@ pub struct AdmittedFindBestMatchOutcome {
     /// The selected worker's scheduler-load snapshot; set only by advisory
     /// probes (`FindBestMatchAdmission::WithoutAdmission`), which never book.
     pub(super) advisory_load: Option<dynamo_scheduler::host::AdvisoryWorkerLoad>,
+    /// Set by the request classifier; replaces the request's `priority` on dispatch.
+    pub(super) backend_priority: Option<i32>,
 }
 
 impl AdmittedFindBestMatchOutcome {
@@ -1453,6 +1455,7 @@ impl KvRouter {
                     outcome: FindBestMatchOutcome::QueueRejected { rejection },
                     booking: None,
                     advisory_load: None,
+                    backend_priority: None,
                 });
             }
             Err(SelectionError::Scheduler(error)) => return Err(map_scheduler_error(error)),
@@ -1471,6 +1474,7 @@ impl KvRouter {
             routing_hashes,
             shared_cache_hits,
             booking,
+            backend_priority,
             ..
         } = selected;
         if update_states && is_admitted_routing && booking.is_none() {
@@ -1592,6 +1596,7 @@ impl KvRouter {
             },
             booking,
             advisory_load,
+            backend_priority,
         })
     }
 

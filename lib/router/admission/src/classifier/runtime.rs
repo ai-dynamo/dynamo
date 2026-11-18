@@ -411,17 +411,6 @@ impl std::fmt::Debug for RequestLifecycle {
     }
 }
 impl RequestLifecycle {
-    /// The backend priority this lifecycle's classification set, if any.
-    pub fn backend_priority(&self) -> Option<i32> {
-        self.runtime
-            .live_requests
-            .lock()
-            .get(&self.request_id)?
-            .overrides
-            .as_ref()?
-            .backend_priority
-    }
-
     pub fn selected(&mut self, worker: WorkerWithDpRank) {
         if self.phase == LifecyclePhase::Registered {
             self.worker = Some(worker);
@@ -959,40 +948,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lifecycle_reports_the_backend_priority_its_classification_set() {
+    async fn a_retry_keeps_the_backend_priority_its_first_classification_set() {
         let runtime =
             RequestClassifierRuntime::new(Box::new(SetsBackendPriority), CancellationToken::new());
         let mut lifecycle = runtime.begin_request("request-1").unwrap();
-        assert_eq!(lifecycle.backend_priority(), None);
-
-        runtime
-            .classify_with(
+        let classify = || {
+            runtime.classify_with(
                 ClassifyRequest::new(10, 0).with_request_id("request-1"),
                 &NoWorkers,
             )
-            .await
-            .unwrap();
-        assert_eq!(lifecycle.backend_priority(), Some(-250));
-        lifecycle.prepare_retry();
-        assert_eq!(lifecycle.backend_priority(), Some(-250));
+        };
 
+        assert_eq!(classify().await.unwrap().backend_priority(), Some(-250));
+        lifecycle.prepare_retry();
+        assert_eq!(classify().await.unwrap().backend_priority(), Some(-250));
         lifecycle.abort(None);
-        assert_eq!(lifecycle.backend_priority(), None);
     }
 
     #[tokio::test]
     async fn default_classifier_sets_no_backend_priority() {
         let runtime =
             RequestClassifierRuntime::new(Box::new(PassThrough), CancellationToken::new());
-        let lifecycle = runtime.begin_request("request-1").unwrap();
-        runtime
+        let _lifecycle = runtime.begin_request("request-1").unwrap();
+        let classified = runtime
             .classify_with(
                 ClassifyRequest::new(10, 0).with_request_id("request-1"),
                 &NoWorkers,
             )
             .await
             .unwrap();
-        assert_eq!(lifecycle.backend_priority(), None);
+        assert_eq!(classified.backend_priority(), None);
     }
 
     #[tokio::test]
