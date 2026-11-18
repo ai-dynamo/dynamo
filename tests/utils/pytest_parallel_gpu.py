@@ -268,10 +268,8 @@ _RETRYABLE_INIT_MARKERS = [
 ]
 _MAX_RETRIES = 3
 
-# A child that passes only after an in-session retry still exits 0, but its
-# output holds the failed attempt. Datadog Auto Test Retries (ddtrace) prints
-# that attempt under pytest's FAILURES banner even though the final summary
-# says "passed"; pytest-rerunfailures reports it as "N rerun" in the summary.
+# Banners a passing child prints when an in-session retry hid a failed attempt:
+# ddtrace retries print FAILURES; pytest-rerunfailures prints "N rerun".
 _RETRIED_FAILURE_RE = re.compile(r"^=+ (FAILURES|.*\b\d+ rerun\b.*) =+$")
 
 
@@ -822,10 +820,8 @@ def run_parallel(
                         passed = False
                         skipped = True
 
-                # Dump buffered output on failure only (matches pytest behavior),
-                # and also on a pass that hid a failed attempt behind an
-                # in-session retry, so that attempt's traceback and worker log
-                # tail reach the job log. With -s, output was already streamed live.
+                # Dump buffered output on failure, or on a pass that hid a failed
+                # retried attempt. With -s, output was already streamed live.
                 failed = not passed and not skipped
                 passed_after_retry = passed and any(
                     _RETRIED_FAILURE_RE.match(line) for line in run_info.captured
