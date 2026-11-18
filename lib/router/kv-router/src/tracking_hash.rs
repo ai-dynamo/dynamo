@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn config_validation_enforces_mode_specific_options() {
         let assert_rejected_by_both = |config: &KvRouterConfig, expected: &str| {
-            assert_eq!(config.validate_config().unwrap_err(), expected);
+            assert_eq!(config.validate().unwrap_err(), expected);
             assert_eq!(
                 tracking_hash_context(config).unwrap_err().to_string(),
                 expected
@@ -188,7 +188,7 @@ mod tests {
         );
 
         let (_key_file, keyed) = keyed_config("2026-01", &[1; KEY_SIZE]);
-        assert!(keyed.validate_config().is_ok());
+        assert!(keyed.validate().is_ok());
         assert!(tracking_hash_context(&keyed).is_ok());
     }
 }

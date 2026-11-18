@@ -414,6 +414,163 @@ class _FailedOpenMediaIO:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "media_io",
+    [_ImportErrorMediaIO(), _SystemErrorMediaIO(), _FailedOpenMediaIO()],
+    ids=["import", "system", "failed-open"],
+)
+async def test_undetected_codec_is_client_unsupported_media(monkeypatch, media_io):
+    """A non-video payload has no codec. That is client input, not a missing decoder.
+
+    The shipped vLLM image has OpenCV without a video backend, so the same
+    failure used to become ``MissingMediaDecoderError`` and HTTP 500. A probed
+    codec such as VP9 still takes that path.
+    """
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: None)
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await loader._decode_video_bytes(b"not-a-video", media_io)
+
+    assert exc_info.value.status == 415
+    assert exc_info.value.message == "Unsupported video media"
+
+
+# ISO-BMFF with an MPEG-4 Part 2 brand. No H.264/HEVC/AV1/VP8/VP9 marker.
+_MP4V_CONTAINER = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 8
+# FLV v1 and the ASF header GUID. The probe names neither flv1 nor WMV2.
+_FLV_CONTAINER = b"FLV\x01" + b"\x00" * 8
+_ASF_CONTAINER = bytes.fromhex("3026b2758e66cf11a6d900aa0062ce6c") + b"\x00" * 8
+_UNNAMED_CONTAINERS = [
+    pytest.param(_MP4V_CONTAINER, id="mp4"),
+    pytest.param(_FLV_CONTAINER, id="flv"),
+    pytest.param(_ASF_CONTAINER, id="asf"),
+]
+
+
+@pytest.mark.asyncio
+async def test_failed_open_non_video_is_unsupported_with_backend(monkeypatch):
+    """OpenCV can have a video backend and still fail to open a non-video."""
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: None)
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: False)
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await loader._decode_video_bytes(
+            b"not-a-video", _FailedOpenMediaIO(), "https://example.com/x.mp4"
+        )
+
+    assert exc_info.value.status == 415
+    assert exc_info.value.url == "https://example.com/x.mp4"
+    assert exc_info.value.message == "Unsupported video media"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "media_io",
+    [_ImportErrorMediaIO(), _FailedOpenMediaIO()],
+    ids=["import", "failed-open"],
+)
+@pytest.mark.parametrize("content", _UNNAMED_CONTAINERS)
+async def test_known_container_without_codec_stays_missing_decoder(
+    monkeypatch, media_io, content, carrier_imports
+):
+    """A real container whose codec the probe does not name stays a missing decoder."""
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: None)
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
+    carrier_imports(present=("cv2",))
+    monkeypatch.setattr(
+        codec_errors.importlib.metadata, "version", lambda p: "5.0.0.93"
+    )
+
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await loader._decode_video_bytes(content, media_io)
+
+    assert "undetected codec" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", _UNNAMED_CONTAINERS)
+async def test_known_container_failed_open_with_backend_is_not_415(
+    monkeypatch, content
+):
+    """A real container OpenCV cannot open is not reported as non-video."""
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: None)
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: False)
+
+    with pytest.raises(ValueError, match="Could not open video stream"):
+        await loader._decode_video_bytes(content, _FailedOpenMediaIO())
+
+
+@pytest.mark.asyncio
+async def test_unsupported_video_reaches_batch_as_415(monkeypatch, caplog):
+    """The 415 survives load_video and the batch aggregate."""
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: None)
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: False)
+
+    async def _load(url, media_io_kwargs=None):
+        return await loader._decode_video_bytes(
+            b"not-a-video", _FailedOpenMediaIO(), url
+        )
+
+    loader._load_video_with_vllm = _load  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(HttpStatusError) as exc_info:
+            await loader.load_video_batch([{"Url": "https://example.com/clip.mp4"}])
+
+    assert exc_info.value.status == 415
+    assert "URL rejected loading video" not in caplog.text
+    assert "Unsupported video loading: 'https://example.com/clip.mp4'" in caplog.text
+    assert "Rejecting non-video input supplied as video" in caplog.text
+    assert "Could not open video stream" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("data", "is_container"),
+    [
+        (b"\x00\x00\x00\x18ftypmp42", True),
+        (b"\x1a\x45\xdf\xa3" + b"\x00" * 4, True),
+        (b"RIFF" + b"\x00\x00\x00\x00" + b"AVI ", True),
+        (b"OggS" + b"\x00" * 4, True),
+        (b"\x00\x00\x01\xba" + b"\x00" * 4, True),
+        (b"FLV\x01" + b"\x00" * 4, True),
+        (bytes.fromhex("3026b2758e66cf11a6d900aa0062ce6c"), True),
+        (b"\x47" + b"\x00" * 187 + b"\x47" + b"\x00" * 187 + b"\x47", True),
+        (b"not-a-video", False),
+        (b"FLV not a file", False),
+        (b"RIFF" + b"\x00\x00\x00\x00" + b"WAVE", False),
+        (b"\x47just-a-letter", False),
+    ],
+    ids=[
+        "ftyp",
+        "ebml",
+        "avi",
+        "ogg",
+        "mpegps",
+        "flv",
+        "asf",
+        "mpegts",
+        "bytes",
+        "flv-text",
+        "wav",
+        "letter-g",
+    ],
+)
+def test_video_container_signatures(data, is_container):
+    assert video_loader_module._has_video_container(data) is is_container
+
+
+@pytest.mark.asyncio
 async def test_decode_video_bytes_failed_open_value_error_is_actionable(
     monkeypatch, carrier_imports
 ):

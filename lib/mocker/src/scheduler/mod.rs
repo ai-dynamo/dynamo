@@ -4,7 +4,7 @@
 //! Dynamo-facing protocol for the shared AISimulate generalized engine.
 //!
 //! Engine scheduling, native KV accounting, preemption, and timing live in
-//! `aisimulate_core::engine`. This module retains only the asynchronous compatibility
+//! `aisim_core::engine`. This module retains only the asynchronous compatibility
 //! contract consumed by Dynamo's Live Mocker and handoff driver.
 
 mod metrics;
