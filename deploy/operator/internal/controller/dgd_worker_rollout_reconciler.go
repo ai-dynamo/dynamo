@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -1500,7 +1501,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 		}
 		newStates[componentName] = newState
 
-		if spec.Replicas != nil && *spec.Replicas == 0 {
+		if ptr.Deref(spec.Replicas, 1) == 0 {
 			continue
 		}
 		if newState.Available == 0 {
@@ -1554,10 +1555,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			continue
 		}
 
-		desired := int32(1)
-		if spec.Replicas != nil {
-			desired = *spec.Replicas
-		}
+		desired := ptr.Deref(spec.Replicas, 1)
 
 		newState := newStates[componentName]
 		oldState := oldStates[componentName]
