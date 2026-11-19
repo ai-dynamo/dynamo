@@ -99,7 +99,9 @@ pub fn http_action_for_error(error: &DynamoError) -> ClientErrorAction {
     http_action_for_class(error.class())
 }
 
-/// Return the first classified DynamoError using its fail-closed semantic accessors.
+/// Return the error in the source chain that a response is rendered from.
+///
+/// A `Cancelled` error is never returned: a chain that holds only cancelled errors yields `None`, so a caller must check for cancellation itself. The first error with a specific reason wins. An error whose reason is `runtime.unclassified` or `transport.cannot_connect` is kept only as a fallback, returned when nothing more specific is found deeper in the chain.
 pub fn find_canonical_error_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a DynamoError> {

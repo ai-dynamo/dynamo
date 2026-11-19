@@ -11,7 +11,6 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-# HTTP rendering of the error contract (`dynamo_error::http`): the class-to-status policy, the sanitized response vocabulary and `HttpError`. Adds the `http` crate for `StatusCode` and `thiserror` for `HttpError`.
 http = ["dep:http", "dep:thiserror"]
 
 [dependencies]
