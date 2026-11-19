@@ -148,15 +148,17 @@ impl ReplayRecoveryProgress {
 }
 
 /// vLLM reports each cached copy of a block, so one eviction must not unindex it.
-/// Returns `None` when a removal has no block left to report.
+/// SGLang reports one removal per block, so its sources use `SetLike` and skip the
+/// counts. Returns `None` when a removal has no block left to report.
 fn apply_block_refcounts(
     dedup: &mut EventDedupFilter,
+    policy: EventDedupPolicy,
     mut placement_event: PlacementEvent,
 ) -> Option<PlacementEvent> {
     // The ZMQ normalizer builds only `Placement::local_worker` placements (the `Worker`
-    // domain), so every event here is refcounted. If it ever emits `CacheOwner` events,
-    // pick the policy per domain, as the dynamo-llm publisher's state agent does.
-    let policy = EventDedupPolicy::RefCounted;
+    // domain), so the source's policy covers every event here. If it ever emits
+    // `CacheOwner` events, pick the policy per domain, as the dynamo-llm publisher's
+    // state agent does.
     let tier = placement_event.placement.tier;
     let domain = placement_event.placement.residency_domain;
     let dp_rank = placement_event.event.dp_rank;
@@ -188,6 +190,7 @@ struct ListenerLoop {
     watermark: Arc<AtomicU64>,
     normalizer: ZmqEventNormalizer,
     dedup: EventDedupFilter,
+    dedup_policy: EventDedupPolicy,
     messages_processed: u64,
 }
 
@@ -198,6 +201,7 @@ impl ListenerLoop {
         dp_rank: u32,
         block_size: u32,
         engine_owned_mm_identity: bool,
+        idempotent_stores: bool,
         indexer: Indexer,
         cancel: CancellationToken,
         live_socket: ZmqSocket,
@@ -215,6 +219,11 @@ impl ListenerLoop {
             normalizer: ZmqEventNormalizer::new(block_size)
                 .with_engine_owned_mm_identity(engine_owned_mm_identity),
             dedup: EventDedupFilter::new(),
+            dedup_policy: if idempotent_stores {
+                EventDedupPolicy::SetLike
+            } else {
+                EventDedupPolicy::RefCounted
+            },
             messages_processed: 0,
         }
     }
@@ -327,7 +336,8 @@ impl ListenerLoop {
                 ) else {
                     continue;
                 };
-                let Some(placement_event) = apply_block_refcounts(&mut self.dedup, placement_event)
+                let Some(placement_event) =
+                    apply_block_refcounts(&mut self.dedup, self.dedup_policy, placement_event)
                 else {
                     continue;
                 };
@@ -407,7 +417,8 @@ impl ListenerLoop {
             ) else {
                 continue;
             };
-            let Some(placement_event) = apply_block_refcounts(&mut self.dedup, placement_event)
+            let Some(placement_event) =
+                apply_block_refcounts(&mut self.dedup, self.dedup_policy, placement_event)
             else {
                 continue;
             };
@@ -533,6 +544,7 @@ async fn run_listener(
     let replay_endpoint = record.replay_endpoint().map(str::to_string);
     let block_size = record.block_size();
     let engine_owned_mm_identity = record.engine_owned_mm_identity();
+    let idempotent_stores = record.idempotent_stores();
     let indexer = record.indexer();
     let watermark = record.watermark();
 
@@ -572,6 +584,7 @@ async fn run_listener(
         dp_rank,
         block_size,
         engine_owned_mm_identity,
+        idempotent_stores,
         indexer,
         cancel,
         socket,
@@ -664,6 +677,7 @@ mod tests {
             0,
             4,
             false,
+            false,
             indexer.clone(),
             cancel.clone(),
             live_socket,
@@ -689,6 +703,7 @@ mod tests {
         context: &zmq::Context,
         indexer: Indexer,
         replay_endpoint: Option<String>,
+        idempotent_stores: bool,
     ) -> (ListenerLoop, zmq::Socket) {
         let publisher = context.socket(zmq::PUB).unwrap();
         publisher.bind("tcp://127.0.0.1:*").unwrap();
@@ -699,6 +714,7 @@ mod tests {
             0,
             4,
             false,
+            idempotent_stores,
             indexer,
             CancellationToken::new(),
             live_socket,
@@ -735,7 +751,7 @@ mod tests {
     async fn block_stays_indexed_until_its_last_copy_is_removed() {
         let context = zmq::Context::new();
         let indexer = create_indexer(4, 1);
-        let (mut listener, _publisher) = test_listener(&context, indexer.clone(), None);
+        let (mut listener, _publisher) = test_listener(&context, indexer.clone(), None, false);
 
         let batches = [store_block(), store_block(), remove_block()];
         for (seq, payload) in batches.iter().enumerate() {
@@ -750,13 +766,37 @@ mod tests {
         assert_eq!(indexed_blocks(&indexer).await, None);
     }
 
+    /// SGLang sends one remove per block however many times it stored it.
     #[tokio::test]
-    async fn replayed_copies_are_counted_like_live_ones() {
+    async fn idempotent_source_unindexes_a_block_on_its_only_remove() {
+        let context = zmq::Context::new();
+        let indexer = create_indexer(4, 1);
+        let (mut listener, _publisher) = test_listener(&context, indexer.clone(), None, true);
+
+        let batches = [store_block(), store_block(), remove_block()];
+        for (seq, payload) in batches.iter().enumerate() {
+            listener
+                .apply_live_batch(seq as u64, payload)
+                .await
+                .unwrap();
+        }
+        assert_eq!(indexed_blocks(&indexer).await, None);
+    }
+
+    #[rstest::rstest]
+    #[case::refcounted(false, Some(1))]
+    #[case::idempotent(true, None)]
+    #[tokio::test]
+    async fn replay_counts_copies_like_the_live_path(
+        #[case] idempotent_stores: bool,
+        #[case] expected: Option<u32>,
+    ) {
         let context = zmq::Context::new();
         let batches = vec![store_block(), store_block(), remove_block()];
         let (endpoint, done_tx, server) = spawn_replay_server(&context, batches, false);
         let indexer = create_indexer(4, 1);
-        let (mut listener, _publisher) = test_listener(&context, indexer.clone(), Some(endpoint));
+        let (mut listener, _publisher) =
+            test_listener(&context, indexer.clone(), Some(endpoint), idempotent_stores);
 
         let replayed = tokio::time::timeout(Duration::from_secs(5), listener.replay_gap(0, 3))
             .await
@@ -766,6 +806,6 @@ mod tests {
         server.await.unwrap();
 
         assert_eq!(replayed, 3);
-        assert_eq!(indexed_blocks(&indexer).await, Some(1));
+        assert_eq!(indexed_blocks(&indexer).await, expected);
     }
 }
