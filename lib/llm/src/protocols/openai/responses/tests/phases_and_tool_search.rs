@@ -415,6 +415,28 @@ async fn undelimited_text_call_text_has_matching_stream_and_unary_order() {
 }
 
 #[tokio::test]
+async fn coalesced_tool_continuation_preserves_call_before_text_in_both_modes() {
+    use dynamo_protocols::types::ChatCompletionMessageContent;
+
+    let mut tail = tool_chunk(None, None, "1}", Some("stop"));
+    tail.inner.choices[0].delta.content = Some(ChatCompletionMessageContent::Text("Done.".into()));
+    let output = matching_stream_and_unary_output(
+        vec![
+            tool_chunk(Some("lookup"), Some("call-1"), r#"{"q":"#, None),
+            tail,
+        ],
+        ResponseParams::default(),
+    )
+    .await;
+
+    assert_eq!(output.as_array().unwrap().len(), 2);
+    assert_eq!(output[0]["type"], "function_call");
+    assert_eq!(output[0]["arguments"], r#"{"q":1}"#);
+    assert_eq!(output[1]["phase"], "final_answer");
+    assert_eq!(output[1]["content"][0]["text"], "Done.");
+}
+
+#[tokio::test]
 async fn undelimited_reasoning_order_and_terminal_status_match_streaming() {
     for callable_tools in [false, true] {
         let request = request(

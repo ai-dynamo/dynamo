@@ -2716,11 +2716,15 @@ mod tests {
         assert_eq!(call.status, Some(OutputStatus::Completed));
     }
 
-    #[test]
-    fn test_backend_error_preserves_completed_message_status() {
+    #[rstest::rstest]
+    #[case::finished(finish_chunk(FinishReason::Stop))]
+    #[case::hidden_reasoning(reasoning_chunk("Private."))]
+    fn test_backend_error_preserves_completed_message_status(
+        #[case] ending: NvCreateChatCompletionStreamResponse,
+    ) {
         let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
         let _ = conv.process_chunk(&text_chunk("complete answer"));
-        let _ = conv.process_chunk(&finish_chunk(FinishReason::Stop));
+        assert!(conv.process_chunk(&ending).is_empty());
 
         let events = conv.emit_error_events(ResponseError {
             misalignment: None,
@@ -2737,12 +2741,15 @@ mod tests {
             ]
         );
 
-        let output = conv.output_with_status(OutputStatus::Incomplete);
-        let OutputItem::Message(message) = &output[0] else {
-            panic!("expected message output");
-        };
-        assert_eq!(message.status, OutputStatus::Completed);
-        assert_eq!(message.phase, Some(MessagePhase::FinalAnswer));
+        let done = event_json(&events[2]);
+        let failed = event_json(&events[3]);
+        assert_eq!(done["item"]["status"], "completed");
+        assert_eq!(done["item"]["phase"], "final_answer");
+        assert_eq!(failed["response"]["status"], "failed");
+        assert_eq!(
+            failed["response"]["output"],
+            serde_json::json!([done["item"]])
+        );
     }
 
     #[test]

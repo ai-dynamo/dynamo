@@ -116,11 +116,12 @@ impl ToolNameMap {
         result
     }
 
-    /// Select native qualified names while retaining reversible fallback aliases.
+    /// Whether the effective catalog contains a callable tool.
     pub(super) fn has_available_tools(&self) -> bool {
         !self.available.is_empty()
     }
 
+    /// Select native qualified names while retaining reversible fallback aliases.
     pub(super) fn native(&self) -> Self {
         let mut result = self.clone();
         for ((namespace, name), alias) in &mut result.by_identity {

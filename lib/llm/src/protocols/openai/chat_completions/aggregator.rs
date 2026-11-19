@@ -553,8 +553,6 @@ impl DeltaAggregator {
                         let has_reasoning = choice.delta.reasoning_content.as_deref().is_some_and(|text| !text.is_empty());
                         let has_text = matches!(&choice.delta.content, Some(ChatCompletionMessageContent::Text(text)) if !text.is_empty());
                         let has_calls = choice.delta.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty());
-                        // Side-by-side fields do not describe their order within this delta.
-                        aggregator.has_unordered_deltas |= usize::from(has_reasoning) + usize::from(has_text) + usize::from(has_calls) > 1;
                         if let Some(reasoning) = &choice.delta.reasoning_content && !reasoning.is_empty() {
                             if let Some(ResponseOutputEvent::Reasoning(previous)) = last_content_event(&mut aggregator.response_events) {
                                 previous.push_str(reasoning);
@@ -571,6 +569,7 @@ impl DeltaAggregator {
                                 aggregator.response_events.push(ResponseOutputEvent::Text(text.clone()));
                             }
                         }
+                        let mut starts_tool_item = false;
                         for call in choice.delta.tool_calls.iter().flatten() {
                             let previously_seen = aggregator.choices.get(&0).is_some_and(|choice| choice.tool_call_chunks.contains_key(&call.index));
                             let name = call.function.as_ref().and_then(|function| function.name.as_deref())
@@ -579,9 +578,15 @@ impl DeltaAggregator {
                                 aggregator.has_unordered_deltas = true;
                             }
                             if let Some(id) = &call.id && aggregator.recorded_calls.insert(id.clone()) {
+                                starts_tool_item = true;
                                 aggregator.response_events.push(ResponseOutputEvent::ToolCall(id.clone()));
                             }
                         }
+                        // Only a new call introduces an item whose order could
+                        // be ambiguous. Argument deltas continue an earlier item.
+                        aggregator.has_unordered_deltas |= usize::from(has_reasoning)
+                            + usize::from(has_text)
+                            + usize::from(starts_tool_item) > 1;
                         // Record only the count: the entries themselves are appended to
                         // the choice's aggregated logprobs below, in the same order.
                         // Only output text is scored. A content-less chunk (buffered
