@@ -18,7 +18,7 @@ The planner supports four optimization targets that determine how scaling decisi
 - **`throughput`** (default): Uses static thresholds on queue depth and KV cache utilization. No SLA targets or profiling needed. Works out of the box.
 - **`latency`**: Same approach as `throughput` but with more aggressive thresholds — scales up earlier and tolerates less queuing. Ideal for latency-sensitive workloads.
 - **`load`**: Uses user-defined prefill queue token thresholds and decode KV utilization thresholds for reactive load-based scaling.
-- **`sla`**: Uses the Planner engine-query layer with forward-pass estimates from the AIConfigurator compatibility API in the `aisimulate` wheel, plus online FPM tuning or FPM regression fallback, to target specific TTFT/ITL values. Supports both throughput-based (predictive) and load-based (reactive) scaling modes. For advanced users who need precise SLA control.
+- **`sla`**: Uses the Planner engine-query layer with forward-pass estimates from the AIConfigurator compatibility API in the `aisim` wheel, plus online FPM tuning or FPM regression fallback, to target specific TTFT/ITL values. Supports both throughput-based (predictive) and load-based (reactive) scaling modes. For advanced users who need precise SLA control.
 
 **When to use which:**
 
@@ -95,7 +95,7 @@ At least one scaling mode must be enabled when using `optimization_target: sla`.
 | `pre_deployment_sweeping_mode` | string | `rapid` | How to generate optional bootstrap performance data: `rapid` (AIC simulation, ~30s), `thorough` (real GPUs, 2-4h), or `none` (skip). |
 
 SLA mode constructs each role's model through
-`aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)`. Set
+`aisim_core.sdk.RustForwardPassPerfModel.best_available(config)`. Set
 `ais_perf_model.roles` to the complete AISimulate configuration for each deployed
 role: `prefill` and `decode` for disaggregated deployments, or `aggregated` for an
 aggregated deployment. Each role key must match its `worker_type`.

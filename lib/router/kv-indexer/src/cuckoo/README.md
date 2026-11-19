@@ -156,9 +156,8 @@ Recovery targets the state whose commit became uncertain:
 - An uncertain consumer lane needs lane retirement and a new snapshot, not producer recovery.
 - Ordinary capacity exhaustion omits only physical admission and requires no recovery.
 
-The in-process `LocalCkfAdapter` exercises this complete boundary today. Non-local transport can
-carry the same snapshot/delta protocol without moving exact full-hash ownership into the global
-consumer.
+The pool relay in `lib/llm` carries this snapshot/delta protocol between processes without moving
+exact full-hash ownership into the global consumer.
 
 ## Directory map
 
@@ -171,7 +170,6 @@ consumer.
 | `publication.rs` | Lease and sequence ownership for snapshots, deltas, and drains |
 | `global.rs` | Manifest validation, lane state machine, transposed query storage |
 | `ingestion_pool.rs` | Bounded lane-sticky Flume transport and readiness fencing |
-| `adapter.rs` | In-process producer-to-consumer composition and snapshot recovery |
 | `search.rs` | Multi-lane prefix search over the transposed table |
 | `failure.rs` | Pre-/post-commit failure dispositions by affected domain |
 

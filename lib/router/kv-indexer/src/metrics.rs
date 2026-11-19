@@ -80,21 +80,6 @@ pub enum EventWarningKind {
     DuplicateStore,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum CkfMutationKind {
-    UnknownRemove,
-    CapacityExhausted,
-}
-
-impl std::fmt::Display for CkfMutationKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnknownRemove => f.write_str(METRIC_CKF_MUTATION_UNKNOWN_REMOVE),
-            Self::CapacityExhausted => f.write_str(METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED),
-        }
-    }
-}
-
 impl std::fmt::Display for EventWarningKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -176,9 +161,6 @@ pub struct KvIndexerMetrics {
     /// Counter of suspicious-but-valid KV events.
     #[cfg(feature = "export")]
     pub kv_cache_event_warnings: IntCounterVec,
-    /// Counters for CKF mutation outcomes that are finer-grained than event status.
-    #[cfg(feature = "export")]
-    pub ckf_mutation: IntCounterVec,
 }
 
 /// Metric status labels.
@@ -193,6 +175,7 @@ pub const METRIC_STATUS_INDEXER_INVARIANT_VIOLATION: &str = "indexer_invariant_v
 pub const METRIC_STATUS_UNSUPPORTED_RESIDENCY_DOMAIN: &str = "unsupported_residency_domain";
 /// An error kind this crate does not know: `KvCacheEventError` is non-exhaustive and lives in
 /// `dynamo-kv-events`, so a newer event crate can report kinds this indexer predates.
+#[cfg(feature = "export")]
 pub const METRIC_STATUS_UNKNOWN: &str = "unknown";
 
 /// Metric event labels.
@@ -202,10 +185,6 @@ pub const METRIC_EVENT_CLEARED: &str = "cleared";
 
 /// Metric warning labels.
 pub const METRIC_WARNING_DUPLICATE_STORE: &str = "duplicate_store";
-
-/// CKF mutation metric labels.
-pub const METRIC_CKF_MUTATION_UNKNOWN_REMOVE: &str = "unknown_remove";
-pub const METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED: &str = "capacity_exhausted";
 
 /// Metric name for KV cache events applied counter.
 #[cfg(feature = "export")]
@@ -221,12 +200,6 @@ pub const KV_CACHE_EVENT_WARNINGS_HELP: &str =
     "Total number of suspicious KV cache events seen by the router indexer";
 #[cfg(feature = "export")]
 pub const KV_CACHE_EVENT_WARNINGS_LABELS: &[&str] = &["warning_kind"];
-#[cfg(feature = "export")]
-const CKF_MUTATION_NAME: &str = "dynamo_kvrouter_ckf_mutation_total";
-#[cfg(feature = "export")]
-pub const CKF_MUTATION_HELP: &str = "Total number of CKF block-level mutation outcomes";
-#[cfg(feature = "export")]
-pub const CKF_MUTATION_LABELS: &[&str] = &["outcome"];
 
 impl KvIndexerMetrics {
     /// Build from counter vectors a host created and registered itself.
@@ -234,12 +207,10 @@ impl KvIndexerMetrics {
     pub fn from_counters(
         kv_cache_events_applied: IntCounterVec,
         kv_cache_event_warnings: IntCounterVec,
-        ckf_mutation: IntCounterVec,
     ) -> Self {
         Self {
             kv_cache_events_applied,
             kv_cache_event_warnings,
-            ckf_mutation,
         }
     }
 
@@ -254,10 +225,6 @@ impl KvIndexerMetrics {
                 Opts::new(KV_CACHE_EVENT_WARNINGS_NAME, KV_CACHE_EVENT_WARNINGS_HELP),
                 KV_CACHE_EVENT_WARNINGS_LABELS,
             )?,
-            IntCounterVec::new(
-                Opts::new(CKF_MUTATION_NAME, CKF_MUTATION_HELP),
-                CKF_MUTATION_LABELS,
-            )?,
         ))
     }
 
@@ -267,7 +234,6 @@ impl KvIndexerMetrics {
         let metrics = Arc::new(Self::new_prometheus()?);
         registry.register(Box::new(metrics.kv_cache_events_applied.clone()))?;
         registry.register(Box::new(metrics.kv_cache_event_warnings.clone()))?;
-        registry.register(Box::new(metrics.ckf_mutation.clone()))?;
         Ok(metrics)
     }
 
@@ -361,13 +327,6 @@ struct PreBoundMetricCounters {
     removed: ResultCounters,
     cleared: ResultCounters,
     duplicate_store_warning: IntCounter,
-    ckf_mutation: CkfMutationCounters,
-}
-
-#[cfg(feature = "export")]
-struct CkfMutationCounters {
-    unknown_remove: IntCounter,
-    capacity_exhausted: IntCounter,
 }
 
 #[cfg(feature = "export")]
@@ -439,14 +398,6 @@ impl PreBoundEventCounters {
                     cleared: ResultCounters::new(cv, METRIC_EVENT_CLEARED),
                     duplicate_store_warning: warnings
                         .with_label_values(&[METRIC_WARNING_DUPLICATE_STORE]),
-                    ckf_mutation: CkfMutationCounters {
-                        unknown_remove: metrics
-                            .ckf_mutation
-                            .with_label_values(&[METRIC_CKF_MUTATION_UNKNOWN_REMOVE]),
-                        capacity_exhausted: metrics
-                            .ckf_mutation
-                            .with_label_values(&[METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED]),
-                    },
                 },
             }
         }
@@ -486,21 +437,5 @@ impl PreBoundEventCounters {
         }
         #[cfg(not(feature = "export"))]
         let _ = (self, kind);
-    }
-
-    pub fn inc_ckf_mutation(&self, kind: CkfMutationKind, count: u64) {
-        #[cfg(feature = "export")]
-        {
-            if count == 0 {
-                return;
-            }
-            let counter = match kind {
-                CkfMutationKind::UnknownRemove => &self.inner.ckf_mutation.unknown_remove,
-                CkfMutationKind::CapacityExhausted => &self.inner.ckf_mutation.capacity_exhausted,
-            };
-            counter.inc_by(count);
-        }
-        #[cfg(not(feature = "export"))]
-        let _ = (self, kind, count);
     }
 }

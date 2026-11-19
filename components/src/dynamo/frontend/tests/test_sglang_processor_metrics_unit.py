@@ -1,9 +1,10 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-"""Metrics-focused SGLang processor tests with lightweight SGLang stubs."""
+"""SGLang processor tests with lightweight backend stubs."""
 
 import asyncio
+import builtins
 import importlib
 import sys
 import types
@@ -14,6 +15,7 @@ from _routed_engine_fakes import FakeRoutedEngine
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -54,7 +56,9 @@ def _install_module(install_module, name: str, **attrs):
     return install_module(name, **attrs)
 
 
-def _install_sglang_stubs(install_module):
+def _install_sglang_stubs(install_module, tokenizer_module):
+    """Install lightweight backend modules with the selected tokenizer layout."""
+
     class _Function:
         pass
 
@@ -136,7 +140,7 @@ def _install_sglang_stubs(install_module):
     _install_module(install_module, "sglang.srt.utils")
     _install_module(
         install_module,
-        "sglang.srt.utils.hf_transformers_utils",
+        tokenizer_module,
         get_tokenizer=lambda *args, **kwargs: None,
     )
 
@@ -154,9 +158,17 @@ class _PostProcessor:
         }
 
 
-def _load_processor_module(module_stubs):
+def _load_processor_module(
+    module_stubs, tokenizer_module="sglang.srt.utils.hf_transformers"
+):
+    """Import a fresh processor against the selected SGLang module layout."""
     install_module, remove_module = module_stubs
-    _install_sglang_stubs(install_module)
+    for name in (
+        "sglang.srt.hf_transformers",
+        "sglang.srt.utils.hf_transformers",
+    ):
+        remove_module(name)
+    _install_sglang_stubs(install_module, tokenizer_module)
     _install_module(install_module, "dynamo._internal", ModelDeploymentCard=object)
     # Importing common.utils initializes native bindings absent from this fixture.
     _install_module(
@@ -202,6 +214,7 @@ def _load_processor_module(module_stubs):
         "dynamo.llm.exceptions",
         HttpError=type("HttpError", (Exception,), {}),
         InvalidArgument=type("InvalidArgument", (Exception,), {}),
+        RoutedEngineError=type("RoutedEngineError", (ValueError,), {}),
         Unknown=type("Unknown", (Exception,), {}),
         WorkerUnavailable=type("WorkerUnavailable", (Exception,), {}),
     )
@@ -402,3 +415,168 @@ def test_sparse_usage_survives_flushes(
             assert usage["completion_tokens"] == count
             assert usage["total_tokens"] == 3 + count
             assert usage["prompt_tokens_details"] == {"cached_tokens": expected_cache}
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        ({"combined_limit": 10, "reject_prompt_overflow": True}, (10, True, False)),
+        ({"combined_limit": 0}, (0, False, False)),
+        ({"combined_limit": 2**32 - 1}, (2**32 - 1, False, False)),
+        ({"combined_limit": True}, None),
+        ({"combined_limit": -1}, None),
+        ({"combined_limit": 2**32}, None),
+        ({"combined_limit": 10.0}, None),
+        ({"combined_limit": "10"}, None),
+        ({"combined_limit": 10, "reject_prompt_overflow": 1}, None),
+        ({"combined_limit": 10, "reject_total_overflow": "true"}, None),
+        ({}, None),
+        ([], None),
+        (None, None),
+    ],
+)
+def test_reads_worker_token_budget(module_stubs, metadata, expected):
+    module = _load_processor_module(module_stubs)
+    mdc = types.SimpleNamespace(
+        runtime_config=lambda: {"runtime_data": {"token_budget": metadata}}
+    )
+
+    budget = module._runtime_token_budget(mdc)
+
+    assert budget == (module.TokenBudget(*expected) if expected else None)
+
+
+@pytest.mark.parametrize(
+    "runtime_config", [None, [], {}, {"runtime_data": None}, {"runtime_data": []}]
+)
+def test_missing_runtime_token_budget(module_stubs, runtime_config):
+    module = _load_processor_module(module_stubs)
+    mdc = types.SimpleNamespace(runtime_config=lambda: runtime_config)
+
+    assert module._runtime_token_budget(mdc) is None
+
+
+@pytest.mark.parametrize("configured_budget", [False, True])
+@pytest.mark.parametrize("stop_conditions", [_MISSING, None, {}])
+def test_token_budget_without_stop_conditions(
+    module_stubs, configured_budget, stop_conditions
+):
+    module = _load_processor_module(module_stubs)
+    engine = FakeRoutedEngine(items=[{"token_ids": [42], "finish_reason": "stop"}])
+    processor = module.SglangProcessor(
+        tokenizer=None,
+        routed_engine=engine,
+        tool_call_parser_name=None,
+        reasoning_parser_name=None,
+        eos_token_ids=None,
+        token_budget=module.TokenBudget(10, True, True) if configured_budget else None,
+    )
+    preprocessed = {}
+    if stop_conditions is not _MISSING:
+        preprocessed["stop_conditions"] = stop_conditions
+
+    async def collect():
+        return [
+            item
+            async for item in processor._generate_and_stream(
+                "req", {"model": "test"}, preprocessed, [1, 2, 3], _PostProcessor()
+            )
+        ]
+
+    assert asyncio.run(collect())
+    assert engine.requests == [preprocessed]
+
+
+@pytest.mark.parametrize(
+    ("prompt_len", "max_tokens", "reject_prompt", "reject_total", "media", "reject"),
+    [
+        (10, None, True, True, None, True),
+        (9, None, True, True, None, False),
+        (6, 4, True, True, None, False),
+        (6, 5, True, True, None, True),
+        (6, 5, True, False, None, False),
+        (10, 5, False, True, None, False),
+        (
+            10,
+            5,
+            True,
+            True,
+            {"image_url": [{"Url": "https://example.com/image.png"}]},
+            False,
+        ),
+    ],
+)
+def test_token_budget_before_dispatch(
+    module_stubs, prompt_len, max_tokens, reject_prompt, reject_total, media, reject
+):
+    module = _load_processor_module(module_stubs)
+    engine = FakeRoutedEngine(items=[{"token_ids": [42], "finish_reason": "stop"}])
+    processor = module.SglangProcessor(
+        tokenizer=None,
+        routed_engine=engine,
+        tool_call_parser_name=None,
+        reasoning_parser_name=None,
+        eos_token_ids=None,
+        token_budget=module.TokenBudget(10, reject_prompt, reject_total),
+    )
+    preprocessed = {"multi_modal_data": media}
+    if max_tokens is not None:
+        preprocessed["stop_conditions"] = {"max_tokens": max_tokens}
+
+    async def collect():
+        return [
+            item
+            async for item in processor._generate_and_stream(
+                "req",
+                {"model": "test"},
+                preprocessed,
+                [1] * prompt_len,
+                _PostProcessor(),
+            )
+        ]
+
+    if reject:
+        with pytest.raises(module.InvalidArgument):
+            asyncio.run(collect())
+        assert engine.requests == []
+    else:
+        assert asyncio.run(collect())
+        assert engine.requests == [preprocessed]
+
+
+@pytest.mark.parametrize(
+    "tokenizer_module",
+    [
+        "sglang.srt.hf_transformers",
+        "sglang.srt.utils.hf_transformers",
+    ],
+)
+def test_tokenizer_import_layouts(module_stubs, tokenizer_module):
+    """Resolve the tokenizer from current sources and the pinned releases."""
+    module = _load_processor_module(module_stubs, tokenizer_module)
+    assert module.get_tokenizer is sys.modules[tokenizer_module].get_tokenizer
+
+
+@pytest.mark.parametrize(
+    "tokenizer_module",
+    ["sglang.srt.hf_transformers", "sglang.srt.utils.hf_transformers"],
+)
+def test_tokenizer_import_preserves_dependency_error(
+    module_stubs, monkeypatch, tokenizer_module
+):
+    """Preserve missing dependencies instead of treating them as a layout move."""
+    original_import = builtins.__import__
+    error = ModuleNotFoundError(
+        "No module named 'tokenizer_dependency'", name="tokenizer_dependency"
+    )
+
+    def import_with_missing_dependency(name, *args, **kwargs):
+        """Fail inside the selected tokenizer module while importing others normally."""
+        if name == tokenizer_module:
+            raise error
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_with_missing_dependency)
+    with pytest.raises(ModuleNotFoundError) as caught:
+        _load_processor_module(module_stubs)
+    assert caught.value is error
