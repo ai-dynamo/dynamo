@@ -4,7 +4,7 @@
 # Base stage - Common setup for all stages
 ARG DOCKER_PROXY
 ARG BASE_IMAGE="library/golang"
-ARG BASE_IMAGE_TAG="1.27.3"
+ARG BASE_IMAGE_TAG="1.27.4"
 FROM ${DOCKER_PROXY}${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
 # Docker buildx automatically provides these
@@ -34,6 +34,11 @@ RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 
 # Run linting
 RUN golangci-lint run --timeout=5m
+
+# Check the CRD API types against Kubernetes API conventions. Keep the version in sync with
+# KUBE_API_LINTER_VERSION in the Makefile.
+RUN go install sigs.k8s.io/kube-api-linter/cmd/golangci-lint-kube-api-linter@v0.0.0-20261012124120-79b557aa8c8d && \
+    golangci-lint-kube-api-linter run --timeout=5m -c .golangci-kal.yml ./api/...
 
 # Test stage
 FROM base AS tester
@@ -205,7 +210,7 @@ COPY --from=sources_collect /sources.zip /sources.zip
 
 
 # Runtime stage
-FROM nvcr.io/nvidia/distroless/go:v4.1.7
+FROM nvcr.io/nvidia/distroless/go:v4.2.1
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/crd-apply .

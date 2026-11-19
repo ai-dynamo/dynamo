@@ -10,7 +10,7 @@ use dynamo_backend_common::CommonArgs;
 use crate::GrpcEndpoint;
 
 const DEFAULT_GRPC_CONNECT_ATTEMPT_TIMEOUT_SECS: u64 = 30;
-const DEFAULT_GRPC_CONNECTIONS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
+const DEFAULT_GRPC_CONNECTIONS: NonZeroUsize = NonZeroUsize::new(32).unwrap();
 const DEFAULT_GRPC_RETRY_INTERVAL_SECS: u64 = 1;
 const DEFAULT_GRPC_STARTUP_DEADLINE_SECS: u64 = 1800;
 
@@ -21,9 +21,10 @@ fn parse_grpc_endpoint(raw: &str) -> Result<GrpcEndpoint, String> {
 /// CLI flags shared by gRPC sidecars.
 #[derive(Args, Clone, Debug)]
 pub struct GrpcTransportArgs {
-    /// Number of parallel sidecar gRPC connections. The default of eight was
-    /// sufficient in sidecar load tests to avoid connection-level throttling
-    /// at high request concurrency.
+    /// Number of parallel sidecar gRPC connections. Each HTTP/2 connection
+    /// serializes all of its streams' per-message work behind one lock, so
+    /// spreading high request concurrency over more connections keeps that
+    /// lock from being contended.
     #[arg(
         long = "grpc-connections",
         env = "DYN_SIDECAR_GRPC_CONNECTIONS",
@@ -127,7 +128,7 @@ mod tests {
         let defaults = TestArgs::try_parse_from(["test", "--grpc-endpoint", "127.0.0.1:50051"])
             .expect("parse defaults");
         let config = defaults.sidecar.grpc.config();
-        assert_eq!(config.connections.get(), 8);
+        assert_eq!(config.connections.get(), 32);
         assert_eq!(config.connect_attempt_timeout, Duration::from_secs(30));
         assert_eq!(config.retry_interval, Duration::from_secs(1));
         assert_eq!(config.startup_deadline, Duration::from_secs(1800));

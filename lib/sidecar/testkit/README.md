@@ -29,13 +29,16 @@ lib/sidecar/
 │   ├── test_fixtures.rs        # Native request, response and metadata builders
 │   └── tests.rs                # Broader tests using a local fake gRPC server, including pre-cancelled decode
 ├── sglang/src/
-│   ├── client.rs               # Inline tests: discovery, status mapping and RPC deadlines
+│   ├── client.rs               # Inline tests: KV sources, status mapping and RPC deadlines
+│   ├── discovery.rs            # Inline tests: typed discovery
 │   ├── engine.rs               # Inline tests: worker metadata, bootstrap and KV sources
-│   ├── native_http.rs          # Inline tests: envelopes, tracing and local HTTP server
+│   ├── listeners.rs            # Inline tests: rank dispatch, per-dispatch rids and abort targets
+│   ├── native_http.rs          # Inline tests: envelopes, error frames and Abort RPC
+│   ├── node.rs                 # Inline tests: node table and KV union
 │   ├── protocol.rs             # Production conversion and child-module declarations
 │   └── protocol/
 │       ├── request_tests.rs    # Request fields, public refusals, routing and rendezvous
-│       └── response_tests.rs   # Token/logprob conversion, stops, usage and errors
+│       └── response_tests.rs   # Frames, prompt logprobs, finish reasons and error items
 └── testkit/
     ├── src/
     │   ├── lib.rs              # Bounded waits and public testkit exports
@@ -49,7 +52,7 @@ lib/sidecar/
     │   └── support/
     │       ├── mod.rs         # Fixture contracts and scheduler-state waits
     │       ├── vllm.rs        # vLLM protocol, discovery, health and child-command adapter
-    │       ├── sglang.rs      # SGLang gRPC/HTTP peers, discovery, health and child-command adapter
+    │       ├── sglang.rs      # SGLang api.v1 gRPC and HTTP peers, discovery, health, Abort and child-command adapter
     │       ├── trtllm.rs      # OpenEngine peer, context limits and child-command adapter
     │       ├── lpx.rs         # LPX peer and child-command adapter
     │       └── process.rs     # Local discovery, worker processes and TCP routing
@@ -130,10 +133,10 @@ cargo test --locked -p dynamo-vllm-sidecar --lib \
   convert::request_tests::canonical_priority_preserves_native_ordering -- --exact
 ```
 
-The vLLM dependency enables common's `tonic-v14` feature. To cover that version
-when running common alone, add `--features tonic-v14`. Building requires the
-repository's normal Rust prerequisites; running these suites needs no GPU,
-model download or inference-engine installation.
+The vLLM and SGLang dependencies enable common's `tonic-v14` feature. To cover
+that version when running common alone, add `--features tonic-v14`. Building
+requires the repository's normal Rust prerequisites; running these suites needs
+no GPU, model download or inference-engine installation.
 
 CI runs them through the ordinary `cargo test --locked --all-targets` step and
 nightly Rust coverage. There are no per-test lane markers or custom unit runner.
@@ -158,10 +161,21 @@ Each suite exercises a different request path:
   errors become HTTP 400, and failures after a token reaches the client become SSE
   errors without a successful finish. Both paths verify subsequent recovery.
 
+The SGLang fixture is one Rust-server listener. `Fixture::start_node` starts the
+listeners of one node, which share a controller and report one
+`DeploymentInfo.node_listeners` table; each listener has its own Mocker
+scheduler, KV-event publisher, Abort log, request log (`received`), health
+control and optional HTTP peer. A single-listener fixture reports a one-entry
+table.
+
 The SGLang fixture owns its optional HTTP peer, discovery metadata and shutdown.
-The HTTP cancellation regression uses that peer and the production sidecar engine.
-It holds an admitted request before headers or during streaming, then checks
-targeted abort before disconnect, another request's isolation and recovery.
+The peer imitates SGLang's Rust server: it serves no `/abort_request`, omits
+empty `output_ids`, and its requests are aborted with the `sglang.api.v1` Abort
+RPC, which the gRPC fixture records. The HTTP cancellation regressions use that
+peer and the production sidecar engine. They hold an admitted request before
+headers or during streaming, then check targeted abort before disconnect,
+decode's drain before abort, another request's isolation and recovery. A native
+HTTP endpoint that never becomes ready leaves the engine on gRPC.
 The existing SGLang aggregate GPU deployment sends chat and native `/generate`
 payloads through the Dynamo HTTP frontend, disconnects each active stream, and
 checks actual scheduler drain and successful recovery. Explicit native stop and
@@ -183,14 +197,14 @@ clients. That makes peer-loss tests deterministic.
 
 | Suite | Scope | Execution |
 | --- | --- | --- |
-| `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM, SGLang and TensorRT-LLM; native rejection, malformed responses and shutdown during pending SGLang health checks | CPU, ordinary pre-merge Cargo tests |
-| `router_sidecar_mocker_integration.rs` | All three backends: registration/error recovery, delayed/interrupted startup, cancellation, SIGTERM, frontend HTTP errors/recovery and real PrefillRouter handoff; vLLM/SGLang model alias publication and native-health readiness; SGLang tokenizer/parser discovery, native tracing and changed-role startup | CPU, ordinary pre-merge Cargo tests |
-| `tests/serve/test_sidecar.py` | vLLM/SGLang: real engine logprobs, structured output, cancellation/recovery, KV transfer and routing, where the `*_kv_router` configs warm two caches and require cache-based selection, plus a completed transfer to decode when disaggregated; TensorRT-LLM: basic aggregated/disaggregated chat | GPU, existing sidecar E2E jobs in post-merge and nightly |
+| `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM, SGLang and TensorRT-LLM; native rejection, malformed responses and shutdown during pending SGLang health checks; vLLM engine loss from its health stream; SGLang with one sidecar per node: Abort only on the owning listener, by that dispatch's own rid, for gRPC and native requests, and engine loss naming the lost listener's DP rank | CPU, ordinary pre-merge Cargo tests |
+| `router_sidecar_mocker_integration.rs` | All three backends: registration/error recovery, delayed/interrupted startup, cancellation, SIGTERM, frontend HTTP errors/recovery and real PrefillRouter handoff; all three plus LPX: request migration after engine failure (before or after the first token) and SIGTERM; vLLM/SGLang model alias publication and native-health readiness; SGLang tokenizer/parser discovery and changed-role startup; vLLM withdrawal and process exit on engine loss; SGLang with one sidecar per node: the prefill rank and port through a real PrefillRouter under round-robin over two nodes (with a pinned rank), and withdrawal and process exit when one listener is lost | CPU, ordinary pre-merge Cargo tests |
+| `tests/serve/test_sidecar.py` | vLLM/SGLang: real engine logprobs, structured output, aggregated and disaggregated cancellation/recovery (decode stops early), KV transfer and routing, where the `*_kv_router` configs warm two caches and require cache-based selection, plus a completed transfer to decode when disaggregated; TensorRT-LLM: aggregated/disaggregated chat and cancellation/recovery; all three: request migration after a real engine is killed mid-stream, on the aggregated and disaggregated `*_kv_router` configs | GPU, existing sidecar E2E jobs in post-merge and nightly |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
 vLLM, SGLang and TensorRT-LLM register the shared wire and process scenarios. TensorRT-LLM uses the existing OpenEngine Mocker through a controlled inference service. Its process tests supply a local model path and verify the context limit returned by OpenEngine.
 
-The alias and health-publication scenarios use `DiscoveryFixture` controls for vLLM and SGLang. TensorRT-LLM is excluded from these scenarios because its sidecar uses a configured model path and does not discover served aliases or gate publication on native health. vLLM keeps Control healthy while the fixture controls Inference readiness; SGLang uses its native HealthCheck RPC. Separate tokenizer discovery, parser settings inherited from engine metadata, changed engine roles and native trace headers remain SGLang-specific because vLLM has different contracts for those values.
+The alias and health-publication scenarios use `DiscoveryFixture` controls for vLLM and SGLang. TensorRT-LLM is excluded from these scenarios because its sidecar uses a configured model path and does not discover served aliases or gate publication on native health. vLLM keeps Control healthy while the fixture controls Inference readiness; SGLang uses its native HealthCheck RPC. Separate tokenizer discovery, parser settings inherited from engine metadata and changed engine roles remain SGLang-specific because vLLM has different contracts for those values.
 
 CPU handoff checks opaque vLLM metadata, SGLang concurrent bootstrap coordination, and TensorRT-LLM OpenEngine KV session forwarding. CPU handoff cancellation holds the peers before Mocker admission; it proves transport cleanup and recovery, not native scheduler or transfer cleanup. A Mocker cannot prove that a real engine accepts the serialized request, executes a structured-output constraint, releases its real scheduler work, or transfers GPU KV cache.
 
@@ -223,7 +237,8 @@ that a real SGLang transfer-wait queue drains after cancellation.
 
 The legacy Python backend suite is also distributed by behavior, including
 `tests/serve/test_vllm.py`, `tests/fault_tolerance/cancellation/test_vllm.py` and
-`tests/fault_tolerance/migration/test_vllm.py`.
+`tests/fault_tolerance/migration/test_vllm.py`. Sidecar migration is not yet
+tested after a prefill-worker failure or on the DEP configs.
 
 ### Adding an integration test
 
@@ -300,3 +315,6 @@ Both aggregated and disaggregated cases use one GPU. The usual
 engine startup, readiness and cleanup. Post-merge and nightly CI execute these
 assertions through the existing sidecar E2E jobs. No separate GPU test executable
 or native-test build artifact is needed.
+
+The SGLang launch scripts run SGLang's Rust server (`SGLANG_RUST_SERVER=1`), so
+the SGLang configs need SGLang v0.5.23 or later.
