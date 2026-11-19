@@ -276,7 +276,9 @@ async fn vllm_format_preserves_binding_terminal_status_and_wire_shape() {
 async fn unary_dispatch_joins_chunks_and_maps_stream_errors() {
     let chunk = |ids: Value| {
         Annotated::from_data(LLMEngineOutput {
-            engine_data: Some(serde_json::json!({"sglang_response": {"output_ids": ids}})),
+            engine_data: Some(Box::new(
+                serde_json::json!({"sglang_response": {"output_ids": ids}}),
+            )),
             ..Default::default()
         })
     };
@@ -437,9 +439,9 @@ async fn format_request_id_is_correlation_only() {
             let output = LLMEngineOutput {
                 token_ids: vec![7],
                 finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Length),
-                engine_data: Some(serde_json::json!({"sglang_response": {
+                engine_data: Some(Box::new(serde_json::json!({"sglang_response": {
                     "output_ids": [7], "meta_info": {"id": "engine-private"}
-                }})),
+                }}))),
                 ..Default::default()
             };
             Ok(ResponseStream::new(
@@ -494,7 +496,9 @@ impl AsyncEngine<Input, Output, Error> for ConcurrentEchoEngine {
         let output = LLMEngineOutput {
             token_ids: token_ids.clone(),
             finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Stop),
-            engine_data: Some(serde_json::json!({"sglang_response": {"output_ids": token_ids}})),
+            engine_data: Some(Box::new(
+                serde_json::json!({"sglang_response": {"output_ids": token_ids}}),
+            )),
             ..Default::default()
         };
         Ok(ResponseStream::new(
@@ -601,7 +605,7 @@ async fn streaming_preserves_json_bytes_and_event_order() {
         .map(|value| {
             Annotated::from_data(LLMEngineOutput {
                 token_ids: vec![1],
-                engine_data: Some(serde_json::json!({"sglang_response": value})),
+                engine_data: Some(Box::new(serde_json::json!({"sglang_response": value}))),
                 ..Default::default()
             })
         })

@@ -193,6 +193,11 @@ class LocalPlannerOrchestrator:
             observation_window_seconds=observation_window_seconds,
         )
 
+    def unregister_internal(self, plugin_id: str, reason: str = "") -> bool:
+        """Synchronously unregister an in-process plugin (see
+        ``PluginRegistryServer.unregister_internal``)."""
+        return self._registry.unregister_internal(plugin_id, reason=reason)
+
     def list_plugins(
         self, request: Optional[ListPluginsRequest] = None
     ) -> list[PluginInfo]:

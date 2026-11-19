@@ -555,51 +555,51 @@ The transport encryption in this release extends to the Frontend HTTP server wit
 
 Between v1.4.2 and v1.5.0 the project merged 658 PRs from 123 contributors, 40 of them from outside NVIDIA. Thank you to the external community contributors in this release (organization identified through the commit-author email domain or the public GitHub profile):
 
-- **DaoCloud:** [@bzsuni](https://github.com/bzsuni), [@carlory](https://github.com/carlory), [@flpanbin](https://github.com/flpanbin), [@muma378](https://github.com/muma378), [@panpan0000](https://github.com/panpan0000), [@weizhoublue](https://github.com/weizhoublue), [@windsonsea](https://github.com/windsonsea), [@yankay](https://github.com/yankay).
-- **CoreWeave:** [@alexeldeib](https://github.com/alexeldeib), [@houshengbo](https://github.com/houshengbo), [@Rexwang8](https://github.com/Rexwang8), [@ritazh](https://github.com/ritazh).
-- **Intel:** @Spycsh, [@tthakkal](https://github.com/tthakkal), [@VincyZhang](https://github.com/VincyZhang).
-- **Aliyun:** [@xianlubird](https://github.com/xianlubird).
-- **Amazon:** [@AineshSootha](https://github.com/AineshSootha), [@jlonge4](https://github.com/jlonge4), [@YiqiuLiu](https://github.com/YiqiuLiu).
-- **Arizona State University:** [@Change72](https://github.com/Change72).
-- **Baseten:** [@michaelfeil](https://github.com/michaelfeil), [@shalinkpatel](https://github.com/shalinkpatel).
-- **Datadog:** [@walkoss](https://github.com/walkoss).
-- **Gcore:** [@Kaonael](https://github.com/Kaonael).
-- **Georgia Tech:** [@Skenix64](https://github.com/Skenix64).
-- **H Company:** [@h-avsha](https://github.com/h-avsha).
-- **Microsoft:** [@Jont828](https://github.com/Jont828).
-- **Reflection AI:** [@joeltg](https://github.com/joeltg).
-- **SK Telecom:** [@changhyeonnam](https://github.com/changhyeonnam).
-- **San Jose State University:** [@ayaangazali](https://github.com/ayaangazali).
-- **Stanford University:** [@merceod](https://github.com/merceod).
-- **UC San Diego Hao AI Lab:** [@vishruthb](https://github.com/vishruthb).
-- **University of Guelph:** [@mgsalem](https://github.com/mgsalem).
-- **University of Washington:** [@Shaoting-Feng](https://github.com/Shaoting-Feng).
-- **Yandex Cloud:** [@jellysnack](https://github.com/jellysnack).
-- **Independent:** [@avinash-rafay](https://github.com/avinash-rafay), [@cmdy](https://github.com/cmdy), [@elizabetht](https://github.com/elizabetht), [@hnt2601](https://github.com/hnt2601), [@Jonny-Skelton](https://github.com/Jonny-Skelton).
+- **DaoCloud:** @bzsuni, @carlory, @flpanbin, @muma378, @panpan0000, @weizhoublue, @windsonsea, @yankay.
+- **CoreWeave:** @alexeldeib, @houshengbo, @Rexwang8, @ritazh.
+- **Intel:** @Spycsh, @tthakkal, @VincyZhang.
+- **Aliyun:** @xianlubird.
+- **Amazon:** @AineshSootha, @jlonge4, @YiqiuLiu.
+- **Arizona State University:** @Change72.
+- **Baseten:** @michaelfeil, @shalinkpatel.
+- **Datadog:** @walkoss.
+- **Gcore:** @Kaonael.
+- **Georgia Tech:** @Skenix64.
+- **H Company:** @h-avsha.
+- **Microsoft:** @Jont828.
+- **Reflection AI:** @joeltg.
+- **SK Telecom:** @changhyeonnam.
+- **San Jose State University:** @ayaangazali.
+- **Stanford University:** @merceod.
+- **UC San Diego Hao AI Lab:** @vishruthb.
+- **University of Guelph:** @mgsalem.
+- **University of Washington:** @Shaoting-Feng.
+- **Yandex Cloud:** @jellysnack.
+- **Independent:** @avinash-rafay, @cmdy, @elizabetht, @hnt2601, @Jonny-Skelton.
 **New Contributors:** welcome to the 23 first-time contributors in this release:
-- [@elizabetht](https://github.com/elizabetht) wrapped OTLP exporter construction in the Tokio runtime context ([#11143](https://github.com/ai-dynamo/dynamo/pull/11143)).
-- [@YiqiuLiu](https://github.com/YiqiuLiu) added a native S3 sink for request-trace records ([#11806](https://github.com/ai-dynamo/dynamo/pull/11806)).
-- [@h-avsha](https://github.com/h-avsha) added embedding cache metrics ([#11969](https://github.com/ai-dynamo/dynamo/pull/11969)).
-- [@avinash-rafay](https://github.com/avinash-rafay) forwarded the full request body to the EPP KV-router scorer ([#11991](https://github.com/ai-dynamo/dynamo/pull/11991)).
-- [@anmolgupt](https://github.com/anmolgupt) added tokenizer alignment, a multi-process pool, and worker byte transport for embedding workers ([#12157](https://github.com/ai-dynamo/dynamo/pull/12157)).
-- [@hnt2601](https://github.com/hnt2601) emitted per-chunk token usage on `/v1/messages` streaming ([#12473](https://github.com/ai-dynamo/dynamo/pull/12473)).
-- [@YijiaZhao](https://github.com/YijiaZhao) sampled variable-length prefill batches in the vLLM self-benchmark ([#12627](https://github.com/ai-dynamo/dynamo/pull/12627)).
-- [@mgsalem](https://github.com/mgsalem) allowed custom ServiceMonitor labels in the Helm chart ([#12716](https://github.com/ai-dynamo/dynamo/pull/12716)).
-- [@kristinapathak](https://github.com/kristinapathak) clarified the verified CI requirement in the contributing guide ([#12763](https://github.com/ai-dynamo/dynamo/pull/12763)).
-- [@bzsuni](https://github.com/bzsuni) fixed the Fern CLI guide link and seven more docs and CI fixes ([#12817](https://github.com/ai-dynamo/dynamo/pull/12817)).
-- [@Skenix64](https://github.com/Skenix64) gated Gemma 4 reasoning on `enable_thinking` ([#13061](https://github.com/ai-dynamo/dynamo/pull/13061)).
-- [@JulienDarve](https://github.com/JulienDarve) bumped vLLM to v0.27.1 and isolated the CUDA context from GPU Memory Service checks in the NVDEC tests ([#13059](https://github.com/ai-dynamo/dynamo/pull/13059), [#13130](https://github.com/ai-dynamo/dynamo/pull/13130)).
-- [@chw001](https://github.com/chw001) corrected the Qwen3.8-2.4T-A95B-FP8 recipe model ID ([#13265](https://github.com/ai-dynamo/dynamo/pull/13265)).
-- [@changhyeonnam](https://github.com/changhyeonnam) regenerated the Kustomize OpenAPI schema after the PodSnapshot change ([#13444](https://github.com/ai-dynamo/dynamo/pull/13444)).
-- [@ayaangazali](https://github.com/ayaangazali) resolved the Planner KV hit rate against the worker namespace ([#13480](https://github.com/ai-dynamo/dynamo/pull/13480)).
-- [@AineshSootha](https://github.com/AineshSootha) cleaned up abort-monitor waiters in the vLLM backend ([#13637](https://github.com/ai-dynamo/dynamo/pull/13637)).
-- [@jlonge4](https://github.com/jlonge4) registered the Neuron NIXL connector in the KV connector protocols ([#13771](https://github.com/ai-dynamo/dynamo/pull/13771)).
-- [@merceod](https://github.com/merceod) added `extra_body` passthrough to media request structs ([#13817](https://github.com/ai-dynamo/dynamo/pull/13817)).
-- [@Jankwi](https://github.com/Jankwi) forwarded `media_io_kwargs` for worker-side video decoding ([#13826](https://github.com/ai-dynamo/dynamo/pull/13826)).
-- [@houshengbo](https://github.com/houshengbo) honored `continue_final_message` in the Rust chat preprocessor ([#13841](https://github.com/ai-dynamo/dynamo/pull/13841)).
-- [@Jonny-Skelton](https://github.com/Jonny-Skelton) mapped `min_tokens` to SGLang's `min_new_tokens` ([#13865](https://github.com/ai-dynamo/dynamo/pull/13865)).
-- [@Rexwang8](https://github.com/Rexwang8) returned HTTP 400 for unsupported multimodal content ([#14056](https://github.com/ai-dynamo/dynamo/pull/14056)).
-- [@luckyq](https://github.com/luckyq) backported the chat logprobs fixes to the release branch ([#14621](https://github.com/ai-dynamo/dynamo/pull/14621)).
+- @elizabetht wrapped OTLP exporter construction in the Tokio runtime context ([#11143](https://github.com/ai-dynamo/dynamo/pull/11143)).
+- @YiqiuLiu added a native S3 sink for request-trace records ([#11806](https://github.com/ai-dynamo/dynamo/pull/11806)).
+- @h-avsha added embedding cache metrics ([#11969](https://github.com/ai-dynamo/dynamo/pull/11969)).
+- @avinash-rafay forwarded the full request body to the EPP KV-router scorer ([#11991](https://github.com/ai-dynamo/dynamo/pull/11991)).
+- @anmolgupt added tokenizer alignment, a multi-process pool, and worker byte transport for embedding workers ([#12157](https://github.com/ai-dynamo/dynamo/pull/12157)).
+- @hnt2601 emitted per-chunk token usage on `/v1/messages` streaming ([#12473](https://github.com/ai-dynamo/dynamo/pull/12473)).
+- @YijiaZhao sampled variable-length prefill batches in the vLLM self-benchmark ([#12627](https://github.com/ai-dynamo/dynamo/pull/12627)).
+- @mgsalem allowed custom ServiceMonitor labels in the Helm chart ([#12716](https://github.com/ai-dynamo/dynamo/pull/12716)).
+- @kristinapathak clarified the verified CI requirement in the contributing guide ([#12763](https://github.com/ai-dynamo/dynamo/pull/12763)).
+- @bzsuni fixed the Fern CLI guide link and seven more docs and CI fixes ([#12817](https://github.com/ai-dynamo/dynamo/pull/12817)).
+- @Skenix64 gated Gemma 4 reasoning on `enable_thinking` ([#13061](https://github.com/ai-dynamo/dynamo/pull/13061)).
+- @JulienDarve bumped vLLM to v0.27.1 and isolated the CUDA context from GPU Memory Service checks in the NVDEC tests ([#13059](https://github.com/ai-dynamo/dynamo/pull/13059), [#13130](https://github.com/ai-dynamo/dynamo/pull/13130)).
+- @chw001 corrected the Qwen3.8-2.4T-A95B-FP8 recipe model ID ([#13265](https://github.com/ai-dynamo/dynamo/pull/13265)).
+- @changhyeonnam regenerated the Kustomize OpenAPI schema after the PodSnapshot change ([#13444](https://github.com/ai-dynamo/dynamo/pull/13444)).
+- @ayaangazali resolved the Planner KV hit rate against the worker namespace ([#13480](https://github.com/ai-dynamo/dynamo/pull/13480)).
+- @AineshSootha cleaned up abort-monitor waiters in the vLLM backend ([#13637](https://github.com/ai-dynamo/dynamo/pull/13637)).
+- @jlonge4 registered the Neuron NIXL connector in the KV connector protocols ([#13771](https://github.com/ai-dynamo/dynamo/pull/13771)).
+- @merceod added `extra_body` passthrough to media request structs ([#13817](https://github.com/ai-dynamo/dynamo/pull/13817)).
+- @Jankwi forwarded `media_io_kwargs` for worker-side video decoding ([#13826](https://github.com/ai-dynamo/dynamo/pull/13826)).
+- @houshengbo honored `continue_final_message` in the Rust chat preprocessor ([#13841](https://github.com/ai-dynamo/dynamo/pull/13841)).
+- @Jonny-Skelton mapped `min_tokens` to SGLang's `min_new_tokens` ([#13865](https://github.com/ai-dynamo/dynamo/pull/13865)).
+- @Rexwang8 returned HTTP 400 for unsupported multimodal content ([#14056](https://github.com/ai-dynamo/dynamo/pull/14056)).
+- @luckyq backported the chat logprobs fixes to the release branch ([#14621](https://github.com/ai-dynamo/dynamo/pull/14621)).
 If you would like to get involved, please see our [Contribution Guide](https://docs.nvidia.com/dynamo/dev/getting-started/contribution-guide).
 
 If you would like to get involved, please see our [Contribution Guide](../../../community/contributing/overview.md).

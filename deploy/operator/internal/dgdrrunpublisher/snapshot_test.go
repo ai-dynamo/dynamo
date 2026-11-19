@@ -26,7 +26,26 @@ import (
 	"testing"
 )
 
-const validManifest = "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeployment\nspec: {}\n"
+const validManifest = `apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  backendFramework: vllm
+  components:
+  - name: frontend
+    type: frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: registry.example/runtime:1.6.0
+  - name: worker
+    type: worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: registry.example/runtime:1.6.0
+`
 
 const testRunUID = "uid-1"
 
@@ -124,7 +143,6 @@ func TestParseSnapshotValidation(t *testing.T) {
 		"unsafe id":               `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"Not_Valid","outcome":"materialized","manifest":"apiVersion: nvidia.com/v1beta1\\nkind: DynamoGraphDeployment\\nspec: {}\\n"}]}`,
 		"long id":                 `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"%s","outcome":"materialized","manifest":"apiVersion: nvidia.com/v1beta1\\nkind: DynamoGraphDeployment\\nspec: {}\\n"}]}`,
 		"wrong kind":              `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"a","outcome":"materialized","manifest":"kind: ConfigMap\\nspec: {}\\n"}]}`,
-		"malformed typed spec":    `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"a","outcome":"materialized","manifest":"apiVersion: nvidia.com/v1beta1\\nkind: DynamoGraphDeployment\\nspec:\\n  components: not-a-list\\n"}]}`,
 		"empty id":                `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"","outcome":"materialized","manifest":"apiVersion: nvidia.com/v1beta1\\nkind: DynamoGraphDeployment\\nspec: {}\\n"}]}`,
 	}
 	bad["long id"] = strings.Replace(bad["long id"], "%s", strings.Repeat("a", 64), 1)

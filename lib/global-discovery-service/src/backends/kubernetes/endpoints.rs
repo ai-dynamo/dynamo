@@ -46,7 +46,7 @@ impl McsReplicaDirectory {
     /// error for a Service that `mcs` cannot import, since none of its
     /// replicas would be listed.
     pub fn new(client: Client, service: &ExportedService, mcs: McsImplementation) -> Self {
-        if !mcs::can_import(mcs, &service.name) {
+        if !mcs.can_import(&service.name) {
             tracing::error!(
                 service = %service.name,
                 karmada_max_service_name = mcs::KARMADA_MAX_SERVICE_NAME,

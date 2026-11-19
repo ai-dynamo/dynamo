@@ -930,13 +930,17 @@ async def test_multimodal_decode_preserves_position_metadata_without_embeddings(
         }
     )
 
+    token_ids_at_first_output = []
+
     async def output():
+        token_ids_at_first_output.append(request.request.token_ids)
         yield {"output_ids": [7], "meta_info": {"finish_reason": {"type": "stop"}}}
 
     handler.engine = SimpleNamespace(async_generate=AsyncMock(return_value=output()))
+    prompt = [1, 2, 3]
     request = SglangMultimodalRequest(
         request=PreprocessedRequest(
-            token_ids=[1, 2, 3],
+            token_ids=prompt,
             stop_conditions=StopConditions(max_tokens=1),
             sampling_options=SamplingOptions(),
         ),
@@ -956,7 +960,8 @@ async def test_multimodal_decode_preserves_position_metadata_without_embeddings(
     ]
     assert result
     kwargs = handler.engine.async_generate.call_args.kwargs
-    assert kwargs["input_ids"] == request.request.token_ids
+    assert kwargs["input_ids"] == prompt
+    assert token_ids_at_first_output == [[]]
     image = kwargs["image_data"][0]
     video = kwargs["video_data"][0]
     assert image["image_grid_thw"].tolist() == [[1, 4, 4], [1, 6, 6]]

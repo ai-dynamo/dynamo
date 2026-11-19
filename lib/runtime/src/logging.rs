@@ -539,19 +539,44 @@ impl GenericHeaders for std::collections::HashMap<String, String> {
     }
 }
 
-struct GenericHeaderExtractor<'a, H>(&'a H);
+struct GenericHeaderExtractor<'a, H> {
+    headers: &'a H,
+    /// Stands in for the `traceparent` header when set.
+    traceparent: Option<String>,
+}
 
 impl<H: GenericHeaders> Extractor for GenericHeaderExtractor<'_, H> {
     fn get(&self, key: &str) -> Option<&str> {
-        self.0.get(key)
+        match &self.traceparent {
+            Some(traceparent) if key == "traceparent" => Some(traceparent),
+            _ => self.headers.get(key),
+        }
     }
 
     fn keys(&self) -> Vec<&str> {
         ["traceparent", "tracestate"]
             .into_iter()
-            .filter(|key| self.0.get(key).is_some())
+            .filter(|key| self.headers.get(key).is_some())
             .collect()
     }
+}
+
+/// Returns a version-00 `traceparent` with trace-flags above `02` reduced to the sampled bit.
+///
+/// `opentelemetry_sdk` 0.31 rejects such a header, for example `03` (sampled plus the W3C
+/// Level 2 random-trace-id flag). W3C says to ignore unknown flags, as 0.32 does itself.
+fn mask_trace_flags(traceparent: &str) -> Option<String> {
+    let traceparent = traceparent.trim();
+    let flags = traceparent.strip_prefix("00-")?.rsplit('-').next()?;
+    let bits = u8::from_str_radix(flags, 16).ok()?;
+    // Uppercase flags are invalid: leave them for the propagator to reject.
+    if bits <= 2 || flags.contains(|c: char| !matches!(c, '0'..='9' | 'a'..='f')) {
+        return None;
+    }
+    let mut masked = traceparent.to_owned();
+    let sampled = if bits & 1 == 0 { "00" } else { "01" };
+    masked.replace_range(traceparent.len() - flags.len().., sampled);
+    Some(masked)
 }
 
 fn extract_trace_parent<H: GenericHeaders>(
@@ -572,7 +597,10 @@ fn extract_trace_parent<H: GenericHeaders>(
     let context = if valid_widths {
         TRACE_PROPAGATOR.extract_with_context(
             &opentelemetry::Context::new(),
-            &GenericHeaderExtractor(headers),
+            &GenericHeaderExtractor {
+                headers,
+                traceparent: headers.get("traceparent").and_then(mask_trace_flags),
+            },
         )
     } else {
         opentelemetry::Context::new()
@@ -1355,9 +1383,13 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         opentelemetry::global::set_tracer_provider(tracer_provider.clone());
 
         let tracer = tracer_provider.tracer(service_name.to_string());
+        // Filter outside the `Option`: a bare `None` layer registers interest in every
+        // callsite, so each disabled `debug!`/`trace!` would run every per-layer filter
+        // on every call instead of being skipped at its callsite.
         let otel_logs_layer = logger_provider_opt
             .as_ref()
-            .map(|lp| OpenTelemetryTracingBridge::new(lp).with_filter(otel_logs_filter_layer));
+            .map(OpenTelemetryTracingBridge::new)
+            .with_filter(otel_logs_filter_layer);
 
         let l = console_layer(console_format, span_events, fmt_filter_layer);
         tracing_subscriber::registry()
@@ -2415,12 +2447,25 @@ pub mod tests {
             "00-bad-2222222222222222-01",                              // bad trace_id
             "00-11111111111111111111111111111111-bad-01",              // bad span_id
             "00-11111111111111111111111111111111-2222222222222222-0x", // bad flags
+            "00-11111111111111111111111111111111-2222222222222222-0B", // uppercase flags
         ] {
             assert_eq!(
                 parse_traceparent(tp),
                 (None, None, None),
                 "should reject: {tp}"
             );
+        }
+    }
+
+    #[test]
+    fn parse_traceparent_masks_unknown_version_00_flags() {
+        // `03` is sampled plus the W3C Level 2 random-trace-id flag.
+        for (flags, expected) in [("03", "01"), ("fe", "00")] {
+            let (trace_id, _, trace_flags) = parse_traceparent(&format!(
+                "00-11111111111111111111111111111111-2222222222222222-{flags}"
+            ));
+            assert!(trace_id.is_some(), "flags {flags}");
+            assert_eq!(trace_flags.as_deref(), Some(expected), "flags {flags}");
         }
     }
 
@@ -3335,6 +3380,9 @@ pub mod tests {
         let file_name = tmp_file.path().to_str().unwrap();
         let guard = StderrOverride::from_file(file_name)?;
         init();
+
+        // Trace context without OTLP export must keep levels below `DYN_LOG` disabled.
+        assert!(!tracing::enabled!(tracing::Level::TRACE));
 
         // Run parent/child/grandchild spans (all INFO level by default)
         parent().await;

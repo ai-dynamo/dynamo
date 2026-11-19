@@ -258,10 +258,9 @@ async fn stale_load_withdraws_worker_without_node_metadata() {
         .expect("metrics publisher callback")(publisher)
     .expect("start metrics publisher");
     // This legacy server has no node metadata: load health must still be supervised.
-    let error = tokio::time::timeout(Duration::from_secs(5), engine.monitor_routing())
+    let error = tokio::time::timeout(Duration::from_secs(5), engine.engine_lost())
         .await
-        .expect("bounded load staleness")
-        .expect_err("stale routing load must withdraw the worker");
+        .expect("bounded load staleness");
     assert!(
         error
             .to_string()
@@ -328,7 +327,7 @@ async fn discovery_keeps_events_load_and_dp_targeting_independent() {
 /// Drives `monitor` until `observed` holds; the monitor must not finish first.
 /// The timeout only bounds a failure.
 async fn drive_monitor_until(
-    monitor: &mut (impl Future<Output = anyhow::Result<()>> + Unpin),
+    monitor: &mut (impl Future<Output = dynamo_backend_common::DynamoError> + Unpin),
     what: &str,
     observed: impl Fn() -> bool,
 ) {
@@ -368,7 +367,7 @@ async fn leader_monitor_rejects_restarted_native_engine() {
     engine.start(0).await.expect("start original engine");
     let errors = || service.metadata_errors_served.load(Ordering::SeqCst);
     let healthy_polls = || service.kv_sources_served.load(Ordering::SeqCst);
-    let monitor = engine.monitor_routing();
+    let monitor = engine.engine_lost();
     tokio::pin!(monitor);
     // Stay healthy past the recovery limit, which withdraws a monitor that
     // does not reset its deadline on a successful poll.
@@ -415,8 +414,7 @@ async fn leader_monitor_rejects_restarted_native_engine() {
         .engine_id = "restarted".into();
     let error = tokio::time::timeout(Duration::from_secs(5), &mut monitor)
         .await
-        .expect("detect changed incarnation")
-        .expect_err("must withdraw stale discovery");
+        .expect("detect changed incarnation");
     assert!(error.to_string().contains("Local engine changed"));
 }
 
@@ -487,10 +485,9 @@ async fn sustained_metadata_outage_withdraws_worker() {
     let engine = engine_with_kv_routing(&server.endpoint);
     engine.start(0).await.expect("start original engine");
     *service.kv_sources_error.lock().await = Some(tonic::Code::ResourceExhausted);
-    let error = tokio::time::timeout(Duration::from_secs(5), engine.monitor_routing())
+    let error = tokio::time::timeout(Duration::from_secs(5), engine.engine_lost())
         .await
-        .expect("bounded metadata recovery")
-        .expect_err("sustained outage must withdraw worker");
+        .expect("bounded metadata recovery");
     assert!(
         error
             .to_string()

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Replace <tag> with a supported SGLang image tag before deploying.
 # EXPERIMENTAL: engine-primary disaggregated SGLang with KV-aware routing
 
 apiVersion: nvidia.com/v1beta1
@@ -29,7 +30,7 @@ spec:
       spec:
         initContainers:
         - name: runtime
-          image: <your-registry>/dynamo-sidecar:1.6.0
+          image: <your-registry>/dynamo-sidecar:<your-version>
           command:
           - dynamo-sglang-sidecar
           args:
@@ -42,7 +43,7 @@ spec:
               optional: true
         containers:
         - name: main
-          image: lmsysorg/sglang:v0.5.22
+          image: lmsysorg/sglang:<tag>
           securityContext:
             capabilities:
               add: ["IPC_LOCK"]
@@ -53,7 +54,7 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.api.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 180
@@ -62,7 +63,7 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.api.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
             periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 3
@@ -71,10 +72,13 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.api.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 6
+          env:
+          - name: SGLANG_RUST_SERVER
+            value: "1"
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -96,6 +100,8 @@ spec:
           - Qwen/Qwen3-0.6B
           - --host
           - 0.0.0.0
+          # Listener k binds --port + k and --grpc-port + k. With --dp-size or
+          # --attn-dp-size N, keep the two ports at least N apart.
           - --port
           - "30000"
           - --grpc-port
@@ -103,8 +109,6 @@ spec:
           - --incremental-streaming-output
           - --disaggregation-mode
           - prefill
-          - --disaggregation-bootstrap-port
-          - "8998"
           - --disaggregation-transfer-backend
           - nixl
           - --page-size
@@ -120,7 +124,7 @@ spec:
       spec:
         initContainers:
         - name: runtime
-          image: <your-registry>/dynamo-sidecar:1.6.0
+          image: <your-registry>/dynamo-sidecar:<your-version>
           command:
           - dynamo-sglang-sidecar
           args:
@@ -133,7 +137,7 @@ spec:
               optional: true
         containers:
         - name: main
-          image: lmsysorg/sglang:v0.5.22
+          image: lmsysorg/sglang:<tag>
           securityContext:
             capabilities:
               add: ["IPC_LOCK"]
@@ -142,7 +146,7 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.api.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 180
@@ -151,7 +155,7 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.api.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
             periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 3
@@ -160,10 +164,13 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.api.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 6
+          env:
+          - name: SGLANG_RUST_SERVER
+            value: "1"
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -185,6 +192,8 @@ spec:
           - Qwen/Qwen3-0.6B
           - --host
           - 0.0.0.0
+          # Listener k binds --port + k and --grpc-port + k. With --dp-size or
+          # --attn-dp-size N, keep the two ports at least N apart.
           - --port
           - "30000"
           - --grpc-port
@@ -192,8 +201,6 @@ spec:
           - --incremental-streaming-output
           - --disaggregation-mode
           - decode
-          - --disaggregation-bootstrap-port
-          - "8998"
           - --disaggregation-transfer-backend
           - nixl
           - --page-size
