@@ -82,6 +82,12 @@ Every Dynamo process reads its own environment at startup, so set these on each 
   **Operator preset:** `9090` on worker, prefill, decode, and planner pods.
 </ParamField>
 
+<ParamField path="DYN_SYSTEM_ENGINE_AUTH_TOKEN" type="string" default="unset">
+  **Experimental.** Requires exactly one `Authorization: Bearer <token>` header for every `/engine/*` request and enabled `/v1/loras` route when set. Use at least 32 printable, non-whitespace ASCII characters supplied through a secret manager. An unset value preserves unauthenticated controls; an invalid configured value prevents the entire system-status server from starting, including its health and metrics endpoints.
+
+  This setting does not authenticate `/health`, `/live`, `/metrics`, or `/metadata`. Keep the system server on a trusted network and restrict access to those endpoints separately.
+</ParamField>
+
 <ParamField path="DYN_HTTP_PORT" type="integer" default="8000">
   Frontend HTTP port, where `dynamo_frontend_*` metrics are served at `/metrics`. Also configurable via the `--http-port` flag.
 
