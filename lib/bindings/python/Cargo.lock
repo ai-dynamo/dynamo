@@ -2290,6 +2290,7 @@ dependencies = [
 name = "dynamo-llm"
 version = "1.8.0"
 dependencies = [
+ "aho-corasick",
  "aligned-vec",
  "anyhow",
  "arc-swap",
