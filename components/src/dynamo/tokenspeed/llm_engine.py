@@ -79,6 +79,8 @@ _CLIENT_ERROR_STATUS = 400
 _ABORT_GRACE_S = 3.0
 # Per-token NVTX ranges are guarded on this so they cost one branch when off.
 _NVTX = _nvtx.ENABLED
+# gc.set_threshold() once the engine is up: see _tune_gc().
+_GC_THRESHOLDS = (50_000, 50, 100)
 
 
 class TokenspeedLLMEngine(LLMEngine):
@@ -890,16 +892,23 @@ def _stop_launcher(process: subprocess.Popen) -> None:
 
 
 def _tune_gc() -> None:
-    """Take the start-up heap out of the cyclic collector's reach.
+    """Keep the cyclic collector off the start-up heap and the output backlog.
 
     Every collection holds the GIL, so it stalls every stream. A full
     collection walks all tracked objects: ``gc.freeze()`` takes the several
     hundred thousand that imports and engine start-up leave alive out of its
-    reach.
+    reach. Under load the output chunks waiting in per-request lists are live
+    too, and the default thresholds re-walk them several times a second;
+    ``_GC_THRESHOLDS`` makes those middle and full collections rare.
     """
     gc.collect()
     gc.freeze()
-    logger.info("GC: froze %d start-up objects", gc.get_freeze_count())
+    gc.set_threshold(*_GC_THRESHOLDS)
+    logger.info(
+        "GC: froze %d start-up objects, thresholds %s",
+        gc.get_freeze_count(),
+        gc.get_threshold(),
+    )
 
 
 def _tokenspeed_engine_module() -> Any:
