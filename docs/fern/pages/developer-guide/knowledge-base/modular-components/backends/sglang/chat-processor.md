@@ -43,7 +43,7 @@ For DeepSeek V4 and V4.1 checkpoints identified by checkpoint metadata, the proc
 
 Recipe encoding rejects `continue_final_message=true` combined with thinking because the current output parser does not track the continued prompt's reasoning state. Continuation with thinking disabled remains supported.
 
-Dynamo continues to own sampling settings, constrained decoding, and output parsing. Image URLs must match the recipe's placeholder order; requests with a different order or UUID-only images are rejected before inference.
+Dynamo continues to own sampling settings, constrained decoding, and output parsing. For recipe-encoded requests, image URLs reach the worker in the rendered placeholder order, including when parallel tool results arrive out of call order. Repeated URLs retain separate image slots. Requests with missing or additional images, changed image multiplicities, or UUID-only images are rejected before inference.
 
 ## Frontend Arguments
 

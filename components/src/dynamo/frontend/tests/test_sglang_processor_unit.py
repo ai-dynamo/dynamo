@@ -94,6 +94,8 @@ from dynamo.llm.exceptions import (
 from dynamo.sglang.thinking_budget import apply_thinking_budget
 
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
+pytest_plugins = ["_deepseek_recipe_fixtures"]
+
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
@@ -3830,7 +3832,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
 
         def render_recipe(request, *, spec, **kwargs):
             assert spec == "dsv41"
-            return [1, 2, 3]
+            return sglang_prepost_module.RenderedDeepSeekPrompt([1, 2, 3])
 
         monkeypatch.setattr(
             sglang_processor_module,
@@ -3980,7 +3982,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
 
         def render(request, **kwargs):
             captured.update(kwargs)
-            return [1, 2, 3]
+            return sglang_prepost_module.RenderedDeepSeekPrompt([1, 2, 3])
 
         class CheckpointTokenizer:
             def __init__(self):
@@ -3992,7 +3994,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         monkeypatch.setattr(sglang_prompt_renderer_module, "recipe_renderer", object())
         monkeypatch.setattr(
             sglang_prompt_renderer_module,
-            "_render_deepseek_v4_prompt_token_ids",
+            "_render_deepseek_prompt",
             render,
         )
         tokenizer = CheckpointTokenizer()
@@ -4013,7 +4015,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
     def test_deepseek_v41_rejects_legacy_v4_encoder(self, monkeypatch):
         monkeypatch.setattr(sglang_prompt_renderer_module, "recipe_renderer", None)
         with pytest.raises(ValueError, match="DeepSeek-V4.1 preprocessing requires"):
-            sglang_prompt_renderer_module._render_deepseek_v4_prompt_token_ids(
+            sglang_prompt_renderer_module._render_deepseek_prompt(
                 {}, messages=[], tokenizer=object(), template_tools=None, spec="dsv41"
             )
 
@@ -5237,6 +5239,68 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert request["response_format"] == original_response_format
 
 
+@pytest.mark.multimodal
+@pytest.mark.parametrize("mode", ["inline", "worker"])
+def test_recipe_image_order_reaches_worker_payload(
+    recipe_tokenizer, tool_image_request, monkeypatch, mode
+):
+    request, expected = tool_image_request
+    original = copy.deepcopy(request)
+    if mode == "worker":
+        for key, value in {
+            "_w_tokenizer": recipe_tokenizer,
+            "_w_tool_call_parser_name": None,
+            "_w_reasoning_parser_name": None,
+            "_w_prompt_renderer": sglang_prompt_renderer_module.DeepSeekPromptRenderer(
+                recipe_tokenizer,
+                "dsv41",
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+            ),
+            "_w_template_force_reasoning": False,
+            "_w_default_thinking_mode": None,
+            "_w_structural_tag_mode": "off",
+        }.items():
+            monkeypatch.setattr(sglang_processor_module, key, value)
+        result = _preprocess_worker(request, request["model"], None).dynamo_preproc
+    else:
+        engine = FakeRoutedEngine(items=[])
+        processor = SglangProcessor(
+            tokenizer=recipe_tokenizer,
+            routed_engine=engine,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+            prompt_renderer=sglang_prompt_renderer_module.DeepSeekPromptRenderer(
+                recipe_tokenizer,
+                "dsv41",
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+            ),
+        )
+
+        async def collect():
+            return [item async for item in processor.generator(request)]
+
+        asyncio.run(collect())
+        result = engine.requests[0]
+    assert result["multi_modal_data"]["image_url"] == [{"Url": url} for url in expected]
+    wire_images = [
+        part["image_url"]["url"]
+        for message in request["messages"]
+        if message["role"] == "tool"
+        for part in message["content"]
+    ]
+    if wire_images == expected:
+        assert all(
+            media["Url"] is url
+            for media, url in zip(result["multi_modal_data"]["image_url"], wire_images)
+        )
+    image_id = recipe_tokenizer.backend_tokenizer.token_to_id("<｜deepseek_image｜>")
+    assert result["token_ids"].count(image_id) == len(expected)
+    assert request == original
+
+
 # ---------------------------------------------------------------------------
 # SglangStreamingPostProcessor: incremental detokenization
 # ---------------------------------------------------------------------------
@@ -5686,9 +5750,11 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             "D",
         ]
         assert [
-            choice["logprobs"]["content"][0]["logprob"]
-            if choice["logprobs"] is not None
-            else None
+            (
+                choice["logprobs"]["content"][0]["logprob"]
+                if choice["logprobs"] is not None
+                else None
+            )
             for choice in choices
         ] == [-0.1, -0.2, None, -0.4]
         assert choices[-1]["finish_reason"] == "stop"
@@ -6024,9 +6090,9 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                         "logprobs": True,
                         "stream": True,
                         "nvext": {
-                            "extra_fields": ["prompt_logprobs"]
-                            if include_prompt_logprobs
-                            else []
+                            "extra_fields": (
+                                ["prompt_logprobs"] if include_prompt_logprobs else []
+                            )
                         },
                         "stream_options": {"include_usage": True},
                     },
@@ -6294,9 +6360,11 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                 )
             ]
             return [
-                item["data"]
-                if item.get("_dynamo_annotated") and "data" in item
-                else item
+                (
+                    item["data"]
+                    if item.get("_dynamo_annotated") and "data" in item
+                    else item
+                )
                 for item in raw_items
             ]
 

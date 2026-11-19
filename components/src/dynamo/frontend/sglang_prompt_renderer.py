@@ -17,6 +17,7 @@ from sglang.srt.parser.jinja_template_utils import (
 
 from .sglang_deepseek import (
     RecipeRequestError,
+    RenderedDeepSeekPrompt,
     recipe_renderer,
     render_recipe_prompt,
     resolve_deepseek_spec,
@@ -39,7 +40,7 @@ class PromptRenderer(Protocol):
         messages: list[dict[str, Any]],
         template_tools: list[dict[str, Any]] | None,
         resolved_responses_template: str | None,
-    ) -> list[int]:
+    ) -> list[int] | RenderedDeepSeekPrompt:
         ...
 
 
@@ -315,7 +316,7 @@ class DeepSeekPromptRenderer:
         messages: list[dict[str, Any]],
         template_tools: list[dict[str, Any]] | None,
         resolved_responses_template: str | None,
-    ) -> list[int]:
+    ) -> list[int] | RenderedDeepSeekPrompt:
         if self._spec is None and not _should_use_deepseek_v4_encoding(
             request,
             tokenizer=self._tokenizer,
@@ -335,7 +336,7 @@ class DeepSeekPromptRenderer:
                 "--isolate-tool-call-markers is not supported with the "
                 "DeepSeek-V4 prompt encoder"
             )
-        return _render_deepseek_v4_prompt_token_ids(
+        return _render_deepseek_prompt(
             request,
             messages=messages,
             tokenizer=self._tokenizer,
@@ -386,7 +387,7 @@ class _NativePromptRenderer:
         messages: list[dict[str, Any]],
         template_tools: list[dict[str, Any]] | None,
         resolved_responses_template: str | None,
-    ) -> list[int]:
+    ) -> list[int] | RenderedDeepSeekPrompt:
         return self.select(request).render(
             request,
             messages=messages,
@@ -504,14 +505,14 @@ def _flatten_message_content(content: Any) -> Any:
     return " ".join(text_parts)
 
 
-def _render_deepseek_v4_prompt_token_ids(
+def _render_deepseek_prompt(
     request: dict[str, Any],
     *,
     messages: list[dict[str, Any]],
     tokenizer,
     template_tools: list[dict[str, Any]] | None,
     spec: str = "dsv4",
-) -> list[int]:
+) -> RenderedDeepSeekPrompt:
     """Use SGLang's recipe adapter or its legacy V4 checkpoint encoder."""
     if recipe_renderer is not None:
         try:
@@ -593,7 +594,7 @@ def _render_deepseek_v4_prompt_token_ids(
         thinking_mode=thinking_mode,
         reasoning_effort=reasoning_effort,
     )
-    return _normalize_prompt_token_ids(tokenizer.encode(prompt))
+    return RenderedDeepSeekPrompt(_normalize_prompt_token_ids(tokenizer.encode(prompt)))
 
 
 def _normalize_prompt_token_ids(prompt_token_ids: Any) -> list[int]:

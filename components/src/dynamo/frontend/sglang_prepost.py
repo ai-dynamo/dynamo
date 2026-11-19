@@ -28,6 +28,7 @@ from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
 from .responses_history import responses_history_recipients, responses_tools_request
+from .sglang_deepseek import RenderedDeepSeekPrompt
 from .sglang_prompt_renderer import (
     KimiK3PromptRenderer,
     PromptRenderer,
@@ -69,6 +70,7 @@ class SglangPreprocessResult:
     request: dict[str, Any]
     force_reasoning: bool = False
     named_zero_arg_tool: str | None = None
+    rendered_image_urls: list[str] | None = None
 
 
 # --- force_reasoning detection (mirrors sglang's template_manager) -------
@@ -554,11 +556,9 @@ def build_tool_call_guided_decoding(
     tool_choice_kind: ToolChoiceKind = (
         "required"
         if tool_choice == "required"
-        else "named"
-        if is_named_choice
-        else "auto"
-        if tool_choice == "auto"
-        else "other"
+        else (
+            "named" if is_named_choice else "auto" if tool_choice == "auto" else "other"
+        )
     )
     raw_tools = request.get("tools") or []
     attempt_structural_tag = should_attempt_structural_tag(
@@ -841,12 +841,18 @@ def preprocess_chat_request(
         filter_named_choice=not kimi_k3_bridge,
     )
 
-    prompt_token_ids = prompt_renderer.render(
+    rendered = prompt_renderer.render(
         request,
         messages=messages,
         template_tools=template_tools,
         resolved_responses_template=resolved_responses_template,
     )
+    if isinstance(rendered, RenderedDeepSeekPrompt):
+        prompt_token_ids = rendered.token_ids
+        rendered_image_urls = rendered.image_urls
+    else:
+        prompt_token_ids = rendered
+        rendered_image_urls = None
 
     response_format_guided_decoding = build_response_format_guided_decoding(request)
     tool_call_guided_decoding = build_tool_call_guided_decoding(
@@ -920,6 +926,7 @@ def preprocess_chat_request(
         reasoning_parser=reasoning_parser,
         guided_decoding=guided_decoding,
         request=request,
+        rendered_image_urls=rendered_image_urls,
         force_reasoning=force_reasoning,
         named_zero_arg_tool=(
             named_closed_zero_arg_tool(request)
