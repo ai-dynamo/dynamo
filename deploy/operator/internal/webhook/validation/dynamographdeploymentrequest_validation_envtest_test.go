@@ -688,6 +688,39 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
+			name:               "v1beta2 unchanged malformed marker cannot bypass override validation",
+			seedWithoutWebhook: true,
+			oldRequest:         beta2SchemaDGDRForAdmission(`{"dgdr_run":{"namespace":"other","settings":{"$null":false}}}`, nil),
+			request: beta2SchemaDGDRForAdmission(`{"dgdr_run":{"namespace":"other","settings":{"$null":false}}}`, func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				request.Labels = map[string]string{"updated": "true"}
+			}),
+			wantWebhook: []string{
+				`spec.aisim.inputOverrides: Invalid value: "<redacted>": spec.aisim.inputOverrides["dgdr_run"]["settings"]: $null must be the boolean true and the only object field`,
+			},
+		},
+		{
+			name:               "v1beta2 unchanged root marker remains invalid on metadata updates",
+			seedWithoutWebhook: true,
+			oldRequest:         beta2SchemaDGDRForAdmission(`{"$null":true}`, nil),
+			request: beta2SchemaDGDRForAdmission(`{"$null":true}`, func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				request.Labels = map[string]string{"updated": "true"}
+			}),
+			wantWebhook: []string{
+				`spec.aisim.inputOverrides: Invalid value: "<redacted>": spec.aisim.inputOverrides: $null is not allowed at the document root`,
+			},
+		},
+		{
+			name:               "v1beta2 unchanged array marker remains invalid on metadata updates",
+			seedWithoutWebhook: true,
+			oldRequest:         beta2SchemaDGDRForAdmission(`{"dgdr_run":{"settings":[{"$null":true}]}}`, nil),
+			request: beta2SchemaDGDRForAdmission(`{"dgdr_run":{"settings":[{"$null":true}]}}`, func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				request.Labels = map[string]string{"updated": "true"}
+			}),
+			wantWebhook: []string{
+				`spec.aisim.inputOverrides: Invalid value: "<redacted>": spec.aisim.inputOverrides["dgdr_run"]["settings"][0]: $null is not allowed inside arrays`,
+			},
+		},
+		{
 			name:               "v1beta2 an unrelated spec edit requires repair of old invalid input",
 			seedWithoutWebhook: true,
 			oldRequest:         beta2SchemaDGDRForAdmission(`{"optimizer":{"max_trials":-1}}`, nil),
@@ -801,6 +834,34 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 						t.Fatalf("stored %s sentinel = %v, found=%v err=%v", role, value, found, err)
 					}
 				}
+			},
+		},
+		{
+			name:    "v1beta2 rejects non-true null directives in opaque adapter input",
+			request: beta2SchemaDGDRForAdmission(`{"dgdr_run":{"settings":{"$null":false}}}`, nil),
+			wantWebhook: []string{
+				`spec.aisim.inputOverrides: Invalid value: "<redacted>": spec.aisim.inputOverrides["dgdr_run"]["settings"]: $null must be the boolean true and the only object field`,
+			},
+		},
+		{
+			name:    "v1beta2 rejects other fields alongside a null directive",
+			request: beta2SchemaDGDRForAdmission(`{"dgdr_run":{"settings":{"$null":true,"other":1}}}`, nil),
+			wantWebhook: []string{
+				`spec.aisim.inputOverrides: Invalid value: "<redacted>": spec.aisim.inputOverrides["dgdr_run"]["settings"]: $null must be the boolean true and the only object field`,
+			},
+		},
+		{
+			name:    "v1beta2 rejects a root null directive",
+			request: beta2SchemaDGDRForAdmission(`{"$null":true}`, nil),
+			wantWebhook: []string{
+				`spec.aisim.inputOverrides: Invalid value: "<redacted>": spec.aisim.inputOverrides: $null is not allowed at the document root`,
+			},
+		},
+		{
+			name:    "v1beta2 rejects null directives anywhere inside an array",
+			request: beta2SchemaDGDRForAdmission(`{"dgdr_run":{"settings":[{"nested":{"$null":true}}]}}`, nil),
+			wantWebhook: []string{
+				`spec.aisim.inputOverrides: Invalid value: "<redacted>": spec.aisim.inputOverrides["dgdr_run"]["settings"][0]["nested"]: $null is not allowed inside arrays`,
 			},
 		},
 		{

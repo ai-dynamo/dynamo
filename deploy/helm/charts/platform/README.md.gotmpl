@@ -127,6 +127,28 @@ upgrade, every Planner ServiceAccount can create DGDR Requests, read Runs and Ca
 get, create, update, or delete any Lease in its namespace, even when the old values are `false`.
 Enable experimental live retune per deployment with `retune.executor: dgdr` in the Planner config.
 
+#### CRD and admission breaking changes
+
+##### Reserved DGDR null-deletion directives
+
+**Affected:** Existing DGDR v1beta2 Requests and Runs whose
+`spec.aisim.inputOverrides` contains a `$null` key.
+
+**Change:** `$null` is reserved for the exact deletion marker `{$null: true}` as an
+object-field value outside arrays. Other values, additional keys in the marker
+object, a marker at the document root, and markers anywhere below an array are
+rejected. This syntax validation also applies to updates with unchanged specs,
+including metadata-only updates. Native JSON nulls retain their existing behavior.
+
+**Action:** Before upgrading, remove invalid `$null` uses from Requests or replace
+field deletions with native nulls submitted through `kubectl create` or
+`kubectl apply --server-side`. Finish or cancel active affected Runs, then delete
+every Run containing invalid directives while the old operator is installed,
+because Run specs are immutable. Adopt `{$null: true}` only after upgrading;
+operators predating this support do not interpret the alias.
+Valid stored override documents are not rewritten and serving workloads are not
+rolled by this change.
+
 #### Operator behavior breaking changes
 
 ##### LPX units-only deployment contract

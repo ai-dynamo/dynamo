@@ -40,14 +40,12 @@ def expand_nulls():
             {"engine": {"workers": {"prefill": None, "decode": None}}},
         ),
         (
-            '{"values":[{"$null":true},{"nested":{"$null":true}},null]}',
-            {"values": [None, {"nested": None}, None]},
+            '{"values":[null,{"nested":null},[1]]}',
+            {"values": [None, {"nested": None}, [1]]},
         ),
-        ('{"$null":true}', None),
-        ('{"value":{"$null":false}}', {"value": {"$null": False}}),
-        ('{"value":{"$null":1}}', {"value": {"$null": 1}}),
-        ('{"value":{"$null":"true"}}', {"value": {"$null": "true"}}),
-        ('{"value":{"$null":true,"other":1}}', {"value": {"$null": True, "other": 1}}),
+        ('{"values":{"$null":true}}', {"values": None}),
+        ("null", None),
+        ('{"value":{"other":true}}', {"value": {"other": True}}),
         (
             '{"optimizer":{"seed":9007199254740993}}',
             {"optimizer": {"seed": 9007199254740993}},
@@ -55,12 +53,10 @@ def expand_nulls():
     ],
     ids=[
         "worker-deletions",
-        "array-nulls",
-        "whole-document",
-        "false",
-        "number",
-        "string",
-        "extra-keys",
+        "native-array-nulls",
+        "whole-array-field",
+        "native-null-document",
+        "ordinary-object",
         "large-integer",
     ],
 )
@@ -68,4 +64,95 @@ def test_expand_input_override_nulls(expand_nulls, raw, want):
     document = json.loads(raw)
 
     assert expand_nulls(document) == want
+    assert document == json.loads(raw)
+
+
+@pytest.mark.parametrize(
+    ("raw", "path", "message"),
+    [
+        (
+            '{"value":{"$null":false}}',
+            '["value"]',
+            "$null must be the boolean true and the only object field",
+        ),
+        (
+            '{"value":{"$null":1}}',
+            '["value"]',
+            "$null must be the boolean true and the only object field",
+        ),
+        (
+            '{"value":{"$null":"true"}}',
+            '["value"]',
+            "$null must be the boolean true and the only object field",
+        ),
+        (
+            '{"value":{"$null":null}}',
+            '["value"]',
+            "$null must be the boolean true and the only object field",
+        ),
+        (
+            '{"value":{"$null":{}}}',
+            '["value"]',
+            "$null must be the boolean true and the only object field",
+        ),
+        (
+            '{"value":{"$null":[]}}',
+            '["value"]',
+            "$null must be the boolean true and the only object field",
+        ),
+        (
+            '{"value":{"$null":true,"other":1}}',
+            '["value"]',
+            "$null must be the boolean true and the only object field",
+        ),
+        ('{"$null":true}', "", "$null is not allowed at the document root"),
+        (
+            '{"values":[{"$null":true}]}',
+            '["values"][0]',
+            "$null is not allowed inside arrays",
+        ),
+        (
+            '{"values":[{"nested":{"$null":true}}]}',
+            '["values"][0]["nested"]',
+            "$null is not allowed inside arrays",
+        ),
+        (
+            '{"values":[[{"$null":true}]]}',
+            '["values"][0][0]',
+            "$null is not allowed inside arrays",
+        ),
+        (
+            '{"a.b":{"c/d":{"$null":false}}}',
+            '["a.b"]["c/d"]',
+            "$null must be the boolean true and the only object field",
+        ),
+        (
+            '{"z":{"$null":false},"a":{"$null":"true"}}',
+            '["a"]',
+            "$null must be the boolean true and the only object field",
+        ),
+    ],
+    ids=[
+        "false",
+        "number",
+        "string",
+        "null",
+        "object",
+        "list",
+        "extra-keys",
+        "root",
+        "array-element",
+        "object-in-array",
+        "nested-array",
+        "map-key-path",
+        "deterministic-error",
+    ],
+)
+def test_reject_invalid_null_sentinels(expand_nulls, raw, path, message):
+    document = json.loads(raw)
+
+    with pytest.raises(ValueError) as caught:
+        expand_nulls(document)
+
+    assert str(caught.value) == f"spec.aisim.inputOverrides{path}: {message}"
     assert document == json.loads(raw)
