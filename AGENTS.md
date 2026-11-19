@@ -46,7 +46,6 @@ to it — edit only the canonical copy.
 - `dynamo-kv-replay-parity` — byte-parity and paired performance campaigns for offline KV-aware replay
 - `dynamo-clone-hotpath-audit` — audit Rust hot-path `.clone()` calls
 - `dynamo-agent-harness` — drive Claude Code, Codex, or OpenCode sessions through a Dynamo endpoint over ACP
-- `update-dtr-base-version` — move the Dynamo Triton Runtime image to a new `tritonserver:<xx.yy>-py3` release
 
 **Pull requests, review, and CI:**
 
