@@ -651,6 +651,101 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
     color: var(--pst-color-text-muted);
 }
 
+/* Lifecycle badges. A badge belongs to a deployment target, so it renders in
+   a recipe page's target summary panel and in the definitions table on the
+   Recipes overview, never on a model card. scripts/gen_recipe_nav.py writes
+   the markup from the catalog's targets[].badge; the four keys here match its
+   BADGES. Functional is a dot and a label, not a pill, so the three badges
+   that claim more stand out. */
+.dynamo-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 18px;
+    padding: 2px 7px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    font-size: 10.5px;
+    font-weight: 700;
+    line-height: 1.2;
+    white-space: nowrap;
+    cursor: help;
+}
+
+.dynamo-badge-nvidia-certified {
+    border-color: var(--nv-color-green, #76b900);
+    background: var(--nv-color-green, #76b900);
+    color: #000000;
+}
+
+.dynamo-badge-optimized {
+    border-color: rgba(118, 185, 0, 0.7);
+    background: rgba(118, 185, 0, 0.14);
+    color: #3f6600;
+}
+
+.dark .dynamo-badge-optimized {
+    color: var(--nv-color-green, #76b900);
+}
+
+.dynamo-badge-functional {
+    padding: 2px 0;
+    color: var(--pst-color-text-muted);
+    font-weight: 600;
+}
+
+.dynamo-badge-functional::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--nv-color-green, #76b900);
+}
+
+.dynamo-badge-community {
+    border-color: rgba(127, 96, 200, 0.6);
+    background: rgba(127, 96, 200, 0.12);
+    color: #4a3190;
+}
+
+.dark .dynamo-badge-community {
+    color: #cdbdf2;
+}
+
+/* In a target summary panel every span is a stacked label-over-value cell;
+   put the pill back on one line, at its own width, under the Badge label. */
+.dynamo-target-picker-summary .dynamo-badge {
+    flex-direction: row;
+    align-self: flex-start;
+    gap: 4px;
+    font-size: 10.5px;
+    line-height: 1.2;
+}
+
+.dynamo-target-picker-summary .dynamo-badge-nvidia-certified {
+    color: #000000;
+}
+
+.dynamo-target-picker-summary .dynamo-badge-optimized {
+    color: #3f6600;
+}
+
+.dark .dynamo-target-picker-summary .dynamo-badge-optimized {
+    color: var(--nv-color-green, #76b900);
+}
+
+.dynamo-target-picker-summary .dynamo-badge-functional {
+    color: var(--pst-color-text-muted);
+}
+
+.dynamo-target-picker-summary .dynamo-badge-community {
+    color: #4a3190;
+}
+
+.dark .dynamo-target-picker-summary .dynamo-badge-community {
+    color: #cdbdf2;
+}
+
 .dynamo-model-summary {
     display: -webkit-box;
     margin: 8px 0;
