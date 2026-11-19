@@ -746,7 +746,7 @@ class SGLangUnmatchedKvTransferCancellationPayload(KvTransferPayload):
                     "bootstrap_host": self._env.get(
                         "SGLANG_BOOTSTRAP_HOST", "127.0.0.1"
                     ),
-                    "bootstrap_port": int(self._env["DYN_DISAGG_BOOTSTRAP_PORT"]),
+                    "bootstrap_port": int(self._env["DYN_ENGINE_HTTP_PORT1"]),
                     "bootstrap_room": random.getrandbits(63),
                 },
             }
