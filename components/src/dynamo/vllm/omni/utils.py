@@ -28,7 +28,6 @@ SIZE_LABEL_LIMIT = 32
 def resolve_stage_configs(
     model: str, *, trust_remote_code: bool, deploy_config_path: str | None
 ) -> tuple[str | None, list[Any]]:
-    """Resolve stages with vLLM-Omni's config resolver."""
     resolved = omni_config.resolve_omni_config(
         model,
         trust_remote_code=trust_remote_code,
