@@ -46,10 +46,6 @@ class DiffusionConfig:
     # Model config
     model_path: str = DEFAULT_VIDEO_MODEL_PATH
     served_model_name: Optional[str] = None
-    # torch_dtype for model loading. Options: "bfloat16", "float16", "float32"
-    # bfloat16 is recommended for Ampere+ GPUs (A100, H100, etc.)
-    # float16 can be used on older GPUs (V100, etc.)
-    torch_dtype: str = "bfloat16"
     # HuggingFace Hub revision (branch, tag, or commit SHA) for model download.
     revision: Optional[str] = None
 
