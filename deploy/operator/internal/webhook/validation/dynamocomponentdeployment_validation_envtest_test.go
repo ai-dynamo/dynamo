@@ -79,7 +79,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 	tests := []dcdAdmissionTestCase{
 		{name: "standalone DCD rejects Engine Group creation through shared component validation", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Spec.EngineGroup = &nvidiacomv1beta1.ComponentEngineGroupSpec{InitialSize: 2}
-		}), wantWebhookErrs: []string{"spec.engineGroup: Forbidden: DGD-driven Engine Group creation is not implemented; use a standalone DynamoGraphDeploymentEngineGroup for the gated proof of concept"}},
+		}), wantWebhookErrs: []string{"spec.engineGroup: Forbidden: Engine Groups require the DGD Grove workload pathway"}},
 		{name: "DGD-owned vLLM multi-GPU automatic candidate is admitted without checkpointRef", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, "vllm")
 			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}

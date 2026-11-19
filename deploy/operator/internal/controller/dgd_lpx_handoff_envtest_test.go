@@ -49,6 +49,7 @@ func TestSetupDynamoGraphDeploymentWithoutLPXCRDs(t *testing.T) {
 			filepath.Join("..", "..", "config", "crd", "bases", "nvidia.com_dynamographdeployments.yaml"),
 			filepath.Join("..", "..", "config", "crd", "bases", "nvidia.com_dynamocomponentdeployments.yaml"),
 			filepath.Join("..", "..", "config", "crd", "bases", "nvidia.com_dynamographdeploymentscalingadapters.yaml"),
+			filepath.Join("..", "..", "config", "crd", "bases", "nvidia.com_dynamographdeploymentenginegroups.yaml"),
 		},
 	}).RunT(t)
 	err := env.Client().List(t.Context(), &v1alpha1.LPXGraphDeploymentList{})

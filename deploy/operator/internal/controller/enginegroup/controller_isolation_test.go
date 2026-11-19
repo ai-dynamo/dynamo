@@ -31,7 +31,7 @@ func TestEngineGroupSlowSubmissionDoesNotStarveAnotherWorld(t *testing.T) {
 	slow.ambiguousApply = false
 	provider := isolationRuntimeProvider{slow: slow, fast: newEngineGroupControllerTestBackend(1), blocked: blocked}
 	env.StartManager(func(mgr ctrl.Manager) error {
-		return (&Reconciler{Client: mgr.GetClient(), RuntimeProvider: provider}).SetupWithManager(mgr)
+		return (&Reconciler{Client: mgr.GetClient(), RuntimeProvider: provider}).SetupWithManager(mgr, false)
 	})
 	// Unblock before the manager cleanup waits for outstanding reconciles.
 	t.Cleanup(func() { close(blocked.release) })

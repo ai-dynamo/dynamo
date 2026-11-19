@@ -454,14 +454,17 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			component,
 			componentPath,
 			dynamoComponentDeploymentSharedSpecValidationOptions{
+				backendFramework:                  spec.BackendFramework,
+				parentEnv:                         spec.Env,
+				hasRootOverride:                   spec.ProviderOverride != nil,
 				grovePathway:                      opts.grovePathway,
 				validateInferencePoolAvailability: validateInferencePoolAvailability,
 				providerOverridesSupported:        true,
 				workloadProvider:                  opts.workloadProvider,
-				hasRootOverride:                   spec.ProviderOverride != nil,
 				oldComponent:                      opts.oldComponents[component.ComponentName],
 				groveUpdateStrategy:               opts.groveUpdateStrategy,
 				groveStrategyChanged:              opts.oldGroveUpdateStrategy != opts.groveUpdateStrategy,
+				engineGroupsSupported:             opts.grovePathway,
 			},
 		)...)
 	}
@@ -915,7 +918,6 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 		if !exists {
 			continue
 		}
-
 		// Until coordinated world rollout exists, preserve the declarative creation template.
 		if oldComponent.EngineGroup != nil || newComponent.EngineGroup != nil {
 			if !apiequality.Semantic.DeepEqual(newComponent, oldComponent) {
