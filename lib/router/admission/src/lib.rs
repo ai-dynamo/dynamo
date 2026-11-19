@@ -30,7 +30,7 @@ pub use classifier::{
     RequestClassifier, RequestClassifierContext, RequestClassifierRuntime, RequestLifecycle,
     RequestProgress, RequestProgressUpdater, WorkerCacheView, WorkerLoadView, WorkerView,
 };
-pub use placement::SessionLane;
+pub use placement::LaneKey;
 pub use profile::{
     AdmissionConfigError, PolicyClassConfig, PolicyProfile, RouterQueuePolicy,
     SYNTHETIC_POLICY_CLASS, UnknownPolicyClassError,

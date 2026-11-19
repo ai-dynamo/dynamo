@@ -7,7 +7,7 @@
 //! host contract.
 
 pub use crate::classifier::{AbortCause, RequestLifecycle, RequestProgress, WorkerView};
-pub use crate::placement::SessionLane;
+pub use crate::placement::LaneKey;
 pub use crate::profile::{PolicyClassConfig, PolicyProfile, RouterQueuePolicy};
 pub use crate::queue::{
     BlockReason, LaneCheck, PolicyQueue, QueueLane, QueueMetadata, QueueRejection, QueueSnapshot,

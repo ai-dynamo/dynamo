@@ -296,13 +296,31 @@ Use a class name from the [router policy configuration](configuration-and-tuning
 > [!NOTE]
 > The dispatch gate is experimental. `DispatchGate`, `DispatchDecision`, and `DispatchHead` may change in a minor release while ThunderAgent is their only in-tree user. Classifying requests without a gate is stable.
 
-Implement `DispatchGate` and return it from `dispatch_gate`. Dynamo queues every request at once and asks the gate about each queue head before it dispatches:
+Implement `DispatchGate` and return it from `dispatch_gate`. In `classify`, give every request the gate may hold a lane key, so a hold blocks only that lane. Dynamo queues every request at once and asks the gate about each queue head before it dispatches:
 
 ```rust
 use dynamo_kv_router::plugins::request_classifier::{
     DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
 };
 use tokio::time::Instant;
+
+impl RequestClassifier for SessionClassifier {
+    fn classify(
+        &mut self,
+        mut request: ClassifyRequest,
+        _workers: &dyn WorkerView,
+    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        // One lane per session: a held turn waits behind its own session only.
+        if let Some(session) = request.session_context().map(|s| s.session_id().to_owned()) {
+            request.set_lane_key(&session);
+        }
+        Ok(request)
+    }
+
+    fn dispatch_gate(&self) -> Option<Arc<dyn DispatchGate>> {
+        Some(Arc::clone(&self.gate) as Arc<dyn DispatchGate>)
+    }
+}
 
 impl DispatchGate for SessionGate {
     fn check(&self, head: &DispatchHead<'_>) -> DispatchDecision {
@@ -329,7 +347,7 @@ impl DispatchGate for SessionGate {
 - `check` runs inside the router's dispatch loop and may be asked more than once about the same head: keep it a read, with no waiting.
 - `Hold` keeps the request queued. Dynamo asks again when the gate calls `notify` on the handle it received in `attach`, when the worker set changes, and no later than `until`. A worker freeing capacity does not re-ask a held request, so call `notify` when what the gate waits for changes. An `until` that has already passed sets no timer, so return `Go` once a hold should end rather than a past `until`. A held request still spends its policy class's waiting budget.
 - `Go` lets the request through Dynamo's own capacity checks; `target` becomes its soft worker preference unless it carries a hard pin. `dispatched` runs once when Dynamo takes the request out of the queue, before selection. Admission can still fail, and the request's lifecycle then ends with `Aborted`.
-- A request that has a session context waits in a lane of its own session, so a held session never blocks other sessions in its class. A held request without a session blocks the class's shared lane.
+- Lanes are the classifier's to assign: call `set_lane_key` in `classify`, with the session id, say, and requests that share a key wait in one lane of their own. Key every request the gate may hold: a held request without a lane key sits at the front of its class's shared queue and blocks the requests behind it. Without a key, a request waits in its pinned worker's lane or the shared queue, exactly as it does with no classifier installed.
 - A class with a zero queue limit never queues, so Dynamo admits its requests without asking the gate. The classifier learns of them from `Sent`. Do not give gated traffic such a class if every request must pass the gate.
 
 Implement `on_event` when the classifier tracks active requests or session capacity. For example, use completion or abort events to release capacity and wake waiting requests:

@@ -3219,6 +3219,18 @@ struct PausingClassifier {
 }
 
 impl RequestClassifier for PausingClassifier {
+    fn classify(
+        &mut self,
+        mut request: ClassifyRequest,
+        _workers: &dyn WorkerView,
+    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+        // Held heads must wait in their own lanes, as ThunderAgent keys them.
+        if let Some(session) = request.session_context().map(|s| s.session_id().to_owned()) {
+            request.set_lane_key(&session);
+        }
+        Ok(request)
+    }
+
     fn dispatch_gate(&self) -> Option<Arc<dyn DispatchGate>> {
         Some(Arc::clone(&self.gate) as Arc<dyn DispatchGate>)
     }

@@ -8,20 +8,20 @@ use tokio::time::Instant;
 
 use crate::scheduling::policy_config::{RouterPolicyConfig, RouterQueuePolicy};
 use dynamo_admission::{
-    BlockReason, LaneCheck, PolicyClassConfig, PolicyProfile, PolicyQueue, PolicyQueueEntry,
-    PolicyQueueStats, QueueLane, QueueLimitKind, QueueMetadata, QueueSnapshot, RecheckScope,
-    SessionLane,
+    BlockReason, LaneCheck, LaneKey, PolicyClassConfig, PolicyProfile, PolicyQueue,
+    PolicyQueueEntry, PolicyQueueStats, QueueLane, QueueLimitKind, QueueMetadata, QueueSnapshot,
+    RecheckScope,
 };
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_session_affinity::WorkerAffinityTarget;
 
 /// A session lane named after a number, where a test wants several distinct lanes.
 fn lane_of(id: u64) -> QueueLane {
-    QueueLane::Session(lane_key(id))
+    QueueLane::Keyed(lane_key(id))
 }
 
-fn lane_key(id: u64) -> SessionLane {
-    SessionLane::new(&format!("lane-{id}"))
+fn lane_key(id: u64) -> LaneKey {
+    LaneKey::new(&format!("lane-{id}"))
 }
 
 fn profile(yaml: &str) -> PolicyProfile {
@@ -43,6 +43,7 @@ fn no_due_metadata(
         due_at: None,
         class_due_at: None,
         arrival_offset_secs,
+        lane_key: None,
     }
 }
 
@@ -119,6 +120,7 @@ fn earliest_due_request_precedes_fcfs_arrival_within_a_class() {
                 due_at: Some(now + std::time::Duration::from_secs(20)),
                 class_due_at: None,
                 arrival_offset_secs: 0.0,
+                lane_key: None,
             },
             1,
             0.0,
@@ -135,6 +137,7 @@ fn earliest_due_request_precedes_fcfs_arrival_within_a_class() {
                 due_at: Some(now + std::time::Duration::from_secs(10)),
                 class_due_at: None,
                 arrival_offset_secs: 1.0,
+                lane_key: None,
             },
             1,
             0.0,
@@ -177,6 +180,7 @@ fn due_time_order_preserves_sub_millisecond_precision() {
                 due_at: Some(due_at + std::time::Duration::from_nanos(1)),
                 class_due_at: None,
                 arrival_offset_secs: 0.0,
+                lane_key: None,
             },
             1,
             0.0,
@@ -193,6 +197,7 @@ fn due_time_order_preserves_sub_millisecond_precision() {
                 due_at: Some(due_at),
                 class_due_at: None,
                 arrival_offset_secs: 1.0,
+                lane_key: None,
             },
             1,
             0.0,
@@ -230,6 +235,7 @@ fn deadline_count_restores_the_no_deadline_fast_path_after_removal() {
                 due_at: Some(due_at),
                 class_due_at: None,
                 arrival_offset_secs: 1.0,
+                lane_key: None,
             },
             2,
             0.0,
@@ -259,6 +265,7 @@ fn deadline_timer_removes_an_expired_blocked_worker_lane() {
                 due_at: Some(due_at),
                 class_due_at: None,
                 arrival_offset_secs: 0.0,
+                lane_key: None,
             },
             1,
             0.0,
@@ -302,6 +309,7 @@ fn strict_priority_precedes_earlier_due_request_within_a_class() {
                 due_at: Some(now + std::time::Duration::from_secs(20)),
                 class_due_at: None,
                 arrival_offset_secs: 0.0,
+                lane_key: None,
             },
             1,
             0.0,
@@ -318,6 +326,7 @@ fn strict_priority_precedes_earlier_due_request_within_a_class() {
                 due_at: Some(now + std::time::Duration::from_secs(10)),
                 class_due_at: None,
                 arrival_offset_secs: 1.0,
+                lane_key: None,
             },
             1,
             0.0,
@@ -359,6 +368,7 @@ fn enqueue_due(
                 due_at,
                 class_due_at,
                 arrival_offset_secs: 0.0,
+                lane_key: None,
             },
             2,
             0.0,
@@ -401,6 +411,7 @@ fn edf_orders_by_due_time_then_enqueue_order_and_ignores_priority_modifiers() {
                     due_at,
                     class_due_at,
                     arrival_offset_secs: 0.0,
+                    lane_key: None,
                 },
                 1,
                 priority_jump,
@@ -805,6 +816,7 @@ fn fcfs_and_wspt_do_not_order_by_class_due_times() {
         due_at,
         class_due_at,
         arrival_offset_secs,
+        lane_key: None,
     };
 
     // FCFS keeps arrival order although the later arrival's class due time is earlier.
@@ -873,6 +885,7 @@ fn timed(cost: usize, due_at: Option<Instant>, class_due_at: Option<Instant>) ->
         due_at,
         class_due_at,
         arrival_offset_secs: 0.0,
+        lane_key: None,
     }
 }
 
@@ -1020,7 +1033,7 @@ fn session_lane_holds_only_its_session_until_rechecked() {
     let mut queue = PolicyQueue::with_class_budget_expiry(&controlled_delay_profile());
     let now = Instant::now();
     let at = |millis| Some(now + std::time::Duration::from_millis(millis));
-    let session = |id: &str| QueueLane::Session(SessionLane::new(id));
+    let session = |id: &str| QueueLane::Keyed(LaneKey::new(id));
     for (payload, millis, placement) in [
         ("a-10", 10, session("a")),
         ("a-40", 40, session("a")),
@@ -1037,7 +1050,7 @@ fn session_lane_holds_only_its_session_until_rechecked() {
     assert_eq!(queue.pop_next(hold_a).unwrap().into_payload(), "b-20");
     assert!(
         queue
-            .class_lane_block_reason(0, QueueLane::Session(SessionLane::new("a")))
+            .class_lane_block_reason(0, QueueLane::Keyed(LaneKey::new("a")))
             .is_some()
     );
     assert_eq!(queue.pop_next(hold_a).unwrap().into_payload(), "shared-30");

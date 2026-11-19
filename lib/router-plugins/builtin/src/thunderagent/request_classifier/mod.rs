@@ -5,7 +5,7 @@
 //!
 //! The classifier records each session request and returns at once; the gate decides, head by
 //! head, whether a queued turn may go and where; lifecycle events settle the ledger. The router
-//! queue keeps the waiting turns, in per-session lanes, so a held session blocks only itself.
+//! queue keeps the waiting turns, in per-session lanes it keys by session id, so a held session blocks only itself.
 
 mod capacity;
 mod scheduler;
@@ -182,7 +182,7 @@ impl ThunderAgentClassifier {
 impl RequestClassifier for ThunderAgentClassifier {
     fn classify(
         &mut self,
-        request: ClassifyRequest,
+        mut request: ClassifyRequest,
         _workers: &dyn WorkerView,
     ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         let Some(session) = request.session_context() else {
@@ -191,9 +191,10 @@ impl RequestClassifier for ThunderAgentClassifier {
         let Some(request_id) = request.request_id().map(str::to_owned) else {
             return Err(Box::new(ThunderAgentError::MissingRequestId) as Box<ClassifierError>);
         };
+        let session_id = session.session_id().to_owned();
         let registration = RequestRegistration::new(
             request_id,
-            session.session_id().to_owned(),
+            session_id.clone(),
             request.isl_tokens(),
             request.progress().clone(),
             session.session_final() == Some(true),
@@ -204,6 +205,9 @@ impl RequestClassifier for ThunderAgentClassifier {
             .lock()
             .register(registration, Instant::now())
             .map_err(|error| Box::new(error) as Box<ClassifierError>)?;
+        // A session's turns wait in their own lane, so a turn the gate holds, or a session
+        // bound to a full worker, blocks only that session.
+        request.set_lane_key(&session_id);
         Ok(request)
     }
 

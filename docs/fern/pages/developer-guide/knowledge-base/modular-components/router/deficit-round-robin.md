@@ -8,12 +8,12 @@ subtitle: Weighted arbitration across router policy classes
 The router uses a Deficit Round Robin (DRR) variant that is work-conserving
 across dispatchable policy classes. DRR determines which class can
 dispatch next; the class's queue policy, EDF by default for configured classes,
-determines request order within that class's shared lane and its per-session lanes.
+determines request order within that class's shared lane and its keyed and worker lanes.
 
 This separation provides:
 
 - Weighted service across policy classes with different request sizes.
-- Independent within-class ordering and per-session lanes, plus strict-priority
+- Independent within-class ordering and per-lane heads, plus strict-priority
   tiers in classes whose queue policy is not EDF.
 - Progress for requests whose token cost is much larger than their class quantum.
 - Bounded arbitration work that does not loop once per token or DRR round.
@@ -41,8 +41,8 @@ amounts of credit.
 
 The scheduler maintains the following state for each class:
 
-- A shared pending heap for requests without a session context, worker pin, or exclusive affinity target.
-- One pending heap per session with queued requests, and one per pinned or exclusively targeted worker for sessionless requests, ordered by the same queue policy.
+- A shared pending heap for requests without a classifier lane key, worker pin, or exclusive affinity target.
+- One pending heap per classifier lane key with queued requests (ThunderAgent keys by session), and one per pinned or exclusively targeted worker for requests without a key, ordered by the same queue policy.
 - A deficit containing earned but unspent credit.
 - A quantum controlling how quickly the deficit grows.
 
@@ -54,7 +54,7 @@ the configured class order from becoming a permanent preference.
 
 For each class in cursor order, the scheduler selects a class candidate by
 comparing the dispatchable shared-heap head with the dispatchable head of each
-session lane. It then applies DRR to that candidate:
+lane. It then applies DRR to that candidate:
 
 1. If the class is empty, reset its deficit to zero.
 2. If none of its lane heads can currently dispatch, retain its deficit but add no credit.
@@ -146,9 +146,9 @@ pins, worker allow-lists, DP-rank bounds, taints, and overload filtering.
 Head-of-line blocking is lane-local. The shared heap does not search past a
 blocked shared head. A sessionless pinned request whose worker is full waits in
 that worker's lane and holds only the requests pinned to the same worker. A
-session lane does not search past its own blocked head, and a blocked session
-lane does not prevent another session lane, or a dispatchable shared head, from
-competing for the class. The class's queue policy is not bypassed within any
+keyed lane does not search past its own blocked head, and a blocked lane does
+not prevent another lane, or a dispatchable shared head, from competing for the
+class. The class's queue policy is not bypassed within any
 individual lane.
 
 New arrivals also join an existing backlog in their resolved class instead of
@@ -163,9 +163,9 @@ One arbitration call performs:
 2. One linear calculation for bulk virtual rounds when required.
 3. At most one final ring scan.
 
-For `C` configured classes and `L` session lane heads that must be
+For `C` configured classes and `L` lane heads that must be
 inspected or rechecked, arbitration is `O(C + L log L)` in the worst case,
-regardless of request cost or quantum. Candidate session heads are tree
+regardless of request cost or quantum. Candidate lane heads are tree
 indexed, so ordinary selections do not need to rescan every ready lane; a
 recheck visits the blocked lanes and pays the tree
 update factor. The queue actor calls arbitration repeatedly while work remains

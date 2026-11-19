@@ -14,6 +14,7 @@ pub use runtime::{ClassificationError, RequestClassifierRuntime, RequestLifecycl
 pub(crate) use view::NoWorkers;
 pub use view::{WorkerCacheView, WorkerLoadView, WorkerView};
 
+use crate::placement::LaneKey;
 use std::error::Error;
 use std::sync::Arc;
 
@@ -48,6 +49,8 @@ pub struct ClassifyRequest {
 #[derive(Clone, Debug, Default)]
 pub struct ClassificationOverrides {
     pub policy_class: Option<String>,
+    /// The lane the request waits in within its class, when the classifier chose one.
+    pub lane_key: Option<LaneKey>,
     pub due_at: Option<Instant>,
     pub scheduling_cost_tokens: Option<usize>,
     pub worker_selection_target: Option<Option<WorkerAffinityTarget>>,
@@ -232,6 +235,21 @@ impl ClassifyRequest {
         self.session_context.as_ref()
     }
 
+    /// Queue the request in the lane keyed by `key` within its class, rather than in the
+    /// class's shared heap or its worker's lane. Requests that share a key share a lane: one
+    /// order, and a head that cannot dispatch holds only that lane. A classifier that returns a
+    /// dispatch gate should key every request the gate may hold, by its session id, say, or a
+    /// held head in the shared heap holds the whole class behind it. The key is hashed with a
+    /// per-process seed, so a client cannot pick a value that lands in another's lane.
+    pub fn set_lane_key(&mut self, key: &str) {
+        self.overrides.lane_key = Some(LaneKey::new(key));
+    }
+
+    /// The lane key set by [`Self::set_lane_key`], if any.
+    pub fn lane_key(&self) -> Option<LaneKey> {
+        self.overrides.lane_key
+    }
+
     /// Exact worker/rank required by the caller. A classifier's soft selection
     /// target cannot override this pin.
     pub fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
@@ -334,9 +352,9 @@ pub trait RequestClassifier: Send + 'static {
     async fn on_event(&mut self, _event: ClassifyEvent) {}
 
     /// The classifier's dispatch gate, read once at install. With a gate installed, the router
-    /// asks it about each queue head before dispatch and keeps a held head queued. A request
-    /// with a session context always waits in its session's lane, gate or not, so a hold blocks
-    /// only that session; a held lane is asked again when the gate's recheck handle fires or its
+    /// asks it about each queue head before dispatch and keeps a held head queued. Key the lane
+    /// of every request the gate may hold ([`ClassifyRequest::set_lane_key`]), so a hold blocks
+    /// only that lane; a held lane is asked again when the gate's recheck handle fires or its
     /// hold deadline passes, not on every worker free. `None` dispatches every head the host's
     /// own capacity checks allow. Experimental, as [`DispatchGate`] is.
     fn dispatch_gate(&self) -> Option<Arc<dyn DispatchGate>> {

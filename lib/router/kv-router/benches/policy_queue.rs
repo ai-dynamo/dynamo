@@ -24,13 +24,13 @@ use criterion::{
 };
 use dynamo_admission::RouterQueuePolicy;
 use dynamo_admission::{
-    PolicyProfile, PolicyQueue, QueueLane, QueueMetadata, QueueSnapshot, SessionLane,
+    LaneKey, PolicyProfile, PolicyQueue, QueueLane, QueueMetadata, QueueSnapshot,
 };
 use dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig;
 use tokio::time::Instant;
 
-fn session_lane(lane: usize) -> SessionLane {
-    SessionLane::new(&format!("session-{lane}"))
+fn lane_key(lane: usize) -> LaneKey {
+    LaneKey::new(&format!("session-{lane}"))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -59,6 +59,7 @@ fn no_due_metadata(
         due_at: None,
         class_due_at: None,
         arrival_offset_secs,
+        lane_key: None,
     }
 }
 
@@ -123,7 +124,7 @@ fn edf_queue(
         let (lane, placement) = match lanes {
             Some(lanes) => {
                 let lane = request_index % lanes;
-                (lane, QueueLane::Session(session_lane(lane)))
+                (lane, QueueLane::Keyed(lane_key(lane)))
             }
             None => (0, QueueLane::Shared),
         };
@@ -137,6 +138,7 @@ fn edf_queue(
                     due_at: None,
                     class_due_at,
                     arrival_offset_secs: request_index as f64,
+                    lane_key: None,
                 },
                 lanes.unwrap_or(1),
                 0.0,
@@ -165,7 +167,7 @@ fn exact_queue(
                 lanes,
                 0.0,
                 0,
-                QueueLane::Session(session_lane(lane)),
+                QueueLane::Keyed(lane_key(lane)),
                 BenchRequest {
                     dispatchable: is_dispatchable(lane),
                 },

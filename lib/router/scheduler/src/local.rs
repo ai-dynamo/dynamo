@@ -1480,9 +1480,38 @@ mod tests {
         }
     }
 
+    /// Keys each request's lane by its session id, as ThunderAgent does.
+    fn key_by_session(mut request: ClassifyRequest) -> ClassifyRequest {
+        if let Some(session) = request.session_context().map(|s| s.session_id().to_owned()) {
+            request.set_lane_key(&session);
+        }
+        request
+    }
+
+    /// A classifier that only keys lanes by session, for lane tests without a gate.
+    struct SessionLaneClassifier;
+
+    impl RequestClassifier for SessionLaneClassifier {
+        fn classify(
+            &mut self,
+            request: ClassifyRequest,
+            _workers: &dyn WorkerView,
+        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+            Ok(key_by_session(request))
+        }
+    }
+
     struct GateClassifier(Arc<TestGate>);
 
     impl RequestClassifier for GateClassifier {
+        fn classify(
+            &mut self,
+            request: ClassifyRequest,
+            _workers: &dyn WorkerView,
+        ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+            Ok(key_by_session(request))
+        }
+
         fn dispatch_gate(&self) -> Option<Arc<dyn DispatchGate>> {
             Some(Arc::clone(&self.0) as Arc<dyn DispatchGate>)
         }
@@ -1551,9 +1580,19 @@ mod tests {
         >,
         request: ScheduleRequest,
     ) -> Admission {
+        // A request with a lifecycle is classified, so the installed classifier keys its
+        // lane; the lifecycle lives as long as the admission and ends when it resolves.
+        let lifecycle = match &request.mode {
+            ScheduleMode::TrackedWithLifecycle { request_id } => scheduler
+                .begin_request_lifecycle(request_id)
+                .expect("lifecycle begins"),
+            _ => None,
+        };
         let owned = Arc::clone(scheduler);
-        let mut admission: Admission =
-            Box::pin(async move { owned.schedule_request_admitted(request).await });
+        let mut admission: Admission = Box::pin(async move {
+            let _lifecycle = lifecycle;
+            owned.schedule_request_admitted(request).await
+        });
         assert!(poll_once(admission.as_mut()).is_pending());
         scheduler.admission_barrier().await.unwrap();
         admission
@@ -2838,6 +2877,10 @@ mod tests {
         ]);
         let (scheduler, _slots, _cfg_tx, cancel_token) =
             make_scheduler(workers, Some(0.5), true, None);
+        assert!(
+            scheduler
+                .install_request_classifier(Box::new(SessionLaneClassifier), cancel_token.clone())
+        );
 
         let mut fill_a = request(ScheduleMode::Tracked {
             request_id: "fill-a".to_string(),
@@ -2869,6 +2912,7 @@ mod tests {
         let tainted = {
             let scheduler = Arc::clone(&scheduler);
             tokio::spawn(async move {
+                let _lifecycle = scheduler.begin_request_lifecycle("a1").unwrap();
                 let mut request = session_request("a1", "a");
                 request.routing_constraints.required_taints = zone_a;
                 scheduler.schedule_request(request).await
@@ -2877,9 +2921,10 @@ mod tests {
         wait_for_pending_count(&scheduler, 1).await;
         let plain = {
             let scheduler = Arc::clone(&scheduler);
-            tokio::spawn(
-                async move { scheduler.schedule_request(session_request("b1", "b")).await },
-            )
+            tokio::spawn(async move {
+                let _lifecycle = scheduler.begin_request_lifecycle("b1").unwrap();
+                scheduler.schedule_request(session_request("b1", "b")).await
+            })
         };
         wait_for_pending_count(&scheduler, 2).await;
 

@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use dynamo_admission::host::{
-    BlockReason, LaneCheck, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueLane,
-    QueueMetadata, QueueSnapshot, RecheckScope, SessionLane,
+    BlockReason, LaneCheck, LaneKey, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueLane,
+    QueueMetadata, QueueSnapshot, RecheckScope,
 };
 use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
 use dynamo_kv_hashing::LocalBlockHash;
@@ -1156,6 +1156,7 @@ impl OfflineReplayRouter {
                 // from scheduler ingress, after any affinity wait.
                 class_due_at: class.slo_ttft_due_at(decay_now),
                 arrival_offset_secs: now_ms.max(0.0) / 1000.0,
+                lane_key: None,
             };
             let priority_jump = pending.priority_jump;
             let strict_priority = pending.strict_priority;
@@ -1163,7 +1164,7 @@ impl OfflineReplayRouter {
             // session bound to a busy rank holds only itself; a sessionless request bound to a
             // rank by its affinity hold waits in that rank's lane.
             let lane = match pending.session_id.as_deref() {
-                Some(session) => QueueLane::Session(SessionLane::new(session)),
+                Some(session) => QueueLane::Keyed(LaneKey::new(session)),
                 None => pending
                     .affinity_hold
                     .as_ref()

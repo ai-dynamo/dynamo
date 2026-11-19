@@ -39,7 +39,7 @@ use crate::types::RejectThresholdsProvider;
 use dynamo_admission::QueueLane;
 use dynamo_admission::{
     BlockReason, ClassificationOverrides, ClassifyRequest, DispatchDecision, DispatchGate,
-    DispatchHead, DispatchRecheck, LaneCheck, RecheckScope, SessionLane,
+    DispatchHead, DispatchRecheck, LaneCheck, LaneKey, RecheckScope,
 };
 use dynamo_admission::{PolicyClassConfig, PolicyProfile};
 use dynamo_admission::{PolicyQueue, QueueMetadata, QueueSnapshot};
@@ -353,12 +353,13 @@ impl QueueEligibility {
         )
     }
 
-    fn lane(&self, request: &SchedulingRequest) -> QueueLane {
-        // A session's requests wait in their own lane, pinned or not, so a head the dispatch
-        // gate holds, or a session bound to a full worker, blocks only that session. Only a
-        // sessionless request takes a worker lane.
-        if let Some(session) = &request.session_context {
-            QueueLane::Session(SessionLane::new(session.session_id()))
+    fn lane(&self, request: &SchedulingRequest, lane_key: Option<LaneKey>) -> QueueLane {
+        // The classifier's lane key wins, pinned or not: ThunderAgent keys by session, so a head
+        // its gate holds, or a session bound to a full worker, blocks only that session.
+        // Without a key the request takes its pinned or exclusively targeted worker's lane, or
+        // the shared heap.
+        if let Some(key) = lane_key {
+            QueueLane::Keyed(key)
         } else if let Some(worker) = request.pinned_worker {
             QueueLane::Exact(worker)
         } else if self.exclusive
@@ -1557,6 +1558,31 @@ impl<
         })
     }
 
+    /// Enqueue a request in the lane keyed by its session id, as a classifier such as
+    /// ThunderAgent keys it, for lane tests.
+    #[cfg(test)]
+    pub(crate) async fn enqueue_keyed_by_session_for_test(&self, request: SchedulingRequest) {
+        let mut queue_metadata = self
+            .default_queue_metadata(&request, Instant::now())
+            .expect("test request names a configured policy class");
+        queue_metadata.lane_key = tests::keyed_by_session(&request);
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let command = AdmissionCommand::Enqueue {
+            request,
+            attempt_tx: None,
+            block_hashes: None,
+            prepared: None,
+            queue_metadata,
+            lease: None,
+            ack_tx,
+        };
+        self.admission_tx
+            .send(command)
+            .await
+            .expect("scheduler queue actor gone");
+        let _ = ack_rx.await;
+    }
+
     /// Enqueue a request with `due_at` for actor-expiry tests.
     #[cfg(test)]
     pub(crate) async fn enqueue_with_due_at_for_test(
@@ -1652,6 +1678,8 @@ impl<
             arrival_offset_secs: ingress_at
                 .saturating_duration_since(self.start_time)
                 .as_secs_f64(),
+            // The classifier's lane key, applied by `validate_classification`.
+            lane_key: None,
         }
     }
 
@@ -1663,6 +1691,7 @@ impl<
     ) -> Result<QueueMetadata, KvSchedulerError> {
         let ClassificationOverrides {
             policy_class,
+            lane_key,
             due_at,
             scheduling_cost_tokens,
             worker_selection_target,
@@ -1709,6 +1738,7 @@ impl<
             metadata.snapshot.scheduling_cost_tokens = cost;
         }
         metadata.due_at = due_at;
+        metadata.lane_key = lane_key;
         Ok(metadata)
     }
 
@@ -2186,7 +2216,7 @@ impl<
             lifecycle_transfer,
             ..
         } = context;
-        let placement = self.eligibility.lane(&request);
+        let placement = self.eligibility.lane(&request, queue_metadata.lane_key);
         let queued = QueuedRequest {
             request,
             attempt_tx,
@@ -2239,7 +2269,9 @@ impl<
         let mut exposed = self.expire_due_classes(now);
         let priority_jump = queued.request.priority_jump;
         let strict_priority = queued.request.strict_priority;
-        let placement = self.eligibility.lane(&queued.request);
+        let placement = self
+            .eligibility
+            .lane(&queued.request, queue_metadata.lane_key);
         let worker_count = self.workers_with_configs.borrow().len();
         loop {
             if due_at.is_some_and(|due_at| due_at <= Instant::now()) {
@@ -5336,6 +5368,14 @@ mod tests {
         slots.assert_completely_drained(decay_now());
     }
 
+    /// The lane key a classifier that keys by session, such as ThunderAgent, would set.
+    pub(super) fn keyed_by_session(request: &SchedulingRequest) -> Option<LaneKey> {
+        request
+            .session_context
+            .as_ref()
+            .map(|session| LaneKey::new(session.session_id()))
+    }
+
     fn in_session(request: &mut SchedulingRequest, session_id: &str) {
         request.session_context = Some(dynamo_router_protocol::session::SessionContext::new(
             session_id.into(),
@@ -5373,7 +5413,7 @@ mod tests {
         for (request_id, session) in [("a1", "a"), ("b1", "b")] {
             let (mut request, _rx) = make_request(request_id, 256);
             in_session(&mut request, session);
-            queue.enqueue(request).await;
+            queue.enqueue_keyed_by_session_for_test(request).await;
         }
         assert_eq!(queue.pending_count(), 2);
         let held = gate.checks.load(Ordering::SeqCst);
@@ -5425,7 +5465,8 @@ mod tests {
         let head_transfer = Arc::new(AdmissionLifecycleTransfer::new("head".to_string()));
         let (mut head, _head_rx) = make_request("head", 64);
         in_session(&mut head, "a");
-        let head_metadata = metadata(&head);
+        let mut head_metadata = metadata(&head);
+        head_metadata.lane_key = keyed_by_session(&head);
         actor.handle_enqueue(
             head,
             None,
@@ -5436,7 +5477,8 @@ mod tests {
         );
         let (mut next, _next_rx) = make_request("next", 64);
         in_session(&mut next, "a");
-        let next_metadata = metadata(&next);
+        let mut next_metadata = metadata(&next);
+        next_metadata.lane_key = keyed_by_session(&next);
         actor.handle_enqueue(next, None, None, None, None, next_metadata);
         actor.handle_update(None, Some(RecheckScope::All)).await;
         assert_eq!(actor.gate_recheck_at, None);
@@ -7412,7 +7454,7 @@ mod tests {
         let (mut first, first_rx) = make_request("pinned-1", 256);
         first.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
         in_session(&mut first, "a");
-        queue.enqueue(first).await;
+        queue.enqueue_keyed_by_session_for_test(first).await;
         let first_resp = first_rx.await.unwrap().unwrap();
         assert_eq!(first_resp.best_worker, WorkerWithDpRank::new(1, 0));
 
@@ -7420,7 +7462,7 @@ mod tests {
         let (mut second, mut second_rx) = make_request("pinned-2", 256);
         second.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
         in_session(&mut second, "b");
-        queue.enqueue(second).await;
+        queue.enqueue_keyed_by_session_for_test(second).await;
         assert_eq!(queue.pending_count(), 1);
         assert!(
             second_rx.try_recv().is_err(),
@@ -7431,7 +7473,7 @@ mod tests {
         let (mut other_worker, mut other_worker_rx) = make_request("pinned-0", 256);
         other_worker.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
         in_session(&mut other_worker, "c");
-        queue.enqueue(other_worker).await;
+        queue.enqueue_keyed_by_session_for_test(other_worker).await;
         assert_eq!(queue.pending_count(), 1);
         let other_worker_resp = other_worker_rx
             .try_recv()
@@ -7810,14 +7852,14 @@ mod tests {
         let (mut first, first_rx) = make_request("pinned-1", 256);
         first.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
         in_session(&mut first, "a");
-        queue.enqueue(first).await;
+        queue.enqueue_keyed_by_session_for_test(first).await;
         let first_resp = first_rx.await.unwrap().unwrap();
         assert_eq!(first_resp.best_worker, WorkerWithDpRank::new(1, 0));
 
         let (mut second, mut second_rx) = make_request("pinned-2", 256);
         second.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
         in_session(&mut second, "b");
-        queue.enqueue(second).await;
+        queue.enqueue_keyed_by_session_for_test(second).await;
         assert_eq!(queue.pending_count(), 1);
         assert!(
             second_rx.try_recv().is_err(),
@@ -7827,7 +7869,7 @@ mod tests {
         let (mut other_worker, mut other_worker_rx) = make_request("pinned-0", 256);
         other_worker.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
         in_session(&mut other_worker, "c");
-        queue.enqueue(other_worker).await;
+        queue.enqueue_keyed_by_session_for_test(other_worker).await;
         assert_eq!(queue.pending_count(), 1);
         let other_worker_resp = other_worker_rx
             .try_recv()
@@ -8375,6 +8417,7 @@ mod tests {
         let now = Instant::now();
         let mut metadata = queue.default_queue_metadata(&request, now).unwrap();
         metadata.due_at = due_at;
+        metadata.lane_key = keyed_by_session(&request);
         actor.handle_enqueue(request, None, lifecycle_transfer, None, None, metadata)
     }
 
