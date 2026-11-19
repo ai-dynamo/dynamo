@@ -396,6 +396,7 @@ areas:
   - dynamo.code-workspace
   - hatch_build.py
   - lib/bindings/kvbm/pyproject.toml
+  - lib/patches/
   - pyproject.toml
   - rust-toolchain.toml
   - scripts/
