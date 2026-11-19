@@ -268,7 +268,7 @@ def construct_mm_data(
 
     # Handle image models - validate image embeddings first
     if image_embeds is None:
-        raise ValueError("No image embeddings provided.")
+        raise RuntimeError("No image embeddings provided.")
 
     image_embeds = image_embeds.to(embeddings_dtype)
 
@@ -285,7 +285,7 @@ def _construct_qwen_image_data(
 ) -> Dict[str, Dict[str, torch.Tensor]]:
     """Construct image data specifically for Qwen models."""
     if image_grid_thw is None or len(image_grid_thw) == 0:
-        raise ValueError("No image grid provided for Qwen model.")
+        raise RuntimeError("No image grid provided for Qwen model.")
 
     grid_thw_tensor = torch.tensor(image_grid_thw)
 
@@ -332,9 +332,9 @@ def construct_qwen_decode_mm_data(
       decode-side prefix caching provides minimal benefit in disaggregated setup.
     """
     if image_grid_thw is None or len(image_grid_thw) == 0:
-        raise ValueError("No image grid provided for Qwen model.")
+        raise RuntimeError("No image grid provided for Qwen model.")
     if embeddings_shape is None:
-        raise ValueError("embeddings_shape is required for Qwen decode mm data.")
+        raise RuntimeError("embeddings_shape is required for Qwen decode mm data.")
 
     # WAR: Use request_id hash as seed for unique placeholder values.
     # This prevents prefix cache from incorrectly matching different images

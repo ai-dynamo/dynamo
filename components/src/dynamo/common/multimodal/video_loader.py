@@ -380,7 +380,7 @@ class VideoLoader:
             return_metadata=True,
         )
         if metadata is None:
-            raise ValueError("Decoded video metadata is required")
+            raise RuntimeError("Decoded video metadata is required")
 
         return np.ascontiguousarray(frames), self._normalize_frontend_metadata(
             metadata, len(frames)
@@ -400,17 +400,17 @@ class VideoLoader:
             source_duration = float(rust_metadata["source_duration"])
             sampled_timestamps = rust_metadata["sampled_timestamps"]
         except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(
+            raise RuntimeError(
                 "Decoded video metadata does not match the Dynamo frontend format"
             ) from exc
 
         if source_fps <= 0 or source_duration <= 0:
-            raise ValueError("Decoded video source fps and duration must be positive")
+            raise RuntimeError("Decoded video source fps and duration must be positive")
         if (
             not isinstance(sampled_timestamps, list)
             or len(sampled_timestamps) != frame_count
         ):
-            raise ValueError(
+            raise RuntimeError(
                 "Decoded video timestamp count must match the transferred frame count"
             )
 
@@ -447,7 +447,7 @@ class VideoLoader:
             if not isinstance(item, dict) or not (
                 URL_VARIANT_KEY in item or DECODED_VARIANT_KEY in item
             ):
-                raise ValueError(
+                raise RuntimeError(
                     f"Invalid video multimodal item at index {idx}. "
                     "Expected dict with 'Url' or 'Decoded' key."
                 )
@@ -456,7 +456,7 @@ class VideoLoader:
                 and DECODED_VARIANT_KEY in item
                 and not self._enable_frontend_decoding
             ):
-                raise ValueError(
+                raise RuntimeError(
                     "Received decoded video data but enable_frontend_decoding=False. "
                     "Enable frontend decoding to transfer decoded video frames via NIXL."
                 )

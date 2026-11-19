@@ -266,12 +266,12 @@ class AudioLoader:
                     metadata = item[DECODED_VARIANT_KEY]
                     audio_futures.append(self._load_decoded_audio(metadata))
                 else:
-                    raise ValueError(
+                    raise RuntimeError(
                         "Received decoded audio data but enable_frontend_decoding=False. "
                         "Enable frontend decoding to transfer decoded audio via NIXL."
                     )
             else:
-                raise ValueError(
+                raise RuntimeError(
                     f"Invalid audio multimodal item at index {idx}. "
                     "Expected dict with 'Url' or 'Decoded' key."
                 )

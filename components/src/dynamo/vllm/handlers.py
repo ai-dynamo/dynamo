@@ -849,12 +849,18 @@ def _vllm_kv_hints_types() -> tuple[type[Any], type[Any]] | None:
 
 
 def _build_vllm_kv_hints(request: Mapping[str, Any]) -> Any | None:
-    """Convert Dynamo's typed KV hint message to vLLM's envelope type."""
+    """Convert Dynamo's typed KV hint message to vLLM's envelope type.
+
+    Raises:
+        RuntimeError: ``kv_hint`` is produced by the KV router, so a
+            structural failure means a Dynamo-internal bug. It should
+            report as a 500.
+    """
     raw_envelope = request.get("kv_hint")
     if raw_envelope is None:
         return None
     if not isinstance(raw_envelope, Mapping):
-        raise ValueError("kv_hint must be an object")
+        raise RuntimeError("kv_hint must be an object")
 
     kv_hints_types = _vllm_kv_hints_types()
     if kv_hints_types is None:
@@ -865,14 +871,14 @@ def _build_vllm_kv_hints(request: Mapping[str, Any]) -> Any | None:
 
     raw_actions = raw_envelope.get("actions")
     if not isinstance(raw_actions, list):
-        raise ValueError("kv_hint.actions must be a list")
+        raise RuntimeError("kv_hint.actions must be a list")
     actions = []
     for raw_action in raw_actions:
         if not isinstance(raw_action, Mapping):
-            raise ValueError("each kv_hint action must be an object")
+            raise RuntimeError("each kv_hint action must be an object")
         payload = raw_action.get("payload")
         if not isinstance(payload, Mapping):
-            raise ValueError("kv_hint action payload must be an object")
+            raise RuntimeError("kv_hint action payload must be an object")
         actions.append(
             action_type(
                 action_id=str(raw_action["action_id"]),

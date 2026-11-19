@@ -100,7 +100,7 @@ def _prepare_embedding_transfers(
         tensor.ndim != 3 or tensor.shape[0] != 1 or tensor.shape[2] != first.shape[2]
         for tensor in tensors
     ):
-        raise ValueError(
+        raise RuntimeError(
             "Coalesced embedding transfer requires matching "
             "[1, visual_tokens, hidden] tensors"
         )
@@ -108,7 +108,7 @@ def _prepare_embedding_transfers(
     expected_shape = (1, sum(tensor.shape[1] for tensor in tensors), first.shape[2])
     if combined_embedding is not None:
         if tuple(combined_embedding.shape) != expected_shape:
-            raise ValueError(
+            raise RuntimeError(
                 "Combined Qwen-VL embedding does not match its per-image views: "
                 f"expected={expected_shape}, actual={tuple(combined_embedding.shape)}"
             )
