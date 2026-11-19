@@ -393,6 +393,9 @@ where
         let tracked = request.mode.is_tracked();
         let request_id = request.mode.request_id().map(str::to_owned);
         let classified_request = self.classify_request(&mut request, ingress_at).await?;
+        let backend_priority = classified_request
+            .as_ref()
+            .and_then(ClassifyRequest::backend_priority);
         let lifecycle_lease = self
             .queue
             .new_request_lifecycle_lease(request.mode.lifecycle_request_id());
@@ -427,7 +430,14 @@ where
         let booking = lifecycle_lease
             .and_then(|lease| lease.commit())
             .map(|booking| self.queue.booking_handle(booking));
-        Ok((AdmittedSchedulingResponse { response, attempt }, booking))
+        Ok((
+            AdmittedSchedulingResponse {
+                response,
+                attempt,
+                backend_priority,
+            },
+            booking,
+        ))
     }
 
     async fn classify_request(
@@ -891,23 +901,6 @@ where
             .add_output_block(&request_id.to_string(), decay_fraction)
     }
 
-    /// Apply output updates before returning, without waiting for admission.
-    ///
-    /// Zero counts and stale or missing bookings return `Ok(())`. A zero count
-    /// does not mutate state or emit load observations. Queue shutdown is checked
-    /// first, including for zero counts.
-    pub async fn add_output_blocks_if_booking(
-        &self,
-        booking: &SchedulerBookingDescriptor,
-        num_blocks: usize,
-        decay_fraction: Option<f64>,
-    ) -> Result<(), KvSchedulerError> {
-        self.queue.ensure_running()?;
-        self.add_output_blocks_if_booking_sync(booking, num_blocks, decay_fraction)
-            .map(|_| ())
-            .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
-    }
-
     /// Apply output updates directly without checking queue shutdown.
     ///
     /// Zero counts and stale or missing bookings return `NoChange`. A zero count
@@ -925,6 +918,29 @@ where
             num_blocks,
             decay_fraction,
         )
+    }
+
+    /// Apply block and progress updates for a current booking without waiting for admission.
+    /// Progress-only updates leave output blocks and published load unchanged.
+    pub async fn update_output_if_booking(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+        num_blocks: usize,
+        decay_fraction: Option<f64>,
+        progress: Option<dynamo_slot_tracker::host::DecodeProgressUpdate>,
+    ) -> Result<(), KvSchedulerError> {
+        self.queue.ensure_running()?;
+        self.slots
+            .update_output_if_booking(
+                &booking.request_id,
+                booking.worker,
+                booking.attempt_id,
+                num_blocks,
+                decay_fraction,
+                progress,
+            )
+            .map(|_| ())
+            .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
     }
 
     pub fn get_potential_loads(
@@ -1043,7 +1059,7 @@ mod tests {
             let before = slots.active_blocks()[&worker];
             // A single poll on this current-thread runtime cannot run the actor.
             assert!(matches!(
-                poll_once(scheduler.add_output_blocks_if_booking(&booking, 3, None)),
+                poll_once(scheduler.update_output_if_booking(&booking, 3, None, None)),
                 std::task::Poll::Ready(Ok(()))
             ));
             assert_eq!(slots.active_blocks()[&worker], before + 3);
@@ -1061,7 +1077,7 @@ mod tests {
                 std::task::Poll::Ready(Ok(LifecycleMutationOutcome::Applied))
             ));
             assert!(matches!(
-                poll_once(scheduler.add_output_blocks_if_booking(&booking, 3, None)),
+                poll_once(scheduler.update_output_if_booking(&booking, 3, None, None)),
                 std::task::Poll::Ready(Ok(()))
             ));
             slots.assert_completely_drained(Instant::now());

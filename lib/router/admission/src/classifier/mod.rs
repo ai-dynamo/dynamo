@@ -53,6 +53,7 @@ pub struct ClassificationOverrides {
     pub due_at: Option<Instant>,
     pub scheduling_cost_tokens: Option<usize>,
     pub worker_selection_target: Option<Option<WorkerAffinityTarget>>,
+    pub backend_priority: Option<i32>,
 }
 
 impl ClassifyRequest {
@@ -191,6 +192,16 @@ impl ClassifyRequest {
 
     pub fn set_scheduling_cost_tokens(&mut self, scheduling_cost_tokens: usize) {
         self.overrides.scheduling_cost_tokens = Some(scheduling_cost_tokens);
+    }
+
+    pub fn backend_priority(&self) -> Option<i32> {
+        self.overrides.backend_priority
+    }
+
+    /// Replace the soft `priority` the host forwards to the backend engine, where higher is
+    /// served first. The router's own queue order does not change.
+    pub fn set_backend_priority(&mut self, priority: i32) {
+        self.overrides.backend_priority = Some(priority);
     }
 
     /// Prefer a worker/rank for this request, replacing its soft affinity target.
