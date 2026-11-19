@@ -655,9 +655,14 @@ def _tekken_vllm_config(tokenizer: Path, outputs: object) -> SimpleNamespace:
 def test_tekken_checkpoints_pin_guidance(
     tmp_path: Path, files: list[str], backend: str, expected: str
 ) -> None:
+    from vllm.transformers_utils.repo_utils import list_repo_files
+
     vllm_main = _load_vllm_main()
     for name in files:
         (tmp_path / name).write_text("{}")
+    # vLLM caches each path's file listing for the whole process, and pytest
+    # reuses this `tmp_path` name once an earlier passing case has deleted it.
+    list_repo_files.cache_clear()
     outputs = SimpleNamespace(backend=backend)
 
     vllm_main.pin_guidance_for_tekken_checkpoints(
