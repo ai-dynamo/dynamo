@@ -263,7 +263,13 @@ class ImageLoader:
         """Open, validate, and decode an image from raw bytes. Runs in a thread."""
         # formats= is the allowlist. Its JPEG plugin also opens multi-picture JPEGs
         # (most phone cameras), which report image.format == "MPO".
-        with Image.open(image_data, formats=["JPEG", "PNG", "WEBP"]) as image:
+        try:
+            image = Image.open(image_data, formats=["JPEG", "PNG", "WEBP"])
+        except Image.DecompressionBombError as exc:
+            raise HttpStatusError(
+                413, "Image exceeds the decoded pixel limit", "image"
+            ) from exc
+        with image:
             if max_pixels is not None and image.width * image.height > max_pixels:
                 raise HttpStatusError(
                     413, "Image exceeds the decoded pixel limit", "image"

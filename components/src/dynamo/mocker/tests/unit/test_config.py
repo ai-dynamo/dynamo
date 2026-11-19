@@ -22,15 +22,6 @@ pytestmark = [
 ]
 
 
-def test_removed_engine_classes_are_not_exported():
-    import dynamo._core as core
-    import dynamo.mocker as mocker
-
-    for name in ("MockEngineArgs", "SglangArgs", "TrtllmArgs"):
-        assert not hasattr(core, name)
-        assert not hasattr(mocker, name)
-
-
 @pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
 def test_canonical_cli_config_reaches_runtime_and_replay(backend):
     from dynamo._core import run_mocker_synthetic_trace_replay

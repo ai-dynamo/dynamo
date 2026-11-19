@@ -1345,12 +1345,15 @@ def dynamo_dynamic_ports(
         engine_grpc_ports: list[int] = []
         engine_kv_replay_ports: list[int] = []
         if request.node.get_closest_marker("engine_ports"):
-            engine_http_ports = allocate_ports(
-                num_system_ports, DynamoPortRange.SERVE.value
+            # One block each, so a single-worker test's DP engine can bind the
+            # first port + rank, up to num_system_ports ranks. With several
+            # workers, worker N's rank k would take worker N+k's port.
+            engine_http_ports = allocate_contiguous_ports(
+                1, num_system_ports, DynamoPortRange.SERVE.value
             )
             all_ports.extend(engine_http_ports)
-            engine_grpc_ports = allocate_ports(
-                num_system_ports, DynamoPortRange.SERVE.value
+            engine_grpc_ports = allocate_contiguous_ports(
+                1, num_system_ports, DynamoPortRange.SERVE.value
             )
             all_ports.extend(engine_grpc_ports)
             # One block, so a data-parallel engine can replay on the first port + rank.
