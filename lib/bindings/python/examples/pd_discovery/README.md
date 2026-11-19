@@ -41,7 +41,10 @@ python3 prefill.py
 python3 prefill.py
 ```
 
-Without `DYN_DISCOVERY_BACKEND`, the workers use etcd at `ETCD_ENDPOINTS`.
+The scripts don't depend on the discovery backend. Without
+`DYN_DISCOVERY_BACKEND`, the workers use etcd at `ETCD_ENDPOINTS`; with
+`DYN_DISCOVERY_BACKEND=kubernetes`, they use Kubernetes discovery like any other
+Dynamo worker.
 
 Each prefill worker connects to every decode worker, and prints:
 
@@ -55,42 +58,6 @@ check. Stop one and every prefill worker prints:
 ```text
 prefill 5a0c58c0314098a0: decode 7391da11afde812d at 192.168.1.242:38553 left
 ```
-
-## Run on Kubernetes
-
-`k8s.yaml` runs two decode and two prefill workers with Kubernetes discovery
-(`DYN_DISCOVERY_BACKEND=kubernetes`) and without the Dynamo operator. It
-creates by hand what the operator creates for a DynamoGraphDeployment: RBAC
-for `DynamoWorkerMetadata` resources and EndpointSlices, a Service with the
-discovery labels, and the pod name, namespace, and UID in each pod's
-environment. The `Dockerfile` builds an image with the Dynamo runtime and the
-two scripts.
-
-From this directory, on minikube:
-
-```bash
-# Build the runtime wheel from this source tree into this directory.
-(cd ../.. && maturin build --release -o examples/pd_discovery)
-docker build --build-arg DYNAMO_RUNTIME=$(ls ai_dynamo_runtime-*.whl) -t pd-discovery:latest .
-minikube image load pd-discovery:latest
-
-# Skip the CRD if the Dynamo platform is installed.
-kubectl apply -f ../../../../../deploy/operator/config/crd/bases/nvidia.com_dynamoworkermetadatas.yaml
-kubectl apply -f k8s.yaml
-
-kubectl -n pd-discovery logs -f -l role=prefill --prefix
-```
-
-On another cluster, push the image to a registry that the cluster can pull
-from and set `image` in `k8s.yaml`. To watch the prefill workers react, scale
-the decode workers or delete a decode pod:
-
-```bash
-kubectl -n pd-discovery scale deploy/decode --replicas=3
-kubectl -n pd-discovery delete pod <decode-pod>
-```
-
-Remove everything with `kubectl delete -f k8s.yaml`.
 
 ## Notes
 
