@@ -303,10 +303,10 @@ pub struct RoutingHost {
     session_affinity_mode: SessionAffinityMode,
     hosted_occupancy: Option<HostedOccupancy>,
     candidate_policy: Option<Arc<dyn HostedCandidatePolicy>>,
-    /// Retains the shared client, overload state, and cancellation subtree for this host.
+    /// Retains the shared client, overload state, and cancellation subtree for this host,
+    /// and supplies the workers' declared DP ranks for hard session affinity.
     ///
     /// Required for every mode except KV, where the [`KvRouter`] owns the client.
-    #[allow(dead_code)]
     routing_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
 }
 

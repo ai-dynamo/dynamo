@@ -500,11 +500,11 @@ into the matching table on every frontend, so size the limit for the sessions li
 frontends, not per frontend. Sync is best effort, so treat this as a sizing guide rather than a
 hard fleet-wide cap.
 
-The first successfully dispatched request binds the session ID to its selected worker and, when available, data-parallel rank. Choose how later requests use that binding with `--router-session-affinity-mode` or `DYN_ROUTER_SESSION_AFFINITY_MODE`:
+The first successfully dispatched request binds the session ID to its selected worker and, when available, data-parallel (DP) rank. KV routing binds the rank its scheduler selected. In `hard` mode, the other router modes bind a rank chosen from the worker's advertised DP ranks by session ID. A worker with one DP rank, or whose runtime config the router has not discovered yet, is bound at worker level; until the router learns the worker's DP ranks, the engine picks the rank. Choose how later requests use that binding with `--router-session-affinity-mode` or `DYN_ROUTER_SESSION_AFFINITY_MODE`:
 
 | Mode | Behavior |
 |---|---|
-| `hard` | Default. Exact-dispatch to the stored target. If the worker or rank is no longer valid, invalidate the binding and retry normal selection once |
+| `hard` | Default. Exact-dispatch every request to the stored worker and DP rank. If the worker is no longer valid (with KV routing, also the rank), invalidate the binding and retry normal selection once |
 | `soft` | Pass the stored target through the normal selection pipeline as an advisory target. The built-in selector retains it while eligible; a custom policy can choose another worker |
 
 **Experimental.** Available since v1.6. When session affinity is enabled (`--router-session-affinity-ttl-secs`), a request that carries a parent session id binds under an internal key derived from that parent id instead of its own session, so the subagents of one parent share a binding while the parent keeps its own. Dynamo's affinity coordinator owns that binding: it commits only after a successful dispatch, is version-checked against concurrent updates, expires on the same TTL, and counts against the same global entry limit as any session binding. A request that carries an explicit worker target stays on its own session, so it is neither rejected against the group nor able to move it. Under the default `hard` mode the group is pinned to its first worker and does not migrate because of load; the binding resets only when the target becomes unusable or dispatch fails.
