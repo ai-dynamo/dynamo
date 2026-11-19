@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -18,6 +19,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
 BACKEND_NAME = "gms-v1"
+
+# Set by Dynamo Snapshot in the processes it checkpoints.
+_SNAPSHOT_CONTROL_DIR_ENV = "DYN_SNAPSHOT_CONTROL_DIR"
 
 
 class GMSV1SleepModeBackend(SleepModeBackend):
@@ -46,14 +50,23 @@ class GMSV1SleepModeBackend(SleepModeBackend):
         self._state = "SUSPENDED"
 
     def discard(self, tags: tuple[str, ...]) -> None:
-        """Release the KV cache, as vLLM's process checkpoint prepare does.
+        """Release the KV cache for a Dynamo Snapshot process checkpoint.
 
         GMS V1 releases only the whole engine, so the weights are suspended
         too; a checkpoint must not hold their GMS mappings either. Waking the
-        KV cache with ``resume(["kv_cache"])`` brings both back.
+        KV cache with ``resume(["kv_cache"])`` brings both back. Other callers,
+        such as vLLM's ``release_kv_cache_memory()``, expect the weights to stay
+        mapped, so outside a snapshot the discard is refused, as before. Inside a
+        snapshot process such a call would suspend the weights too; Dynamo does
+        not make it with GMS V1.
         """
         if tuple(tags) != ("kv_cache",):
             raise ValueError(f"GMS V1 can discard only the KV cache, not {tags}")
+        if not os.environ.get(_SNAPSHOT_CONTROL_DIR_ENV):
+            raise RuntimeError(
+                "GMS V1 cannot discard the KV cache without suspending the "
+                "weights; it does so only for a Dynamo Snapshot checkpoint"
+            )
         self.suspend(1)
         self._kv_cache_discarded = True
 

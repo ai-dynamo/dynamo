@@ -33,7 +33,14 @@ def _backend() -> GMSV1SleepModeBackend:
     return backend
 
 
-def test_discard_kv_cache_suspends_whole_engine_and_kv_cache_wake_resumes_it():
+@pytest.fixture
+def snapshot_process(monkeypatch, tmp_path):
+    monkeypatch.setenv("DYN_SNAPSHOT_CONTROL_DIR", str(tmp_path))
+
+
+def test_discard_kv_cache_suspends_whole_engine_and_kv_cache_wake_resumes_it(
+    snapshot_process,
+):
     """vLLM's process checkpoint prepare discards the KV cache and its restore
     wakes ["kv_cache"]; GMS V1 releases and brings back the whole engine."""
     backend = _backend()
@@ -49,8 +56,20 @@ def test_discard_kv_cache_suspends_whole_engine_and_kv_cache_wake_resumes_it():
     assert backend.state() == "RUNNING"
 
 
+def test_discard_outside_a_snapshot_is_refused(monkeypatch):
+    """vLLM's release_kv_cache_memory() expects the weights to stay mapped."""
+    monkeypatch.delenv("DYN_SNAPSHOT_CONTROL_DIR", raising=False)
+    backend = _backend()
+
+    with pytest.raises(RuntimeError, match="Dynamo Snapshot checkpoint"):
+        backend.discard(("kv_cache",))
+
+    backend._client.suspend.assert_not_called()
+    assert backend.state() == "RUNNING"
+
+
 @pytest.mark.parametrize("tags", [("weights",), ("kv_cache", "weights")])
-def test_discard_refuses_anything_but_the_kv_cache(tags):
+def test_discard_refuses_anything_but_the_kv_cache(snapshot_process, tags):
     backend = _backend()
 
     with pytest.raises(ValueError, match="only the KV cache"):
@@ -70,7 +89,7 @@ def test_partial_tag_resume_after_sleep_is_still_refused():
     backend._client.resume.assert_not_called()
 
 
-def test_weights_resume_after_kv_cache_discard_is_refused():
+def test_weights_resume_after_kv_cache_discard_is_refused(snapshot_process):
     backend = _backend()
     backend.discard(("kv_cache",))
 

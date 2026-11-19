@@ -80,6 +80,7 @@ async def test_prepare_snapshot_follows_vllm_checkpoint_lifecycle(
     hooks["checkpoint_prepare"].return_value = None
     if lifecycle:
         hooks["checkpoint_state"] = AsyncMock(return_value=("prepared", None))
+        hooks["is_sleeping"] = AsyncMock(return_value=False)
     engine_client = SimpleNamespace(**hooks)
     config = SimpleNamespace(
         headless=False,
@@ -97,6 +98,8 @@ async def test_prepare_snapshot_follows_vllm_checkpoint_lifecycle(
     engine_client.checkpoint_restore.assert_awaited_once()
     assert engine_client.sleep.await_count == (0 if lifecycle else 1)
     assert engine_client.wake_up.await_count == (0 if lifecycle else 1)
+    if lifecycle:
+        engine_client.is_sleeping.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
