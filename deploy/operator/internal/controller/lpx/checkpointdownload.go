@@ -107,7 +107,7 @@ func ensureCheckpointsDownloaded(
 		return nil, nil, nil
 	}
 
-	return ensureDownloaded(ctx, checkpoints, existing, "checkpoint", lpx.CheckpointKey, registry.EnsureCheckpointDownloaded)
+	return ensureDownloaded(ctx, checkpoints, existing, "checkpoint", (*lpx.Checkpoint).Key, registry.EnsureCheckpointDownloaded)
 }
 
 // workloadCheckpoints returns the distinct checkpoints of the resolved
@@ -117,7 +117,7 @@ func workloadCheckpoints(workloads map[string]*lpx.Workload) []*lpx.Checkpoint {
 	for _, workload := range workloads {
 		for _, projection := range workload.ModelProjections() {
 			if checkpoint := projection.Checkpoint(); checkpoint != nil {
-				checkpointsByKey[lpx.CheckpointKey(checkpoint)] = checkpoint
+				checkpointsByKey[checkpoint.Key()] = checkpoint
 			}
 		}
 	}
@@ -134,7 +134,7 @@ func workloadCheckpoints(workloads map[string]*lpx.Workload) []*lpx.Checkpoint {
 func checkpointKeys(checkpoints []*lpx.Checkpoint) []string {
 	keys := make([]string, 0, len(checkpoints))
 	for _, checkpoint := range checkpoints {
-		keys = append(keys, lpx.CheckpointKey(checkpoint))
+		keys = append(keys, checkpoint.Key())
 	}
 	return keys
 }

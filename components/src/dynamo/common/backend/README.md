@@ -180,6 +180,13 @@ return a JSON object from each handler. The request body must also be a JSON
 object. Override `on_endpoint_ready(endpoint)` when later management operations
 need access to the serving endpoint; the worker invokes it once before serving.
 
+## Embedding in a Host Process
+
+`Worker.run()` configures the process's Python logging for Dynamo by default:
+it replaces the root logger's handlers and level and reformats the vLLM and
+SGLang loggers. When the engine runs inside another framework's process that
+owns its logging, set `WorkerConfig(configure_logging=False)` to leave it as is.
+
 ## Request Cancellation
 
 `Worker.generate()` automatically monitors for client

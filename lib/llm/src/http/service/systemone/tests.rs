@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use crate::protocols::systemone::ScoringBackend;
 use async_trait::async_trait;
 use axum::{body::to_bytes, http::StatusCode, response::Response};
 use base64::Engine as _;
@@ -24,6 +25,8 @@ mod backend_failure;
 mod native_abort;
 #[path = "tests/preflight.rs"]
 mod preflight;
+#[path = "tests/vllm.rs"]
+mod vllm;
 
 #[tokio::test]
 async fn empty_canonical_questions_are_rejected_before_admission() {
@@ -179,8 +182,8 @@ async fn empty_and_closed_admission_are_not_capacity_rejections() {
 }
 
 use super::{
-    Placement, PreparedBranch, StartedBranch, add_input_tokens, dispatch, finish_branch,
-    pin_to_placement, resolve_dp_rank,
+    Placement, PreparedBranch, StartedBranch, add_input_tokens, bind_native, dispatch,
+    finish_branch, pin_to_placement, resolve_dp_rank,
 };
 use crate::{
     discovery::SystemOneExecutionSelection,
@@ -193,7 +196,6 @@ use crate::{
             preprocessor::{PreprocessedRequest, RoutingHints},
             timing::RequestTracker,
         },
-        sglang::generate::SglangGenerateRequest,
         systemone::build_native_score_request,
     },
 };
@@ -316,16 +318,17 @@ async fn unavailable_with_retry_after_does_not_claim_capacity() {
 
 #[test]
 fn placement_pin_sets_both_worker_and_rank() {
-    let native: SglangGenerateRequest =
-        serde_json::from_value(build_native_score_request(&[1], &[2], "test-salt").unwrap())
-            .unwrap();
-    let mut preprocessed = super::super::sglang_generate::preprocessed_request(
-        native,
+    crate::generate_format::test_formats::install();
+    let native = build_native_score_request(&[1], &[2], "test-salt").unwrap();
+    let mut preprocessed = bind_native(
+        ScoringBackend::Sglang,
         "test-model",
-        None,
+        16,
+        &native,
         "request-1",
     )
-    .unwrap();
+    .unwrap()
+    .request;
     pin_to_placement(
         &mut preprocessed,
         Placement {
@@ -341,10 +344,7 @@ fn placement_pin_sets_both_worker_and_rank() {
 fn prepared_noul_branch(index: usize) -> PreparedBranch {
     let prompt_ids = vec![1, 2];
     let label_ids = vec![17 + index as u32 * 100, 4 + index as u32 * 100];
-    let native = serde_json::from_value(
-        build_native_score_request(&prompt_ids, &label_ids, "validation").unwrap(),
-    )
-    .unwrap();
+    let native = build_native_score_request(&prompt_ids, &label_ids, "validation").unwrap();
     PreparedBranch {
         index,
         temperature: 1.0,
@@ -354,9 +354,34 @@ fn prepared_noul_branch(index: usize) -> PreparedBranch {
     }
 }
 
+fn started_branch(
+    prepared: PreparedBranch,
+    tracker: Arc<RequestTracker>,
+    stream: ManyOut<Annotated<LLMEngineOutput>>,
+) -> StartedBranch {
+    crate::generate_format::test_formats::install();
+    let native = build_native_score_request(&prepared.prompt_ids, &prepared.label_ids, "salt");
+    let exchange = bind_native(
+        ScoringBackend::Sglang,
+        "test-model",
+        16,
+        &native.unwrap(),
+        "branch-0",
+    )
+    .unwrap()
+    .exchange;
+    StartedBranch {
+        backend: ScoringBackend::Sglang,
+        prepared,
+        tracker,
+        stream,
+        exchange,
+    }
+}
+
 fn terminal_output(label_ids: &[u32]) -> Annotated<LLMEngineOutput> {
     Annotated::from_data(LLMEngineOutput {
-        engine_data: Some(json!({
+        engine_data: Some(Box::new(json!({
             "sglang_response": {
                 "output_ids": [],
                 "meta_info": {
@@ -369,7 +394,7 @@ fn terminal_output(label_ids: &[u32]) -> Annotated<LLMEngineOutput> {
                     ]]
                 }
             }
-        })),
+        }))),
         ..Default::default()
     })
 }
@@ -384,11 +409,7 @@ async fn finish_branch_parses_terminal_scores_and_tracker_placement() {
     );
     let parent = Context::new(());
     let result = finish_branch(
-        StartedBranch {
-            prepared: prepared_noul_branch(0),
-            tracker,
-            stream,
-        },
+        started_branch(prepared_noul_branch(0), tracker, stream),
         0,
         4,
         parent.context(),
@@ -408,60 +429,53 @@ async fn finish_branch_parses_terminal_scores_and_tracker_placement() {
 
 #[tokio::test]
 async fn finish_branch_stops_when_parent_is_cancelled() {
-    let tracker = Arc::new(RequestTracker::new());
-    tracker.record_worker(41, Some(0), "decode");
-    let stream = ResponseStream::new(
-        Box::pin(stream::pending::<Annotated<LLMEngineOutput>>()),
-        Context::new(()).context(),
-    );
-    let parent = Context::new(());
-    let parent_context = parent.context();
-    parent_context.kill();
-    let result = finish_branch(
-        StartedBranch {
-            prepared: prepared_noul_branch(0),
-            tracker,
-            stream,
-        },
-        0,
-        1,
-        parent_context,
-    )
-    .await;
-    let Err(error) = result else {
-        panic!("cancelled parent should stop branch completion")
-    };
-    assert_eq!(error.status.as_u16(), 499);
+    for backend in [ScoringBackend::Sglang, ScoringBackend::Vllm] {
+        let tracker = Arc::new(RequestTracker::new());
+        tracker.record_worker(41, Some(0), "decode");
+        let stream = ResponseStream::new(
+            Box::pin(stream::pending::<Annotated<LLMEngineOutput>>()),
+            Context::new(()).context(),
+        );
+        let parent = Context::new(());
+        let parent_context = parent.context();
+        parent_context.kill();
+        let mut started = started_branch(prepared_noul_branch(0), tracker, stream);
+        started.backend = backend;
+        let result = finish_branch(started, 0, 1, parent_context).await;
+        let Err(error) = result else {
+            panic!("cancelled parent should stop branch completion")
+        };
+        assert_eq!(error.status.as_u16(), 499);
+    }
 }
 
 #[tokio::test]
 async fn cancelled_stream_completion_is_not_a_malformed_response() {
-    let parent = Context::new(()).context();
-    let stream_parent = parent.clone();
-    let stream = stream::poll_fn(move |_| {
-        stream_parent.kill();
-        std::task::Poll::Ready(None::<Annotated<LLMEngineOutput>>)
-    });
-    let result = finish_branch(
-        StartedBranch {
-            prepared: prepared_noul_branch(0),
-            tracker: Arc::new(RequestTracker::new()),
-            stream: ResponseStream::new(Box::pin(stream), Context::new(()).context()),
-        },
-        0,
-        1,
-        parent,
-    )
-    .await;
-    let Err(error) = result else {
-        panic!("cancelled stream must not produce an answer")
-    };
-    assert_eq!(error.status.as_u16(), 499);
+    for backend in [ScoringBackend::Sglang, ScoringBackend::Vllm] {
+        let parent = Context::new(()).context();
+        let stream_parent = parent.clone();
+        let stream = stream::poll_fn(move |_| {
+            stream_parent.kill();
+            std::task::Poll::Ready(None::<Annotated<LLMEngineOutput>>)
+        });
+        let mut started = started_branch(
+            prepared_noul_branch(0),
+            Arc::new(RequestTracker::new()),
+            ResponseStream::new(Box::pin(stream), Context::new(()).context()),
+        );
+        started.backend = backend;
+        let result = finish_branch(started, 0, 1, parent).await;
+        let Err(error) = result else {
+            panic!("cancelled stream must not produce an answer")
+        };
+        assert_eq!(error.status.as_u16(), 499);
+    }
 }
 
 #[derive(Clone, Copy)]
 enum EngineBehavior {
     Success,
+    Vllm(vllm::Outcome),
     PlacementMismatch,
     MalformedWithPendingSibling,
     PendingGenerate,
@@ -519,9 +533,23 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let index: usize = request.id().rsplit('-').next().unwrap().parse().unwrap();
-        let native = request.extra_args.as_ref().unwrap()["sglang_tito"].clone();
-        let label_ids: Vec<u32> =
-            serde_json::from_value(native["token_ids_logprob"].clone()).unwrap();
+        let is_vllm = request
+            .extra_args
+            .as_ref()
+            .unwrap()
+            .get("vllm_tito")
+            .is_some();
+        let (native, label_ids): (Value, Vec<u32>) = if is_vllm {
+            let native = request.extra_args.as_ref().unwrap()["vllm_tito"].clone();
+            let ids =
+                serde_json::from_value(native["sampling_params"]["logprob_token_ids"].clone())
+                    .unwrap();
+            (native, ids)
+        } else {
+            let native = request.extra_args.as_ref().unwrap()["sglang_tito"].clone();
+            let ids = serde_json::from_value(native["token_ids_logprob"].clone()).unwrap();
+            (native, ids)
+        };
         let stream_context = Context::new(()).context();
         self.observations.lock().unwrap().push(ObservedBranch {
             index,
@@ -542,6 +570,29 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .unwrap()
             .record_worker(worker_id, Some(3), "decode");
         self.started.notify_one();
+        if matches!(self.behavior, EngineBehavior::PendingStream)
+            || (matches!(self.behavior, EngineBehavior::PendingSiblings) && index > 0)
+        {
+            return Ok(ResponseStream::new(
+                Box::pin(stream::pending()),
+                stream_context,
+            ));
+        }
+        if is_vllm {
+            let outcome = match self.behavior {
+                EngineBehavior::Vllm(outcome) => outcome,
+                _ => vllm::Outcome::Success,
+            };
+            let output = vllm::terminal(&label_ids, request.token_ids.len(), index + 1, outcome);
+            let outputs = stream::iter([Annotated::from_data(output)]);
+            if matches!(outcome, vllm::Outcome::Cancelled | vllm::Outcome::Error) {
+                return Ok(ResponseStream::new(
+                    Box::pin(outputs.chain(stream::pending())),
+                    stream_context,
+                ));
+            }
+            return Ok(ResponseStream::new(Box::pin(outputs), stream_context));
+        }
         if let EngineBehavior::RejectRequest {
             class,
             branch,
@@ -627,14 +678,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     self.sibling_started.notified().await;
                 }
                 let abort = Annotated::from_data(LLMEngineOutput {
-                    engine_data: Some(json!({"sglang_response": {
+                    engine_data: Some(Box::new(json!({"sglang_response": {
                         "output_ids": [],
                         "meta_info": {"finish_reason": {
                             "type": "abort",
                             "status_code": status,
                             "message": "private worker detail"
                         }}
-                    }})),
+                    }}))),
                     ..Default::default()
                 });
                 if branch == 0 {
@@ -648,14 +699,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     stream_context,
                 ));
             }
-        }
-        if matches!(self.behavior, EngineBehavior::PendingStream)
-            || (matches!(self.behavior, EngineBehavior::PendingSiblings) && index > 0)
-        {
-            return Ok(ResponseStream::new(
-                Box::pin(stream::pending()),
-                stream_context,
-            ));
         }
         if matches!(self.behavior, EngineBehavior::MalformedWithPendingSibling) {
             if index == 2 {
@@ -683,6 +726,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 }
 
 fn selection(engine: Arc<TestEngine>) -> SystemOneExecutionSelection {
+    crate::generate_format::test_formats::install();
     let mut card = ModelDeploymentCard::load_from_disk(
         "tests/data/sample-models/mock-llama-3.1-8b-instruct",
         None,
@@ -692,6 +736,7 @@ fn selection(engine: Arc<TestEngine>) -> SystemOneExecutionSelection {
     card.runtime_config.data_parallel_size = 4;
     let preprocessor = OpenAIPreprocessor::new(card.clone()).unwrap();
     SystemOneExecutionSelection {
+        backend: ScoringBackend::Sglang,
         canonical_model: "test-model".to_string(),
         engine,
         card,
@@ -754,13 +799,29 @@ async fn dispatch_request(
 
 #[tokio::test]
 async fn dispatch_limits_active_siblings_and_cancels_queued_work() {
+    for backend in [ScoringBackend::Sglang, ScoringBackend::Vllm] {
+        assert_bounded_fanout(backend).await;
+    }
+}
+
+async fn assert_bounded_fanout(backend: ScoringBackend) {
     let engine = TestEngine::new(EngineBehavior::PendingSiblings);
+    let mut selected = selection(engine.clone());
+    if backend == ScoringBackend::Vllm {
+        vllm::configure_selection(&mut selected);
+    }
+    let branches = (0..20)
+        .map(|index| match backend {
+            ScoringBackend::Sglang => prepared_noul_branch(index),
+            ScoringBackend::Vllm => vllm::prepared_branch(index),
+        })
+        .collect();
     let parent = Context::new(()).context();
     let admission = Arc::new(Semaphore::new(20));
     let permit = admission.clone().acquire_many_owned(20).await.unwrap();
     let task = tokio::spawn(dispatch(
-        selection(engine.clone()),
-        (0..20).map(prepared_noul_branch).collect(),
+        selected,
+        branches,
         "bounded-fanout".to_string(),
         parent.clone(),
         permit,
@@ -778,14 +839,26 @@ async fn dispatch_limits_active_siblings_and_cancels_queued_work() {
     .await
     .unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
-    assert_eq!(engine.observations.lock().unwrap().len(), 5);
+    {
+        let observations = engine.observations.lock().unwrap();
+        assert_eq!(observations.len(), 5);
+        for sibling in &observations[1..] {
+            assert_eq!(sibling.routing.backend_instance_id, Some(41));
+            assert_eq!(sibling.routing.dp_rank, Some(3));
+        }
+    }
     parent.kill();
     let response = tokio::time::timeout(Duration::from_secs(2), task)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(response.status().as_u16(), 499);
-    assert_eq!(engine.observations.lock().unwrap().len(), 5);
+    let observations = engine.observations.lock().unwrap();
+    assert_eq!(observations.len(), 5);
+    for sibling in &observations[1..] {
+        assert!(sibling.request_context.is_killed());
+        assert!(sibling.stream_context.is_killed());
+    }
     assert_eq!(admission.available_permits(), 20);
 }
 
@@ -886,7 +959,7 @@ async fn placement_mismatch_fails_with_unavailable_without_answers() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = response_body(response).await;
     assert!(body.get("answers").is_none());
-    assert_eq!(body["detail"], "SGLang scoring worker is unavailable");
+    assert_eq!(body["detail"], "scoring worker is unavailable");
     assert!(parent.is_killed());
     assert_eq!(semaphore.available_permits(), 2);
 }

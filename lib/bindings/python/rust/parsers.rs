@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::preprocessor::structural_tag_parser_names;
 use dynamo_llm::protocols::openai::chat_completions::tool_parser_v2::unified_family_names;
 use dynamo_parsers::reasoning::get_available_reasoning_parsers;
 use dynamo_parsers::tool_calling::parsers::get_available_tool_parsers;
@@ -29,10 +30,17 @@ pub fn get_reasoning_parser_names() -> Vec<&'static str> {
     with_unified_families(get_available_reasoning_parsers())
 }
 
+/// Get selectable parser names with registered structural-tag builders.
+#[pyfunction]
+pub fn get_structural_tag_parser_names() -> Vec<&'static str> {
+    structural_tag_parser_names()
+}
+
 /// Add parsers module functions to the Python module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_tool_parser_names, m)?)?;
     m.add_function(wrap_pyfunction!(get_reasoning_parser_names, m)?)?;
+    m.add_function(wrap_pyfunction!(get_structural_tag_parser_names, m)?)?;
     Ok(())
 }
 

@@ -134,7 +134,7 @@ def _supports_systemone_serial(
     output_type: ModelType,
     worker_type: WorkerType,
 ) -> bool:
-    """Gate the serialized SGLang 0.5.19/0.5.22 execution profile.
+    """Gate the serialized SGLang 0.5.19/0.5.22/0.5.23 execution profile.
 
     CUDA is the qualified deployment; device support is not validated here,
     and XPU remains unqualified.
@@ -161,10 +161,10 @@ def _supports_systemone_serial(
     if not eligible:
         return False
     installed = version("sglang")
-    if re.fullmatch(r"0\.5\.(?:19|22)(?:\+cu[0-9]+)?", installed) is None:
+    if re.fullmatch(r"0\.5\.(?:19|22|23)(?:\+cu[0-9]+)?", installed) is None:
         logging.warning(
             "Decision scoring is disabled: the serial worker uses SGLang %s; "
-            "the qualified CUDA profiles require SGLang 0.5.19 or 0.5.22",
+            "the qualified CUDA profiles require SGLang 0.5.19, 0.5.22, or 0.5.23",
             installed,
         )
         return False
@@ -652,8 +652,14 @@ async def get_runtime_config(
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
-    # Multimodal and diffusion handlers do not forward the per-request gate.
-    if llm_handler and not getattr(server_args, "dllm_algorithm", None):
+    # Frontend-decoded media uses the regular LLM handlers, which forward the
+    # reasoning gate. Dedicated multimodal pipelines register through an encoder;
+    # diffusion handlers do not forward the gate.
+    if (
+        not dynamo_args.multimodal_worker
+        and not dynamo_args.multimodal_encode_worker
+        and not getattr(server_args, "dllm_algorithm", None)
+    ):
         publish_sglang_structural_tag_reasoning_policy(
             runtime_config, engine, server_args
         )

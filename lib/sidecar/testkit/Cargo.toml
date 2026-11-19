@@ -34,6 +34,7 @@ dynamo-trtllm-mocker = { path = "../../mocker/servers/trtllm" }
 dynamo-lpx-sidecar = { path = "../lpx" }
 tokio-stream = { workspace = true, features = ["net"] }
 tonic = { workspace = true }
+tonic-health = { workspace = true }
 tonic-v14 = { workspace = true }
 tonic-health-v14 = { workspace = true }
 serde_json = { workspace = true }

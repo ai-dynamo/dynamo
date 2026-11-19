@@ -96,14 +96,14 @@ func TestRenderSelectedLPXRolePreservesTemplate(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			t.Log("Author a Cyborg role using the shared LPX role base renderer")
+			t.Log("Author an LPX role without a runtime sidecar using the shared LPX role base renderer")
 			source := &v1beta1.DynamoGraphDeployment{
 				Name: "hybrid", Namespace: "test",
 			}
 			container := test.container.DeepCopy()
 			container.Name, container.Image = commonconsts.MainContainerName, "cyborg:test"
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "engine", ComponentType: v1beta1.ComponentTypeDecode, SharedMemorySize: test.sharedMemorySize,
+				ComponentName: "engine", ComponentType: v1beta1.ComponentTypeLPX, SharedMemorySize: test.sharedMemorySize,
 				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers:      []corev1.Container{*container},
 					SecurityContext: test.authored,
@@ -113,7 +113,7 @@ func TestRenderSelectedLPXRolePreservesTemplate(t *testing.T) {
 			t.Log("Render the role before runtime-specific lowering")
 			template, err := renderSelectedLPXRole(component, source, nil,
 				&configv1alpha1.OperatorConfiguration{}, &mockSecretsRetriever{}, DiscoveryContext{},
-				&podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults(), servingHash: "serving"})
+				&podTemplateRuntimeDefaults{ComponentDefaults: &BaseComponentDefaults{}, servingHash: "serving"})
 			require.NoError(t, err)
 
 			t.Log("Retain authored security and use the ordinary shared memory default unless resized or disabled")

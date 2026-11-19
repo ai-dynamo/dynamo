@@ -99,7 +99,7 @@ func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
 	g.Expect(metav1.IsControlledBy(first, live)).To(BeTrue())
 	g.Expect(first.Spec.Hardware).NotTo(BeNil())
 	g.Expect(apiequality.Semantic.DeepEqual(first.Spec.NativeSearchInput, live.Spec.NativeSearchInput)).To(BeTrue())
-	g.Expect(first.Status.AISimulate).To(BeNil())
+	g.Expect(first.Status.AISim).To(BeNil())
 
 	t.Log("Editing the Request causally requests cancellation without deleting the active Run")
 	g.Eventually(func(g Gomega) {

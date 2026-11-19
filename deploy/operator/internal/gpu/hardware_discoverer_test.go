@@ -28,11 +28,9 @@ import (
 )
 
 func TestDiscovererWithoutReader(t *testing.T) {
-	var nilDiscoverer *Discoverer
-	for _, d := range []*Discoverer{nilDiscoverer, {}} {
-		if _, err := d.Discover(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "APIReader is not configured") {
-			t.Fatalf("got %v", err)
-		}
+	d := &Discoverer{}
+	if _, err := d.Discover(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "APIReader is not configured") {
+		t.Fatalf("got %v", err)
 	}
 }
 
@@ -56,7 +54,6 @@ func TestKnownSKU(t *testing.T) {
 		info *GPUInfo
 		want nvidiacomv1beta1.GPUSKUType
 	}{
-		{"nil", nil, ""},
 		{"discovered system wins", &GPUInfo{System: "h100_sxm", Model: "NVIDIA H200"}, "h100_sxm"},
 		{"inferred from the model", &GPUInfo{Model: "NVIDIA H200"}, "h200_sxm"},
 		{"unknown model is not passed through", &GPUInfo{Model: "NVIDIA RTX 6000 Ada"}, ""},

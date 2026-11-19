@@ -27,13 +27,19 @@ The `--help` output is organized into the following groups:
 
 ### Tool and Reasoning Parsers
 
-Use `--dyn-tool-call-parser` and `--dyn-reasoning-parser` to match the model's output format when the model emits tool calls and/or reasoning content. The current supported values are documented in [Tool Call Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#supported-reasoning-parsers).
+Use `--dyn-tool-call-parser` and `--dyn-reasoning-parser` to match the model's output format when the model emits tool calls and/or reasoning content. The current supported values are documented in [Tool Call Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#supported-reasoning-parsers).
 
 To set the thinking mode used when a request omits an explicit control, pass
 `--dyn-default-thinking-mode enabled|disabled` or set
 `DYN_DEFAULT_THINKING_MODE`. Request-level thinking controls, including
 adaptive thinking, take precedence. See
-[Deployment-Level Thinking Default](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#deployment-level-thinking-default).
+[Deployment-Level Thinking Default](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#deployment-level-thinking-default).
+
+Set chat template defaults with `--default-chat-template-kwargs` on the
+frontend, not on the worker. The frontend renders the chat template for workers
+and sidecars, so the worker refuses the vLLM flag at startup. A `vllm-rs serve`
+engine behind the vLLM sidecar applies its own flag only to its own HTTP server,
+and the sidecar cannot detect it.
 
 For reasoning models with structured output (`response_format`, JSON schema,
 or required/named tool choice), configure both reasoning parsers on the worker:
@@ -69,7 +75,7 @@ also using the router queue, configure the frontend-side
 after a request reaches the worker.
 
 For the cross-layer behavior, see
-[Priority Scheduling](../../../../../use-cases/agents/priority-scheduling.md). For the upstream
+[Priority Scheduling](../../../../../use-cases/agents/priority-scheduling.mdx). For the upstream
 flag definition, see the
 [vLLM serve args documentation](https://docs.vllm.ai/en/stable/configuration/serve_args.html).
 
@@ -80,6 +86,73 @@ Dynamo supports [vLLM prompt embeddings](https://docs.vllm.ai/en/stable/features
 - Enable with `--enable-prompt-embeds` (disabled by default)
 - Embeddings are sent as base64-encoded PyTorch tensors via the `prompt_embeds` field in the Completions API
 - NATS must be configured with a 15MB max payload for large embeddings (already set in default deployments)
+
+### Custom JSON Content
+
+**Experimental, unreleased.** Aggregated Python vLLM token workers started with
+`--enable-multimodal` accept explicit custom parts in user and tool messages.
+
+Custom content requires the Rust frontend preprocessing path
+(`--dyn-chat-processor dynamo`, the default). The Python frontend processor
+(`--dyn-chat-processor vllm`) and worker-side tokenization
+(`--use-vllm-tokenizer`) are unsupported. Keep tokenization in the Rust frontend
+when sending custom content.
+
+The example combines projected chemistry soft tokens with a standard image URL.
+The model must support both the registered chemistry modality and image inputs.
+The payload names and encoding inside `fields` are application-defined:
+
+```json
+{
+  "model": "chemistry-vision-model",
+  "messages": [{
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "Does this structure "},
+      {"type": "custom", "kind": "chemistry", "fields": {
+        "projected_soft_tokens": {
+          "dtype": "float32", "shape": [2, 4096], "data_base64": "..."
+        },
+        "revision": 1
+      }},
+      {"type": "text", "text": " match the reaction diagram?"},
+      {"type": "image_url", "image_url": {"url": "https://example.org/reaction-diagram.png"}}
+    ]
+  }],
+  "max_tokens": 64
+}
+```
+
+The model name, tensor dimensions, encoded bytes, and image URL are illustrative.
+`kind` is a non-empty string. The built-in wire names `text`, `image_url`,
+`video_url`, `audio_url`, and `input_audio` are reserved and rejected as custom
+kinds, including when mixed with typed media. `fields` is a JSON object whose
+values may be any JSON, including arrays and null. Dynamo passes the **complete
+fields object** as `multi_modal_data[kind]`; the example processor receives both
+`projected_soft_tokens` and `revision` under the chemistry modality. Dynamo does
+**not** select `fields[kind]` or decode the base64 bytes. Repeated parts of one
+kind become an ordered list of fields objects. Built-in image, video and audio
+parts retain their existing typed schema and validation. They may share requests
+with custom parts when their engine modality names do not collide.
+
+The model plugin owns domain validation and interpretation. Install or mount it
+in the worker environment. For the existing model-specific chat template, Dynamo
+preserves each custom part in place as `{"type":"custom","kind":"chemistry"}`;
+`fields` is absent. The template handles that part and renders the marker its
+registered processor expects. Clients do not also insert a literal marker in a
+text part. Dynamo neither derives a universal marker from `kind` nor changes the
+model's template. Auxiliary messages retain the same payload-free custom parts,
+role metadata, and ordering; payloads travel only in `multi_modal_data`.
+
+For an already rendered prompt, `nvext.token_data` supplies token IDs directly.
+Clients using it remain responsible for the complete model-specific token
+sequence.
+
+The frontend sends custom content only to workers that advertise
+`custom_json_v1` and returns 400 when none does. Custom P/D, encoder
+disaggregation, speculative prefill, custom caching/KVBM, SGLang, TensorRT-LLM,
+and native vLLM sidecars are unsupported. Extending these paths requires a
+separate qualification of plugin payload identity and lifecycle.
 
 ## Hashing Consistency for KV Events
 

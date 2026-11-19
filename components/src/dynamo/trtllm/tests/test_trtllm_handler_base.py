@@ -25,8 +25,10 @@ if not torch.cuda.is_available():
         allow_module_level=True,
     )
 from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
+from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
+from tensorrt_llm.llmapi.llm_args import WaitingQueuePolicy
 
 from dynamo.common.backend.logprobs import extract_from_completion_output
 from dynamo.llm.exceptions import EngineShutdown
@@ -36,7 +38,9 @@ from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.request_handlers.handler_base import (
     BYPASS_REMOTE_PREFILL_ANNOTATION,
     HandlerBase,
+    _abort_unless_finished,
 )
+from dynamo.trtllm.utils.disagg_utils import TRTLLM_HAS_ORIG_ELAPSED_S
 
 pytestmark = [
     pytest.mark.unit,
@@ -793,7 +797,8 @@ class TestPrefillPromptMetadata:
 
 
 class TestDisaggRequestId:
-    """Tests for disagg_request_id population in _setup_disaggregated_params_for_mode."""
+    """Tests for _setup_disaggregated_params_for_mode: disagg_request_id population
+    and the decode handoff."""
 
     def _make_prefill_handler(self, machine_id: int = 42) -> HandlerBase:
         config = MagicMock()
@@ -888,14 +893,73 @@ class TestDisaggRequestId:
         )
         assert params.request_type == "context_and_generation"
 
+    @pytest.mark.parametrize(
+        ("request_extra", "has_field", "expected"),
+        [
+            ({"elapsed_since_arrival_ms": 1500.0}, True, 1.5),
+            ({}, True, None),
+            ({"elapsed_since_arrival_ms": 1500.0}, False, None),
+        ],
+        ids=["stamped", "unstamped", "older-trtllm"],
+    )
+    def test_decode_passes_frontend_elapsed_as_orig_elapsed_s(
+        self, monkeypatch, request_extra, has_field, expected
+    ):
+        """A decode leg orders by its arrival at the frontend, when the router stamped it.
+
+        A TRT-LLM build without the field keeps its params untouched: they are slotted.
+        """
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base.TRTLLM_HAS_ORIG_ELAPSED_S",
+            has_field,
+        )
+        handler = self._make_decode_handler()
+        handler._decode_disaggregated_params_from_prefill = MagicMock(
+            return_value=(SimpleNamespace(request_type="generation_only"), {})
+        )
+
+        params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request={"prefill_result": {"disaggregated_params": {}}, **request_extra},
+            ep_disaggregated_params=None,
+        )
+
+        assert getattr(params, "orig_elapsed_s", None) == expected
+
+    def test_decode_handoff_matches_installed_disaggregated_params(self):
+        """The real params take orig_elapsed_s only on a TRT-LLM build that defines it.
+
+        Before TRT-LLM 1.4.0rc3 the slotted dataclass has no such attribute, and
+        setting one would raise.
+        """
+        handler = self._make_decode_handler()
+        params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request={
+                "elapsed_since_arrival_ms": 1500.0,
+                "prefill_result": {
+                    "disaggregated_params": {
+                        "request_type": "context_only",
+                        "ctx_request_id": 1,
+                        "first_gen_tokens": [7],
+                    }
+                },
+            },
+            ep_disaggregated_params=None,
+        )
+
+        assert params.request_type == "generation_only"
+        expected = 1.5 if TRTLLM_HAS_ORIG_ELAPSED_S else None
+        assert getattr(params, "orig_elapsed_s", None) == expected
+
 
 class TestGenerateLocally:
     """Verify generate_locally forwards request options to generate_async.
 
     Health check requests (built by TrtllmHealthCheckPayload) must reach
     the TRT-LLM engine at priority=1.0.  Regular inference requests
-    (built by the Rust frontend as PreprocessedRequest, which has no
-    priority field) must fall back to DEFAULT_REQUEST_PRIORITY (0.5).
+    (built by the Rust frontend as PreprocessedRequest, which carries a
+    priority only under routing) reach it at routing.priority mapped onto
+    TRT-LLM's scale when the engine's waiting queue orders by priority, and
+    at DEFAULT_REQUEST_PRIORITY (0.5) otherwise.
     """
 
     def _make_handler(self) -> HandlerBase:
@@ -1024,6 +1088,263 @@ class TestGenerateLocally:
         assert chunks[-1].get("engine_data", {}).get("kv_cache_hit") == expected
 
     @pytest.mark.asyncio
+    @pytest.mark.multimodal
+    async def test_audio_inputs_reach_generate_async(self):
+        handler = self._make_handler()
+        audio = object()
+        handler.multimodal_processor = MagicMock()
+        handler.multimodal_processor.process_openai_request = mock.AsyncMock(
+            return_value={
+                "prompt": "<|audio|> Transcribe this",
+                "multi_modal_data": {"audio": [(audio, 16000)]},
+            }
+        )
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result()
+        )
+
+        request = {
+            "token_ids": [1],
+            "multi_modal_data": {"audio_url": [{"Url": "data:audio/wav;base64,AA=="}]},
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert chunks
+        inputs = handler.engine.llm.generate_async.call_args.kwargs["inputs"]
+        assert inputs["multi_modal_data"]["audio"] == [(audio, 16000)]
+        assert inputs["prompt"] == "<|audio|> Transcribe this"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        (
+            "mode",
+            "max_tokens",
+            "engine_steps",
+            "expected_tokens",
+            "expected_finish",
+            "expected_stop_reason",
+            "logprob_kind",
+        ),
+        [
+            # TensorRT-LLM 1.4.0rc2 imports the prefill token without a length
+            # check and then samples one more token.
+            (
+                DisaggregationMode.DECODE,
+                1,
+                [([11], None, None), ([11, 12], "length", None)],
+                [11],
+                "length",
+                None,
+                "flat",
+            ),
+            (
+                DisaggregationMode.DECODE,
+                1,
+                [([11, 12], "stop", 12)],
+                [11],
+                "length",
+                None,
+                "dict",
+            ),
+            (
+                DisaggregationMode.DECODE,
+                2,
+                [([11], None, None), ([11, 12], "length", None)],
+                [11, 12],
+                "length",
+                None,
+                "flat",
+            ),
+            (
+                DisaggregationMode.DECODE,
+                8,
+                [([11], None, None), (list(range(11, 19)), "length", None)],
+                list(range(11, 19)),
+                "length",
+                None,
+                "flat",
+            ),
+            (
+                DisaggregationMode.AGGREGATED,
+                1,
+                [([11], None, None), ([11, 12], "length", None)],
+                [11, 12],
+                "length",
+                None,
+                "flat",
+            ),
+            (
+                DisaggregationMode.DECODE,
+                2,
+                [([11], None, None), ([11, 12], "stop", 12)],
+                [11, 12],
+                "stop",
+                12,
+                "flat",
+            ),
+            (
+                DisaggregationMode.DECODE,
+                1,
+                [([11, 12], "stop", 12)],
+                [11],
+                "length",
+                None,
+                "dict-missing-discarded",
+            ),
+            (
+                DisaggregationMode.DECODE,
+                1,
+                [
+                    ([11], None, None),
+                    ([11, 12], None, None),
+                    ([11, 12, 13], "stop", 13),
+                ],
+                [11],
+                "length",
+                None,
+                "dict",
+            ),
+        ],
+        ids=[
+            "decode-1-extra-step",
+            "decode-1-stop-cut-off",
+            "decode-2",
+            "decode-8",
+            "aggregated-not-capped",
+            "decode-2-stop-at-cap",
+            "decode-1-missing-discarded-logprob",
+            "decode-1-drain-extra-steps",
+        ],
+    )
+    async def test_generation_only_output_is_capped_at_max_tokens(
+        self,
+        mode,
+        max_tokens,
+        engine_steps,
+        expected_tokens,
+        expected_finish,
+        expected_stop_reason,
+        logprob_kind,
+        monkeypatch,
+        caplog,
+    ):
+        """Cap decode output without finishing before the engine or losing logprobs."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base._decode_token_cap_warned",
+            False,
+        )
+        handler = self._make_handler()
+        handler.disaggregation_mode = mode
+        params = (
+            SimpleNamespace(request_type="generation_only", disagg_request_id=None)
+            if mode == DisaggregationMode.DECODE
+            else None
+        )
+        handler._setup_disaggregated_params_for_mode = MagicMock(
+            return_value=(params, None, {})
+        )
+
+        results = []
+        for token_ids, finish_reason, stop_reason in engine_steps:
+            output = MagicMock()
+            output.index = 0
+            output.token_ids = token_ids
+            if logprob_kind == "flat":
+                output.logprobs = [-0.5] * len(token_ids)
+            else:
+                output.logprobs = [
+                    {
+                        token_id: SimpleNamespace(
+                            logprob=-0.5, rank=1, decoded_token=str(token_id)
+                        )
+                    }
+                    for token_id in token_ids
+                ]
+                if logprob_kind == "dict-missing-discarded":
+                    output.logprobs[-1] = None
+            output.finish_reason = finish_reason
+            output.stop_reason = stop_reason
+            output.request_perf_metrics = None
+            output.prompt_logprobs = []
+            res = MagicMock()
+            res.outputs = [output]
+            res.finished = finish_reason is not None
+            res.cached_tokens = None
+            results.append(res)
+
+        generation_result = MagicMock()
+        generation_result.finished = False
+        consumed = []
+
+        async def mock_aiter(self_mock):
+            """Record engine steps and set completion before yielding its final output."""
+            for res in results:
+                consumed.append(res)
+                generation_result.finished = res.finished
+                yield res
+
+        generation_result.__aiter__ = mock_aiter
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": max_tokens},
+            "sampling_options": {},
+            "output_options": {"logprobs": 0},
+        }
+        context = self._make_context()
+        chunks = []
+        with caplog.at_level(logging.WARNING):
+            async for chunk in handler.generate_locally(request, context):
+                chunks.append(chunk)
+                if "finish_reason" in chunk:
+                    assert generation_result.finished
+                    assert len(consumed) == len(engine_steps)
+                    # A client disconnect after the terminal chunk must not abort.
+                    _abort_unless_finished(generation_result, context.id())
+
+        assert [t for c in chunks for t in c["token_ids"]] == expected_tokens
+        assert [lp for c in chunks for lp in c.get("log_probs", [])] == [-0.5] * len(
+            expected_tokens
+        )
+        if logprob_kind != "flat":
+            assert [
+                entry[0]["token_id"]
+                for c in chunks
+                for entry in c.get("top_logprobs", [])
+            ] == expected_tokens
+        assert chunks[-1]["finish_reason"] == expected_finish
+        assert chunks[-1].get("stop_reason") == expected_stop_reason
+        assert chunks[-1]["completion_usage"]["completion_tokens"] == len(
+            expected_tokens
+        )
+        assert sum("finish_reason" in c for c in chunks) == 1
+        # The engine must run to completion so the KV transfer finishes.
+        assert len(consumed) == len(engine_steps)
+        generation_result.abort.assert_not_called()
+        cap_warnings = [
+            record
+            for record in caplog.records
+            if "Clamping TensorRT-LLM decode output" in record.message
+        ]
+        overshot = mode == DisaggregationMode.DECODE and any(
+            len(tokens) > max_tokens for tokens, _, _ in engine_steps
+        )
+        assert len(cap_warnings) == int(overshot)
+        if overshot:
+            assert context.id() in cap_warnings[0].message
+            first_overshoot = next(
+                len(tokens) for tokens, _, _ in engine_steps if len(tokens) > max_tokens
+            )
+            assert f"{first_overshoot} tokens exceed max_tokens={max_tokens}" in (
+                cap_warnings[0].message
+            )
+
+    @pytest.mark.asyncio
     async def test_health_check_gets_priority_1(self):
         """TrtllmHealthCheckPayload → generate_locally → generate_async priority=1.0."""
         handler = self._make_handler()
@@ -1044,12 +1365,12 @@ class TestGenerateLocally:
 
     @pytest.mark.asyncio
     async def test_regular_request_gets_default_priority(self):
-        """Rust PreprocessedRequest shape (no priority key) → default 0.5."""
+        """Rust PreprocessedRequest shape (no routing priority) → default 0.5."""
         handler = self._make_handler()
         generation_result = self._make_mock_generation_result()
         handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
 
-        # Mirrors the Rust PreprocessedRequest struct — no priority field.
+        # Mirrors the Rust PreprocessedRequest struct without routing hints.
         request = {
             "token_ids": [1, 2, 3],
             "stop_conditions": {"max_tokens": 10},
@@ -1063,6 +1384,49 @@ class TestGenerateLocally:
         handler.engine.llm.generate_async.assert_called_once()
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["priority"] == DEFAULT_REQUEST_PRIORITY
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("waiting_queue_policy", "expected"),
+        [
+            (WaitingQueuePolicy.PRIORITY, 0.5 + 2**-24),
+            (WaitingQueuePolicy.FCFS, DEFAULT_REQUEST_PRIORITY),
+            (None, DEFAULT_REQUEST_PRIORITY),
+        ],
+        ids=["priority-queue", "fcfs-queue", "no-scheduler-config"],
+    )
+    async def test_routing_priority_follows_engine_waiting_queue(
+        self, waiting_queue_policy, expected
+    ):
+        """routing.priority reaches a priority-queue engine on TRT-LLM's scale.
+
+        The default FCFS queue ignores priorities and warns for each request
+        that carries one, so it keeps the default. Engine args without a
+        scheduler config run that default queue.
+        """
+        handler = self._make_handler()
+        if waiting_queue_policy is None:
+            del handler.engine.llm.args.scheduler_config
+        else:
+            handler.engine.llm.args.scheduler_config.waiting_queue_policy = (
+                waiting_queue_policy
+            )
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+            "routing": {"priority": 1},
+        }
+
+        context = self._make_context()
+        chunks = [c async for c in handler.generate_locally(request, context)]
+        assert len(chunks) > 0
+
+        handler.engine.llm.generate_async.assert_called_once()
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert kwargs["priority"] == expected
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1136,6 +1500,69 @@ class TestGenerateLocally:
         handler._initiate_shutdown.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.core
+    async def test_presubmit_request_error_raises_invalid_argument(self):
+        """Preserve an engine rejection as a client error without shutting down."""
+        handler = self._make_handler()
+        error = RequestError(
+            "The prompt length (5.0) should not exceed max_num_tokens (4)"
+        )
+        handler.engine.llm.generate_async = MagicMock(side_effect=error)
+        handler._initiate_shutdown = mock.AsyncMock()
+
+        request = {
+            "token_ids": [1, 2, 3, 4, 5],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        with pytest.raises(InvalidArgument) as exc_info:
+            async for _ in handler.generate_locally(request, self._make_context()):
+                pass
+
+        assert str(exc_info.value) == str(error)
+        assert exc_info.value.__cause__ is error
+        handler.engine.llm.generate_async.assert_called_once()
+        handler._initiate_shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.core
+    async def test_long_encoder_prompt_reaches_engine(self):
+        """Let the engine validate decoder length after encoder preprocessing."""
+        handler = self._make_handler()
+        handler.engine.llm.args = SimpleNamespace(
+            backend="pytorch",
+            enable_chunked_prefill=False,
+            max_num_tokens=4,
+            parallel_config=SimpleNamespace(cp_size=1),
+        )
+        handler.engine.llm._is_encoder_decoder_model.return_value = True
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result()
+        )
+        handler._initiate_shutdown = mock.AsyncMock()
+        request = {
+            "token_ids": [1, 2, 3, 4, 5],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert chunks[-1]["token_ids"] == [42]
+        handler.engine.llm.generate_async.assert_called_once()
+        assert handler.engine.llm.generate_async.call_args.kwargs["inputs"] == [
+            1,
+            2,
+            3,
+            4,
+            5,
+        ]
+        handler._initiate_shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_presubmit_signature_type_error_is_fatal(self):
         handler = self._make_handler()
 
@@ -1174,9 +1601,38 @@ class TestGenerateLocally:
         assert str(shutdown_error) == error_message
 
     @pytest.mark.asyncio
-    async def test_validation_error_during_iteration_remains_fatal(self):
+    @pytest.mark.core
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ValueError("invalid executor result"),
+            RequestError("request failed"),
+            RequestError("Guided decoding error: CUDA error: illegal memory access"),
+            RequestError(
+                "Guided decoding error: Request 7 failed to accept last new token: 42."
+            ),
+            RequestError(
+                "Guided decoding error: [12:00:00] json_schema_converter.cc:1: "
+                "Internal compiler failure"
+            ),
+            RequestError(
+                "Guided decoding error: [12:00:00] regex_converter.cc:1: "
+                "Internal matcher failure"
+            ),
+        ],
+        ids=[
+            "fatal-error",
+            "request-error",
+            "guided-internal-error",
+            "guided-token-error",
+            "schema-internal-error",
+            "regex-internal-error",
+        ],
+    )
+    async def test_error_during_iteration_keeps_existing_handling(self, error):
+        """During iteration, a RequestError other than a guided-decoding
+        rejection keeps the error chunk; it is not an InvalidArgument."""
         handler = self._make_handler()
-        error = ValueError("invalid executor result")
         generation_result = MagicMock()
         generation_result.abort = MagicMock()
 
@@ -1204,7 +1660,108 @@ class TestGenerateLocally:
                 "token_ids": [],
             }
         ]
-        handler._initiate_shutdown.assert_awaited_once_with(error)
+        if isinstance(error, RequestError):
+            handler._initiate_shutdown.assert_not_awaited()
+        else:
+            handler._initiate_shutdown.assert_awaited_once_with(error)
+
+    @pytest.mark.asyncio
+    @pytest.mark.core
+    @pytest.mark.parametrize(
+        "error_msg",
+        [
+            'Guided decoding error: [12:00:00] json_schema_converter.cc:1: Unsupported type "invalid_type"',
+            "Guided decoding error: [12:00:00] regex_converter.cc:100: Regex parsing error at position 11: Unclosed '['",
+            'Guided decoding error: [12:00:00] /project/xgrammar/cpp/json_schema_converter.cc:902: Unsupported type "invalid_type"\nStack trace:\n...',
+            "Guided decoding error: [12:00:00] /project/xgrammar/cpp/regex_converter.cc:100: Regex parsing error at position 11: Unclosed '['\nStack trace:\n...",
+        ],
+        ids=["invalid-schema", "malformed-regex", "schema-path", "regex-path"],
+    )
+    async def test_guided_decoding_error_during_iteration_raises_invalid_argument(
+        self,
+        error_msg,
+    ):
+        """A grammar rejection from the engine is a client error, not a shutdown."""
+        handler = self._make_handler()
+        error = RequestError(error_msg)
+        generation_result = MagicMock()
+        generation_result.abort = MagicMock()
+
+        async def raise_during_iteration(self_mock):
+            raise error
+            yield
+
+        generation_result.__aiter__ = raise_during_iteration
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+        handler._initiate_shutdown = mock.AsyncMock()
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        with pytest.raises(InvalidArgument) as exc_info:
+            async for _ in handler.generate_locally(request, self._make_context()):
+                pass
+
+        assert str(exc_info.value) == str(error)
+        assert exc_info.value.__cause__ is error
+        handler._initiate_shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.core
+    @pytest.mark.parametrize(
+        "error_msg",
+        [
+            "Guided decoding error: Request 7 failed to accept last new token: 42.",
+            'Guided decoding error: [12:00:00] json_schema_converter.cc:1: Unsupported type "invalid_type"',
+            "Guided decoding error: [12:00:00] regex_converter.cc:100: Regex parsing error at position 11: Unclosed '['",
+        ],
+        ids=["token-error", "schema-error", "regex-error"],
+    )
+    async def test_guided_decoding_error_after_output_keeps_error_chunk(
+        self, error_msg
+    ):
+        """After a token is emitted, a guided decoding error is engine-side."""
+        handler = self._make_handler()
+        error = RequestError(error_msg)
+        output = MagicMock()
+        output.token_ids = [42]
+        output.finish_reason = None
+        output.stop_reason = None
+        output.request_perf_metrics = None
+        output.prompt_logprobs = []
+        res = MagicMock()
+        res.outputs = [output]
+        res.finished = False
+        generation_result = MagicMock()
+        generation_result.abort = MagicMock()
+
+        async def yield_then_raise(self_mock):
+            yield res
+            raise error
+
+        generation_result.__aiter__ = yield_then_raise
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+        handler._initiate_shutdown = mock.AsyncMock()
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert len(chunks) == 2
+        assert chunks[0]["token_ids"] == [42]
+        assert chunks[1] == {
+            "finish_reason": {"error": str(error)},
+            "token_ids": [],
+        }
+        handler._initiate_shutdown.assert_not_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(10)

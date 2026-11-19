@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Install guard for PyNvVideoCodec, run beside the install in the runtime images.
 
-    PYTHONPATH=/tmp/compliance python3 -m compliance.check_pynvvideocodec --pinned 2.2.3
+    PYTHONPATH=/tmp/compliance python3 -m compliance.check_pynvvideocodec --pinned 2.2.4
 
 The pin is passed in, not read from the requirements file, and a test asserts the
 two agree. What counts as denied comes from policy/codec_policy.yaml.

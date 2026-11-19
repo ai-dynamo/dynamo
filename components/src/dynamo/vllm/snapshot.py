@@ -7,6 +7,7 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.snapshot.lifecycle import (
     EngineSnapshotController,
     SnapshotConfig,
@@ -35,6 +36,17 @@ class _ReleaseOnlyKvCache:
 
     async def sleep(self, *_args: object) -> None:
         await self._engine_client.release_kv_cache_memory()
+
+
+def apply_restore_served_model_name(config: Config) -> None:
+    """Serve the names the restore Pod sets in ``DYN_SERVED_MODEL_NAME``.
+
+    Like ``--served-model-name``, the first name is primary and the rest are
+    aliases. Unset keeps the names the snapshot was captured with.
+    """
+    served_names = split_served_model_names(os.environ.get("DYN_SERVED_MODEL_NAME"))
+    if served_names:
+        config.served_model_name, *config.served_model_aliases = served_names
 
 
 async def prepare_snapshot_engine(

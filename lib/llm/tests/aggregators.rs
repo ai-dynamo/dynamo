@@ -193,6 +193,7 @@ fn make_stream_delta(
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     })
 }
 
@@ -917,6 +918,7 @@ fn make_stream_delta_with_reasoning(
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     })
 }
 
@@ -986,11 +988,11 @@ async fn test_hermes_batch_guided_json_failure_ignores_quoted_marker_substring()
 }
 
 #[tokio::test]
-async fn test_hermes_batch_experimental_flag_rejects_unsupported_v2_parser() {
+async fn test_batch_experimental_flag_rejects_unsupported_v2_parser() {
     if test_utils::run_isolated(
         concat!(
             module_path!(),
-            "::test_hermes_batch_experimental_flag_rejects_unsupported_v2_parser"
+            "::test_batch_experimental_flag_rejects_unsupported_v2_parser"
         ),
         &[(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, "true")],
     ) {
@@ -999,7 +1001,7 @@ async fn test_hermes_batch_experimental_flag_rejects_unsupported_v2_parser() {
 
     let error = NvCreateChatCompletionResponse::from_annotated_stream(
         futures::stream::iter([make_stream_delta(Some("answer"), None)]),
-        ParsingOptions::new(Some("hermes".to_string()), None)
+        ParsingOptions::new(Some("unknown_parser".to_string()), None)
             .with_guided_tool_constraint(GuidedToolConstraint::GuidedJsonRequired),
     )
     .await
@@ -1171,6 +1173,34 @@ async fn test_all_unified_batch_request_policies_for_each_selector_shape() {
 }
 
 #[tokio::test]
+async fn auto_rejects_unavailable_parser_pairs_before_batch_output() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::auto_rejects_unavailable_parser_pairs_before_batch_output"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "auto")],
+    ) {
+        return;
+    }
+
+    let options = ParsingOptions::new(Some("muse_glimmer".to_string()), Some("qwen3".to_string()));
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter([make_stream_delta(Some("raw tool markup"), None)]),
+        options,
+    )
+    .await;
+    let error = result.expect_err("invalid parser selection must not return raw content");
+    assert_eq!(
+        error.class(),
+        dynamo_runtime::error::ErrorClass::InvalidRequest
+    );
+    let message = error.to_string();
+    assert!(message.contains("muse_glimmer"), "{message}");
+    assert!(message.contains("--dyn-"), "{message}");
+}
+
+#[tokio::test]
 async fn explicit_v2_rejects_unconfigured_forced_tool_batch() {
     if test_utils::run_isolated(
         concat!(
@@ -1212,7 +1242,7 @@ async fn explicit_v2_rejects_unsupported_batch_parser_for_every_tool_choice() {
             tool_name: "weather".to_string(),
         },
     ] {
-        let options = ParsingOptions::new(Some("hermes".to_string()), None)
+        let options = ParsingOptions::new(Some("unknown_parser".to_string()), None)
             .with_guided_tool_constraint(constraint);
         let result = NvCreateChatCompletionResponse::from_annotated_stream(
             futures::stream::iter([make_stream_delta(Some("raw output"), None)]),
