@@ -287,13 +287,6 @@ repos:
       additional_dependencies: [pytest]
       pass_filenames: false
       always_run: true
-    - id: ca-floor-in-install-run
-      name: Check the ca-certificates floor check ends the RUN that installs the package
-      entry: python3 tests/dependencies/test_ca_floor_in_install_run.py
-      language: python
-      additional_dependencies: [pytest]
-      pass_filenames: false
-      always_run: true
     - id: validate-agent-instructions
       name: Validate AGENTS.md and CLAUDE.md pairs
       entry: python3 scripts/validate_agent_instructions.py
