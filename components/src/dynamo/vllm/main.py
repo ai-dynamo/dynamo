@@ -40,6 +40,7 @@ from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import (
     EMBEDDING_CACHE_METRIC_PREFIX,
     LLMBackendMetrics,
+    get_extra_metric_prefixes,
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import create_runtime
@@ -58,7 +59,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
+from dynamo.vllm.kv_hints import kvcr_host_capacity_blocks, publish_kv_hint_capabilities
 from dynamo.vllm.nixl_telemetry import allow_nixl_telemetry_capture
 from dynamo.vllm.worker_factory import WorkerFactory
 
@@ -425,6 +426,7 @@ def setup_metrics_collection(
         == "DynamoMultimodalEmbeddingCacheConnector"
     ):
         engine_metric_prefixes.append(EMBEDDING_CACHE_METRIC_PREFIX)
+    engine_metric_prefixes.extend(get_extra_metric_prefixes())
 
     if config.engine_args.disable_log_stats is False:
         # Register the dedicated dynamo_component registry callback
@@ -1055,6 +1057,11 @@ async def register_vllm_model(
         )
         num_gpu_blocks = 0
     runtime_config.total_kv_blocks = per_rank_kv_blocks(num_gpu_blocks, dp_range[1])
+    runtime_config.cache_owner_capacity_blocks = kvcr_host_capacity_blocks(
+        config.engine_args,
+        runtime_values["block_size"],
+        runtime_values["kv_event_block_size"],
+    )
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
     runtime_config.enable_local_indexer = config.enable_local_indexer

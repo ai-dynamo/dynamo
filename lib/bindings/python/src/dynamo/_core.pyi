@@ -21,7 +21,7 @@ from typing import (
     overload,
 )
 
-from aisimulate_core.sdk import ForwardPassPerfModelConfig
+from aisim_core.sdk import ForwardPassPerfModelConfig
 from typing_extensions import NotRequired
 
 # Import from specialized modules
@@ -962,6 +962,7 @@ class ModelRuntimeConfig:
 
     context_length: int | None
     total_kv_blocks: int | None
+    cache_owner_capacity_blocks: int | None
     max_num_seqs: int | None
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
@@ -2411,11 +2412,15 @@ class ReplaySchedulerMetricsSnapshot(TypedDict):
     waiting_requests: int
 
 class ReplaySchedulerIntervalMetrics(TypedDict):
+    g1_prefix_cache_lookup: Optional[dict[str, int]]
     cache_hit_tokens: int
     cache_total_tokens: int
     preemptions: int
 
 class ReplayTrafficMetricsSnapshot(TypedDict):
+    delivered_output_tokens: int
+    committed_prefill_tokens: int
+    first_admission: dict[str, int]
     duration_s: float
     arriving_requests: int
     completed_requests: int
@@ -2431,6 +2436,7 @@ class ReplayTrafficMetricsSnapshot(TypedDict):
     accept_length_forward_count: int
 
 class ReplayTelemetrySnapshot(TypedDict):
+    host_caches: list[dict[str, Any]]
     sample_ordinal: int
     kind: Literal["baseline", "periodic", "final"]
     interval_start_ms: float
@@ -2534,6 +2540,9 @@ def run_mocker_trace_replay(
     agentic_profile: Optional[Dict[str, Any]] = None,
     deterministic: bool = False,
     conversation_affinity: Optional[Dict[str, Any]] = None,
+    agentic_warmup_policy: Optional[
+        Literal["repeated_prefixes", "live_trajectory_v1"]
+    ] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 

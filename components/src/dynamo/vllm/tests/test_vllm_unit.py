@@ -2637,7 +2637,6 @@ async def test_generate_text_mode_applies_nvext_cache_salt():
         default_sampling_params={},
         config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
         engine_client=EngineClient(),
-        _deferred_aborts={},
         _shutdown_on_engine_dead=lambda exc: None,
         _abort_monitor=abort_monitor,
         _to_local_dp_rank=lambda rank: None,
@@ -2717,7 +2716,6 @@ async def test_generate_text_mode_notifies_for_empty_decoded_token():
         default_sampling_params={},
         config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
         engine_client=EngineClient(),
-        _deferred_aborts={},
         _shutdown_on_engine_dead=lambda exc: None,
         _abort_monitor=abort_monitor,
         _to_local_dp_rank=lambda rank: None,
@@ -2795,6 +2793,7 @@ async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch)
             "num_gpu_blocks": 16,
             "max_num_seqs": 8,
             "max_num_batched_tokens": 512,
+            "block_size": 16,
             "kv_event_block_size": 16,
         },
     )

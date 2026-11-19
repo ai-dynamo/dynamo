@@ -296,6 +296,11 @@ pub struct ModelRuntimeConfig {
     /// estimate and must not silently become a hard-admission denominator.
     pub total_kv_blocks: Option<u64>,
 
+    /// Host-pinned capacity, in KV blocks, of the cache owner (KVCR instance) attached
+    /// to each router-visible data-parallel rank.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_owner_capacity_blocks: Option<u64>,
+
     pub max_num_seqs: Option<u64>,
 
     pub max_num_batched_tokens: Option<u64>,
@@ -460,6 +465,7 @@ impl Default for ModelRuntimeConfig {
         Self {
             context_length: None,
             total_kv_blocks: None,
+            cache_owner_capacity_blocks: None,
             max_num_seqs: None,
             max_num_batched_tokens: None,
             tool_call_parser: None,
@@ -593,19 +599,12 @@ impl dynamo_scheduler::host::WorkerConfigLike for ModelRuntimeConfig {
         })
     }
 
-    fn native_offloading_capacity_tokens(&self) -> Option<u64> {
-        self.runtime_data
-            .get("native_offloading_capacity")?
-            .get("total_tokens")?
-            .as_u64()
+    fn cache_owner_capacity_blocks(&self) -> Option<u64> {
+        self.cache_owner_capacity_blocks
     }
 
     fn taints(&self) -> &HashSet<String> {
         &self.taints
-    }
-
-    fn stable_routing_id(&self) -> Option<&str> {
-        self.stable_routing_id.as_deref()
     }
 
     fn topology_domains(&self) -> Option<&HashMap<String, String>> {
@@ -622,10 +621,6 @@ impl dynamo_scheduler::host::WorkerConfigLike for ModelRuntimeConfig {
 
     fn kv_transfer_enforcement(&self) -> Option<KvTransferEnforcement> {
         self.kv_transfer_enforcement
-    }
-
-    fn kv_transfer_preferred_weight(&self) -> Option<f32> {
-        self.kv_transfer_preferred_weight
     }
 }
 
@@ -1271,21 +1266,6 @@ mod tests {
 
         let error = "baseten".parse::<TokenizerBackend>().unwrap_err();
         assert!(error.contains("basetenkenizer"));
-    }
-
-    #[test]
-    fn native_offloading_capacity_is_backend_neutral() {
-        use dynamo_scheduler::host::WorkerConfigLike;
-
-        let mut config = ModelRuntimeConfig::default();
-        config
-            .set_engine_specific(
-                "native_offloading_capacity",
-                serde_json::json!({"total_tokens": 300}),
-            )
-            .unwrap();
-
-        assert_eq!(config.native_offloading_capacity_tokens(), Some(300));
     }
 
     #[test]

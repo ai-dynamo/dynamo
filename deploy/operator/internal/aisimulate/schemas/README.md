@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # AISimulate input schemas
 
 Each JSON file is generated from the exact pinned wheel's
-`aisimulate.config.CoreRecommendationConfig.model_json_schema(mode="validation")`.
+`aisim.config.CoreRecommendationConfig.model_json_schema(mode="validation")`.
 The operator embeds only `latest.json`, which the generator refreshes together with
 the versioned snapshot and the `SchemaVersion` constant. Webhook setup compiles it
 before registering handlers, so an invalid schema fails startup rather than admission.
