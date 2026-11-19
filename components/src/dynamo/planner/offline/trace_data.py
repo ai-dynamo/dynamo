@@ -37,7 +37,6 @@ _MOONCAKE_FIELDS = (
 
 
 def _mooncake_key(record: Dict[str, Any], name: str, alias: str, location: str) -> str:
-    """Return the key that holds a Mooncake field in ``record``."""
     if alias not in record:
         return name
     if name in record:
