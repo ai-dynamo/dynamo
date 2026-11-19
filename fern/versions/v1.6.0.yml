@@ -198,6 +198,8 @@ navigation:
             path: ../pages-v1.6.0/kubernetes/fault-tolerance/request-rejection.md
           - page: Graceful Shutdown
             path: ../pages-v1.6.0/kubernetes/fault-tolerance/graceful-shutdown.md
+          - page: Shadow Engine Failover
+            path: ../pages-v1.6.0/developer-guide/knowledge-base/kubernetes/kubernetes-operator/shadow-engine-failover.md
       - section: Auto Deployment
         icon: wand-magic-sparkles
         collapsed: true
@@ -222,6 +224,8 @@ navigation:
             contents:
               - page: Dynamo Snapshot
                 path: ../pages-v1.6.0/developer-guide/knowledge-base/kubernetes/kubernetes-operator/snapshot.md
+              - page: Model Express
+                path: ../pages-v1.6.0/developer-guide/knowledge-base/kubernetes/model-loading/modelexpress.md
           - page: Benchmarking with AIPerf
             path: ../pages-v1.6.0/kubernetes/operations/benchmarking-with-aiperf.mdx
           - page: Performance Tuning
