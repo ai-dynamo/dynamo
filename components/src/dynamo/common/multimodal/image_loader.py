@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import errno
 import hashlib
 import logging
 import os
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from io import BytesIO
 from typing import Any, Coroutine, Dict, Final, List, Literal, overload
 from urllib.parse import urlsplit
@@ -42,6 +43,18 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 UUID_ONLY_VARIANT_KEY: Final = "UuidOnly"
 IMAGE_CACHE_SCOPE_KEY: Final = "image_cache_scope"
 IMAGE_CACHE_SESSION_SCOPED_ENV: Final = "DYN_MM_IMAGE_CACHE_SESSION_SCOPED"
+
+
+# Pillow reports a codec allocation failure as an OSError without errno.
+_PILLOW_CODEC_OOM_MESSAGE: Final = "out of memory when reading image file"
+
+
+def _is_host_resource_error(e: OSError) -> bool:
+    """True when a decode OSError comes from host resource exhaustion rather
+    than from the image bytes."""
+    if e.errno in (errno.EMFILE, errno.ENFILE, errno.ENOMEM):
+        return True
+    return e.errno is None and _PILLOW_CODEC_OOM_MESSAGE in str(e)
 
 
 def image_cache_scope_from_request(request: Mapping[str, Any]) -> str | None:
@@ -135,6 +148,10 @@ async def read_decoded_media_via_nixl(*args: Any, **kwargs: Any) -> Any:
     return await _read_decoded_media_via_nixl(*args, **kwargs)
 
 
+def _pillow_rgb(image: Image.Image) -> Image.Image:
+    return image.convert("RGB")
+
+
 class ImageLoader:
     CACHE_SIZE_MAXIMUM = int(os.environ.get("DYN_MM_IMAGE_CACHE_SIZE", "8"))
 
@@ -147,6 +164,7 @@ class ImageLoader:
         max_bytes: int | None = None,
         session_scoped_cache: bool | None = None,
         max_pixels: int | None = None,
+        to_rgb: Callable[[Image.Image], Image.Image] = _pillow_rgb,
     ):
         """
         Initialize the ImageLoader with caching, HTTP settings, and optional NIXL config for
@@ -168,6 +186,11 @@ class ImageLoader:
                 DYN_MM_IMAGE_CACHE_SESSION_SCOPED (default off). When enabled,
                 HTTP loads without a scope bypass all image caches.
             max_pixels: Optional per-image pixel limit, checked before RGB decode.
+            to_rgb: Converts a decoded image to RGB. The default drops alpha, as
+                Pillow's ``convert("RGB")`` does. A backend whose own loader treats
+                transparency differently passes that conversion. It must return an
+                RGB image and be safe to call from a worker thread. Frontend-decoded
+                arrays that are already RGB skip it.
         """
         self._http_timeout = http_timeout
         self._cache_size = cache_size
@@ -179,6 +202,7 @@ class ImageLoader:
         ):
             raise ValueError("max_pixels must be a positive integer")
         self._max_pixels = max_pixels
+        self._to_rgb = to_rgb
         if session_scoped_cache is None:
             session_scoped_cache = image_cache_session_scoped_from_env()
         self._session_scoped_cache = session_scoped_cache
@@ -232,27 +256,39 @@ class ImageLoader:
 
     @staticmethod
     def _open_image_sync(
-        image_data: BytesIO, max_pixels: int | None = None
+        image_data: BytesIO,
+        max_pixels: int | None = None,
+        to_rgb: Callable[[Image.Image], Image.Image] = _pillow_rgb,
     ) -> Image.Image:
         """Open, validate, and decode an image from raw bytes. Runs in a thread."""
         # formats= is the allowlist. Its JPEG plugin also opens multi-picture JPEGs
         # (most phone cameras), which report image.format == "MPO".
-        with Image.open(image_data, formats=["JPEG", "PNG", "WEBP"]) as image:
+        try:
+            image = Image.open(image_data, formats=["JPEG", "PNG", "WEBP"])
+        except Image.DecompressionBombError as exc:
+            raise HttpStatusError(
+                413, "Image exceeds the decoded pixel limit", "image"
+            ) from exc
+        with image:
             if max_pixels is not None and image.width * image.height > max_pixels:
                 raise HttpStatusError(
                     413, "Image exceeds the decoded pixel limit", "image"
                 )
             # Image.open() is lazy — check dimensions before RGB expansion.
-            return image.convert("RGB")
+            # Decode here: to_rgb may return its argument, and the file closes on exit.
+            image.load()
+            return to_rgb(image)
 
     @staticmethod
     async def _open_image(
-        image_data: BytesIO, max_pixels: int | None = None
+        image_data: BytesIO,
+        max_pixels: int | None = None,
+        to_rgb: Callable[[Image.Image], Image.Image] = _pillow_rgb,
     ) -> Image.Image:
         """Open and validate an image from raw bytes, converting to RGB."""
         with _nvtx.annotate("mm:img:pil_open_convert", color="lime"):
             return await asyncio.to_thread(
-                ImageLoader._open_image_sync, image_data, max_pixels
+                ImageLoader._open_image_sync, image_data, max_pixels, to_rgb
             )
 
     def _cache_put(self, key: str, image: Image.Image) -> None:
@@ -287,6 +323,7 @@ class ImageLoader:
                         return await self._open_image(
                             BytesIO(cached_content),
                             max_pixels if max_pixels is not None else self._max_pixels,
+                            self._to_rgb,
                         )
                     except (OSError, ValueError) as exc:
                         logger.warning(
@@ -307,9 +344,24 @@ class ImageLoader:
                     raise ValueError("Empty response content from image URL")
                 image_data = BytesIO(content)
 
-            image = await self._open_image(
-                image_data, max_pixels if max_pixels is not None else self._max_pixels
-            )
+            # Only the decode is covered: fetch failures (SSRF blocks, aiohttp
+            # connector errors) are OSErrors too and must not read as bad data.
+            try:
+                image = await self._open_image(
+                    image_data,
+                    max_pixels if max_pixels is not None else self._max_pixels,
+                    self._to_rgb,
+                )
+            except Image.UnidentifiedImageError:
+                raise
+            except (OSError, SyntaxError) as e:
+                # Pillow: OSError for truncated or corrupt data, SyntaxError for a
+                # broken PNG chunk. Host resource exhaustion is a server fault.
+                if isinstance(e, OSError) and _is_host_resource_error(e):
+                    raise
+                raise HttpStatusError(
+                    400, "Invalid or truncated image data", image_url
+                ) from e
             if self._shared_image_cache is not None and key is not None:
                 # Cache fills are awaited deliberately so Redis acknowledges a
                 # successful write before this request returns. A cache outage
@@ -409,7 +461,7 @@ class ImageLoader:
         if arr.ndim == 3 and arr.shape[-1] == 1:
             arr = arr.squeeze(axis=-1)
         image = Image.fromarray(arr)
-        return image if image.mode == "RGB" else image.convert("RGB")
+        return image if image.mode == "RGB" else self._to_rgb(image)
 
     @_nvtx.annotate("mm:img:load_image", color="lime")
     async def load_image(
@@ -488,7 +540,7 @@ class ImageLoader:
                         normalized_url, max_bytes=self._max_bytes()
                     )
                     image_data = BytesIO(image_bytes)
-                return await self._open_image(image_data, max_pixels)
+                return await self._open_image(image_data, max_pixels, self._to_rgb)
             except Image.UnidentifiedImageError as e:
                 logger.error(
                     "Unsupported image format decoding: '%s'",
@@ -503,7 +555,7 @@ class ImageLoader:
                 source = describe_media_source(image_url)
                 logger.error("%s decoding image: '%s': %s", type(e).__name__, source, e)
                 raise ValueError(f"Failed to decoding image: '{source}': {e}") from e
-            except OSError as e:
+            except (OSError, SyntaxError) as e:
                 logger.error(
                     "Invalid or truncated image data: '%s'",
                     describe_media_source(image_url),
