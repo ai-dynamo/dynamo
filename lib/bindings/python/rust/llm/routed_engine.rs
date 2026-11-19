@@ -82,9 +82,26 @@ fn copy_session_affinity(
     }
 }
 
+/// Give the routed request its parent request's agent context, unless it carries its own.
+///
+/// The router, request tracing and workers read the session only from this request field, and
+/// a chat processor replaces the preprocessor that would have filled it.
+fn inherit_agent_context(
+    parent_context: &crate::context::Context,
+    request: &mut PreprocessedRequest,
+) {
+    if request.agent_context.is_none() {
+        request.agent_context = parent_context.agent_context().cloned();
+    }
+}
+
 #[pymethods]
 impl RoutedEngine {
     /// Send a preprocessed request through the Rust prefill-routed pipeline.
+    ///
+    /// With `context`, the routed request takes the parent request's id and metadata, is
+    /// cancelled with it, and inherits its session affinity and, unless `preprocessed` carries
+    /// an `agent_context` of its own, its agent context.
     #[pyo3(signature = (preprocessed, context=None))]
     fn generate<'p>(
         &self,
@@ -99,6 +116,7 @@ impl RoutedEngine {
             request.tracker = Some(Arc::new(RequestTracker::new()));
         }
         let request_context = if let Some(parent_context) = context.as_ref() {
+            inherit_agent_context(parent_context, &mut request);
             let parent_metadata = parent_context.metadata_snapshot();
             let parent_controller = parent_context.inner();
             let mut child_context = SingleIn::with_id_and_metadata(
@@ -202,7 +220,8 @@ fn dispatch_span(
 mod tests {
     use super::*;
     use dynamo_llm::protocols::common::extensions::{
-        SessionAffinityId, session_affinity_from_headers,
+        AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SessionAffinityId, agent_context_from_headers,
+        session_affinity_from_headers,
     };
     use dynamo_runtime::logging::{DistributedTraceIdLayer, inject_trace_headers_into_map};
     use opentelemetry::trace::{TraceContextExt, TraceId, TracerProvider as _};
@@ -234,6 +253,51 @@ mod tests {
             .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .expect("session affinity restored after Python boundary");
         assert_eq!(session_affinity.as_str(), "session-123");
+    }
+
+    fn agent_context(session_id: &str, parent_session_id: Option<&str>) -> AgentContext {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-dynamo-session-id", session_id.parse().unwrap());
+        if let Some(parent_session_id) = parent_session_id {
+            headers.insert(
+                "x-dynamo-parent-session-id",
+                parent_session_id.parse().unwrap(),
+            );
+        }
+        agent_context_from_headers(&headers).expect("agent context headers")
+    }
+
+    /// The Python binding context of a request whose pipeline context carries `agent_context`.
+    fn python_context_with(agent_context: AgentContext) -> crate::context::Context {
+        let mut source = SingleIn::new(());
+        source.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
+        crate::context::Context::new(source.context(), None, None, Default::default())
+            .with_agent_context_from(&source)
+            .expect("pipeline context converts to Python binding context")
+    }
+
+    #[test]
+    fn request_inherits_agent_context_across_python_boundary() {
+        let python_context = python_context_with(agent_context("session-123", Some("parent-1")));
+        let mut request = preprocessed_request();
+        inherit_agent_context(&python_context, &mut request);
+
+        let inherited = request
+            .agent_context
+            .expect("agent context inherited after Python boundary");
+        assert_eq!(inherited.session_id, "session-123");
+        assert_eq!(inherited.parent_session_id.as_deref(), Some("parent-1"));
+    }
+
+    #[test]
+    fn processor_agent_context_is_not_overwritten() {
+        let python_context = python_context_with(agent_context("from-headers", None));
+        let mut request = preprocessed_request();
+        request.agent_context = Some(agent_context("from-processor", None));
+        inherit_agent_context(&python_context, &mut request);
+
+        let kept = request.agent_context.expect("processor's agent context");
+        assert_eq!(kept.session_id, "from-processor");
     }
 
     fn make_trace_context(

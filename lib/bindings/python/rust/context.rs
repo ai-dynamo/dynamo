@@ -12,7 +12,9 @@
 
 use dynamo_backend_common::FirstTokenNotifier;
 use dynamo_llm::http::service::response_headers::{RESPONSE_HEADERS_CONTEXT_KEY, ResponseHeaders};
-use dynamo_llm::protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId};
+use dynamo_llm::protocols::common::extensions::{
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+};
 use dynamo_runtime::logging::DistributedTraceContext;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::pipeline::Context as PipelineContext;
@@ -67,6 +69,9 @@ pub struct Context {
     first_token: Option<FirstTokenNotifier>,
     metadata: Arc<Mutex<BTreeMap<String, String>>>,
     session_affinity: Option<SessionAffinityId>,
+    /// The request's agent identity. A request routed with this context
+    /// inherits it unless it carries its own.
+    agent_context: Option<Arc<AgentContext>>,
     /// Where a frontend chat engine sets HTTP response headers. `None` when
     /// the request's response cannot carry them.
     response_headers: Option<ResponseHeaders>,
@@ -190,6 +195,7 @@ impl Context {
             first_token,
             metadata: Arc::new(Mutex::new(metadata)),
             session_affinity: None,
+            agent_context: None,
             response_headers: None,
             span: None,
         }
@@ -202,6 +208,16 @@ impl Context {
         self.session_affinity = context
             .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)?
             .map(|session_affinity| session_affinity.as_ref().clone());
+        Ok(self)
+    }
+
+    /// Keep the [`AgentContext`] the HTTP handler put on the request's
+    /// context, so a request routed from Python can inherit it.
+    pub fn with_agent_context_from<T: Send + Sync + 'static>(
+        mut self,
+        context: &PipelineContext<T>,
+    ) -> Result<Self, String> {
+        self.agent_context = context.get_optional::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)?;
         Ok(self)
     }
 
@@ -262,6 +278,10 @@ impl Context {
         self.session_affinity.as_ref()
     }
 
+    pub fn agent_context(&self) -> Option<&AgentContext> {
+        self.agent_context.as_deref()
+    }
+
     /// Build the `traceparent` header value. Prefers the engine.generate
     /// OTel span context when valid so downstream engine spans nest under
     /// `engine.generate`; falls back to the inbound trace context.
@@ -310,6 +330,7 @@ impl Context {
             first_token: None,
             metadata: Arc::new(Mutex::new(metadata.unwrap_or_default())),
             session_affinity: None,
+            agent_context: None,
             response_headers: None,
             span: None,
         }
@@ -329,6 +350,7 @@ impl Context {
             first_token: None,
             metadata: Arc::new(Mutex::new(self.metadata_snapshot())),
             session_affinity: self.session_affinity.clone(),
+            agent_context: self.agent_context.clone(),
             response_headers: None,
             span: self.span.clone(),
         }
