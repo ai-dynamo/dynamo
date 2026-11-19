@@ -198,8 +198,6 @@ mod tests {
         assert_eq!(request.total_kv_blocks, Some(1000));
     }
 
-    /// SGLang sends one remove per block however many times it stored the block, so its
-    /// pods must not have repeated stores counted. vLLM and TensorRT-LLM pods keep the counts.
     #[test]
     fn only_sglang_renderer_pods_skip_block_refcounts() {
         for (renderer_protocol, idempotent_stores) in [
