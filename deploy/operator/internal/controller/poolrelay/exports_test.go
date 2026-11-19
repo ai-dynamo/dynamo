@@ -1212,23 +1212,36 @@ func TestRelayWithoutAClusterIDRunsUnderTheClusterSetID(t *testing.T) {
 		property   string
 		noProperty bool
 		readFails  bool
+		// routingPool, when set, is the DYN_RELAY_ROUTING_POOL of the Relay's main
+		// container, which names the pool's cluster itself.
+		routingPool string
 		// wantClusterID is the cluster ID that the Relay runs under, if it runs.
 		wantClusterID string
-		// wantWithdrawn is part of the message with which the Relay withdraws.
-		wantWithdrawn string
+		// wantHeld is part of the message with which the Relay is held as it is.
+		wantHeld string
 	}{
 		{name: "a Relay without a clusterId runs under the cluster's ID", watched: true, property: "east", wantClusterID: "east"},
 		{name: "a clusterId wins over the cluster's ID", clusterID: "west", watched: true, property: "east", wantClusterID: "west"},
-		{name: "without the property the Relay withdraws", watched: true, noProperty: true, wantWithdrawn: "does not exist"},
-		{name: "a property without a value gives no cluster ID", watched: true, wantWithdrawn: `gives ""`},
-		{name: "a property with surrounding whitespace gives no cluster ID", watched: true, property: " east", wantWithdrawn: `gives " east"`},
+		{name: "without the property the Relay is held", watched: true, noProperty: true, wantHeld: "does not exist"},
+		{name: "a property without a value gives no cluster ID", watched: true, wantHeld: `gives ""`},
+		{name: "a property with surrounding whitespace gives no cluster ID", watched: true, property: " east", wantHeld: `gives " east"`},
+		{name: "a property with a control character gives no cluster ID", watched: true, property: "ea\tst", wantHeld: `gives "ea\tst"`},
+		{name: "a property with a slash gives no cluster ID", watched: true, property: "us/east", wantHeld: `gives "us/east"`},
 		{
 			name: "a property longer than a clusterId gives no cluster ID", watched: true,
-			property: strings.Repeat("e", maxClusterIDLength+1), wantWithdrawn: "1 to 128 characters",
+			property: strings.Repeat("e", maxClusterIDLength+1), wantHeld: "1 to 128 characters",
 		},
-		{name: "without the watch a Relay needs a clusterId", property: "east", wantWithdrawn: "set clusterId"},
-		{name: "without the pool's exports a Relay needs a clusterId", exportsOff: true, property: "east", wantWithdrawn: "set clusterId"},
-		{name: "a failed read fails the reconcile instead of withdrawing the Relay", watched: true, property: "east", readFails: true},
+		{
+			name: "a Relay that names its cluster in DYN_RELAY_ROUTING_POOL needs a clusterId", watched: true,
+			property: "east", routingPool: "east/inference/green", wantHeld: "sets DYN_RELAY_ROUTING_POOL",
+		},
+		{
+			name: "with a clusterId, DYN_RELAY_ROUTING_POOL names the same cluster", clusterID: "west", watched: true,
+			property: "east", routingPool: "west/inference/green", wantClusterID: "west",
+		},
+		{name: "without the watch a Relay needs a clusterId", property: "east", wantHeld: "restart the operator"},
+		{name: "without the pool's exports a Relay needs a clusterId", exportsOff: true, property: "east", wantHeld: "set clusterId"},
+		{name: "a failed read fails the reconcile instead of holding the Relay", watched: true, property: "east", readFails: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
@@ -1239,6 +1252,9 @@ func TestRelayWithoutAClusterIDRunsUnderTheClusterSetID(t *testing.T) {
 			dgd := newExportTestDGD("green", "Frontend")
 			relay := newExportTestRelay(dgd)
 			relay.Spec.ClusterID = tc.clusterID
+			if tc.routingPool != "" {
+				relay.Spec.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "DYN_RELAY_ROUTING_POOL", Value: tc.routingPool}}
+			}
 			poolRelayService := multicluster.PoolRelayServiceName(relay.Name)
 			objects := append([]client.Object{dgd, relay}, poolServices(t, scheme, relay, dgd, poolRelayService)...)
 			if !tc.noProperty {
@@ -1268,17 +1284,17 @@ func TestRelayWithoutAClusterIDRunsUnderTheClusterSetID(t *testing.T) {
 			ready := meta.FindStatusCondition(relay.Status.Conditions, "Ready")
 			switch {
 			case tc.readFails:
-				t.Log("A failed read is an error to retry: the Relay is neither published nor withdrawn")
+				t.Log("A failed read is an error to retry: the Relay is neither published nor held")
 				g.Expect(err).To(gomega.MatchError(gomega.ContainSubstring("denied")))
 				g.Expect(apierrors.IsNotFound(deploymentErr)).To(gomega.BeTrue())
 				g.Expect(ready).To(gomega.BeNil())
-			case tc.wantWithdrawn != "":
-				t.Log("The Relay withdraws, and says why")
+			case tc.wantHeld != "":
+				t.Log("The Relay is held as it is, with nothing published, and says why")
 				g.Expect(err).NotTo(gomega.HaveOccurred())
 				g.Expect(apierrors.IsNotFound(deploymentErr)).To(gomega.BeTrue())
 				g.Expect(ready).NotTo(gomega.BeNil())
-				g.Expect(ready.Reason).To(gomega.Equal("InvalidConfiguration"))
-				g.Expect(ready.Message).To(gomega.ContainSubstring(tc.wantWithdrawn))
+				g.Expect(ready.Reason).To(gomega.Equal("ClusterIDUnavailable"))
+				g.Expect(ready.Message).To(gomega.ContainSubstring(tc.wantHeld))
 			default:
 				t.Log("The Relay runs under the case's cluster ID")
 				g.Expect(err).NotTo(gomega.HaveOccurred())
@@ -1320,6 +1336,54 @@ func TestClearingAClusterIDThatTheClusterGivesKeepsTheRelaysPods(t *testing.T) {
 	after := &appsv1.Deployment{}
 	g.Expect(fakeClient.Get(ctx, deploymentKey, after)).To(gomega.Succeed())
 	g.Expect(after.Spec.Template).To(gomega.Equal(before.Spec.Template))
+}
+
+func TestARelayStaysAsItIsWhileItsClusterIDIsUnavailable(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	ctx := context.Background()
+
+	t.Log("Publish a pool whose Relay has no clusterId, in a cluster whose ID is east")
+	scheme := newExportTestScheme(t)
+	dgd := newExportTestDGD("green", "Frontend")
+	relay := newExportTestRelay(dgd)
+	relay.Spec.ClusterID = ""
+	property := newClusterIDProperty("east")
+	poolRelayService := multicluster.PoolRelayServiceName(relay.Name)
+	objects := append([]client.Object{dgd, relay, property}, poolServices(t, scheme, relay, dgd, poolRelayService)...)
+	fakeClient := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{}, objects...)
+	r := newExportTestReconciler(fakeClient, events.NewFakeRecorder(50), configv1alpha1.MCSImplementationStandard, exportTestVersion)
+	r.exports.clusterPropertyWatched = true
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(relay)}
+	deploymentKey := client.ObjectKey{Namespace: relay.Namespace, Name: poolRelayService}
+	_, err := r.Reconcile(ctx, request)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	published := &appsv1.Deployment{}
+	g.Expect(fakeClient.Get(ctx, deploymentKey, published)).To(gomega.Succeed())
+	exports := exportNames(listServiceExports(t, fakeClient, exportTestVersion, relay.Namespace))
+	g.Expect(exports).NotTo(gomega.BeEmpty())
+
+	t.Log("Delete the property: the Relay, its Service and its exports stay as they are, and the Relay reports why")
+	g.Expect(fakeClient.Delete(ctx, property)).To(gomega.Succeed())
+	_, err = r.Reconcile(ctx, request)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	held := &appsv1.Deployment{}
+	g.Expect(fakeClient.Get(ctx, deploymentKey, held)).To(gomega.Succeed())
+	g.Expect(held.Spec.Template).To(gomega.Equal(published.Spec.Template))
+	g.Expect(fakeClient.Get(ctx, deploymentKey, &corev1.Service{})).To(gomega.Succeed())
+	g.Expect(exportNames(listServiceExports(t, fakeClient, exportTestVersion, relay.Namespace))).To(gomega.ConsistOf(exports))
+	g.Expect(fakeClient.Get(ctx, request.NamespacedName, relay)).To(gomega.Succeed())
+	ready := meta.FindStatusCondition(relay.Status.Conditions, "Ready")
+	g.Expect(ready).NotTo(gomega.BeNil())
+	g.Expect(ready.Reason).To(gomega.Equal("ClusterIDUnavailable"))
+	g.Expect(ready.Message).To(gomega.ContainSubstring("does not exist"))
+
+	t.Log("Give the cluster the ID west: the Relay runs under it")
+	g.Expect(fakeClient.Create(ctx, newClusterIDProperty("west"))).To(gomega.Succeed())
+	_, err = r.Reconcile(ctx, request)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	moved := &appsv1.Deployment{}
+	g.Expect(fakeClient.Get(ctx, deploymentKey, moved)).To(gomega.Succeed())
+	g.Expect(moved.Spec.Template.Spec.Containers[0].Args[:2]).To(gomega.Equal([]string{"--cluster-id", "west"}))
 }
 
 func TestPoolsFollowTheClusterIDProperty(t *testing.T) {

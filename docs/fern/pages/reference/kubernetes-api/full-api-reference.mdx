@@ -1407,7 +1407,7 @@ DynamoPoolRelaySpec configures Relay Pods for the DGD with the same name and nam
 **Appears in:** [DynamoPoolRelay](#dynamopoolrelay)
 
 <ParamField path="clusterId" type="string">
-ClusterID is the Relay's stable logical cluster ID across restarts. Empty uses the cluster's ID in its ClusterSet, from the About API's ClusterProperty cluster.clusterset.k8s.io, when the operator's multiCluster.mcsImplementation is mcs. With Karmada, set it to the member cluster's name in Karmada.
+ClusterID is the Relay's logical cluster ID. Omitted, the Relay runs under the cluster's ID in its ClusterSet from the About API's ClusterProperty cluster.clusterset.k8s.io, with the operator's mcsImplementation mcs, unless its main container sets DYN_RELAY_ROUTING_POOL. With Karmada, set the member cluster's name. A changed ID restarts the Relay's Pods.
 **Validation:** MaxLength: 128  MinLength: 1  Pattern: `^[^[:space:]\p\{Z\}\x85\x1c-\x1f](.*[^[:space:]\p\{Z\}\x85\x1c-\x1f])?$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -1446,7 +1446,7 @@ AvailableReplicas is the number of Relay Pods the Deployment reports available.
 </ParamField>
 
 <ParamField path="conditions" type="Condition array">
-Conditions includes Ready for listener availability, not model or KV readiness. Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound, DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers, InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict. With multi-cluster export configured, Conditions also includes Exported: True with reason Exported once the pool's Services are exported, or False with reason Withdrawn, ServiceNotOwned, InvalidServiceName, ServiceNameTooLong, NoFrontend, ClusterIDMismatch, or ExportFailed.
+Conditions includes Ready for listener availability, not model or KV readiness. Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound, DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers, InvalidConfiguration, ClusterIDUnavailable, ReconcileFailed, or ResourceOwnershipConflict. With multi-cluster export configured, Conditions also includes Exported: True with reason Exported once the pool's Services are exported, or False with reason Withdrawn, ServiceNotOwned, InvalidServiceName, ServiceNameTooLong, NoFrontend, ClusterIDMismatch, or ExportFailed.
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>

@@ -683,7 +683,7 @@ func TestRelayWithoutAClusterIDFollowsTheClusterSetID(t *testing.T) {
 	}
 	startRelayController(t, config, relayControllerOptions{version: exportTestVersion})
 
-	t.Log("Create a pool whose Relay has no clusterId in a cluster with no ID in its ClusterSet: the API server accepts it, and the Relay withdraws")
+	t.Log("Create a pool whose Relay has no clusterId in a cluster with no ID in its ClusterSet: the API server accepts it, and the Relay is held")
 	relay := readSampleRelay(t)
 	relay.Spec.ClusterID = ""
 	createNamespace(t, apiClient, relay.Namespace)
@@ -691,14 +691,17 @@ func TestRelayWithoutAClusterIDFollowsTheClusterSetID(t *testing.T) {
 	if err := apiClient.Create(ctx, relay); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "the Relay withdrawn for want of a cluster ID", func() (bool, error) {
-		current := &v1alpha1.DynamoPoolRelay{}
-		if err := apiClient.Get(ctx, client.ObjectKeyFromObject(relay), current); err != nil {
-			return false, err
+	heldFor := func(cause string) func() (bool, error) {
+		return func() (bool, error) {
+			current := &v1alpha1.DynamoPoolRelay{}
+			if err := apiClient.Get(ctx, client.ObjectKeyFromObject(relay), current); err != nil {
+				return false, err
+			}
+			ready := meta.FindStatusCondition(current.Status.Conditions, "Ready")
+			return ready != nil && ready.Reason == "ClusterIDUnavailable" && strings.Contains(ready.Message, cause), nil
 		}
-		ready := meta.FindStatusCondition(current.Status.Conditions, "Ready")
-		return ready != nil && ready.Reason == "InvalidConfiguration" && strings.Contains(ready.Message, "does not exist"), nil
-	})
+	}
+	eventually(t, "the Relay held for want of a cluster ID", heldFor("does not exist"))
 	deploymentKey := client.ObjectKey{Namespace: relay.Namespace, Name: multicluster.PoolRelayServiceName(relay.Name)}
 	runsUnder := func(clusterID string) func() (bool, error) {
 		return func() (bool, error) {
@@ -724,6 +727,15 @@ func TestRelayWithoutAClusterIDFollowsTheClusterSetID(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventually(t, "the Relay's Deployment under cluster ID west", runsUnder("west"))
+
+	t.Log("Delete the property: the Relay is held, and keeps running under cluster ID west")
+	if err := apiClient.Delete(ctx, property); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the Relay held after the property's deletion", heldFor("does not exist"))
+	if running, err := runsUnder("west")(); err != nil || !running {
+		t.Fatalf("the held Relay's Deployment no longer runs under west: %v", err)
+	}
 }
 
 // relayEventNotes returns the notes of the events with reason that regard relay.

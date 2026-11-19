@@ -18,7 +18,8 @@ metadata:
   namespace: inference
 spec:
   # Keep this logical cluster ID stable across Relay restarts. With standard MCS,
-  # leave it out to use the cluster's ID in its ClusterSet from the About API.
+  # you can leave it out to use the cluster's ID in its ClusterSet from the About
+  # API, unless the Relay sets DYN_RELAY_ROUTING_POOL.
   clusterId: example-cluster
   replicas: 2
   podTemplate:

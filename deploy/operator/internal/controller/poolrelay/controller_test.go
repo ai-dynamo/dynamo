@@ -9,6 +9,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -21,6 +23,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/yaml"
 )
 
 func relaySpec(clusterID string) v1alpha1.DynamoPoolRelaySpec {
@@ -771,6 +775,22 @@ func TestRelayClusterIDRejectsSurroundingWhitespace(t *testing.T) {
 				t.Fatalf("accepted cluster ID %q", clusterID)
 			}
 		})
+	}
+}
+
+func TestMaxClusterIDLengthIsTheSchemas(t *testing.T) {
+	t.Log("Read clusterId's MaxLength from the generated CRD")
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "crd", "bases", "nvidia.com_dynamopoolrelays.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	crd := &apiextensionsv1.CustomResourceDefinition{}
+	if err := yaml.Unmarshal(data, crd); err != nil {
+		t.Fatal(err)
+	}
+	clusterID := crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"].Properties["clusterId"]
+	if clusterID.MaxLength == nil || *clusterID.MaxLength != maxClusterIDLength {
+		t.Fatalf("clusterId's MaxLength is %v, but maxClusterIDLength is %d", clusterID.MaxLength, maxClusterIDLength)
 	}
 }
 

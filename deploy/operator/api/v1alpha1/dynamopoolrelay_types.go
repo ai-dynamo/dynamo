@@ -12,10 +12,11 @@ import (
 
 // DynamoPoolRelaySpec configures Relay Pods for the DGD with the same name and namespace.
 type DynamoPoolRelaySpec struct {
-	// ClusterID is the Relay's stable logical cluster ID across restarts. Empty
-	// uses the cluster's ID in its ClusterSet, from the About API's ClusterProperty
-	// cluster.clusterset.k8s.io, when the operator's multiCluster.mcsImplementation
-	// is mcs. With Karmada, set it to the member cluster's name in Karmada.
+	// ClusterID is the Relay's logical cluster ID. Omitted, the Relay runs under the
+	// cluster's ID in its ClusterSet from the About API's ClusterProperty
+	// cluster.clusterset.k8s.io, with the operator's mcsImplementation mcs, unless its
+	// main container sets DYN_RELAY_ROUTING_POOL. With Karmada, set the member
+	// cluster's name. A changed ID restarts the Relay's Pods.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
@@ -57,7 +58,7 @@ type DynamoPoolRelayStatus struct {
 	// Conditions includes Ready for listener availability, not model or KV readiness.
 	// Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound,
 	// DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers,
-	// InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict.
+	// InvalidConfiguration, ClusterIDUnavailable, ReconcileFailed, or ResourceOwnershipConflict.
 	// With multi-cluster export configured, Conditions also includes Exported: True
 	// with reason Exported once the pool's Services are exported, or False with
 	// reason Withdrawn, ServiceNotOwned, InvalidServiceName, ServiceNameTooLong,

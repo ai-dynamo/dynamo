@@ -415,15 +415,17 @@ maintained, until their `DynamoPoolRelay`s are deleted.
 The relay's cluster ID must be the name that the MCS implementation gives this cluster, because the
 Global Discovery Service matches the pool's registration to its imports by that name:
 
-- With `mcs`, leave `clusterId` out. The relay then runs under the cluster's ID in its ClusterSet,
-  which the About API's `ClusterProperty` `cluster.clusterset.k8s.io` holds. The cluster must serve
-  the About API when the operator starts. The operator watches the property: until it exists, the
-  relay is withdrawn with reason `InvalidConfiguration`, and a change of its value restarts the Pods
-  of every relay that uses it. A `clusterId` that is set wins over the property.
+- With `mcs`, you can leave `clusterId` out, unless the relay sets `DYN_RELAY_ROUTING_POOL`, which
+  names the cluster too. The relay then runs under the cluster's ID in its ClusterSet, which the
+  About API's `ClusterProperty` `cluster.clusterset.k8s.io` holds, and the cluster must serve the
+  About API when the operator starts. The operator watches the property, and a change of its value
+  restarts the Pods of every relay that uses it. A `clusterId` that is set wins over the property.
 - With `karmada`, set `clusterId` to this cluster's member cluster name in Karmada.
 
-Without a configured implementation or the About API, `clusterId` is required, and a relay without
-one is withdrawn with reason `InvalidConfiguration`.
+With `karmada`, without a configured implementation, or without the About API, `clusterId` is
+required. While the operator cannot settle a relay's cluster ID, for example because the property is
+missing or unusable, it leaves the relay as it is, without updating or removing it, and reports
+`Ready` `False` with reason `ClusterIDUnavailable`.
 
 The MCS implementation reports on each export in the export's status, with the conditions `Valid`,
 `Ready` and `Conflict`; Karmada writes none. The operator reports on the pool's exports in the

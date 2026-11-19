@@ -149,10 +149,10 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		return r.withdraw(ctx, &relay, "UnsupportedSourceScope", "The Relay source file cannot isolate a DGD in the shared global Dynamo namespace")
 	}
 
-	// The Relay runs under its clusterId, or else under the cluster's ID in its ClusterSet.
+	// The Relay runs under its clusterId or the cluster's ID; without either, it stays as it is.
 	clusterID, err := r.resolveClusterID(ctx, &relay)
 	if errors.Is(err, errNoClusterID) {
-		return r.withdraw(ctx, &relay, "InvalidConfiguration", err.Error())
+		return ctrl.Result{}, r.reportUnsettled(ctx, &relay, "ClusterIDUnavailable", err)
 	}
 	if err != nil {
 		return ctrl.Result{}, err
@@ -191,7 +191,7 @@ func (r *reconciler) publish(
 				_, withdrawErr := r.withdraw(ctx, relay, "ResourceOwnershipConflict", err.Error())
 				return ctrl.Result{}, errors.Join(err, withdrawErr)
 			}
-			return ctrl.Result{}, errors.Join(err, r.reportApplyFailure(ctx, relay, err))
+			return ctrl.Result{}, errors.Join(err, r.reportUnsettled(ctx, relay, "ReconcileFailed", err))
 		}
 	}
 	deployment, err := r.applyDeployment(ctx, relay, desiredDeployment)
@@ -200,7 +200,7 @@ func (r *reconciler) publish(
 			_, withdrawErr := r.withdraw(ctx, relay, "ResourceOwnershipConflict", err.Error())
 			return ctrl.Result{}, errors.Join(err, withdrawErr)
 		}
-		return ctrl.Result{}, errors.Join(err, r.reportApplyFailure(ctx, relay, err))
+		return ctrl.Result{}, errors.Join(err, r.reportUnsettled(ctx, relay, "ReconcileFailed", err))
 	}
 
 	// Deployment status is listener availability, never model or KV readiness.
@@ -423,15 +423,16 @@ func (r *reconciler) applyDeployment(ctx context.Context, relay *v1alpha1.Dynamo
 	return observed, nil
 }
 
-// An apply error makes the current Relay condition unready without claiming
-// that this generation's required resources were reconciled.
-func (r *reconciler) reportApplyFailure(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, operationErr error) error {
+// reportUnsettled makes the current Relay condition unready, with reason, without
+// claiming that this generation's required resources were reconciled: after an
+// apply error, or while the Relay's resources stay as they are.
+func (r *reconciler) reportUnsettled(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, reason string, problem error) error {
 	before := relay.DeepCopy()
 	relay.Status.Endpoint = ""
 	relay.Status.AvailableReplicas = 0
 	meta.SetStatusCondition(&relay.Status.Conditions, metav1.Condition{
-		Type: "Ready", Status: metav1.ConditionFalse, Reason: "ReconcileFailed",
-		Message: operationErr.Error(), ObservedGeneration: relay.Generation,
+		Type: "Ready", Status: metav1.ConditionFalse, Reason: reason,
+		Message: problem.Error(), ObservedGeneration: relay.Generation,
 	})
 	if equality.Semantic.DeepEqual(before.Status, relay.Status) {
 		return nil
@@ -500,25 +501,39 @@ func sourceJSON(namespaces []string, connectionRevision string) string {
 	return string(encoded)
 }
 
-// maxClusterIDLength is the most characters that a clusterId may have.
+// maxClusterIDLength is the most characters that a clusterId may have: its
+// schema's MaxLength.
 const maxClusterIDLength = 128
 
-// errNoClusterID marks a Relay without a cluster ID to run under: its clusterId
-// is empty, and the cluster's ID in its ClusterSet cannot stand in for it.
+// errNoClusterID marks a Relay whose cluster ID the controller cannot settle:
+// its clusterId is omitted, and the cluster's ID in its ClusterSet cannot stand in.
 var errNoClusterID = errors.New("the Relay has no cluster ID")
 
 // resolveClusterID returns the cluster ID that relay runs under: its clusterId
 // if set, and otherwise the cluster's ID in its ClusterSet, from the About API's
 // ClusterProperty that the controller watches with standard MCS. The error
-// wraps errNoClusterID when neither gives an ID that the Relay accepts.
+// wraps errNoClusterID when neither gives an ID that the Relay can use.
 func (r *reconciler) resolveClusterID(ctx context.Context, relay *v1alpha1.DynamoPoolRelay) (string, error) {
 	if relay.Spec.ClusterID != "" {
 		return relay.Spec.ClusterID, nil
 	}
 	if r.exports == nil || !r.exports.clusterPropertyWatched {
-		return "", fmt.Errorf("%w: clusterId is empty, and the operator uses the cluster's ID in its ClusterSet only "+
-			"with multiCluster.mcsImplementation %s in a cluster that serves the About API; set clusterId",
+		return "", fmt.Errorf("%w: clusterId is omitted, and the operator uses the cluster's ID in its ClusterSet only "+
+			"with multiCluster.mcsImplementation %s in a cluster that served the About API when the operator started; "+
+			"set clusterId, or install the About API and restart the operator",
 			errNoClusterID, configv1alpha1.MCSImplementationStandard)
+	}
+
+	// A registration that names its cluster itself cannot follow an ID that can change.
+	if podTemplate := relay.Spec.PodTemplate; podTemplate != nil {
+		for _, container := range podTemplate.Spec.Containers {
+			if container.Name == mainContainer && slices.ContainsFunc(container.Env, func(item corev1.EnvVar) bool {
+				return item.Name == "DYN_RELAY_ROUTING_POOL"
+			}) {
+				return "", fmt.Errorf("%w: clusterId is omitted, but the main container sets DYN_RELAY_ROUTING_POOL, "+
+					"whose cluster must equal the Relay's cluster ID; set clusterId", errNoClusterID)
+			}
+		}
 	}
 
 	// The watch of the property requeues the Relay when the property changes.
@@ -527,20 +542,21 @@ func (r *reconciler) resolveClusterID(ctx context.Context, relay *v1alpha1.Dynam
 		return "", err
 	}
 	if property == nil {
-		return "", fmt.Errorf("%w: clusterId is empty, and ClusterProperty %s does not exist; create it, or set clusterId",
+		return "", fmt.Errorf("%w: clusterId is omitted, and ClusterProperty %s does not exist; create it, or set clusterId",
 			errNoClusterID, multicluster.ClusterIDProperty)
 	}
 	clusterID := multicluster.ClusterPropertyValue(property)
-	if clusterID == "" || utf8.RuneCountInString(clusterID) > maxClusterIDLength || hasSurroundingSpace(clusterID) {
-		return "", fmt.Errorf("%w: clusterId is empty, and ClusterProperty %s gives %q, which a clusterId cannot be: "+
-			"it needs 1 to %d characters and no surrounding whitespace",
+	if clusterID == "" || utf8.RuneCountInString(clusterID) > maxClusterIDLength || hasSurroundingSpace(clusterID) ||
+		strings.ContainsFunc(clusterID, unicode.IsControl) || strings.Contains(clusterID, "/") {
+		return "", fmt.Errorf("%w: clusterId is omitted, and ClusterProperty %s gives %q, which a cluster ID cannot be: "+
+			"it needs 1 to %d characters, and no surrounding whitespace, control characters or /",
 			errNoClusterID, multicluster.ClusterIDProperty, clusterID, maxClusterIDLength)
 	}
 	return clusterID, nil
 }
 
 // hasSurroundingSpace reports whether value starts or ends with a character that
-// the Relay's Python CLI strips: Unicode white space or U+001C-U+001F.
+// the Relay's Python CLI rejects there: Unicode white space or U+001C-U+001F.
 func hasSurroundingSpace(value string) bool {
 	return strings.TrimFunc(value, func(r rune) bool {
 		return unicode.IsSpace(r) || r >= '\x1c' && r <= '\x1f'
