@@ -37,15 +37,11 @@ impl TtsEngine {
         Self { config, channels }
     }
 
-    fn validate(&self, request: &NvCreateAudioSpeechRequest) -> Result<(), DynamoError> {
+    fn validate(request: &NvCreateAudioSpeechRequest, model_name: &str) -> Result<(), DynamoError> {
         let error = if request.input.trim().is_empty() {
             Some("input must contain text".into())
-        } else if request
-            .model
-            .as_deref()
-            .is_some_and(|m| m != self.config.model_name)
-        {
-            Some(format!("model must be '{}'", self.config.model_name))
+        } else if request.model.as_deref().is_some_and(|m| m != model_name) {
+            Some(format!("model must be '{model_name}'"))
         } else if request
             .response_format
             .as_deref()
@@ -110,7 +106,7 @@ impl RawEngine for TtsEngine {
     ) -> Result<BoxStream<'static, Result<Value, DynamoError>>, DynamoError> {
         let request: NvCreateAudioSpeechRequest = serde_json::from_value(request)
             .map_err(|e| invalid_argument(format!("invalid audio speech request: {e}")))?;
-        self.validate(&request)?;
+        Self::validate(&request, &self.config.model_name)?;
         let rpc_request = SynthesizeSpeechRequest {
             text: request.input,
             voice_name: request
@@ -129,22 +125,13 @@ impl RawEngine for TtsEngine {
         let mut client = RivaSpeechSynthesisClient::new(self.channels.next_channel())
             .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
         let model = self.config.model_name.clone();
-        Ok(async_stream::try_stream! {
-            let mut responses = tokio::select! {
-                biased;
-                _ = ctx.stopped() => return,
-                _ = ctx.killed() => return,
-                result = client.synthesize_online(request) => result,
-            }.map_err(synthesis_error)?.into_inner();
+        let audio = async_stream::try_stream! {
+            let mut responses = client.synthesize_online(request).await
+                .map_err(synthesis_error)?.into_inner();
             let id = events::id("speech");
             let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
             loop {
-                let response = tokio::select! {
-                    biased;
-                    _ = ctx.stopped() => return,
-                    _ = ctx.killed() => return,
-                    result = responses.message() => result,
-                }.map_err(synthesis_error)?;
+                let response = responses.message().await.map_err(synthesis_error)?;
                 let Some(response) = response else {
                     break;
                 };
@@ -158,10 +145,58 @@ impl RawEngine for TtsEngine {
                 };
                 yield serde_json::to_value(response).map_err(|e| DynamoError::msg(e.to_string()))?;
             }
-        }.boxed())
+        };
+        Ok(async_stream::stream! {
+            let cancelled = async {
+                tokio::select! {
+                    _ = ctx.stopped() => {},
+                    _ = ctx.killed() => {},
+                }
+            };
+            // Drop the RPC on cancellation even if the caller retains the finished stream.
+            let audio = audio.take_until(cancelled);
+            tokio::pin!(audio);
+            while let Some(response) = audio.next().await {
+                yield response;
+            }
+        }
+        .boxed())
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_backend_common::{BackendError, ErrorType};
+    use serde_json::json;
+
+    #[test]
+    fn tts_validates_pcm_format_defaults() {
+        for (format, valid) in [
+            (None, true),
+            (Some(json!(null)), true),
+            (Some(json!("pcm")), true),
+            (Some(json!("mp3")), false),
+            (Some(json!("wav")), false),
+        ] {
+            let mut request = json!({"input": "Hello"});
+            if let Some(format) = format {
+                request["response_format"] = format;
+            }
+            let request = serde_json::from_value(request).unwrap();
+            let result = TtsEngine::validate(&request, "test-model");
+            assert_eq!(result.is_ok(), valid, "{request:?}");
+            if let Err(error) = result {
+                assert_eq!(
+                    error.error_type(),
+                    ErrorType::Backend(BackendError::InvalidArgument)
+                );
+                assert!(error.to_string().contains("response_format='pcm'"));
+            }
+        }
     }
 }

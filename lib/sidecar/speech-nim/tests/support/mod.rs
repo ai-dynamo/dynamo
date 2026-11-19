@@ -97,6 +97,9 @@ impl riva_speech_synthesis_server::RivaSpeechSynthesis for SpeechNim {
         self.tts
             .send(Call { request, responses })
             .map_err(|_| Status::unavailable("test receiver gone"))?;
+        if !self.ready.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
@@ -180,6 +183,8 @@ impl Server {
         let Mode::Asr(config) = Args::parse_from([
             "sidecar",
             "asr",
+            "--grpc-connections",
+            "1",
             "--grpc-endpoint",
             &format!("127.0.0.1:{}", self.port),
             "--grpc-startup-deadline-secs",
@@ -198,6 +203,8 @@ impl Server {
         let Mode::Tts(config) = Args::parse_from([
             "sidecar",
             "tts",
+            "--grpc-connections",
+            "1",
             "--grpc-endpoint",
             &format!("127.0.0.1:{}", self.port),
             "--grpc-startup-deadline-secs",

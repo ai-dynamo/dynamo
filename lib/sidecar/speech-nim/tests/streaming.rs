@@ -549,6 +549,7 @@ async fn tts_preserves_pcm_chunks_and_config() {
         .unwrap();
     let (first, mut stream) = within(output).await.unwrap();
     assert_eq!(first["object"], "audio.speech");
+    assert_eq!(first["data"][0]["output_format"], "pcm");
     assert_eq!(first["data"][0]["b64_json"], "AQACAA==");
     call.responses
         .send(Ok(SynthesizeSpeechResponse {
@@ -565,70 +566,13 @@ async fn tts_preserves_pcm_chunks_and_config() {
 }
 
 #[tokio::test]
-async fn tts_defaults_to_pcm_when_format_is_omitted_or_null() {
-    let mut server = Server::start().await;
-    let engine = TtsEngine::new(server.tts_config(), server.connection().await);
-    for request in [
-        json!({"input": "Hello"}),
-        json!({"input": "Hello", "response_format": null}),
-    ] {
-        let stream = engine
-            .generate(request, GenerateContext::new(mock_context(), None))
-            .await
-            .unwrap();
-        let output = tokio::spawn(stream.collect::<Vec<_>>());
-        let mut call = within(server.tts.recv()).await.unwrap();
-        let request = within(call.request.get_mut().message())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(request.encoding, AudioEncoding::LinearPcm as i32);
-        call.responses
-            .send(Ok(SynthesizeSpeechResponse {
-                audio: vec![1, 0, 2, 0],
-                ..Default::default()
-            }))
-            .await
-            .unwrap();
-        drop(call.responses);
-        let output = within(output).await.unwrap();
-        assert_eq!(output.len(), 1);
-        let response = output[0].as_ref().unwrap();
-        assert_eq!(response["data"][0]["output_format"], "pcm");
-        assert_eq!(response["data"][0]["b64_json"], "AQACAA==");
-    }
-}
-
-#[tokio::test]
-async fn tts_rejects_non_pcm_format_before_rpc() {
-    let mut server = Server::start().await;
-    let engine = TtsEngine::new(server.tts_config(), server.connection().await);
-    for request in [
-        json!({"input": "Hello", "response_format": "mp3"}),
-        json!({"input": "Hello", "response_format": "wav"}),
-    ] {
-        let Err(error) = engine
-            .generate(request, GenerateContext::new(mock_context(), None))
-            .await
-        else {
-            panic!("non-PCM format was silently accepted")
-        };
-        assert_eq!(
-            error.error_type(),
-            ErrorType::Backend(BackendError::InvalidArgument)
-        );
-        assert!(error.to_string().contains("response_format='pcm'"));
-        assert!(server.tts.try_recv().is_err());
-    }
-}
-
-#[tokio::test]
 async fn tts_rejects_unsupported_options_before_rpc() {
-    let server = Server::start().await;
+    let mut server = Server::start().await;
     let engine = TtsEngine::new(server.tts_config(), server.connection().await);
     for (field, value) in [
         ("input", json!(" ")),
         ("model", json!("wrong")),
+        ("response_format", json!("mp3")),
         ("speed", json!(2)),
         ("data_source", json!("url")),
         ("instructions", json!("whisper")),
@@ -650,27 +594,60 @@ async fn tts_rejects_unsupported_options_before_rpc() {
             error.error_type(),
             ErrorType::Backend(BackendError::InvalidArgument)
         );
+        assert!(server.tts.try_recv().is_err());
     }
 }
 
 #[tokio::test]
-async fn tts_maps_invalid_argument_and_cancels_open_rpc_on_stop() {
+async fn tts_cancels_during_rpc_startup_and_between_chunks() {
     let mut server = Server::start().await;
     let engine = TtsEngine::new(server.tts_config(), server.connection().await);
-    let ctx = mock_context();
-    let stream = engine
-        .generate(
-            json!({"input": "Hello", "response_format": "pcm", "speed": null}),
-            GenerateContext::new(ctx.clone(), None),
-        )
-        .await
-        .unwrap();
-    let output = tokio::spawn(stream.collect::<Vec<_>>());
-    let call = within(server.tts.recv()).await.unwrap();
-    ctx.stop_generating();
-    assert!(within(output).await.unwrap().is_empty());
-    within(call.responses.closed()).await;
+    for (pending_headers, kill) in [(true, false), (true, true), (false, false), (false, true)] {
+        server.ready.store(!pending_headers, Ordering::SeqCst);
+        let ctx = mock_context();
+        let mut stream = engine
+            .generate(
+                json!({"input": "Hello", "response_format": "pcm", "speed": null}),
+                GenerateContext::new(ctx.clone(), None),
+            )
+            .await
+            .unwrap();
+        let mut output = tokio::spawn(async move {
+            let response = stream.next().await;
+            (response, stream)
+        });
+        let call = within(server.tts.recv()).await.unwrap();
+        if !pending_headers {
+            call.responses
+                .send(Ok(SynthesizeSpeechResponse {
+                    audio: vec![1, 0],
+                    ..Default::default()
+                }))
+                .await
+                .unwrap();
+            let (response, mut stream) = within(output).await.unwrap();
+            assert!(response.unwrap().is_ok());
+            output = tokio::spawn(async move {
+                let response = stream.next().await;
+                (response, stream)
+            });
+        }
+        if kill {
+            ctx.kill();
+        } else {
+            ctx.stop_generating();
+        }
+        let (response, _stream) = within(output).await.unwrap();
+        assert!(response.is_none());
+        // Retaining the finished stream must not keep the NIM RPC alive.
+        within(call.responses.closed()).await;
+    }
+}
 
+#[tokio::test]
+async fn tts_maps_invalid_argument_without_leaking_server_details() {
+    let mut server = Server::start().await;
+    let engine = TtsEngine::new(server.tts_config(), server.connection().await);
     let stream = engine
         .generate(
             json!({"input": "Hello", "response_format": "pcm"}),
@@ -815,42 +792,20 @@ async fn asr_control_backpressure_does_not_block_commit_or_clear() {
 }
 
 #[tokio::test]
-async fn startup_rejects_explicit_offline_asr_profiles() {
-    let models = [
-        ("offline-flag", [("streaming", "True"), ("offline", "True")]),
-        ("offline-type", [("streaming", "True"), ("type", "offline")]),
-        ("streaming", [("streaming", "True"), ("offline", "False")]),
-    ]
-    .into_iter()
-    .map(
-        |(name, parameters)| riva_speech_recognition_config_response::Config {
-            model_name: name.into(),
-            parameters: parameters
-                .into_iter()
-                .map(|(key, value)| (key.into(), value.into()))
-                .collect(),
-        },
-    )
-    .collect();
-    let server = Server::start_with_asr_models(models).await;
-    let mut config = server.asr_config();
-    within(client::connect(&Mode::Asr(config.clone())))
+async fn startup_rejects_automatically_selected_offline_only_service() {
+    let server =
+        Server::start_with_asr_models(vec![riva_speech_recognition_config_response::Config {
+            model_name: "offline".into(),
+            parameters: [("offline".into(), "True".into())].into(),
+        }])
+        .await;
+    let error = within(client::connect(&Mode::Asr(server.asr_config())))
         .await
-        .unwrap();
-
-    for name in ["offline-flag", "offline-type"] {
-        config.nim_model = name.into();
-        let error = within(client::connect(&Mode::Asr(config.clone())))
-            .await
-            .err()
-            .expect("explicit offline model must fail startup");
-        let status = error.downcast_ref::<Status>().unwrap();
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
-        assert!(status.message().contains(name), "{status}");
-        assert!(status.message().contains("streaming model"), "{status}");
-    }
-    config.nim_model = "streaming".into();
-    within(client::connect(&Mode::Asr(config))).await.unwrap();
+        .err()
+        .expect("an offline-only catalog must fail automatic startup");
+    let status = error.downcast_ref::<Status>().unwrap();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("streaming model"), "{status}");
 }
 
 #[tokio::test]

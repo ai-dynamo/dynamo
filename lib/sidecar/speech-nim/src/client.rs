@@ -14,6 +14,7 @@ use crate::{
         asr::{
             RivaSpeechRecognitionConfigRequest,
             riva_speech_recognition_client::RivaSpeechRecognitionClient,
+            riva_speech_recognition_config_response::Config as AsrModelConfig,
         },
         tts::{
             RivaSynthesisConfigRequest, riva_speech_synthesis_client::RivaSpeechSynthesisClient,
@@ -69,26 +70,8 @@ async fn model_ready(mode: &Mode, channel: Channel) -> Result<bool, Status> {
                     model_name: config.nim_model.clone(),
                 })
                 .await?;
-            let models = response.into_inner().model_config;
-            if !config.nim_model.is_empty()
-                && models.iter().any(|model| {
-                    model.model_name == config.nim_model
-                        && (model
-                            .parameters
-                            .get("offline")
-                            .is_some_and(|value| value.eq_ignore_ascii_case("true"))
-                            || model
-                                .parameters
-                                .get("type")
-                                .is_some_and(|value| value.eq_ignore_ascii_case("offline")))
-                })
-            {
-                return Err(Status::invalid_argument(format!(
-                    "Speech NIM ASR model '{}' is offline-only; realtime transcription requires a streaming model",
-                    config.nim_model
-                )));
-            }
-            Ok(!models.is_empty())
+            asr_models_ready(&response.into_inner().model_config, &config.nim_model)
+                .map_err(Status::invalid_argument)
         }
         Mode::Tts(_) => {
             let response = RivaSpeechSynthesisClient::new(channel)
@@ -96,6 +79,81 @@ async fn model_ready(mode: &Mode, channel: Channel) -> Result<bool, Status> {
                 .get_riva_synthesis_config(RivaSynthesisConfigRequest::default())
                 .await?;
             Ok(!response.into_inner().model_config.is_empty())
+        }
+    }
+}
+
+fn asr_models_ready(models: &[AsrModelConfig], model_name: &str) -> Result<bool, String> {
+    let mut candidates = models
+        .iter()
+        .filter(|model| model_name.is_empty() || model.model_name == model_name)
+        .peekable();
+    if candidates.peek().is_none() {
+        return Ok(false);
+    }
+    if candidates.any(|model| {
+        ![("offline", "true"), ("type", "offline")]
+            .into_iter()
+            .any(|(key, offline)| {
+                model
+                    .parameters
+                    .get(key)
+                    .is_some_and(|value| value.eq_ignore_ascii_case(offline))
+            })
+    }) {
+        return Ok(true);
+    }
+    let selection = if model_name.is_empty() {
+        "catalog".into()
+    } else {
+        format!("model '{model_name}'")
+    };
+    Err(format!(
+        "Speech NIM ASR {selection} is offline-only; realtime transcription requires a streaming model"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model(name: &str, parameters: &[(&str, &str)]) -> AsrModelConfig {
+        AsrModelConfig {
+            model_name: name.into(),
+            parameters: parameters
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn asr_readiness_requires_an_eligible_profile() {
+        let offline = model("offline", &[("streaming", "True"), ("offline", "tRuE")]);
+        let offline_type = model("offline-type", &[("type", "OfFlInE")]);
+        let streaming = model("streaming", &[("offline", "False")]);
+        let unmarked = model("unmarked", &[]);
+        for (selection, models, expected) in [
+            ("", vec![], Ok(false)),
+            ("", vec![offline.clone()], Err(())),
+            ("", vec![offline_type.clone()], Err(())),
+            ("", vec![offline.clone(), streaming.clone()], Ok(true)),
+            ("", vec![unmarked.clone()], Ok(true)),
+            ("offline", vec![offline.clone(), streaming.clone()], Err(())),
+            (
+                "offline-type",
+                vec![offline_type, streaming.clone()],
+                Err(()),
+            ),
+            ("streaming", vec![offline, streaming.clone()], Ok(true)),
+            ("unmarked", vec![unmarked], Ok(true)),
+            ("missing", vec![streaming], Ok(false)),
+        ] {
+            assert_eq!(
+                asr_models_ready(&models, selection).map_err(|_| ()),
+                expected,
+                "selection={selection:?}, models={models:?}"
+            );
         }
     }
 }
