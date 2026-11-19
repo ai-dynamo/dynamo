@@ -3836,6 +3836,16 @@ mod ownership_tests {
         }
 
         let missing = ModelDeploymentCard::with_name_only("model");
+        let text = card_with_contract(
+            crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES,
+            serde_json::json!(["text"]),
+        );
+        let vision = card_with_contract(
+            crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES,
+            serde_json::json!(["text", "image"]),
+        );
+        assert_eq!(missing.mdcsum(), text.mdcsum());
+        assert_eq!(text.mdcsum(), vision.mdcsum());
         let qwen = card_with_contract(
             VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
             serde_json::json!({

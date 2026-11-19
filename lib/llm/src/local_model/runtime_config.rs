@@ -31,6 +31,9 @@ pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
 
+/// Complete input-modality list advertised by a worker; absence means unknown.
+pub const SUPPORTED_INPUT_MODALITIES: &str = "supported_input_modalities";
+
 /// Runtime-data key indicating speculative decoding is configured by a backend.
 pub const SPEC_DECODE_RUNTIME_KEY: &str = "spec_decode";
 

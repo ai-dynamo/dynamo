@@ -51,6 +51,7 @@ pub(crate) struct DesiredInstance {
     pub(crate) projection_fingerprint: String,
     /// Digest of this worker's Qwen video prompt-expansion contract.
     pub(crate) video_contract: Option<String>,
+    pub(crate) input_modalities: Option<Vec<String>>,
 }
 
 impl DesiredInstance {
@@ -71,19 +72,49 @@ fn cohort_video_contract(members: &[DesiredInstance]) -> Option<String> {
         .then_some(agreed)
 }
 
-/// Identifies a cohort's active video contract without changing its MDC checksum.
-fn cohort_fingerprint(mdc_checksum: &str, video_contract: Option<&str>) -> String {
-    match video_contract {
-        Some(contract) => format!("{mdc_checksum}\0video_contract\0{contract}"),
-        None => mdc_checksum.to_string(),
-    }
+fn cohort_input_modalities(members: &[DesiredInstance]) -> Option<Vec<String>> {
+    let mut members = members.iter();
+    let agreed = members.next()?.input_modalities.clone()?;
+    members
+        .all(|member| member.input_modalities.as_ref() == Some(&agreed))
+        .then_some(agreed)
 }
 
-/// Splits a fingerprint back into the MDC checksum and video contract it carries.
-fn fingerprint_parts(fingerprint: &str) -> (&str, Option<&str>) {
-    match fingerprint.split_once("\0video_contract\0") {
-        Some((mdc_checksum, contract)) => (mdc_checksum, Some(contract)),
+fn input_modalities_digest(modalities: &[String]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for modality in modalities {
+        hasher.update(&(modality.len() as u64).to_be_bytes());
+        hasher.update(modality.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Active cohort contracts change materialization, not worker compatibility.
+fn cohort_fingerprint(
+    mdc_checksum: &str,
+    video_contract: Option<&str>,
+    input_modalities: Option<&[String]>,
+) -> String {
+    let mut fingerprint = mdc_checksum.to_string();
+    if let Some(contract) = video_contract {
+        fingerprint.push_str("\0video_contract\0");
+        fingerprint.push_str(contract);
+    }
+    if let Some(modalities) = input_modalities {
+        fingerprint.push_str("\0input_modalities\0");
+        fingerprint.push_str(&input_modalities_digest(modalities));
+    }
+    fingerprint
+}
+
+fn fingerprint_parts(fingerprint: &str) -> (&str, Option<&str>, Option<&str>) {
+    let (base, modalities) = match fingerprint.split_once("\0input_modalities\0") {
+        Some((base, contract)) => (base, Some(contract)),
         None => (fingerprint, None),
+    };
+    match base.split_once("\0video_contract\0") {
+        Some((mdc_checksum, contract)) => (mdc_checksum, Some(contract), modalities),
+        None => (base, None, modalities),
     }
 }
 
@@ -96,6 +127,7 @@ pub(crate) struct GroupSpec {
     pub(crate) representative: DesiredInstance,
     /// Contract shared by the cohort, if any.
     pub(crate) video_contract: Option<String>,
+    pub(crate) input_modalities: Option<Vec<String>>,
 }
 
 #[async_trait]
@@ -198,6 +230,7 @@ struct RetainedPipeline {
     /// pending, so it is the only record of what the retained workers must publish.
     /// `None` means it was built without exact video routing.
     contract: Option<String>,
+    input_modalities: Option<String>,
 }
 
 struct DesiredGroup {
@@ -432,6 +465,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             if existing.mdc_checksum == instance.mdc_checksum
                 && existing.projection_fingerprint == instance.projection_fingerprint
                 && existing.video_contract == instance.video_contract
+                && existing.input_modalities == instance.input_modalities
                 && super::image_edits::advertised_limit(&existing.card)
                     == super::image_edits::advertised_limit(&instance.card)
             {
@@ -607,8 +641,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             .to_string();
         let member_keys = group.cohorts[&mdc_checksum].clone();
         let members = self.members(&member_keys);
-        let fingerprint =
-            cohort_fingerprint(&mdc_checksum, cohort_video_contract(&members).as_deref());
+        let fingerprint = cohort_fingerprint(
+            &mdc_checksum,
+            cohort_video_contract(&members).as_deref(),
+            cohort_input_modalities(&members).as_deref(),
+        );
         let fingerprint_changed =
             status_checksum(&old_status).is_some_and(|previous| previous != fingerprint);
         let mut retained_commit = status_committed_members(&old_status).cloned();
@@ -621,13 +658,24 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 .1
                 .map(str::to_string),
         };
+        let committed_modalities = match &group.retained {
+            Some(retained) => retained.input_modalities.clone(),
+            None => fingerprint_parts(status_checksum(&old_status).unwrap_or_default())
+                .2
+                .map(str::to_string),
+        };
         if fingerprint_changed {
             retained_commit = retained_commit.and_then(|committed_members| {
-                let (previous_checksum, _) = fingerprint_parts(status_checksum(&old_status)?);
+                let (previous_checksum, _, _) = fingerprint_parts(status_checksum(&old_status)?);
                 if previous_checksum != mdc_checksum {
                     return None;
                 }
-                surviving_commit(&members, &committed_members, committed_contract.as_deref())
+                surviving_commit(
+                    &members,
+                    &committed_members,
+                    committed_contract.as_deref(),
+                    committed_modalities.as_deref(),
+                )
             });
             cancel_build(&old_status);
             if retained_commit.is_some() {
@@ -640,6 +688,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 group.retained.get_or_insert_with(|| RetainedPipeline {
                     admission_tx: previous_tx,
                     contract: committed_contract,
+                    input_modalities: committed_modalities,
                 });
             } else {
                 group.admission_tx.send_replace(Vec::new());
@@ -662,7 +711,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             // one keeps receiving requests expanded with the contract it dropped.
             let had_commit = retained_commit.is_some();
             retained_commit = retained_commit.and_then(|committed_members| {
-                surviving_commit(&members, &committed_members, committed_contract.as_deref())
+                surviving_commit(
+                    &members,
+                    &committed_members,
+                    committed_contract.as_deref(),
+                    committed_modalities.as_deref(),
+                )
             });
             if had_commit && retained_commit.is_none() {
                 self.host.remove_group(key);
@@ -906,7 +960,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 continue;
             };
             let video_contract = cohort_video_contract(&members);
-            let fingerprint = cohort_fingerprint(&mdc_checksum, video_contract.as_deref());
+            let input_modalities = cohort_input_modalities(&members);
+            let fingerprint = cohort_fingerprint(
+                &mdc_checksum,
+                video_contract.as_deref(),
+                input_modalities.as_deref(),
+            );
 
             let cancellation = CancellationToken::new();
             let generation = self.next_build_generation;
@@ -918,6 +977,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 generation,
                 representative,
                 video_contract,
+                input_modalities,
             };
             group.status = GroupStatus::Building {
                 mdc_checksum: fingerprint,
@@ -988,9 +1048,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 .cohorts
                 .get(&result.spec.mdc_checksum)
                 .is_some_and(|member_keys| {
+                    let members = self.members(member_keys);
                     cohort_fingerprint(
                         &result.spec.mdc_checksum,
-                        cohort_video_contract(&self.members(member_keys)).as_deref(),
+                        cohort_video_contract(&members).as_deref(),
+                        cohort_input_modalities(&members).as_deref(),
                     ) == result.spec.fingerprint
                 });
         let committed_members = match &group.status {
@@ -1248,17 +1310,18 @@ fn cancel_build(status: &GroupStatus) {
     }
 }
 
-/// The committed workers that may keep serving: those still present, provided they
-/// all still publish `contract`. `None` withdraws the commit.
+/// The committed workers that may keep serving under the pipeline's contracts.
+/// `None` withdraws the commit.
 fn surviving_commit(
     members: &[DesiredInstance],
     committed_members: &BTreeSet<String>,
     contract: Option<&str>,
+    input_modalities: Option<&str>,
 ) -> Option<BTreeSet<String>> {
     // Keep serving the committed workers that are still here rather than demanding
     // the whole membership, so dropping the last worker of a rolling upgrade does
     // not withdraw a healthy group.
-    let surviving = members
+    let mut surviving = members
         .iter()
         .filter(|member| committed_members.contains(&member.key))
         .collect::<Vec<_>>();
@@ -1274,6 +1337,17 @@ fn surviving_commit(
             .iter()
             .all(|member| member.video_contract.as_deref() == Some(contract))
     {
+        return None;
+    }
+    if let Some(contract) = input_modalities {
+        surviving.retain(|member| {
+            member
+                .input_modalities
+                .as_deref()
+                .is_some_and(|modalities| input_modalities_digest(modalities) == contract)
+        });
+    }
+    if surviving.is_empty() {
         return None;
     }
     Some(
@@ -1482,6 +1556,7 @@ mod tests {
                 mdc_checksum: card.mdcsum().to_string(),
                 projection_fingerprint: card.source_path.clone().unwrap(),
                 video_contract: crate::discovery::watcher::qwen_video_contract_digest(&card),
+                input_modalities: crate::discovery::watcher::input_modalities_contract(&card),
                 card,
             }))
         }
@@ -1651,6 +1726,7 @@ mod tests {
             mdc_checksum: card.mdcsum().to_string(),
             projection_fingerprint: mdc_checksum.to_string(),
             video_contract: crate::discovery::watcher::qwen_video_contract_digest(&card),
+            input_modalities: crate::discovery::watcher::input_modalities_contract(&card),
             card,
         }
     }
@@ -1676,6 +1752,26 @@ mod tests {
         instance
     }
 
+    fn instance_with_modalities(
+        id: u64,
+        source: &str,
+        modalities: Option<serde_json::Value>,
+    ) -> DesiredInstance {
+        let mut desired = instance(id, source);
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.source_path = Some(source.to_string());
+        if let Some(value) = modalities {
+            card.runtime_config.runtime_data.insert(
+                crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES.into(),
+                value,
+            );
+        }
+        desired.input_modalities = crate::discovery::watcher::input_modalities_contract(&card);
+        desired.mdc_checksum = card.mdcsum().to_string();
+        desired.card = card;
+        desired
+    }
+
     fn contract_digest(resize_mode: &str) -> String {
         instance_with_contract(0, "spec", resize_mode)
             .video_contract
@@ -1697,6 +1793,161 @@ mod tests {
         let result = controller.builds.join_next().await.unwrap().unwrap();
         controller.active_builds -= 1;
         controller.apply_build_result(result);
+    }
+
+    #[test]
+    fn modality_fingerprint_is_independent_of_checksum_and_video() {
+        let modalities = vec!["image".to_string(), "text".to_string()];
+        for video in [None, Some("video-digest")] {
+            for input in [None, Some(modalities.as_slice())] {
+                let fingerprint = cohort_fingerprint("checksum", video, input);
+                let (checksum, actual_video, actual_modalities) = fingerprint_parts(&fingerprint);
+                assert_eq!(checksum, "checksum");
+                assert_eq!(actual_video, video);
+                assert_eq!(
+                    actual_modalities.map(str::to_owned),
+                    input.map(input_modalities_digest)
+                );
+                if video.is_none() && input.is_none() {
+                    assert_eq!(fingerprint, "checksum");
+                }
+            }
+        }
+        let normalized = instance_with_modalities(
+            1,
+            "same",
+            Some(serde_json::json!(["text", "image", "text"])),
+        );
+        assert_eq!(normalized.input_modalities, Some(modalities));
+        let malformed = instance_with_modalities(2, "same", Some(serde_json::json!(["text", 1])));
+        assert!(malformed.input_modalities.is_none());
+    }
+
+    #[tokio::test]
+    async fn modality_consensus_keeps_legacy_workers_admitted_and_fences_republished_contracts() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (host, mut starts) = FakeHost::new();
+            let mut controller = ModelDiscoveryController::new(host.clone());
+            let text = instance_with_modalities(1, "same", Some(serde_json::json!(["text"])));
+            let legacy = instance_with_modalities(2, "same", None);
+            assert_eq!(text.mdc_checksum, legacy.mdc_checksum);
+            controller.apply_added(text.clone());
+            controller.apply_added(legacy.clone());
+            controller.start_queued_builds();
+            let mixed = starts.recv().await.unwrap();
+            assert!(mixed.input_modalities.is_none());
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+            assert_eq!(host.members(&group_key()).len(), 2);
+
+            let competing =
+                instance_with_modalities(9, "rejected-cohort", Some(serde_json::json!(["image"])));
+            controller.apply_added(competing);
+            assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+            controller.apply_removed(&legacy.key);
+            assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+            controller.start_queued_builds();
+            let known = starts.recv().await.unwrap();
+            assert_eq!(known.input_modalities, Some(vec!["text".into()]));
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+
+            let vision =
+                instance_with_modalities(3, "same", Some(serde_json::json!(["text", "image"])));
+            controller.apply_added(vision.clone());
+            controller.start_queued_builds();
+            let mixed = starts.recv().await.unwrap();
+            assert!(mixed.input_modalities.is_none());
+            assert_eq!(*host.admissions.lock().unwrap()[1].borrow(), vec![1]);
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+            assert_eq!(host.members(&group_key()).len(), 2);
+            controller.apply_removed(&vision.key);
+            controller.start_queued_builds();
+            assert_eq!(
+                starts.recv().await.unwrap().input_modalities,
+                Some(vec!["text".into()])
+            );
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+
+            // Same-ID publication must not keep using a pipeline that omitted images.
+            controller.apply_added(instance_with_modalities(1, "same", None));
+            assert!(host.members(&group_key()).is_empty());
+            controller.start_queued_builds();
+            assert!(starts.recv().await.unwrap().input_modalities.is_none());
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+            controller.apply_added(text);
+            controller.start_queued_builds();
+            assert_eq!(
+                starts.recv().await.unwrap().input_modalities,
+                Some(vec!["text".into()])
+            );
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+        })
+        .await
+        .expect("modality cohort lifecycle timed out");
+    }
+
+    #[tokio::test]
+    async fn republished_modality_keeps_safe_members_during_rebuilds() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for (start_rebuild, fail_rebuild, modalities) in [
+                (false, false, None),
+                (true, false, Some(serde_json::json!(["image"]))),
+                (true, true, Some(serde_json::json!(["text", 1]))),
+            ] {
+                let (host, mut starts) = FakeHost::new();
+                let mut controller = ModelDiscoveryController::new(host.clone());
+                for id in [1, 2] {
+                    controller.apply_added(instance_with_modalities(
+                        id,
+                        "same",
+                        Some(serde_json::json!(["text"])),
+                    ));
+                }
+                controller.start_queued_builds();
+                starts.recv().await.unwrap();
+                host.release.add_permits(1);
+                finish_build(&mut controller).await;
+                let admissions = host.admissions.lock().unwrap()[0].clone();
+                if start_rebuild {
+                    host.failures
+                        .store(usize::from(fail_rebuild), Ordering::SeqCst);
+                    controller.apply_added(instance_with_modalities(3, "same", None));
+                    controller.start_queued_builds();
+                    assert!(starts.recv().await.unwrap().input_modalities.is_none());
+                    if fail_rebuild {
+                        host.release.add_permits(1);
+                        finish_build(&mut controller).await;
+                    }
+                }
+                controller.apply_added(instance_with_modalities(1, "same", modalities));
+                assert_eq!(host.members(&group_key()).len(), 2);
+                assert_eq!(*admissions.borrow(), vec![2]);
+                assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+                let observation = host.inventory.snapshot().pop().unwrap().1;
+                assert_eq!(observation.committed, HashSet::from([2]));
+                if !start_rebuild || fail_rebuild {
+                    controller.start_queued_builds();
+                    assert!(starts.recv().await.unwrap().input_modalities.is_none());
+                }
+                host.release.add_permits(1);
+                finish_build(&mut controller).await;
+                assert_eq!(
+                    host.members(&group_key()).len(),
+                    if start_rebuild { 3 } else { 2 }
+                );
+                assert!(admissions.has_changed().is_err());
+                let observation = host.inventory.snapshot().pop().unwrap().1;
+                assert!(observation.committed.contains(&1));
+                assert!(observation.committed.contains(&2));
+            }
+        })
+        .await
+        .expect("modality cohort lifecycle timed out");
     }
 
     #[tokio::test]
@@ -1753,7 +2004,8 @@ mod tests {
             upgraded_spec.fingerprint,
             cohort_fingerprint(
                 &upgraded_spec.mdc_checksum,
-                Some(&contract_digest("round_ties_even"))
+                Some(&contract_digest("round_ties_even")),
+                None,
             )
         );
         host.release.add_permits(1);

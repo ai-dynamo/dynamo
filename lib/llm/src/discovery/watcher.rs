@@ -444,6 +444,18 @@ impl ModelWatcher {
 
         validate_policy_worker_role(card, &self.plugins)?;
 
+        let modalities_key = crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES;
+        match &spec.input_modalities {
+            Some(modalities) => {
+                card.runtime_config
+                    .runtime_data
+                    .insert(modalities_key.to_string(), serde_json::json!(modalities));
+            }
+            None => {
+                card.runtime_config.runtime_data.remove(modalities_key);
+            }
+        }
+
         // Prepare without exact video routing unless the cohort agreed on a contract.
         let mut removed_video_contract = false;
         if spec.video_contract.is_none() {
@@ -1181,6 +1193,7 @@ impl ControllerHost for ModelWatcher {
         let mdc_checksum = card.mdcsum().to_string();
         let projection_fingerprint = lora_projection_fingerprint(&card)?;
         let video_contract = qwen_video_contract_digest(&card);
+        let input_modalities = input_modalities_contract(&card);
         Ok(Some(DesiredInstance {
             key: mcid.to_path(),
             mcid,
@@ -1190,6 +1203,7 @@ impl ControllerHost for ModelWatcher {
             mdc_checksum,
             projection_fingerprint,
             video_contract,
+            input_modalities,
         }))
     }
 
@@ -1585,6 +1599,21 @@ fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<Str
     });
     canonicalize_json_object_keys(&mut value);
     Ok(blake3::hash(&serde_json::to_vec(&value)?).to_string())
+}
+
+pub(super) fn input_modalities_contract(card: &ModelDeploymentCard) -> Option<Vec<String>> {
+    let values = card
+        .runtime_config
+        .runtime_data
+        .get(crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES)?
+        .as_array()?;
+    let mut modalities = values
+        .iter()
+        .map(|value| value.as_str().map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    modalities.sort_unstable();
+    modalities.dedup();
+    Some(modalities)
 }
 
 /// Hashes the published Qwen video prompt-expansion contract.
@@ -2525,6 +2554,7 @@ request_classifier:
                 fingerprint: desired.mdc_checksum.clone(),
                 generation: instance as u64 + 1,
                 video_contract: desired.video_contract.clone(),
+                input_modalities: desired.input_modalities.clone(),
                 representative: desired,
             };
             let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![worker_id]);
@@ -2671,6 +2701,7 @@ request_classifier:
             mdc_checksum: card.mdcsum().to_string(),
             projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
             video_contract: qwen_video_contract_digest(&card),
+            input_modalities: input_modalities_contract(&card),
             card,
             group_key: key.clone(),
         };
@@ -2681,6 +2712,7 @@ request_classifier:
             generation: 1,
             representative: desired.clone(),
             video_contract: desired.video_contract.clone(),
+            input_modalities: desired.input_modalities.clone(),
         };
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
         let prepared = watcher
@@ -2766,6 +2798,7 @@ request_classifier:
                 mdc_checksum: card.mdcsum().to_string(),
                 projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
                 video_contract: qwen_video_contract_digest(&card),
+                input_modalities: input_modalities_contract(&card),
                 card,
                 group_key: key.clone(),
             };
@@ -2776,6 +2809,7 @@ request_classifier:
                 generation: 1,
                 representative: desired.clone(),
                 video_contract: desired.video_contract.clone(),
+                input_modalities: desired.input_modalities.clone(),
             };
             let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
             let prepared = watcher
@@ -2991,6 +3025,7 @@ request_classifier:
             mdc_checksum: card.mdcsum().to_string(),
             projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
             video_contract: qwen_video_contract_digest(&card),
+            input_modalities: input_modalities_contract(&card),
             card,
             group_key: key.clone(),
         };
@@ -3001,6 +3036,7 @@ request_classifier:
             generation: 1,
             representative: desired,
             video_contract: None,
+            input_modalities: None,
         };
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
 
@@ -3678,6 +3714,7 @@ request_classifier:
                 fingerprint: desired.mdc_checksum.clone(),
                 generation: index + 1,
                 video_contract: desired.video_contract.clone(),
+                input_modalities: desired.input_modalities.clone(),
                 representative: desired.clone(),
             };
             let (_tx, rx) = tokio::sync::watch::channel(vec![worker_id]);

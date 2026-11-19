@@ -857,6 +857,79 @@ impl Model {
             .ok_or_else(|| self.engine_error(self.has_chat_engine()))
     }
 
+    /// Keep omission aligned with the selected deployment, including its media-processing peers.
+    pub(crate) fn get_chat_engine_with_image_policy(
+        &self,
+    ) -> Result<(OpenAIChatCompletionsStreamingEngine, ParsingOptions, bool), ModelManagerError>
+    {
+        self.get_chat_engine_with_image_policy_for_capability(None)?
+            .ok_or_else(|| self.engine_error(self.has_chat_engine()))
+    }
+
+    pub(crate) fn get_chat_engine_with_image_policy_for_capability(
+        &self,
+        capability: Option<&str>,
+    ) -> Result<
+        Option<(OpenAIChatCompletionsStreamingEngine, ParsingOptions, bool)>,
+        ModelManagerError,
+    > {
+        if let Some(capability) = capability
+            && !self.has_chat_engine_for_capability(capability)
+        {
+            return if self.has_chat_engine() {
+                Ok(None)
+            } else {
+                Err(self.engine_error(false))
+            };
+        }
+        self.select_worker_set_with_snapshot(
+            |ws| {
+                if capability.is_some_and(|capability| !ws.supports_runtime_capability(capability))
+                {
+                    return None;
+                }
+                ws.chat_engine
+                    .clone()
+                    .map(|engine| (engine, ws.parsing_options()))
+            },
+            WorkerSet::worker_count,
+            |(engine, parsing), selected, snapshot| {
+                let omit_images =
+                    Self::namespace_input_modality_support(snapshot, selected.namespace(), "image")
+                        == Some(false);
+                (engine, parsing, omit_images)
+            },
+        )
+        .map(Some)
+        .ok_or_else(|| self.engine_error(self.has_chat_engine()))
+    }
+
+    fn namespace_input_modality_support(
+        snapshot: &[&WorkerSet],
+        namespace: &str,
+        modality: &str,
+    ) -> Option<bool> {
+        let mut unknown = false;
+        let mut found = false;
+        for set in snapshot.iter().filter(|set| set.namespace() == namespace) {
+            found = true;
+            let value = set
+                .card()
+                .runtime_config
+                .runtime_data
+                .get(crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES);
+            match value.and_then(serde_json::Value::as_array) {
+                Some(values) if values.iter().all(serde_json::Value::is_string) => {
+                    if values.iter().any(|value| value.as_str() == Some(modality)) {
+                        return Some(true);
+                    }
+                }
+                _ => unknown = true,
+            }
+        }
+        if unknown || !found { None } else { Some(false) }
+    }
+
     /// Select a chat engine from a WorkerSet that advertises `capability`.
     /// `Ok(None)` means chat WorkerSets exist but none advertises it.
     pub fn get_chat_engine_with_parsing_for_capability(
@@ -985,6 +1058,20 @@ impl Model {
         F: Fn(&WorkerSet) -> Option<T>,
         C: Fn(&WorkerSet) -> usize,
     {
+        self.select_worker_set_with_snapshot(extract, count_workers, |value, _, _| value)
+    }
+
+    fn select_worker_set_with_snapshot<T, U, F, C, M>(
+        &self,
+        extract: F,
+        count_workers: C,
+        project: M,
+    ) -> Option<U>
+    where
+        F: Fn(&WorkerSet) -> Option<T>,
+        C: Fn(&WorkerSet) -> usize,
+        M: Fn(T, &WorkerSet, &[&WorkerSet]) -> U,
+    {
         // One immutable membership map drives both the readiness filter and
         // candidate eligibility, so a concurrent add/remove can't make us treat a
         // namespace as complete while routing to a set that lost a peer.
@@ -1013,21 +1100,21 @@ impl Model {
             if count_workers(ws) == 0 || !ready_namespaces.contains(ws.namespace()) {
                 return None;
             }
-            return extract(ws);
+            return extract(ws).map(|value| project(value, ws, &snapshot));
         }
 
         // Collect eligible sets with their worker counts, skipping sets with no workers or sets in
         // a namespace whose worker set is incomplete.
         // In-process models (no discovery watcher) return count=1, so they always participate.
         // Discovery models with count=0 have no available workers and are skipped.
-        let eligible: Vec<(T, usize)> = snapshot
+        let eligible: Vec<(T, usize, &WorkerSet)> = snapshot
             .iter()
             .filter_map(|&ws| {
                 let count = count_workers(ws);
                 if count == 0 || !ready_namespaces.contains(ws.namespace()) {
                     return None;
                 }
-                extract(ws).map(|val| (val, count))
+                extract(ws).map(|val| (val, count, ws))
             })
             .collect();
 
@@ -1036,15 +1123,18 @@ impl Model {
         }
 
         if eligible.len() == 1 {
-            return eligible.into_iter().next().map(|(val, _)| val);
+            return eligible
+                .into_iter()
+                .next()
+                .map(|(val, _, ws)| project(val, ws, &snapshot));
         }
 
         // Weighted random selection proportional to worker count
-        let total_weight: usize = eligible.iter().map(|(_, w)| w).sum();
+        let total_weight: usize = eligible.iter().map(|(_, w, _)| w).sum();
         let mut pick = rand::rng().random_range(0..total_weight);
-        for (val, weight) in eligible {
+        for (val, weight, ws) in eligible {
             if pick < weight {
-                return Some(val);
+                return Some(project(val, ws, &snapshot));
             }
             pick -= weight;
         }
@@ -1405,6 +1495,11 @@ mod tests {
             Err(ModelManagerError::ModelNotFound(_))
         ));
 
+        assert!(matches!(
+            model
+                .get_chat_engine_with_image_policy_for_capability(Some(JSON_MULTIMODAL_CAPABILITY)),
+            Err(ModelManagerError::ModelNotFound(_))
+        ));
         model.add_worker_set("text".to_string(), chat_set("text", false));
         assert!(
             model
@@ -1413,6 +1508,12 @@ mod tests {
                 .is_none()
         );
 
+        assert!(
+            model
+                .get_chat_engine_with_image_policy_for_capability(Some(JSON_MULTIMODAL_CAPABILITY))
+                .unwrap()
+                .is_none()
+        );
         let mut idle = WorkerSet::new("idle".to_string(), "idle-sum".to_string(), {
             let mut card = ModelDeploymentCard::default();
             card.runtime_config
@@ -1429,6 +1530,11 @@ mod tests {
             Err(ModelManagerError::ModelUnavailable(_))
         ));
 
+        assert!(matches!(
+            model
+                .get_chat_engine_with_image_policy_for_capability(Some(JSON_MULTIMODAL_CAPABILITY)),
+            Err(ModelManagerError::ModelUnavailable(_))
+        ));
         let flagged = chat_set("vllm", true);
         let flagged_engine = flagged.chat_engine.clone().unwrap();
         model.add_worker_set("vllm".to_string(), flagged);
@@ -1438,6 +1544,12 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(Arc::ptr_eq(&engine, &flagged_engine));
+            let (engine, _, omit) = model
+                .get_chat_engine_with_image_policy_for_capability(Some(JSON_MULTIMODAL_CAPABILITY))
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(&engine, &flagged_engine));
+            assert!(!omit, "unknown modalities must preserve images");
         }
     }
 
@@ -2636,5 +2748,114 @@ mod tests {
             !model.is_ready_to_serve(),
             "only an incomplete namespace remains: not ready to serve"
         );
+    }
+
+    #[test]
+    fn image_omission_follows_selected_deployment_and_pipeline_peers() {
+        use crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES;
+        let model = Model::new("test".into());
+        let text_engine = make_test_chat_engine();
+        let vision_engine = make_test_chat_engine();
+        let make_set = |namespace: &str, modalities: Option<Vec<&str>>, worker_type| {
+            let mut card = ModelDeploymentCard::with_name_only("test");
+            card.worker_type = Some(worker_type);
+            card.runtime_config.runtime_data.insert(
+                crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY.into(),
+                (namespace == "text").into(),
+            );
+            if let Some(modalities) = modalities {
+                card.runtime_config.runtime_data.insert(
+                    SUPPORTED_INPUT_MODALITIES.into(),
+                    serde_json::json!(modalities),
+                );
+            }
+            WorkerSet::new(namespace.into(), card.mdcsum().to_string(), card)
+        };
+        let mut text = make_set("text", Some(vec!["text"]), WorkerType::Aggregated);
+        text.chat_engine = Some(text_engine.clone());
+        model.add_worker_set("text".into(), Arc::new(text));
+        assert!(model.get_chat_engine_with_image_policy().unwrap().2);
+        let mut vision = make_set("vision", Some(vec!["image"]), WorkerType::Aggregated);
+        vision.chat_engine = Some(vision_engine.clone());
+        model.add_worker_set("vision".into(), Arc::new(vision));
+        for _ in 0..32 {
+            let (engine, _, omit) = model.get_chat_engine_with_image_policy().unwrap();
+            assert_eq!(omit, Arc::ptr_eq(&engine, &text_engine));
+            assert!(Arc::ptr_eq(&engine, &text_engine) || Arc::ptr_eq(&engine, &vision_engine));
+        }
+        for _ in 0..32 {
+            let (engine, _, omit) = model
+                .get_chat_engine_with_image_policy_for_capability(Some(
+                    crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+                ))
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(&engine, &text_engine));
+            assert!(omit);
+        }
+        model.remove_worker_set("vision");
+
+        for peer in [WorkerType::Prefill, WorkerType::Encode] {
+            model.add_worker_set(
+                "text:peer".into(),
+                Arc::new(make_set("text", Some(vec!["image"]), peer)),
+            );
+            assert!(
+                !model.get_chat_engine_with_image_policy().unwrap().2,
+                "the {peer:?} capability must preserve images"
+            );
+            model.remove_worker_set("text:peer");
+        }
+        model.add_worker_set(
+            "text:prefill".into(),
+            Arc::new(make_set("text", None, WorkerType::Prefill)),
+        );
+        assert!(
+            !model.get_chat_engine_with_image_policy().unwrap().2,
+            "an unknown pipeline peer must preserve images"
+        );
+    }
+
+    #[test]
+    fn input_modality_support_preserves_unknown_and_pipeline_peers() {
+        use crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES;
+        for (values, expected) in [
+            (vec![], None),
+            (vec![None], None),
+            (vec![Some(serde_json::json!(["text"]))], Some(false)),
+            (vec![Some(serde_json::json!(["text", "image"]))], Some(true)),
+            (vec![Some(serde_json::json!(["text"])), None], None),
+            (
+                vec![
+                    Some(serde_json::json!(["text"])),
+                    Some(serde_json::json!(["image"])),
+                ],
+                Some(true),
+            ),
+            (vec![Some(serde_json::json!([7]))], None),
+            (vec![Some(serde_json::json!("text"))], None),
+        ] {
+            let model = Model::new("test".into());
+            for (index, value) in values.into_iter().enumerate() {
+                let name = index.to_string();
+                let mut card = ModelDeploymentCard::with_name_only("test");
+                if let Some(value) = value {
+                    card.runtime_config
+                        .runtime_data
+                        .insert(SUPPORTED_INPUT_MODALITIES.into(), value);
+                }
+                let checksum = card.mdcsum().to_string();
+                model.add_worker_set(
+                    name.clone(),
+                    Arc::new(WorkerSet::new("pipeline".into(), checksum, card)),
+                );
+            }
+            let sets = model.worker_sets.load();
+            let snapshot: Vec<_> = sets.values().map(Arc::as_ref).collect();
+            assert_eq!(
+                Model::namespace_input_modality_support(&snapshot, "pipeline", "image"),
+                expected
+            );
+        }
     }
 }

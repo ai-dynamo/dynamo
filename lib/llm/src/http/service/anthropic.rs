@@ -485,6 +485,16 @@ async fn handler_anthropic_messages(
             .into_marked_response(&mut inflight_guard));
         }
     }
+    let engine_selection = super::image_omission::select_chat_engine(&state, &canonical_model);
+    let request = if !state.media_rejection().enabled()
+        && engine_selection.as_ref().is_ok_and(|(_, _, omit)| *omit)
+    {
+        request.omit_images().map_err(|error| {
+            AnthropicHandlerError::validation(error).into_marked_response(&mut inflight_guard)
+        })?
+    } else {
+        request
+    };
     let mut request = request.into_request(&headers).map_err(|error| {
         AnthropicHandlerError::validation(error).into_marked_response(&mut inflight_guard)
     })?;
@@ -552,6 +562,7 @@ async fn handler_anthropic_messages(
             headers,
             stream_handle,
             inflight_guard,
+            engine_selection,
         )
         .in_current_span(),
     )
@@ -576,6 +587,10 @@ async fn anthropic_messages(
     headers: HeaderMap,
     mut stream_handle: ConnectionHandle,
     mut inflight_guard: InflightGuard,
+    engine_selection: Result<
+        super::image_omission::ChatEngineSelection,
+        crate::discovery::ModelManagerError,
+    >,
 ) -> Result<Response, Response> {
     let streaming = request.stream;
     let request_id = request.id().to_string();
@@ -616,33 +631,29 @@ async fn anthropic_messages(
     let (orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();
 
-    // Looked up after the media refusal so a refused request gets the
-    // configured status, not this lookup's 404/503.
-    let (engine, parsing_options) = state
-        .manager()
-        .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|e| match e {
-            // Registered but not ready to serve yet → retryable 503 (mapped to
-            // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
-            // canonical, customer-facing message so both APIs report the same
-            // text. Anything else is a genuine missing model → 404.
-            crate::discovery::ModelManagerError::ModelUnavailable(_) => AnthropicHandlerError::new(
-                ErrorClass::Unavailable,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "overloaded_error",
-                super::openai::model_not_ready_message(&model),
-                ErrorType::Unavailable,
-            )
-            .into_marked_response(&mut inflight_guard),
-            _ => AnthropicHandlerError::new(
-                ErrorClass::NotFound,
-                StatusCode::NOT_FOUND,
-                "not_found_error",
-                format!("Model '{}' not found", model),
-                ErrorType::NotFound,
-            )
-            .into_marked_response(&mut inflight_guard),
-        })?;
+    // Surface selection errors after media refusal to preserve its configured status.
+    let (engine, parsing_options, _) = engine_selection.map_err(|e| match e {
+        // Registered but not ready to serve yet → retryable 503 (mapped to
+        // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
+        // canonical, customer-facing message so both APIs report the same
+        // text. Anything else is a genuine missing model → 404.
+        crate::discovery::ModelManagerError::ModelUnavailable(_) => AnthropicHandlerError::new(
+            ErrorClass::Unavailable,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "overloaded_error",
+            super::openai::model_not_ready_message(&model),
+            ErrorType::Unavailable,
+        )
+        .into_marked_response(&mut inflight_guard),
+        _ => AnthropicHandlerError::new(
+            ErrorClass::NotFound,
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+            format!("Model '{}' not found", model),
+            ErrorType::NotFound,
+        )
+        .into_marked_response(&mut inflight_guard),
+    })?;
 
     // Anthropic exposes input usage in `message_start`, before the backend's
     // authoritative count is available. Seed the stream with the same
@@ -1059,13 +1070,27 @@ async fn anthropic_messages(
 /// Handler for POST /v1/messages/count_tokens.
 /// Returns an estimated input token count using a len/3 heuristic.
 async fn handler_count_tokens(
-    State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
     request: ValidatedRequest<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
     if request.has_thread() {
         return Err(thread_unsupported_response());
     }
+    let (model, _) = request.identity();
+    let canonical = state
+        .manager()
+        .resolve_canonical_name(resolve_request_model(&model, template.as_ref()));
+    let should_omit_images = !state.media_rejection().enabled()
+        && super::image_omission::select_chat_engine(&state, &canonical)
+            .is_ok_and(|(_, _, omit)| omit);
+    let request = if should_omit_images {
+        request
+            .omit_images()
+            .map_err(|error| AnthropicHandlerError::validation(error).into_response())?
+    } else {
+        request
+    };
     let mut request = request
         .into_request(&headers)
         .map_err(|error| AnthropicHandlerError::validation(error).into_response())?;

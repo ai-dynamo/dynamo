@@ -22,6 +22,7 @@ mod anthropic;
 mod batch_proxy;
 mod decision_lifecycle;
 mod image_edits;
+mod image_omission;
 pub mod metadata;
 mod openai;
 mod server;
