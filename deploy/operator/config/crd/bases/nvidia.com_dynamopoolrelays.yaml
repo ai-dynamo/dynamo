@@ -59,7 +59,11 @@ spec:
               description: DynamoPoolRelaySpec configures Relay Pods for the DGD with the same name and namespace.
               properties:
                 clusterId:
-                  description: ClusterID is the Relay's stable logical cluster ID across restarts.
+                  description: |-
+                    ClusterID is the Relay's stable logical cluster ID across restarts. Empty
+                    uses the cluster's ID in its ClusterSet, from the About API's ClusterProperty
+                    cluster.clusterset.k8s.io, when the operator's multiCluster.mcsImplementation
+                    is mcs. With Karmada, set it to the member cluster's name in Karmada.
                   maxLength: 128
                   minLength: 1
                   pattern: ^[^[:space:]\p{Z}\x85\x1c-\x1f](.*[^[:space:]\p{Z}\x85\x1c-\x1f])?$
@@ -8195,7 +8199,6 @@ spec:
                   minimum: 1
                   type: integer
               required:
-                - clusterId
                 - podTemplate
               type: object
             status:

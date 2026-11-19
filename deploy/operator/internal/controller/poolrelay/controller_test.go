@@ -634,7 +634,7 @@ func TestDeploymentApplyUsesResponseWhenCacheIsStale(t *testing.T) {
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
 		}},
 	}
-	_, old, err := render(relay, []string{"green-runtime"})
+	_, old, err := render(relay, relay.Spec.ClusterID, []string{"green-runtime"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -648,7 +648,7 @@ func TestDeploymentApplyUsesResponseWhenCacheIsStale(t *testing.T) {
 	}
 	stale := old.DeepCopy()
 	relay.Spec.PodTemplate.Spec.Containers[0].Image = "relay:new"
-	_, wanted, err := render(relay, []string{"green-runtime"})
+	_, wanted, err := render(relay, relay.Spec.ClusterID, []string{"green-runtime"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -740,7 +740,7 @@ func TestRelayEnvironmentOwnership(t *testing.T) {
 	}
 	relay.Spec.PodTemplate.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "relay-registry"}}
 	relay.Spec.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "DYN_RELAY_PUBLICATION_THRESHOLD", Value: "32"}}
-	_, deployment, err := render(relay, []string{"green-runtime"})
+	_, deployment, err := render(relay, relay.Spec.ClusterID, []string{"green-runtime"})
 	if err != nil {
 		t.Fatalf("supported Relay tuning was rejected: %v", err)
 	}
@@ -753,7 +753,7 @@ func TestRelayEnvironmentOwnership(t *testing.T) {
 		t.Fatal("PodTemplate image pull secrets were not preserved")
 	}
 	relay.Spec.PodTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "DYN_RELAY_CONNECTION_REVISION", Value: "wrong"}}
-	if _, _, err := render(relay, []string{"green-runtime"}); err == nil {
+	if _, _, err := render(relay, relay.Spec.ClusterID, []string{"green-runtime"}); err == nil {
 		t.Fatal("operator-owned connection revision was accepted")
 	}
 }
@@ -767,7 +767,7 @@ func TestRelayClusterIDRejectsSurroundingWhitespace(t *testing.T) {
 				ObjectMeta: relayMeta,
 				Spec:       relaySpec(clusterID),
 			}
-			if _, _, err := render(relay, []string{"green-runtime"}); err == nil {
+			if _, _, err := render(relay, relay.Spec.ClusterID, []string{"green-runtime"}); err == nil {
 				t.Fatalf("accepted cluster ID %q", clusterID)
 			}
 		})

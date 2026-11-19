@@ -671,6 +671,61 @@ func TestNamespaceRestrictedRelayControllerFollowsTheClusterID(t *testing.T) {
 	eventually(t, "a ClusterIDMismatch event with the new ID", mismatchWith(relay.Spec.ClusterID+"-west"))
 }
 
+func TestRelayWithoutAClusterIDFollowsTheClusterSetID(t *testing.T) {
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		t.Skip("KUBEBUILDER_ASSETS is needed for the controller API test")
+	}
+	ctx := context.Background()
+	config := startExportAPIServer(t, exportTestVersion)
+	apiClient, err := client.New(config, client.Options{Scheme: newExportTestScheme(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startRelayController(t, config, relayControllerOptions{version: exportTestVersion})
+
+	t.Log("Create a pool whose Relay has no clusterId in a cluster with no ID in its ClusterSet: the API server accepts it, and the Relay withdraws")
+	relay := readSampleRelay(t)
+	relay.Spec.ClusterID = ""
+	createNamespace(t, apiClient, relay.Namespace)
+	createDGD(t, apiClient, relay, "Frontend")
+	if err := apiClient.Create(ctx, relay); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the Relay withdrawn for want of a cluster ID", func() (bool, error) {
+		current := &v1alpha1.DynamoPoolRelay{}
+		if err := apiClient.Get(ctx, client.ObjectKeyFromObject(relay), current); err != nil {
+			return false, err
+		}
+		ready := meta.FindStatusCondition(current.Status.Conditions, "Ready")
+		return ready != nil && ready.Reason == "InvalidConfiguration" && strings.Contains(ready.Message, "does not exist"), nil
+	})
+	deploymentKey := client.ObjectKey{Namespace: relay.Namespace, Name: multicluster.PoolRelayServiceName(relay.Name)}
+	runsUnder := func(clusterID string) func() (bool, error) {
+		return func() (bool, error) {
+			deployment := &appsv1.Deployment{}
+			if err := apiClient.Get(ctx, deploymentKey, deployment); err != nil {
+				return false, client.IgnoreNotFound(err)
+			}
+			args := deployment.Spec.Template.Spec.Containers[0].Args
+			return len(args) > 1 && args[0] == "--cluster-id" && args[1] == clusterID, nil
+		}
+	}
+
+	t.Log("Give the cluster an ID in its ClusterSet: the property's watch requeues the Relay, which runs under that ID")
+	property := newClusterIDProperty("east")
+	if err := apiClient.Create(ctx, property); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the Relay's Deployment under cluster ID east", runsUnder("east"))
+
+	t.Log("Change the cluster's ID: the Relay follows it")
+	property.Object["spec"] = map[string]any{"value": "west"}
+	if err := apiClient.Update(ctx, property); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the Relay's Deployment under cluster ID west", runsUnder("west"))
+}
+
 // relayEventNotes returns the notes of the events with reason that regard relay.
 func relayEventNotes(t *testing.T, c client.Client, relay *v1alpha1.DynamoPoolRelay, reason string) []string {
 	t.Helper()

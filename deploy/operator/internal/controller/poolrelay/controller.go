@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -148,7 +149,16 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		return r.withdraw(ctx, &relay, "UnsupportedSourceScope", "The Relay source file cannot isolate a DGD in the shared global Dynamo namespace")
 	}
 
-	resources, desiredDeployment, err := render(&relay, namespaces)
+	// The Relay runs under its clusterId, or else under the cluster's ID in its ClusterSet.
+	clusterID, err := r.resolveClusterID(ctx, &relay)
+	if errors.Is(err, errNoClusterID) {
+		return r.withdraw(ctx, &relay, "InvalidConfiguration", err.Error())
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	resources, desiredDeployment, err := render(&relay, clusterID, namespaces)
 	if err != nil {
 		return r.withdraw(ctx, &relay, "InvalidConfiguration", err.Error())
 	}
@@ -490,15 +500,61 @@ func sourceJSON(namespaces []string, connectionRevision string) string {
 	return string(encoded)
 }
 
-func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Object, *appsv1.Deployment, error) {
+// maxClusterIDLength is the most characters that a clusterId may have.
+const maxClusterIDLength = 128
+
+// errNoClusterID marks a Relay without a cluster ID to run under: its clusterId
+// is empty, and the cluster's ID in its ClusterSet cannot stand in for it.
+var errNoClusterID = errors.New("the Relay has no cluster ID")
+
+// resolveClusterID returns the cluster ID that relay runs under: its clusterId
+// if set, and otherwise the cluster's ID in its ClusterSet, from the About API's
+// ClusterProperty that the controller watches with standard MCS. The error
+// wraps errNoClusterID when neither gives an ID that the Relay accepts.
+func (r *reconciler) resolveClusterID(ctx context.Context, relay *v1alpha1.DynamoPoolRelay) (string, error) {
+	if relay.Spec.ClusterID != "" {
+		return relay.Spec.ClusterID, nil
+	}
+	if r.exports == nil || !r.exports.clusterPropertyWatched {
+		return "", fmt.Errorf("%w: clusterId is empty, and the operator uses the cluster's ID in its ClusterSet only "+
+			"with multiCluster.mcsImplementation %s in a cluster that serves the About API; set clusterId",
+			errNoClusterID, configv1alpha1.MCSImplementationStandard)
+	}
+
+	// The watch of the property requeues the Relay when the property changes.
+	property, err := multicluster.ReadClusterIDProperty(ctx, r.exports.cache)
+	if err != nil {
+		return "", err
+	}
+	if property == nil {
+		return "", fmt.Errorf("%w: clusterId is empty, and ClusterProperty %s does not exist; create it, or set clusterId",
+			errNoClusterID, multicluster.ClusterIDProperty)
+	}
+	clusterID := multicluster.ClusterPropertyValue(property)
+	if clusterID == "" || utf8.RuneCountInString(clusterID) > maxClusterIDLength || hasSurroundingSpace(clusterID) {
+		return "", fmt.Errorf("%w: clusterId is empty, and ClusterProperty %s gives %q, which a clusterId cannot be: "+
+			"it needs 1 to %d characters and no surrounding whitespace",
+			errNoClusterID, multicluster.ClusterIDProperty, clusterID, maxClusterIDLength)
+	}
+	return clusterID, nil
+}
+
+// hasSurroundingSpace reports whether value starts or ends with a character that
+// the Relay's Python CLI strips: Unicode white space or U+001C-U+001F.
+func hasSurroundingSpace(value string) bool {
+	return strings.TrimFunc(value, func(r rune) bool {
+		return unicode.IsSpace(r) || r >= '\x1c' && r <= '\x1f'
+	}) != value
+}
+
+// render returns the Relay's resources and its Deployment, which runs under
+// clusterID.
+func render(relay *v1alpha1.DynamoPoolRelay, clusterID string, namespaces []string) ([]client.Object, *appsv1.Deployment, error) {
 	name := multicluster.PoolRelayServiceName(relay.Name)
 	if problems := validation.IsDNS1035Label(name); len(problems) != 0 {
 		return nil, nil, fmt.Errorf("DGD name %q cannot produce a valid <dgd>-pool-relay Service name %q: %s", relay.Name, name, strings.Join(problems, "; "))
 	}
-	clusterID := relay.Spec.ClusterID
-	if clusterID == "" || strings.TrimFunc(clusterID, func(r rune) bool {
-		return unicode.IsSpace(r) || r >= '\x1c' && r <= '\x1f'
-	}) != clusterID {
+	if clusterID == "" || hasSurroundingSpace(clusterID) {
 		return nil, nil, fmt.Errorf("clusterId must be non-empty and have no surrounding whitespace")
 	}
 	if relay.Spec.PodTemplate == nil {
@@ -547,7 +603,7 @@ func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Obje
 		ClusterID string
 		Image     string
 		Env       []corev1.EnvVar
-	}{relay.Spec.ClusterID, main.Image, env})
+	}{clusterID, main.Image, env})
 	if err != nil {
 		return nil, nil, fmt.Errorf("encode Relay connection settings: %w", err)
 	}
@@ -580,7 +636,7 @@ func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Obje
 	probeHandler := corev1.ProbeHandler{GRPC: &corev1.GRPCAction{Port: relayPort, Service: new("dynamo.kvrelay.v1.KvEventRelay")}}
 	container := *main.DeepCopy()
 	container.Command = []string{"python3", "-m", "dynamo.pool_relay"}
-	container.Args = []string{"--cluster-id", relay.Spec.ClusterID, "--sources-file", sourcesFilePath, "--bind", fmt.Sprintf("0.0.0.0:%d", relayPort)}
+	container.Args = []string{"--cluster-id", clusterID, "--sources-file", sourcesFilePath, "--bind", fmt.Sprintf("0.0.0.0:%d", relayPort)}
 	container.Env = env
 	container.Ports = append(container.Ports, corev1.ContainerPort{Name: "grpc", ContainerPort: relayPort, Protocol: corev1.ProtocolTCP}, corev1.ContainerPort{Name: "system", ContainerPort: systemPort, Protocol: corev1.ProtocolTCP}, corev1.ContainerPort{Name: "recovery", ContainerPort: recoveryPort, Protocol: corev1.ProtocolTCP})
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{Name: "relay-sources", MountPath: "/var/run/dynamo-relay/sources", ReadOnly: true})

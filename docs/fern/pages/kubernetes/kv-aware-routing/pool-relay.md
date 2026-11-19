@@ -45,7 +45,8 @@ contain only lowercase letters, digits, and hyphens, and be at most 52 character
 can create a `<dgd>-pool-relay` Service.
 
 Save the following as `pool-relay-operator.yaml`. Replace the image and cluster ID, then match the
-transport settings to the DGD's workers. The [operator sample](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/samples/dynamo-pool-relay.yaml)
+transport settings to the DGD's workers. With standard MCS, you can leave `clusterId` out; see
+[Export to Other Clusters with MCS](#export-to-other-clusters-with-mcs). The [operator sample](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/samples/dynamo-pool-relay.yaml)
 has the same fields.
 
 ```yaml
@@ -411,10 +412,18 @@ it is deleted, the operator creates its own. Without a configured implementation
 creates no exports. Clearing the implementation leaves the exports that it created in place, no longer
 maintained, until their `DynamoPoolRelay`s are deleted.
 
-Set `clusterId` to the name that the MCS implementation gives this cluster, because the Global
-Discovery Service matches the pool's registration to its imports by that name: with standard MCS,
-the cluster's ID in its ClusterSet, which the About API's `ClusterProperty`
-`cluster.clusterset.k8s.io` holds; with Karmada, this cluster's member cluster name.
+The relay's cluster ID must be the name that the MCS implementation gives this cluster, because the
+Global Discovery Service matches the pool's registration to its imports by that name:
+
+- With `mcs`, leave `clusterId` out. The relay then runs under the cluster's ID in its ClusterSet,
+  which the About API's `ClusterProperty` `cluster.clusterset.k8s.io` holds. The cluster must serve
+  the About API when the operator starts. The operator watches the property: until it exists, the
+  relay is withdrawn with reason `InvalidConfiguration`, and a change of its value restarts the Pods
+  of every relay that uses it. A `clusterId` that is set wins over the property.
+- With `karmada`, set `clusterId` to this cluster's member cluster name in Karmada.
+
+Without a configured implementation or the About API, `clusterId` is required, and a relay without
+one is withdrawn with reason `InvalidConfiguration`.
 
 The MCS implementation reports on each export in the export's status, with the conditions `Valid`,
 `Ready` and `Conflict`; Karmada writes none. The operator reports on the pool's exports in the
@@ -430,7 +439,7 @@ shows both.
 | `InvalidServiceName` | No Service can have a name that the pool needs, so that Service is not exported. For example, a frontend component's Service name, `<dgd>-<component name>`, is longer than 63 characters. |
 | `ServiceNameTooLong` | With `karmada`, a Service name is longer than 55 characters, which Karmada cannot import, so that Service is not exported. |
 | `NoFrontend` | The DGD has no frontend component, so the Global Router has nowhere to send the pool's requests. |
-| `ClusterIDMismatch` | With `mcs`, the relay's `clusterId` differs from the cluster's ID in its ClusterSet. The Global Discovery Service lists the pool only when they match. The operator watches the property, so creating, changing or deleting it checks every pool again. It skips the check when the cluster has no such property, or did not serve the About API when the operator started. |
+| `ClusterIDMismatch` | With `mcs`, the relay's `clusterId` is set and differs from the cluster's ID in its ClusterSet. The Global Discovery Service lists the pool only when they match. The operator watches the property, so creating, changing or deleting it checks every pool again. It skips the check when the cluster has no such property, or did not serve the About API when the operator started. |
 | `ExportFailed` | Listing, creating, repairing or deleting an export, reading one of the pool's Services, or reading the cluster's ID in its ClusterSet failed. The operator retries with backoff. |
 
 ## Optional mTLS Sidecar

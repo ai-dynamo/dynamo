@@ -1406,9 +1406,9 @@ DynamoPoolRelaySpec configures Relay Pods for the DGD with the same name and nam
 **Kind:** `type`
 **Appears in:** [DynamoPoolRelay](#dynamopoolrelay)
 
-<ParamField path="clusterId" type="string" required={true}>
-ClusterID is the Relay's stable logical cluster ID across restarts.
-**Validation:** MaxLength: 128  MinLength: 1  Pattern: `^[^[:space:]\p\{Z\}\x85\x1c-\x1f](.*[^[:space:]\p\{Z\}\x85\x1c-\x1f])?$`  Required: \&#123;\&#125;
+<ParamField path="clusterId" type="string">
+ClusterID is the Relay's stable logical cluster ID across restarts. Empty uses the cluster's ID in its ClusterSet, from the About API's ClusterProperty cluster.clusterset.k8s.io, when the operator's multiCluster.mcsImplementation is mcs. With Karmada, set it to the member cluster's name in Karmada.
+**Validation:** MaxLength: 128  MinLength: 1  Pattern: `^[^[:space:]\p\{Z\}\x85\x1c-\x1f](.*[^[:space:]\p\{Z\}\x85\x1c-\x1f])?$`  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="podTemplate" type="PodTemplateSpec" required={true}>

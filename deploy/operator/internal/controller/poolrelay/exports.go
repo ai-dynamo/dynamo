@@ -99,8 +99,9 @@ type exportSettings struct {
 	runtimeConfig *commoncontroller.RuntimeConfig
 	// clusterPropertyWatched is true when the controller watches the About API's
 	// ClusterProperties: the MCS implementation labels imports with the cluster's
-	// ID in its ClusterSet, and the cluster serves the API. Otherwise the check of
-	// a pool's cluster ID is skipped.
+	// ID in its ClusterSet, and the cluster serves the API. A Relay without a
+	// clusterId then runs under that ID. Otherwise a Relay needs a clusterId, and
+	// it is not checked.
 	clusterPropertyWatched bool
 }
 
@@ -152,8 +153,8 @@ func (r *reconciler) watchExports(
 		return controllerBuilder, err
 	}
 	if !served {
-		mgr.GetLogger().Info("The cluster does not serve the About API's ClusterProperty, " +
-			"so the clusterId of DynamoPoolRelays is not checked; to check it, install the About API and restart the operator")
+		mgr.GetLogger().Info("The cluster does not serve the About API's ClusterProperty, so DynamoPoolRelays need a " +
+			"clusterId, and it is not checked; to use the cluster's ID instead, install the About API and restart the operator")
 		return controllerBuilder, nil
 	}
 	r.exports.clusterPropertyWatched = true
@@ -540,8 +541,9 @@ func (r *reconciler) exportProblems(
 
 	// A standard implementation labels the pool's imports with the cluster's ID in
 	// its ClusterSet, and the Global Discovery Service joins the pool's
-	// registration to them only under the same cluster ID.
-	if !r.exports.clusterPropertyWatched {
+	// registration to them only under the same cluster ID. A Relay without a
+	// clusterId runs under that ID, so only a clusterId that is set can differ.
+	if !r.exports.clusterPropertyWatched || relay.Spec.ClusterID == "" {
 		return problems, nil
 	}
 	property, err := multicluster.ReadClusterIDProperty(ctx, r.exports.cache)
@@ -643,8 +645,8 @@ func (r *reconciler) relaysExportingService(ctx context.Context, namespace, name
 }
 
 // mapClusterPropertyToRelays requeues every Relay in a namespace that the
-// operator manages: each pool's cluster ID is compared with the cluster's ID in
-// its ClusterSet.
+// operator manages: a Relay without a clusterId runs under the cluster's ID in
+// its ClusterSet, and the clusterId of any other is compared with it.
 func (r *reconciler) mapClusterPropertyToRelays(ctx context.Context, _ client.Object) []ctrl.Request {
 	relays := &v1alpha1.DynamoPoolRelayList{}
 	if err := r.List(ctx, relays); err != nil {
