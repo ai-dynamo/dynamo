@@ -112,6 +112,208 @@ async fn setup_with_limits(
 }
 
 #[tokio::test]
+async fn asr_reads_commit_and_clear_while_precommit_output_is_blocked() {
+    for control in ["input_audio_buffer.commit", "input_audio_buffer.clear"] {
+        let limits = Limits {
+            response_timeout: Duration::from_millis(300),
+            event_capacity: 1.try_into().unwrap(),
+            close_timeout: Duration::from_millis(100),
+            ..Limits::for_protocol(Protocol::VllmTranscription)
+        };
+        let (listener, client, input, mut session) =
+            setup_with_limits(Protocol::VllmTranscription, limits, std::future::pending()).await;
+        let sent = Arc::new(Notify::new());
+        let server_sent = sent.clone();
+        let server = tokio::spawn(async move {
+            let mut socket = accept_asr(&listener).await;
+            assert_eq!(
+                receive(&mut socket).await["type"],
+                "input_audio_buffer.append"
+            );
+            for index in 0..3 {
+                send(
+                    &mut socket,
+                    json!({"type": "transcription.delta", "delta": index.to_string()}),
+                )
+                .await;
+            }
+            socket
+                .send(Message::Ping(b"output-full".to_vec().into()))
+                .await
+                .unwrap();
+            loop {
+                match tokio::time::timeout(DEADLINE, socket.next()).await.unwrap() {
+                    Some(Ok(Message::Pong(payload))) => {
+                        assert_eq!(payload.as_ref(), b"output-full");
+                        break;
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        let event: Value = serde_json::from_str(&text).unwrap();
+                        assert_eq!(event["type"], "input_audio_buffer.append");
+                    }
+                    other => panic!("expected the backpressure barrier pong, got {other:?}"),
+                }
+            }
+            server_sent.notify_one();
+            loop {
+                match tokio::time::timeout(DEADLINE, socket.next()).await.unwrap() {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Text(text))) => {
+                        let event: Value = serde_json::from_str(&text).unwrap();
+                        assert!(matches!(
+                            event["type"].as_str(),
+                            Some("input_audio_buffer.append" | "input_audio_buffer.commit")
+                        ));
+                    }
+                    other => panic!("unexpected upstream event: {other:?}"),
+                }
+            }
+        });
+        input.send(asr_session()).await.unwrap();
+        assert_eq!(next(&mut session).await["type"], "session.updated");
+        input.send(audio()).await.unwrap();
+        tokio::time::timeout(DEADLINE, sent.notified())
+            .await
+            .unwrap();
+        // The pong proves three deltas reached the one-slot public queue,
+        // the coordinator's pending send, and the one-slot turn queue.
+        input.send(json!({"type": control})).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("pre-commit output backpressure blocked client control and upstream closure")
+            .unwrap();
+        if control == "input_audio_buffer.clear" {
+            assert_eq!(next(&mut session).await["delta"], "0");
+            assert_eq!(
+                next(&mut session).await["type"],
+                "input_audio_buffer.cleared"
+            );
+        } else {
+            let mut index = 0;
+            loop {
+                let event = next(&mut session).await;
+                if event["type"] == "conversation.item.input_audio_transcription.failed" {
+                    break;
+                }
+                if event["type"] == "conversation.item.input_audio_transcription.delta" {
+                    assert_eq!(event["delta"], index.to_string());
+                    index += 1;
+                } else {
+                    assert_eq!(event["type"], "input_audio_buffer.committed");
+                }
+            }
+            assert_eq!(index, 3);
+        }
+        drop(input);
+        assert!(
+            tokio::time::timeout(DEADLINE, session.next())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        client.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn fatal_session_error_closes_omni_upstream_before_blocked_error_delivery() {
+    let limits = Limits {
+        event_capacity: 1.try_into().unwrap(),
+        max_buffered_output_bytes: 1024.try_into().unwrap(),
+        close_timeout: Duration::from_millis(100),
+        ..Limits::for_protocol(Protocol::Omni)
+    };
+    let (listener, client, input, mut session) =
+        setup_with_limits(Protocol::Omni, limits, std::future::pending()).await;
+    let full = Arc::new(Notify::new());
+    let server_full = full.clone();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        send(&mut socket, json!({"type": "session.created"})).await;
+        assert_eq!(receive(&mut socket).await["type"], "session.update");
+        send(&mut socket, json!({"type": "session.updated"})).await;
+        for kind in [
+            "input_audio_buffer.append",
+            "input_audio_buffer.commit",
+            "response.create",
+        ] {
+            assert_eq!(receive(&mut socket).await["type"], kind);
+        }
+        for index in 0..3 {
+            send(
+                &mut socket,
+                json!({
+                    "type": "response.output_text.delta", "event_id": format!("delta-{index}"),
+                    "response_id": "upstream", "item_id": "item", "output_index": 0,
+                    "content_index": 0, "delta": index.to_string()
+                }),
+            )
+            .await;
+        }
+        socket
+            .send(Message::Ping(b"output-full".to_vec().into()))
+            .await
+            .unwrap();
+        assert!(
+            matches!(tokio::time::timeout(DEADLINE, socket.next()).await.unwrap(),
+            Some(Ok(Message::Pong(payload))) if payload.as_ref() == b"output-full")
+        );
+        server_full.notify_one();
+        loop {
+            match tokio::time::timeout(DEADLINE, socket.next()).await.unwrap() {
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(Message::Text(text))) => {
+                    let event: Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(event["type"], "response.cancel");
+                }
+                other => panic!("expected upstream cancellation and closure, got {other:?}"),
+            }
+        }
+    });
+    input
+        .send(typed_client_event(
+            json!({"type": "session.update", "session": {
+                "type": "realtime", "model": MODEL, "output_modalities": ["text"]
+            }}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(next(&mut session).await["type"], "session.updated");
+    input.send(audio()).await.unwrap();
+    input
+        .send(json!({"type": "input_audio_buffer.commit"}))
+        .await
+        .unwrap();
+    tokio::time::timeout(DEADLINE, full.notified())
+        .await
+        .unwrap();
+    input
+        .send(typed_client_event(
+            json!({"type": "session.update", "session": {
+                "type": "realtime", "instructions": "x".repeat(2048)
+            }}),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .expect("fatal error delivery kept the upstream socket alive")
+        .unwrap();
+    assert_eq!(next(&mut session).await["delta"], "0");
+    let error = next(&mut session).await;
+    assert_eq!(error["type"], "error");
+    assert_eq!(error["error"]["code"], "session_error");
+    assert!(
+        tokio::time::timeout(DEADLINE, session.next())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    client.shutdown().await;
+}
+
+#[tokio::test]
 async fn committed_asr_deadline_closes_upstream_while_output_is_blocked() {
     let limits = Limits {
         response_timeout: Duration::from_millis(300),

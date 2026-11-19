@@ -52,6 +52,7 @@ impl Session {
             protocol,
             input,
             output: emitter,
+            local_output: None,
             cancel: cancel.clone(),
             turns: VecDeque::new(),
             pending: VecDeque::new(),
@@ -93,6 +94,7 @@ struct BufferedEvent {
 
 struct TurnOutput {
     events: mpsc::Receiver<BufferedEvent>,
+    pending: Option<BufferedEvent>,
     clears: usize,
 }
 
@@ -257,6 +259,7 @@ struct Coordinator {
     protocol: Protocol,
     input: BoxStream<'static, Value>,
     output: Emitter,
+    local_output: Option<(Value, usize)>,
     cancel: CancellationToken,
     turns: VecDeque<TurnOutput>,
     pending: VecDeque<TurnDriver>,
@@ -268,39 +271,56 @@ struct Coordinator {
 impl Coordinator {
     async fn run(mut self, cancellation: impl Future<Output = ()>) {
         let cancel = self.cancel.clone();
-        tokio::select! {
-            _ = cancel.cancelled() => {},
-            _ = cancellation => {},
-            result = self.drive() => {
-                if let Err(error) = result {
-                    tracing::debug!(%error, "realtime session failed");
-                    let event = events::event("error", json!({"error": {
-                        "type": "server_error", "code": "session_error",
-                        "message": "Realtime session failed",
-                    }}));
-                    tokio::select! {
-                        _ = cancel.cancelled() => {},
-                        _ = self.output.send(event) => {},
-                    }
-                }
-            },
-        }
+        tokio::pin!(cancellation);
+        let result = tokio::select! {
+            _ = cancel.cancelled() => Ok(()),
+            _ = &mut cancellation => Ok(()),
+            result = self.drive() => result,
+        };
         self.cancel.cancel();
         // Each turn owns its socket and gets a bounded opportunity to close it.
         while self.tasks.join_next().await.is_some() {}
+        if let Err(error) = result {
+            tracing::debug!(%error, "realtime session failed");
+            let event = events::event(
+                "error",
+                json!({"error": {
+                    "type": "server_error", "code": "session_error",
+                    "message": "Realtime session failed",
+                }}),
+            );
+            tokio::select! {
+                _ = &mut cancellation => {},
+                _ = self.client.inner.shutdown.cancelled() => {},
+                _ = self.output.send(event) => {},
+            }
+        }
     }
 
     async fn drive(&mut self) -> Result<(), Error> {
         let mut eof = false;
+        let output = self.output.output.clone();
+        let budget = self.output.budget.clone();
         loop {
             self.start_ready_turns();
-            if eof && self.turns.is_empty() {
+            if eof && self.turns.is_empty() && self.local_output.is_none() {
                 return Ok(());
             }
+            let pending_turn = self
+                .turns
+                .front()
+                .is_some_and(|turn| turn.pending.is_some());
+            let draining_clears = self.turns.front().is_some_and(|turn| {
+                turn.pending.is_none()
+                    && turn.clears > 0
+                    && turn.events.is_closed()
+                    && turn.events.is_empty()
+            });
+            let local_size = self.local_output.as_ref().map_or(0, |(_, size)| *size);
             tokio::select! {
-                event = self.input.next(), if !eof => {
+                event = self.input.next(), if !eof && self.local_output.is_none() && !draining_clears => {
                     match event {
-                        Some(event) => self.handle(event).await?,
+                        Some(event) => self.handle(event)?,
                         None => {
                             eof = true;
                             if let Some(turn) = self.active.take() {
@@ -309,13 +329,34 @@ impl Coordinator {
                         }
                     }
                 }
+                permit = output.reserve(), if pending_turn => {
+                    let event = self.turns.front_mut().expect("pending turn").pending.take().expect("pending event");
+                    permit.map_err(|_| Error::Closed)?.send(event);
+                }
+                permits = async {
+                    let bytes = budget.clone().acquire_many_owned(local_size as u32)
+                        .await.map_err(|_| Error::Closed)?;
+                    let output = output.reserve().await.map_err(|_| Error::Closed)?;
+                    Ok::<_, Error>((bytes, output))
+                }, if self.local_output.is_some() && !pending_turn => {
+                    let (bytes, output) = permits?;
+                    let (value, _) = self.local_output.take().expect("pending local event");
+                    output.send(BufferedEvent { value, _bytes: bytes });
+                }
                 event = async { self.turns.front_mut().expect("guarded by nonempty").events.recv().await },
-                    if !self.turns.is_empty() => {
+                    if !self.turns.is_empty() && !pending_turn && self.local_output.is_none() => {
                     if let Some(event) = event {
-                        self.output.output.send(event).await.map_err(|_| Error::Closed)?;
-                    } else if let Some(turn) = self.turns.pop_front() {
-                        for _ in 0..turn.clears {
-                            self.emit(events::event("input_audio_buffer.cleared", json!({}))).await?;
+                        self.turns.front_mut().expect("front turn").pending = Some(event);
+                    } else {
+                        let turn = self.turns.front_mut().expect("front turn");
+                        if turn.clears > 0 {
+                            turn.clears -= 1;
+                            if turn.clears == 0 {
+                                self.turns.pop_front();
+                            }
+                            self.emit(events::event("input_audio_buffer.cleared", json!({})))?;
+                        } else {
+                            self.turns.pop_front();
                         }
                     }
                 }
@@ -329,11 +370,13 @@ impl Coordinator {
         }
     }
 
-    async fn emit(&mut self, event: Value) -> Result<(), Error> {
-        self.output.send(event).await
+    fn emit(&mut self, event: Value) -> Result<(), Error> {
+        let size = self.output.event_size(&event)?;
+        self.local_output = Some((event, size));
+        Ok(())
     }
 
-    async fn handle(&mut self, event: Value) -> Result<(), Error> {
+    fn handle(&mut self, event: Value) -> Result<(), Error> {
         if self
             .active
             .as_ref()
@@ -349,29 +392,24 @@ impl Coordinator {
                     self.protocol,
                     &self.client.inner.model,
                 ) {
-                    return self
-                        .emit(events::invalid(
-                            "invalid_session",
-                            &error.to_string(),
-                            &event,
-                        ))
-                        .await;
+                    return self.emit(events::invalid(
+                        "invalid_session",
+                        &error.to_string(),
+                        &event,
+                    ));
                 }
                 self.emit(events::event(
                     "session.updated",
                     json!({"session": self.session}),
-                ))
-                .await?;
+                ))?;
             }
             Some("input_audio_buffer.append") => {
                 if self.session.is_none() {
-                    return self
-                        .emit(events::invalid(
-                            "invalid_session",
-                            "send a valid session.update first",
-                            &event,
-                        ))
-                        .await;
+                    return self.emit(events::invalid(
+                        "invalid_session",
+                        "send a valid session.update first",
+                        &event,
+                    ));
                 }
                 let pcm = event["audio"]
                     .as_str()
@@ -382,24 +420,24 @@ impl Coordinator {
                 match pcm {
                     Ok(pcm) => {
                         if self.active.is_none() && !self.open_turn() {
-                            return self
-                                .emit(events::invalid(
-                                    "session_busy",
-                                    "too many pending turns",
-                                    &event,
-                                ))
-                                .await;
+                            return self.emit(events::invalid(
+                                "session_busy",
+                                "too many pending turns",
+                                &event,
+                            ));
                         }
                         let turn = self.active.as_ref().expect("turn opened");
                         if let Err(error) = turn.input.append(pcm, &self.client.inner.limits) {
                             self.cancel_active();
-                            self.emit(events::invalid("invalid_audio", &error.to_string(), &event))
-                                .await?;
+                            self.emit(events::invalid(
+                                "invalid_audio",
+                                &error.to_string(),
+                                &event,
+                            ))?;
                         }
                     }
                     Err(error) => {
-                        self.emit(events::invalid("invalid_audio", &error.to_string(), &event))
-                            .await?
+                        self.emit(events::invalid("invalid_audio", &error.to_string(), &event))?
                     }
                 }
             }
@@ -411,8 +449,7 @@ impl Coordinator {
                         "invalid_audio",
                         "input audio buffer is empty",
                         &event,
-                    ))
-                    .await?;
+                    ))?;
                 }
             }
             Some("input_audio_buffer.clear") => {
@@ -427,22 +464,18 @@ impl Coordinator {
                         .checked_add(1)
                         .ok_or_else(|| Error::Invalid("too many clear acknowledgements".into()))?;
                 } else {
-                    self.emit(events::event("input_audio_buffer.cleared", json!({})))
-                        .await?;
+                    self.emit(events::event("input_audio_buffer.cleared", json!({})))?;
                 }
             }
             // Preserve the existing Omni bridge's independent-utterance contract.
             Some(kind)
                 if self.protocol == Protocol::Omni
                     && (kind.starts_with("conversation.item.") || kind == "response.create") => {}
-            _ => {
-                self.emit(events::invalid(
-                    "unsupported_event",
-                    "unsupported realtime event",
-                    &event,
-                ))
-                .await?
-            }
+            _ => self.emit(events::invalid(
+                "unsupported_event",
+                "unsupported realtime event",
+                &event,
+            ))?,
         }
         Ok(())
     }
@@ -503,7 +536,11 @@ impl Coordinator {
             response: events::id("resp"),
         };
         self.pending.push_back(driver);
-        self.turns.push_back(TurnOutput { events, clears: 0 });
+        self.turns.push_back(TurnOutput {
+            events,
+            pending: None,
+            clears: 0,
+        });
         self.active = Some(Turn { input, cancel });
         true
     }
@@ -516,13 +553,18 @@ struct Emitter {
 }
 
 impl Emitter {
-    async fn send(&self, value: Value) -> Result<(), Error> {
-        let size = serde_json::to_vec(&value)?.len().max(1);
+    fn event_size(&self, value: &Value) -> Result<usize, Error> {
+        let size = serde_json::to_vec(value)?.len().max(1);
         if size > self.limit {
             return Err(Error::Protocol(
                 "upstream event exceeds the output byte budget".into(),
             ));
         }
+        Ok(size)
+    }
+
+    async fn send(&self, value: Value) -> Result<(), Error> {
+        let size = self.event_size(&value)?;
         let bytes = self
             .budget
             .clone()

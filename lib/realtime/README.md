@@ -161,6 +161,8 @@ Public HTTPS addresses, including IP literals and nondefault ports, are accepted
 Otherwise, an applicable egress proxy requires `DYN_MM_TRUST_EGRESS_PROXY=1`,
 asserting that the proxy enforces destination policy. Proxy selection honors
 `NO_PROXY` on every redirect; direct hops retain connect-time DNS protection.
+Downloads follow at most three redirects. The reference-audio timeout covers
+the whole download, including redirects and the response body.
 
 ## Bounds and Health
 
@@ -184,6 +186,8 @@ Overflow is reported instead of dropping audio silently. Commit and clear do not
 consume audio-queue capacity. Omni input uses one buffer bounded by the turn byte
 limit, then uploads in chunks; `--event-capacity` bounds ASR input and output events.
 Output backpressure reaches the upstream socket.
+ASR commit and clear can be processed while transcript output is full. A pending
+control acknowledgement or validation error can still apply input backpressure.
 The realtime response deadline starts once a turn is connected and committed,
 excluding time waiting for a turn slot. It covers upload and blocked output sends;
 expiry releases the upstream connection before terminal failure delivery can wait
@@ -203,7 +207,7 @@ cargo test --locked \
   -p dynamo-realtime -p dynamo-backend-common -p dynamo-sidecar-common \
   -p dynamo-vllm-sidecar -p dynamo-sglang-sidecar \
   -p dynamo-trtllm-sidecar -p dynamo-lpx-sidecar -p dynamo-sidecar-testkit \
-  --lib --test executable --test realtime
+  --lib --test executable --test realtime --test realtime_health
 ```
 
 Before rollout, compare direct-engine, Python-handler, and sidecar runs with the

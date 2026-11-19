@@ -466,7 +466,7 @@ async fn resolve_reference(
     let mut stream = response.bytes_stream();
     let mut audio = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| invalid_argument("could not read reference audio"))?;
+        let chunk = chunk.map_err(reference::fetch_error)?;
         if chunk.len() > limit.saturating_sub(audio.len()) {
             return Err(invalid_argument("reference audio exceeds the byte limit"));
         }
@@ -726,7 +726,7 @@ mod tests {
         );
     }
 
-    async fn engine() -> (SpeechEngine, tokio::task::JoinHandle<()>) {
+    pub(super) async fn engine() -> (SpeechEngine, tokio::task::JoinHandle<()>) {
         let app = Router::new().route(
             "/v1/audio/speech",
             post(|Json(body): Json<Value>| async move {
@@ -786,7 +786,7 @@ mod tests {
         )
     }
 
-    fn context() -> GenerateContext {
+    pub(super) fn context() -> GenerateContext {
         GenerateContext::new(Context::new(()).context(), None)
     }
 

@@ -3,7 +3,7 @@
 
 use dynamo_backend_common::{DynamoError, ErrorType};
 use dynamo_llm::preprocessor::media::MediaFetcher;
-use dynamo_sidecar_common::invalid_argument;
+use dynamo_sidecar_common::{connection_timeout, invalid_argument};
 use hyper_util::client::proxy::matcher::Matcher;
 use reqwest::{Client, Response, StatusCode, redirect::Policy};
 use url::Url;
@@ -14,6 +14,14 @@ pub(super) fn policy_from_env() -> MediaFetcher {
     policy.allow_direct_ip = true;
     policy.allow_direct_port = true;
     policy
+}
+
+pub(super) fn fetch_error(error: reqwest::Error) -> DynamoError {
+    if error.is_timeout() {
+        connection_timeout("reference-audio fetch timed out")
+    } else {
+        invalid_argument("could not fetch reference audio")
+    }
 }
 
 pub(super) struct ReferenceClient {
@@ -80,7 +88,8 @@ impl ReferenceClient {
         policy: &MediaFetcher,
     ) -> Result<Response, DynamoError> {
         // resolve_reference's caller bounds the entire fetch, including all hops/body.
-        for redirects in 0..3 {
+        let mut redirects_remaining = 3;
+        loop {
             if !matches!(url.scheme(), "http" | "https") {
                 return Err(invalid_argument("reference audio requires an HTTP(S) URL"));
             }
@@ -100,7 +109,7 @@ impl ReferenceClient {
                 .get(url.clone())
                 .send()
                 .await
-                .map_err(|_| invalid_argument("could not fetch reference audio"))?;
+                .map_err(fetch_error)?;
             let location = response.headers().get(reqwest::header::LOCATION);
             if matches!(
                 response.status(),
@@ -111,9 +120,10 @@ impl ReferenceClient {
                     | StatusCode::PERMANENT_REDIRECT
             ) && let Some(location) = location
             {
-                if redirects == 2 {
+                if redirects_remaining == 0 {
                     return Err(invalid_argument("too many reference-audio redirects"));
                 }
+                redirects_remaining -= 1;
                 let mut next = url
                     .join(
                         location
@@ -121,7 +131,6 @@ impl ReferenceClient {
                             .map_err(|_| invalid_argument("invalid reference-audio redirect"))?,
                     )
                     .map_err(|_| invalid_argument("invalid reference-audio redirect"))?;
-                // Preserve authorization for absolute same-origin redirects too.
                 if next.origin() == url.origin()
                     && next.username().is_empty()
                     && next.password().is_none()
@@ -133,19 +142,19 @@ impl ReferenceClient {
                 }
                 url = next;
             } else {
-                return response
-                    .error_for_status()
-                    .map_err(|_| invalid_argument("could not fetch reference audio"));
+                return response.error_for_status().map_err(fetch_error);
             }
         }
-        unreachable!("redirect limit is checked before following the last hop")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_backend_common::BackendError;
+    use axum::{Router, body::Body, extract::Path, routing::get};
+    use dynamo_backend_common::{BackendError, RawEngine};
+    use futures::{StreamExt, TryStreamExt};
+    use serde_json::json;
     use std::{sync::Arc, time::Duration};
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
@@ -155,6 +164,150 @@ mod tests {
         policy.allow_remote_urls = true;
         policy.timeout = Some(Duration::from_secs(3));
         policy
+    }
+
+    fn internal_policy(timeout: Duration) -> MediaFetcher {
+        let mut policy = protected_policy();
+        policy.allow_private_ips = true;
+        policy.timeout = Some(timeout);
+        policy
+    }
+
+    #[tokio::test]
+    async fn reference_audio_follows_three_redirects_but_rejects_four() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let visited = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = visited.clone();
+            let app = Router::new().route(
+                "/{remaining}",
+                get(move |Path(remaining): Path<usize>| {
+                    let seen = seen.clone();
+                    async move {
+                        seen.lock().unwrap().push(remaining);
+                        if remaining == 0 {
+                            axum::http::Response::builder()
+                                .body(Body::from("audio"))
+                                .unwrap()
+                        } else {
+                            axum::http::Response::builder()
+                                .status(StatusCode::FOUND)
+                                .header("location", format!("/{}", remaining - 1))
+                                .body(Body::empty())
+                                .unwrap()
+                        }
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let policy = internal_policy(Duration::from_secs(2));
+            let mut client = ReferenceClient::new(&policy).unwrap();
+            client.proxies = Matcher::builder().build();
+            let audio = super::super::resolve_reference(
+                &format!("http://{address}/3"),
+                &policy,
+                &client,
+                1024,
+            )
+            .await
+            .unwrap();
+            assert_eq!(audio, "data:application/octet-stream;base64,YXVkaW8=");
+            assert_eq!(*visited.lock().unwrap(), [3, 2, 1, 0]);
+            visited.lock().unwrap().clear();
+            let error = super::super::resolve_reference(
+                &format!("http://{address}/4"),
+                &policy,
+                &client,
+                1024,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::InvalidArgument)
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("too many reference-audio redirects")
+            );
+            assert_eq!(*visited.lock().unwrap(), [4, 3, 2, 1]);
+            server.abort();
+        })
+        .await
+        .expect("reference redirect test must finish");
+    }
+
+    async fn assert_timeout_classification(phase: &str) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let app = Router::new()
+                .route(
+                    "/headers",
+                    get(|| async { std::future::pending::<axum::http::Response<Body>>().await }),
+                )
+                .route(
+                    "/body",
+                    get(|| async {
+                        Body::from_stream(
+                            futures::stream::once(async { Ok::<_, std::io::Error>("audio") })
+                                .chain(futures::stream::pending()),
+                        )
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let (mut engine, upstream) = super::super::tests::engine().await;
+            // Exercise both possible timer winners deterministically.
+            for (http_timeout, outer_timeout) in [(20, 250), (250, 20)] {
+                let policy = internal_policy(Duration::from_millis(http_timeout));
+                let mut client = ReferenceClient::new(&policy).unwrap();
+                client.proxies = Matcher::builder().build();
+                engine.reference_client = Arc::new(client);
+                engine.reference_policy = internal_policy(Duration::from_millis(outer_timeout));
+                let error = engine
+                    .generate(
+                        json!({
+                            "input": "hello", "ref_audio": format!("http://{address}/{phase}"),
+                        }),
+                        super::super::tests::context(),
+                    )
+                    .await
+                    .unwrap()
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error.error_type(),
+                    ErrorType::Backend(BackendError::ConnectionTimeout)
+                );
+                assert!(
+                    error
+                        .to_string()
+                        .contains("reference-audio fetch timed out")
+                );
+            }
+            engine.cleanup().await.unwrap();
+            upstream.abort();
+            server.abort();
+        })
+        .await
+        .expect("reference timeout test must finish");
+    }
+
+    #[tokio::test]
+    async fn reference_header_timeout_is_a_gateway_timeout() {
+        assert_timeout_classification("headers").await;
+    }
+
+    #[tokio::test]
+    async fn reference_body_timeout_is_a_gateway_timeout() {
+        assert_timeout_classification("body").await;
     }
 
     #[test]

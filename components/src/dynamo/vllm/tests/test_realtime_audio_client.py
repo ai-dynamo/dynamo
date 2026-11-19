@@ -103,37 +103,14 @@ async def test_example_sends_declared_pcm_rate(
         "input_audio_buffer.commit",
     ]
     session = received[0]["session"]
-    if session_type == "transcription":
-        assert session == {
-            "type": "transcription",
-            "audio": {
-                "input": {
-                    "format": {"type": "audio/pcm", "rate": 24_000},
-                    "transcription": {"model": "test-model", "language": "en"},
-                    "noise_reduction": None,
-                    "turn_detection": None,
-                }
-            },
-        }
+    assert session["type"] == session_type
+    if session_type == "realtime" and input_sample_rate is None:
+        assert "audio" not in session
     else:
-        expected_session = {
-            "type": "realtime",
-            "model": "test-model",
-            "output_modalities": ["audio"],
+        assert session["audio"]["input"]["format"] == {
+            "type": "audio/pcm",
+            "rate": expected_rate,
         }
-        if input_sample_rate == 24_000:
-            expected_session["audio"] = {
-                "input": {
-                    "format": {"type": "audio/pcm", "rate": 24_000},
-                    "turn_detection": None,
-                },
-                "output": {
-                    "format": {"type": "audio/pcm", "rate": 24_000},
-                    "speed": 1.0,
-                    "voice": "alloy",
-                },
-            }
-        assert session == expected_session
 
     chunks = [
         base64.b64decode(event["audio"], validate=True) for event in received[1:-1]

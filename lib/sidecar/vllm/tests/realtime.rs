@@ -4,35 +4,21 @@
 //! Exercise the sidecar executable through discovery and the bidirectional
 //! request plane. The upstream is a deterministic vLLM transcription service.
 
-use std::{process::Command, time::Duration};
+#[path = "common/realtime.rs"]
+mod common;
 
-use axum::{
-    Json, Router,
-    extract::{WebSocketUpgrade, ws::Message},
-    routing::get,
-};
+use std::{process::Command, sync::atomic::Ordering, time::Duration};
+
 use base64::{Engine, prelude::BASE64_STANDARD};
 use dynamo_runtime::{
-    DistributedRuntime, Runtime,
-    distributed::{DiscoveryBackend, DistributedConfig},
     engine::AsyncEngine,
-    pipeline::{
-        RequestStream,
-        context::Context,
-        network::{
-            ResponsePlaneMode,
-            egress::push_router::{PushRouter, RouterMode},
-        },
-    },
-    protocols::annotated::Annotated,
-    storage::kv,
+    pipeline::{RequestStream, context::Context},
 };
 use futures::StreamExt;
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio_stream::wrappers::ReceiverStream;
 
-const MODEL: &str = "test-asr";
-const DEADLINE: Duration = Duration::from_secs(30);
+use common::{DEADLINE, MODEL};
 
 struct Sidecar(std::process::Child);
 
@@ -43,77 +29,16 @@ impl Drop for Sidecar {
     }
 }
 
-async fn upstream(ws: WebSocketUpgrade) -> axum::response::Response {
-    ws.on_upgrade(|mut socket| async move {
-        socket
-            .send(Message::Text(
-                json!({"type": "session.created", "id": "upstream"})
-                    .to_string()
-                    .into(),
-            ))
-            .await
-            .unwrap();
-        // Startup and active health probes close after session.created.
-        while let Some(Ok(Message::Text(text))) = socket.recv().await {
-            let request: Value = serde_json::from_str(&text).unwrap();
-            let event = match request["type"].as_str() {
-                Some("session.update") => {
-                    assert_eq!(request["model"], MODEL);
-                    continue;
-                }
-                Some("input_audio_buffer.append") => {
-                    assert!(
-                        !BASE64_STANDARD
-                            .decode(request["audio"].as_str().unwrap())
-                            .unwrap()
-                            .is_empty()
-                    );
-                    json!({"type": "transcription.delta", "delta": "hello"})
-                }
-                Some("input_audio_buffer.commit") if request["final"] == true => {
-                    json!({"type": "transcription.done", "text": "hello"})
-                }
-                Some("input_audio_buffer.commit") => continue,
-                other => panic!("unexpected upstream request: {other:?}"),
-            };
-            socket
-                .send(Message::Text(event.to_string().into()))
-                .await
-                .unwrap();
-        }
-    })
-}
-
 #[test]
 fn asr_executable_streams_through_discovery_and_tcp_before_commit() {
-    // This binary contains one test. Configure its process-global runtime
-    // before starting any threads, independently of developer settings.
-    unsafe {
-        for (key, _) in std::env::vars().filter(|(key, _)| {
-            key.starts_with("DYN_") || key.starts_with("ETCD_") || key.starts_with("NATS_")
-        }) {
-            std::env::remove_var(key);
-        }
-        std::env::set_var("DYN_SYSTEM_HOST", "127.0.0.1");
-        std::env::set_var("DYN_SYSTEM_PORT", "0");
-        std::env::set_var("DYN_ENABLE_OTEL", "false");
-    }
+    common::configure_process();
     tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(round_trip());
 }
 
 async fn round_trip() {
-    let app = Router::new()
-        .route("/health", get(|| async { "healthy" }))
-        .route(
-            "/v1/models",
-            get(|| async { Json(json!({"data": [{"id": MODEL}]})) }),
-        )
-        .route("/v1/realtime", get(upstream));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let upstream_url = format!("http://{}", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let upstream = common::start_upstream().await;
     let discovery = tempfile::tempdir().unwrap();
     let logs = tempfile::NamedTempFile::new().unwrap();
     let mut child = Sidecar(
@@ -123,7 +48,7 @@ async fn round_trip() {
                 "--protocol",
                 "asr",
                 "--http-endpoint",
-                &upstream_url,
+                &upstream.url,
                 "--model",
                 MODEL,
                 "--namespace",
@@ -144,47 +69,13 @@ async fn round_trip() {
             .spawn()
             .unwrap(),
     );
-    let runtime = Runtime::from_current().unwrap();
-    let mut config = DistributedConfig::process_local();
-    config.discovery_backend =
-        DiscoveryBackend::KvStore(kv::Selector::File(discovery.path().into()));
-    config.response_plane = Some(ResponsePlaneMode::Tcp);
-    let drt = DistributedRuntime::new(runtime.clone(), config)
-        .await
-        .unwrap();
-    let endpoint = drt
-        .namespace("media-test")
-        .unwrap()
-        .component("asr")
-        .unwrap()
-        .endpoint("generate");
-    let client = endpoint.client().await.unwrap();
-    tokio::time::timeout(DEADLINE, client.wait_for_instances())
-        .await
-        .unwrap_or_else(|error| {
-            panic!(
-                "sidecar did not register: {error}\n{}",
-                std::fs::read_to_string(logs.path()).unwrap()
-            )
-        })
-        .unwrap();
-    let router = PushRouter::<Value, Annotated<Value>>::from_client_with_options(
-        client,
-        RouterMode::RoundRobin,
-        dynamo_llm::kv_router::plugins::push_router_options(),
-    )
-    .await
-    .unwrap();
+    let (runtime, drt) = common::runtime(discovery.path()).await;
+    let endpoint = common::endpoint(&drt);
+    let router = common::router(&endpoint).await;
+    assert!(upstream.healthy.load(Ordering::SeqCst));
+    assert!(upstream.probes.load(Ordering::SeqCst) > 0);
     let (input, receiver) = tokio::sync::mpsc::channel(4);
-    input
-        .send(json!({"type": "session.update", "session": {
-            "type": "transcription", "audio": {"input": {
-                "format": {"type": "audio/pcm", "rate": 24000},
-                "transcription": {"model": MODEL}, "turn_detection": null
-            }}
-        }}))
-        .await
-        .unwrap();
+    input.send(common::session_update()).await.unwrap();
     let mut output = tokio::time::timeout(
         DEADLINE,
         router.generate(Context::new(RequestStream::new(
@@ -244,5 +135,4 @@ async fn round_trip() {
     .expect("sidecar shuts down after SIGTERM");
     assert!(status.success());
     runtime.shutdown();
-    server.abort();
 }

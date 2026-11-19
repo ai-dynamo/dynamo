@@ -37,7 +37,8 @@ async-trait = { workspace = true }
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
-hyper-util = { workspace = true, features = ["client-proxy"] }
+# The separately locked Python bindings can retain a newer compatible matcher.
+hyper-util = { version = "0.1.17", features = ["client-proxy"] }
 pep440_rs = "0.7"
 percent-encoding = "2.3.2"
 serde = { workspace = true }
