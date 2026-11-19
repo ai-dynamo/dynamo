@@ -258,6 +258,11 @@ def test_scheduler_output_interface():
             ),
             (SchedulerOutput, "num_scheduled_tokens", {"is_instance_of": dict}),
             (SchedulerOutput, "total_num_scheduled_tokens"),
+            (
+                SchedulerOutput,
+                "preempted_req_ids",
+                {"is_instance_of": (set[str] | None)},
+            ),
         ]
     )
 
