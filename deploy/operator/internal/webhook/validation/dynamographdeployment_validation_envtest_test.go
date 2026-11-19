@@ -3142,6 +3142,32 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 
+		// Delegated-only graphs have no ordinary Grove headless Service.
+		{
+			name: "LPX-only graph accepts a digit-leading name without an ordinary Grove Service",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+			}),
+		},
+		{
+			name: "LPX-only graph accepts a dotted name without an ordinary Grove Service",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = "model.v1"
+			}),
+		},
+		{
+			name: "adding an ordinary Grove worker to an LPX-only graph rejects a new headless Service error",
+			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+				dgd.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = "etcd"
+			}),
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = digitLeadingDGDName
+				dgd.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = "etcd"
+				dgd.Spec.Components = append(dgd.Spec.Components, betaDGDForAdmission(nil).Spec.Components[1])
+			}),
+			wantWebhookErrs: []string{groveDigitNameErr},
+		},
 		{
 			name: "LPX Pod selector rejects a generated name longer than 63 characters",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {

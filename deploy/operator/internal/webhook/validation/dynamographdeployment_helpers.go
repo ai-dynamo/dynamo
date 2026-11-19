@@ -534,7 +534,10 @@ func generatedDynamoGraphDeploymentNameViolations(
 // dgd must not be nil.
 func generatedProviderHeadlessServiceNameViolations(dgd *nvidiacomv1beta1.DynamoGraphDeployment, grovePathway, disaggregatedSet bool) []generatedNameViolation {
 	var violations []generatedNameViolation
-	if grovePathway {
+	// Grove creates the ordinary PCS only when it owns at least one component.
+	if grovePathway && slices.ContainsFunc(dgd.Spec.Components, func(component nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
+		return !component.ManagedByExternalController()
+	}) {
 		pcsName := dynamo.PCSNameForDGD(dgd, (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController)
 		violations = append(violations, generatedHeadlessServiceNameViolations(field.NewPath("metadata", "name"), pcsName+"-0", "Grove PodCliqueSet headless Service name")...)
 	}
