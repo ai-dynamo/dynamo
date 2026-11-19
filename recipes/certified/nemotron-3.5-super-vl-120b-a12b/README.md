@@ -10,8 +10,9 @@ Dynamo 1.7.0 enterprise images `dynamo-frontend-enterprise` and `vllm-runtime-en
 recipes are tuned for agentic coding traffic like the SWE-bench Pro trace: long, multi-turn
 prompts with high prefix reuse.
 
-See the [recipe page](https://docs.nvidia.com/dynamo/dev/recipes/nemotron-3-5-super-vl-certified) for
-certification results.
+See the
+[recipe page](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/recipes/model-recipes/nemotron-3-5-super-vl-120b-a12b-certified.mdx)
+for certification results.
 
 The open-source recipes for this model, including other GPUs and TensorRT-LLM, are in
 [`recipes/nemotron-3.5-super-vl-120b-a12b`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3.5-super-vl-120b-a12b).
