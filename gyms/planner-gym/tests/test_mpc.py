@@ -429,6 +429,46 @@ def test_reconcile_books_unknown_starting_workers_and_retires_ready_ones():
     assert mpc.pending_orders == 1
 
 
+def test_late_worker_is_not_counted_as_serving_until_reported_ready():
+    mpc = _mpc(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), cold_start_s=30.0)
+    mpc._reconcile_orders(100.0, ready=1, expected=1)
+    mpc._book_decision(100.0, 2)  # booked for t=130
+    # Due at this tick: it serves from the first step.
+    mpc._reconcile_orders(130.0, ready=1, expected=2)
+    assert mpc._active_schedule(2)[:2] == [2, 2]
+    # Five seconds late and still starting: only the ready worker serves now.
+    mpc._reconcile_orders(135.0, ready=1, expected=2)
+    assert mpc.pending_orders == 1
+    assert mpc._active_schedule(2)[:3] == [1, 2, 2]
+    # Still starting a tick later: the current step again has one worker.
+    mpc._reconcile_orders(140.0, ready=1, expected=2)
+    assert mpc._active_schedule(2)[:3] == [1, 2, 2]
+    # Reported ready: the order retires and both workers serve.
+    mpc._reconcile_orders(145.0, ready=2, expected=2)
+    assert mpc.pending_orders == 0
+    assert mpc._active_schedule(2)[0] == 2
+
+
+def test_late_worker_rule_applies_to_each_disaggregated_pool():
+    mpc = _mpc(
+        _LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS),
+        mode="disagg",
+        cold_start_s=30.0,
+    )
+    book = mpc._book_p
+    book.reconcile(100.0, 1, 1)
+    book.book(100.0, 3)  # two prefill workers booked for t=130
+    book.reconcile(130.0, 1, 3)
+    assert book.schedule(3)[:2] == [3, 3]
+    book.reconcile(135.0, 1, 3)
+    assert book.pending == 2
+    assert book.schedule(3)[:3] == [1, 3, 3]
+    # One came up, one is still late.
+    book.reconcile(140.0, 2, 3)
+    assert book.pending == 1
+    assert book.schedule(3)[:3] == [2, 3, 3]
+
+
 def test_queue_spike_floor_does_not_wind_up_while_orders_are_in_flight():
     """Pending workers must not cause a new replica order every tick.
 

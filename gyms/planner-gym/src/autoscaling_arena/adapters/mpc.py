@@ -534,6 +534,10 @@ class _PoolBook:
                 to_cancel -= take
             orders = [o for o in orders if o[1] > 0]
             base = max(0, base - to_cancel)
+        # A starter still reported after its booked time is late: expect it at
+        # the next step, and let the observed ready count stand for this one.
+        late_at = self.t_s + self._dt
+        orders = [[r if r >= self.t_s - 1e-6 else late_at, c] for r, c in orders]
         out = []
         for k in range(self._plan_steps):
             t_k = self.t_s + k * self._dt
@@ -782,8 +786,9 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
         Pending orders arrive at their booked time; new orders (candidate
         above the provisioned fleet) arrive after the cold start; a smaller
         target cancels pending orders newest-first and removes active
-        workers at once. Late orders (booked time already passed) count from
-        the first step.
+        workers at once. An order due at this tick counts from the first
+        step; one still starting after its booked time is late and is
+        expected at the next step.
         """
         dt = self._poll_interval_s
         orders = sorted(([o[0], o[1]] for o in self._orders), key=lambda o: o[0])
@@ -801,6 +806,10 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
                 to_cancel -= take
             orders = [o for o in orders if o[1] > 0]
             base = max(0, base - to_cancel)
+        # A starter still reported after its booked time is late: expect it at
+        # the next step, and let the observed ready count stand for this one.
+        late_at = self._t_s + dt
+        orders = [[r if r >= self._t_s - 1e-6 else late_at, c] for r, c in orders]
         schedule = []
         for k in range(self._plan_steps):
             t_k = self._t_s + k * dt
