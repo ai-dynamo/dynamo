@@ -1426,7 +1426,7 @@ impl<
                 ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at)
                     .with_pinned_worker(request.pinned_worker)
                     .with_sequence_hashes(request.token_seq.as_deref())
-                    .with_busy_thresholds(Arc::clone(&self.profile), reject_thresholds);
+                    .with_busy_thresholds(reject_thresholds);
             if let Some(request_id) = request.mode.request_id() {
                 classification = classification.with_request_id(request_id);
             }
@@ -1554,6 +1554,8 @@ impl<
             due_at,
             scheduling_cost_tokens,
             worker_selection_target,
+            // Returned with the admitted response; the queue does not use it.
+            backend_priority: _,
         } = classified_request.into_queue_inputs();
 
         if scheduling_cost_tokens == Some(0) {
@@ -2836,6 +2838,7 @@ impl<
                 } else {
                     None
                 };
+                let progress = |worker| self.slots.decode_progress_for(worker);
                 // Held for this selection, so the snapshot the policy reads borrows live counters.
                 let resident_blocks = self
                     .resident_blocks
@@ -2849,7 +2852,8 @@ impl<
                             eligibility,
                             self.block_size,
                         )
-                        .with_resident_blocks(resident_blocks.as_deref().map(|counts| &**counts)),
+                        .with_resident_blocks(resident_blocks.as_deref().map(|counts| &**counts))
+                        .with_decode_progress(Some(&progress)),
                         prepared,
                         trace,
                     )
@@ -5353,6 +5357,119 @@ mod tests {
             );
             assert_eq!(prepared_queue.prepared_selections(), 2);
         }
+    }
+
+    #[tokio::test]
+    async fn prepared_rows_read_decode_progress_at_actor_selection() {
+        use dynamo_slot_tracker::host::DecodeProgressUpdate;
+        use dynamo_worker_selection::{
+            WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
+        };
+
+        struct ProgressPicker;
+        impl WorkerPicker for ProgressPicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::DECODE_PROGRESS
+            }
+
+            fn pick(
+                &self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, dynamo_worker_selection::host::WorkerSelectionPolicyError>
+            {
+                use dynamo_worker_selection::experimental::decode_progress::DecodeProgressByRow;
+                let row = input
+                    .candidates()
+                    .iter()
+                    .position(|row| row.worker().worker_id == 0)
+                    .unwrap();
+                assert_eq!(
+                    input.decode_progress(row).unwrap().remaining_token_budget(),
+                    48
+                );
+                Ok(input
+                    .candidates()
+                    .iter()
+                    .position(|row| row.worker().worker_id == 1)
+                    .unwrap())
+            }
+        }
+        let prepared_selections = Arc::new(AtomicUsize::new(0));
+        let policy = || CountingPreparedPolicy {
+            inner: WorkerSelectionPolicy::new(
+                dynamo_worker_selection::SelectionConfig::default(),
+                "test",
+                vec![],
+                Box::new(ProgressPicker),
+            ),
+            prepared_selections: Arc::clone(&prepared_selections),
+        };
+        let (queue, slots) = make_queue_with_custom_selector(2, 16, 64, None, policy());
+        let mut actor = actor_with_selector_for_test(&queue, &slots, policy());
+        let request_id = "background".to_string();
+        let worker = WorkerWithDpRank::new(0, 0);
+        let attempt = slots
+            .add_request_if_registered_admitted(
+                dynamo_slot_tracker::host::SequenceRequest {
+                    request_id: request_id.clone(),
+                    token_sequence: None,
+                    expected_output_tokens: None,
+                    track_prefill_tokens: false,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                Instant::now(),
+            )
+            .unwrap();
+        slots
+            .mark_prefill_completed(&request_id, Instant::now())
+            .unwrap();
+        slots
+            .update_output_if_booking(
+                &request_id,
+                worker,
+                attempt,
+                0,
+                None,
+                Some(DecodeProgressUpdate::observed(128, 8)),
+            )
+            .unwrap();
+        let (request, mut rx) = make_request("prepared-progress", 16);
+        let prepared = queue.prepare_candidates(&request);
+        assert!(prepared.is_some());
+        slots
+            .update_output_if_booking(
+                &request_id,
+                worker,
+                attempt,
+                0,
+                None,
+                Some(DecodeProgressUpdate::observed(128, 80)),
+            )
+            .unwrap();
+        actor.refresh_workers_generation();
+        assert_eq!(
+            actor.with_projected_loads(
+                request,
+                Instant::now(),
+                prepared,
+                |actor, request, prepared| {
+                    actor.admit_one_projected(
+                        AdmissionContext::untracked(0, None),
+                        request,
+                        prepared,
+                    )
+                }
+            ),
+            Admission::Booked
+        );
+        assert_eq!(
+            rx.try_recv().unwrap().unwrap().best_worker,
+            WorkerWithDpRank::new(1, 0)
+        );
+        assert_eq!(prepared_selections.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
