@@ -6,6 +6,7 @@
 package controller
 
 import (
+	dsrender "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/disaggregatedset"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -46,7 +47,7 @@ func TestDisaggregatedSetRealLWSCRDValidationAndConvergence(t *testing.T) {
 	dgd.Namespace = testEnv.Namespace()
 	dcds, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, nil, dynamo.RollingUpdateContext{})
 	require.NoError(t, err)
-	selection, reason := selectDisaggregatedSetComponents(dgd)
+	selection, reason := dsrender.Select(dgd)
 	require.Empty(t, reason)
 
 	runtimeConfig := &commoncontroller.RuntimeConfig{
