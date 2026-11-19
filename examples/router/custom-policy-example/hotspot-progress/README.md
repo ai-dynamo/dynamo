@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 `hotspot-progress` is an experimental policy for a two-worker aggregated pool
 serving two siblings with a shared prefix. It can move the first sibling from a
 warm worker with a decode backlog to an idle worker. Enable soft session affinity
-so the host can bind later siblings to the worker that accepted the dispatch.
+so the host updates the group's binding when a worker accepts a dispatch.
 
 ## Decisions
 
@@ -29,6 +29,13 @@ warm prefix on A, or any overlap on B returns the choice to the fallback. A soft
 target outside the candidates also uses the fallback. The host enforces exact
 pins and worker eligibility. The policy reports an error for roles other than
 aggregated.
+
+Each request uses the soft target it acquired before selection. In a group
+already bound to A, concurrent siblings can both acquire A. Once the first
+request books B, the second can still carry A even after the binding changes
+to B. Because B is now busy, the second request uses the fallback and may land
+on A. Retention applies when the second request acquires B and B still meets the
+zero-overlap and prefill conditions above.
 
 The picker requests `CACHE`, `LOAD`, and experimental `DECODE_PROGRESS`. Only
 the first-move branch reads progress, once on A after checking the load gates.
@@ -92,9 +99,9 @@ for availability and freshness details.
 
 The policy tests cover the first-move count and budget boundaries, fallback,
 and unsupported roles. The affinity regression uses the native session affinity
-table, the selector, and real slot bookings. It models the frontend's accepted
-dispatch by booking the selected worker and committing its affinity hold, then
-obtains the next sibling's target from that table.
+table, the selector, and real slot bookings. It starts with an unbound group,
+models an accepted dispatch by booking the selected worker and committing its
+affinity hold, then acquires the next sibling's target from the table.
 
 ```bash
 cargo test -p dynamo-custom-policy-example-hotspot-progress --test policy
