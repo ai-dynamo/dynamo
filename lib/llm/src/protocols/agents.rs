@@ -110,8 +110,9 @@ pub(crate) fn agent_context_header_values_for_session(
     if borrowed_header_value(headers, HEADER_DYNAMO_SESSION_ID).is_none()
         && let Some(mut values) = mapped_agent_context_header_values(headers)
     {
-        values.parent_session_id = values
-            .parent_session_id
+        values.parent_session_id = borrowed_header_value(headers, HEADER_DYNAMO_PARENT_SESSION_ID)
+            .map(str::to_owned)
+            .or(values.parent_session_id)
             .filter(|parent| *parent != session_id);
         values.session_id = session_id;
         return values;

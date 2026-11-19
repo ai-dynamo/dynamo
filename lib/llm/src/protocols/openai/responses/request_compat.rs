@@ -3,11 +3,30 @@
 
 //! Normalize coding-agent extensions before typed Responses admission.
 
+use std::collections::{HashMap, HashSet};
+
+use dynamo_protocols::types::{
+    ChatCompletionRequestMessage as Message, ChatCompletionRequestMessageContentPartText,
+    ChatCompletionRequestToolMessageContent as ToolContent,
+    ChatCompletionRequestToolMessageContentPart as ToolPart, ChatCompletionRequestUserMessage,
+    ChatCompletionRequestUserMessageContentPart as UserPart,
+};
 use serde_json::Value;
 
 use super::ResponsesConversionError;
 
-pub(crate) fn hoist_additional_tools(body: &mut Value) -> Result<(), ResponsesConversionError> {
+pub(crate) fn normalize_input(body: &mut Value) -> Result<(), ResponsesConversionError> {
+    if let Some(items) = body.get_mut("input").and_then(Value::as_array_mut) {
+        for item in items {
+            if item.get("type").and_then(Value::as_str) == Some("custom_tool_call_output") {
+                item["type"] = Value::String("function_call_output".into());
+            }
+        }
+    }
+    hoist_additional_tools(body)
+}
+
+fn hoist_additional_tools(body: &mut Value) -> Result<(), ResponsesConversionError> {
     let Some(items) = body.get("input").and_then(Value::as_array) else {
         return Ok(());
     };
@@ -25,22 +44,30 @@ pub(crate) fn hoist_additional_tools(body: &mut Value) -> Result<(), ResponsesCo
             "tools must be an array".into(),
         ));
     }
-    let mut tools = body
-        .get("tools")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    if items.iter().any(|item| {
+        item.get("type").and_then(Value::as_str) == Some("additional_tools")
+            && !item.get("tools").is_some_and(Value::is_array)
+    }) {
+        return Err(ResponsesConversionError::InvalidArgument(
+            "additional_tools input must contain a tools array".into(),
+        ));
+    }
+    let Value::Array(items) = body["input"].take() else {
+        unreachable!("input array was validated");
+    };
+    let mut tools = match body["tools"].take() {
+        Value::Array(tools) => tools,
+        _ => Vec::new(),
+    };
     let mut input = Vec::with_capacity(items.len());
-    for item in items {
+    for mut item in items {
         if item.get("type").and_then(Value::as_str) == Some("additional_tools") {
-            let Some(additional) = item.get("tools").and_then(Value::as_array) else {
-                return Err(ResponsesConversionError::InvalidArgument(
-                    "additional_tools input must contain a tools array".into(),
-                ));
+            let Value::Array(additional) = item["tools"].take() else {
+                unreachable!("additional tools array was validated");
             };
-            tools.extend(additional.iter().cloned());
+            tools.extend(additional);
         } else {
-            input.push(item.clone());
+            input.push(item);
         }
     }
     body["input"] = Value::Array(input);
@@ -64,75 +91,107 @@ pub(crate) fn body_affinity(body: &Value) -> Option<&str> {
 
 /// Kimi numbers results within the most recent assistant call batch.
 /// Merge split results within a run, then retain unmatched output as user notes.
-pub(super) fn kimi_history(
-    messages: &[super::ChatCompletionRequestMessage],
-) -> anyhow::Result<Vec<super::ChatCompletionRequestMessage>> {
-    use std::collections::{HashMap, HashSet};
-    let mut merged: Vec<Value> = Vec::with_capacity(messages.len());
+pub(super) fn kimi_history(messages: Vec<Message>) -> Vec<Message> {
+    if !messages
+        .iter()
+        .any(|message| matches!(message, Message::Tool(_)))
+    {
+        return messages;
+    }
+
+    let mut merged = Vec::with_capacity(messages.len());
     let mut run: HashMap<String, usize> = HashMap::new();
     for message in messages {
-        let message = serde_json::to_value(message)?;
-        if message["role"] != "tool" {
-            run.clear();
-        } else if let Some(id) = message["tool_call_id"].as_str() {
-            if let Some(index) = run.get(id).copied() {
-                let first = &mut merged[index]["content"];
-                if let (Value::String(a), Some(b)) = (&mut *first, message["content"].as_str()) {
-                    if !a.is_empty() && !a.ends_with('\n') {
-                        a.push('\n');
-                    }
-                    a.push_str(b);
-                } else if let Some(parts) = first.as_array_mut() {
-                    parts.extend(content_parts(&message["content"]));
-                } else {
-                    let mut parts = content_parts(first);
-                    parts.extend(content_parts(&message["content"]));
-                    *first = Value::Array(parts);
-                }
+        if let Message::Tool(tool) = message {
+            if let Some(index) = run.get(&tool.tool_call_id).copied()
+                && let Message::Tool(first) = &mut merged[index]
+            {
+                merge_tool_content(&mut first.content, tool.content);
                 continue;
             }
-            run.insert(id.to_string(), merged.len());
+            run.insert(tool.tool_call_id.clone(), merged.len());
+            merged.push(Message::Tool(tool));
+        } else {
+            run.clear();
+            merged.push(message);
         }
-        merged.push(message);
     }
+
     let mut settled = Vec::with_capacity(merged.len());
     let mut notes = Vec::new();
-    let mut calls: HashSet<String> = HashSet::new();
+    let mut calls = HashSet::new();
     for message in merged {
-        if message["role"] == "tool" {
-            let id = message["tool_call_id"].as_str().unwrap_or_default();
-            if calls.contains(id) {
-                settled.push(message);
+        if let Message::Tool(tool) = message {
+            if calls.contains(&tool.tool_call_id) {
+                settled.push(Message::Tool(tool));
             } else {
-                let mut parts = vec![serde_json::json!({"type":"text", "text":format!(
-                    "[Output of tool call '{id}', which matches no tool call before it:]"
-                )})];
-                parts.extend(content_parts(&message["content"]));
-                notes.push(serde_json::json!({"role":"user", "content":parts}));
+                let id = tool.tool_call_id;
+                let mut parts = vec![UserPart::Text(
+                    ChatCompletionRequestMessageContentPartText {
+                        text: format!(
+                            "[Output of tool call '{id}', which matches no tool call before it:]"
+                        ),
+                        prompt_cache_breakpoint: None,
+                    },
+                )];
+                parts.extend(tool_parts(tool.content).into_iter().map(|part| match part {
+                    ToolPart::Text(text) => UserPart::Text(text),
+                    ToolPart::ImageUrl(image) => UserPart::ImageUrl(image),
+                    ToolPart::VideoUrl(video) => UserPart::VideoUrl(video),
+                    ToolPart::AudioUrl(audio) => UserPart::AudioUrl(audio),
+                    ToolPart::Custom(custom) => UserPart::Custom(custom),
+                }));
+                notes.push(Message::User(ChatCompletionRequestUserMessage {
+                    content: parts.into(),
+                    name: None,
+                }));
             }
-            continue;
-        }
-        settled.append(&mut notes);
-        if message["role"] == "assistant" {
-            calls = message["tool_calls"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|call| call["id"].as_str().map(str::to_owned))
-                .collect();
         } else {
+            settled.append(&mut notes);
             calls.clear();
+            if let Message::Assistant(assistant) = &message {
+                calls.extend(
+                    assistant
+                        .tool_calls
+                        .iter()
+                        .flatten()
+                        .map(|call| call.id.clone()),
+                );
+            }
+            settled.push(message);
         }
-        settled.push(message);
     }
     settled.append(&mut notes);
-    Ok(serde_json::from_value(Value::Array(settled))?)
+    settled
 }
 
-fn content_parts(content: &Value) -> Vec<Value> {
-    content.as_array().cloned().unwrap_or_else(|| {
-        vec![serde_json::json!({"type":"text", "text":content.as_str().unwrap_or_default()})]
-    })
+fn merge_tool_content(first: &mut ToolContent, next: ToolContent) {
+    match (first, next) {
+        (ToolContent::Text(first), ToolContent::Text(next)) => {
+            if !first.is_empty() && !first.ends_with('\n') {
+                first.push('\n');
+            }
+            first.push_str(&next);
+        }
+        (ToolContent::Array(parts), next) => parts.extend(tool_parts(next)),
+        (first, next) => {
+            let mut parts = tool_parts(std::mem::take(first));
+            parts.extend(tool_parts(next));
+            *first = ToolContent::Array(parts);
+        }
+    }
+}
+
+fn tool_parts(content: ToolContent) -> Vec<ToolPart> {
+    match content {
+        ToolContent::Array(parts) => parts,
+        ToolContent::Text(text) => vec![ToolPart::Text(
+            ChatCompletionRequestMessageContentPartText {
+                text,
+                prompt_cache_breakpoint: None,
+            },
+        )],
+    }
 }
 
 #[cfg(test)]
@@ -176,14 +235,14 @@ mod tests {
                 {"role":"tool","tool_call_id":"a","content":"continued"}
             ]))
             .unwrap();
-        let normalized = kimi_history(&messages).unwrap();
+        let normalized = kimi_history(messages);
         let value = serde_json::to_value(&normalized).unwrap();
         assert_eq!(value.as_array().unwrap().len(), 4);
         assert_eq!(value[1]["content"], "first\ncontinued");
         assert_eq!(value[2]["tool_call_id"], "b");
         assert_eq!(value[3]["role"], "user");
         assert_eq!(value[3]["content"][1]["text"], "orphan");
-        assert_eq!(kimi_history(&normalized).unwrap(), normalized);
+        assert_eq!(kimi_history(normalized.clone()), normalized);
     }
 
     #[test]
@@ -197,11 +256,11 @@ mod tests {
                 {"role":"tool","tool_call_id":"a","content":"late result"}
             ]))
             .unwrap();
-        let normalized = kimi_history(&messages).unwrap();
+        let normalized = kimi_history(messages);
         let value = serde_json::to_value(&normalized).unwrap();
         assert_eq!(value[2]["role"], "user");
         assert_eq!(value[2]["content"][1]["text"], "late result");
-        assert_eq!(kimi_history(&normalized).unwrap(), normalized);
+        assert_eq!(kimi_history(normalized.clone()), normalized);
     }
 
     #[test]
