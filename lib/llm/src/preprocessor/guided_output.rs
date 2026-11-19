@@ -14,7 +14,10 @@ use crate::protocols::{
         invalid_argument_error,
         llm_backend::PreprocessedRequest,
     },
-    openai::{GuidedToolConstraint, chat_completions::NvCreateChatCompletionRequest, validate},
+    openai::{
+        GuidedToolConstraint, chat_completions::NvCreateChatCompletionRequest,
+        common_ext::CommonExtProvider, validate,
+    },
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -239,6 +242,12 @@ impl OpenAIPreprocessor {
                 }
             }
         }
+        // A continued assistant prompt does not establish the engine gate's state.
+        if reasoning && request.get_continue_final_message() == Some(true) {
+            return Err(invalid_argument_error(
+                "continue_final_message cannot be used with a guided answer that requires an active reasoning gate. Start a new assistant turn or disable thinking if the model supports it.",
+            ));
+        }
         common.require_reasoning = reasoning;
         let extra = common.extra_args.get_or_insert_with(|| json!({}));
         let extra = extra
@@ -294,7 +303,6 @@ impl OpenAIPreprocessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::openai::common_ext::CommonExtProvider;
 
     fn request(fields: Value) -> NvCreateChatCompletionRequest {
         let mut request = json!({"model":"test", "messages":[{"role":"user","content":"test"}]});
@@ -506,21 +514,69 @@ mod tests {
         }
     }
 
-    #[test]
-    fn guided_output_preserves_existing_native_json_envelopes() {
+    #[tokio::test]
+    async fn guided_output_rejects_ambiguous_gated_continuations() {
+        for (capability, thinking, expected_error) in [
+            (Some(gate()), true, Some("continue_final_message")),
+            (Some(gate()), false, None),
+            (None, true, Some("cannot preserve")),
+        ] {
+            let processor = processor(capability);
+            for mut fields in [
+                json!({"guided_json":{"type":"object"}}),
+                json!({"guided_json":r#"{"type":"object"}"#}),
+                json!({"response_format":{"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object"}}}}),
+                json!({"guided_choice":["yes","no"]}),
+                json!({"guided_regex":"yes|no"}),
+                json!({"guided_grammar":"root ::= \"yes\" | \"no\""}),
+            ] {
+                fields["messages"] = json!([
+                    {"role":"user","content":"Answer using the supplied constraint."},
+                    {"role":"assistant","content":"<think>done</think>partial"}
+                ]);
+                fields["continue_final_message"] = json!(true);
+                fields["add_generation_prompt"] = json!(false);
+                fields["chat_template_kwargs"] = json!({"enable_thinking":thinking});
+                let mut request = request(fields.clone());
+                normalize_guided_json(&mut request).unwrap();
+                let (mut common, _, prefill) =
+                    processor.preprocess_request(&request, None).await.unwrap();
+                let installed = processor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, prefill.clone())
+                    .unwrap();
+                let result = processor.resolve_guided_output_plan(
+                    &request,
+                    &mut common,
+                    &prefill,
+                    &installed,
+                );
+                if let Some(expected_error) = expected_error {
+                    let error = result.unwrap_err().to_string();
+                    assert!(error.contains(expected_error), "{fields}: {error}");
+                } else {
+                    assert_eq!(result.unwrap(), Some(GuidedOutputPlan::Direct));
+                    assert!(!common.require_reasoning);
+                    assert_eq!(common.extra_args.as_ref().unwrap()["reasoning_ended"], true);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn guided_output_preserves_existing_native_json_envelopes() {
         let processor = processor(None);
-        for fields in [
+        for mut fields in [
             json!({"guided_json":{"type":"array"}}),
             json!({"response_format":{"type":"json_schema","json_schema":{"name":"guided_json","schema":{"type":"array"}}}}),
         ] {
+            fields["messages"] = json!([{"role":"assistant","content":"partial"}]);
+            fields["continue_final_message"] = json!(true);
+            fields["add_generation_prompt"] = json!(false);
+            fields["chat_template_kwargs"] = json!({"enable_thinking":true});
             let mut request = request(fields);
             normalize_guided_json(&mut request).unwrap();
-            let mut common = processor
-                .builder_with_lora(&request, None)
-                .unwrap()
-                .token_ids(vec![])
-                .build()
-                .unwrap();
+            let (mut common, _, prefill) =
+                processor.preprocess_request(&request, None).await.unwrap();
             for installed in [
                 GuidedToolConstraint::StructuralTag,
                 GuidedToolConstraint::BeamTurnGrammar {
@@ -529,7 +585,7 @@ mod tests {
             ] {
                 assert_eq!(
                     processor
-                        .resolve_guided_output_plan(&request, &mut common, &true.into(), &installed)
+                        .resolve_guided_output_plan(&request, &mut common, &prefill, &installed)
                         .unwrap(),
                     Some(GuidedOutputPlan::NativeJson)
                 );
@@ -856,17 +912,35 @@ mod tests {
         ) {
             return;
         }
-        for (reasoner, tool, capability) in [
-            ("minimax_m3", "minimax_m3", None),
+        for (reasoner, tool, capability, continue_final, thinking) in [
+            ("minimax_m3", "minimax_m3", None, false, true),
             (
                 "minimax_m3",
                 "minimax_m3",
                 Some(GuidedReasoningMode::Unsupported),
+                false,
+                true,
             ),
             (
                 "qwen3",
                 "qwen3_coder",
                 Some(GuidedReasoningMode::ExplicitGate),
+                false,
+                true,
+            ),
+            (
+                "qwen3",
+                "qwen3_coder",
+                Some(GuidedReasoningMode::ExplicitGate),
+                true,
+                true,
+            ),
+            (
+                "qwen3",
+                "qwen3_coder",
+                Some(GuidedReasoningMode::ExplicitGate),
+                true,
+                false,
             ),
         ] {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -895,20 +969,23 @@ mod tests {
                 json!({"guided_json":{"type":"object"}}),
                 json!({"response_format":{"type":"json_schema","json_schema":{"name":"guided_json","schema":{"type":"object"}}}}),
             ] {
-                let mut fields = json!({"chat_template_kwargs":{"thinking_mode":"enabled","enable_thinking":true},"tool_choice":"auto","tools":[{"type":"function","function":{"name":"weather","parameters":{"type":"object","properties":{"city":{"type":"string","enum":["Paris"]}}}}}]});
+                let mut fields = json!({"chat_template_kwargs":{"thinking_mode":if thinking {"enabled"} else {"disabled"},"enable_thinking":thinking},"tool_choice":"auto","tools":[{"type":"function","function":{"name":"weather","parameters":{"type":"object","properties":{"city":{"type":"string","enum":["Paris"]}}}}}]});
                 fields
                     .as_object_mut()
                     .unwrap()
                     .extend(format.as_object().unwrap().clone());
+                if continue_final {
+                    fields["messages"] = json!([
+                        {"role":"user","content":"Provide today's weather."},
+                        {"role":"assistant","content":"<think>done</think>partial"}
+                    ]);
+                    fields["continue_final_message"] = json!(true);
+                    fields["add_generation_prompt"] = json!(false);
+                }
                 let mut request = request(fields);
                 normalize_guided_json(&mut request).unwrap();
-                let mut common = processor
-                    .builder_with_lora(&request, None)
-                    .unwrap()
-                    .token_ids(vec![])
-                    .build()
-                    .unwrap();
-                let prefill: PromptReasoningPrefill = true.into();
+                let (mut common, _, prefill) =
+                    processor.preprocess_request(&request, None).await.unwrap();
                 let installed = processor
                     .apply_tool_choice_guided_decoding(&request, &mut common, prefill.clone())
                     .unwrap();
@@ -920,13 +997,20 @@ mod tests {
                     &prefill,
                     &installed,
                 );
-                if capability == Some(GuidedReasoningMode::ExplicitGate) {
+                if continue_final && thinking {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("continue_final_message")
+                    );
+                } else if capability == Some(GuidedReasoningMode::ExplicitGate) {
                     assert_eq!(result.unwrap(), Some(GuidedOutputPlan::NativeJson));
                     assert!(common.guided_output_plan.is_none());
-                    assert!(common.require_reasoning);
+                    assert_eq!(common.require_reasoning, thinking);
                     assert_eq!(
                         common.extra_args.as_ref().unwrap()["reasoning_ended"],
-                        false
+                        !thinking
                     );
                 } else {
                     assert!(result.unwrap_err().to_string().contains("cannot preserve"));

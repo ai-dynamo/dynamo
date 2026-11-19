@@ -4,6 +4,7 @@
 """CPU-only contracts against the vLLM APIs installed in the runtime image."""
 
 import importlib
+import inspect
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -30,6 +31,7 @@ pytestmark = [
 def test_installed_reasoner_and_generate_api_match_published_capability(
     parser_name: str,
 ) -> None:
+    assert not inspect.iscoroutinefunction(async_llm.AsyncLLM.get_tokenizer)
     tokenizer = transformers.PreTrainedTokenizerFast(
         tokenizer_object=tokenizers.Tokenizer(
             tokenizers.models.WordLevel(

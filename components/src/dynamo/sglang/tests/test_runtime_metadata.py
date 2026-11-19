@@ -8,6 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from dynamo.common.guided_output import GUIDED_OUTPUT_REASONING_RUNTIME_KEY
 from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY, TokenBudget
 from dynamo.sglang.capacity import (
     get_hicache_native_offloading_capacity,
@@ -407,6 +408,7 @@ async def test_hicache_publish_failure_preserves_core_capacity(
         hicache_write_policy="write_back",
         max_prefill_tokens=None,
         page_size=16,
+        reasoning_parser=None,
         speculative_algorithm="NONE",
         speculative_num_steps=None,
     )
@@ -453,6 +455,12 @@ async def test_hicache_publish_failure_preserves_core_capacity(
 
     assert runtime_config.total_kv_blocks == 64
     assert runtime_config.max_num_batched_tokens == 1024
+    capability = json.loads(
+        runtime_config.runtime_data[GUIDED_OUTPUT_REASONING_RUNTIME_KEY]
+    )
+    assert capability["mode"] == "immediate"
+    assert capability["reasoner"] is None
+    assert capability["request_controls"] is False
     assert json.loads(runtime_config.runtime_data[TOKEN_BUDGET_RUNTIME_KEY]) == {
         "combined_limit": 4092,
         "reject_prompt_overflow": True,

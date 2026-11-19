@@ -2616,6 +2616,7 @@ async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch)
     # test covers only the freeze ordering.
     for name in (
         "ModelRuntimeConfig",
+        "publish_guided_output_capability",
         "publish_vllm_structural_tag_reasoning_policy",
         "publish_vllm_qwen_video_processor_contract",
         "publish_vllm_nemotron_video_processor_contract",
@@ -2652,15 +2653,19 @@ async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch)
 
     config = Mock(freeze_gc_after_init=True, dyn_default_thinking_mode=None)
     vllm_config = Mock(lora_config=None)
+    engine_client = Mock()
 
     await vllm_main.register_vllm_model(
         dynamo_llm.ModelInput.Tokens,
         dynamo_llm.ModelType.Chat,
         Mock(),
         config,
-        Mock(),
+        engine_client,
         vllm_config,
         worker_type=dynamo_llm.WorkerType.Aggregated,
     )
 
     assert order == ["freeze_gc_heap", "register_model"]
+    vllm_main.publish_guided_output_capability.assert_called_once_with(
+        vllm_main.ModelRuntimeConfig.return_value, engine_client, vllm_config
+    )

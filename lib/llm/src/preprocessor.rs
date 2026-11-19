@@ -20813,7 +20813,10 @@ responses_tools: None,
 #[cfg(test)]
 mod beam_route_tests {
     use super::*;
-    use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+    use crate::protocols::{
+        common::guided_output::GuidedOutputPlan,
+        openai::chat_completions::NvCreateChatCompletionRequest,
+    };
     use std::collections::HashMap;
 
     fn test_prompt_formatter_with_exclusion(
@@ -20843,6 +20846,37 @@ mod beam_route_tests {
             .exclude_tools_when_tool_choice_none = true;
         preprocessor.beam_route = beam_route;
         preprocessor
+    }
+
+    #[tokio::test]
+    async fn beam_guided_choice_can_continue_the_rendered_final_channel() {
+        let mut preprocessor = synthetic_preprocessor(
+            true,
+            "{% for message in messages %}<|start|>{{ message.role }}<|channel|>final<|message|>{{ message.content }}<|return|>{% endfor %}",
+        );
+        preprocessor.tool_call_parser = Some("beam".into());
+        preprocessor.runtime_config.tool_call_parser = Some("beam".into());
+        preprocessor.runtime_config.reasoning_parser = Some("beam".into());
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model":"test",
+            "messages":[{"role":"assistant","content":"partial"}],
+            "continue_final_message":true,
+            "add_generation_prompt":false,
+            "guided_choice":["yes"]
+        }))
+        .unwrap();
+        let (mut common, _, prefill) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+        let installed = preprocessor
+            .apply_tool_choice_guided_decoding(&request, &mut common, prefill.clone())
+            .unwrap();
+        let plan = preprocessor
+            .resolve_guided_output_plan(&request, &mut common, &prefill, &installed)
+            .unwrap();
+        assert_eq!(plan, Some(GuidedOutputPlan::Direct));
+        assert!(!common.require_reasoning);
     }
 
     /// Beam's contract: `builtin_tools` names the tools from `tools` for the system
