@@ -220,6 +220,8 @@ impl RecheckPlan {
         self.all || self.capacity || !self.workers.is_empty()
     }
 
+    /// The scope the next dispatch rechecks under, for the test hooks.
+    #[cfg(any(test, feature = "testing"))]
     fn scope(&self) -> Option<RecheckScope> {
         if self.all {
             Some(RecheckScope::All)
@@ -693,6 +695,8 @@ impl<T> PolicyClassQueue<T> {
         self.blocked_lanes.contains_key(&lane) || self.shared_blocked.contains_key(&lane)
     }
 
+    /// Why a lane is blocked, for the test hooks.
+    #[cfg(any(test, feature = "testing"))]
     fn block_reason(&self, lane: LaneKey) -> Option<BlockReason> {
         self.blocked_lanes.get(&lane).copied().or_else(|| {
             self.shared_blocked
