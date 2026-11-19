@@ -304,6 +304,7 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments/finalizers
+  - dynamographdeploymentenginegroups/finalizers
   - dynamographdeploymentrequests/finalizers
   - dynamographdeploymentruns/finalizers
   - dynamographdeployments/finalizers
@@ -317,6 +318,7 @@ rules:
   resources:
   - dynamocomponentdeployments/status
   - dynamographdeploymentcandidates/status
+  - dynamographdeploymentenginegroups/status
   - dynamographdeploymentrequests/status
   - dynamographdeploymentruns/status
   - dynamographdeployments/status
@@ -340,6 +342,16 @@ rules:
   - get
   - list
   - patch
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamographdeploymentenginegroups
+  verbs:
+  - get
+  - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - nvidia.com
