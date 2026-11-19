@@ -78,7 +78,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 dynamo-router-policies = { path = "lib/router-plugins/builtin", version = "1.8.0" }
 dynamo-generate-format-catalog = { path = "lib/generate-format-catalog", version = "1.8.0" }
 # Published separately by https://github.com/ai-dynamo/aisimulate.
-aisimulate-core = { version = "=0.13.0-dev.202610290000000087" }
+aisim-core = { version = "=0.15.0-dev.202611130000000104" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.8.0" }
@@ -88,8 +88,8 @@ dynamo-lora = { path = "lib/lora", version = "1.8.0" }
 dynamo-sglang-generate = { path = "lib/generate-formats/sglang", version = "1.8.0" }
 dynamo-vllm-generate = { path = "lib/generate-formats/vllm", version = "1.8.0" }
 dynamo-rl = { path = "lib/rl", version = "1.8.0" }
-dynamo-tokenizers = { version = "=4.1.2" }
-dynamo-renderer = { version = "=10.1.0" }
+dynamo-tokenizers = { version = "=4.3.0" }
+dynamo-renderer = { version = "=10.4.1" }
 dynamo-tokens = { path = "lib/tokens", version = "1.8.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.8.0" }
 dynamo-error = { path = "lib/error", version = "1.8.0" }
@@ -194,7 +194,7 @@ tempfile = "3"
 thiserror = { version = "2.0.17" }
 tmq = { version = "0.5.0" }
 zmq = { version = "0.10" }
-tokio = { version = "=1.54.0", features = ["full"] }
+tokio = { version = "=1.54.1", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7.19", features = ["codec", "net", "rt", "io-util"] }
 tower = { version = "0.5", features = ["util"] }

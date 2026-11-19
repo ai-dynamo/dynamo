@@ -9791,6 +9791,21 @@ spec:
                       minimum: 1
                       type: integer
                   type: object
+                rerun:
+                  description: |-
+                    Rerun intentionally creates a new Request generation when the search inputs otherwise
+                    remain unchanged. It starts the normal cancel-and-replace lifecycle; it does not retry
+                    the same immutable Run.
+                  properties:
+                    reason:
+                      description: |-
+                        Reason records why the user requested another Run. Changing this value creates a new
+                        Request generation and the value is frozen into that generation's immutable Run.
+                      minLength: 1
+                      type: string
+                  required:
+                    - reason
+                  type: object
                 v1beta1:
                   description: |-
                     V1Beta1 losslessly preserves a native v1beta1 spec while this object is
@@ -9967,7 +9982,7 @@ spec:
                 - message: exactly one of native v1beta2 fields or v1beta1 must be specified
                   rule: has(self.v1beta1) != has(self.model)
                 - message: v1beta1 is mutually exclusive with native v1beta2 fields
-                  rule: '!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisim) || has(self.recommendation) || has(self.overrides))'
+                  rule: '!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisim) || has(self.recommendation) || has(self.rerun) || has(self.overrides))'
                 - message: the conversion carrier is immutable
                   rule: has(self.v1beta1) == has(oldSelf.v1beta1) && (!has(self.v1beta1) || self.v1beta1 == oldSelf.v1beta1)
             status:
