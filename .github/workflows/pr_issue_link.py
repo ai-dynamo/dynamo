@@ -40,8 +40,11 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from collections.abc import Callable
 
 # An owner or repository name is ASCII, starts alphanumeric, and runs to at
 # most 100 characters. Matching the segment on `\w` instead let PR text name a
@@ -188,6 +191,20 @@ def repo_visible(repo: str, token: str) -> tuple[bool, bool]:
     return False, False
 
 
+def has_repo_write_permission(repo: str, username: str, token: str) -> bool:
+    """Trust a fork author only when GitHub confirms write access to this repo."""
+    status, body = http_json(
+        f"https://api.github.com/repos/{repo}/collaborators/{username}/permission",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    # Fail closed on missing permissions or API errors: an outside contributor
+    # must not be able to probe which private Linear issue IDs exist.
+    return status == 200 and body.get("permission") in {"write", "maintain", "admin"}
+
+
 def verify_linear_issue(identifier: str, api_key: str) -> tuple[bool, bool]:
     """Return (exists, api_ok)."""
     if not api_key:
@@ -219,6 +236,81 @@ def verify_linear_issue(identifier: str, api_key: str) -> tuple[bool, bool]:
     return False, False
 
 
+def linear_issue_has_project(identifier: str, api_key: str) -> tuple[bool, bool]:
+    """Return (has_project, api_ok) for a Linear issue that already verified."""
+    if not api_key:
+        return False, False
+    status, body = http_json(
+        "https://api.linear.app/graphql",
+        payload={
+            "query": "query($id: String!) { issue(id: $id) { project { id } } }",
+            "variables": {"id": identifier},
+        },
+        headers={"Authorization": api_key, "Content-Type": "application/json"},
+    )
+    issue = (body.get("data") or {}).get("issue") if status == 200 else None
+    if not issue:
+        return False, False
+    return bool(issue.get("project")), True
+
+
+def project_warning(identifier: str, api_key: str) -> list[str]:
+    """Warn, never block, when the linked Linear issue sits in no project.
+
+    Release tracking reads feature progress from Linear projects, so an issue
+    outside one never reaches its feature. An outage stays silent: the warning
+    is advisory and must not depend on the API being up.
+    """
+    has_project, api_ok = linear_issue_has_project(identifier, api_key)
+    if has_project or not api_ok:
+        return []
+    print(
+        f"::warning title=Linear issue has no project::{identifier} is in no Linear "
+        "project. If it is feature work, put it in its feature project; if it is "
+        "a bug, test or other work in a workstream, put it in that workstream "
+        "project. Leave it out of a project only when neither fits."
+    )
+    return [
+        "",
+        f"Warning: Linear issue {identifier} is in no project. If it is feature work,",
+        "put it in its feature project; if it is a bug, test or other work in a",
+        "workstream, put it in that workstream project. Leave it out of a project",
+        "only when neither fits. This warning does not block the merge.",
+    ]
+
+
+BRANCH_LOOKUP_DELAYS = (2.0, 8.0)
+
+
+def release_branch_cut(
+    repo: str, branch: str, token: str, sleep: Callable[[float], None] = time.sleep
+) -> tuple[bool, bool]:
+    """Return (cut, api_ok) for an exact branch name in `repo`.
+
+    The `git/ref` endpoint matches the full name only, so the model-launch
+    branches cut as `release/1.6.0-<model>-dev.1` never read as `release/1.6.0`.
+    An unknown answer fails open, so a throttled or failed lookup is retried
+    first: the cut re-runs hundreds of checks at once, which is exactly when
+    the API throttles.
+    """
+    for delay in (*BRANCH_LOOKUP_DELAYS, None):
+        status, _ = http_json(
+            f"https://api.github.com/repos/{repo}/git/ref/heads/"
+            + urllib.parse.quote(branch, safe="/"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+            },
+        )
+        if status == 200:
+            return True, True
+        if status in (404, 410):
+            return False, True
+        if delay is not None:
+            sleep(delay)
+    return False, False
+
+
 def main() -> int:
     title = os.environ.get("PR_TITLE", "")
     body = os.environ.get("PR_BODY", "") or ""
@@ -230,13 +322,14 @@ def main() -> int:
     repo = os.environ.get("REPO", "").lower()
     head_repo = os.environ.get("PR_HEAD_REPO", repo)
     association = os.environ.get("PR_AUTHOR_ASSOCIATION", "").upper()
-    # Org authors keep Linear verification from forks; the fork gating
-    # below applies only to authors outside the org.
+    # author_association can say CONTRIBUTOR for a repository writer. GitHub's
+    # repository permission is authoritative for whether a fork author may
+    # submit a Linear reference for verification.
     trusted_author = association in {"OWNER", "MEMBER", "COLLABORATOR"}
-    is_untrusted_fork = head_repo.lower() != repo.lower() and not trusted_author
+    needs_permission_check = head_repo.lower() != repo.lower() and not trusted_author
     gh_token = os.environ.get("GITHUB_TOKEN", "")
     linear_key = os.environ.get("LINEAR_API_KEY", "")
-    blocking_date = os.environ.get("BLOCKING_DATE", "2026-10-21")
+    blocking_branch = os.environ.get("BLOCKING_BRANCH", "release/1.7.0")
 
     if author in BOT_AUTHORS:
         print(f"Author {author} is a bot; skipping the issue-link check.")
@@ -354,7 +447,13 @@ def main() -> int:
         )
 
     all_linear_ids = sorted(linear_ids, key=lambda i: (i not in intent_linear, i))
+    is_untrusted_fork = needs_permission_check and not (
+        all_linear_ids
+        and not verified
+        and has_repo_write_permission(repo, author, gh_token)
+    )
     fork_linear_ids: list[str] = []
+    verified_linear = ""
     decided_linear = False
     for identifier in all_linear_ids[:MAX_CANDIDATES]:
         if verified:
@@ -373,6 +472,7 @@ def main() -> int:
         exists, api_ok = verify_linear_issue(identifier, linear_key)
         if exists:
             verified.append(f"Linear issue {identifier}")
+            verified_linear = identifier
         elif not api_ok:
             unverified.append(f"Linear reference {identifier} (not verified)")
         else:
@@ -394,7 +494,12 @@ def main() -> int:
                 f.write(text_out + "\n")
 
     if verified:
-        summarize(["### PR issue link: found", ""] + [f"- {v}" for v in verified])
+        warning = (
+            project_warning(verified_linear, linear_key) if verified_linear else []
+        )
+        summarize(
+            ["### PR issue link: found", ""] + [f"- {v}" for v in verified] + warning
+        )
         return 0
 
     if unverified:
@@ -443,6 +548,26 @@ def main() -> int:
         else []
     )
 
+    # The check fails only once the next minor release branch exists. Before
+    # that it reports the same remediation and passes, so the check can sit in
+    # the required status checks ahead of the cut and switch on by itself. An
+    # API failure reads as not cut yet, the same fail-open an outage earns
+    # everywhere else in this check.
+    cut, cut_known = release_branch_cut(repo, blocking_branch, gh_token)
+    gate_lines = (
+        [f"This check is required: `{blocking_branch}` has been cut."]
+        if cut
+        else [
+            f"This check is advisory until `{blocking_branch}` is cut and "
+            "passes for now. From the cut it fails pull requests without a link."
+        ]
+        + (
+            []
+            if cut_known
+            else ["", f"Could not confirm whether `{blocking_branch}` exists yet."]
+        )
+    )
+
     summarize(
         [
             (
@@ -465,13 +590,13 @@ def main() -> int:
             "  `ai-dynamo/enhancements#12`.",
             "",
             "If no issue exists yet, create one first and start the work from it.",
-            f"This check is advisory today and becomes required on {blocking_date}.",
         ]
+        + gate_lines
         + (
             [
                 "",
                 f"Linear references found ({', '.join(fork_linear_ids)}) cannot be",
-                "verified for fork PRs from outside the org; reference a GitHub",
+                "verified for fork PRs without repository write access; reference a GitHub",
                 "issue instead.",
             ]
             if fork_linear_ids
@@ -488,7 +613,10 @@ def main() -> int:
             else []
         )
     )
-    return 1
+    if cut:
+        return 1
+    print(f"::warning::No linked issue. Required once {blocking_branch} is cut.")
+    return 0
 
 
 if __name__ == "__main__":

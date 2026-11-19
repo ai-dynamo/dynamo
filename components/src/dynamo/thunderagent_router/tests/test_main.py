@@ -130,9 +130,13 @@ class FakeKvRouter:
         self.chunks = chunks if chunks is not None else []
         self.error = error
         self.sent: Optional[dict[str, Any]] = None
+        self.context: Any = None
 
-    async def generate_from_request(self, preprocessed):
+    async def generate_from_request(
+        self, preprocessed, response_buffer_size=100, context=None
+    ):
         self.sent = preprocessed
+        self.context = context
 
         async def stream():
             for chunk in self.chunks:
@@ -143,12 +147,12 @@ class FakeKvRouter:
         return stream()
 
 
-async def drive(handler: ThunderAgentRouterHandler) -> None:
+async def drive(handler: ThunderAgentRouterHandler, context=None) -> None:
     request = {
         "token_ids": [1, 2, 3],
         "agent_context": {"session_id": "p1"},
     }
-    async for _ in handler.generate(request):
+    async for _ in handler.generate(request, context=context):
         pass
 
 
@@ -160,7 +164,9 @@ async def test_a_placed_program_pins_both_backend_id_and_dp_rank():
     handler._scheduler = FakeScheduler(replica_hint=(7, 3))  # type: ignore[assignment]
     handler._kv_router = FakeKvRouter()  # type: ignore[assignment]
 
-    await drive(handler)
+    context = object()
+    await drive(handler, context=context)
+    assert handler._kv_router.context is context
 
     sent = handler._kv_router.sent
     assert sent is not None
@@ -185,6 +191,32 @@ async def test_an_unplaced_program_sends_no_pin_and_is_counted():
     assert sent is not None
     assert sent["routing"] is None
     assert handler._stat_unpinned_turns == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "agent_context", [{"session_id": "p1"}, None], ids=["program", "passthrough"]
+)
+async def test_the_upstream_arrival_stamp_reaches_the_kv_router(agent_context):
+    """The KvRouter adds its own time to the age the frontend stamped. Without the
+    stamp it starts from zero, and a backend that admits by arrival treats the
+    request as new."""
+    handler = make_handler()
+    handler._scheduler = FakeScheduler(replica_hint=(7, 3))  # type: ignore[assignment]
+    handler._kv_router = FakeKvRouter()  # type: ignore[assignment]
+
+    request: dict[str, Any] = {
+        "token_ids": [1, 2, 3],
+        "elapsed_since_arrival_ms": 1500.0,
+    }
+    if agent_context is not None:
+        request["agent_context"] = agent_context
+    async for _ in handler.generate(request):
+        pass
+
+    sent = handler._kv_router.sent
+    assert sent is not None
+    assert sent["elapsed_since_arrival_ms"] == 1500.0
 
 
 @pytest.mark.asyncio

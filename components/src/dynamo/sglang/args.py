@@ -36,8 +36,10 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import (
     ConfigArgumentMerger,
     add_sglang_cli_compat,
+    kv_events_config_with_dynamo_format,
     resolved_server_args,
     sglang_default_mla_attention_backend,
+    sglang_dsa_supports_decode_context_parallel,
     sglang_uses_mla_backend,
 )
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
@@ -54,11 +56,12 @@ DCP_CAPABLE_ATTENTION_BACKENDS = frozenset({"triton", "aiter"})
 
 # MLA backends whose decode returns no log-sum-exp, which SGLang's DCP decode needs.
 # Drop entries once the SGLang pin has #35384/#37735, or #33325 adds fa3 DCP decode.
+# DSA/NSA are rejected only when the engine lacks DSA DCP support.
 MLA_DCP_UNSUPPORTED_DECODE_BACKENDS = frozenset(
     {"fa3", "fa4", "flashmla", "dsa", "nsa"}
 )
 
-# Sparse-attention MLA backends; DSA models need them, so only --dcp-size 1 helps.
+# Sparse-attention MLA backends that require the engine's DSA DCP implementation.
 MLA_SPARSE_ATTENTION_BACKENDS = frozenset({"dsa", "nsa"})
 
 ATTENTION_BACKEND_CLI_FIELDS = (
@@ -170,6 +173,31 @@ def _diffusion_generator_kwargs(server_args: Any) -> dict[str, Any]:
         kwargs["master_port"] = master_port
 
     return kwargs
+
+
+CUDA_COREDUMP_WAIT_ENV = "SGLANG_CUDA_COREDUMP_BEFORE_CRASH_WAIT_SECS"
+
+
+def _default_cuda_coredump_wait(server_args: Any) -> None:
+    """Skip SGLang's pre-crash coredump wait when no coredump can be triggered.
+
+    On SIGQUIT (e.g. a dead detokenizer) SGLang's TokenizerManager tries a CUDA
+    user-triggered coredump and then sleeps this many seconds (default 60) even
+    when the trigger was a no-op, delaying worker exit and pod restart. Leave an
+    explicit value, CUDA_ENABLE_USER_TRIGGERED_COREDUMP=1, or --crash-dump-folder
+    (which makes SGLang enable user-triggered coredumps) untouched.
+    """
+    if CUDA_COREDUMP_WAIT_ENV in os.environ:
+        return
+    if os.environ.get("CUDA_ENABLE_USER_TRIGGERED_COREDUMP") == "1":
+        return
+    if getattr(server_args, "crash_dump_folder", None):
+        return
+    os.environ[CUDA_COREDUMP_WAIT_ENV] = "0"
+    logging.info(
+        "CUDA user-triggered coredumps are disabled; setting %s=0",
+        CUDA_COREDUMP_WAIT_ENV,
+    )
 
 
 def _unsupported_fpm_trace_role(dynamo_config: DynamoConfig) -> Optional[str]:
@@ -369,6 +397,19 @@ def _validate_mla_dcp_decode_backend(
         backend = sglang_default_mla_attention_backend(server_args)
     if backend not in MLA_DCP_UNSUPPORTED_DECODE_BACKENDS:
         return
+    if backend in MLA_SPARSE_ATTENTION_BACKENDS:
+        # Unresolved kernel choices are checked again on the engine's config.
+        support = sglang_dsa_supports_decode_context_parallel(server_args)
+        if support is not False:
+            return
+        raise ValueError(
+            f"--dcp-size {dcp_size} is not supported with the decode attention "
+            f"backend '{backend}' and the selected DSA kernels "
+            f"(prefill={getattr(resolved, 'dsa_prefill_backend', None)!r}, "
+            f"decode={getattr(resolved, 'dsa_decode_backend', None)!r}) "
+            "on this SGLang build and GPU. Use --dcp-size 1. Otherwise, select "
+            "matching DCP-capable DSA kernels supported by the engine and GPU."
+        )
 
     selected = (
         " SGLang selects it automatically for this model and GPU because no "
@@ -377,9 +418,7 @@ def _validate_mla_dcp_decode_backend(
         else ""
     )
     remedy = (
-        "Use --dcp-size 1."
-        if backend in MLA_SPARSE_ATTENTION_BACKENDS
-        else "Use --attention-backend flashinfer (or trtllm_mla / cutedsl_mla "
+        "Use --attention-backend flashinfer (or trtllm_mla / cutedsl_mla "
         "on Blackwell), or --dcp-size 1."
     )
     raise ValueError(
@@ -877,13 +916,24 @@ async def parse_args(args: list[str]) -> Config:
         gateway_count = effective_gateway_workers(parsed_args, dynamo_config)
         if gateway_count > 1 and parsed_args.tokenizer_worker_num != gateway_count:
             parsed_args.tokenizer_worker_num = gateway_count
+        parsed_args.kv_events_config = kv_events_config_with_dynamo_format(
+            parsed_args.kv_events_config
+        )
         server_args = ServerArgs.from_cli_args(parsed_args)
+        _default_cuda_coredump_wait(server_args)
 
     if getattr(server_args, "schedule_low_priority_values_first", False):
         raise ValueError(
             "--schedule-low-priority-values-first is not supported in Dynamo's "
             "SGLang integration. Dynamo normalizes request priority so higher "
             "values are always higher priority at the API layer."
+        )
+
+    if getattr(server_args, "default_chat_template_kwargs", None):
+        raise ValueError(
+            "--default-chat-template-kwargs has no effect on a Dynamo worker, because "
+            "the Dynamo frontend renders the chat template. Set "
+            "--default-chat-template-kwargs on the frontend (python -m dynamo.frontend)."
         )
 
     backend_from_cli = _attention_backend_from_cli(parsed_args)

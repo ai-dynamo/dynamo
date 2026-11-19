@@ -33,8 +33,7 @@ func applyOwnershipConflict(
 ) (*metav1.Condition, ownershipConflictTransition) {
 	previous := meta.FindStatusCondition(conditions, nvidiacomv1beta1.ConditionTypeOwnershipConflict)
 
-	var ownershipConflict *commoncontroller.OwnershipConflictError
-	if errors.As(reconcileErr, &ownershipConflict) {
+	if ownershipConflict, ok := errors.AsType[*commoncontroller.OwnershipConflictError](reconcileErr); ok {
 		condition := &metav1.Condition{
 			Type:               nvidiacomv1beta1.ConditionTypeOwnershipConflict,
 			Status:             metav1.ConditionTrue,

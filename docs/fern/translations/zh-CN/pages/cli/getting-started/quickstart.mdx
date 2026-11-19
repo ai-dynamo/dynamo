@@ -16,7 +16,7 @@ subtitle: 约 5 分钟内在容器中运行一个兼容 OpenAI 的 Dynamo endpoi
   <Card title="本地安装" icon="regular laptop-code" href="../installation/install-dynamo.mdx">
     完整演练 — PyPI、配置。
   </Card>
-  <Card title="Kubernetes" icon="regular cubes" href="../../../../../kubernetes/model-deployment/overview.mdx">
+  <Card title="Kubernetes" icon="regular cubes" href="../../../../../pages/kubernetes/model-deployment/introduction.mdx">
     生产级多节点集群。
   </Card>
   <Card title="从源码构建" icon="regular code-branch" href="../../developer-guide/advanced-customizations/building-from-source.md">
@@ -35,17 +35,17 @@ Dynamo 与后端无关 — 每种安装路径都适用于 **SGLang**、**TensorR
 <Tabs>
   <Tab title="SGLang" language="sglang">
     ```bash
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
+    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0
     ```
   </Tab>
   <Tab title="TensorRT-LLM" language="trtllm">
     ```bash
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0
+    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.0
     ```
   </Tab>
   <Tab title="vLLM" language="vllm">
     ```bash
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
+    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
     ```
   </Tab>
 </Tabs>
@@ -131,10 +131,10 @@ curl localhost:8000/v1/chat/completions \
 ## 摘自 Digest
 
 <CardGroup cols={2}>
-  <Card title="面向 Agentic Inference 的全栈优化" icon="regular microchip" href="../../../../../blog/2026/agentic-inference-optimizations.mdx">
+  <Card title="面向 Agentic Inference 的全栈优化" icon="regular microchip" href="../../../../../pages/blog/2026/agentic-inference-optimizations.mdx">
     Dynamo 如何在三层上优化 agentic 工作负载：前端 API、路由器和 KV cache 管理。
   </Card>
-  <Card title="Flash Indexer：跨星系 KV 路由" icon="regular bolt" href="../../../../../blog/2026/flash-indexer.mdx">
+  <Card title="Flash Indexer：跨星系 KV 路由" icon="regular bolt" href="../../../../../pages/blog/2026/flash-indexer.mdx">
     Dynamo 的并发全局索引如何经历六次迭代，演进到能够维持超过 100M ops/sec。
   </Card>
 </CardGroup>
@@ -147,13 +147,13 @@ curl localhost:8000/v1/chat/completions \
   <Card title="架构" icon="regular sitemap" href="../../developer-guide/knowledge-base/overview.md">
     前端、路由器和 worker 如何协同工作。
   </Card>
-  <Card title="前端指南" icon="regular bolt" href="../../../../../developer-guide/knowledge-base/modular-components/frontend/overview.md">
+  <Card title="前端指南" icon="regular bolt" href="../../../../../pages/developer-guide/knowledge-base/modular-components/frontend/overview.md">
     Worker 发现、多模型路由、OpenAI 兼容性。
   </Card>
-  <Card title="KV Cache 感知路由" icon="regular route" href="../../../../../developer-guide/knowledge-base/modular-components/router/routing-concepts.md#kv-cache-routing">
+  <Card title="KV Cache 感知路由" icon="regular route" href="../../../../../pages/developer-guide/knowledge-base/modular-components/router/routing-concepts.md#kv-cache-routing">
     路由器如何为了前缀复用而放置请求。
   </Card>
-  <Card title="Health Checks" icon="regular heart-pulse" href="../../../../../reference/observability/health-checks.mdx">
+  <Card title="Health Checks" icon="regular heart-pulse" href="../../../../../pages/reference/observability/health-checks.mdx">
     生产部署的存活和就绪探针。
   </Card>
 </CardGroup>

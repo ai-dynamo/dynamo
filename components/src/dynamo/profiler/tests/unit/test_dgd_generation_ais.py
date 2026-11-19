@@ -5,33 +5,34 @@
 
 from pathlib import Path
 
+import pandas as pd
 import pytest
 import yaml
 
-try:
-    from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
-    from dynamo.planner.config.parallelization import PickedParallelConfig
-    from dynamo.planner.config.planner_config import (
-        PlannerConfig,
-        PlannerPreDeploymentSweepMode,
-    )
-    from dynamo.profiler.utils.dgd_generation import (
-        _build_planner_config,
-        _inject_mocker_ais_args,
-        _load_latest_database_version,
-        build_aic_interpolation_spec,
-        build_ais_perf_model_spec,
-        enable_vllm_benchmark_mode,
-    )
-    from dynamo.profiler.utils.dgd_template import load_dgd_template
-    from dynamo.profiler.utils.dgdr_v1beta1_types import (
-        DynamoGraphDeploymentRequestSpec,
-        FeaturesSpec,
-        MockerSpec,
-    )
-    from dynamo.profiler.utils.profile_common import needs_profile_data
-except ImportError as e:
-    pytest.skip(f"Missing dependency: {e}", allow_module_level=True)
+from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
+from dynamo.planner.config.parallelization import PickedParallelConfig
+from dynamo.planner.config.planner_config import (
+    PlannerConfig,
+    PlannerPreDeploymentSweepMode,
+)
+from dynamo.profiler.utils.dgd_generation import (
+    _build_planner_config,
+    _inject_mocker_ais_args,
+    _load_latest_database_version,
+    build_aic_interpolation_spec,
+    build_ais_perf_model_spec,
+    enable_vllm_benchmark_mode,
+)
+from dynamo.profiler.utils.dgd_template import load_dgd_template
+from dynamo.profiler.utils.dgdr_v1beta1_types import (
+    DynamoGraphDeploymentRequestSpec,
+    FeaturesSpec,
+    MockerSpec,
+)
+from dynamo.profiler.utils.profile_common import (
+    needs_profile_data,
+    picked_config_from_row,
+)
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -42,7 +43,7 @@ pytestmark = [
 
 def test_aic_import_treats_missing_root_package_as_optional(monkeypatch):
     def raise_missing_root(_):
-        raise ModuleNotFoundError(name="aisimulate_core")
+        raise ModuleNotFoundError(name="aisim_core")
 
     monkeypatch.setattr(
         "dynamo.profiler.utils.dgd_generation.importlib.import_module",
@@ -54,7 +55,7 @@ def test_aic_import_treats_missing_root_package_as_optional(monkeypatch):
 
 @pytest.mark.parametrize(
     "missing_module",
-    ["aisimulate_core.sdk.operations.attention", "unrelated_dependency"],
+    ["aisim_core.sdk.operations.attention", "unrelated_dependency"],
 )
 def test_aic_import_propagates_internal_or_unrelated_missing_module(
     monkeypatch, missing_module
@@ -71,6 +72,18 @@ def test_aic_import_propagates_internal_or_unrelated_missing_module(
         _load_latest_database_version()
 
     assert exc_info.value.name == missing_module
+
+
+@pytest.mark.parametrize(
+    ("prefix", "row", "expected_cp"),
+    [
+        ("(p)", {"(p)tp": 1, "(p)dp": 1, "(p)moe_tp": 4, "(p)cp": 4}, 4),
+        ("(d)", {"(d)tp": 1, "(d)dp": 8, "(d)moe_tp": 8}, 1),
+        ("(p)", {"(p)tp": 2, "(p)cp": float("nan")}, 1),
+    ],
+)
+def test_picked_config_from_row_reads_selected_cp(prefix, row, expected_cp):
+    assert picked_config_from_row(prefix, pd.Series(row)).cp == expected_cp
 
 
 def _dgdr(
@@ -339,7 +352,7 @@ class TestInjectMockerAicArgs:
     @pytest.mark.parametrize("explicit_capacity", [False, True])
     def test_dense_tp_pick_starts_with_canonical_estimator(self, explicit_capacity):
         # Only packaged model metadata/performance tables are used; no weights.
-        from aisimulate_core.sdk import RustForwardPassPerfModel
+        from aisim_core.sdk import RustForwardPassPerfModel
 
         from dynamo.mocker.args import parse_args
         from dynamo.mocker.config import build_mocker_engine_args
@@ -460,6 +473,31 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         assert cfg.ais_perf_model.roles["prefill"]["tp"] == prefill_pick.tp
         assert cfg.ais_perf_model.roles["decode"]["tp"] == decode_pick.tp
         assert resolved_versions == [("h200_sxm", "vllm")]
+
+    def test_ais_perf_model_keeps_selected_prefill_cp(self, monkeypatch):
+        # The SGLang MoE RAPID pick: prefill CP4 and decode without CP.
+        monkeypatch.setattr(
+            "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
+            lambda **_: "0.5.15",
+        )
+        planner = PlannerConfig(
+            enable_throughput_scaling=True,
+            enable_load_scaling=False,
+            optimization_target="sla",
+            pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Rapid,
+        )
+
+        spec = build_ais_perf_model_spec(
+            _dgdr(planner=planner, model="Qwen/Qwen3-30B-A3B"),
+            best_prefill_pick=PickedParallelConfig(tp=1, dp=1, moe_tp=4, cp=4),
+            best_decode_pick=PickedParallelConfig(tp=1, dp=8, moe_tp=8),
+            resolved_backend="sglang",
+            system="h100_sxm",
+        )
+
+        assert spec is not None
+        assert spec.roles["prefill"]["cp_size"] == 4
+        assert spec.roles["decode"]["cp_size"] is None
 
     def test_ais_perf_model_falls_back_when_database_is_unavailable(self, monkeypatch):
         monkeypatch.setattr(
@@ -821,6 +859,7 @@ def test_profiler_preserves_explicit_estimator_config(tmp_path):
             "h200_sxm",
             "moe_tp_size",
         ),
+        ({}, PickedParallelConfig(cp=4), "vllm", "h200_sxm", "cp_size"),
     ],
 )
 def test_profiler_rejects_estimator_identity_that_disagrees_with_deployment(

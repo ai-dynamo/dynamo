@@ -94,6 +94,23 @@ class BasePredictor(ABC):
         """Predict the next value"""
         pass
 
+    def prepare(self) -> None:
+        """Require enough history and a successful forecast before activation."""
+        self._check_warmup_history()
+        self._check_warmup_forecast(self.predict_next())
+
+    def _check_warmup_history(self) -> None:
+        if len(self.data_buffer) < self.minimum_data_points:
+            raise ValueError(
+                f"{type(self).__name__} needs {self.minimum_data_points} effective warmup points; "
+                f"received {len(self.data_buffer)}"
+            )
+
+    @staticmethod
+    def _check_warmup_forecast(forecast: float) -> None:
+        if not math.isfinite(forecast) or forecast < 0:
+            raise ValueError("warmup forecast must be finite and nonnegative")
+
 
 class ConstantPredictor(BasePredictor):
     """
@@ -115,7 +132,7 @@ class ARIMAPredictor(BasePredictor):
 
     def __init__(self, config: PlannerConfig) -> None:
         super().__init__(minimum_data_points=5)
-        self.model = None
+        self.model: pmdarima.ARIMA | None = None
         # Keep raw values so we can fit in raw space first, then fallback to log1p space.
         self._raw_buffer: list[float] = []
         # Pending raw points to incrementally update the fitted model with.
@@ -147,23 +164,40 @@ class ARIMAPredictor(BasePredictor):
                 self.data_buffer[-1] = math.log1p(raw)
 
     def predict_next(self) -> float:
+        return self._predict_next()
+
+    def prepare(self) -> None:
+        self._check_warmup_history()
+        self._check_warmup_forecast(self._predict_next(strict=True))
+
+    @staticmethod
+    def _is_constant(values: list[float]) -> bool:
+        # Ignore floating-point aggregation noise, not meaningful load changes.
+        return math.isclose(min(values), max(values), rel_tol=1e-12, abs_tol=0.0)
+
+    def _predict_next(self, *, strict: bool = False) -> float:
         """Predict the next value(s)"""
         if len(self._raw_buffer) < self.minimum_data_points:
             return self.get_last_value()
 
-        # Check if all values are the same (constant data)
-        # pmdarima will predict 0 for constant data, we need to correct its prediction
-        if len(set(self._raw_buffer)) == 1:
-            return float(self._raw_buffer[0])
+        # pmdarima's constant-series shortcut fits a zero-mean model.
+        if self._is_constant(self._raw_buffer):
+            return self.get_last_value()
 
         try:
             # Fit auto ARIMA model once, then only do incremental updates.
             if self.model is None:
+                log_buffer = [math.log1p(v) for v in self._raw_buffer]
+                if self._is_constant(log_buffer):
+                    return self.get_last_value()
                 # First fit: honor requested mode
                 self._mode = self._requested_mode
-                if self._mode == ARIMAPredictor.Mode.LOG1P:
-                    # Ensure model buffer is in log-space
-                    self.data_buffer = [math.log1p(v) for v in self._raw_buffer]
+                # Rebuild from raw history after a model reset, too.
+                self.data_buffer = (
+                    log_buffer
+                    if self._mode == ARIMAPredictor.Mode.LOG1P
+                    else list(self._raw_buffer)
+                )
                 self.model = pmdarima.auto_arima(
                     self.data_buffer,
                     suppress_warnings=True,
@@ -183,14 +217,14 @@ class ARIMAPredictor(BasePredictor):
                 # If user requested raw and it collapses to (0,d,0), fallback to log1p(y)
                 try:
                     if order is not None and len(order) == 3:
-                        p, _, q = order
+                        p, d, q = order
                         if (
                             p == 0
                             and q == 0
+                            and not (d == 0 and self.model.with_intercept)
                             and self._requested_mode == ARIMAPredictor.Mode.RAW
                         ):
                             # Build log buffer/model in locals and only swap on success
-                            log_buffer = [math.log1p(v) for v in self._raw_buffer]
                             log_model = pmdarima.auto_arima(
                                 log_buffer,
                                 suppress_warnings=True,
@@ -237,10 +271,25 @@ class ARIMAPredictor(BasePredictor):
             # Make prediction
             assert self.model is not None
             forecast = float(self.model.predict(n_periods=1)[0])
+            if (
+                forecast == 0.0
+                and self.get_last_value() > 0.0
+                and self.model.order == (0, 0, 0)
+                and self.model.seasonal_order == (0, 0, 0, 0)
+                and not self.model.with_intercept
+            ):
+                # Updating a variance-only model cannot change its zero mean.
+                logger.warning(
+                    "ARIMA zero-mean model cannot track positive load; refitting next interval"
+                )
+                self.model = None
+                return self.get_last_value()
             if self._mode == ARIMAPredictor.Mode.LOG1P:
                 return max(0.0, math.expm1(forecast))
             return max(0.0, forecast)
         except Exception as e:
+            if strict:
+                raise
             # Log the specific error for debugging
             logger.warning(f"ARIMA prediction failed: {e}, using last value")
             self._pending_raw_updates = []

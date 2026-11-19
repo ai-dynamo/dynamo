@@ -23,14 +23,13 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
 func TestBugDGD_IntermediateHubAddsMainOnlyPodTemplateRoundTrips(t *testing.T) {
 	alpha := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "main-only-pod-template", Namespace: "ns"},
+		Name: "main-only-pod-template", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -65,7 +64,7 @@ func TestBugDGD_IntermediateHubAddsMainOnlyPodTemplateRoundTrips(t *testing.T) {
 
 func TestBugDGD_BetaPrefillDecodeConvertFromUsesAlphaSubComponentType(t *testing.T) {
 	hub := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "disaggregated", Namespace: "ns"},
+		Name: "disaggregated", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
@@ -112,7 +111,7 @@ func TestBugDGD_LegacyServiceMapKeysSurviveConversion(t *testing.T) {
 		"VllmPrefillWorker": v1beta1.ComponentTypePrefill,
 	}
 	alpha := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "legacy-service-names", Namespace: "ns"},
+		Name: "legacy-service-names", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"VllmDecodeWorker": {

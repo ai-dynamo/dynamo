@@ -9,21 +9,28 @@ overrides. No vllm handler branches on the marker today; this is wire-format
 parity with trtllm/sglang for any future marker-gated behavior.
 """
 
+import base64
+import io
 import json
+import wave
+from types import SimpleNamespace
 
 import pytest
 
 from dynamo.health_check import HEALTH_CHECK_KEY
+from dynamo.vllm.handlers import build_sampling_params, build_sampling_params_openai
 from dynamo.vllm.health_check import (
     VllmEmbeddingHealthCheckPayload,
     VllmHealthCheckPayload,
     VllmOmniHealthCheckPayload,
     VllmPrefillHealthCheckPayload,
+    VllmTranscriptionHealthCheckPayload,
 )
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -32,6 +39,10 @@ PAYLOAD_FACTORIES = [
     pytest.param(VllmHealthCheckPayload, id="VllmHealthCheckPayload"),
     pytest.param(VllmPrefillHealthCheckPayload, id="VllmPrefillHealthCheckPayload"),
     pytest.param(VllmOmniHealthCheckPayload, id="VllmOmniHealthCheckPayload"),
+    pytest.param(
+        VllmTranscriptionHealthCheckPayload,
+        id="VllmTranscriptionHealthCheckPayload",
+    ),
     pytest.param(
         VllmEmbeddingHealthCheckPayload,
         id="VllmEmbeddingHealthCheckPayload",
@@ -89,3 +100,64 @@ def test_embedding_payload_omits_model_when_no_name():
     assert "model" not in payload
     assert payload.get("input") == "probe"
     assert payload.get(HEALTH_CHECK_KEY) is True
+
+
+def test_transcription_payload_contains_valid_short_wav():
+    payload = VllmTranscriptionHealthCheckPayload(model_name="whisper").to_dict()
+
+    assert payload.get("model") == "whisper"
+    assert payload.get("language") == "en"
+    assert payload.get("response_format") == "json"
+    assert payload.get(HEALTH_CHECK_KEY) is True
+
+    audio = base64.b64decode(payload["audio_b64"], validate=True)
+    with wave.open(io.BytesIO(audio), "rb") as wav:
+        assert wav.getnchannels() == 1
+        assert wav.getsampwidth() == 2
+        assert wav.getframerate() == 16_000
+        assert wav.getnframes() == 1_600
+
+
+GENERATE_PAYLOAD_CLASSES = [
+    pytest.param(VllmHealthCheckPayload, id="aggregated"),
+    pytest.param(VllmPrefillHealthCheckPayload, id="prefill"),
+]
+
+
+def _engine(return_sampling_mask: bool) -> SimpleNamespace:
+    return SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(return_sampling_mask=return_sampling_mask)
+        ),
+        tokenizer=None,
+    )
+
+
+def _sampling_values(payload: dict, use_text_input: bool) -> dict:
+    return payload if use_text_input else payload["sampling_options"]
+
+
+@pytest.mark.parametrize("use_text_input", [False, True], ids=["tokens", "text"])
+@pytest.mark.parametrize("cls", GENERATE_PAYLOAD_CLASSES)
+def test_mask_mode_canary_is_sampled(cls, use_text_input):
+    """With --return-sampling-mask, vLLM rejects requests unless temperature > 0
+    and top_k > 0; a greedy canary keeps /live at 503 forever."""
+    payload = cls(_engine(True), use_text_input=use_text_input).to_dict()
+    values = _sampling_values(payload, use_text_input)
+    assert values["temperature"] > 0
+    assert values["top_k"] > 0
+
+
+@pytest.mark.parametrize("cls", GENERATE_PAYLOAD_CLASSES)
+def test_mask_mode_canary_passes_vllm_sampling_checks(cls):
+    """The canary values must survive the request path into vLLM's
+    SamplingParams, where input_processor enforces the mask-mode checks."""
+    token_payload = cls(_engine(True), use_text_input=False).to_dict()
+    params = build_sampling_params(token_payload, {})
+    assert params.temperature > 0
+    assert params.top_k > 0
+
+    text_payload = cls(_engine(True), use_text_input=True).to_dict()
+    params = build_sampling_params_openai(text_payload, {})
+    assert params.temperature > 0
+    assert params.top_k > 0

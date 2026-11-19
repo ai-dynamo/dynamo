@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Block dynamo.vllm/sglang/triton from shadowing the installed packages.
+"""Block Dynamo component packages from shadowing installed dependencies.
 
 Pytest collection puts components/src/dynamo on sys.path, which makes
 `import vllm` resolve to dynamo.vllm. Spawned subprocesses (EngineCore,
 sglang scheduler) inherit that and crash on `from vllm.v1 ...`. The same
 applies to dynamo.triton vs. the triton compiler package torch imports.
+Likewise, dynamo.aisimulate must not shadow the installed AISimulate SDK.
 """
 
 from __future__ import annotations
@@ -24,7 +25,9 @@ _NO_DEFAULT_MARKERS_ENV = "DYNAMO_PYTEST_NO_DEFAULT_MARKERS"
 _SUITE_MARKERS = REQUIRED_CATEGORIES["Lifecycle"]
 _MACHINE_MARKERS = REQUIRED_CATEGORIES["Hardware"]
 
-# Trees that ship runnable demos and agent scripts rather than CI suites.
+# Trees with dedicated CI jobs or runnable demos outside the runtime suites.
+# Helm chart tests run in helm-chart-tests, which installs the Helm CLI.
+# Operator upgrade tests run in operator-upgrade-contract, which installs Go.
 # Their files are still collected, so a developer can run one explicitly, but
 # they must not be defaulted into a lifecycle: an unmarked demo helper such as
 # examples/backends/sglang/test_sglang_profile.py assumes a server the harness
@@ -32,13 +35,19 @@ _MACHINE_MARKERS = REQUIRED_CATEGORIES["Hardware"]
 # Anything under these roots that carries its own markers is unaffected.
 # ``skills`` is a symlink to ``.agents/skills``, so resolve() lands on
 # ``.agents``; both names are listed because either can reach collection.
-_UNMANAGED_ROOTS = frozenset({"examples", "skills", ".agents"})
+_UNMANAGED_PATHS = (
+    ("examples",),
+    ("skills",),
+    (".agents",),
+    ("deploy", "helm"),
+    ("deploy", "operator", "hack"),
+)
 _REPO_ROOT = Path(__file__).resolve().parent
 
 # Seed sys.modules with the venv copies before pytest collection runs.
 # Best-effort: an engine that is present but not importable (an editable install
 # with an unreadable source tree raises PermissionError) must not abort collection.
-for _name in ("vllm", "sglang", "triton"):
+for _name in ("vllm", "sglang", "triton", "aisimulate"):
     try:
         importlib.import_module(_name)
     # ImportError is a missing engine; OSError is one whose sources are present
@@ -138,7 +147,7 @@ def pytest_runtest_protocol(item, nextitem):
 
 
 def _is_unmanaged(item) -> bool:
-    """True when the item lives in a demo or script tree, not a CI suite."""
+    """True when runtime CI must not supply lifecycle or hardware defaults."""
     try:
         path = Path(str(item.path)).resolve()
     except (AttributeError, OSError, ValueError):
@@ -147,7 +156,7 @@ def _is_unmanaged(item) -> bool:
         parts = path.relative_to(_REPO_ROOT).parts
     except ValueError:
         return False
-    return bool(parts) and parts[0] in _UNMANAGED_ROOTS
+    return any(parts[: len(prefix)] == prefix for prefix in _UNMANAGED_PATHS)
 
 
 def _tag_xfail_for_datadog(item) -> None:
@@ -214,7 +223,7 @@ def pytest_itemcollected(item):
     fault-tolerance suite in a single process -- the imports alone cost ~90 MB
     resident for the rest of the run, and the job was OOM-killed (exit 137).
 
-    Trees in ``_UNMANAGED_ROOTS`` are skipped entirely; they keep the
+    Trees in ``_UNMANAGED_PATHS`` are skipped entirely; they keep the
     pre-default behaviour of being deselected unless they mark themselves.
 
     ``DYNAMO_PYTEST_NO_DEFAULT_MARKERS=1`` disables the defaults so the marker

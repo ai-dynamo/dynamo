@@ -113,6 +113,7 @@ def _wrap_preprocessed_request(request: dict[str, Any]) -> dict[str, Any]:
         "mm_processor_kwargs": request.get("mm_processor_kwargs"),
         "agent_context": request.get("agent_context"),
         "request_timestamp_ms": request.get("request_timestamp_ms"),
+        "elapsed_since_arrival_ms": request.get("elapsed_since_arrival_ms"),
     }
 
 
@@ -186,7 +187,7 @@ class ThunderAgentRouterHandler:
             self._capacity.stop()
         logger.info("ThunderAgent Router shutdown complete")
 
-    async def generate(self, request: dict[str, Any]):
+    async def generate(self, request: dict[str, Any], context=None):
         if self._scheduler is None or self._kv_router is None:
             raise RuntimeError(
                 "ThunderAgentRouterHandler used before initialize() was called"
@@ -226,7 +227,8 @@ class ThunderAgentRouterHandler:
             )
             first_chunk = True
             async for chunk in await self._kv_router.generate_from_request(
-                preprocessed  # type: ignore[arg-type]
+                preprocessed,  # type: ignore[arg-type]
+                context=context,
             ):
                 if proof is not None:
                     if first_chunk:
@@ -305,7 +307,8 @@ class ThunderAgentRouterHandler:
         )
         try:
             async for chunk in await self._kv_router.generate_from_request(
-                preprocessed  # type: ignore[arg-type]
+                preprocessed,  # type: ignore[arg-type]
+                context=context,
             ):
                 # Cold start: admission had no MDC, so take the replica the engine used.
                 # Only a complete one is usable -- see assign_worker.

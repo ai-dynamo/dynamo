@@ -23,7 +23,7 @@ vLLM-shaped core with a different capacity policy.
 | Scheduler model | Waiting and running queues with a shared token budget | Cache-aware waiting and running queues | vLLM-shaped core with capacity-first admission |
 | KV representation | Native block pool | Token pool and radix cache | Native block pool |
 | Memory pressure | LIFO or FIFO recompute preemption | Decode retraction with cached-prefix preservation | `GUARANTEED_NO_EVICT`; reserves prompt plus maximum output at admission |
-| Prefix reuse | Block-hash matching when prefix caching is enabled | Radix-prefix matching | Block-hash matching when prefix caching is enabled |
+| Prefix reuse | Block-hash matching when prefix caching is enabled | Radix-prefix matching; off on decode workers by default | Block-hash matching when prefix caching is enabled |
 | Default block or page size | 64 tokens | 1 token, or `sglang.page_size` | 32 tokens |
 | Aggregated simulation | Supported | Supported | Supported |
 | Prefill/decode disaggregation | Supported | Supported | Not supported |
@@ -86,7 +86,7 @@ kv_transfer:
   timing_mode: destination_missing
 ```
 
-The offline simulation uses a per-request line-rate model:
+The offline simulation prices each transfer with a line-rate model:
 
 ```text
 transfer time = transferred KV bytes / kv_transfer_bandwidth
@@ -95,7 +95,12 @@ transferred KV bytes = charged tokens * kv_bytes_per_token
 
 `timing_mode: full_prompt` charges the full logical prompt. `destination_missing` charges only the
 prompt footprint absent from the destination and can produce zero delay on a full destination hit.
-Concurrent requests do not contend for a shared link.
+
+That time applies to a transfer alone on its links. In offline prediction, each prefill rank sends
+over one link and each decode rank receives over one link, both at the configured bandwidth.
+Transfers in flight at the same time share these links max-min fairly, so concurrent handoffs from
+one prefill rank, or into one decode rank, take longer than a lone transfer. Live Mocker workers do
+not share links: each transfer waits its own fixed delay.
 
 Set `bytes_per_token: auto` to derive the value from model metadata and parallelism, or provide a
 positive integer. Set a positive `bandwidth_gb_per_second` to apply the transfer delay. TensorRT-LLM
