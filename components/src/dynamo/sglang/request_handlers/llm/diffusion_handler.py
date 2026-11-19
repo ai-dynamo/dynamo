@@ -8,6 +8,7 @@ import sglang as sgl
 
 from dynamo._core import Context
 from dynamo.llm.exceptions import InvalidArgument
+from dynamo.sglang._compat import cache_salt_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.llm.decode_handler import (
@@ -15,6 +16,7 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _validate_stop_token_ids,
 )
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import reject_unconsumed_media
+from dynamo.sglang.request_utils import request_cache_salt
 from dynamo.sglang.thinking_budget import thinking_budget_requested
 
 
@@ -98,6 +100,7 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
             **input_param,
             sampling_params=sampling_params,
             stream=True,  # Always stream for Dynamo
+            **cache_salt_kwargs(self.engine, request_cache_salt(request)),
             external_trace_header=trace_header,
             rid=trace_id,
         )
