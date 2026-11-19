@@ -3,19 +3,20 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::kv_cache_groups::DeviceRecords;
 use super::{KvCacheGroupResidency, MatchDetails, MatchEdge, MatchObserver};
 use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 use crate::prelude::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
 /// One known hybrid candidate waiting for its resume point.
-struct Pending {
-    worker: WorkerWithDpRank,
+pub(crate) struct Pending {
+    pub(crate) worker: WorkerWithDpRank,
     /// The worker's Device filter bit.
-    bit: u64,
+    pub(crate) bit: u64,
     /// Attention coverage end, capped by the query limit.
-    bound: u32,
+    pub(crate) bound: u32,
     /// Index into the recorded chain of the settled checkpoint.
-    resolved: Option<u32>,
+    pub(crate) resolved: Option<u32>,
 }
 
 /// One bit per candidate slot. Up to 256 slots stay on the stack, and a larger
@@ -145,9 +146,15 @@ impl<'a> ForwardDeviceEvaluator<'a> {
     }
 
     /// Settle candidates against current checkpoint records, deepest bound
-    /// first. A worker's resume point is its deepest recorded position within
-    /// its bound whose record holds the worker; unsettled workers get none.
-    fn resolve(&self, pending: &mut [Pending]) {
+    /// first. A worker's resume point is its deepest position in `chain`
+    /// within its bound whose record holds the worker; unsettled workers get
+    /// none. `chain` holds the matched `(position, hash)` pairs by ascending
+    /// position.
+    pub(crate) fn resolve(
+        records: DeviceRecords<'_>,
+        chain: &[(usize, ExternalSequenceBlockHash)],
+        pending: &mut [Pending],
+    ) {
         let Some(first) = pending.first() else {
             return;
         };
@@ -172,11 +179,9 @@ impl<'a> ForwardDeviceEvaluator<'a> {
         // Members of the last populated record that every open slot was
         // checked against. An equal set cannot hold any of them.
         let mut checked = None;
-        let mut index = self
-            .chain
-            .partition_point(|&(position, _)| position <= deepest);
+        let mut index = chain.partition_point(|&(position, _)| position <= deepest);
         while index > 0 {
-            let (position, hash) = self.chain[index - 1];
+            let (position, hash) = chain[index - 1];
             while let Some(entry) = pending.get(next)
                 && entry.bound as usize >= position
             {
@@ -192,47 +197,46 @@ impl<'a> ForwardDeviceEvaluator<'a> {
                 };
                 // Nobody can use the positions above the next candidate's bound.
                 let bound = entry.bound as usize;
-                index = self.chain[..index - 1].partition_point(|&(position, _)| position <= bound);
+                index = chain[..index - 1].partition_point(|&(position, _)| position <= bound);
                 open.clear();
                 open_bits = 0;
                 continue;
             }
             let at = (index - 1) as u32;
             let before = unsettled;
-            self.residency
-                .visit_checkpoint_workers(hash, open_bits, |workers| {
-                    let signature = workers.signature();
-                    if checked == Some(signature) {
-                        return;
-                    }
-                    checked = Some(signature);
-                    let few_holders = workers.len() * 2 < unsettled;
-                    if few_holders && let Some(slots) = &slots {
-                        for worker in workers.iter() {
-                            if let Some(&slot) = slots.get(worker)
-                                && (slot as usize) < next
-                                && pending[slot as usize].resolved.is_none()
-                            {
-                                pending[slot as usize].resolved = Some(at);
-                                unsettled -= 1;
-                            }
+            records.visit(hash, open_bits, |workers| {
+                let signature = workers.signature();
+                if checked == Some(signature) {
+                    return;
+                }
+                checked = Some(signature);
+                let few_holders = workers.len() * 2 < unsettled;
+                if few_holders && let Some(slots) = &slots {
+                    for worker in workers.iter() {
+                        if let Some(&slot) = slots.get(worker)
+                            && (slot as usize) < next
+                            && pending[slot as usize].resolved.is_none()
+                        {
+                            pending[slot as usize].resolved = Some(at);
+                            unsettled -= 1;
                         }
-                    } else {
-                        sparse |= few_holders;
-                        open.retain(|&slot| {
-                            let entry = &mut pending[slot as usize];
-                            if entry.resolved.is_some() {
-                                return false;
-                            }
-                            if workers.contains(&entry.worker) {
-                                entry.resolved = Some(at);
-                                unsettled -= 1;
-                                return false;
-                            }
-                            true
-                        });
                     }
-                });
+                } else {
+                    sparse |= few_holders;
+                    open.retain(|&slot| {
+                        let entry = &mut pending[slot as usize];
+                        if entry.resolved.is_some() {
+                            return false;
+                        }
+                        if workers.contains(&entry.worker) {
+                            entry.resolved = Some(at);
+                            unsettled -= 1;
+                            return false;
+                        }
+                        true
+                    });
+                }
+            });
             if sparse && slots.is_none() {
                 slots = Some(
                     pending
@@ -373,7 +377,7 @@ impl<'a> ForwardDeviceEvaluator<'a> {
             entry.bound > 0
         });
 
-        self.resolve(&mut pending);
+        Self::resolve(self.residency.device_records(), &self.chain, &mut pending);
 
         let top_cap = top.map_or(0, |index| self.chain[index].0 as u32);
         let emit_caps = self.emit_caps;

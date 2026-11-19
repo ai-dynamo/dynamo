@@ -119,6 +119,39 @@ struct CheckpointPresence {
     device_workers: CheckpointWorkerSet,
 }
 
+/// Owners held on each lower tier, summed over all records. Zero is exact,
+/// so a query skips a lower tier that has no checkpoint; a nonzero value may
+/// be briefly stale-high. Device is not counted: every Device checkpoint
+/// would write here, and each worker already has its own Device count.
+///
+/// The counters sit on their own cache lines, away from the directory fields
+/// that every lookup reads.
+#[derive(Debug, Default)]
+#[repr(align(128))]
+struct LowerTierMembers([AtomicUsize; 3]);
+
+impl LowerTierMembers {
+    fn joined(&self, tier_index: usize) {
+        if let Some(count) = tier_index.checked_sub(1) {
+            self.0[count].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn left(&self, tier_index: usize) {
+        if let Some(count) = tier_index.checked_sub(1) {
+            self.0[count].fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether any owner holds a checkpoint on this tier. Device is unknown
+    /// here and reported as held.
+    fn any(&self, tier_index: usize) -> bool {
+        tier_index
+            .checked_sub(1)
+            .is_none_or(|count| self.0[count].load(Ordering::Relaxed) > 0)
+    }
+}
+
 /// How one record update changed the owner's Device worker-set membership.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeviceMembership {
@@ -128,7 +161,20 @@ enum DeviceMembership {
 }
 
 impl CheckpointPresence {
+    #[cfg(test)]
     fn update(&mut self, owner: ResidencyOwner, mask: u8) -> DeviceMembership {
+        self.update_counted(owner, mask, &Default::default())
+    }
+
+    /// `members` counts, per lower tier, the owners held across all records.
+    /// It is raised before a record that gained an owner becomes visible and
+    /// lowered after one lost it, under the record's shard guard.
+    fn update_counted(
+        &mut self,
+        owner: ResidencyOwner,
+        mask: u8,
+        members: &LowerTierMembers,
+    ) -> DeviceMembership {
         if self
             .owners
             .iter()
@@ -139,9 +185,11 @@ impl CheckpointPresence {
         }
         for (index, owners) in self.owners.iter_mut().enumerate() {
             if mask & (1 << index) != 0 {
-                owners.insert(owner);
-            } else {
-                owners.remove(&owner);
+                if owners.insert(owner) {
+                    members.joined(index);
+                }
+            } else if owners.remove(&owner) {
+                members.left(index);
             }
         }
         if let Some(worker) = owner.as_worker() {
@@ -256,6 +304,7 @@ struct CheckpointDirectory {
     /// Built on the first Device join; a deployment without one never pays
     /// for it.
     filter: OnceLock<DeviceFilter>,
+    lower_tier_members: LowerTierMembers,
 }
 
 impl CheckpointDirectory {
@@ -300,7 +349,7 @@ impl CheckpointDirectory {
                 Entry::Occupied(mut entry) => {
                     let (change, empty) = {
                         let record = entry.get_mut();
-                        let change = record.update(owner, mask);
+                        let change = record.update_counted(owner, mask, &self.lower_tier_members);
                         let holders = record.device_workers.len();
                         self.track_filter(hash, filter_bit, change, holders);
                         (change, record.is_empty())
@@ -312,7 +361,7 @@ impl CheckpointDirectory {
                 }
                 Entry::Vacant(entry) if mask != 0 => {
                     let mut record = CheckpointPresence::default();
-                    let change = record.update(owner, mask);
+                    let change = record.update_counted(owner, mask, &self.lower_tier_members);
                     let holders = record.device_workers.len();
                     self.track_filter(hash, filter_bit, change, holders);
                     entry.insert(Box::new(record));
@@ -375,6 +424,28 @@ impl CheckpointDirectory {
         }
     }
 
+    /// Run `visit` on this hash's nonempty owner set of `tier` under the shard
+    /// read guard. Nothing is copied out of the record; the visitor must be
+    /// short and touch only query-local state.
+    fn visit_owners(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        tier: StorageTier,
+        visit: impl FnOnce(&TierOwners),
+    ) {
+        if let Some(record) = self.entries.get(&hash.0) {
+            let owners = &record.owners[tier_index(tier)];
+            if !owners.is_empty() {
+                visit(owners);
+            }
+        }
+    }
+
+    fn tier_has_checkpoints(&self, tier: StorageTier) -> bool {
+        self.lower_tier_members.any(tier_index(tier))
+    }
+
+    #[cfg(test)]
     fn with_owners(
         &self,
         hash: ExternalSequenceBlockHash,
@@ -396,6 +467,24 @@ impl CheckpointDirectory {
     }
 }
 
+/// The Device checkpoint records, for an evaluator that settles workers
+/// against them from its own view of the table.
+#[derive(Clone, Copy)]
+pub(crate) struct DeviceRecords<'a>(&'a CheckpointDirectory);
+
+impl DeviceRecords<'_> {
+    /// See [`KvCacheGroupResidency::visit_checkpoint_workers`].
+    pub(crate) fn visit(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        bits: u64,
+        visit: impl FnOnce(&CheckpointWorkerSet),
+    ) {
+        self.0.visit_device_workers(hash, bits, visit);
+    }
+}
+
+#[cfg(test)]
 fn compare_owners(left: &ResidencyOwner, right: &ResidencyOwner) -> std::cmp::Ordering {
     match (left, right) {
         (ResidencyOwner::Worker(left), ResidencyOwner::Worker(right)) => left.cmp(right),
@@ -405,7 +494,7 @@ fn compare_owners(left: &ResidencyOwner, right: &ResidencyOwner) -> std::cmp::Or
     }
 }
 
-fn tier_index(tier: StorageTier) -> usize {
+pub(crate) fn tier_index(tier: StorageTier) -> usize {
     match tier {
         StorageTier::Device => 0,
         StorageTier::HostPinned => 1,
@@ -652,9 +741,45 @@ impl CheckpointReadView {
         Some(owner)
     }
 
+    /// Visit the owners that hold a complete checkpoint at `hash` on `tier`
+    /// now, in place: the visitor runs under the directory shard read guard,
+    /// so it must be short and touch only query-local state. Separate calls
+    /// may see newer versions.
+    pub(crate) fn visit_owners(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        tier: StorageTier,
+        visit: impl FnOnce(&FxHashSet<ResidencyOwner>),
+    ) {
+        self.checkpoints.visit_owners(hash, tier, visit);
+    }
+
+    /// Whether any owner holds a checkpoint on a lower `tier`. `false` is
+    /// exact; Device always reports `true`.
+    pub(crate) fn tier_has_checkpoints(&self, tier: StorageTier) -> bool {
+        self.checkpoints.tier_has_checkpoints(tier)
+    }
+
+    /// How many checkpoint records credit this worker on Device and the
+    /// worker's Device filter bit; `None` for a worker that was unknown when
+    /// this view was captured. See [`KnownWorkerRead::device_summary`].
+    pub(crate) fn device_summary(&self, worker: WorkerWithDpRank) -> Option<(usize, u64)> {
+        self.registry.workers.get(&worker).map(|summary| {
+            (
+                summary.device_checkpoints.load(Ordering::Relaxed),
+                summary.filter_bit,
+            )
+        })
+    }
+
+    pub(crate) fn device_records(&self) -> DeviceRecords<'_> {
+        DeviceRecords(&self.checkpoints)
+    }
+
     /// The callback receives a copy of the current complete owners. All guards
     /// are released before invoking the callback; separate calls may see newer
     /// versions.
+    #[cfg(test)]
     pub fn with_owners(
         &self,
         hash: ExternalSequenceBlockHash,
@@ -666,6 +791,7 @@ impl CheckpointReadView {
 
     /// Compatibility enumeration for explicitly tracked owners. Unlike the old
     /// implementation this does not retain checkpoint or shard snapshots.
+    #[cfg(test)]
     pub fn owners_at(
         &self,
         hash: ExternalSequenceBlockHash,
@@ -754,6 +880,10 @@ impl KvCacheGroupResidency {
         visit: impl FnOnce(&CheckpointWorkerSet),
     ) {
         self.checkpoints.visit_device_workers(hash, bits, visit);
+    }
+
+    pub(crate) fn device_records(&self) -> DeviceRecords<'_> {
+        DeviceRecords(&self.checkpoints)
     }
 
     #[cfg(test)]

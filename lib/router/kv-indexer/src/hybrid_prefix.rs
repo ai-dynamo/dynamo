@@ -2,8 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use rustc_hash::FxHashMap;
+use std::cell::OnceCell;
 use std::collections::HashMap;
 
+use super::forward_prefix::{ForwardDeviceEvaluator, Pending};
+use super::kv_cache_groups::tier_index;
 use super::{
     CheckpointLayout, CheckpointReadView, KvCacheGroupResidency, LowerTierMatchDetails,
     MatchDetails, MatchObserver,
@@ -54,53 +57,104 @@ impl DeviceWorkerState {
     }
 }
 
-/// Complete checkpoints collected at the block hashes visited by each tier walk.
+/// The blocks one tier's walks visited, by one-based position.
+#[derive(Default)]
+struct TierBlocks {
+    /// The hash seen first at each position.
+    first: Vec<Option<ExternalSequenceBlockHash>>,
+    /// Other hashes seen at a position, in visit order. Empty unless two
+    /// walks of the tier disagree about a position.
+    other: Vec<(usize, ExternalSequenceBlockHash)>,
+}
+
+impl TierBlocks {
+    fn record(&mut self, position: usize, hash: ExternalSequenceBlockHash) {
+        if position >= self.first.len() {
+            self.first.resize(position + 1, None);
+        }
+        match self.first[position] {
+            None => self.first[position] = Some(hash),
+            Some(first) if first == hash => {}
+            Some(_) => self.other.push((position, hash)),
+        }
+    }
+
+    /// The hashes seen at `position`, in visit order.
+    fn at(&self, position: usize) -> impl Iterator<Item = ExternalSequenceBlockHash> + '_ {
+        let first = self.first.get(position).copied().flatten();
+        let other = self
+            .other
+            .iter()
+            .filter(move |&&(other, _)| other == position)
+            .map(|&(_, hash)| hash);
+        first.into_iter().chain(other)
+    }
+}
+
+/// One hybrid worker's hits on a lower tier, waiting for its deepest
+/// checkpoint in `(floor, end]`.
+struct LowerQuery {
+    worker: WorkerWithDpRank,
+    end: usize,
+    floor: usize,
+    /// The checkpoint, once settled; `ZERO` if the worker holds none.
+    point: Checkpoint,
+    /// Settled, or past its floor.
+    done: bool,
+}
+
+type TierCandidates = FxHashMap<ResidencyOwner, Vec<Checkpoint>>;
+
+/// Caps hybrid workers at their checkpoints across the Device and lower tiers.
+///
+/// The tier walks only note which blocks they visited. Checkpoint records are
+/// read afterwards, outside the tree guards. Workers are settled together
+/// from the deepest block downward: one record read serves every worker
+/// waiting at that block, and reading stops when no worker is waiting. Workers
+/// that hold a checkpoint where their match ends therefore cost one read,
+/// however many of the visited blocks have one.
 pub(crate) struct HybridPrefixEvaluator {
     view: CheckpointReadView,
-    candidates: FxHashMap<(ResidencyOwner, StorageTier), Vec<Checkpoint>>,
     tier: StorageTier,
     max_blocks: usize,
+    /// The query's length in blocks, to size a tier's block index before its
+    /// walk takes any tree guard.
+    blocks: usize,
     workers: FxHashMap<WorkerWithDpRank, DeviceWorkerState>,
     device_prepared: bool,
-    /// Blocks the walks visited, in visit order. Walks only append here;
-    /// checkpoint records are read once a walk has released its tree guards.
-    recorded: Vec<(StorageTier, usize, ExternalSequenceBlockHash)>,
+    /// Blocks each tier's walks visited, indexed like `StorageTier`.
+    visited: [TierBlocks; 4],
+    /// Every owner's checkpoints among a lower tier's visited blocks, by
+    /// ascending position. Only a transfer hint asks for an arbitrary owner
+    /// and range, so a tier's map is built the first time one does.
+    candidates: [OnceCell<TierCandidates>; 4],
 }
 
 impl HybridPrefixEvaluator {
     pub(crate) fn new(residency: &KvCacheGroupResidency, max_blocks: Option<usize>) -> Self {
         Self {
             view: residency.read_view(),
-            candidates: FxHashMap::default(),
             tier: StorageTier::Device,
             max_blocks: max_blocks.unwrap_or(usize::MAX),
+            blocks: 0,
             workers: FxHashMap::default(),
             device_prepared: false,
-            recorded: Vec::new(),
+            visited: Default::default(),
+            candidates: Default::default(),
         }
     }
 
-    /// Size the block record for a query of `blocks` blocks before the walk
+    /// Size the block index for a query of `blocks` blocks before the walk
     /// takes any tree guard.
     pub(crate) fn reserve_blocks(&mut self, blocks: usize) {
-        self.recorded.reserve(blocks.min(self.max_blocks));
+        self.blocks = blocks.min(self.max_blocks);
+        self.size_tier(StorageTier::Device);
     }
 
-    /// Read the checkpoint records of the visited blocks. The first hash seen
-    /// at a position wins, as it did when records were read during the walk.
-    fn resolve_recorded(&mut self) {
-        let candidates = &mut self.candidates;
-        for (tier, position, hash) in self.recorded.drain(..) {
-            self.view.with_owners(hash, tier, |owners| {
-                for &owner in owners {
-                    let points = candidates.entry((owner, tier)).or_default();
-                    if let Err(index) =
-                        points.binary_search_by_key(&position, |point| point.position)
-                    {
-                        points.insert(index, Checkpoint { position, hash });
-                    }
-                }
-            });
+    fn size_tier(&mut self, tier: StorageTier) {
+        let first = &mut self.visited[tier_index(tier)].first;
+        if self.blocks > 0 && first.len() <= self.blocks {
+            first.resize(self.blocks + 1, None);
         }
     }
 
@@ -112,6 +166,7 @@ impl HybridPrefixEvaluator {
 
     pub(crate) fn on_tier(&mut self, tier: StorageTier) {
         self.tier = tier;
+        self.size_tier(tier);
     }
 
     fn layout(&self, owner: ResidencyOwner) -> Option<CheckpointLayout> {
@@ -144,6 +199,8 @@ impl HybridPrefixEvaluator {
         Some(self.latest_checkpoint(owner, tier, end, floor))
     }
 
+    /// The deepest visited block of a lower `tier` in `(floor, end]` where
+    /// `owner` holds a complete checkpoint, for any owner and range.
     fn latest_checkpoint(
         &self,
         owner: ResidencyOwner,
@@ -151,8 +208,9 @@ impl HybridPrefixEvaluator {
         end: usize,
         floor: usize,
     ) -> Checkpoint {
-        self.candidates
-            .get(&(owner, tier))
+        self.candidates[tier_index(tier)]
+            .get_or_init(|| self.collect_candidates(tier))
+            .get(&owner)
             .and_then(|points| {
                 let index = points.partition_point(|point| point.position <= end);
                 points
@@ -163,23 +221,195 @@ impl HybridPrefixEvaluator {
             .unwrap_or(Checkpoint::ZERO)
     }
 
+    /// Read the record of every block `tier`'s walks visited. At one position
+    /// an owner keeps the hash seen first.
+    fn collect_candidates(&self, tier: StorageTier) -> TierCandidates {
+        let mut candidates = TierCandidates::default();
+        if !self.view.tier_has_checkpoints(tier) {
+            return candidates;
+        }
+        let visited = &self.visited[tier_index(tier)];
+        // Owners are copied out, so no shard guard is held while the map grows.
+        let mut owners = Vec::with_capacity(self.workers.len().max(16));
+        for position in 1..visited.first.len() {
+            for hash in visited.at(position) {
+                owners.clear();
+                self.view.visit_owners(hash, tier, |current| {
+                    owners.extend(current.iter().copied());
+                });
+                for &owner in &owners {
+                    let points = candidates.entry(owner).or_default();
+                    if points
+                        .last()
+                        .is_none_or(|point: &Checkpoint| point.position != position)
+                    {
+                        points.push(Checkpoint { position, hash });
+                    }
+                }
+            }
+        }
+        candidates
+    }
+
+    /// Settle each query's deepest checkpoint on a lower `tier`, from the
+    /// deepest block downward. A record is read once for every query open at
+    /// its block, and reading stops when no query is open. At one position
+    /// the hash seen first is tried first.
+    fn settle_lower(&self, tier: StorageTier, queries: &mut [LowerQuery]) {
+        if !self.view.tier_has_checkpoints(tier) {
+            return;
+        }
+        let visited = &self.visited[tier_index(tier)];
+        let last = visited.first.len().saturating_sub(1);
+        // A query opens at its end and closes at its floor.
+        let mut by_end: Vec<u32> = Vec::with_capacity(queries.len());
+        for (slot, query) in queries.iter_mut().enumerate() {
+            query.end = query.end.min(last);
+            if query.end > query.floor {
+                by_end.push(slot as u32);
+            }
+        }
+        if by_end.is_empty() {
+            return;
+        }
+        by_end.sort_unstable_by_key(|&slot| std::cmp::Reverse(queries[slot as usize].end));
+        let mut by_floor = by_end.clone();
+        by_floor.sort_unstable_by_key(|&slot| std::cmp::Reverse(queries[slot as usize].floor));
+        let (mut opened, mut closed) = (0, 0);
+        let mut open: Vec<u32> = Vec::with_capacity(by_end.len());
+        let mut waiting = 0usize;
+        // Built after the first record with few owners meets many open
+        // queries, outside its shard guard, and used from the next record on.
+        let mut slots: Option<FxHashMap<WorkerWithDpRank, u32>> = None;
+        let mut sparse = false;
+        let mut position = queries[by_end[0] as usize].end;
+        while position > 0 {
+            while let Some(&slot) = by_end.get(opened)
+                && queries[slot as usize].end >= position
+            {
+                open.push(slot);
+                waiting += 1;
+                opened += 1;
+            }
+            while let Some(&slot) = by_floor.get(closed)
+                && queries[slot as usize].floor >= position
+            {
+                let query = &mut queries[slot as usize];
+                if !query.done {
+                    query.done = true;
+                    waiting -= 1;
+                }
+                closed += 1;
+            }
+            if waiting == 0 {
+                // Nobody can use the blocks above the next query's end.
+                let Some(&slot) = by_end.get(opened) else {
+                    break;
+                };
+                position = queries[slot as usize].end;
+                open.clear();
+                continue;
+            }
+            for hash in visited.at(position) {
+                self.view.visit_owners(hash, tier, |owners| {
+                    let few_owners = owners.len() * 2 < waiting;
+                    if few_owners && let Some(slots) = &slots {
+                        for owner in owners {
+                            if let Some(worker) = owner.as_worker()
+                                && let Some(&slot) = slots.get(&worker)
+                            {
+                                let query = &mut queries[slot as usize];
+                                if !query.done && query.end >= position {
+                                    query.point = Checkpoint { position, hash };
+                                    query.done = true;
+                                    waiting -= 1;
+                                }
+                            }
+                        }
+                    } else {
+                        sparse |= few_owners;
+                        open.retain(|&slot| {
+                            let query = &mut queries[slot as usize];
+                            if query.done {
+                                return false;
+                            }
+                            if owners.contains(&ResidencyOwner::worker(query.worker)) {
+                                query.point = Checkpoint { position, hash };
+                                query.done = true;
+                                waiting -= 1;
+                                return false;
+                            }
+                            true
+                        });
+                    }
+                });
+                if sparse && slots.is_none() {
+                    slots = Some(
+                        by_end
+                            .iter()
+                            .map(|&slot| (queries[slot as usize].worker, slot))
+                            .collect(),
+                    );
+                }
+                if waiting == 0 {
+                    break;
+                }
+            }
+            position -= 1;
+        }
+    }
+
+    /// Settle every scored hybrid worker's Device resume point: its deepest
+    /// matched block within its score where it holds a checkpoint. The workers
+    /// are settled together from the deepest score downward, so one record
+    /// read serves every worker waiting at that block.
     pub(crate) fn prepare_device(&mut self, raw: &MatchDetails) {
-        self.resolve_recorded();
         if self.device_prepared {
             return;
         }
         self.device_prepared = true;
+        let mut pending = Vec::with_capacity(raw.overlap_scores.scores.len());
         for (&worker, &blocks) in &raw.overlap_scores.scores {
-            let point = self.latest_checkpoint(
-                ResidencyOwner::worker(worker),
-                StorageTier::Device,
-                (blocks as usize).min(self.max_blocks),
-                0,
-            );
+            let bound = (blocks as usize).min(self.max_blocks);
+            // A worker the registry does not summarize is searched in full.
+            let (count, bit) = self
+                .view
+                .device_summary(worker)
+                .unwrap_or((usize::MAX, u64::MAX));
             let state = self.worker_state(worker);
-            if state.captured.is_some() {
-                state.checkpoint = point;
-                state.resume_cap = Some(point.position);
+            if state.captured.is_none() {
+                continue;
+            }
+            state.checkpoint = Checkpoint::ZERO;
+            state.resume_cap = Some(0);
+            // A zero count is exact: no record credits the worker on Device.
+            if count > 0 && bound > 0 {
+                pending.push(Pending {
+                    worker,
+                    bit,
+                    bound: u32::try_from(bound).unwrap_or(u32::MAX),
+                    resolved: None,
+                });
+            }
+        }
+        if pending.is_empty() {
+            return;
+        }
+        let chain: Vec<_> = self.visited[tier_index(StorageTier::Device)]
+            .first
+            .iter()
+            .enumerate()
+            .filter_map(|(position, hash)| hash.map(|hash| (position, hash)))
+            .collect();
+        ForwardDeviceEvaluator::resolve(self.view.device_records(), &chain, &mut pending);
+        for entry in pending {
+            let Some(index) = entry.resolved else {
+                continue;
+            };
+            let (position, hash) = chain[index as usize];
+            if let Some(state) = self.workers.get_mut(&entry.worker) {
+                state.checkpoint = Checkpoint { position, hash };
+                state.resume_cap = Some(position);
             }
         }
     }
@@ -220,27 +450,36 @@ impl HybridPrefixEvaluator {
         tiers: &mut HashMap<StorageTier, LowerTierMatchDetails>,
         snapshot: &ResidencyRoutingSnapshot,
     ) {
-        self.resolve_recorded();
+        // Each hybrid worker's deepest checkpoint within its hits on a tier.
+        let mut lower_points = FxHashMap::default();
         for (tier, details) in tiers.iter() {
+            let mut queries = Vec::new();
             for (worker, hits) in &details.hits {
                 let Some(next) = details.next_continuations.get(worker) else {
                     continue;
                 };
-                let start = next.start_pos.saturating_sub(*hits);
-                if let Some(point) = self.checkpoint(
-                    ResidencyOwner::worker(*worker),
-                    *tier,
-                    next.start_pos,
-                    start,
-                ) {
-                    let state = self.worker_state(*worker);
-                    let cap = state.resume_cap.unwrap_or(0);
-                    state.resume_cap = Some(if point.position > start {
-                        cap.max(point.position)
-                    } else {
-                        cap
-                    });
+                // Only a known hybrid worker is capped.
+                if self.layout(ResidencyOwner::worker(*worker)).is_none() {
+                    continue;
                 }
+                queries.push(LowerQuery {
+                    worker: *worker,
+                    end: next.start_pos.min(self.max_blocks),
+                    floor: next.start_pos.saturating_sub(*hits),
+                    point: Checkpoint::ZERO,
+                    done: false,
+                });
+            }
+            self.settle_lower(*tier, &mut queries);
+            for query in queries {
+                lower_points.insert((*tier, query.worker), query.point);
+                let state = self.worker_state(query.worker);
+                let cap = state.resume_cap.unwrap_or(0);
+                state.resume_cap = Some(if query.point.position > query.floor {
+                    cap.max(query.point.position)
+                } else {
+                    cap
+                });
             }
         }
         device.overlap_scores.scores.retain(|worker, blocks| {
@@ -279,9 +518,9 @@ impl HybridPrefixEvaluator {
                 next.start_pos = end;
                 if end == 0 {
                     next.last_matched_hash = None;
-                } else if let Some(point) =
-                    self.checkpoint(ResidencyOwner::worker(*worker), *tier, end, start)
-                {
+                } else if let Some(point) = lower_points.get(&(*tier, *worker)) {
+                    // The cap is at or past this checkpoint, so it is also the
+                    // deepest one within the capped hits; no second read.
                     // Continuations are no longer consumed after finalization.
                     if point.position == end {
                         next.last_matched_hash = Some(point.hash);
@@ -394,7 +633,7 @@ impl MatchObserver for HybridPrefixEvaluator {
         if position > self.max_blocks {
             return;
         }
-        self.recorded.push((self.tier, position, hash));
+        self.visited[tier_index(self.tier)].record(position, hash);
     }
 }
 
@@ -604,7 +843,12 @@ mod tests {
         evaluator.on_tier(StorageTier::HostPinned);
         evaluator.reserve_workers(workers.len());
         assert_eq!(evaluator.workers.capacity(), 0);
-        assert_eq!(evaluator.candidates.capacity(), 0);
+        assert!(
+            evaluator
+                .visited
+                .iter()
+                .all(|tier| tier.first.capacity() == 0)
+        );
     }
 
     #[test]
@@ -716,6 +960,122 @@ mod tests {
             );
             assert_eq!(raw.hybrid_resume_caps.get(&worker), Some(&2));
             assert_eq!(lower[&StorageTier::HostPinned].hits[&worker], 2);
+        }
+    }
+
+    #[test]
+    fn lower_tier_credit_ends_at_the_deepest_checkpoint_within_the_hits() {
+        use crate::LowerTierContinuation;
+        let worker = WorkerWithDpRank::new(7, 0);
+        let hash = ExternalSequenceBlockHash;
+        // The Device checkpoint is at block 2, and the host walk continues over
+        // blocks 3 and 4. Host credit ends at the deepest host checkpoint among
+        // those two; one at block 2 or above is outside the walk.
+        for (host_checkpoints, expected_hits) in
+            [(&[3, 4][..], 2), (&[3][..], 1), (&[2][..], 0), (&[][..], 0)]
+        {
+            let residency = KvCacheGroupResidency::new();
+            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            store_device_checkpoint(&residency, worker, 2);
+            for &position in host_checkpoints {
+                residency.apply(&crate::testing::recurrent_store(
+                    worker,
+                    StorageTier::HostPinned,
+                    position,
+                    0,
+                    1,
+                ));
+            }
+            let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
+            evaluator.observe_worker(worker);
+            for position in 1..=2 {
+                evaluator.observe_block(position, hash(position as u64));
+            }
+            let mut raw = MatchDetails::default();
+            raw.overlap_scores.scores.insert(worker, 2);
+            raw.last_matched_hashes.insert(worker, hash(2));
+            evaluator.prepare_device(&raw);
+            evaluator.on_tier(StorageTier::HostPinned);
+            evaluator.observe_worker(worker);
+            for position in 3..=4 {
+                evaluator.observe_block(position, hash(position as u64));
+            }
+            let mut lower = HashMap::from([(
+                StorageTier::HostPinned,
+                LowerTierMatchDetails {
+                    hits: FxHashMap::from_iter([(worker, 2)]),
+                    next_continuations: FxHashMap::from_iter([(
+                        worker,
+                        LowerTierContinuation::new(4, hash(4)),
+                    )]),
+                    ..Default::default()
+                },
+            )]);
+            evaluator.finish(&mut raw, &mut lower, &Default::default());
+
+            let context = format!("host checkpoints {host_checkpoints:?}");
+            let host = &lower[&StorageTier::HostPinned];
+            assert_eq!(host.hits[&worker], expected_hits, "{context}");
+            assert_eq!(
+                host.next_continuations[&worker].start_pos,
+                2 + expected_hits,
+                "{context}"
+            );
+            assert_eq!(raw.overlap_scores.scores[&worker], 2, "{context}");
+            assert_eq!(raw.hybrid_resume_caps.get(&worker), Some(&2), "{context}");
+        }
+    }
+
+    #[test]
+    fn lower_tier_walks_that_disagree_about_a_position_keep_both_hashes() {
+        use crate::LowerTierContinuation;
+        let first = WorkerWithDpRank::new(7, 0);
+        let second = WorkerWithDpRank::new(8, 0);
+        let hash = ExternalSequenceBlockHash;
+        // Each worker reaches block 2 through its own hash and holds its host
+        // checkpoint there.
+        let walks = [(first, 21), (second, 22)];
+        let residency = KvCacheGroupResidency::new();
+        for (worker, at_two) in walks {
+            residency.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            residency.apply(&crate::testing::recurrent_store(
+                worker,
+                StorageTier::HostPinned,
+                at_two,
+                0,
+                1,
+            ));
+        }
+        let mut evaluator = HybridPrefixEvaluator::new(&residency, None);
+        evaluator.prepare_device(&MatchDetails::default());
+        evaluator.on_tier(StorageTier::HostPinned);
+        for (worker, at_two) in walks {
+            evaluator.observe_worker(worker);
+            evaluator.observe_block(1, hash(at_two - 10));
+            evaluator.observe_block(2, hash(at_two));
+            evaluator.observe_block(3, hash(at_two + 10));
+        }
+        let mut raw = MatchDetails::default();
+        let mut lower = HashMap::from([(
+            StorageTier::HostPinned,
+            LowerTierMatchDetails {
+                hits: FxHashMap::from_iter(walks.map(|(worker, _)| (worker, 3))),
+                next_continuations: FxHashMap::from_iter(walks.map(|(worker, at_two)| {
+                    (worker, LowerTierContinuation::new(3, hash(at_two + 10)))
+                })),
+                ..Default::default()
+            },
+        )]);
+        evaluator.finish(&mut raw, &mut lower, &Default::default());
+
+        let host = &lower[&StorageTier::HostPinned];
+        for (worker, at_two) in walks {
+            assert_eq!(host.hits[&worker], 2, "{worker:?}");
+            assert_eq!(
+                host.next_continuations[&worker].last_matched_hash,
+                Some(hash(at_two)),
+                "{worker:?}"
+            );
         }
     }
 
