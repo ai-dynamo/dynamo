@@ -191,7 +191,7 @@ spec:
             requests:
               cpu: "16"
               memory: 328Gi
-              ephemeral-storage: 64Gi
+              ephemeral-storage: 128Gi
               nvidia.com/gpu: "1"
             limits:
               nvidia.com/gpu: "1"

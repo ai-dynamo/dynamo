@@ -33,8 +33,8 @@ disaggregated target transfers KV cache between workers with NIXL over UCX on RD
   1.7.0. See
   [Dynamo Enterprise Certified Recipes](../README.md#prerequisites).
 - 4 B200 GPUs for the aggregated target, or 5 for the disaggregated target.
-- Nodes with room for 16 CPUs and 328 GiB of memory per worker pod, plus 64 GiB (aggregated) or
-  128 GiB (disaggregated) of ephemeral storage.
+- Nodes with room for 16 CPUs, 328 GiB of memory, and 128 GiB of ephemeral storage per worker
+  pod. The checkpoint downloads into the ephemeral storage.
 - Room for 16 CPUs and 16 GiB of memory for the frontend pod.
 - For the disaggregated target, an RDMA device plugin that exposes `rdma/shared_hca`.
 - A Hugging Face token with access to the checkpoint.
@@ -73,6 +73,42 @@ Wait for every pod to become ready:
 ```bash
 kubectl get pods -n ${NAMESPACE} -w
 ```
+
+### Shared Model Cache
+
+With `emptyDir`, every worker pod downloads the checkpoint again each time it starts, including on
+scale-up and rescheduling. To download it once and reuse it, keep the checkpoint on the
+`shared-model-cache` PVC instead. This needs a ReadWriteMany storage class whose filesystem
+supports file locking, such as NFSv4.
+
+Create the PVC from the open-source recipe's
+[`model-cache.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3.5-super-vl-120b-a12b/model-cache/model-cache.yaml),
+after setting `storageClassName` to that class:
+
+```bash
+kubectl apply -f recipes/nemotron-3.5-super-vl-120b-a12b/model-cache/model-cache.yaml -n ${NAMESPACE}
+```
+
+Then, in every worker, replace the `hf-cache` `emptyDir` with the PVC and mount its `hub`
+directory:
+
+```yaml
+volumeMounts:
+- name: hf-cache
+  mountPath: /hf-cache
+  subPath: hub
+# ...
+volumes:
+- name: hf-cache
+  persistentVolumeClaim:
+    claimName: shared-model-cache
+```
+
+The first workers to start download the checkpoint into the PVC. They lock each file as they
+download it, so the others wait instead of downloading it again. Later pods find the checkpoint in
+the cache and skip the download, but still contact Hugging Face at startup, so keep the token. The
+weights no longer use ephemeral storage, so the workers' ephemeral-storage requests can come down.
+The same PVC also serves the [benchmark](#benchmark) Job.
 
 ## Smoke Test
 

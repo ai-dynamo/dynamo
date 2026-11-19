@@ -267,7 +267,7 @@ The **B200 Certified** targets use only [Dynamo Enterprise Support](../../enterp
 
 - A Kubernetes cluster with the Dynamo platform 1.7.0 installed from the enterprise Helm chart and 4 B200 GPUs available. See [Install](../../enterprise/install.mdx).
 - A Hugging Face token with access to the checkpoint `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4`.
-- Room for 16 CPUs and 16 GiB of memory for the frontend pod, and 16 CPUs, 328 GiB of memory, and 64 GiB of ephemeral storage per worker pod.
+- Room for 16 CPUs and 16 GiB of memory for the frontend pod, and 16 CPUs, 328 GiB of memory, and 128 GiB of ephemeral storage per worker pod.
 
 </div>
 
@@ -686,7 +686,7 @@ GPU counts below use the standalone manifests. P counts prefill workers. D count
 The B200 Certified targets differ from the open-source B200 targets as follows. The [certified recipe README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/certified/nemotron-3.5-super-vl-120b-a12b/README.md) has the details.
 
 - They use the 1.7.0 enterprise images, which publish on NGC with the Dynamo 1.7.0 release.
-- Each worker downloads the checkpoint into an `emptyDir` volume, in place of the `shared-model-cache` PVC.
+- Each worker downloads the checkpoint into an `emptyDir` volume, in place of the `shared-model-cache` PVC. To download it once and reuse it across pods, mount the PVC instead; see [Shared Model Cache](https://github.com/ai-dynamo/dynamo/blob/main/recipes/certified/nemotron-3.5-super-vl-120b-a12b/README.md#shared-model-cache).
 - To serve image or video requests, add `--mm-ipc-gpu-memory-gb 10` to every worker and raise the request size limits; see [Multimodal Workloads](https://github.com/ai-dynamo/dynamo/blob/main/recipes/certified/nemotron-3.5-super-vl-120b-a12b/README.md#multimodal-workloads). NIM Factory image and video accuracy testing, in release candidate `01M7QFWA5YFWDAQ7TBP7AHQSF0`, used these settings.
 - To serve video on the disaggregated target, also raise `DYN_TCP_REQUEST_TIMEOUT` to 120 s and the NIXL KV lease (`kv_lease_duration`) to 2400 s; the same README section shows how. With the defaults, large videos time out on the way to prefill, and decode can read KV after prefill has released it.
 - The disaggregated prefill workers offload KV cache to CPU, 200 GB per worker, and the decode workers use `NixlConnector` alone.
