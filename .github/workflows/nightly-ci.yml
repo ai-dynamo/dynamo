@@ -578,11 +578,16 @@ jobs:
       DYN_REPLAY_HARNESS_REVISION: ${{ needs.resolve-source-sha.outputs.source_sha }}
       DYN_REPLAY_IMAGE: ${{ needs.resolve-source-sha.outputs.source_sha }}-${{ needs.frontend-build.outputs.target_tag_plain }}-nightly
     steps:
-      - name: Checkout the harness at the image's source commit
+      # The default checkout is github.sha, which resolve-source-sha also gives
+      # frontend-build; the next step fails if the two ever differ.
+      - name: Checkout the harness
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
           persist-credentials: false
+
+      - name: Require the harness and image to share a commit
+        shell: bash
+        run: test "${GITHUB_SHA}" = "${DYN_REPLAY_HARNESS_REVISION}"
 
       - name: Prepare sealed tokenizer assets
         shell: bash
