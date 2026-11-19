@@ -447,6 +447,23 @@ impl LLMEngine for TrtllmSidecarEngine {
             "TensorRT-LLM gRPC is ready"
         );
         let mut config = model.engine_config();
+        if let Some(media) = limits.supported_media {
+            let mut modalities = vec!["text"];
+            for (name, supported) in [
+                ("image", media.image),
+                ("video", media.video),
+                ("audio", media.audio),
+            ] {
+                if supported {
+                    modalities.push(name);
+                }
+            }
+            config.runtime_data.insert(
+                dynamo_llm::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES.into(),
+                serde_json::json!(modalities),
+            );
+        }
+
         config.served_model_name = Some(info.served_model_name.clone());
         if let Some(node) = self.routing.get().and_then(|routing| routing.node.as_ref()) {
             config.runtime_data.insert(
