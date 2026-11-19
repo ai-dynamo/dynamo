@@ -49,7 +49,7 @@ On Kubernetes, native k8s discovery will be used by default.
 
 | Triton release tag                      |  CUDA  | NVIDIA driver |
 | :-------------------------------------- | :----: | :-----------: |
-| `nvcr.io/nvidia/tritonserver:26.09-py3` | `13.4` |   `615.61`    |
+| `nvcr.io/nvidia/tritonserver:26.11-py3` | `13.5` |   `615.61`    |
 
 The specific release of Triton Server is pinned in [`container/context.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/container/context.yaml) under `triton.cuda13.4` (`runtime_image_tag`/`base_image_tag`), the same way the other framework runtimes pin their images.
 
@@ -324,7 +324,7 @@ The Dynamo Frontend then forwards the base64 string unchanged when the client se
 
 ## Configuring the Triton Version
 
-The Triton release is pinned by `triton.cuda13.4.runtime_image_tag` in [`container/context.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/container/context.yaml) (default `26.09-py3`), mirroring how the other framework runtimes pin their images.
+The Triton release is pinned by `triton.cuda13.4.runtime_image_tag` in [`container/context.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/container/context.yaml) (default `26.11-py3`), mirroring how the other framework runtimes pin their images.
 The CUDA family is fixed by the Triton release, so `--cuda-version` is auto-derived; passing it explicitly is rejected.
 
 To build with a different Triton release, override `RUNTIME_IMAGE_TAG` at build time (no `context.yaml` edit needed).
@@ -337,9 +337,9 @@ the Rust `cudarc` crate rejects other CUDA versions at build time, and the wheel
 ```bash
 python container/render.py --framework=triton --target=runtime --output-short-filename
 docker buildx build --network=host \
-  --build-arg RUNTIME_IMAGE_TAG=26.09-py3 \
+  --build-arg RUNTIME_IMAGE_TAG=26.11-py3 \
   --build-arg BASE_IMAGE_TAG=26.02-cuda13.1-devel-ubuntu24.04 \
-  -f container/rendered.Dockerfile -t dynamo:triton-26.08 .
+  -f container/rendered.Dockerfile -t dynamo:triton-26.11 .
 ```
 
 To make a release the default, edit `triton.cuda13.4` in `container/context.yaml`.
