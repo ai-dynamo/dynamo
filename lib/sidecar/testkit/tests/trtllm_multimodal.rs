@@ -278,6 +278,40 @@ async fn both_media_capability_signals_are_required() {
 }
 
 #[tokio::test]
+async fn malformed_advertisement_keeps_explicitly_supported_images() {
+    use dynamo_llm::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES;
+
+    let control = Controller::<Adapter>::default();
+    let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
+    advertise_media(&fixture, &["image"]);
+    fixture
+        .discovery
+        .model_info
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .extra = Some(
+        dynamo_sidecar_common::json_to_struct(
+            serde_json::json!({"trtllm_supported_modalities": ["image", 7]}),
+            "test capabilities",
+        )
+        .unwrap(),
+    );
+    let engine = fixture.engine().await;
+    let config = engine.start(0).await.unwrap();
+    assert!(!config.runtime_data.contains_key(SUPPORTED_INPUT_MODALITIES));
+    let ctx = mock_context();
+    let handle = control.request(ctx.id(), RequestPlan::default());
+    fixture.respond(ctx.id(), vec![finished()]);
+    let out = collect(&engine, image_request(), GenerateContext::new(ctx, None)).await;
+    assert!(out.last().unwrap().is_ok());
+    assert_eq!(handle.native_request().unwrap().media.len(), 2);
+    engine.cleanup().await.unwrap();
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn videos_recover_discovery_and_preserve_sources_uuids_and_usage() {
     let control = Controller::<Adapter>::default();
     let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;

@@ -447,7 +447,9 @@ impl LLMEngine for TrtllmSidecarEngine {
             "TensorRT-LLM gRPC is ready"
         );
         let mut config = model.engine_config();
-        if let Some(media) = limits.supported_media {
+        if info.has_complete_media_capability
+            && let Some(media) = limits.supported_media
+        {
             let mut modalities = vec!["text"];
             for (name, supported) in [
                 ("image", media.image),

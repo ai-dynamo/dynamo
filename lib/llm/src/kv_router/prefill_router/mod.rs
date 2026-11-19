@@ -323,6 +323,10 @@ struct PrefillBuildContext {
 
 pub(crate) trait PrefillRouterLifecycle: Send + Sync {
     fn set_target(&self, target: Option<WorkerSetTarget>);
+    fn target_allows_image_omission(&self) -> bool {
+        false
+    }
+
     /// Returns `None` when this router does not target the group, and an empty
     /// set when it targets the endpoint but its binding is not yet available.
     fn available_worker_ids_for(
@@ -335,6 +339,21 @@ pub(crate) trait PrefillRouterLifecycle: Send + Sync {
 impl PrefillRouterLifecycle for PrefillRouter {
     fn set_target(&self, target: Option<WorkerSetTarget>) {
         self.set_target(target);
+    }
+
+    fn target_allows_image_omission(&self) -> bool {
+        let current_target = self.target.lock();
+        if current_target.is_none() {
+            return true;
+        }
+        // Activation and target changes publish under the same lock.
+        self.lifecycle_state() == PrefillLifecycleState::Active
+            && self.target_tx.as_ref().is_some_and(|target| {
+                target
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(WorkerSetTarget::allows_image_omission)
+            })
     }
 
     fn available_worker_ids_for(

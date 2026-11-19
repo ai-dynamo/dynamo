@@ -4406,20 +4406,6 @@ async fn check_reject_media_anthropic(status: StatusCode) {
         }
     }
 
-    let duplicate_model = r#"{"model":"text-only","model":"text-only","max_tokens":16,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://invalid.invalid/image"}}]}]}"#;
-    let response = client
-        .post(format!("http://localhost:{port}/v1/messages"))
-        .header("content-type", "application/json")
-        .body(duplicate_model)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::BAD_REQUEST,
-        "duplicate fields must survive image omission"
-    );
-
     for invalid_field in ["model", "max_tokens", "role"] {
         let mut request = serde_json::json!({
             "model": "unregistered", "max_tokens": 16,
@@ -4666,18 +4652,69 @@ async fn test_image_omission_uses_model_modalities_without_global_rejection() {
     let captured = engine.messages.lock().unwrap().take().unwrap().to_string();
     assert!(captured.contains("[image omitted]"));
     assert!(!captured.contains("image_url") && !captured.contains("file-image"));
-    let mut counts = Vec::new();
-    for part in [
-        serde_json::json!({"type":"image","source":{"type":"url","url":"https://invalid.invalid/image"}}),
-        serde_json::json!({"type":"text","text":"[image omitted]"}),
+    let url_image = serde_json::json!({
+        "type":"image", "source":{"type":"url","url":"https://invalid.invalid/image"}
+    });
+    let response = client
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .json(&serde_json::json!({
+            "model":"text-only", "max_tokens":1, "messages":[{"role":"user","content":[url_image]}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let captured = engine.messages.lock().unwrap().take().unwrap().to_string();
+    assert!(captured.contains("[image omitted]"));
+    assert!(!captured.contains("invalid.invalid"));
+
+    let duplicate_model = r#"{"model":"text-only","model":"text-only","max_tokens":16,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://invalid.invalid/image"}}]}]}"#;
+    let response = client
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .header("content-type", "application/json")
+        .body(duplicate_model)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "duplicate fields must survive image omission"
+    );
+    assert!(engine.messages.lock().unwrap().is_none());
+
+    for image in [
+        serde_json::json!({"type":"image"}),
+        serde_json::json!({"type":"image", "source":{"type":"base64","media_type":"image/png"}}),
+        serde_json::json!({"type":"image", "source":{"type":"url","url":null}}),
+        serde_json::json!({"type":"image", "source":{"type":"url","url":"https://invalid.invalid/image","data":null}}),
     ] {
+        for part in [
+            image.clone(),
+            serde_json::json!({"type":"tool_result","tool_use_id":"call_1","content":[image]}),
+        ] {
+            let response = client
+                .post(format!("http://127.0.0.1:{port}/v1/messages"))
+                .json(&serde_json::json!({
+                    "model":"text-only", "max_tokens":1, "messages":[{"role":"user","content":[part]}]
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(engine.messages.lock().unwrap().is_none());
+        }
+    }
+    for model in ["text-only", "vision", "unknown"] {
         let response = client.post(format!("http://127.0.0.1:{port}/v1/messages/count_tokens"))
-            .json(&serde_json::json!({"model":"text-only","messages":[{"role":"user","content":[part]}]}))
+            .json(&serde_json::json!({"model":model,"messages":[{"role":"user","content":[url_image]}]}))
             .send().await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        counts.push(response.json::<serde_json::Value>().await.unwrap()["input_tokens"].clone());
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["input_tokens"],
+            86
+        );
     }
-    assert_eq!(counts[0], counts[1]);
     cancel.cancel();
     join.await.unwrap().unwrap();
 }
