@@ -38,6 +38,7 @@ from .args import Config
 from .cache_info import configure_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
+from .decision_clef import ClefHealthCheckPayload, initialize_clef
 from .dp_topology import get_dp_range_for_worker
 from .handlers import (
     BaseWorkerHandler,
@@ -1723,7 +1724,7 @@ SetupMetricsCollectionFn = Callable[..., None]
 
 @dataclass
 class _WorkerLifecycle:
-    """Owns the engine and handler of a prefill, decode, or aggregated worker.
+    """Owns a worker's engine and handler until serving exits.
 
     On exit it shuts the vLLM EngineCore down explicitly. EngineCore is a
     non-daemon child, so leaving it to interpreter exit can block the main
@@ -1732,7 +1733,7 @@ class _WorkerLifecycle:
 
     engine_client: Optional[AsyncLLM] = None
     vllm_config: Optional[VllmConfig] = None
-    handler: Optional[BaseWorkerHandler] = None
+    handler: BaseWorkerHandler | ClassifyWorkerHandler | None = None
     shutdown_event: asyncio.Event | None = None
 
     def __enter__(self) -> "_WorkerLifecycle":
@@ -2399,25 +2400,34 @@ class WorkerFactory:
             _component_gauges,
         ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
 
-        handler = ClassifyWorkerHandler(
-            runtime=runtime,
-            engine=engine_client,
-            config=config,
-            model_config=getattr(vllm_config, "model_config", None),
+        with _WorkerLifecycle(
+            engine_client=engine_client,
+            vllm_config=vllm_config,
             shutdown_event=shutdown_event,
-        )
+        ) as lifecycle:
+            handler = ClassifyWorkerHandler(
+                runtime=runtime,
+                engine=engine_client,
+                config=config,
+                model_config=getattr(vllm_config, "model_config", None),
+                shutdown_event=shutdown_event,
+            )
+            lifecycle.handler = handler
 
-        classify_health_check_payload = VllmEmbeddingHealthCheckPayload(
-            model_name=config.served_model_name or config.model
-        ).to_dict()
-
-        logger.info("Starting to serve the classify worker endpoint...")
-        try:
+            logger.info("Starting to serve the classify worker endpoint...")
+            handler.decision_clef = await initialize_clef(handler, vllm_config, config)
+            health_payload = (
+                ClefHealthCheckPayload(config.served_model_name or config.model)
+                if handler.decision_clef is not None
+                else VllmEmbeddingHealthCheckPayload(
+                    model_name=config.served_model_name or config.model
+                )
+            )
             await asyncio.gather(
                 generate_endpoint.serve_endpoint(
                     handler.generate,
                     metrics_labels=[("model", config.model)],
-                    health_check_payload=classify_health_check_payload,
+                    health_check_payload=health_payload.to_dict(),
                 ),
                 self.register_vllm_model(
                     ModelInput.Text,
@@ -2428,13 +2438,13 @@ class WorkerFactory:
                     vllm_config,
                     worker_type=WorkerType.Aggregated,
                     needs=[],
+                    **(
+                        {"native_decision": True}
+                        if handler.decision_clef is not None
+                        else {}
+                    ),
                 ),
             )
-        except Exception as e:
-            logger.error(f"Failed to serve classify worker endpoint: {e}")
-            raise
-        finally:
-            handler.cleanup()
 
     def _maybe_create_failover_metrics(self, config: Config, generate_endpoint):
         """Create + register per-engine failover metrics (shadow mode only).
