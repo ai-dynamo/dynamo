@@ -1769,6 +1769,7 @@ def test_glm_tool_decoder_only_receives_answer(
         request["tools"][0]["function"]["parameters"] = {
             "type": "object",
             "properties": {},
+            "additionalProperties": False,
         }
     request["separate_reasoning"] = separate_reasoning
     answer = (
@@ -1815,8 +1816,10 @@ def test_glm_tool_decoder_only_receives_answer(
     async def collect():
         return [item async for item in processor.generator(request)]
 
+    output = asyncio.run(collect())
+    assert not any(item.get("event") == "error" for item in output), output
     choices = [
-        choice for item in asyncio.run(collect()) for choice in item["data"]["choices"]
+        choice for item in output for choice in item.get("data", {}).get("choices", [])
     ]
     deltas = [choice["delta"] for choice in choices]
     calls = [call for delta in deltas for call in delta.get("tool_calls", [])]

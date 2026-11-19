@@ -189,6 +189,7 @@ def _load_processor_module(
         SglangStreamingPostProcessor=object,
         ToolCallParserType=object,
         _client_wants_separate_reasoning=lambda *_args, **_kwargs: False,
+        _effective_reasoning_parser_name=lambda *_args, **_kwargs: None,
         _get_history_tool_calls_count=lambda *_args, **_kwargs: 0,
         _guided_output_requires_reasoning=lambda *_args, **_kwargs: False,
         convert_tools=lambda *_args, **_kwargs: None,
