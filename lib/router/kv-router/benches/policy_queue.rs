@@ -23,10 +23,15 @@ use criterion::{
     BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
 };
 use dynamo_admission::RouterQueuePolicy;
-use dynamo_admission::{PolicyProfile, PolicyQueue, QueueMetadata, QueueSnapshot, WorkerPlacement};
+use dynamo_admission::{
+    LaneKey, PolicyProfile, PolicyQueue, QueueLane, QueueMetadata, QueueSnapshot,
+};
 use dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig;
-use dynamo_router_protocol::worker::WorkerWithDpRank;
 use tokio::time::Instant;
+
+fn lane_key(lane: usize) -> LaneKey {
+    LaneKey::new(&format!("session-{lane}"))
+}
 
 #[derive(Debug, Clone, Copy)]
 struct BenchRequest {
@@ -54,6 +59,7 @@ fn no_due_metadata(
         due_at: None,
         class_due_at: None,
         arrival_offset_secs,
+        lane_key: None,
     }
 }
 
@@ -118,12 +124,9 @@ fn edf_queue(
         let (lane, placement) = match lanes {
             Some(lanes) => {
                 let lane = request_index % lanes;
-                (
-                    lane,
-                    WorkerPlacement::Exact(WorkerWithDpRank::new(lane as u64, 0)),
-                )
+                (lane, QueueLane::Keyed(lane_key(lane)))
             }
-            None => (0, WorkerPlacement::Any),
+            None => (0, QueueLane::Shared),
         };
         let class_due_at =
             class.slo_ttft_due_at(ingress_origin + Duration::from_micros(request_index as u64));
@@ -135,6 +138,7 @@ fn edf_queue(
                     due_at: None,
                     class_due_at,
                     arrival_offset_secs: request_index as f64,
+                    lane_key: None,
                 },
                 lanes.unwrap_or(1),
                 0.0,
@@ -163,7 +167,7 @@ fn exact_queue(
                 lanes,
                 0.0,
                 0,
-                WorkerPlacement::Exact(WorkerWithDpRank::new(lane as u64, 0)),
+                QueueLane::Keyed(lane_key(lane)),
                 BenchRequest {
                     dispatchable: is_dispatchable(lane),
                 },
@@ -182,7 +186,7 @@ fn shared_queue(requests: usize) -> PolicyQueue<BenchRequest> {
                 1,
                 0.0,
                 0,
-                WorkerPlacement::Any,
+                QueueLane::Shared,
                 BenchRequest { dispatchable: true },
             )
             .unwrap();

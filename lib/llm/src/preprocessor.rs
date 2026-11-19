@@ -31,7 +31,7 @@ use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionRequestMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestToolMessageContentPart,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ChatCompletionToolChoiceOption, EncodingFormat,
+    ChatCompletionToolChoiceOption, EncodingFormat, InputAudioFormat,
 };
 use dynamo_renderer::{OAIPromptFormatter, PromptRenderError, RenderedPrompt};
 use dynamo_runtime::config::{
@@ -395,6 +395,8 @@ fn tool_content_part_as_user(
     })
 }
 
+type MediaInfo = (&'static str, Option<url::Url>, Option<String>);
+
 enum MultimodalContentPart<'a> {
     User(&'a ChatCompletionRequestUserMessageContentPart),
     Tool(&'a ChatCompletionRequestToolMessageContentPart),
@@ -434,8 +436,8 @@ impl<'a> MultimodalContentPart<'a> {
         }
     }
 
-    fn media_info(&self) -> Option<(&'static str, Option<url::Url>, Option<String>)> {
-        match self {
+    fn media_info(&self) -> Result<Option<MediaInfo>> {
+        Ok(match self {
             Self::User(part) => match *part {
                 ChatCompletionRequestUserMessageContentPart::ImageUrl(part) => Some((
                     "image_url",
@@ -452,6 +454,18 @@ impl<'a> MultimodalContentPart<'a> {
                     part.audio_url.as_ref().map(|media| media.url.clone()),
                     part.uuid.clone(),
                 )),
+                ChatCompletionRequestUserMessageContentPart::InputAudio(part) => {
+                    let format = match &part.input_audio.format {
+                        InputAudioFormat::Wav => "wav",
+                        InputAudioFormat::Mp3 => "mpeg",
+                    };
+                    let url = url::Url::parse(&format!(
+                        "data:audio/{format};base64,{}",
+                        part.input_audio.data
+                    ))
+                    .map_err(|_| invalid_argument_error("Invalid input_audio data"))?;
+                    Some(("audio_url", Some(url), None))
+                }
                 _ => None,
             },
             Self::Tool(part) => match *part {
@@ -472,7 +486,7 @@ impl<'a> MultimodalContentPart<'a> {
                 )),
                 _ => None,
             },
-        }
+        })
     }
 }
 
@@ -763,6 +777,9 @@ struct ChoiceReasoningState {
 struct ReasoningUsageEstimator {
     total: u32,
     active_choices: HashSet<u32>,
+    // Tokens of empty chunks for a choice still in reasoning, settled by its next
+    // release: a tool call drops them, since `glm47` emits a call only once complete.
+    held: HashMap<u32, u32>,
 }
 
 impl ReasoningUsageEstimator {
@@ -779,31 +796,60 @@ impl ReasoningUsageEstimator {
             .choices
             .iter()
             .any(|choice| choice.delta.reasoning_content.is_some());
-        let active_without_visible_output = chunk.inner.choices.iter().any(|choice| {
-            self.active_choices.contains(&choice.index) && !choice_has_visible_output(choice)
-        });
+        let held_choice = chunk
+            .inner
+            .choices
+            .iter()
+            .find(|choice| {
+                self.active_choices.contains(&choice.index) && !choice_has_visible_output(choice)
+            })
+            .map(|choice| choice.index);
         let usage_chunk_while_reasoning =
             chunk.inner.choices.is_empty() && !self.active_choices.is_empty();
 
-        if token_count > 0
-            && (has_reasoning || active_without_visible_output || usage_chunk_while_reasoning)
-        {
-            self.total = self.total.saturating_add(token_count);
+        if token_count > 0 {
+            if has_reasoning || usage_chunk_while_reasoning {
+                self.total = self.total.saturating_add(token_count);
+            } else if let Some(index) = held_choice {
+                let held = self.held.entry(index).or_default();
+                *held = held.saturating_add(token_count);
+            }
         }
 
         for choice in &chunk.inner.choices {
             if choice.delta.reasoning_content.is_some() {
+                self.settle_held(choice.index, true);
                 self.active_choices.insert(choice.index);
             } else if choice_has_visible_output(choice) {
+                let released_tool_call = choice
+                    .delta
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty());
+                self.settle_held(choice.index, !released_tool_call);
                 self.active_choices.remove(&choice.index);
             }
+        }
+    }
+
+    fn settle_held(&mut self, index: u32, was_reasoning: bool) {
+        if let Some(held) = self.held.remove(&index)
+            && was_reasoning
+        {
+            self.total = self.total.saturating_add(held);
         }
     }
 
     fn annotate(&self, usage: &mut dynamo_protocols::types::CompletionUsage) {
         let details = usage.completion_tokens_details.get_or_insert_default();
         if details.reasoning_tokens.unwrap_or(0) == 0 {
-            details.reasoning_tokens = Some(self.total);
+            // Text still held when usage arrives was never released as anything
+            // else, so it stays reasoning.
+            let unsettled = self
+                .held
+                .values()
+                .fold(0u32, |sum, held| sum.saturating_add(*held));
+            details.reasoning_tokens = Some(self.total.saturating_add(unsettled));
         }
     }
 }
@@ -4220,6 +4266,11 @@ impl OpenAIPreprocessor {
                         *url = serde_json::Value::String(String::new());
                     }
                 }
+                if let Some(audio) = part.get_mut("input_audio")
+                    && let Some(data) = audio.get_mut("data")
+                {
+                    *data = serde_json::Value::String(String::new());
+                }
             }
         }
     }
@@ -4347,7 +4398,7 @@ impl OpenAIPreprocessor {
                 continue;
             };
             for content_part in content_parts {
-                let Some((type_str, url, uuid)) = content_part.media_info() else {
+                let Some((type_str, url, uuid)) = content_part.media_info()? else {
                     if let Some(part) = content_part.custom_part() {
                         if !self.runtime_config.runtime_flag_enabled(
                             crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
@@ -9623,7 +9674,8 @@ mod strip_tests {
             "role": "user",
             "content": [
                 {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAA..."}},
-                {"type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}}
+                {"type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}},
+                {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}}
             ]
         }]);
         OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
@@ -9633,6 +9685,7 @@ mod strip_tests {
             parts[1]["audio_url"]["url"],
             "https://example.com/audio.wav"
         );
+        assert_eq!(parts[2]["input_audio"]["data"], "");
     }
 
     #[test]
@@ -12634,6 +12687,129 @@ responses_tools: None,
                 .as_ref()
                 .and_then(|details| details.reasoning_tokens),
             Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_usage_excludes_a_held_tool_call() {
+        use crate::protocols::openai::GuidedToolConstraint;
+        use crate::protocols::openai::chat_completions::unified_parser;
+        let thought = ["The user", " wants", " a file", ".</think>"];
+        let call = format!(
+            "<tool_call>write<arg_key>content</arg_key><arg_value>{}</arg_value></tool_call>",
+            "x".repeat(40)
+        );
+        let pieces: Vec<String> = thought
+            .iter()
+            .map(|piece| piece.to_string())
+            .chain(
+                call.as_bytes()
+                    .chunks(4)
+                    .map(|piece| String::from_utf8(piece.to_vec()).unwrap()),
+            )
+            .collect();
+        let mut chunks: Vec<_> = pieces
+            .iter()
+            .map(|piece| reasoning_usage_chunk(None, Some(piece), 1))
+            .collect();
+        chunks
+            .last_mut()
+            .unwrap()
+            .data
+            .as_mut()
+            .unwrap()
+            .inner
+            .choices[0]
+            .finish_reason = Some(FinishReason::ToolCalls);
+        chunks.push(reasoning_usage_trailer(pieces.len() as u32, None));
+        let tools = vec![dynamo_parsers::tool_calling::ToolDefinition {
+            name: "write".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"content": {"type": "string"}}
+            })),
+            strict: None,
+        }];
+        let raw = unified_parser::apply_stream_with_constraint(
+            stream::iter(chunks),
+            Some(tools),
+            GuidedToolConstraint::None,
+            dynamo_parsers_v2::UnifiedParserStartingState::Reasoning,
+            "glm47",
+            true,
+        );
+        let output =
+            OpenAIPreprocessor::apply_unified_response_policies(Box::pin(raw), true, false, false)
+                .collect::<Vec<_>>()
+                .await;
+
+        assert!(
+            output
+                .iter()
+                .filter_map(|response| response.data.as_ref())
+                .flat_map(|chunk| &chunk.inner.choices)
+                .any(|choice| choice.delta.tool_calls.is_some()),
+            "the parser must emit the held call"
+        );
+        let usage = output
+            .last()
+            .and_then(|response| response.data.as_ref())
+            .and_then(|chunk| chunk.inner.usage.as_ref())
+            .unwrap();
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+            Some(thought.len() as u32),
+            "only the thought chunks are reasoning, not the chunks of the held call"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_usage_settles_held_tokens_per_choice() {
+        let on_choice = |index: u32, mut chunk: Annotated<NvCreateChatCompletionStreamResponse>| {
+            chunk.data.as_mut().unwrap().inner.choices[0].index = index;
+            chunk
+        };
+        let mut tool_call = on_choice(1, reasoning_usage_chunk(None, None, 1));
+        tool_call.data.as_mut().unwrap().inner.choices[0]
+            .delta
+            .tool_calls = Some(vec![
+            dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                index: 0,
+                id: Some("call-1".to_string()),
+                r#type: None,
+                function: Some(dynamo_protocols::types::FunctionCallStream {
+                    name: Some("write".to_string()),
+                    arguments: Some("{}".to_string()),
+                }),
+                custom: None,
+            },
+        ]);
+        let output = annotate_reasoning_usage(stream::iter(vec![
+            on_choice(0, reasoning_usage_chunk(Some("a"), None, 1)),
+            on_choice(1, reasoning_usage_chunk(Some("b"), None, 1)),
+            on_choice(0, reasoning_usage_chunk(None, None, 1)),
+            on_choice(1, reasoning_usage_chunk(None, None, 1)),
+            tool_call,
+            reasoning_usage_trailer(5, None),
+        ]))
+        .collect::<Vec<_>>()
+        .await;
+
+        let usage = output
+            .last()
+            .and_then(|response| response.data.as_ref())
+            .and_then(|chunk| chunk.inner.usage.as_ref())
+            .unwrap();
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+            Some(3),
+            "choice 0's unreleased token stays reasoning; choice 1's call drops only its own"
         );
     }
 
@@ -16608,6 +16784,50 @@ responses_tools: None,
         .unwrap()
         {
             dynamo_renderer::PromptFormatter::OAI(formatter) => formatter,
+        }
+    }
+
+    #[test]
+    fn audio_urls_and_input_audio_render_as_placeholders() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let tokenizer = mdc.tokenizer().unwrap();
+        let formatter = test_prompt_formatter(
+            "{% for m in messages %}{% for part in m.content %}{{ part.type }};{% endfor %}{% endfor %}",
+        );
+        let preprocessor = OpenAIPreprocessor::new_with_parts(mdc, formatter, tokenizer).unwrap();
+        let audio_url = serde_json::json!({
+            "type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}
+        });
+        for (messages, expected) in [
+            (
+                serde_json::json!([{"role": "user", "content": [audio_url.clone()]}]),
+                "audio;",
+            ),
+            (
+                serde_json::json!([{
+                    "role": "tool", "tool_call_id": "call-1", "content": [audio_url.clone()]
+                }]),
+                "audio;",
+            ),
+            (
+                serde_json::json!([{"role": "user", "content": [
+                    {"type": "input_audio", "input_audio": {"data": "AA==", "format": "wav"}},
+                    audio_url
+                ]}]),
+                "audio;audio;",
+            ),
+        ] {
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test-model", "messages": messages
+                }))
+                .unwrap();
+            let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert_eq!(rendered.as_str(), expected);
         }
     }
 
