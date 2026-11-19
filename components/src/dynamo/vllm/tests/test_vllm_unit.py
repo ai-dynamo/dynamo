@@ -18,6 +18,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 import dynamo.llm as dynamo_llm
+from dynamo.llm.exceptions import HttpError
 from dynamo.vllm import envs
 from dynamo.vllm.args import (
     _connector_to_kv_transfer_json,
@@ -1642,7 +1643,6 @@ def test_build_sampling_params_maps_guided_decoding(constraint_name, constraint_
     ],
 )
 def test_build_sampling_params_rejects_guided_json_reference_cycles(schema):
-    from dynamo.llm import HttpError
     from dynamo.vllm.handlers import build_sampling_params
 
     request = {
@@ -1670,7 +1670,6 @@ def test_build_sampling_params_rejects_guided_json_reference_cycles(schema):
 def test_vllm_client_error_preserves_http_status(error_type, expected_status):
     from vllm import exceptions as vllm_exceptions
 
-    from dynamo.llm.exceptions import HttpError
     from dynamo.vllm.errors import vllm_client_error_to_http_error
 
     diagnostic = "/private/worker.py: enum array must not be empty"
@@ -1696,7 +1695,6 @@ def test_vllm_client_error_public_error_keeps_status_for_non_400(
 ):
     from vllm import exceptions as vllm_exceptions
 
-    from dynamo.llm.exceptions import HttpError
     from dynamo.vllm.errors import vllm_client_error_to_public_error
 
     error = getattr(vllm_exceptions, error_type)("invalid request")
