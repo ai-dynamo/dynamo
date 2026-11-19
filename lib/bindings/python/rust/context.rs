@@ -69,8 +69,6 @@ pub struct Context {
     first_token: Option<FirstTokenNotifier>,
     metadata: Arc<Mutex<BTreeMap<String, String>>>,
     session_affinity: Option<SessionAffinityId>,
-    /// The request's agent identity. A request routed with this context
-    /// inherits it unless it carries its own.
     agent_context: Option<Arc<AgentContext>>,
     /// Where a frontend chat engine sets HTTP response headers. `None` when
     /// the request's response cannot carry them.
@@ -211,8 +209,7 @@ impl Context {
         Ok(self)
     }
 
-    /// Keep the [`AgentContext`] the HTTP handler put on the request's
-    /// context, so a request routed from Python can inherit it.
+    /// Keep the request's [`AgentContext`], for a request routed from Python to inherit.
     pub fn with_agent_context_from<T: Send + Sync + 'static>(
         mut self,
         context: &PipelineContext<T>,
