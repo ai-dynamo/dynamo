@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A profiler results directory as mocker timing.
-
-The directory becomes an AIS perf model, or, with the deprecated directory
-form of ``--planner-profile-data``, lookup tables.
-"""
+"""A profiler results directory as mocker timing, through an AIS perf model."""
 
 import json
 import subprocess
@@ -16,12 +12,11 @@ import numpy as np
 import pytest
 
 from dynamo.common.ais_perf_model import engine_perf_config
-from dynamo.mocker.args import parse_args, resolve_planner_profile_data
+from dynamo.mocker.args import ProfileDataResult, parse_args, use_planner_profile_data
 from dynamo.mocker.config import load_mocker_engine_args
 from dynamo.mocker.utils.planner_profiler_perf_data_converter import (
-    convert_profile_results_to_npz,
+    write_ais_perf_model,
 )
-from dynamo.mocker.utils.profile_results_ais_perf_model import write_ais_perf_model
 from dynamo.replay import run_synthetic_trace_replay
 
 # The type marker is on each test: the ones that run the native replay or a
@@ -42,27 +37,18 @@ MAX_KV_TOKENS = 945_029
 MEASURED_TTFT_MS = {100: 19.525209, 4168: 87.342026, 7219: 143.294598}
 MODEL = "profiled-model"
 WORKER_TYPES = [("agg", "aggregated"), ("prefill", "prefill"), ("decode", "decode")]
-DIRECTORY_WARNING = (
-    r"^--planner-profile-data with a profiler results directory is deprecated and "
-    r"will be removed in v1\.9; use --ais-perf-model with the file that "
-    r"`python -m dynamo\.mocker\.utils\.profile_results_ais_perf_model` writes for "
-    r"the directory\.$"
-)
+DIRECTORY = ["--planner-profile-data", str(PROFILE)]
 
 
-@pytest.fixture(scope="module")
-def perf_model(tmp_path_factory) -> Path:
-    """The AIS perf model file written for ``PROFILE``."""
-    output = tmp_path_factory.mktemp("converted") / "perf_model"
-    return write_ais_perf_model(PROFILE, output, model=MODEL)
+def started(argv: list[str]) -> tuple[dict, ProfileDataResult]:
+    """Return the engine args a mocker started with ``argv`` runs with.
 
-
-@pytest.fixture(scope="module")
-def lookup_tables(tmp_path_factory) -> Path:
-    """The lookup tables that the deprecated converter writes for ``PROFILE``."""
-    return convert_profile_results_to_npz(
-        PROFILE, tmp_path_factory.mktemp("tables") / "perf_data.npz"
-    )
+    The second value owns the folder of a tuned model: an engine built from
+    the engine args reads that folder, so keep the value until then.
+    """
+    args = parse_args(argv)
+    resolved = use_planner_profile_data(args)
+    return load_mocker_engine_args(args), resolved
 
 
 def write_points(directory: Path, prefill: list, decode: list) -> Path:
@@ -90,22 +76,135 @@ def write_points(directory: Path, prefill: list, decode: list) -> Path:
     return directory
 
 
-def one_request_at_a_time(input_tokens: int, engine_timing: dict) -> dict:
-    """Replay three requests, one at a time, and return the summary."""
+@pytest.fixture
+def too_few_points(tmp_path) -> Path:
+    """A profiler results directory with three points for each phase."""
+    return write_points(
+        tmp_path / "profile",
+        [(1000, 30.0), (4000, 90.0), (8000, 170.0)],
+        [(0.1, 500.0, 7.0), (0.4, 2000.0, 15.0), (0.8, 4000.0, 30.0)],
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mode, worker_type", WORKER_TYPES)
+def test_mocker_tunes_an_ais_perf_model_with_a_directory(mode, worker_type):
+    argv = ["--model-path", MODEL, "--disaggregation-mode", mode, *DIRECTORY]
+
+    engine = started(argv)[0]["engine"]
+
+    assert engine["timing_model"]["provider"] == "ais"
+    config = engine["timing_model"]["config"]
+    recorded = {
+        "model": MODEL,
+        "backend": "vllm",
+        "system": "unknown",
+        "worker_type": worker_type,
+        "estimation_mode": "fpm_regression",
+        "nextn": 0,
+    }
+    assert {key: config[key] for key in recorded} == recorded
+    # The KV capacity of the profiled engine, in blocks of 64 tokens.
+    assert engine["num_gpu_blocks"] == MAX_KV_TOKENS // 64
+
+    engine = started(argv + ["--num-gpu-blocks-override", "4096"])[0]["engine"]
+    assert engine["num_gpu_blocks"] == 4096
+
+
+@pytest.mark.unit
+def test_directory_model_follows_engine_type_and_draft_depth():
+    argv = ["--engine-type", "sglang", "--ais-nextn", "2", *DIRECTORY]
+
+    config = started(argv)[0]["engine"]["timing_model"]["config"]
+
+    assert (config["backend"], config["nextn"]) == ("sglang", 2)
+    # Without --model-path the directory names the model.
+    assert config["model"] == PROFILE.name
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("input_tokens", sorted(MEASURED_TTFT_MS))
+def test_mocker_engine_keeps_measured_prefill_time(input_tokens):
+    """One request at a time through the engine a mocker with the directory runs."""
+    engine_args, _tuned_model = started(["--model-path", MODEL, *DIRECTORY])
+
     report = run_synthetic_trace_replay(
         input_tokens,
         50,
         3,
         replay_mode="offline",
         replay_concurrency=1,
-        **engine_timing,
+        extra_engine_args=json.dumps(engine_args),
     )
-    return report.to_dict()["summary"]
+
+    # The fit is within 12% of every such prefill point of this profile.
+    assert report.to_dict()["summary"]["mean_ttft_ms"] == pytest.approx(
+        MEASURED_TTFT_MS[input_tokens], rel=0.12
+    )
 
 
 @pytest.mark.unit
-def test_file_names_one_saved_model_for_each_worker_type(perf_model):
-    assert perf_model.name == "ais_perf_model.json"
+def test_directory_with_an_old_ais_input_is_refused():
+    with pytest.warns(FutureWarning, match=r"use --ais-perf-model VALUE\.$"):
+        args = parse_args(
+            ["--model-path", MODEL, "--ais-system", "h200_sxm", *DIRECTORY]
+        )
+
+    with pytest.raises(ValueError, match="^choose one timing provider"):
+        use_planner_profile_data(args)
+
+
+@pytest.mark.unit
+def test_engine_args_file_keeps_its_own_timing(tmp_path):
+    timing = {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 2.0}
+    file = tmp_path / "engine.json"
+    file.write_text(json.dumps({"engine": {"timing_model": timing}}))
+
+    engine = started([*DIRECTORY, "--extra-engine-args", str(file)])[0]["engine"]
+
+    assert engine["timing_model"] == timing
+
+
+@pytest.mark.unit
+def test_lookup_table_file_stays_the_timing_source(tmp_path):
+    tables = tmp_path / "tables.npz"
+    np.savez(
+        tables,
+        prefill_isl=np.array([128.0, 256.0]),
+        prefill_ttft_ms=np.array([4.0, 8.0]),
+        decode_active_kv_tokens=np.array([1024.0, 2048.0]),
+        decode_context_length=np.array([128.0, 256.0]),
+        decode_itl=np.array([[1.0, 1.5], [2.0, 2.5]]),
+    )
+
+    engine = started(["--planner-profile-data", str(tables)])[0]["engine"]
+    timing = engine["timing_model"]
+
+    assert timing["provider"] == "dynamo_profile"
+    assert timing["config"] == {"path": str(tables)}
+
+
+@pytest.mark.unit
+def test_mocker_refuses_a_directory_with_too_few_points(too_few_points):
+    args = parse_args(["--planner-profile-data", str(too_few_points)])
+
+    with pytest.raises(ValueError, match="^ais_perf_model: the model is not ready"):
+        use_planner_profile_data(args)
+
+
+@pytest.mark.unit
+def test_mocker_refuses_a_path_without_profile_data(tmp_path):
+    args = parse_args(["--planner-profile-data", str(tmp_path)])
+
+    with pytest.raises(FileNotFoundError, match="neither a mocker-format NPZ file"):
+        use_planner_profile_data(args)
+
+
+@pytest.mark.unit
+def test_written_file_names_one_saved_model_for_each_worker_type(tmp_path):
+    perf_model = write_ais_perf_model(PROFILE, tmp_path / "out", model=MODEL)
+
+    assert perf_model == tmp_path / "out" / "ais_perf_model.json"
     assert [entry["worker_type"] for entry in json.loads(perf_model.read_text())] == [
         "prefill",
         "decode",
@@ -113,84 +212,34 @@ def test_file_names_one_saved_model_for_each_worker_type(perf_model):
     ]
     for _, worker_type in WORKER_TYPES:
         config = engine_perf_config(str(perf_model), worker_type)
-        written = {
-            "model": MODEL,
-            "backend": "vllm",
-            "system": "unknown",
-            "worker_type": worker_type,
-            "estimation_mode": "fpm_regression",
-        }
-        assert {key: config[key] for key in written} == written
         assert config["deployment_limits"]["max_kv_tokens"] == MAX_KV_TOKENS
         # The saved state is next to the file.
         snapshot = config["estimator_config"]["state_snapshot"]
         assert Path(snapshot["path"]) == perf_model.parent / worker_type
 
 
-@pytest.mark.unit
-@pytest.mark.parametrize("mode, worker_type", WORKER_TYPES)
-def test_mocker_takes_timing_and_kv_capacity_from_the_file(
-    perf_model, mode, worker_type
-):
-    argv = ["--model-path", MODEL, "--disaggregation-mode", mode]
-    argv += ["--ais-perf-model", str(perf_model)]
-
-    engine = load_mocker_engine_args(parse_args(argv))["engine"]
-
-    assert engine["timing_model"]["provider"] == "ais"
-    assert engine["timing_model"]["config"]["worker_type"] == worker_type
-    # The KV capacity of the profiled engine, in blocks of 64 tokens.
-    assert engine["num_gpu_blocks"] == MAX_KV_TOKENS // 64
-
-    engine = load_mocker_engine_args(
-        parse_args(argv + ["--num-gpu-blocks-override", "4096"])
-    )["engine"]
-    assert engine["num_gpu_blocks"] == 4096
-
-
 @pytest.mark.integration
-@pytest.mark.parametrize("input_tokens", sorted(MEASURED_TTFT_MS))
-def test_replay_through_the_file_keeps_measured_prefill_time(perf_model, input_tokens):
-    summary = one_request_at_a_time(input_tokens, {"ais_perf_model": str(perf_model)})
+def test_replay_takes_the_written_file(tmp_path):
+    perf_model = write_ais_perf_model(PROFILE, tmp_path / "out", model=MODEL)
 
-    # The fit is within 12% of every such prefill point of this profile.
-    assert summary["mean_ttft_ms"] == pytest.approx(
-        MEASURED_TTFT_MS[input_tokens], rel=0.12
+    report = run_synthetic_trace_replay(
+        4168,
+        50,
+        3,
+        replay_mode="offline",
+        replay_concurrency=1,
+        ais_perf_model=str(perf_model),
     )
 
-
-@pytest.mark.integration
-def test_replay_through_the_file_and_through_lookup_tables(perf_model, lookup_tables):
-    """Decode time agrees inside the profiled range; short prefills differ."""
-    table_timing = {
-        "type": "external",
-        "provider": "dynamo_profile",
-        "config": {"path": str(lookup_tables)},
-    }
-    tables = {
-        "extra_engine_args": json.dumps({"engine": {"timing_model": table_timing}})
-    }
-    model = {"ais_perf_model": str(perf_model)}
-
-    # Contexts of about 3,200 tokens: both follow the same plane.
-    assert one_request_at_a_time(3151, model)["mean_itl_ms"] == pytest.approx(
-        one_request_at_a_time(3151, tables)["mean_itl_ms"], rel=0.015
+    assert report.to_dict()["summary"]["mean_ttft_ms"] == pytest.approx(
+        MEASURED_TTFT_MS[4168], rel=0.12
     )
-    # The line through the prefill points is far below the shortest one, which
-    # the test above finds through the file.
-    assert one_request_at_a_time(100, tables)["mean_ttft_ms"] < 1.0
 
 
 @pytest.mark.unit
-def test_too_few_points_write_nothing(tmp_path):
-    profile = write_points(
-        tmp_path / "profile",
-        [(1000, 30.0), (4000, 90.0), (8000, 170.0)],
-        [(0.1, 500.0, 7.0), (0.4, 2000.0, 15.0), (0.8, 4000.0, 30.0)],
-    )
-
+def test_too_few_points_write_nothing(too_few_points, tmp_path):
     with pytest.raises(ValueError, match="^ais_perf_model: the model is not ready"):
-        write_ais_perf_model(profile, tmp_path / "out", model=MODEL)
+        write_ais_perf_model(too_few_points, tmp_path / "out", model=MODEL)
 
     assert sorted(path.name for path in tmp_path.iterdir()) == ["profile"]
 
@@ -211,7 +260,7 @@ def test_command_prints_the_file_it_wrote(tmp_path):
     command = [
         sys.executable,
         "-m",
-        "dynamo.mocker.utils.profile_results_ais_perf_model",
+        "dynamo.mocker.utils.planner_profiler_perf_data_converter",
     ]
     command += [str(PROFILE), str(output), "--model", MODEL, "--backend", "sglang"]
 
@@ -223,136 +272,3 @@ def test_command_prints_the_file_it_wrote(tmp_path):
     assert engine_perf_config(done.stdout.splitlines()[-1], "decode")["backend"] == (
         "sglang"
     )
-
-
-@pytest.mark.unit
-def test_lookup_tables_keep_their_values(lookup_tables):
-    """The values the scikit-learn regression gave for this profile."""
-    with np.load(lookup_tables) as tables:
-        assert tables["prefill_isl"][[0, 99]] == pytest.approx([100.0, 16372.0])
-        assert tables["prefill_ttft_ms"][[0, 49, 99]] == pytest.approx(
-            [0.6065956666666105, 178.74199816419093, 360.5128170392157], rel=1e-9
-        )
-        assert tables["decode_active_kv_tokens"][99] == pytest.approx(910195.0)
-        assert tables["decode_context_length"][[0, 99]] == pytest.approx([1.0, 13585.0])
-        assert tables["decode_itl"][[0, 49, 99, 99], [0, 49, 0, 99]] == pytest.approx(
-            [
-                6.110762547385647,
-                20.67015159320542,
-                18534.580560736187,
-                34.15789791294073,
-            ],
-            rel=1e-9,
-        )
-
-
-@pytest.mark.unit
-def test_lookup_tables_fit_points_of_one_context_length(tmp_path):
-    """Requests and KV tokens rise together, so the fit has one slope."""
-    counts = [935, 931, 937, 934, 933, 934, 940, 935, 936, 934, 936, 937, 936, 937]
-    profile = write_points(
-        tmp_path / "profile",
-        [(1000, 30.0), (6000, 120.0)],
-        # Requests of 100 tokens: 6 ms plus 40 ns for each KV token.
-        [(count / 1000, 100.0, 6 + 0.004 * count) for count in counts + [935]],
-    )
-
-    with np.load(
-        convert_profile_results_to_npz(profile, tmp_path / "tables.npz")
-    ) as tables:
-        # The measured time of 940 requests.
-        assert tables["decode_itl"][99, 99] == pytest.approx(9.76, rel=1e-6)
-
-
-@pytest.mark.unit
-def test_lookup_tables_without_kv_usage_are_finite(tmp_path):
-    profile = write_points(
-        tmp_path / "profile",
-        [(1000, 30.0), (6000, 120.0)],
-        [(0.0, 500.0, 7.0), (0.0, 4000.0, 8.0)],
-    )
-
-    with np.load(
-        convert_profile_results_to_npz(profile, tmp_path / "tables.npz")
-    ) as tables:
-        assert np.isfinite(tables["decode_itl"]).all()
-
-
-@pytest.mark.unit
-def test_lookup_tables_refuse_a_time_that_is_not_a_number(tmp_path):
-    profile = write_points(
-        tmp_path / "profile",
-        [(1000, 30.0), (6000, 120.0)],
-        [(0.1, 500.0, float("nan")), (0.6, 4000.0, 20.0)],
-    )
-
-    with pytest.raises(ValueError, match="NaN or infinity"):
-        convert_profile_results_to_npz(profile, tmp_path / "tables.npz")
-
-
-@pytest.mark.unit
-def test_lookup_tables_refuse_time_that_falls_with_tokens(tmp_path):
-    decode = [(0.1, 500.0, 7.0), (0.6, 4000.0, 20.0)]
-    falling_prefill = write_points(
-        tmp_path / "prefill", [(1000, 90.0), (6000, 30.0)], decode
-    )
-    falling_decode = write_points(
-        tmp_path / "decode",
-        [(1000, 30.0), (6000, 120.0)],
-        [(0.1, 500.0, 20.0), (0.3, 4000.0, 15.0), (0.6, 4000.0, 7.0)],
-    )
-
-    with pytest.raises(RuntimeError, match="^Failed to fit prefill regression"):
-        convert_profile_results_to_npz(falling_prefill, tmp_path / "prefill.npz")
-    with pytest.raises(RuntimeError, match="^Failed to fit decode regression"):
-        convert_profile_results_to_npz(falling_decode, tmp_path / "decode.npz")
-
-
-@pytest.mark.unit
-def test_lookup_tables_ignore_time_that_falls_with_batch_size(tmp_path):
-    """At one KV token count, more requests do not make a step faster."""
-    profile = write_points(
-        tmp_path / "profile",
-        [(1000, 30.0), (6000, 120.0)],
-        # 100 and 500 requests of 100 tokens, then 10 and 18 of 5,000 tokens.
-        [
-            (0.1, 100.0, 5.0),
-            (0.5, 100.0, 4.0),
-            (0.5, 5000.0, 30.0),
-            (0.9, 5000.0, 55.0),
-        ],
-    )
-
-    with np.load(
-        convert_profile_results_to_npz(profile, tmp_path / "tables.npz")
-    ) as tables:
-        itl = tables["decode_itl"]
-
-    # Along a row the KV token count is fixed and the batch size falls.
-    assert np.all(np.diff(itl, axis=1) == 0)
-    assert np.all(np.diff(itl[:, 0]) > 0)
-
-
-@pytest.mark.unit
-def test_directory_form_warns_once_the_tables_are_written():
-    with pytest.warns(FutureWarning, match=DIRECTORY_WARNING) as warned:
-        result = resolve_planner_profile_data(PROFILE)
-
-    assert len(warned) == 1
-    with np.load(result.npz_path) as tables:
-        assert tables["decode_itl"].shape == (100, 100)
-
-
-@pytest.mark.unit
-def test_table_file_and_failed_conversion_do_not_warn(lookup_tables, tmp_path):
-    # A warning is an error in this suite, so none is given here.
-    assert resolve_planner_profile_data(lookup_tables).npz_path == lookup_tables
-    with pytest.raises(FileNotFoundError, match="neither a mocker-format NPZ file"):
-        resolve_planner_profile_data(tmp_path / "missing")
-    falling = write_points(
-        tmp_path / "falling",
-        [(1000, 90.0), (6000, 30.0)],
-        [(0.1, 500.0, 7.0), (0.6, 4000.0, 20.0)],
-    )
-    with pytest.raises(RuntimeError, match="^Failed to fit prefill regression"):
-        resolve_planner_profile_data(falling)
