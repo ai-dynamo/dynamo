@@ -134,6 +134,15 @@ See [Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-
   </Step>
 </Steps>
 
+## Single-Call Output
+
+With `parallel_tool_calls: false`, Dynamo limits returned tool calls using parsed
+call boundaries. Dynamo does not inject raw delimiters such as `</tool_call>`
+as generation stops, because they can also occur inside argument text. The backend can still
+generate additional calls that the frontend discards; this setting does not
+guarantee that native generation ends immediately after the first call. Usage
+continues to reflect backend generation, including discarded output.
+
 ## Custom Freeform Tools
 
 Chat Completions accepts custom tools whose input is freeform text, such as code or

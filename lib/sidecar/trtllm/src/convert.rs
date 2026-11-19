@@ -662,7 +662,10 @@ fn output_candidates(count: u32) -> pb::CandidateTokenSelection {
 fn stop_conditions(request: &PreprocessedRequest) -> Vec<pb::StopCondition> {
     let stop = &request.stop_conditions;
     let mut conditions = Vec::new();
-    if let Some(stop_strings) = stop.stop.as_ref() {
+    for stop_strings in [stop.stop.as_ref(), stop.stop_visible.as_ref()]
+        .into_iter()
+        .flatten()
+    {
         for text in stop_strings {
             conditions.push(pb::StopCondition {
                 condition: Some(pb::stop_condition::Condition::StopText(text.clone())),
@@ -698,9 +701,14 @@ fn stop_token_ids(request: &PreprocessedRequest) -> Vec<u32> {
 fn has_visible_stop_tokens(request: &PreprocessedRequest) -> bool {
     request
         .stop_conditions
-        .stop_token_ids_visible
+        .stop_visible
         .as_ref()
-        .is_some_and(|ids| !ids.is_empty())
+        .is_some_and(|stops| !stops.is_empty())
+        || request
+            .stop_conditions
+            .stop_token_ids_visible
+            .as_ref()
+            .is_some_and(|ids| !ids.is_empty())
 }
 
 /// Hidden stop IDs to remove when the engine confirms they ended generation.
@@ -858,9 +866,10 @@ fn validate_request(
     }
     let sampling = &request.sampling_options;
     if sampling.include_stop_str_in_output == Some(true) {
-        // Would map to `include_stop_in_output`; not yet tested end to end.
+        // Parser boundaries have a separate frontend projection; ordinary user
+        // stop strings are still trimmed by the decoder on this path.
         return Err(client::invalid_argument(
-            "include_stop_str_in_output is not supported by the TensorRT-LLM sidecar",
+            "include_stop_str_in_output is not supported for user stop strings by the TensorRT-LLM sidecar",
         ));
     }
     if sampling.n.unwrap_or(1) != 1 {

@@ -28,6 +28,19 @@ pub use dynamo_parsers::tool_calling::StructuralTagSchemaMode;
 // Reserve a topology namespace so generated taints can be rebuilt without touching caller taints.
 pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 
+/// Engine retains parser stop strings while frontend trims ordinary user stops.
+pub const VISIBLE_STOP_STRINGS_CAPABILITY: &str = "visible_stop_strings";
+
+/// Require a closed reasoning prefill when a supported parser disables thinking.
+pub const REQUIRE_CLOSED_REASONING_PREFILL_CAPABILITY: &str = "require_closed_reasoning_prefill";
+
+/// Report incomplete native tool calls as protocol errors at a successful finish.
+pub const REJECT_INCOMPLETE_NATIVE_TOOL_CALLS_CAPABILITY: &str =
+    "reject_incomplete_native_tool_calls";
+
+/// Render Responses context overflow as an in-protocol failed event stream.
+pub const RESPONSES_CONTEXT_OVERFLOW_EVENTS_CAPABILITY: &str = "responses_context_overflow_events";
+
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
 
@@ -523,6 +536,13 @@ impl ModelRuntimeConfig {
             self.structural_tag_scope = StructuralTagScope::Auto;
             self.structural_tag_schema = StructuralTagSchemaMode::Auto;
         }
+    }
+
+    pub(crate) fn reject_incomplete_native_tool_calls(&self) -> bool {
+        self.runtime_data
+            .get(REJECT_INCOMPLETE_NATIVE_TOOL_CALLS_CAPABILITY)
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
     }
 
     /// Check whether a runtime boolean is explicitly enabled.

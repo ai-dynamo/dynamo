@@ -560,6 +560,7 @@ mod tests {
             None, // No tool_definitions in this test
             false,
             false,
+            false, // No strict GLM capability for this backend.
             reasoning_parsed_stream,
         );
 
@@ -676,6 +677,7 @@ mod tests {
             None,
             false,
             false,
+            false, // No strict GLM capability for this backend.
             reasoning_parsed_stream,
         );
 
@@ -777,6 +779,7 @@ mod tests {
             None, // No tool_definitions in this test
             false,
             false,
+            false, // No strict GLM capability for this backend.
             reasoning_parsed_stream,
         );
 
@@ -910,5 +913,31 @@ mod tests {
         assert_eq!(reasoning, "Reasoning before the close tag.");
         assert_eq!(content, "Final answer here.");
         assert!(!content.contains("</think>"));
+    }
+    #[tokio::test]
+    async fn glm45_close_marker_is_independent_of_chunk_boundaries() {
+        let input = "planning</think>Visible text.<tool_call>Bash</tool_call>";
+        for offset in 0..="</think>".len() {
+            let split = "planning".len() + offset;
+            let (reasoning, content) = run_parser_with_injected_reasoning(
+                vec![chunk(&input[..split]), chunk(&input[split..])],
+                "glm45",
+            )
+            .await;
+            assert_eq!(reasoning, "planning", "offset={offset}");
+            assert_eq!(
+                content, "Visible text.<tool_call>Bash</tool_call>",
+                "offset={offset}"
+            );
+        }
+        let (reasoning, content) =
+            run_parser_with_injected_reasoning(vec![chunk("Unicode 思考<"), chunk("x")], "glm45")
+                .await;
+        assert_eq!(reasoning, "Unicode 思考<x");
+        assert!(content.is_empty());
+        let (reasoning, content) =
+            run_parser_with_injected_reasoning(vec![chunk("literal<")], "glm45").await;
+        assert_eq!(reasoning, "literal<");
+        assert!(content.is_empty());
     }
 }

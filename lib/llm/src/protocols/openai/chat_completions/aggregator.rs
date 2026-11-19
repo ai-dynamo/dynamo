@@ -784,6 +784,17 @@ impl DeltaAggregator {
                             aggregator.response_events = parsed.events;
                         }
                         if parsed.incomplete_native_call
+                            && super::unified_parser::rejects_incomplete_native_tool_call(
+                                family,
+                                choice
+                                    .finish_reason
+                                    .unwrap_or(dynamo_protocols::types::FinishReason::Stop),
+                                parsing_options.reject_incomplete_native_tool_calls,
+                            )
+                        {
+                            return Err(super::unified_parser::incomplete_tool_call_error());
+                        }
+                        if parsed.incomplete_native_call
                             && matches!(
                                 choice.finish_reason,
                                 Some(
@@ -862,6 +873,27 @@ impl DeltaAggregator {
                     &parsing_options.tools,
                 )
                 .await;
+                if super::unified_parser::rejects_incomplete_native_tool_call(
+                    parser,
+                    choice
+                        .finish_reason
+                        .unwrap_or(dynamo_protocols::types::FinishReason::Stop),
+                    parsing_options.reject_incomplete_native_tool_calls,
+                ) && super::unified_parser::first_unquoted_native_tool_call_marker(
+                    &choice.text,
+                    "glm47",
+                )
+                .is_some()
+                    && super::unified_parser::glm_unfinished_call(&choice.text)
+                        .map_err(|error| {
+                            dynamo_runtime::error::DynamoError::from(
+                                error.as_ref() as &(dyn std::error::Error + 'static)
+                            )
+                        })?
+                        .is_some()
+                {
+                    return Err(super::unified_parser::incomplete_tool_call_error());
+                }
                 let (tool_calls, content) = match parse_result {
                     Ok(result) => result,
                     Err(error) => {
@@ -3948,32 +3980,69 @@ mod tests {
 
     #[tokio::test]
     async fn test_glm47_single_truncated_call_is_suppressed() {
-        let text = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Bos";
-        let delta = create_test_delta(
-            0,
-            text,
-            Some(dynamo_protocols::types::Role::Assistant),
-            Some(dynamo_protocols::types::FinishReason::Length),
-            None,
-            None,
-        );
-        let stream = Box::pin(stream::iter(vec![delta]));
-        let result =
-            DeltaAggregator::apply(stream, ParsingOptions::new(Some("glm47".to_string()), None))
-                .await
-                .unwrap();
-
-        let choice = &result.inner.choices[0];
-        assert_eq!(
-            choice.finish_reason,
-            Some(dynamo_protocols::types::FinishReason::Length)
-        );
-        assert!(
-            choice.message.tool_calls.is_none(),
-            "incomplete call must not produce a structured tool_call"
-        );
-        assert_eq!(choice.message.content, None);
-        assert!(!serde_json::to_string(choice).unwrap().contains(text));
+        use dynamo_protocols::types::FinishReason;
+        let text = "I'll check. <tool_call>get_weather<arg_key>city</arg_key><arg_value>Bos";
+        for strict in [false, true] {
+            for reason in [
+                None,
+                Some(FinishReason::Length),
+                Some(FinishReason::Stop),
+                Some(FinishReason::ToolCalls),
+            ] {
+                let delta = create_test_delta(
+                    0,
+                    text,
+                    Some(dynamo_protocols::types::Role::Assistant),
+                    reason,
+                    None,
+                    None,
+                );
+                let other = create_test_delta(
+                    1,
+                    "other choice",
+                    Some(dynamo_protocols::types::Role::Assistant),
+                    Some(FinishReason::Stop),
+                    None,
+                    None,
+                );
+                let result = DeltaAggregator::apply(
+                    Box::pin(stream::iter(vec![delta, other])),
+                    ParsingOptions::new(Some("glm47".to_string()), None)
+                        .with_reject_incomplete_native_tool_calls(strict),
+                )
+                .await;
+                if strict && reason != Some(FinishReason::Length) {
+                    assert_eq!(
+                        result.unwrap_err().class(),
+                        dynamo_runtime::error::ErrorClass::BackendProtocol
+                    );
+                    continue;
+                }
+                let result = result.unwrap();
+                let choice = &result.inner.choices[0];
+                if reason.is_some() {
+                    assert_eq!(choice.finish_reason, Some(FinishReason::Length));
+                }
+                assert!(choice.message.tool_calls.is_none());
+                assert_eq!(
+                    choice.message.content,
+                    Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                        "I'll check. ".into()
+                    ))
+                );
+                assert_eq!(
+                    result.inner.choices[1].message.content,
+                    Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                        "other choice".into()
+                    ))
+                );
+                assert!(
+                    !serde_json::to_string(choice)
+                        .unwrap()
+                        .contains("<tool_call>")
+                );
+            }
+        }
     }
 
     #[tokio::test]

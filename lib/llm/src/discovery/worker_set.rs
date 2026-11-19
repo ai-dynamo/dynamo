@@ -449,24 +449,7 @@ impl WorkerSet {
 
     /// Build ParsingOptions from this WorkerSet's card configuration.
     pub fn parsing_options(&self) -> crate::protocols::openai::ParsingOptions {
-        crate::protocols::openai::ParsingOptions {
-            default_thinking_mode: self
-                .card
-                .runtime_config
-                .runtime_data
-                .get(crate::preprocessor::DEFAULT_THINKING_MODE_RUNTIME_KEY)
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string),
-            structural_tag: self.card.runtime_config.structural_tag.clone(),
-            exclude_tools_when_tool_choice_none: self
-                .card
-                .runtime_config
-                .exclude_tools_when_tool_choice_none,
-            ..crate::protocols::openai::ParsingOptions::new(
-                self.card.runtime_config.tool_call_parser.clone(),
-                self.card.runtime_config.reasoning_parser.clone(),
-            )
-        }
+        crate::protocols::openai::ParsingOptions::from_runtime_config(&self.card.runtime_config)
     }
 
     /// Current instance membership, excluding canceled and closed lifecycle views.

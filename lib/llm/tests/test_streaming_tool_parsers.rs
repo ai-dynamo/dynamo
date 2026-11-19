@@ -183,6 +183,7 @@ async fn parse_response_stream(
                 None,  // No tool_definitions in this test
                 false, // No structural_tag in this test
                 false,
+                false,
                 stream,
             ))
         } else {
@@ -2050,6 +2051,7 @@ mod tests {
             None,
             false,
             false,
+            false,
             Box::pin(futures::stream::iter(chunks)),
         )
         .collect()
@@ -2114,6 +2116,7 @@ mod tests {
             None,
             false,
             true,
+            false,
             Box::pin(futures::stream::iter(chunks)),
         )
         .collect()
@@ -2158,6 +2161,7 @@ mod tests {
             Some("hermes".to_string()),
             Some(ChatCompletionToolChoiceOption::Required),
             None,
+            false,
             false,
             false,
             Box::pin(futures::stream::iter(chunks)),
@@ -2227,6 +2231,7 @@ async fn run_glm47_jail(
         Some("glm47".to_string()),
         None,
         None,
+        false,
         false,
         false,
         Box::pin(stream::iter(chunks)),
@@ -2474,62 +2479,68 @@ async fn test_deepseek_v4_finalize_recovers_at_bare_eof_with_no_finish_reason() 
 // unchanged and nothing else — no synthesized `ToolCalls` finish chunk fabricated
 // from the jail's own EOF-triggered finalize, because the request never completed.
 #[tokio::test]
-async fn test_deepseek_v4_upstream_typed_errors_suppress_jail_finalize() {
+async fn test_upstream_typed_errors_suppress_jail_finalize() {
     use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 
-    for error_type in [
-        ErrorType::Backend(BackendError::InvalidArgument),
-        ErrorType::Backend(BackendError::EngineShutdown),
-        ErrorType::Backend(BackendError::Disconnected),
-    ] {
-        let message = format!("typed {error_type} error");
-        let output_chunks = parse_response_stream(
-            stream::iter(vec![
-                deepseek_v4_partial_invoke_chunk(),
-                Annotated {
-                    data: None,
-                    id: None,
-                    event: Some("error".to_string()),
-                    comment: None,
-                    error: Some(
-                        DynamoError::builder()
-                            .error_type(error_type)
-                            .message(&message)
-                            .build(),
-                    ),
-                },
-            ]),
-            true,
-            false,
-            Some("deepseek_v4".to_string()),
-            None,
-        )
-        .await;
+    for parser in ["deepseek_v4", "glm47"] {
+        for error_type in [
+            ErrorType::Backend(BackendError::InvalidArgument),
+            ErrorType::Backend(BackendError::EngineShutdown),
+            ErrorType::Backend(BackendError::Disconnected),
+        ] {
+            let message = format!("typed {error_type} error");
+            let output_chunks = parse_response_stream(
+                stream::iter(vec![
+                    if parser == "glm47" {
+                        make_glm47_chunk(Some("<tool_call>"), None)
+                    } else {
+                        deepseek_v4_partial_invoke_chunk()
+                    },
+                    Annotated {
+                        data: None,
+                        id: None,
+                        event: Some("error".to_string()),
+                        comment: None,
+                        error: Some(
+                            DynamoError::builder()
+                                .error_type(error_type)
+                                .message(&message)
+                                .build(),
+                        ),
+                    },
+                ]),
+                true,
+                false,
+                Some(parser.to_string()),
+                None,
+            )
+            .await;
 
-        assert!(
-            !output_chunks.is_empty(),
-            "the terminal error itself must still reach the caller"
-        );
-        let last = output_chunks.last().expect("non-empty output");
-        assert!(
-            last.is_error(),
-            "the terminal error must be the LAST item in the output stream; got: {output_chunks:#?}"
-        );
-        let error = last.error.as_ref().expect("terminal error must be typed");
-        assert_eq!(error.error_type(), error_type);
-        assert_eq!(error.message(), message);
-        assert_eq!(
-            output_chunks.iter().filter(|a| a.is_error()).count(),
-            1,
-            "the terminal error must be surfaced exactly once; got: {output_chunks:#?}"
-        );
+            assert!(
+                !output_chunks.is_empty(),
+                "the terminal error itself must still reach the caller"
+            );
+            let last = output_chunks.last().expect("non-empty output");
+            assert!(
+                last.is_error(),
+                "the terminal error must be the LAST item in the output stream; got: {output_chunks:#?}"
+            );
+            let error = last.error.as_ref().expect("terminal error must be typed");
+            assert_eq!(error.error_type(), error_type);
+            assert_eq!(error.message(), message);
+            assert_eq!(
+                output_chunks.iter().filter(|a| a.is_error()).count(),
+                1,
+                "the terminal error must be surfaced exactly once; got: {output_chunks:#?}"
+            );
 
-        let aggregated = aggregate_content_from_chunks(&output_chunks);
-        assert!(
-            !aggregated.has_tool_calls,
-            "an upstream error must suppress the jail's EOF finalize entirely — no \
+            let aggregated = aggregate_content_from_chunks(&output_chunks);
+            assert!(
+                !aggregated.has_tool_calls,
+                "an upstream error must suppress the jail's EOF finalize entirely — no \
              synthesized tool call may reach the caller for a request that never actually \
              completed; got: {output_chunks:#?}"
-        );
+            );
+        }
     }
 }
