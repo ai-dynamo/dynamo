@@ -1962,22 +1962,34 @@ fn utf8_raw_key() -> Vec<u8> {
     key
 }
 
-#[test]
-fn non_utf8_extra_key_does_not_fail_the_batch() {
-    let events = [
-        binary_key_stored(11, None, Some(prompt_embeds_digest())),
-        binary_key_stored(12, None, None),
-    ];
-
+// Decodes one batch and returns the block hashes each event adds to the index.
+fn indexed_block_hashes(events: &[BinaryKeyStored]) -> Vec<Vec<u64>> {
     let payload = to_vec_named(&(0.0_f64, events, Some(0_i32))).unwrap();
-    let batch = decode_event_batch(&payload).expect("a binary key must not fail the batch");
-    assert_eq!(batch.events.len(), 2);
-    assert!(
-        batch
-            .events
-            .iter()
-            .all(|event| matches!(event, RawKvEvent::BlockStored { .. }))
-    );
+    let batch = decode_event_batch(&payload).unwrap();
+
+    let mut normalizer = ZmqEventNormalizer::new(2);
+    batch
+        .events
+        .into_iter()
+        .enumerate()
+        .map(|(event_id, event)| {
+            let placement = normalizer
+                .normalize(event, event_id as u64, WorkerWithDpRank::new(7, 0))
+                .unwrap();
+            match placement.event.data {
+                KvCacheEventData::Stored(store) => store
+                    .blocks
+                    .iter()
+                    .map(|block| block.block_hash.0)
+                    .collect(),
+                KvCacheEventData::Removed(removed) => {
+                    assert!(removed.block_hashes.is_empty());
+                    Vec::new()
+                }
+                KvCacheEventData::Cleared => panic!("no clear was sent"),
+            }
+        })
+        .collect()
 }
 
 #[test]
@@ -1988,33 +2000,24 @@ fn binary_extra_key_keeps_block_and_children_out_of_the_index() {
             binary_key_stored(12, Some(11), None),
             binary_key_stored(21, None, None),
         ];
-        let payload = to_vec_named(&(0.0_f64, events, Some(0_i32))).unwrap();
-        let batch = decode_event_batch(&payload).unwrap();
-
-        let mut normalizer = ZmqEventNormalizer::new(2);
-        let indexed: Vec<Vec<u64>> = batch
-            .events
-            .into_iter()
-            .enumerate()
-            .map(|(event_id, event)| {
-                let placement = normalizer
-                    .normalize(event, event_id as u64, WorkerWithDpRank::new(7, 0))
-                    .unwrap();
-                match placement.event.data {
-                    KvCacheEventData::Stored(store) => store
-                        .blocks
-                        .iter()
-                        .map(|block| block.block_hash.0)
-                        .collect(),
-                    KvCacheEventData::Removed(removed) => {
-                        assert!(removed.block_hashes.is_empty());
-                        Vec::new()
-                    }
-                    KvCacheEventData::Cleared => panic!("no clear was sent"),
-                }
-            })
-            .collect();
-
-        assert_eq!(indexed, vec![vec![], vec![], vec![21]], "raw key {key:?}");
+        assert_eq!(
+            indexed_block_hashes(&events),
+            vec![vec![], vec![], vec![21]],
+            "raw key {key:?}"
+        );
     }
+}
+
+#[test]
+fn binary_extra_key_on_a_later_block_keeps_the_earlier_blocks() {
+    // The raw key is on block 1, so the store is cut at token 1 * block_size.
+    let store = BinaryKeyStored {
+        event_type: "BlockStored",
+        block_hashes: vec![11, 12],
+        parent_block_hash: None,
+        token_ids: vec![0, 0, 0, 0],
+        block_size: 2,
+        extra_keys: vec![None, Some(vec![ByteBuf::from(prompt_embeds_digest())])],
+    };
+    assert_eq!(indexed_block_hashes(&[store]), vec![vec![11]]);
 }
