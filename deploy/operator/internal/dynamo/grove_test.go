@@ -2428,7 +2428,9 @@ func TestBuildCliqueForRoleCustomKaiScheduler(t *testing.T) {
 					ComponentName: "Worker", ComponentType: commonconsts.ComponentTypeWorker,
 					Replicas: new(int32(1)),
 				}
-				dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "default"}
+				dgd := &v1beta1.DynamoGraphDeployment{
+					ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+				}
 				runtimeConfig := &controller_common.RuntimeConfig{
 					Gate: features.Gates{Grove: true, KaiScheduler: true},
 				}

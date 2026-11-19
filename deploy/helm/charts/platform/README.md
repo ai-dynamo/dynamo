@@ -770,7 +770,7 @@ Kubernetes: `>=1.30.0-0`
 | global.nats.install | bool | `false` | Whether this chart should install the bundled NATS subchart. When true, deploys NATS and auto-configures the operator with its address. When false, NATS is not deployed. Use dynamo-operator.natsAddr to point at an external instance if you are bringing your own NATS. NATS is optional because the default request and event planes use TCP and ZMQ, respectively. |
 | global.kai-scheduler.install | bool | `false` | Whether this chart should install the bundled kai-scheduler subchart. When true, deploys kai-scheduler and its CRDs. Integration is automatically enabled. NOTE: For production environments, it is recommended to install kai-scheduler separately. |
 | global.kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler integration (queue creation, schedulerName injection). Set to true when kai-scheduler is available in the cluster (installed externally). Automatically enabled when install=true. The operator uses this to decide whether to inject schedulerName and queue labels into pod templates. |
-| global.kai-scheduler.schedulerName | string | `"kai-scheduler"` | Pod scheduler name for the operator's KAI integration. Grove must support this name with its KAI backend; this setting does not reconfigure Grove or KAI itself. |
+| global.kai-scheduler.schedulerName | string | `"kai-scheduler"` | Scheduler name the operator sets on Grove pods when KAI integration is enabled. A custom name requires install=false and a Grove version that maps the name to its KAI backend; this setting does not reconfigure Grove or KAI. |
 | global.volcano-scheduler.enabled | bool | `false` | EXPERIMENTAL: Whether to enable Volcano scheduler integration for Grove PodCliqueSets. Set to true when Volcano is available in the cluster and Grove is configured with Volcano scheduler support. The operator uses this to inject schedulerName and map nvidia.com/volcano-queue to Grove's Volcano queue annotation. |
 | global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
 | global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
@@ -956,36 +956,47 @@ global:
     enabled: true   # Enables multinode orchestration via PodCliqueSets
 ```
 
-To select a custom KAI scheduler name, set the operator integration value:
+To use a KAI-compatible scheduler under a different name (for example, Run:ai),
+install it separately and set its name:
 
 ```yaml
 global:
   kai-scheduler:
+    install: false        # A custom name requires an externally managed scheduler
     enabled: true
     schedulerName: runai-scheduler
   grove:
     enabled: true
 ```
 
+> [!WARNING]
+> This setting changes only the scheduler name in Dynamo's pod templates. It does not
+> rename or reconfigure KAI or Grove. Before using a custom name, confirm that your Grove
+> version maps that name to its KAI backend and that the scheduler reads Grove's PodGroups
+> and queue metadata. The bundled Grove `v0.2.0-beta1` KAI profile is named `kai-scheduler`
+> and does not support a custom name. Changing this value alone does not enable Run:ai.
+> Custom KAI scheduler identity support is tracked in
+> [Grove PR #962](https://github.com/ai-dynamo/grove/pull/962); verify release availability
+> before choosing an external Grove version.
+
 The default is `kai-scheduler`. An empty value also uses that default. For a directly
 managed `OperatorConfiguration`, set `orchestrators.kaiScheduler.schedulerName` instead.
-Names must be valid Kubernetes scheduler names (DNS subdomains); names such as
-`Runai_Scheduler` are rejected during operator startup.
+Names must be DNS subdomains, like `PodSpec.schedulerName`: lowercase letters, digits,
+`-` and `.`, at most 253 characters, with each dot-separated part starting and ending
+in a letter or digit. An invalid name such as `Runai_Scheduler` stops the operator at
+startup with an error on `orchestrators.kaiScheduler.schedulerName`.
 
-The operator injects the validated `kai.scheduler/queue` label when a component omits
-`schedulerName` or explicitly selects the configured KAI scheduler. An explicit
-component scheduler with a different name is preserved without KAI queue injection.
-The queue is selected from the DGD's `nvidia.com/kai-scheduler-queue` annotation,
-falling back to `dynamo`.
+The operator sets `schedulerName` and the `kai.scheduler/queue` label when a component
+omits `schedulerName` or sets it to the configured name. A component that sets a
+different scheduler name is left unchanged, without injecting a KAI queue label.
+The queue comes from the DGD's `nvidia.com/kai-scheduler-queue` annotation (default
+`dynamo`), and the operator checks that the KAI Queue exists.
 
-This value configures Dynamo's workload templates only. It does not rename or
-reconfigure KAI or Grove. Before using a custom name, verify that the installed
-Grove version maps that name to its KAI backend and that the scheduler consumes
-Grove's PodGroups and queue metadata. The bundled Grove profile is named
-`kai-scheduler`; changing this value alone does not establish Run:ai compatibility.
-Existing workloads keep their current templates when this value is omitted.
-Changing the configured name is an explicit scheduling change and can roll workloads;
-coordinate it with the scheduler and Grove configuration.
+> [!NOTE]
+> Changing the configured scheduler name can change the pod templates and roll Grove
+> workloads using the KAI integration. Explicit component overrides selecting another
+> scheduler stay unchanged. Coordinate the change with your scheduler and Grove
+> configuration. Leaving the value unset keeps current templates.
 
 Volcano:
 

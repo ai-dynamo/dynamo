@@ -825,7 +825,6 @@ func injectKaiSchedulerIfEnabled(
 	validatedQueueName string,
 	schedulerName string,
 ) {
-	// Only inject when both Grove and KAI integration are enabled.
 	if !runtimeConfig.Gate.Enabled(features.Grove) || !runtimeConfig.Gate.Enabled(features.KaiScheduler) {
 		return
 	}

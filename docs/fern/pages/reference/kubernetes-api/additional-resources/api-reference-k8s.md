@@ -4293,7 +4293,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `schedulerName` _string_ | SchedulerName is the pod scheduler name used by the KAI integration.<br />Empty defaults to kai-scheduler. Grove must support this name with its KAI backend. |  | Optional: \{\} <br /> |
+| `schedulerName` _string_ | SchedulerName is the pod scheduler name used by the KAI integration.<br />Empty defaults to `kai-scheduler`. Grove must support this name with its KAI backend. | kai-scheduler | Optional: \{\} <br /> |
 | `enabled` _boolean_ | Enabled overrides auto-detection. nil = auto-detect. |  | Optional: \{\} <br /> |
 
 

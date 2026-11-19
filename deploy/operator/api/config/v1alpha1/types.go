@@ -236,7 +236,8 @@ const DefaultKaiSchedulerName = "kai-scheduler"
 // KaiSchedulerConfiguration holds Kai-scheduler settings.
 type KaiSchedulerConfiguration struct {
 	// SchedulerName is the pod scheduler name used by the KAI integration.
-	// Empty defaults to kai-scheduler. Grove must support this name with its KAI backend.
+	// Empty defaults to `kai-scheduler`. Grove must support this name with its KAI backend.
+	// +kubebuilder:default="kai-scheduler"
 	// +optional
 	SchedulerName string `json:"schedulerName,omitempty"`
 
