@@ -604,6 +604,8 @@ To force read-only mode (import only, never load from disk), pass `gms_read_only
 
 This forces `RO` lock mode instead of the default `RW_OR_RO` auto-detection. The engine will only import existing committed weights and fail if none are available.
 
+A vLLM engine that imports committed weights, in `RO` or `RW_OR_RO` mode, rebuilds its layers' host-side state by running vLLM's weight post-processing on meta tensors. If a step of that post-processing needs weight values, the model cannot attach read-only: the engine exits with `[GMS] Read-only attach cannot rebuild this model's layer state` instead of serving with unprocessed layers.
+
 To bound how long a restored engine waits for the published weights layout before remapping, pass `gms_ro_connect_timeout_ms`:
 
 ```bash
