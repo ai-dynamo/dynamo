@@ -250,6 +250,20 @@ These flags control which role this worker plays in a disaggregated deployment. 
   Environment variable: `DYN_VLLM_GMS_SHADOW_MODE`
 </ParamField>
 
+<ParamField path="--gms-graph-archive" type="string" default="null">
+  Experimental. Directory, shared by the engines of one deployment, where GMS shadow engines keep a [Foundry](https://github.com/foundry-org/foundry) CUDA-graph archive. The first shadow that attaches its weights read-only saves its CUDA graphs there; later shadows rebuild them from it instead of capturing each size next to the serving engine. An archive that Foundry refuses is set aside and later engines capture natively; a start that fails for another reason keeps the archive, up to 3 failures in a row.
+
+  Requires `--load-format gms`, `--gms-shadow-mode`, `--num-gpu-blocks-override`, `--compilation-config '{"mode": 0}'` (torch.compile off), `--disable-custom-all-reduce` with tensor parallelism, and a runtime image with Foundry and its vLLM plugin. Data and pipeline parallelism, `--headless`, `--enable-dbo`, speculative decoding and embedding workers are not supported. Every engine of the deployment needs the same flag and arguments. See [CUDA Graph Archive](https://github.com/ai-dynamo/dynamo/blob/main/lib/gpu_memory_service/README.md#cuda-graph-archive-vllm) in the GPU Memory Service README for the policy and the directory layout.
+
+  Environment variable: `DYN_VLLM_GMS_GRAPH_ARCHIVE`
+</ParamField>
+
+<ParamField path="--gms-graph-archive-config" type="string" default="null">
+  Foundry settings file (TOML) for `--gms-graph-archive`, for example the address region and the switches that skip warm-up forwards. It must not set `mode` or `workspace_root`, which are chosen per engine. Default: Foundry's defaults.
+
+  Environment variable: `DYN_VLLM_GMS_GRAPH_ARCHIVE_CONFIG`
+</ParamField>
+
 ## Benchmarking
 
 These flags control the self-benchmark sweep that runs on startup before the worker begins accepting production requests.

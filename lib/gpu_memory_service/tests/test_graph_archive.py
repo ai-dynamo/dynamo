@@ -14,7 +14,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 from _deps import HAS_GMS
@@ -25,13 +25,18 @@ if not HAS_GMS:
         allow_module_level=True,
     )
 
+from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.integrations.vllm import graph_archive
 from gpu_memory_service.integrations.vllm.graph_archive import (
     FOUNDRY_FORMAT,
+    LOADER_OPTION,
     MAX_FAILED_STARTS,
     ArchiveMode,
     GraphArchive,
+    GraphArchiveError,
     archive_key,
+    check_read_only_attach,
+    engine_identity,
 )
 
 pytestmark = [
@@ -623,3 +628,67 @@ def test_key_is_the_same_for_equal_identities():
 
     assert archive_key(identity, RANKS) == archive_key(same, RANKS)
     assert archive_key(identity, RANKS) != archive_key(other, RANKS)
+
+
+def _engine_args(**overrides) -> SimpleNamespace:
+    """Engine arguments with every field the identity reads."""
+    fields = dict.fromkeys(graph_archive._ENGINE_ARGS)
+    fields.update(
+        model=Path("/models/m"),
+        max_num_seqs=8,
+        tensor_parallel_size=2,
+        compilation_config=_Compilation(),
+        model_loader_extra_config={},
+        master_port=29500,
+    )
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+def _engine_key(engine_args) -> str:
+    identity = engine_identity(engine_args, {"region_size": "8GB"}, ["pytest"])
+    return archive_key(identity, RANKS)
+
+
+def test_key_ignores_what_differs_between_the_engines_of_a_pod():
+    base = _engine_args()
+    other_engine = _engine_args(
+        master_port=base.master_port + 100,
+        model_loader_extra_config={
+            "gms_read_only": True,
+            "gms_ro_connect_timeout_ms": 1000,
+            LOADER_OPTION: "load",
+        },
+        compilation_config=_Compilation(),  # a different, equal object
+    )
+
+    assert _engine_key(base) == _engine_key(other_engine)
+    assert _engine_key(base) != _engine_key(_engine_args(max_num_seqs=16))
+    assert _engine_key(base) != _engine_key(_engine_args(moe_backend="triton"))
+    assert _engine_key(base) != _engine_key(
+        _engine_args(model_loader_extra_config={"gms_reconstruction_mode": "load_diff"})
+    )
+    assert _engine_key(base) != _engine_key(
+        _engine_args(compilation_config=_Compilation(capture_sizes=(1,)))
+    )
+
+
+def test_key_covers_backend_settings_and_versions():
+    args = _engine_args()
+    identity = engine_identity(
+        args, {"region_size": "8GB"}, ["pytest", "no-such-package"]
+    )
+    other = engine_identity(
+        args, {"region_size": "16GB"}, ["pytest", "no-such-package"]
+    )
+
+    assert identity["version.no-such-package"] is None
+    assert identity["version.pytest"] == pytest.__version__
+    assert archive_key(identity, RANKS) != archive_key(other, RANKS)
+
+
+def test_read_only_attach_is_required_only_in_archive_mode():
+    check_read_only_attach({}, GrantedLockType.RW)
+    check_read_only_attach({LOADER_OPTION: "load"}, GrantedLockType.RO)
+    with pytest.raises(GraphArchiveError, match="read-only weights attach"):
+        check_read_only_attach({LOADER_OPTION: "load"}, GrantedLockType.RW)
