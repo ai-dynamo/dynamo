@@ -1,6 +1,6 @@
 meta:
   catch_all: '@ai-dynamo/dynamo-runtime-codeowners'
-  delegated_policy_reviews: true
+  delegated_policy_reviews: false
 areas:
 - label: frontend
   github_team: '@ai-dynamo/dynamo-frontend-codeowners'

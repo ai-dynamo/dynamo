@@ -112,7 +112,7 @@ def main() -> int:
         )
         if not owners and f in DELEGATED_POLICY_PATHS and ("/" + f, []) in rules:
             owners_str = (
-                "(delegated -- ownership-approvals requires the affected owners)"
+                "(delegated -- ownership-policy-approvals requires the affected owners)"
             )
         print(f"{f}\n    review: {owners_str}")
 

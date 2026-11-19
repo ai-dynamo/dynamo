@@ -21,7 +21,7 @@ permissions:
   checks: write
 
 concurrency:
-  group: ownership-approvals-${{ github.event.workflow_run.head_sha || github.run_id }}
+  group: ownership-policy-approvals-${{ github.event.workflow_run.head_sha || github.run_id }}
   cancel-in-progress: false
 
 jobs:

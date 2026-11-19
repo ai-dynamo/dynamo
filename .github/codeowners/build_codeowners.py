@@ -462,7 +462,7 @@ def _print_summary(
     )
     if model.delegated_paths():
         print(
-            f"delegated to ownership-approvals: {', '.join(sorted(model.delegated_paths()))}"
+            f"delegated to ownership-policy-approvals: {', '.join(sorted(model.delegated_paths()))}"
         )
     if unmatched:
         print("catch-all-only sample (add an explicit glob to cover these):")

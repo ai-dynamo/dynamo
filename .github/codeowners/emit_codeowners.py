@@ -359,7 +359,7 @@ def _render_codeowners(
     if model.delegated_paths():
         lines += [
             "",
-            "# Ownership changes require the affected owners via the codeowners check.",
+            "# Ownership changes require the affected owners via ownership-policy-approvals.",
             "# Empty exact rules replace blanket file-level review requests.",
         ]
         lines += [anchor(path) for path in sorted(model.delegated_paths())]

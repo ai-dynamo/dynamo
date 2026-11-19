@@ -22,7 +22,17 @@ from ownership_approvals import (
 
 AREAS = ".github/codeowners/areas.yaml"
 EXTERNAL = ".github/codeowners/external_contributors.yaml"
-CHECK_NAME = "ownership-approvals"
+CHECK_NAME = "ownership-policy-approvals"
+CHECK_ERRORS = (
+    AttributeError,
+    ValueError,
+    KeyError,
+    TypeError,
+    OSError,
+    subprocess.SubprocessError,
+    yaml.YAMLError,
+    SystemExit,
+)
 
 
 def command(*args: str, **kwargs) -> str:
@@ -155,10 +165,19 @@ def blob(ref: str, path: str) -> str:
 
 def inputs(ref: str) -> tuple[dict, list[dict]]:
     spec = yaml.safe_load(blob(ref, AREAS))
-    external = yaml.safe_load(blob(ref, EXTERNAL)).get("contributors") or []
-    if not isinstance(spec, dict) or not isinstance(external, list):
-        raise ValueError("Malformed ownership policy")
-    return spec, external
+    external = yaml.safe_load(blob(ref, EXTERNAL))
+    if external is None:
+        external = {}
+    if not isinstance(spec, dict) or not isinstance(external, dict):
+        raise ValueError("Ownership policy documents must be mappings")
+    contributors = external.get("contributors")
+    if contributors is None:
+        contributors = []
+    if not isinstance(contributors, list) or not all(
+        isinstance(row, dict) for row in contributors
+    ):
+        raise ValueError("External contributors must be a list of mappings")
+    return spec, contributors
 
 
 def check_run(
@@ -200,6 +219,14 @@ def evaluate(repo: str, pr: dict, reviews: list[dict]) -> str:
             "Policy PRs must have a unique head SHA for commit-scoped checks"
         )
     command("git", "fetch", "--no-tags", "origin", base, f"refs/pull/{number}/head")
+    ancestor = command("git", "merge-base", base, head).strip()
+    base_changes = command(
+        "git", "diff", "--no-renames", "--name-only", "-z", ancestor, base
+    ).split("\0")
+    if any(map(policy_path, base_changes)):
+        raise ValueError(
+            "Ownership policy changed on main; merge/rebase main and obtain fresh head approvals"
+        )
     proposed = command("git", "merge-tree", "--write-tree", base, head).splitlines()[0]
     # Read both snapshots without checking out code from the PR.
     before_paths = set(
@@ -320,54 +347,56 @@ def evaluate_one(repo: str, number: int) -> None:
     check_id = check_run(
         repo, head, conclusion=None, summary="Checking ownership approvals."
     )
-    reviews = None
     try:
-        comparison = api(f"repos/{repo}/compare/{pr['base']['sha']}...{head}")
-        files = comparison["files"]
-        paths = [
-            p for f in files for p in (f["filename"], f.get("previous_filename", ""))
-        ]
-        # The compare API caps files at 300; a full evaluation handles larger diffs.
-        if len(files) >= 300 or any(map(policy_path, paths)):
-            reviews = pages(f"repos/{repo}/pulls/{number}/reviews")
-            summary = evaluate(repo, pr, reviews)
-        else:
-            summary = (
-                "No ownership change; native GitHub CODEOWNERS reviews still apply."
+        for attempt in range(3):
+            reviews = None
+            comparison = api(f"repos/{repo}/compare/{pr['base']['sha']}...{head}")
+            files = comparison["files"]
+            paths = [
+                p
+                for f in files
+                for p in (f["filename"], f.get("previous_filename", ""))
+            ]
+            # The compare API caps files at 300; fully evaluate larger diffs.
+            if len(files) >= 300 or any(map(policy_path, paths)):
+                reviews = pages(f"repos/{repo}/pulls/{number}/reviews")
+                summary = evaluate(repo, pr, reviews)
+            else:
+                summary = (
+                    "No ownership change; native GitHub CODEOWNERS reviews still apply."
+                )
+            current = api(f"repos/{repo}/pulls/{number}")
+            if (current["head"]["sha"], current["base"]["ref"], current["state"]) != (
+                head,
+                "main",
+                "open",
+            ):
+                return
+            if current["base"]["sha"] != pr["base"]["sha"]:
+                if attempt == 2:
+                    raise ValueError(
+                        "Base changed repeatedly during evaluation; rerun this PR check"
+                    )
+                pr = current
+                continue
+            conclusion = "success"
+            if reviews is not None and review_version(reviews) != review_version(
+                pages(f"repos/{repo}/pulls/{number}/reviews")
+            ):
+                summary, conclusion = (
+                    "Reviews changed during evaluation; awaiting a fresh evaluation",
+                    "failure",
+                )
+            checks = pages(
+                f"repos/{repo}/commits/{head}/check-runs?check_name={CHECK_NAME}&filter=all",
+                key="check_runs",
             )
-        conclusion = "success"
-    except (
-        ValueError,
-        KeyError,
-        TypeError,
-        subprocess.SubprocessError,
-        yaml.YAMLError,
-        SystemExit,
-    ) as error:
-        summary = str(error)
-        conclusion = "failure"
-    current = api(f"repos/{repo}/pulls/{number}")
-    if (
-        current["head"]["sha"],
-        current["base"]["sha"],
-        current["base"]["ref"],
-        current["state"],
-    ) != (head, pr["base"]["sha"], "main", "open"):
-        return
-    if reviews is not None and review_version(reviews) != review_version(
-        pages(f"repos/{repo}/pulls/{number}/reviews")
-    ):
-        conclusion, summary = (
-            "failure",
-            "Reviews changed during evaluation; awaiting a fresh evaluation.",
-        )
-    checks = pages(
-        f"repos/{repo}/commits/{head}/check-runs?check_name={CHECK_NAME}&filter=all",
-        key="check_runs",
-    )
-    own = [c for c in checks if c["app"]["id"] == 15368]
-    if not own or max(c["id"] for c in own) != check_id:
-        return
+            own = [c for c in checks if c["app"]["id"] == 15368]
+            if not own or max(c["id"] for c in own) != check_id:
+                return
+            break
+    except CHECK_ERRORS as error:
+        summary, conclusion = str(error), "failure"
     check_run(repo, head, conclusion=conclusion, summary=summary, check_id=check_id)
     print(f"PR #{number}: {summary}")
 
@@ -381,8 +410,15 @@ def main() -> None:
         check_activation(repo)
         return
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+    failed = []
     for number in discover(repo, event):
-        evaluate_one(repo, number)
+        try:
+            evaluate_one(repo, number)
+        except CHECK_ERRORS as error:
+            failed.append(number)
+            print(f"::error::PR #{number} needs retry: {error}")
+    if failed:
+        raise SystemExit(f"Retry PRs individually: {failed}")
 
 
 if __name__ == "__main__":

@@ -39,7 +39,7 @@ python .github/codeowners/who_owns.py --codeowners CODEOWNERS <path> [<path> ...
 The command reports team handles. To inspect a roster, use an authenticated
 GitHub API read with organization membership access, for example
 `gh api orgs/ai-dynamo/teams/dynamo-runtime-codeowners/members --paginate`.
-For ownership-policy changes, the `ownership-approvals` check summarizes the
+For ownership-policy changes, the `ownership-policy-approvals` check summarizes the
 required groups and whether their approvals cover the proposed policy.
 
 ## Flow 2: The `codeowners` CI check failed
@@ -85,7 +85,7 @@ ordinary PRs.
 Edit `.github/codeowners/areas.yaml` - move a glob between areas, add a
 `shared:` entry (multi-team co-ownership), or adjust `classify.filetype_rules`.
 Then regenerate exactly as in Flow 2 step 4 and commit both files. When
-`meta.delegated_policy_reviews` is enabled, the required `ownership-approvals`
+`meta.delegated_policy_reviews` is enabled, the required `ownership-policy-approvals`
 check replaces blanket reviews for these two files: every old and new effective
 owner approves the transfer, including retained owners receiving an alternative.
 Check its summary for the affected groups. Generator/checker/workflow changes

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from copy import deepcopy
 from pathlib import Path
 
@@ -240,19 +242,20 @@ def test_only_current_head_approvals_count():
     assert approved_reviewers([current, withdrawn], "author", "head") == set()
 
 
-def test_review_relay_and_bootstrap_cannot_replace_native_structure():
+def test_rollout_preserves_native_owners_until_activation():
     root = Path(__file__).resolve().parents[2]
     workflow = yaml.load(
         (root / ".github/workflows/codeowners.yml").read_text(), Loader=yaml.BaseLoader
     )
     assert "edited" in workflow["on"]["pull_request"]["types"]
-    assert (
-        workflow["jobs"]["gate-mode"]["steps"][0]["with"]["ref"]
-        == "${{ github.event.repository.default_branch }}"
-    )
     assert "ownership-review-event" in workflow["jobs"]["codeowners"]["name"]
-    assert "base.ref == 'main'" in workflow["jobs"]["approval-bootstrap"]["name"]
-    assert "delegated == 'false'" in workflow["jobs"]["approval-bootstrap"]["name"]
+    assert "approval-bootstrap" not in workflow["jobs"]
+    assert gate.CHECK_NAME != "ownership-approvals"
+    spec = yaml.safe_load((root / gate.AREAS).read_text())
+    active = spec["meta"]["delegated_policy_reviews"]
+    rules = parse_codeowners((root / "CODEOWNERS").read_text())
+    assert resolve_owners(rules, gate.AREAS) == ([] if active else [OPS, PROCESS])
+    assert resolve_owners(rules, "CODEOWNERS") == ([] if active else [PROCESS])
 
 
 @pytest.mark.parametrize("newer_check", [False, True])
@@ -317,6 +320,11 @@ def test_native_exemptions_require_a_separately_required_check(
     ]
     monkeypatch.setattr(gate, "api", lambda *a, **kw: rules)
     gate.check_activation("org/repo")
+    checks = rules[0]["parameters"]["required_status_checks"]
+    checks[0]["context"] = "ownership-approvals"
+    with pytest.raises(ValueError, match="Before enabling delegation"):
+        gate.check_activation("org/repo")
+    checks[0]["context"] = gate.CHECK_NAME
     rules[0]["parameters"]["required_status_checks"][0]["integration_id"] = None
     with pytest.raises(ValueError, match="Before enabling delegation"):
         gate.check_activation("org/repo")
@@ -456,3 +464,155 @@ def test_rendered_shared_owner_uses_affected_groups_without_process(spec, glob, 
         rendered_policy(spec, []), rendered_policy(changed, []), [path]
     )
     assert required == {"@org/a", "@org/b"}
+
+
+@pytest.mark.parametrize("external", ["", "contributors:", "{}", "contributors: []"])
+def test_empty_external_policy_matches_generator_semantics(monkeypatch, external):
+    monkeypatch.setattr(
+        gate, "blob", lambda ref, path: "{}" if path == gate.AREAS else external
+    )
+    assert gate.inputs("head") == ({}, [])
+
+
+@pytest.mark.parametrize(
+    "external", ["[]", "false", "42", "contributors: text", "contributors: [null]"]
+)
+def test_malformed_external_policy_fails_explicitly(monkeypatch, external):
+    monkeypatch.setattr(
+        gate, "blob", lambda ref, path: "{}" if path == gate.AREAS else external
+    )
+    with pytest.raises(ValueError):
+        gate.inputs("head")
+
+
+def test_unwitnessed_scope_reordering_requires_process_even_for_same_owners():
+    old = "/src/*/left.py @a\n/src/new/*.py @b\n/exact @a"
+    new = "/src/new/*.py @b\n/src/*/left.py @a\n/exact @b"
+    required, _ = required_approvals(
+        old, new, ["src/old/left.py", "src/new/right.py", "exact"]
+    )
+    assert required == {"@a", "@b", PROCESS}
+
+
+@pytest.mark.parametrize(
+    "mode", ["once", "always", "head", "read_error", "review_error", "malformed"]
+)
+def test_snapshot_retry_is_bounded_and_postevaluation_errors_terminal_fail(
+    monkeypatch, mode
+):
+    initial = {
+        "state": "open",
+        "head": {"sha": "head"},
+        "base": {"ref": "main", "sha": "base0"},
+    }
+    reads, review_reads = 0, 0
+    evaluated, published = [], []
+
+    def api(endpoint, **kwargs):
+        nonlocal reads, review_reads
+        if endpoint.endswith("/pulls/1"):
+            reads += 1
+            if reads > 1 and mode == "read_error":
+                raise OSError("temporary read failure")
+            base = (
+                f"base{reads-1}"
+                if mode == "always"
+                else ("base1" if reads > 1 and mode == "once" else "base0")
+            )
+            return dict(
+                initial,
+                head={"sha": "new" if reads > 1 and mode == "head" else "head"},
+                base={"ref": "main", "sha": base},
+            )
+        if "/compare/" in endpoint:
+            return {"files": [{"filename": "CODEOWNERS"}]}
+        if "/reviews?" in endpoint:
+            review_reads += 1
+            if review_reads > 1 and mode == "review_error":
+                raise OSError("review read failure")
+            return []
+        if "/check-runs?" in endpoint:
+            return {"check_runs": [{"id": 42, "app": {"id": 15368}}]}
+        raise AssertionError(endpoint)
+
+    def evaluate(repo, pr, reviews):
+        evaluated.append(pr["base"]["sha"])
+        if mode == "malformed":
+            return rendered_policy({"meta": None}, [])
+        return "approved"
+
+    def publish(*args, **kwargs):
+        published.append(kwargs)
+        return 42
+
+    monkeypatch.setattr(gate, "api", api)
+    monkeypatch.setattr(gate, "evaluate", evaluate)
+    monkeypatch.setattr(gate, "check_run", publish)
+    gate.evaluate_one("org/repo", 1)
+    if mode == "head":
+        assert [p["conclusion"] for p in published] == [None]
+    else:
+        assert published[-1]["conclusion"] == (
+            "success" if mode == "once" else "failure"
+        )
+        assert published[-1]["check_id"] == 42
+    assert evaluated == (
+        ["base0", "base1", "base2"]
+        if mode == "always"
+        else ["base0", "base1"]
+        if mode == "once"
+        else ["base0"]
+    )
+
+
+@pytest.mark.parametrize("failure", ["lookup", "publication", "malformed"])
+def test_one_pr_api_failure_does_not_skip_remaining_prs(monkeypatch, tmp_path, failure):
+    event = tmp_path / "event.json"
+    event.write_text("{}")
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    monkeypatch.setenv("GITHUB_REPOSITORY", "org/repo")
+    monkeypatch.setattr(sys, "argv", ["check"])
+    monkeypatch.setattr(gate, "discover", lambda *a: [1, 2])
+    completed = []
+
+    def api(endpoint, **kwargs):
+        if "/pulls/" in endpoint:
+            number = int(endpoint.rsplit("/", 1)[1])
+            if number == 1 and failure == "lookup":
+                raise subprocess.CalledProcessError(1, "gh api", stderr="502")
+            return {
+                "state": "open",
+                "head": {"sha": str(number)},
+                "base": {"sha": "base", "ref": "main"},
+            }
+        if "/compare/" in endpoint:
+            return {
+                "files": [{"filename": "CODEOWNERS"}]
+                if failure == "malformed" and endpoint.endswith("...1")
+                else []
+            }
+        if "/reviews?" in endpoint:
+            return []
+        if "/check-runs?" in endpoint:
+            return {"check_runs": [{"id": 42, "app": {"id": 15368}}]}
+        raise AssertionError(endpoint)
+
+    def publish(repo, head, **kwargs):
+        if kwargs["conclusion"] is not None:
+            if head == "1" and failure == "publication":
+                raise OSError("publication failed")
+            completed.append((head, kwargs["conclusion"]))
+        return 42
+
+    monkeypatch.setattr(gate, "api", api)
+    monkeypatch.setattr(gate, "check_run", publish)
+    monkeypatch.setattr(
+        gate, "evaluate", lambda *args: rendered_policy({"meta": None}, [])
+    )
+    if failure == "malformed":
+        gate.main()
+        assert completed == [("1", "failure"), ("2", "success")]
+    else:
+        with pytest.raises(SystemExit, match=r"Retry PRs individually: \[1\]"):
+            gate.main()
+        assert completed == [("2", "success")]

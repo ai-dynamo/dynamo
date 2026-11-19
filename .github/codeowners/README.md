@@ -52,7 +52,7 @@ adding required approvals.
 ### Approval of ownership changes
 
 `meta.delegated_policy_reviews: true` delegates exactly `areas.yaml` and root
-`CODEOWNERS` to the required `ownership-approvals` check. The generated file ends
+`CODEOWNERS` to the required `ownership-policy-approvals` check. The generated file ends
 with exact ownerless rules for those two paths; all other files retain native
 CODEOWNERS review. The existing `codeowners` check continues to validate coverage,
 contracts, tests and generated-file drift.
@@ -76,7 +76,9 @@ the PR cannot self-approve. Email-only owners cannot be resolved by this check;
 use GitHub team or user handles for delegated policy changes.
 
 Approvals count only for the current PR head commit. Every push or rebase requires
-fresh approvals. Changes to enforcement Python or its workflows additionally
+fresh approvals. If policy or enforcement changes on `main` after branching, merge
+or rebase that change and obtain fresh head approvals. Source-only base changes
+do not invalidate consent. Changes to enforcement Python or its workflows additionally
 require Ops and Process. Contract/default/delegation-setting changes, added or
 removed directory/wildcard scopes, and reordered broad scopes also require Process:
 they can affect future files absent from the tracked tree. Reassigning an existing
@@ -94,16 +96,29 @@ are blocked until they use distinct commits, because checks are commit-scoped.
 
 #### Rollout
 
-1. Provide `ORG_READ_TOKEN`, limited to organization **Members: read**, to the
-   trusted workflow. Publish checks with `GITHUB_TOKEN` (`checks: write`).
-2. Require **`ownership-approvals` from GitHub Actions (App ID 15368)** on `main`,
-   keeping `codeowners` required. The activation guard rejects delegation until
-   both checks are required.
-3. Merge after native Ops/Process review. The bootstrap supplies the new check
-   only while live `main` disables delegation. Other open PRs may wait for it.
-4. Existing PRs are **not automatically migrated**. Re-run their `codeowners`
-   workflow or dispatch the new workflow with a single `pr` number. The same
-   single-PR dispatch refreshes membership changes without a new commit.
+1. Merge this installer with `meta.delegated_policy_reviews: false`. Native owners
+   remain intact. There are no bootstrap approval results.
+2. Provide `ORG_READ_TOKEN`, limited to organization **Members: read**. Dispatch
+   the trusted workflow for one PR to publish its first real check.
+3. Require **`ownership-policy-approvals` from GitHub Actions (App ID 15368)** on
+   `main`, keeping `codeowners` and all other checks required. In the ruleset UI,
+   select GitHub Actions as the expected source after that first run. Alternatively,
+   [update the existing repository ruleset](https://docs.github.com/en/rest/repos/rules#update-a-repository-ruleset)
+   with `PUT /repos/{owner}/{repo}/rulesets/{ruleset_id}`, preserving its other
+   rules and appending this entry to `required_status_checks`:
+
+   ```json
+   {"context": "ownership-policy-approvals", "integration_id": 15368}
+   ```
+
+4. In a separate activation PR, set `meta.delegated_policy_reviews: true` and
+   regenerate `CODEOWNERS`. The installed evaluator checks affected-owner consent;
+   the activation guard requires both check identities before native exceptions
+   can merge. Historical `ownership-approvals` bootstrap results cannot satisfy
+   the fresh `ownership-policy-approvals` requirement.
+5. Existing PRs are not automatically migrated. Re-run `codeowners` or dispatch
+   the trusted workflow with a single `pr` number. If their policy base is stale,
+   first merge/rebase `main`. This dispatch also refreshes membership changes.
 
 Branch-rule administration and secret provisioning are separate from changing
 repository files. Do not remove native protection or the activation guard before

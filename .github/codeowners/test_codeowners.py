@@ -1138,7 +1138,9 @@ class TestIsPolicyChange:
 
     def test_policy_files_delegate_without_exempting_the_checker(self) -> None:
         root = Path(__file__).resolve().parents[2]
-        rules = parse_codeowners((root / "CODEOWNERS").read_text())
+        spec = yaml.safe_load((root / ".github/codeowners/areas.yaml").read_text())
+        spec["meta"]["delegated_policy_reviews"] = True
+        rules = parse_codeowners(rendered_policy(spec, []))
         assert resolve_owners(rules, "CODEOWNERS") == []
         assert resolve_owners(rules, ".github/codeowners/areas.yaml") == []
         assert resolve_owners(rules, ".github/codeowners/ownership_approvals.py")
@@ -1886,6 +1888,11 @@ class TestApprovalCurrentHead:
             "areas": [
                 {"label": "old", "github_team": "@org/old", "path_globs": ["src/"]},
                 {"label": "new", "github_team": "@org/new", "path_globs": []},
+                {
+                    "label": "zz-stable",
+                    "github_team": "@org/stable",
+                    "path_globs": [f"zz-padding/{i}.py" for i in range(10)],
+                },
             ],
         }
         source = repo / ".github/codeowners"
@@ -1905,9 +1912,13 @@ class TestApprovalCurrentHead:
         (repo / "CODEOWNERS").write_text(rendered_policy(policy, []))
         (repo / "src").mkdir()
         (repo / "src/a.py").write_text("pass\n")
+        (repo / "zz-padding").mkdir()
+        for i in range(10):
+            (repo / f"zz-padding/{i}.py").write_text("pass\n")
         _git(
             repo,
             "add",
+            *[f"zz-padding/{i}.py" for i in range(10)],
             ".github/codeowners/areas.yaml",
             ".github/codeowners/external_contributors.yaml",
             "CODEOWNERS",
@@ -1973,6 +1984,39 @@ class TestApprovalCurrentHead:
         for review in reviews:
             review["commit_id"] = _head(repo)
         assert "✅ @org/new" in approval_gate.evaluate("org/repo", pr, reviews)
+
+        # A clean source-only base update preserves consent; policy drift does not.
+        _git(repo, "switch", "-c", "base-update", base)
+        (repo / "unrelated.txt").write_text("base-only content\n")
+        _git(repo, "add", "unrelated.txt")
+        _git(repo, "commit", "-q", "-s", "-m", "unrelated base change")
+        pr["base"]["sha"] = _head(repo)
+        _git(repo, "switch", "codeowners-test")
+        assert "✅ @org/new" in approval_gate.evaluate("org/repo", pr, reviews)
+        reviews.append(
+            {
+                "id": 3,
+                "user": {"login": "carol", "type": "User"},
+                "state": "APPROVED",
+                "submitted_at": "2026-11-03T00:00:00Z",
+                "commit_id": pr["head"]["sha"],
+            }
+        )
+        _git(repo, "switch", "base-update")
+        external = [{"name": "Carol", "github": "carol", "areas": ["old"]}]
+        (source / "external_contributors.yaml").write_text(
+            yaml.safe_dump({"contributors": external})
+        )
+        base_spec = yaml.safe_load((source / "areas.yaml").read_text())
+        (repo / "CODEOWNERS").write_text(rendered_policy(base_spec, external))
+        _git(repo, "add", ".github/codeowners/external_contributors.yaml", "CODEOWNERS")
+        _git(repo, "commit", "-q", "-s", "-m", "base ownership changes after review")
+        pr["base"]["sha"] = _head(repo)
+        _git(repo, "switch", "codeowners-test")
+        _git(repo, "merge-tree", "--write-tree", pr["base"]["sha"], pr["head"]["sha"])
+        with pytest.raises(ValueError, match="Ownership policy changed on main"):
+            approval_gate.evaluate("org/repo", pr, reviews)
+        pr["base"]["sha"] = base
         _git(
             repo,
             "mv",
