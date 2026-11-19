@@ -12,6 +12,8 @@ KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY = (
     "router_hint_source_control_endpoints"
 )
 
+SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY = "sglang_ebnf_full_assistant"
+
 
 class DisaggregationMode(Enum):
     """Disaggregation mode for LLM workers."""

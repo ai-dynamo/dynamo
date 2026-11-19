@@ -79,6 +79,8 @@ vllm = [
 sglang = [
     "uvloop",
     "sglang[diffusion]==0.5.23",
+    "jsonschema>=4.18,<5",
+    "referencing>=0.28,<1",
     # sglang[diffusion] dropped accelerate in 0.5.12; diffusers still needs it.
     "accelerate>=0.17.0",
     "blake3>=1.0.0,<2.0.0",

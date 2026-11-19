@@ -193,6 +193,9 @@ pub const SGLANG_SYSTEMONE_SERIAL_V1: &str = "sglang_systemone_serial_v1";
 /// Absence is conservative and leaves remote prefill cancellation disabled.
 pub const DISAGG_PREFILL_CANCEL_ANYTIME_V1: &str = "disagg_prefill_cancel_anytime_v1";
 
+/// Worker-advertised support for applying EBNF to the complete assistant turn.
+pub const SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY: &str = "sglang_ebnf_full_assistant";
+
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

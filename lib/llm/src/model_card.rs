@@ -1415,6 +1415,12 @@ impl ModelDeploymentCard {
                         .extend_from_slice(b"\0disagg_prefill_cancel_anytime_v1\0true");
                 }
 
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY,
+                ) {
+                    bytes_to_hash.extend_from_slice(b"\0sglang_ebnf_full_assistant\0true");
+                }
+
                 // TODO: Do we want any other user_data or runtime_config?
 
                 blake3::hash(&bytes_to_hash).to_string()
@@ -3679,6 +3685,26 @@ mod ownership_tests {
             .runtime_config
             .runtime_data
             .insert(capability.into(), true.into());
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn sglang_full_assistant_ebnf_isolates_worker_sets() {
+        use crate::local_model::runtime_config::SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY;
+
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled.runtime_config.runtime_data.insert(
+            SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY.to_string(),
+            false.into(),
+        );
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled.runtime_config.runtime_data.insert(
+            SGLANG_EBNF_FULL_ASSISTANT_CAPABILITY.to_string(),
+            true.into(),
+        );
+
         assert_eq!(missing.mdcsum(), disabled.mdcsum());
         assert_ne!(missing.mdcsum(), enabled.mdcsum());
     }
