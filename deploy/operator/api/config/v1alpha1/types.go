@@ -79,6 +79,7 @@ type OperatorConfiguration struct {
 	GPU GPUConfiguration `json:"gpu"`
 
 	// DGDR configures profiling Jobs created for v1beta1 deployment requests.
+	// +optional
 	DGDR DGDRConfiguration `json:"dgdr,omitempty"`
 
 	// Logging configuration
@@ -104,6 +105,7 @@ type DGDRConfiguration struct {
 	// /bin/sh with set -o pipefail support, kubectl and the copier's shell utilities.
 	// Per-request profiling Job container image overrides take precedence.
 	// Existing Jobs keep their image.
+	// +optional
 	OutputCopierImage string `json:"outputCopierImage,omitempty"`
 }
 

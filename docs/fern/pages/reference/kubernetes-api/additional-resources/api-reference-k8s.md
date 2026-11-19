@@ -4178,7 +4178,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `outputCopierImage` _string_ | OutputCopierImage is a complete image reference for the output-copier sidecar.<br />Empty uses the bundled digest-pinned kubectl image. The image must provide<br />/bin/sh with set -o pipefail support, kubectl and the copier's shell utilities.<br />Per-request profiling Job container image overrides take precedence.<br />Existing Jobs keep their image. |  |  |
+| `outputCopierImage` _string_ | OutputCopierImage is a complete image reference for the output-copier sidecar.<br />Empty uses the bundled digest-pinned kubectl image. The image must provide<br />/bin/sh with set -o pipefail support, kubectl and the copier's shell utilities.<br />Per-request profiling Job container image overrides take precedence.<br />Existing Jobs keep their image. |  | Optional: \{\} <br /> |
 
 
 #### DRAConfiguration
@@ -4524,7 +4524,7 @@ OperatorConfiguration is the Schema for the operator configuration.
 | `checkpoint` _[CheckpointConfiguration](#checkpointconfiguration)_ | Checkpoint/restore configuration |  | Required: \{\} <br /> |
 | `discovery` _[DiscoveryConfiguration](#discoveryconfiguration)_ | Discovery backend configuration |  | Required: \{\} <br /> |
 | `gpu` _[GPUConfiguration](#gpuconfiguration)_ | GPU discovery configuration |  | Required: \{\} <br /> |
-| `dgdr` _[DGDRConfiguration](#dgdrconfiguration)_ | DGDR configures profiling Jobs created for v1beta1 deployment requests. |  |  |
+| `dgdr` _[DGDRConfiguration](#dgdrconfiguration)_ | DGDR configures profiling Jobs created for v1beta1 deployment requests. |  | Optional: \{\} <br /> |
 | `logging` _[LoggingConfiguration](#loggingconfiguration)_ | Logging configuration |  | Required: \{\} <br /> |
 | `security` _[SecurityConfiguration](#securityconfiguration)_ | HTTP/2 and TLS settings |  | Required: \{\} <br /> |
 | `lpx` _[LPXConfiguration](#lpxconfiguration)_ | LPX scheduler integration and model-registry configuration. |  | Required: \{\} <br /> |
