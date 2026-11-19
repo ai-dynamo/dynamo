@@ -5,6 +5,8 @@ apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: qwen3-32b-vllm-disagg
+  annotations:
+    nvidia.com/sweeper-evaluation-context: '{"aic_nextn":null,"gpu_budget":16,"hardware_sku":"h200_sxm","min_gpu_budget":null,"startup_time":null}'
 spec:
   components:
   - name: Frontend
@@ -23,7 +25,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-  - name: VllmDecodeWorker
+  - name: decode
     type: decode
     replicas: 2
     podTemplate:
@@ -54,6 +56,8 @@ spec:
           - '8192'
           - --served-model-name
           - Qwen/Qwen3-32B
+          - --max-model-len
+          - '131072'
           resources:
             limits:
               nvidia.com/gpu: '2'
@@ -63,7 +67,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-  - name: VllmPrefillWorker
+  - name: prefill
     type: prefill
     replicas: 2
     podTemplate:
@@ -82,7 +86,7 @@ spec:
           - --disaggregation-mode
           - prefill
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
           - --tensor-parallel-size
           - '2'
           - --block-size
@@ -96,6 +100,8 @@ spec:
           - '16384'
           - --served-model-name
           - Qwen/Qwen3-32B
+          - --max-model-len
+          - '131072'
           resources:
             limits:
               nvidia.com/gpu: '2'
