@@ -240,6 +240,7 @@ def test_vllm_chat_processor_tokenizes_and_streams_tool_calls(
     response = requests.post(
         f"http://localhost:{frontend_port}/v1/chat/completions",
         json=payload,
+        headers={"x-dynamo-session-id": "session-123"},
         timeout=60,
         stream=True,
     )
@@ -247,6 +248,7 @@ def test_vllm_chat_processor_tokenizes_and_streams_tool_calls(
     captured = _read_captured_request(capture_path)
 
     assert captured["model"] == TEST_MODEL
+    assert captured["image_cache_scope"] == "session-123"
     assert isinstance(captured["token_ids"], list) and captured["token_ids"]
 
     guided_decoding = captured["sampling_options"].get("guided_decoding")
