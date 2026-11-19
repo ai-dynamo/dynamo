@@ -53,7 +53,7 @@ Use `dynamo_kv_router::plugins` for plugin registration and these modules for pl
 |---|---|
 | `plugins::worker_selection` | `WorkerFilter`, `WorkerScorer`, `WorkerPicker`, `WorkerSelectionPolicy`, request context, worker signal accessors, configuration, and factories |
 | `plugins` | `RouterPluginRegistry` and the resolved `RouterPlugins` bundle |
-| `plugins::worker_selection::experimental` | Unstable extensions: the [resident block counts](#experimental-resident-block-counts) and [KVCR occupancy](#kvcr-occupancy). No compatibility guarantee |
+| `plugins::worker_selection::experimental` | Unstable extensions: the [resident block counts](#experimental-resident-block-counts), [KVCR occupancy](#kvcr-occupancy), and [decode progress](#experimental-decode-progress). No compatibility guarantee |
 
 Dynamo owns scheduler queues, eligibility checks, reservations, lifecycle synchronization, and the default selector implementation. Low-level host interfaces such as `WorkerSelector` are used to connect Dynamo components; external plugins use `WorkerSelectionPolicy`.
 
@@ -690,6 +690,35 @@ let occupancy = candidate.cache_owner_blocks().zip(capacity)
 - `cache_owner_capacity_blocks()` needs no input group. A vLLM worker advertises its KVCR tier's `secondary_g2_slots` times the offload chunk size (the connector's `blocks_per_chunk` or `block_size`), in router blocks; a pool served by `kvcr-service` advertises none.
 
 Dynamo looks a count up only when a component calls the accessor, so a policy that reads only resident block counts pays nothing for it. KVCR evicts least-recently-used blocks, so a warm instance usually reads close to full.
+
+## Experimental Decode Progress
+
+A picker declares `DECODE_PROGRESS` in `required_worker_inputs()` and imports
+`DecodeProgressByRow` to read `input.decode_progress(row)`:
+
+```rust
+use dynamo_kv_router::plugins::worker_selection::experimental::decode_progress::{
+    DECODE_PROGRESS, DecodeProgressByRow,
+};
+```
+
+| Method | Value |
+|---|---|
+| `observed_requests()` | Number of active requests covered by the summary |
+| `remaining_token_budget()` | Sum of effective output limits minus observed output, in raw tokens. This is an upper bound. |
+| `observed_age()` | `Duration` since the oldest nonempty token observation. Apply your policy's freshness limit. |
+
+Collection supports single-choice aggregated requests with a positive effective
+output limit, including requests that can finish at EOS or a stop condition.
+If the frontend derives a limit from the remaining context, that limit counts too.
+
+A rank returns `None` if it is idle or any active request is prefilling, has no
+effective limit, or lacks a valid observation. An undeclared input or unsupported
+host, including the standalone EPP, also returns `None`. Choose a fallback for
+those cases.
+
+Observations are local to one frontend. LOAD and progress are advisory reads and
+can differ during concurrent updates.
 
 ## Policy Contract
 

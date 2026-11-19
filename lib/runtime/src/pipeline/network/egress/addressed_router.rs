@@ -1442,6 +1442,35 @@ mod tests {
                 callbacks,
                 responses,
             );
+            let removed = Instance {
+                component: "worker".to_string(),
+                endpoint: "generate".to_string(),
+                namespace: "default".to_string(),
+                instance_id: 42,
+                transport: TransportType::Nats("worker.generate".to_string()),
+                device_type: None,
+                request_plane_codec: None,
+            };
+            router
+                .cancel_instance_streams(&removed.endpoint_instance_id())
+                .await;
+            let rejected = SingleIn::new(AddressedRequest::with_instance(
+                42_u64,
+                "test".to_string(),
+                removed,
+            ));
+            let result: anyhow::Result<ManyOut<Annotated<u64>>> = router.generate(rejected).await;
+            let error = result.expect_err("tombstoned worker must reject before sending");
+            assert!(match_error_chain(
+                error.as_ref(),
+                &[ErrorType::Disconnected],
+                &[]
+            ));
+            assert!(matches!(
+                request_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+
             let request = SingleIn::new(AddressedRequest::new(42_u64, "test".to_string()));
             let pool = quic_response::QuicResponseClientPool::from_env().unwrap();
             let (response, (mut sender, payload_codec)) =
