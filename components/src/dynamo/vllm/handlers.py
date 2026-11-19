@@ -237,9 +237,6 @@ def _rl_init_weights_timeout_s() -> float:
     )
 
 
-# How often pause() asks a preparing vLLM engine for its checkpoint state,
-# how long it waits for the engine to become prepared, and how long a single
-# read of the engine state may take.
 _CHECKPOINT_STATE_POLL_INTERVAL_SEC = 0.1
 _CHECKPOINT_PREPARE_TIMEOUT_SEC = 300.0
 _ENGINE_STATE_READ_TIMEOUT_SEC = 30.0
