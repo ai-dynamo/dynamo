@@ -91,12 +91,14 @@ class TokenspeedLLMEngine(LLMEngine):
         kv_block_size: int | None = None,
         engine_startup_timeout: float = 3600.0,
         bootstrap_host: str | None = None,
+        freeze_gc_after_init: bool = False,
     ):
         self.server_args = server_args
         self.engine_argv = list(engine_argv or [])
         self.kv_block_size = kv_block_size
         self.engine_startup_timeout = engine_startup_timeout
         self.bootstrap_host = bootstrap_host
+        self.freeze_gc_after_init = freeze_gc_after_init
         self.disaggregation_mode = resolve_disaggregation_mode(server_args)
         # Attention-DP ranks, one engine each.
         self._dp_size = attention_dp_size(server_args)
@@ -135,6 +137,7 @@ class TokenspeedLLMEngine(LLMEngine):
             kv_block_size=config.kv_block_size,
             engine_startup_timeout=config.engine_startup_timeout,
             bootstrap_host=config.bootstrap_host,
+            freeze_gc_after_init=config.freeze_gc_after_init,
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
@@ -216,7 +219,8 @@ class TokenspeedLLMEngine(LLMEngine):
             len(engines),
             self._model_max_len,
         )
-        _tune_gc()
+        if self.freeze_gc_after_init:
+            _tune_gc()
 
         return EngineConfig(
             model=self.server_args.model,
@@ -892,7 +896,8 @@ def _stop_launcher(process: subprocess.Popen) -> None:
 
 
 def _tune_gc() -> None:
-    """Keep the cyclic collector off the start-up heap and the output backlog.
+    """--freeze-gc-after-init: keep the cyclic collector off the start-up heap
+    and the output backlog.
 
     Every collection holds the GIL, so it stalls every stream. A full
     collection walks all tracked objects: ``gc.freeze()`` takes the several
