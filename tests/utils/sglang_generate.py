@@ -60,11 +60,12 @@ def assert_native_stream(
 
     Chunks carry only their own new tokens, each with an aligned logprob entry;
     the terminal response reports the prompt size and the cumulative output size.
+    SGLang's Rust server omits `output_ids` from a chunk without tokens.
     """
 
     output_ids: list[int] = []
     for event in events:
-        event_ids = event.get("output_ids")
+        event_ids = event.get("output_ids", [])
         assert isinstance(event_ids, list) and all(
             isinstance(token_id, int) for token_id in event_ids
         ), event
