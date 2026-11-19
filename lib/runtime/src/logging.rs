@@ -28,6 +28,7 @@
 //! "test_logging::api" = "trace"
 //! ```
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Once, OnceLock};
 
@@ -539,43 +540,78 @@ impl GenericHeaders for std::collections::HashMap<String, String> {
     }
 }
 
-struct GenericHeaderExtractor<'a, H>(&'a H);
+struct GenericHeaderExtractor<'a, H> {
+    headers: &'a H,
+    /// The `traceparent` header after [`normalize_traceparent`].
+    traceparent: &'a str,
+}
 
 impl<H: GenericHeaders> Extractor for GenericHeaderExtractor<'_, H> {
     fn get(&self, key: &str) -> Option<&str> {
-        self.0.get(key)
+        if key == "traceparent" {
+            Some(self.traceparent)
+        } else {
+            self.headers.get(key)
+        }
     }
 
     fn keys(&self) -> Vec<&str> {
         ["traceparent", "tracestate"]
             .into_iter()
-            .filter(|key| self.0.get(key).is_some())
+            .filter(|key| self.get(key).is_some())
             .collect()
+    }
+}
+
+/// Returns the trimmed `traceparent` when its field widths are valid.
+///
+/// `opentelemetry_sdk` 0.31 rejects a version-00 header whose trace-flags are above `02`, such
+/// as `03` (sampled plus the W3C Level 2 random-trace-id flag). W3C says to ignore unknown
+/// flags, so those are reduced to the sampled bit, as `opentelemetry_sdk` 0.32 does itself.
+fn normalize_traceparent(header: &str) -> Option<Cow<'_, str>> {
+    let header = header.trim();
+    let mut fields = header.split('-');
+    let (Some(version), Some(trace_id), Some(span_id), Some(flags)) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return None;
+    };
+    if version.len() != 2 || trace_id.len() != 32 || span_id.len() != 16 || flags.len() != 2 {
+        return None;
+    }
+    if version != "00" {
+        return Some(Cow::Borrowed(header));
+    }
+    if fields.next().is_some() {
+        return None;
+    }
+    // Uppercase flags are invalid: leave them for the propagator to reject.
+    let lowercase_hex = flags
+        .bytes()
+        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    match u8::from_str_radix(flags, 16) {
+        Ok(bits) if lowercase_hex && bits > 2 => Some(Cow::Owned(format!(
+            "{}{:02x}",
+            &header[..header.len() - flags.len()],
+            bits & 0x01
+        ))),
+        _ => Some(Cow::Borrowed(header)),
     }
 }
 
 fn extract_trace_parent<H: GenericHeaders>(
     headers: &H,
 ) -> (TraceParent, Option<opentelemetry::Context>) {
-    let valid_widths = headers.get("traceparent").is_some_and(|header| {
-        let mut fields = header.trim().split('-');
-        let version_field = fields.next();
-        matches!(
-            (version_field, fields.next(), fields.next(), fields.next()),
-            (Some(version), Some(trace_id), Some(span_id), Some(flags))
-                if version.len() == 2
-                    && trace_id.len() == 32
-                    && span_id.len() == 16
-                    && flags.len() == 2
-        ) && (version_field != Some("00") || fields.next().is_none())
-    });
-    let context = if valid_widths {
-        TRACE_PROPAGATOR.extract_with_context(
+    let traceparent = headers.get("traceparent").and_then(normalize_traceparent);
+    let context = match traceparent.as_deref() {
+        Some(traceparent) => TRACE_PROPAGATOR.extract_with_context(
             &opentelemetry::Context::new(),
-            &GenericHeaderExtractor(headers),
-        )
-    } else {
-        opentelemetry::Context::new()
+            &GenericHeaderExtractor {
+                headers,
+                traceparent,
+            },
+        ),
+        None => opentelemetry::Context::new(),
     };
     let span = context.span();
     let span_context = span.span_context();
@@ -2419,11 +2455,36 @@ pub mod tests {
             "00-bad-2222222222222222-01",                              // bad trace_id
             "00-11111111111111111111111111111111-bad-01",              // bad span_id
             "00-11111111111111111111111111111111-2222222222222222-0x", // bad flags
+            "00-11111111111111111111111111111111-2222222222222222-0B", // uppercase flags
         ] {
             assert_eq!(
                 parse_traceparent(tp),
                 (None, None, None),
                 "should reject: {tp}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_00_traceparent_ignores_unknown_trace_flags() {
+        // `03` is sampled plus the W3C Level 2 random-trace-id flag.
+        for (flags, expected) in [("03", "01"), ("ff", "01"), ("fe", "00")] {
+            let traceparent =
+                format!("00-11111111111111111111111111111111-2222222222222222-{flags}");
+            let (trace_parent, context) = extract_trace_parent(&TraceparentHeader(&traceparent));
+
+            assert_eq!(
+                trace_parent.trace_flags.as_deref(),
+                Some(expected),
+                "flags {flags}"
+            );
+            // The request-span builders set this context as the OTel parent.
+            let context = context.unwrap_or_else(|| panic!("no parent context for flags {flags}"));
+            let span = context.span();
+            assert!(span.span_context().is_remote());
+            assert_eq!(
+                span.span_context().trace_id().to_string(),
+                "11111111111111111111111111111111"
             );
         }
     }
