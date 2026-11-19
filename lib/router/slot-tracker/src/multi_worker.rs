@@ -3539,6 +3539,126 @@ mod tests {
         assert_eq!(sequences.remote_state_update_count(), 0);
     }
 
+    struct BoundedChannelSubscriber {
+        rx: mpsc::Receiver<ActiveSequenceEvent>,
+    }
+
+    impl SequenceSubscriber for BoundedChannelSubscriber {
+        async fn next_event(&mut self) -> Option<anyhow::Result<ActiveSequenceEvent>> {
+            self.rx.recv().await.map(Ok)
+        }
+
+        fn poll_next_event(
+            &mut self,
+            cx: &mut Context<'_>,
+        ) -> Poll<Option<anyhow::Result<ActiveSequenceEvent>>> {
+            self.rx.poll_recv(cx).map(|event| event.map(Ok))
+        }
+    }
+
+    async fn wait_until(deadline: Instant, mut done: impl FnMut() -> bool) -> bool {
+        while !done() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        true
+    }
+
+    /// A due prompt-trie sweep must not stop replica sync from draining its bounded inbox.
+    /// The producer drops on a full inbox as the ZMQ ingress does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replica_sync_drains_while_prompt_trie_sweep_is_blocked() {
+        const CAPACITY: usize = 8;
+        const EVENTS: usize = 4 * CAPACITY;
+        const WATCHDOG: Duration = Duration::from_secs(5);
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (mut sequences, _) = make_recording_sequences(HashMap::from([(1_u64, (0_u32, 1_u32))]));
+        // Leaves the stale child [4] under the shared node [1, 2].
+        sequences.apply_replica_batch(vec![
+            replica_add("kept", worker, vec![1, 2, 3]),
+            replica_add("stale", worker, vec![1, 2, 4]),
+            replica_free("stale", worker),
+        ]);
+        sequences.prompt_registry.make_prompt_cleanup_due();
+        let shared = sequences
+            .prompt_registry
+            .prompt_trie_root_child(1)
+            .expect("shared prefix node");
+        let sequences = Arc::new(sequences);
+
+        assert!(shared.read().has_child(4));
+
+        // The sweep waits for this node's write lock while another thread holds a read guard.
+        let (held_tx, held_rx) = std_mpsc::channel();
+        let (release_tx, release_rx) = std_mpsc::channel::<()>();
+        let holder = {
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || {
+                let _guard = shared.read();
+                held_tx.send(()).unwrap();
+                // Returns on release or when the test drops the sender on failure.
+                let _ = release_rx.recv();
+            })
+        };
+        held_rx.recv().unwrap();
+        let (tx, rx) = mpsc::channel(CAPACITY);
+        let cancel_token = CancellationToken::new();
+        sequences.start_replica_sync(BoundedChannelSubscriber { rx }, cancel_token.clone());
+
+        // Flushing this event starts the due sweep.
+        tx.try_send(replica_add("trigger", worker, vec![100]))
+            .unwrap();
+        // parking_lot reports a writer waiting for readers to leave as exclusively locked.
+        assert!(
+            wait_until(Instant::now() + WATCHDOG, || shared.is_locked_exclusive()).await,
+            "the sweep never reached the held node"
+        );
+
+        let mut dropped = 0;
+        let mut stalled = false;
+        for i in 0..EVENTS {
+            let event = replica_add(format!("req-{i}"), worker, vec![200 + i as u64]);
+            if tx.try_send(event).is_err() {
+                dropped += 1;
+            }
+            if !stalled {
+                stalled =
+                    !wait_until(Instant::now() + WATCHDOG, || tx.capacity() == CAPACITY).await;
+            }
+        }
+        let applied = || {
+            (0..EVENTS)
+                .filter(|i| {
+                    sequences
+                        .request_index
+                        .worker_for(&format!("req-{i}"))
+                        .is_some()
+                })
+                .count()
+        };
+        if !stalled {
+            wait_until(Instant::now() + WATCHDOG, || applied() == EVENTS).await;
+        }
+        let applied_during_sweep = applied();
+        let sweep_still_waiting = shared.is_locked_exclusive();
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        assert!(
+            !stalled && dropped == 0,
+            "while the sweep ran, replica sync stalled={stalled} and dropped {dropped} of {EVENTS} events"
+        );
+        assert_eq!(applied_during_sweep, EVENTS);
+        assert!(sweep_still_waiting);
+        assert!(
+            wait_until(Instant::now() + WATCHDOG, || !shared.read().has_child(4)).await,
+            "the sweep did not unlink the stale child"
+        );
+        cancel_token.cancel();
+    }
+
     #[tokio::test]
     async fn replica_sync_flushes_sparse_event_without_waiting_for_another() {
         let worker = WorkerWithDpRank::new(1, 0);
