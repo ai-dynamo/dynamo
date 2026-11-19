@@ -406,9 +406,14 @@ async fn zero_max_tokens_is_rejected_rather_than_defaulted() {
 async fn unsupported_request_features_are_refused() {
     let service = service();
     type Mutate = fn(&mut pb::GenerateRequest);
-    let cases: [(&str, Mutate); 5] = [
+    let cases: [(&str, Mutate); 6] = [
         ("multimodal media", |r| {
             r.media.push(pb::MediaItem::default());
+        }),
+        ("encoder handoffs", |r| {
+            r.encoded_media = Some(pb::EncodedMediaRef {
+                opaque_state: vec![1],
+            });
         }),
         ("LoRA selection", |r| r.lora_name = "adapter".to_string()),
         ("num_sequences", |r| {

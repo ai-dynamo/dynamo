@@ -196,6 +196,13 @@ struct ControlledControl {
 
 #[tonic::async_trait]
 impl Control for ControlledControl {
+    async fn shutdown(
+        &self,
+        _request: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::unimplemented("engine shutdown is not implemented"))
+    }
+
     async fn get_model_info(
         &self,
         request: Request<pb::GetModelInfoRequest>,
@@ -241,6 +248,13 @@ impl Control for ControlledControl {
     ) -> Result<Response<pb::HealthResponse>, Status> {
         self.inner.health(request).await
     }
+    async fn release_encoded_media(
+        &self,
+        request: Request<pb::ReleaseEncodedMediaRequest>,
+    ) -> Result<Response<pb::ReleaseEncodedMediaResponse>, Status> {
+        Control::release_encoded_media(&self.inner, request).await
+    }
+
     async fn abort(
         &self,
         request: Request<pb::AbortRequest>,
@@ -395,6 +409,13 @@ struct ControlledInference {
 #[tonic::async_trait]
 impl Inference for ControlledInference {
     type GenerateStream = BoxStream<'static, Result<pb::GenerateResponse, Status>>;
+
+    async fn encode(
+        &self,
+        request: Request<pb::EncodeRequest>,
+    ) -> Result<Response<pb::EncodeResponse>, Status> {
+        Inference::encode(&self.inner, request).await
+    }
 
     async fn generate(
         &self,

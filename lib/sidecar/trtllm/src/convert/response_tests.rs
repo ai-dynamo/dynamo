@@ -501,49 +501,64 @@ fn held_hidden_stop_token_is_released_unless_it_ended_the_sequence() {
 
 #[test]
 fn hidden_stop_waits_for_terminal_cache_usage_without_visible_stops() {
-    let req = request();
-    let mut state = ResponseState::new(&req, AGG);
-    let delta = state
-        .convert(token_response(vec![
-            logprob_token(5, -0.1),
-            logprob_token(2, -0.2),
-        ]))
-        .expect("convert token")
-        .expect("delta");
-    assert_eq!(delta.token_ids, [5]);
-    assert!(delta.finish_reason.is_none());
+    for only_hidden in [false, true] {
+        let mut req = request();
+        let mut tokens = vec![logprob_token(5, -0.1), logprob_token(2, -0.2)];
+        if only_hidden {
+            req.output_options.logprobs = None;
+            tokens = vec![pb::TokenInfo {
+                token_id: 2,
+                ..Default::default()
+            }];
+        }
+        let mut state = ResponseState::new(&req, AGG);
+        let delta = state
+            .convert(token_response(tokens))
+            .expect("convert token");
+        if only_hidden {
+            assert!(delta.is_none(), "hidden stop must wait for terminal usage");
+        } else {
+            let delta = delta.expect("delta");
+            assert_eq!(delta.token_ids, [5]);
+            assert!(delta.finish_reason.is_none());
+        }
 
-    let terminal = state
-        .convert(pb::GenerateResponse {
-            request_id: "r".to_string(),
-            event: Some(pb::generate_response::Event::Finished(
-                pb::GenerationFinished {
-                    output_index: Some(0),
-                    reason: pb::FinishReason::Stop as i32,
-                    message: String::new(),
-                    stop_match: Some(pb::StopMatch {
-                        r#match: Some(pb::stop_match::Match::EosTokenId(2)),
-                    }),
-                },
-            )),
-            usage: Some(pb::Usage {
-                prompt_tokens: 218,
-                completion_tokens: 2,
-                total_tokens: 220,
-                cached_prompt_tokens: Some(217),
-                reasoning_tokens: None,
-            }),
-        })
-        .expect("convert finished")
-        .expect("terminal");
-    assert!(terminal.token_ids.is_empty());
-    assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
-    let usage = terminal.completion_usage.unwrap();
-    assert_eq!(usage.prompt_tokens, 218);
-    assert_eq!(
-        usage.prompt_tokens_details.unwrap().cached_tokens,
-        Some(217)
-    );
+        let terminal = state
+            .convert(pb::GenerateResponse {
+                request_id: "r".to_string(),
+                event: Some(pb::generate_response::Event::Finished(
+                    pb::GenerationFinished {
+                        output_index: Some(0),
+                        reason: pb::FinishReason::Stop as i32,
+                        stop_match: Some(pb::StopMatch {
+                            r#match: Some(if only_hidden {
+                                pb::stop_match::Match::StopTokenId(2)
+                            } else {
+                                pb::stop_match::Match::EosTokenId(2)
+                            }),
+                        }),
+                        ..Default::default()
+                    },
+                )),
+                usage: Some(pb::Usage {
+                    prompt_tokens: 218,
+                    completion_tokens: 2,
+                    total_tokens: 220,
+                    cached_prompt_tokens: Some(217),
+                    reasoning_tokens: None,
+                }),
+            })
+            .expect("convert finished")
+            .expect("terminal");
+        assert!(terminal.token_ids.is_empty());
+        assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
+        let usage = terminal.completion_usage.unwrap();
+        assert_eq!((usage.prompt_tokens, usage.completion_tokens), (218, 2));
+        assert_eq!(
+            usage.prompt_tokens_details.unwrap().cached_tokens,
+            Some(217)
+        );
+    }
 }
 
 #[test]

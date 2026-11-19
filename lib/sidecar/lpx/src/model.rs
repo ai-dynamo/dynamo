@@ -255,6 +255,7 @@ pub(crate) fn role_name(role: pb::EngineRole) -> &'static str {
         pb::EngineRole::Aggregated => "AGGREGATED",
         pb::EngineRole::Prefill => "PREFILL",
         pb::EngineRole::Decode => "DECODE",
+        pb::EngineRole::Encoder => "ENCODER",
     }
 }
 

@@ -3,9 +3,12 @@
 
 """E2E coverage for native-gRPC sidecar launch scripts."""
 
+import base64
 import importlib.util
 import os
 import pathlib
+import re
+from copy import deepcopy
 from dataclasses import dataclass, field
 
 import pytest
@@ -16,6 +19,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
+from tests.serve.conftest import get_multimodal_test_image_bytes
 from tests.serve.lora_utils import MinioLoraConfig
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_metrics import (
@@ -37,8 +41,13 @@ from tests.utils.payload_builder import (
     sglang_generate_cancellation_payloads,
     stop_string_payloads,
 )
-from tests.utils.payloads import KvTransferPayload, OmittedMaxTokensChatPayload
+from tests.utils.payloads import (
+    ChatPayload,
+    KvTransferPayload,
+    OmittedMaxTokensChatPayload,
+)
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
+from tests.utils.router_nvext import require_router_worker_id
 
 vllm_sidecar_dir = os.environ.get("VLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/vllm"
@@ -180,6 +189,31 @@ class SidecarConfig(EngineConfig):
     port_env: dict[str, tuple[int, DynamoPortRange]] = field(default_factory=dict)
     # Upload the test LoRA adapter to MinIO before launch.
     needs_minio_lora: bool = False
+
+
+@dataclass
+class EncoderImagePayload(ChatPayload):
+    """Image-conditioned output through a vision-disabled EPD consumer."""
+
+    color: str = field(default="green", kw_only=True)
+    split: bool = field(default=False, kw_only=True)
+
+    def validate(self, response, content):
+        super().validate(response, content)
+        colors = re.findall(r"\b(red|green)\b", content.lower())
+        assert colors and colors[0] == self.color, content
+        result = response.json()
+        usage = result["usage"]
+        assert usage["prompt_tokens"] > 64, usage
+        assert usage["completion_tokens"] > 0, usage
+        assert (
+            usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+        ), usage
+        if self.split:
+            workers = require_router_worker_id(result)
+            assert workers.get("prefill_worker_id") is not None, workers
+            assert workers.get("decode_worker_id") is not None, workers
+            assert workers["prefill_worker_id"] != workers["decode_worker_id"], workers
 
 
 def _on_first_gpu(*names: str) -> dict[str, tuple[int, ...]]:
@@ -367,6 +401,33 @@ sidecar_configs = {
             ),
         ],
     ),
+    **{
+        f"trtllm_image_{topology}": SidecarConfig(
+            name=f"trtllm_image_{topology}",
+            directory=trtllm_sidecar_dir,
+            script_name=f"disagg_multimodal_{topology}.sh",
+            timeout=1200,
+            marks=[
+                pytest.mark.trtllm,
+                pytest.mark.gpu_1,
+                pytest.mark.nightly,
+                pytest.mark.requested_trtllm_kv_tokens(2048),
+                pytest.mark.timeout(1500),
+            ],
+            model="Qwen/Qwen3-VL-2B-Instruct",
+            gpu_env=_on_first_gpu("ENCODER_GPU", "PD_GPU", "PREFILL_GPU", "DECODE_GPU"),
+            health_check_workers=True,
+            health_check_worker_count=3 if topology == "e_p_d" else 2,
+            env={
+                **TRTLLM_MULTI_ENGINE_ENV,
+                "MODEL_REVISION": "89644892e4d85e24eaac8bacfd4f463576704203",
+                "TRTLLM_CONTEXT_LENGTH": "2048",
+                "DYN_REQUEST_PLANE": "tcp",
+            },
+            request_payloads=[],
+        )
+        for topology in ("e_pd", "e_p_d")
+    },
     # Migration coverage only; KV-routing payloads run for vLLM and SGLang.
     "trtllm_kv_router": SidecarConfig(
         name="trtllm_kv_router",
@@ -652,6 +713,42 @@ sidecar_configs = {
 @pytest.fixture(params=params_with_model_mark(sidecar_configs))
 def sidecar_config_test(request, monkeypatch, discovery_backend):
     config = sidecar_configs[request.param]
+    if config.name.startswith("trtllm_image_e_"):
+        config = deepcopy(config)
+        config.request_payloads = [
+            EncoderImagePayload(
+                body={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,"
+                                        + base64.b64encode(
+                                            get_multimodal_test_image_bytes(color)
+                                        ).decode()
+                                    },
+                                },
+                                {
+                                    "type": "text",
+                                    "text": "What color is the square? Answer with one color.",
+                                },
+                            ],
+                        }
+                    ],
+                    "temperature": 0,
+                    "max_tokens": 16,
+                    "nvext": {"extra_fields": ["worker_id"]},
+                },
+                color=color,
+                split=config.name.endswith("e_p_d"),
+                expected_response=[color],
+                expected_log=[],
+            )
+            for color in ("green", "red")
+        ]
     monkeypatch.setenv("MODEL", config.model)
     monkeypatch.setenv("DYN_DISCOVERY_BACKEND", discovery_backend)
     monkeypatch.setenv("DYN_NAMESPACE", f"sidecar-{generate_random_suffix()}")

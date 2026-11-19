@@ -49,6 +49,25 @@ pub(crate) fn request() -> PreprocessedRequest {
         .expect("request")
 }
 
+pub(crate) fn encoder_model_info() -> pb::ModelInfo {
+    pb::ModelInfo {
+        model_id: "model-source".into(),
+        served_model_name: "served-model".into(),
+        max_context_length: Some(4096),
+        supports_multimodal: Some(true),
+        extra: Some(
+            dynamo_sidecar_common::json_to_struct(
+                json!({
+                    "trtllm_supported_modalities": ["image"],
+                }),
+                "test",
+            )
+            .unwrap(),
+        ),
+        ..Default::default()
+    }
+}
+
 /// Engine limits as `Control.GetModelInfo` would report them, with no
 /// separate output cap.
 pub(crate) fn limits(context_length: u32) -> Option<ModelLimits> {
@@ -59,6 +78,7 @@ pub(crate) fn limits(context_length: u32) -> Option<ModelLimits> {
         supported_inputs: None,
         supports_image_routing: false,
         supported_media: Some(SupportedMedia::default()),
+        ..Default::default()
     })
 }
 
@@ -73,6 +93,7 @@ pub(crate) fn image_limits(context_length: u32) -> Option<ModelLimits> {
             image: true,
             ..Default::default()
         }),
+        ..Default::default()
     })
 }
 
@@ -88,6 +109,7 @@ pub(crate) fn image_video_limits(context_length: u32) -> Option<ModelLimits> {
             video: true,
             ..Default::default()
         }),
+        ..Default::default()
     })
 }
 
@@ -103,6 +125,7 @@ pub(crate) fn all_media_limits(context_length: u32) -> Option<ModelLimits> {
             video: true,
             audio: true,
         }),
+        ..Default::default()
     })
 }
 

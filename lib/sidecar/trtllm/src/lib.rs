@@ -10,6 +10,7 @@ mod convert;
 /// not carry separate copies of the same keys.
 #[doc(hidden)]
 pub mod disagg;
+mod encoder_handoff;
 mod engine;
 mod headless;
 mod model;
@@ -50,7 +51,14 @@ pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
         bootstrap,
         move |drt, (args, metadata, engine, config), shutdown| async move {
             if let Some(node) = metadata.filter(|node| !node.leader) {
-                headless::relay(drt, args, node, shutdown).await
+                headless::relay(
+                    drt,
+                    args,
+                    node,
+                    shutdown,
+                    engine::RoutingSupervision::PRODUCTION,
+                )
+                .await
             } else {
                 Worker::new(Arc::new(engine), config)
                     .run_with_drt(drt, shutdown)

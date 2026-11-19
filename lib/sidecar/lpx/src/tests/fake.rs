@@ -197,6 +197,13 @@ fn first_token(request_id: &str) -> pb::GenerateResponse {
 
 #[tonic::async_trait]
 impl pb::inference_server::Inference for FakeEngine {
+    async fn encode(
+        &self,
+        _request: Request<pb::EncodeRequest>,
+    ) -> Result<Response<pb::EncodeResponse>, Status> {
+        Err(Status::unimplemented("media encoding is not simulated"))
+    }
+
     type GenerateStream = Pin<Box<dyn Stream<Item = Result<pb::GenerateResponse, Status>> + Send>>;
 
     async fn generate(
@@ -265,6 +272,20 @@ impl pb::inference_server::Inference for FakeEngine {
 
 #[tonic::async_trait]
 impl pb::control_server::Control for FakeEngine {
+    async fn release_encoded_media(
+        &self,
+        _request: Request<pb::ReleaseEncodedMediaRequest>,
+    ) -> Result<Response<pb::ReleaseEncodedMediaResponse>, Status> {
+        Err(Status::unimplemented("media encoding is not simulated"))
+    }
+
+    async fn shutdown(
+        &self,
+        _request: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::unimplemented("engine shutdown is not implemented"))
+    }
+
     async fn get_server_info(
         &self,
         _request: Request<pb::GetServerInfoRequest>,

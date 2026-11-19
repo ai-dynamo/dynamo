@@ -80,6 +80,7 @@ pub(crate) fn build_generate_request(
         kv,
         guided: None,
         media: Vec::new(),
+        encoded_media: None,
         lora_name: request
             .routing
             .as_ref()

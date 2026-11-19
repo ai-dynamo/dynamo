@@ -514,6 +514,13 @@ impl pb::inference_server::Inference for TrtllmMockerService {
     type GenerateStream =
         Pin<Box<dyn Stream<Item = Result<pb::GenerateResponse, Status>> + Send + 'static>>;
 
+    async fn encode(
+        &self,
+        _request: Request<pb::EncodeRequest>,
+    ) -> Result<Response<pb::EncodeResponse>, Status> {
+        Err(Status::unimplemented("media encoding is not simulated"))
+    }
+
     async fn generate(
         &self,
         request: Request<pb::GenerateRequest>,
@@ -733,6 +740,13 @@ impl pb::control_server::Control for TrtllmMockerService {
         }))
     }
 
+    async fn release_encoded_media(
+        &self,
+        _request: Request<pb::ReleaseEncodedMediaRequest>,
+    ) -> Result<Response<pb::ReleaseEncodedMediaResponse>, Status> {
+        Err(Status::unimplemented("media encoding is not simulated"))
+    }
+
     async fn abort(
         &self,
         request: Request<pb::AbortRequest>,
@@ -806,6 +820,13 @@ impl pb::control_server::Control for TrtllmMockerService {
     // KV events stay UNIMPLEMENTED on purpose: the real TensorRT-LLM OpenEngine
     // server does not implement them, and a mocker that did would let a test
     // pass here and fail against a real engine.
+    async fn shutdown(
+        &self,
+        _request: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::unimplemented("engine shutdown is not implemented"))
+    }
+
     async fn get_kv_event_sources(
         &self,
         _request: Request<pb::GetKvEventSourcesRequest>,

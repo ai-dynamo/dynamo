@@ -386,6 +386,25 @@ fn image_routing_hints_require_capability_and_exact_frontend_metadata() {
 }
 
 #[test]
+fn encode_and_consume_preserve_the_original_media_envelope() {
+    let mut req = request();
+    add_images(&mut req, ["https://example.com/first.png"]);
+    req.multi_modal_uuids = Some(HashMap::from([(
+        "image_url".into(),
+        vec![Some("caller-owned".into())],
+    )]));
+    let encoded = build_encode_request(req.clone(), "e", "model", image_limits(4096)).unwrap();
+    req.encoder_result = Some(json!({"opaque_state":"AQID"}));
+    for mode in [AGG, PREFILL] {
+        let consumed =
+            build_generate_request(req.clone(), "consumer", "model", image_limits(4096), mode)
+                .unwrap();
+        assert_eq!(encoded.media, consumed.media);
+        assert_eq!(consumed.encoded_media.unwrap().opaque_state, [1, 2, 3]);
+    }
+}
+
+#[test]
 fn caller_uuids_cannot_spoof_internal_image_routing_hints() {
     let mut req = request();
     add_images(
@@ -1176,4 +1195,53 @@ fn prefill_result_on_a_non_decode_worker_is_rejected() {
             "unexpected error for {mode}: {error}"
         );
     }
+}
+
+#[test]
+fn encode_has_no_generation_options_and_cannot_consume_another_result() {
+    let mut source = request();
+    add_images(&mut source, ["https://example.com/image.png"]);
+    let encoded =
+        build_encode_request(source.clone(), "encode", "model", image_limits(4096)).unwrap();
+    assert_eq!(encoded.media.len(), 1);
+    assert_eq!(
+        encoded.input,
+        Some(pb::encode_request::Input::TokenIds(pb::TokenIds {
+            ids: source.token_ids.to_vec()
+        }))
+    );
+    assert!(build_encode_request(request(), "encode", "model", image_limits(4096)).is_err());
+    source.encoder_result = Some(json!({"opaque_state":"AQID"}));
+    assert!(build_encode_request(source, "encode", "model", image_limits(4096)).is_err());
+}
+
+#[test]
+fn native_reference_bytes_are_forwarded_without_interpretation() {
+    let mut source = request();
+    add_images(&mut source, ["https://example.com/image.png"]);
+    source.encoder_result = Some(json!({"opaque_state":"AP8A"}));
+    let consumed = build_generate_request(source, "pd", "model", image_limits(4096), AGG).unwrap();
+    let native = consumed.encoded_media.unwrap();
+    assert_eq!(native.opaque_state, [0, 255, 0]);
+}
+
+#[test]
+fn decode_with_kv_does_not_reconsume_the_encoder_reference() {
+    let mut source = request();
+    add_images(&mut source, ["https://example.com/image.png"]);
+    source.encoder_result = Some(json!({"opaque_state":"AQID"}));
+    source.prefill_result = Some(dynamo_backend_common::PrefillResult {
+        disaggregated_params: crate::disagg::session_to_json(fake_session()).unwrap(),
+        prompt_tokens_details: None,
+    });
+    let wire = build_generate_request(
+        source,
+        "d",
+        "model",
+        image_limits(4096),
+        DisaggregationMode::Decode,
+    )
+    .unwrap();
+    assert!(wire.encoded_media.is_none());
+    assert_eq!(wire.kv.unwrap().session, Some(fake_session()));
 }

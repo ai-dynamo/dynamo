@@ -399,10 +399,43 @@ impl TrtllmClient {
     }
 
     pub(crate) async fn abort(&self, request_id: String) -> Result<(), DynamoError> {
+        self.abort_target(pb::abort_request::Target::RequestId(request_id))
+            .await
+    }
+
+    pub(crate) async fn encode(
+        &self,
+        request: pb::EncodeRequest,
+    ) -> Result<pb::EncodeResponse, DynamoError> {
+        self.inference()
+            .encode(request)
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(|status| status_to_dynamo("Encode", status))
+    }
+
+    pub(crate) async fn release_encoder_handoff(
+        &self,
+        handoff: pb::EncodedMediaRef,
+    ) -> Result<(), DynamoError> {
+        tokio::time::timeout(
+            RPC_TIMEOUT,
+            self.control()
+                .release_encoded_media(pb::ReleaseEncodedMediaRequest {
+                    encoded_media: Some(handoff),
+                }),
+        )
+        .await
+        .map_err(|_| connection_timeout("ReleaseEncodedMedia timed out"))?
+        .map_err(|status| status_to_dynamo("ReleaseEncodedMedia", status))?;
+        Ok(())
+    }
+
+    async fn abort_target(&self, target: pb::abort_request::Target) -> Result<(), DynamoError> {
         let response = tokio::time::timeout(
             RPC_TIMEOUT,
             self.control().abort(pb::AbortRequest {
-                target: Some(pb::abort_request::Target::RequestId(request_id)),
+                target: Some(target),
             }),
         )
         .await
@@ -439,6 +472,7 @@ fn is_terminal_discovery_error(status: &tonic::Status) -> bool {
     matches!(
         status.code(),
         tonic::Code::InvalidArgument
+            | tonic::Code::FailedPrecondition
             | tonic::Code::NotFound
             | tonic::Code::Unimplemented
             | tonic::Code::Unauthenticated

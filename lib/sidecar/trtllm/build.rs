@@ -10,6 +10,8 @@ use std::path::PathBuf;
 /// new upstream file has to be vendored deliberately rather than picked up by a
 /// glob.
 const PROTOS: &[&str] = &[
+    "encoded_media.proto",
+    "encoding.proto",
     "error.proto",
     "generation.proto",
     "kv.proto",
