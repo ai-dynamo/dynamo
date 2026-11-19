@@ -94,10 +94,12 @@ pub struct ResponseStreamConverter {
     // a tool call or text.
     reasoning_items: Vec<ReasoningState>,
     active_reasoning_index: Option<usize>,
-    // A terminal interruption in suppressed reasoning belongs to that span.
-    ends_in_hidden_reasoning: bool,
+    // The terminal interruption belongs to this item even though it is omitted.
+    omitted_terminal_item: Option<OmittedTerminalItem>,
     // Function call tracking
     function_call_items: Vec<FunctionCallState>,
+    // Filtered calls keep their identity across continuation deltas.
+    filtered_tool_call_indexes: HashSet<u32>,
     // Hold custom calls and following tool headers until a completion boundary,
     // so dropping a partial custom input cannot leave an item or an index gap.
     deferred_tool_calls: Vec<usize>,
@@ -108,6 +110,11 @@ pub struct ResponseStreamConverter {
     // The backend ended with a terminal reason that is not success-like.
     incomplete_reason: Option<&'static str>,
     terminal_failure_emitted: bool,
+}
+
+enum OmittedTerminalItem {
+    Reasoning,
+    ParallelToolCall,
 }
 
 struct ReasoningState {
@@ -190,8 +197,9 @@ impl ResponseStreamConverter {
             finished_message: None,
             reasoning_items: Vec::new(),
             active_reasoning_index: None,
-            ends_in_hidden_reasoning: false,
+            omitted_terminal_item: None,
             function_call_items: Vec::new(),
+            filtered_tool_call_indexes: HashSet::new(),
             deferred_tool_calls: Vec::new(),
             next_output_index: 0,
             usage: None,
@@ -213,7 +221,7 @@ impl ResponseStreamConverter {
     }
 
     fn start_message(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
-        self.ends_in_hidden_reasoning = false;
+        self.omitted_terminal_item = None;
         self.append_active_reasoning_done_events(events, OutputStatus::Completed);
         if !self.message_started {
             // Text or a refusal after tool calls proves those calls completed.
@@ -321,9 +329,13 @@ impl ResponseStreamConverter {
         reasoning: &str,
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) {
-        if self.ends_in_hidden_reasoning {
+        if matches!(
+            self.omitted_terminal_item,
+            Some(OmittedTerminalItem::Reasoning)
+        ) {
             return;
         }
+        self.omitted_terminal_item = None;
         let state_index = match self.active_reasoning_index {
             Some(state_index) => state_index,
             None => {
@@ -343,7 +355,7 @@ impl ResponseStreamConverter {
                 );
 
                 if !self.params.raw_reasoning_requested() {
-                    self.ends_in_hidden_reasoning = true;
+                    self.omitted_terminal_item = Some(OmittedTerminalItem::Reasoning);
                     return;
                 }
 
@@ -743,14 +755,17 @@ impl ResponseStreamConverter {
             let reasoning_after_text = (content_text.is_some() || refusal.is_some())
                 && self.message_started
                 && self.active_reasoning_index.is_none()
-                && !self.ends_in_hidden_reasoning;
+                && !matches!(
+                    self.omitted_terminal_item,
+                    Some(OmittedTerminalItem::Reasoning)
+                );
 
             if !reasoning_after_text && let Some(reasoning) = reasoning {
                 self.append_reasoning_delta(reasoning, events);
             }
 
             if let Some(content) = content_text {
-                self.ends_in_hidden_reasoning = false;
+                self.omitted_terminal_item = None;
                 // Starting the answer is an explicit reasoning phase boundary.
                 // The reasoning item completed even when this same chunk also
                 // reports that the answer exhausted the output budget.
@@ -789,7 +804,7 @@ impl ResponseStreamConverter {
             }
 
             if let Some(refusal) = refusal {
-                self.ends_in_hidden_reasoning = false;
+                self.omitted_terminal_item = None;
                 self.append_active_reasoning_done_events(events, OutputStatus::Completed);
                 let content_index = match self.refusal_content_index {
                     Some(index) => index,
@@ -823,14 +838,24 @@ impl ResponseStreamConverter {
             if let Some(tool_calls) = &delta.tool_calls {
                 // Match the chat-completions post-parse fallback: when the
                 // caller disables parallel tool calls, retain only tool-call
-                // index 0. Filter before starting the reasoning boundary or
-                // allocating converter state so suppressed calls cannot emit
-                // any Responses API events at finish or EOF.
+                // index 0. Remember a filtered item for terminal status without
+                // allocating an output item or closing the current message.
                 let enforce_single_tool_call = self.params.parallel_tool_calls == Some(false);
-                let tool_calls = tool_calls
-                    .iter()
-                    .filter(|tc| !enforce_single_tool_call || tc.index == 0);
                 for tc in tool_calls {
+                    if enforce_single_tool_call && tc.index > 0 {
+                        let new_filtered_call = tc.id.as_deref().is_some_and(|id| !id.is_empty())
+                            && self.filtered_tool_call_indexes.insert(tc.index);
+                        if new_filtered_call
+                            && content_text.is_none()
+                            && reasoning.is_none()
+                            && refusal.is_none()
+                            && !matches!(delta.content.as_ref(), Some(ChatCompletionMessageContent::Parts(parts)) if !parts.is_empty())
+                        {
+                            self.omitted_terminal_item =
+                                Some(OmittedTerminalItem::ParallelToolCall);
+                        }
+                        continue;
+                    }
                     let tc_index = tc.index as usize;
 
                     // Start a new function call if we haven't seen this index
@@ -930,7 +955,7 @@ impl ResponseStreamConverter {
                         self.deferred_tool_calls.push(tc_index);
                     }
                     if should_start || should_defer {
-                        self.ends_in_hidden_reasoning = false;
+                        self.omitted_terminal_item = None;
                         // Starting an allowed tool call is an explicit reasoning
                         // phase boundary, independent of the finish reason. Text
                         // before the call is commentary and closes before it.
@@ -1164,7 +1189,7 @@ impl ResponseStreamConverter {
     }
 
     fn output_status(&self) -> OutputStatus {
-        if self.incomplete_reason.is_some() {
+        if self.incomplete_reason.is_some() && self.omitted_terminal_item.is_none() {
             OutputStatus::Incomplete
         } else {
             OutputStatus::Completed
@@ -1185,8 +1210,7 @@ impl ResponseStreamConverter {
     }
 
     fn item_output_status(&self, output_index: u32) -> OutputStatus {
-        if !self.ends_in_hidden_reasoning
-            && self.incomplete_reason.is_some()
+        if self.output_status() == OutputStatus::Incomplete
             && Some(output_index) == self.terminal_output_index()
         {
             OutputStatus::Incomplete
@@ -1548,21 +1572,19 @@ impl ResponseStreamConverter {
         error: ResponseError,
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) -> Result<Event, anyhow::Error> {
-        let output_status = OutputStatus::Incomplete;
-        self.append_active_reasoning_done_events(events, output_status);
+        let item_status = if self.omitted_terminal_item.is_some() {
+            OutputStatus::Completed
+        } else {
+            OutputStatus::Incomplete
+        };
+        self.append_active_reasoning_done_events(events, item_status);
         if self.close_deferred {
             self.close_current_message(events);
         }
-        let message_status = if self.ends_in_hidden_reasoning {
-            OutputStatus::Completed
-        } else {
-            output_status
-        };
-        self.close_open_message_item(events, message_status);
-        self.append_pending_function_call_done_events(events, output_status, false);
+        self.close_open_message_item(events, item_status);
+        self.append_pending_function_call_done_events(events, item_status, false);
 
-        let mut response =
-            self.make_response(Status::Failed, self.output_with_status(output_status));
+        let mut response = self.make_response(Status::Failed, self.output_with_status(item_status));
         response.error = Some(error);
         let failed = ResponseStreamEvent::ResponseFailed(ResponseFailedEvent {
             sequence_number: self.next_seq(),
@@ -3942,6 +3964,8 @@ mod tests {
             Some("{}"),
         ));
         assert!(filtered.is_empty());
+        let _ = conv.process_chunk(&text_chunk(" More text."));
+        let _ = conv.process_chunk(&finish_chunk(FinishReason::Length));
         let _ = conv.emit_end_events();
 
         let output = conv.completed_output();
@@ -3949,6 +3973,7 @@ mod tests {
             panic!("expected only the message output");
         };
         assert_eq!(message.phase, Some(MessagePhase::FinalAnswer));
+        assert_eq!(message.status, OutputStatus::Incomplete);
     }
 
     #[test]

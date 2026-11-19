@@ -308,6 +308,7 @@ async fn matching_stream_and_unary_output(
     chunks: Vec<crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse>,
     params: ResponseParams,
 ) -> Value {
+    use crate::protocols::openai::ParsingOptions;
     use crate::protocols::openai::chat_completions::DeltaAggregator;
     use dynamo_runtime::protocols::annotated::Annotated;
 
@@ -322,7 +323,7 @@ async fn matching_stream_and_unary_output(
     let streaming = &events.last().unwrap()["response"];
     let aggregated = DeltaAggregator::apply(
         futures::stream::iter(chunks.into_iter().map(Annotated::from_data)),
-        Default::default(),
+        ParsingOptions::default().with_parallel_tool_calls(params.parallel_tool_calls),
     )
     .await
     .unwrap();
@@ -436,15 +437,36 @@ async fn coalesced_tool_continuation_preserves_call_before_text_in_both_modes() 
     assert_eq!(output[1]["content"][0]["text"], "Done.");
 }
 
+#[rstest::rstest]
+#[case::length("length", "max_output_tokens")]
+#[case::content_filter("content_filter", "content_filter")]
 #[tokio::test]
-async fn omitted_terminal_tool_call_keeps_previous_unary_items_completed() {
-    use crate::protocols::openai::chat_completions::DeltaAggregator;
+async fn omitted_terminal_tool_call_keeps_previous_unary_items_completed(
+    #[case] finish_reason: &str,
+    #[case] expected_reason: &str,
+) {
+    use crate::protocols::openai::chat_completions::{DeltaAggregator, ToolCallCompletion};
     use dynamo_runtime::protocols::annotated::Annotated;
 
-    let mut tail = tool_chunk(Some("lookup"), Some("call-2"), r#"{"q":"#, Some("length"));
+    let mut tail = tool_chunk(
+        Some("lookup"),
+        Some("call-2"),
+        r#"{"q":"#,
+        Some(finish_reason),
+    );
     tail.inner.choices[0].delta.tool_calls.as_mut().unwrap()[0].index = 1;
+    let mut first = raw_chunk("Checking.", None);
+    if finish_reason == "content_filter" {
+        // An earlier mixed chunk can invalidate replay without obscuring the final call.
+        first.inner.choices[0].delta.reasoning_content = Some("Planning.".into());
+        tail.tool_call_completion.push(ToolCallCompletion {
+            choice_index: 0,
+            tool_index: 1,
+            complete: false,
+        });
+    }
     let chunks = [
-        raw_chunk("Checking.", None),
+        first,
         tool_chunk(Some("lookup"), Some("call-1"), r#"{"q":1}"#, None),
         tail,
     ];
@@ -460,13 +482,33 @@ async fn omitted_terminal_tool_call_keeps_previous_unary_items_completed() {
     .unwrap();
 
     assert_eq!(response["status"], "incomplete");
-    assert_eq!(
-        response["incomplete_details"]["reason"],
-        "max_output_tokens"
-    );
+    assert_eq!(response["incomplete_details"]["reason"], expected_reason);
     let output = response["output"].as_array().unwrap();
     assert_eq!(output.len(), 2);
     assert_eq!(output[0]["phase"], "commentary");
+    assert_eq!(output[0]["status"], "completed");
+    assert_eq!(output[1]["call_id"], "call-1");
+    assert_eq!(output[1]["status"], "completed");
+}
+
+#[tokio::test]
+async fn omitted_terminal_tool_call_under_parallel_cap_preserves_status_in_both_modes() {
+    let mut second = tool_chunk(Some("lookup"), Some("call-2"), r#"{"q":2}"#, None);
+    second.inner.choices[0].delta.tool_calls.as_mut().unwrap()[0].index = 1;
+    let output = matching_stream_and_unary_output(
+        vec![
+            raw_chunk("Checking.", None),
+            tool_chunk(Some("lookup"), Some("call-1"), r#"{"q":1}"#, None),
+            second,
+            raw_chunk("", Some("length")),
+        ],
+        ResponseParams {
+            parallel_tool_calls: Some(false),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(output.as_array().unwrap().len(), 2);
     assert_eq!(output[0]["status"], "completed");
     assert_eq!(output[1]["call_id"], "call-1");
     assert_eq!(output[1]["status"], "completed");

@@ -1904,8 +1904,9 @@ pub fn chat_completion_to_response(
                             &mut open,
                             &mut pending_scores,
                         );
-                        if let Some(call) = replay_calls.iter().find(|call| call.id == id) {
-                            ends_in_omitted_item = false;
+                        let call = replay_calls.iter().find(|call| call.id == id);
+                        ends_in_omitted_item = call.is_none();
+                        if let Some(call) = call {
                             output.push(params.tool_output(
                                 format!("fc_{}", Uuid::new_v4().simple()),
                                 call.id.clone(),
