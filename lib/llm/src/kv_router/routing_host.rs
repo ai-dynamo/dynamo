@@ -59,6 +59,7 @@ mod request_guard;
 
 pub(crate) use builder::{EVERY_ROLE, check_hint_policies_route_on_kv_path, hosted_picker};
 pub use builder::{LlmDispatch, MultimodalCache, RoutingHostBuilder};
+pub(super) use cancellation::cancelled_error;
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
 pub(crate) use hosted::hosted_request;
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};

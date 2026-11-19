@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use dynamo_runtime::pipeline::SingleIn;
 use dynamo_worker_selection::host::ConditionalDisaggDecisionInput;
@@ -15,6 +17,16 @@ pub(super) struct ConditionalDisaggDecodeDecision {
     pub plan: RoutePlan,
     pub overlap_tokens: usize,
     pub net_new_tokens: usize,
+    encoder_binding: Option<Arc<super::PrefillBinding>>,
+}
+
+impl ConditionalDisaggDecodeDecision {
+    pub(super) fn allows_encoder_bypass(&self, router: &PrefillRouter) -> bool {
+        self.encoder_binding.as_ref().is_none_or(|expected| {
+            matches!(router.activation_snapshot(), super::ActivationSnapshot::Active(current)
+                if Arc::ptr_eq(&current, expected))
+        })
+    }
 }
 
 fn decode_gate_allows_bypass(
@@ -33,6 +45,25 @@ impl PrefillRouter {
         request: &SingleIn<PreprocessedRequest>,
         request_id: &str,
     ) -> Result<Option<ConditionalDisaggDecodeDecision>> {
+        let has_raw_media = !request.staged_kv_cleanup
+            && request
+                .multi_modal_data
+                .as_ref()
+                .is_some_and(|media| media.values().any(|items| !items.is_empty()));
+        let encoder_binding = if request.encoder_result.is_some() || has_raw_media {
+            let Some(binding) = self
+                .binding()
+                .filter(|binding| !binding.encoder_result_requires_prefill)
+            else {
+                // Keep raw-media fallback on the admitted Prefill path too. Its
+                // handoff policy does not establish Decode's inline-MM support.
+                return Ok(None);
+            };
+            Some(binding)
+        } else {
+            None
+        };
+
         // Conditional disagg chooses a cache-hot decode worker, so it only
         // applies to a KV-routed decode set.
         if !self.decode_router_mode.is_kv_routing() {
@@ -141,6 +172,7 @@ impl PrefillRouter {
                 plan,
                 overlap_tokens,
                 net_new_tokens,
+                encoder_binding,
             }));
         }
 
@@ -154,7 +186,7 @@ impl PrefillRouter {
         let Some(threshold) = self.conditional_disagg_prefill_busy_threshold else {
             return Ok(None);
         };
-        let Some(binding) = self.binding.load_full() else {
+        let Some(binding) = self.binding() else {
             return Ok(None);
         };
         Ok(Some(
