@@ -6,7 +6,6 @@ module.exports = async function rerunFailedCI({ github, context, core }) {
   const ACTIONS_BOT_ID = 41898282;
   const FAILED = new Set(['failure', 'timed_out']);
   const MAX_RUN_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-  const REJECTED_RETRY_STATUSES = new Set([400, 401, 403, 404, 410, 422]);
 
   function attemptMarker(run) {
     return `<!-- dynamo-rerun-ci:run:${run.id}:attempt:${run.run_attempt} -->`;
@@ -158,14 +157,9 @@ module.exports = async function rerunFailedCI({ github, context, core }) {
       messages[messageIndex] = `${link}: requested failed jobs and their dependent jobs.`;
     } catch (error) {
       core.warning(`Could not request a retry for workflow run ${run.id} (HTTP ${error.status ?? 'unknown'}).`);
-      if (REJECTED_RETRY_STATUSES.has(error.status)) {
-        reservations.pop();
-        messages[messageIndex] = `${link}: retry rejected (HTTP ${error.status}). No retry was accepted. Resolve the error before posting a new command.`;
-      } else {
-        // An interrupted response can hide an accepted POST. Keep its reservation.
-        // Never retry automatically or fall back to a full workflow run.
-        messages[messageIndex] = `${link}: could not confirm the retry. Reservation retained. Inspect the run before retrying manually in Actions.`;
-      }
+      // An interrupted response can hide an accepted POST. Keep its reservation.
+      // Never retry automatically or fall back to a full workflow run.
+      messages[messageIndex] = `${link}: could not confirm the retry. Reservation retained. Inspect the run before retrying manually in Actions.`;
       failedRequests++;
     }
     await update();
