@@ -223,13 +223,19 @@ def test_load_suite_returns_explicit_case_hardware_pairs(tmp_path) -> None:
         yaml.safe_dump(
             {
                 "source": "https://github.com/ai-dynamo/dynamo/issues/8469",
-                "tests": [{"case": "qwen", "hardware": "h200-sxm-8gpu"}],
+                "tests": [
+                    {
+                        "case": "qwen",
+                        "hardware": "h200-sxm-8gpu",
+                        "automatic": True,
+                    }
+                ],
             }
         )
     )
 
     assert run_cases.load_suite(suite) == [
-        run_cases.SuiteEntry(case="qwen", hardware="h200-sxm-8gpu")
+        run_cases.SuiteEntry(case="qwen", hardware="h200-sxm-8gpu", automatic=True)
     ]
     assert run_cases.default_suite_output_root(suite) == (
         run_cases._DEFAULT_OUTPUT_ROOT / "suite"

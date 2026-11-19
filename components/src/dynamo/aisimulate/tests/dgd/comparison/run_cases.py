@@ -104,6 +104,7 @@ class SuiteEntry:
 
     case: str
     hardware: str
+    automatic: bool = False
     status: SuiteException | None = None
     exceptions: dict[str, dict[str, SuiteException]] | None = None
 
@@ -532,7 +533,16 @@ def load_suite(path: Path) -> list[SuiteEntry]:
         field = f"tests[{index}]"
         unknown = sorted(
             set(item)
-            - {"case", "hardware", "status", "reason", "links", "match", "exceptions"}
+            - {
+                "case",
+                "hardware",
+                "automatic",
+                "status",
+                "reason",
+                "links",
+                "match",
+                "exceptions",
+            }
         )
         if unknown:
             raise ValueError(
@@ -546,12 +556,16 @@ def load_suite(path: Path) -> list[SuiteEntry]:
             raise ValueError(
                 f"{path}: {field} cannot combine case-wide status with exceptions"
             )
+        automatic = item.get("automatic", False)
+        if not isinstance(automatic, bool):
+            raise TypeError(f"{path}: {field}.automatic must be a boolean")
         entries.append(
             SuiteEntry(
                 case=_required_name(item.get("case"), field=f"{field}.case", path=path),
                 hardware=_required_name(
                     item.get("hardware"), field=f"{field}.hardware", path=path
                 ),
+                automatic=automatic,
                 status=status,
                 exceptions=exceptions or None,
             )

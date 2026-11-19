@@ -64,11 +64,13 @@ tests:
 
   - case: gpt-oss-120b-trtllm-agg
     hardware: gb200-sxm-4gpu
+    automatic: true
     exceptions:
       render:
         sweeper-direct:
           status: broken
           reason: The direct renderer does not support the TRT-LLM TEP topology selected by Sweeper.
+          match: TEP .*not implemented
           links: [https://github.com/ai-dynamo/dynamo/pull/13765]
 
   - case: gpt-oss-120b-trtllm-disagg
@@ -165,11 +167,13 @@ tests:
 
   - case: qwen3-235b-fp8-trtllm-agg
     hardware: h200-sxm-16gpu
+    automatic: true
     exceptions:
       render:
         sweeper-direct:
           status: broken
           reason: The direct renderer does not support the TRT-LLM DEP topology selected by Sweeper.
+          match: DEP .*not implemented
           links: [https://github.com/ai-dynamo/dynamo/pull/13765]
 
   - case: qwen3-235b-fp8-trtllm-disagg
@@ -183,6 +187,11 @@ tests:
 
   - case: qwen3-32b-fp8-trtllm-agg
     hardware: h200-sxm-2gpu
+    automatic: true
+
+  - case: qwen3-32b-fp8-trtllm-agg
+    hardware: h100-sxm-2gpu
+    automatic: true
 
   - case: qwen3-32b-fp8-trtllm-disagg
     hardware: h200-sxm-8gpu
@@ -203,9 +212,11 @@ tests:
 
   - case: qwen3-32b-vllm-agg
     hardware: h200-sxm-16gpu
+    automatic: true
 
   - case: qwen3-32b-vllm-disagg
     hardware: h200-sxm-16gpu
+    automatic: true
 
   - case: qwen3-vl-30b-fp8-vllm-agg
     hardware: gb200-sxm-1gpu

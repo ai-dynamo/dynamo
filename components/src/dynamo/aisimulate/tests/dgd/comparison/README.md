@@ -15,9 +15,13 @@ optional evidence links. Only an explicit `match` regex accepts a known failure;
 historical entries remain diagnostic and fail closed. A missing generated variant has no placeholder
 golden.
 
-This is a manual corpus-generation tool. Automatic Recommend-to-DGD coverage runs in the
-[DGD CLI E2E table](../e2e/test_dgd_cli.py) with small deterministic
-searches. The runner does not deploy generated manifests or recipes.
+Rows marked `automatic: true` also run as parametrized Planner CPU integration tests in
+[`test_model_corpus.py`](../test_model_corpus.py). Those rows use explicitly seeded searches,
+generate into pytest's temporary directory, and compare every generated variant with its own
+checked-in parsed-YAML golden. A mismatch writes an adjacent `.new.yaml` proposal and prints the
+unified diff and acceptance command in the failing test output. The smaller
+[DGD CLI E2E table](../e2e/test_dgd_cli.py) continues to cover the public CLI with tiny fixed
+searches. Neither path deploys generated manifests or recipes.
 
 The portable runner and comparison-corpus direction build on Ashna Mehrotra's work in
 [PR #14031](https://github.com/ai-dynamo/dynamo/pull/14031).
@@ -41,9 +45,10 @@ python components/src/dynamo/aisimulate/tests/dgd/comparison/run_cases.py \
 
 The **AI Simulate DGD comparison** Actions workflow runs the same command on demand. It can generate
 the full suite or selected cases on one hardware profile, including the `h100-sxm-2gpu` profile,
-and uploads the generated DGDs and diagnostics without the local model caches. Dispatch it from
-`main`; it uses the exact-SHA planner image produced by post-merge CI so the source, Dynamo runtime,
-and pinned AISimulate version stay aligned.
+and uploads the generated DGDs and diagnostics without the local model caches. It runs in the
+matching planner test image. On `main`, it walks first-parent history to the newest commit with a
+published test image, covering documentation-only commits that intentionally skip image builds; on
+another ref, that ref's exact image must already exist.
 
 Use `--output-dir` to write into a temporary directory instead of updating the checked-in
 `generated/<suite-name>/` tree. Individual `--hardware` runs write under the ignored
@@ -51,6 +56,10 @@ Use `--output-dir` to write into a temporary directory instead of updating the c
 
 Each Sweeper case performs one search. The selected Candidate is passed to both the AIC and direct
 renderers, so renderer differences cannot be caused by separate searches.
+
+Automatic rows explicitly set the AISimulate search algorithm and seed in their case input. The
+repository's exact AISimulate wheel pin supplies the model metadata, performance data, sampler, and
+renderers used by the Planner test image.
 
 Final DGDs use type-first names and are intended to be complete manifests:
 
