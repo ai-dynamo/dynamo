@@ -23,11 +23,9 @@ short version.
 | `testkit/` | Shared CPU integration tests that run real sidecars against fake engines |
 | `SUPPORT_NOTES.md` | User-visible limits; update it when you add or remove one |
 
-Each engine crate uses the same folders: `src/` for code and unit tests,
-`deploy/` for Kubernetes manifests, `launch/` for the scripts that end-to-end
-tests start, and `proto/` where the crate vendors protobuf files. We are
-investigating removing `tests/`; do not add anything to it. Do not add new
-folders.
+Each engine crate uses the same folders: `src/` for code, `deploy/` for
+Kubernetes manifests, `launch/` for launch scripts, and `proto/` where the
+crate vendors protobuf files. Do not add new folders.
 
 ## Writing sidecar code
 
