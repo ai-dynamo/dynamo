@@ -11,7 +11,7 @@ use dynamo_kv_events::cursor::{CursorObservation, CursorState};
 use dynamo_kv_events::event::KvCacheEventData;
 use dynamo_kv_events::placement::PlacementEvent;
 use dynamo_kv_events::zmq_wire::{
-    EventDedupFilter, EventDedupPolicy, ZmqEventNormalizer, decode_event_batch,
+    EventDedupFilter, EventDedupPolicy, RawKvEvent, ZmqEventNormalizer, decode_event_batch,
 };
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 
@@ -232,6 +232,43 @@ impl ListenerLoop {
         cursor_from_watermark(self.watermark.load(Ordering::Acquire))
     }
 
+    /// Normalizes one engine event, applies the source's block refcounts and indexes what is
+    /// left. The live and replay paths both call it, so they share one refcount table.
+    /// Returns whether an event reached the indexer.
+    async fn apply_raw_event(
+        &mut self,
+        raw_event: RawKvEvent,
+        seq: u64,
+        effective_dp_rank: u32,
+        path: &str,
+    ) -> Result<bool, String> {
+        let Some(placement_event) = self.normalizer.normalize(
+            raw_event,
+            seq,
+            WorkerWithDpRank::new(self.worker_id, effective_dp_rank),
+        ) else {
+            return Ok(false);
+        };
+        let Some(placement_event) =
+            apply_block_refcounts(&mut self.dedup, self.dedup_policy, placement_event)
+        else {
+            return Ok(false);
+        };
+        let router_event = placement_event
+            .into_router_event()
+            .expect("local worker placement must convert to router event");
+        self.indexer
+            .apply_event_routed(router_event)
+            .await
+            .map_err(|error| {
+                format!(
+                    "failed to apply {path} event for worker {} dp_rank {}: {error}",
+                    self.worker_id, self.dp_rank
+                )
+            })?;
+        Ok(true)
+    }
+
     async fn replay_gap(&mut self, start_seq: u64, end_seq: u64) -> Result<u64, String> {
         tracing::info!(
             self.worker_id,
@@ -268,8 +305,6 @@ impl ListenerLoop {
 
         let worker_id = self.worker_id;
         let dp_rank = self.dp_rank;
-        let indexer = &self.indexer;
-        let watermark = &self.watermark;
 
         let req_frames = vec![Vec::new(), start_seq.to_be_bytes().to_vec()];
         if let Err(error) = replay_socket.send_multipart(req_frames).await {
@@ -329,31 +364,10 @@ impl ListenerLoop {
                 .data_parallel_rank
                 .map_or(dp_rank, |rank| rank.cast_unsigned());
             for raw_event in batch.events {
-                let Some(placement_event) = self.normalizer.normalize(
-                    raw_event,
-                    seq,
-                    WorkerWithDpRank::new(worker_id, effective_dp_rank),
-                ) else {
-                    continue;
-                };
-                let Some(placement_event) =
-                    apply_block_refcounts(&mut self.dedup, self.dedup_policy, placement_event)
-                else {
-                    continue;
-                };
-                let router_event = placement_event
-                    .into_router_event()
-                    .expect("local worker placement must convert to router event");
-                indexer
-                    .apply_event_routed(router_event)
-                    .await
-                    .map_err(|error| {
-                        format!(
-                            "failed to apply replayed event for worker {worker_id} dp_rank {dp_rank}: {error}"
-                        )
-                    })?;
+                self.apply_raw_event(raw_event, seq, effective_dp_rank, "replayed")
+                    .await?;
             }
-            watermark.store(seq, Ordering::Release);
+            self.watermark.store(seq, Ordering::Release);
             replay_progress.record_batch(seq);
         }
 
@@ -410,31 +424,12 @@ impl ListenerLoop {
             .data_parallel_rank
             .map_or(self.dp_rank, |rank| rank.cast_unsigned());
         for raw_event in batch.events {
-            let Some(placement_event) = self.normalizer.normalize(
-                raw_event,
-                seq,
-                WorkerWithDpRank::new(self.worker_id, effective_dp_rank),
-            ) else {
-                continue;
-            };
-            let Some(placement_event) =
-                apply_block_refcounts(&mut self.dedup, self.dedup_policy, placement_event)
-            else {
-                continue;
-            };
-            let router_event = placement_event
-                .into_router_event()
-                .expect("local worker placement must convert to router event");
-            self.indexer
-                .apply_event_routed(router_event)
-                .await
-                .map_err(|error| {
-                    format!(
-                        "failed to apply live event for worker {} dp_rank {}: {error}",
-                        self.worker_id, self.dp_rank
-                    )
-                })?;
-            self.messages_processed += 1;
+            if self
+                .apply_raw_event(raw_event, seq, effective_dp_rank, "live")
+                .await?
+            {
+                self.messages_processed += 1;
+            }
         }
         self.watermark.store(seq, Ordering::Release);
         Ok(())
@@ -807,5 +802,31 @@ mod tests {
 
         assert_eq!(replayed, 3);
         assert_eq!(indexed_blocks(&indexer).await, expected);
+    }
+
+    /// Replay and live events share one refcount table, so copies stored during a replay
+    /// count toward later live removes.
+    #[tokio::test]
+    async fn live_removes_count_copies_stored_during_replay() {
+        let context = zmq::Context::new();
+        let batches = vec![store_block(), store_block()];
+        let (endpoint, done_tx, server) = spawn_replay_server(&context, batches, false);
+        let indexer = create_indexer(4, 1);
+        let (mut listener, _publisher) =
+            test_listener(&context, indexer.clone(), Some(endpoint), false);
+
+        let replayed = tokio::time::timeout(Duration::from_secs(5), listener.replay_gap(0, 2))
+            .await
+            .expect("replay completion marker")
+            .unwrap();
+        done_tx.send(()).unwrap();
+        server.await.unwrap();
+        assert_eq!(replayed, 2);
+
+        listener.apply_live_batch(2, &remove_block()).await.unwrap();
+        assert_eq!(indexed_blocks(&indexer).await, Some(1));
+
+        listener.apply_live_batch(3, &remove_block()).await.unwrap();
+        assert_eq!(indexed_blocks(&indexer).await, None);
     }
 }

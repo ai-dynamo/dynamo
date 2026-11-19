@@ -149,7 +149,7 @@ Omitting the field in a patch leaves its value unchanged; pass `false` to disabl
 
 Custom discovery sources must include the setting in their worker records. The Kubernetes EPP adapter does not detect the SGLang build and currently leaves this setting unset, which uses `false`.
 
-For raw SGLang sources, also set the boolean `idempotent_stores` to `true`. SGLang sends one remove per block however many times it stored the block, so the indexer must not count [repeated block stores](standalone-indexer.md#repeated-block-stores). The default, `false`, counts them, as vLLM sources need. The setting applies to all of the worker's DP ranks, and a patch handles it as it does `engine_owned_mm_identity`. The Kubernetes EPP adapter also leaves this setting unset, so it counts repeated stores from SGLang pods.
+For raw SGLang sources, also set the boolean `idempotent_stores` to `true`. SGLang sends one remove per block however many times it stored the block, so the indexer must not count [repeated block stores](standalone-indexer.md#repeated-block-stores). The default, `false`, counts them, as vLLM sources need. The setting applies to all of the worker's DP ranks, and a patch handles it as it does `engine_owned_mm_identity`. The Kubernetes EPP adapter sets it to `true` when `DYN_EPP_TOKENIZER_PROTOCOL` is `sglang-renderer`.
 
 `worker_id` is service-wide, not scoped by model or routing group. `POST /workers`
 is an upsert and returns `201`: reusing an existing ID replaces its catalog
