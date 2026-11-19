@@ -175,6 +175,12 @@ pub(crate) fn build_generate_request(
         video_data,
         audio_data,
         priority: routing.and_then(|routing| routing.priority).map(i64::from),
+        cache_salt: routing
+            .and_then(|routing| routing.cache_namespace.clone())
+            .filter(|salt| !salt.is_empty())
+            .map(|salt| pb::StringOrList {
+                value: Some(pb::string_or_list::Value::One(salt)),
+            }),
         require_reasoning: Some(request.require_reasoning),
         lora_path: routing
             .and_then(|routing| routing.lora_name.clone())

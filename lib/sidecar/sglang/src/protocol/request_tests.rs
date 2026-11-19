@@ -114,6 +114,36 @@ fn rendezvous(request: &pb::GenerateRequest) -> Option<(String, i64, i64)> {
 }
 
 #[test]
+fn cache_salt_is_forwarded_in_every_worker_role() {
+    for mode in [
+        DisaggregationMode::Aggregated,
+        DisaggregationMode::Prefill,
+        DisaggregationMode::Decode,
+    ] {
+        for salt in [None, Some(""), Some("tenant-a")] {
+            let mut request = request();
+            request.routing = Some(RoutingHints {
+                cache_namespace: salt.map(str::to_string),
+                ..Default::default()
+            });
+            request.bootstrap_info = Some(BootstrapInfo {
+                bootstrap_host: "prefill".to_string(),
+                bootstrap_port: 5000,
+                bootstrap_room: 42,
+                handoff_id: None,
+            });
+            let mapped = build(&request, mode).unwrap();
+            let expected = salt
+                .filter(|salt| !salt.is_empty())
+                .map(|salt| pb::StringOrList {
+                    value: Some(pb::string_or_list::Value::One(salt.to_string())),
+                });
+            assert_eq!(mapped.cache_salt, expected, "mode={mode:?}, salt={salt:?}");
+        }
+    }
+}
+
+#[test]
 fn request_maps_native_fields_and_full_width_room() {
     let mut request = request();
     request.bootstrap_info = Some(BootstrapInfo {
