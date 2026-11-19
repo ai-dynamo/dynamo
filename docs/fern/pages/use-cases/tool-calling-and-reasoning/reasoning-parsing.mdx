@@ -112,6 +112,43 @@ Set `DYN_PARSER_VERSION` in the frontend and backend worker environments before 
   </Step>
 </Steps>
 
+## Responses Reasoning Replay
+
+For Responses requests, `include: ["reasoning.encrypted_content"]` without
+`reasoning.summary` returns replay data without plaintext reasoning in `content`
+or `response.reasoning_text.*` events. Setting `reasoning.summary` returns the
+**full reasoning text** in the reasoning item's `content` as `reasoning_text`
+parts. The `summary` array stays empty: Dynamo does not generate a summary.
+
+The replay payload is `trtllm-reasoning-v1:` followed by standard base64 of the
+exact UTF-8 reasoning text. For example, `hello` becomes
+`trtllm-reasoning-v1:aGVsbG8=`. The prefix identifies the versioned replay
+format; Dynamo retains it for compatibility with existing conversation history,
+including when the frontend serves another backend.
+
+<Warning>
+This payload is **not encryption**. Anyone who has the blob can read the
+reasoning. Store, transmit, and log it with the same protections as plaintext
+reasoning.
+</Warning>
+
+On replay, nonempty readable `content` takes precedence. Otherwise Dynamo
+decodes the recognized prefix, returning HTTP 400 for malformed base64 or
+invalid UTF-8. If no readable content or recognized payload is available,
+Dynamo falls back to readable `summary` text. Other providers' opaque encodings
+are not decoded or forwarded as reasoning to the backend; do not rely on them
+to preserve conversation reasoning.
+
+Without either `reasoning.summary` or the encrypted-content include, Dynamo
+returns backend reasoning as raw text only for these configured selectors:
+
+- Tool parser: `kimi_k3`, its alias `kimi-k3`, or `glm47`.
+- Reasoning parser: `kimi_k3`, its alias `kimi-k3`, or `glm45`.
+
+Either match enables this behavior. Kimi K2 profiles are excluded. Other profiles
+require an explicit reasoning output request. The returned text is the model's
+full reasoning, rather than a generated summary.
+
 ## Deployment-Level Thinking Default
 
 Set `--dyn-default-thinking-mode` on a backend worker to choose the thinking

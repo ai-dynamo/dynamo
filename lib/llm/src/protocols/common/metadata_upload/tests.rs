@@ -84,7 +84,7 @@ fn rejects_duplicate_fields_in_raw_json() {
     ] {
         let error = serde_json::from_str::<MetadataUpload>(input).unwrap_err();
         let message = error.to_string();
-        assert!(message.contains("duplicate"), "{input}: {error}");
+        assert!(message.contains("invalid metadata_upload JSON"), "{error}");
         assert!(!message.contains("s3://") && !message.contains("X-Token"));
     }
 }
@@ -96,19 +96,11 @@ fn rejects_duplicate_upload_fields_in_raw_openai_requests() {
 
     let chat = r#"{"model":"test","messages":[{"role":"user","content":"hello"}],"nvext":{"metadata_upload":{"url":"s3://a","url":"s3://b"}}}"#;
     let error = serde_json::from_str::<NvCreateChatCompletionRequest>(chat).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("duplicate metadata_upload field")
-    );
+    assert!(error.to_string().contains("invalid metadata_upload JSON"));
 
     let completion = r#"{"model":"test","prompt":"hello","nvext":{"metadata_upload":{"kind":"generation_artifact","contents":[],"mode":"inline_base64","mode":"inline_base64"}}}"#;
     let error = serde_json::from_str::<NvCreateCompletionRequest>(completion).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("duplicate metadata_upload field")
-    );
+    assert!(error.to_string().contains("invalid metadata_upload JSON"));
 
     let valid_chat = r#"{"model":"test","messages":[{"role":"user","content":"hello"}],"nvext":{"metadata_upload":{"url":"s3://a"}}}"#;
     assert!(serde_json::from_str::<NvCreateChatCompletionRequest>(valid_chat).is_ok());
