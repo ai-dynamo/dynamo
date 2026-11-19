@@ -15,10 +15,9 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -60,6 +59,9 @@ type reconciler struct {
 	client.Client
 	scheme         *runtime.Scheme
 	defaultBackend configv1alpha1.DiscoveryBackend
+	// clusterID is the operator's multiCluster.clusterId: the cluster ID of a Relay
+	// that omits its clusterId, if set.
+	clusterID string
 	// exports configures the pool's ServiceExports, which the controller maintains
 	// when the multiClusterExport gate is on, and is nil otherwise.
 	exports *exportSettings
@@ -68,7 +70,10 @@ type reconciler struct {
 // Setup registers the one-DGD Relay controller and its DGD dependency watch, and,
 // when the multiClusterExport gate is on, the watches of the pool's exports.
 func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runtimeConfig *commoncontroller.RuntimeConfig) error {
-	r := &reconciler{Client: mgr.GetClient(), scheme: mgr.GetScheme(), defaultBackend: config.Discovery.Backend}
+	r := &reconciler{
+		Client: mgr.GetClient(), scheme: mgr.GetScheme(),
+		defaultBackend: config.Discovery.Backend, clusterID: config.MultiCluster.ClusterID,
+	}
 	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.DynamoPoolRelay{}).
 		WithEventFilter(eventFilter(config, runtimeConfig)).
@@ -501,27 +506,18 @@ func sourceJSON(namespaces []string, connectionRevision string) string {
 	return string(encoded)
 }
 
-// maxClusterIDLength is the most characters that a clusterId may have: its
-// schema's MaxLength.
-const maxClusterIDLength = 128
-
 // errNoClusterID marks a Relay whose cluster ID the controller cannot settle:
-// its clusterId is omitted, and the cluster's ID in its ClusterSet cannot stand in.
+// its clusterId is omitted, and neither the operator nor the About API stands in.
 var errNoClusterID = errors.New("the Relay has no cluster ID")
 
-// resolveClusterID returns the cluster ID that relay runs under: its clusterId
-// if set, and otherwise the cluster's ID in its ClusterSet, from the About API's
-// ClusterProperty that the controller watches with standard MCS. The error
-// wraps errNoClusterID when neither gives an ID that the Relay can use.
+// resolveClusterID returns the cluster ID that relay runs under, in the same
+// order in every Global Discovery mode: its clusterId, the operator's
+// multiCluster.clusterId, or the cluster's ID in its ClusterSet, from the About
+// API's ClusterProperty that the controller watches with standard MCS. The error
+// wraps errNoClusterID when none gives an ID that the Relay can use.
 func (r *reconciler) resolveClusterID(ctx context.Context, relay *v1alpha1.DynamoPoolRelay) (string, error) {
 	if relay.Spec.ClusterID != "" {
 		return relay.Spec.ClusterID, nil
-	}
-	if r.exports == nil || !r.exports.clusterPropertyWatched {
-		return "", fmt.Errorf("%w: clusterId is omitted, and the operator uses the cluster's ID in its ClusterSet only "+
-			"with multiCluster.mcsImplementation %s in a cluster that served the About API when the operator started; "+
-			"set clusterId, or install the About API and restart the operator",
-			errNoClusterID, configv1alpha1.MCSImplementationStandard)
 	}
 
 	// A registration that names its cluster itself cannot follow an ID that can change.
@@ -535,6 +531,15 @@ func (r *reconciler) resolveClusterID(ctx context.Context, relay *v1alpha1.Dynam
 			}
 		}
 	}
+	if r.clusterID != "" {
+		return r.clusterID, nil
+	}
+	if r.exports == nil || !r.exports.clusterPropertyWatched {
+		return "", fmt.Errorf("%w: clusterId is omitted, the operator's multiCluster.clusterId is empty, and the operator "+
+			"uses the cluster's ID in its ClusterSet only with multiCluster.mcsImplementation %s in a cluster that served "+
+			"the About API when the operator started; set clusterId or multiCluster.clusterId, or install the About API "+
+			"and restart the operator", errNoClusterID, configv1alpha1.MCSImplementationStandard)
+	}
 
 	// The watch of the property requeues the Relay when the property changes.
 	property, err := multicluster.ReadClusterIDProperty(ctx, r.exports.cache)
@@ -546,21 +551,11 @@ func (r *reconciler) resolveClusterID(ctx context.Context, relay *v1alpha1.Dynam
 			errNoClusterID, multicluster.ClusterIDProperty)
 	}
 	clusterID := multicluster.ClusterPropertyValue(property)
-	if clusterID == "" || utf8.RuneCountInString(clusterID) > maxClusterIDLength || hasSurroundingSpace(clusterID) ||
-		strings.ContainsFunc(clusterID, unicode.IsControl) || strings.Contains(clusterID, "/") {
-		return "", fmt.Errorf("%w: clusterId is omitted, and ClusterProperty %s gives %q, which a cluster ID cannot be: "+
-			"it needs 1 to %d characters, and no surrounding whitespace, control characters or /",
-			errNoClusterID, multicluster.ClusterIDProperty, clusterID, maxClusterIDLength)
+	if err := configvalidation.CheckClusterID(clusterID); err != nil {
+		return "", fmt.Errorf("%w: clusterId is omitted, and ClusterProperty %s gives %q, which a cluster ID cannot be: it %w",
+			errNoClusterID, multicluster.ClusterIDProperty, clusterID, err)
 	}
 	return clusterID, nil
-}
-
-// hasSurroundingSpace reports whether value starts or ends with a character that
-// the Relay's Python CLI rejects there: Unicode white space or U+001C-U+001F.
-func hasSurroundingSpace(value string) bool {
-	return strings.TrimFunc(value, func(r rune) bool {
-		return unicode.IsSpace(r) || r >= '\x1c' && r <= '\x1f'
-	}) != value
 }
 
 // render returns the Relay's resources and its Deployment, which runs under
@@ -570,7 +565,7 @@ func render(relay *v1alpha1.DynamoPoolRelay, clusterID string, namespaces []stri
 	if problems := validation.IsDNS1035Label(name); len(problems) != 0 {
 		return nil, nil, fmt.Errorf("DGD name %q cannot produce a valid <dgd>-pool-relay Service name %q: %s", relay.Name, name, strings.Join(problems, "; "))
 	}
-	if clusterID == "" || hasSurroundingSpace(clusterID) {
+	if clusterID == "" || configvalidation.HasSurroundingSpace(clusterID) {
 		return nil, nil, fmt.Errorf("clusterId must be non-empty and have no surrounding whitespace")
 	}
 	if relay.Spec.PodTemplate == nil {

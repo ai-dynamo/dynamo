@@ -19,6 +19,7 @@ package validation
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -101,6 +102,32 @@ func TestValidateOperatorConfiguration_MCSImplementation(t *testing.T) {
 			t.Log("Validate a configuration that exports Global Router pools through this implementation")
 			cfg := validConfig()
 			cfg.MultiCluster.MCSImplementation = tc.implementation
+			errs := ValidateOperatorConfiguration(cfg)
+			if len(errs) != tc.wantErrors {
+				t.Errorf("expected %d errors, got %d: %v", tc.wantErrors, len(errs), errs)
+			}
+		})
+	}
+}
+
+func TestValidateOperatorConfiguration_MultiClusterClusterID(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		clusterID  string
+		wantErrors int
+	}{
+		{name: "unset", clusterID: ""},
+		{name: "a stable name", clusterID: "aws-east"},
+		{name: "surrounding whitespace", clusterID: " aws-east", wantErrors: 1},
+		{name: "a separator that the PoolRelay strips", clusterID: "aws-east\x1f", wantErrors: 1},
+		{name: "a control character", clusterID: "aws\teast", wantErrors: 1},
+		{name: "a slash, which the pool's registration key cannot hold", clusterID: "aws/east", wantErrors: 1},
+		{name: "longer than a clusterId", clusterID: strings.Repeat("e", MaxClusterIDLength+1), wantErrors: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Validate a configuration that gives every DynamoPoolRelay without a clusterId this cluster ID")
+			cfg := validConfig()
+			cfg.MultiCluster.ClusterID = tc.clusterID
 			errs := ValidateOperatorConfiguration(cfg)
 			if len(errs) != tc.wantErrors {
 				t.Errorf("expected %d errors, got %d: %v", tc.wantErrors, len(errs), errs)

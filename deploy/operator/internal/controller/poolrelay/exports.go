@@ -99,9 +99,9 @@ type exportSettings struct {
 	runtimeConfig *commoncontroller.RuntimeConfig
 	// clusterPropertyWatched is true when the controller watches the About API's
 	// ClusterProperties: the MCS implementation labels imports with the cluster's
-	// ID in its ClusterSet, and the cluster serves the API. A Relay without a
-	// clusterId then runs under that ID. Otherwise a Relay needs a clusterId, and
-	// it is not checked.
+	// ID in its ClusterSet, and the cluster serves the API. A Relay that omits its
+	// clusterId, without the operator's multiCluster.clusterId, then runs under that
+	// ID. Otherwise its cluster ID is not checked.
 	clusterPropertyWatched bool
 }
 
@@ -541,20 +541,24 @@ func (r *reconciler) exportProblems(
 
 	// A standard implementation labels the pool's imports with the cluster's ID in
 	// its ClusterSet, and the Global Discovery Service joins the pool's
-	// registration to them only under the same cluster ID. A Relay without a
-	// clusterId runs under that ID, so only a clusterId that is set can differ.
-	if !r.exports.clusterPropertyWatched || relay.Spec.ClusterID == "" {
+	// registration to them only under the same cluster ID. A Relay that takes the
+	// cluster's ID cannot differ from it, so only a set cluster ID is checked.
+	setID, setBy := relay.Spec.ClusterID, "clusterId"
+	if setID == "" {
+		setID, setBy = r.clusterID, "the operator's multiCluster.clusterId"
+	}
+	if !r.exports.clusterPropertyWatched || setID == "" {
 		return problems, nil
 	}
 	property, err := multicluster.ReadClusterIDProperty(ctx, r.exports.cache)
 	if err != nil || property == nil {
 		return problems, err
 	}
-	if clusterID := multicluster.ClusterPropertyValue(property); clusterID != "" && clusterID != relay.Spec.ClusterID {
+	if clusterID := multicluster.ClusterPropertyValue(property); clusterID != "" && clusterID != setID {
 		problems = append(problems, exportProblem{reason: reasonClusterIDMismatch, related: property, message: fmt.Sprintf(
-			"clusterId %q differs from the ID %q that ClusterProperty %s gives this cluster in its ClusterSet; "+
+			"%s %q differs from the ID %q that ClusterProperty %s gives this cluster in its ClusterSet; "+
 				"the Global Discovery Service lists the pool only when they match",
-			relay.Spec.ClusterID, clusterID, multicluster.ClusterIDProperty)})
+			setBy, setID, clusterID, multicluster.ClusterIDProperty)})
 	}
 	return problems, nil
 }
@@ -645,8 +649,8 @@ func (r *reconciler) relaysExportingService(ctx context.Context, namespace, name
 }
 
 // mapClusterPropertyToRelays requeues every Relay in a namespace that the
-// operator manages: a Relay without a clusterId runs under the cluster's ID in
-// its ClusterSet, and the clusterId of any other is compared with it.
+// operator manages: a Relay may run under the cluster's ID in its ClusterSet,
+// and the cluster ID of any other is compared with it.
 func (r *reconciler) mapClusterPropertyToRelays(ctx context.Context, _ client.Object) []ctrl.Request {
 	relays := &v1alpha1.DynamoPoolRelayList{}
 	if err := r.List(ctx, relays); err != nil {

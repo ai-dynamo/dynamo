@@ -116,6 +116,8 @@ type relayControllerOptions struct {
 	restricted string
 	// wrap, when set, wraps the manager's client.
 	wrap func(client.Client) client.Client
+	// clusterID is the operator's multiCluster.clusterId.
+	clusterID string
 }
 
 // startRelayController starts a manager that runs the Relay controller with the
@@ -145,9 +147,11 @@ func startRelayController(t *testing.T, config *rest.Config, options relayContro
 		t.Fatal(err)
 	}
 	if err := Setup(manager, &configv1alpha1.OperatorConfiguration{
-		Discovery:    configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
-		MultiCluster: configv1alpha1.MultiClusterConfiguration{MCSImplementation: configv1alpha1.MCSImplementationStandard},
-		Namespace:    configv1alpha1.NamespaceConfiguration{Restricted: options.restricted},
+		Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+		MultiCluster: configv1alpha1.MultiClusterConfiguration{
+			MCSImplementation: configv1alpha1.MCSImplementationStandard, ClusterID: options.clusterID,
+		},
+		Namespace: configv1alpha1.NamespaceConfiguration{Restricted: options.restricted},
 	}, &commoncontroller.RuntimeConfig{
 		Gate: features.Gates{MultiClusterExport: true, ServiceExportVersion: options.version},
 	}); err != nil {
@@ -735,6 +739,59 @@ func TestRelayWithoutAClusterIDFollowsTheClusterSetID(t *testing.T) {
 	eventually(t, "the Relay held after the property's deletion", heldFor("does not exist"))
 	if running, err := runsUnder("west")(); err != nil || !running {
 		t.Fatalf("the held Relay's Deployment no longer runs under west: %v", err)
+	}
+}
+
+func TestOperatorClusterIDStandsInForAnOmittedClusterID(t *testing.T) {
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		t.Skip("KUBEBUILDER_ASSETS is needed for the controller API test")
+	}
+	ctx := context.Background()
+	config := startExportAPIServer(t, exportTestVersion)
+	scheme := newExportTestScheme(t)
+	if err := eventsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	apiClient, err := client.New(config, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startRelayController(t, config, relayControllerOptions{version: exportTestVersion, clusterID: "fleet-east"})
+
+	t.Log("Create a pool whose Relay has no clusterId, in a cluster with no ID in its ClusterSet: it runs under the operator's multiCluster.clusterId")
+	relay := readSampleRelay(t)
+	relay.Spec.ClusterID = ""
+	createNamespace(t, apiClient, relay.Namespace)
+	createDGD(t, apiClient, relay, "Frontend")
+	if err := apiClient.Create(ctx, relay); err != nil {
+		t.Fatal(err)
+	}
+	deploymentKey := client.ObjectKey{Namespace: relay.Namespace, Name: multicluster.PoolRelayServiceName(relay.Name)}
+	runsUnderFleetEast := func() (bool, error) {
+		deployment := &appsv1.Deployment{}
+		if err := apiClient.Get(ctx, deploymentKey, deployment); err != nil {
+			return false, client.IgnoreNotFound(err)
+		}
+		args := deployment.Spec.Template.Spec.Containers[0].Args
+		return len(args) > 1 && args[0] == "--cluster-id" && args[1] == "fleet-east", nil
+	}
+	eventually(t, "the Relay's Deployment under cluster ID fleet-east", runsUnderFleetEast)
+	waitForExports(t, apiClient, relay, multicluster.PoolRelayServiceName(relay.Name), relay.Name+"-frontend")
+
+	t.Log("Give the cluster another ID in its ClusterSet: the Relay keeps the operator's ID, and the mismatch is reported")
+	if err := apiClient.Create(ctx, newClusterIDProperty("west")); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "a ClusterIDMismatch event about the operator's multiCluster.clusterId", func() (bool, error) {
+		for _, note := range relayEventNotes(t, apiClient, relay, reasonClusterIDMismatch) {
+			if strings.Contains(note, `multiCluster.clusterId "fleet-east"`) && strings.Contains(note, `the ID "west"`) {
+				return true, nil
+			}
+		}
+		return false, nil
+	})
+	if running, err := runsUnderFleetEast(); err != nil || !running {
+		t.Fatalf("the Relay's Deployment no longer runs under fleet-east: %v", err)
 	}
 }
 

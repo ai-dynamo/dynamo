@@ -6,6 +6,7 @@
 package poolrelay
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -1135,8 +1137,12 @@ func TestPoolExportsCheckTheClusterID(t *testing.T) {
 		emptyProperty bool
 		// emptyClusterID clears the Relay's clusterId.
 		emptyClusterID bool
-		readFails      bool
-		wantMismatch   bool
+		// defaultClusterID is the operator's multiCluster.clusterId.
+		defaultClusterID string
+		readFails        bool
+		wantMismatch     bool
+		// wantMismatchOf names the cluster ID that differs, if not the Relay's clusterId "east".
+		wantMismatchOf string
 	}{
 		{name: "a Relay with the cluster's ID", watched: true, property: "east"},
 		{name: "a Relay with another cluster ID", watched: true, property: "west", wantMismatch: true},
@@ -1144,6 +1150,15 @@ func TestPoolExportsCheckTheClusterID(t *testing.T) {
 		{name: "a property without a value gives no cluster ID", watched: true, emptyProperty: true},
 		{name: "without the watch the check is skipped", property: "west"},
 		{name: "a Relay without a clusterId runs under the cluster's ID, so it cannot differ", watched: true, property: "west", emptyClusterID: true},
+		{
+			name: "the operator's multiCluster.clusterId, which a Relay without a clusterId runs under, is checked", watched: true,
+			property: "west", emptyClusterID: true, defaultClusterID: "fleet-east",
+			wantMismatch: true, wantMismatchOf: `multiCluster.clusterId "fleet-east"`,
+		},
+		{
+			name: "the operator's multiCluster.clusterId that is the cluster's ID", watched: true,
+			property: "fleet-east", emptyClusterID: true, defaultClusterID: "fleet-east",
+		},
 		{name: "a failed read fails the reconcile instead of skipping the check", watched: true, readFails: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1173,6 +1188,7 @@ func TestPoolExportsCheckTheClusterID(t *testing.T) {
 			recorder := events.NewFakeRecorder(10)
 			r := newExportTestReconciler(fakeClient, recorder, configv1alpha1.MCSImplementationStandard, exportTestVersion)
 			r.exports.clusterPropertyWatched = tc.watched
+			r.clusterID = tc.defaultClusterID
 
 			t.Log("Reconcile the pool's exports, and look for the mismatch warning")
 			err := r.reconcileExports(context.Background(), relay, dgd)
@@ -1189,7 +1205,7 @@ func TestPoolExportsCheckTheClusterID(t *testing.T) {
 			}
 			g.Expect(recorded).To(gomega.ContainElement(gomega.SatisfyAll(
 				gomega.HavePrefix(corev1.EventTypeWarning+" "+reasonClusterIDMismatch),
-				gomega.ContainSubstring(`clusterId "east"`),
+				gomega.ContainSubstring(cmp.Or(tc.wantMismatchOf, `clusterId "east"`)),
 				gomega.ContainSubstring(`the ID "west"`),
 			)))
 		})
@@ -1215,6 +1231,8 @@ func TestRelayWithoutAClusterIDRunsUnderTheClusterSetID(t *testing.T) {
 		// routingPool, when set, is the DYN_RELAY_ROUTING_POOL of the Relay's main
 		// container, which names the pool's cluster itself.
 		routingPool string
+		// defaultClusterID is the operator's multiCluster.clusterId.
+		defaultClusterID string
 		// wantClusterID is the cluster ID that the Relay runs under, if it runs.
 		wantClusterID string
 		// wantHeld is part of the message with which the Relay is held as it is.
@@ -1222,6 +1240,22 @@ func TestRelayWithoutAClusterIDRunsUnderTheClusterSetID(t *testing.T) {
 	}{
 		{name: "a Relay without a clusterId runs under the cluster's ID", watched: true, property: "east", wantClusterID: "east"},
 		{name: "a clusterId wins over the cluster's ID", clusterID: "west", watched: true, property: "east", wantClusterID: "west"},
+		{
+			name: "without MCS, the operator's multiCluster.clusterId stands in for an omitted clusterId", exportsOff: true,
+			defaultClusterID: "fleet-east", wantClusterID: "fleet-east",
+		},
+		{
+			name: "the operator's multiCluster.clusterId wins over the cluster's ID", watched: true, property: "east",
+			defaultClusterID: "fleet-east", wantClusterID: "fleet-east",
+		},
+		{
+			name: "a clusterId wins over the operator's multiCluster.clusterId", clusterID: "west", exportsOff: true,
+			defaultClusterID: "fleet-east", wantClusterID: "west",
+		},
+		{
+			name: "DYN_RELAY_ROUTING_POOL needs a clusterId even with the operator's multiCluster.clusterId", exportsOff: true,
+			defaultClusterID: "fleet-east", routingPool: "fleet-east/inference/green", wantHeld: "sets DYN_RELAY_ROUTING_POOL",
+		},
 		{name: "without the property the Relay is held", watched: true, noProperty: true, wantHeld: "does not exist"},
 		{name: "a property without a value gives no cluster ID", watched: true, wantHeld: `gives ""`},
 		{name: "a property with surrounding whitespace gives no cluster ID", watched: true, property: " east", wantHeld: `gives " east"`},
@@ -1229,7 +1263,7 @@ func TestRelayWithoutAClusterIDRunsUnderTheClusterSetID(t *testing.T) {
 		{name: "a property with a slash gives no cluster ID", watched: true, property: "us/east", wantHeld: `gives "us/east"`},
 		{
 			name: "a property longer than a clusterId gives no cluster ID", watched: true,
-			property: strings.Repeat("e", maxClusterIDLength+1), wantHeld: "1 to 128 characters",
+			property: strings.Repeat("e", configvalidation.MaxClusterIDLength+1), wantHeld: "1 to 128 characters",
 		},
 		{
 			name: "a Relay that names its cluster in DYN_RELAY_ROUTING_POOL needs a clusterId", watched: true,
@@ -1240,7 +1274,7 @@ func TestRelayWithoutAClusterIDRunsUnderTheClusterSetID(t *testing.T) {
 			property: "east", routingPool: "west/inference/green", wantClusterID: "west",
 		},
 		{name: "without the watch a Relay needs a clusterId", property: "east", wantHeld: "restart the operator"},
-		{name: "without the pool's exports a Relay needs a clusterId", exportsOff: true, property: "east", wantHeld: "set clusterId"},
+		{name: "without the pool's exports a Relay needs a cluster ID", exportsOff: true, property: "east", wantHeld: "set clusterId or multiCluster.clusterId"},
 		{name: "a failed read fails the reconcile instead of holding the Relay", watched: true, property: "east", readFails: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1272,6 +1306,7 @@ func TestRelayWithoutAClusterIDRunsUnderTheClusterSetID(t *testing.T) {
 			fakeClient := newExportTestClient(scheme, exportTestVersion, funcs, objects...)
 			r := newExportTestReconciler(fakeClient, events.NewFakeRecorder(20), configv1alpha1.MCSImplementationStandard, exportTestVersion)
 			r.exports.clusterPropertyWatched = tc.watched
+			r.clusterID = tc.defaultClusterID
 			if tc.exportsOff {
 				r.exports = nil
 			}

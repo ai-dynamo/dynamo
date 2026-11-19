@@ -12,11 +12,11 @@ import (
 
 // DynamoPoolRelaySpec configures Relay Pods for the DGD with the same name and namespace.
 type DynamoPoolRelaySpec struct {
-	// ClusterID is the Relay's logical cluster ID. Omitted, the Relay runs under the
-	// cluster's ID in its ClusterSet from the About API's ClusterProperty
-	// cluster.clusterset.k8s.io, with the operator's mcsImplementation mcs, unless its
-	// main container sets DYN_RELAY_ROUTING_POOL. With Karmada, set the member
-	// cluster's name. A changed ID restarts the Relay's Pods.
+	// ClusterID is the Relay's logical cluster ID. Omitted, it is the operator's
+	// multiCluster.clusterId, or else, with mcsImplementation mcs, the cluster's ID in
+	// its ClusterSet from the About API's ClusterProperty cluster.clusterset.k8s.io.
+	// It is required while the main container sets DYN_RELAY_ROUTING_POOL. A changed
+	// ID restarts the Relay's Pods.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128

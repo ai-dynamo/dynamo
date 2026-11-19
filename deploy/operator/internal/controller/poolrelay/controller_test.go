@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -789,8 +790,8 @@ func TestMaxClusterIDLengthIsTheSchemas(t *testing.T) {
 		t.Fatal(err)
 	}
 	clusterID := crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"].Properties["clusterId"]
-	if clusterID.MaxLength == nil || *clusterID.MaxLength != maxClusterIDLength {
-		t.Fatalf("clusterId's MaxLength is %v, but maxClusterIDLength is %d", clusterID.MaxLength, maxClusterIDLength)
+	if clusterID.MaxLength == nil || *clusterID.MaxLength != configvalidation.MaxClusterIDLength {
+		t.Fatalf("clusterId's MaxLength is %v, but MaxClusterIDLength is %d", clusterID.MaxLength, configvalidation.MaxClusterIDLength)
 	}
 }
 
