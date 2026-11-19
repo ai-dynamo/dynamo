@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
+from dynamo.vllm.generation_policy import PASSTHROUGH_GENERATION_POLICY
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
 
 pytestmark = [
@@ -72,6 +73,7 @@ def _handler_with_responses(responses):
         pass
 
     handler = SimpleNamespace()
+    handler.generation_policy = PASSTHROUGH_GENERATION_POLICY
     handler.engine_client = _FakeEngineClient(responses)
     handler.runtime = SimpleNamespace(shutdown=lambda: None)
     handler._extract_logprobs = BaseWorkerHandler._extract_logprobs
