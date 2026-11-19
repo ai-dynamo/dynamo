@@ -536,6 +536,7 @@ pub trait BidirectionalEngine: Send + Sync + 'static {
 
     /// Optional finite canary. The worker sends this as a one-event input stream
     /// and then closes input. The response must reflect upstream engine health.
+    /// Session traffic does not mark the endpoint healthy or defer this probe.
     async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
         Ok(None)
     }

@@ -5,8 +5,9 @@
 
 The client supports two session types:
 
-* ``realtime`` sends 16 kHz PCM16 to a vLLM-Omni worker and saves returned
-  ``response.output_audio.delta`` events as WAV files.
+* ``realtime`` defaults to 16 kHz PCM16 for the Python vLLM-Omni worker. Use
+  ``--input-sample-rate 24000`` for the sidecar. Returned
+  ``response.output_audio.delta`` events are saved as WAV files.
 * ``transcription`` sends 24 kHz PCM16 to a standard vLLM ASR worker and prints
   the returned transcription delta and completed events.
 
@@ -113,7 +114,9 @@ def _write_wav(path: str, pcm16_bytes: bytes, sample_rate: int) -> None:
         wav_file.writeframes(pcm16_bytes)
 
 
-def _input_sample_rate(session_type: str) -> int:
+def _input_sample_rate(session_type: str, requested: int | None = None) -> int:
+    if requested is not None:
+        return requested
     if session_type == "transcription":
         return TRANSCRIPTION_INPUT_SAMPLE_RATE
     return REALTIME_INPUT_SAMPLE_RATE
@@ -139,15 +142,29 @@ def _session_block(args: argparse.Namespace) -> dict:
             },
         }
 
-    return {
+    session = {
         "type": "realtime",
         "model": args.model,
         "output_modalities": args.output_modalities or ["audio"],
     }
+    if _input_sample_rate(args.session_type, args.input_sample_rate) == 24_000:
+        # The public realtime schema requires output alongside input.
+        session["audio"] = {
+            "input": {
+                "format": {"type": "audio/pcm", "rate": 24_000},
+                "turn_detection": None,
+            },
+            "output": {
+                "format": {"type": "audio/pcm", "rate": 24_000},
+                "speed": 1.0,
+                "voice": "alloy",
+            },
+        }
+    return session
 
 
 async def run(args: argparse.Namespace) -> int:
-    input_sample_rate = _input_sample_rate(args.session_type)
+    input_sample_rate = _input_sample_rate(args.session_type, args.input_sample_rate)
     pcm16 = _load_pcm16(args.input_audio, args.input_audio_url, input_sample_rate)
     chunk_bytes = max(input_sample_rate * 2 * args.chunk_ms // 1000, 2)
 
@@ -308,6 +325,13 @@ def main() -> None:
         default=DEFAULT_AUDIO_URL,
         help="sample audio URL fetched when --input-audio is omitted",
     )
+    parser.add_argument(
+        "--input-sample-rate",
+        type=int,
+        choices=[16_000, 24_000],
+        default=None,
+        help="PCM input rate: Omni Python defaults to 16000; use 24000 for the sidecar",
+    )
     parser.add_argument("--language", default="en", help="transcription input language")
     parser.add_argument(
         "--output-modalities",
@@ -339,6 +363,8 @@ def main() -> None:
         help="fail unless a transcription delta arrives before audio is committed",
     )
     args = parser.parse_args()
+    if args.session_type == "transcription" and args.input_sample_rate == 16_000:
+        parser.error("transcription sessions require --input-sample-rate 24000")
     if args.require_incremental and args.session_type != "transcription":
         parser.error("--require-incremental requires --session-type transcription")
     sys.exit(asyncio.run(run(args)))

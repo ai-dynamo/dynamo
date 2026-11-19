@@ -101,21 +101,42 @@ struct Turn {
     cancel: CancellationToken,
 }
 
+enum AudioInput {
+    Streaming(VecDeque<Vec<u8>>),
+    Buffered(Vec<u8>),
+}
+
+impl Default for AudioInput {
+    fn default() -> Self {
+        Self::Streaming(VecDeque::new())
+    }
+}
+
+impl AudioInput {
+    fn clear(&mut self) {
+        match self {
+            Self::Streaming(audio) => audio.clear(),
+            Self::Buffered(audio) => audio.clear(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct InputState {
-    audio: VecDeque<Vec<u8>>,
+    audio: AudioInput,
     received: usize,
     committed: bool,
     acknowledge_commit: bool,
     finished: bool,
 }
 
-/// Audio is bounded by bytes and event count. Commit has a separate slot;
-/// the coordinator clears a turn by dropping its input and output buffers.
+/// ASR streams through a bounded queue; Omni buffers one byte-bounded utterance.
+/// Commit has a separate slot so a full audio queue cannot block it.
 #[derive(Default)]
 struct TurnInput {
     state: Mutex<InputState>,
     changed: Notify,
+    committed: Notify,
 }
 
 enum Command {
@@ -124,6 +145,19 @@ enum Command {
 }
 
 impl TurnInput {
+    fn new(protocol: Protocol) -> Self {
+        Self {
+            state: Mutex::new(InputState {
+                audio: match protocol {
+                    Protocol::VllmTranscription => AudioInput::default(),
+                    Protocol::Omni => AudioInput::Buffered(Vec::new()),
+                },
+                ..InputState::default()
+            }),
+            ..Self::default()
+        }
+    }
+
     fn append(&self, pcm: Vec<u8>, limits: &Limits) -> Result<(), Error> {
         let mut state = self.state.lock();
         if pcm.len()
@@ -137,23 +171,34 @@ impl TurnInput {
             ));
         }
         let received = pcm.len();
-        if state.audio.len() >= limits.event_capacity.get() {
-            // A burst can fill the event slots before the upstream handshake
-            // finishes. Preserve PCM order without increasing the queue bound.
-            let tail = state.audio.back_mut().expect("nonzero full audio queue");
-            if pcm.len()
-                > limits
-                    .max_audio_chunk_bytes
-                    .get()
-                    .saturating_sub(tail.len())
-            {
-                return Err(Error::Invalid(
-                    "input audio buffer exceeds the configured limit".into(),
-                ));
+        match &mut state.audio {
+            AudioInput::Streaming(audio) => {
+                if audio.len() >= limits.event_capacity.get() {
+                    // A burst can fill the event slots before the upstream handshake
+                    // finishes. Preserve PCM order without increasing the queue bound.
+                    let tail = audio.back_mut().expect("nonzero full audio queue");
+                    if pcm.len()
+                        > limits
+                            .max_audio_chunk_bytes
+                            .get()
+                            .saturating_sub(tail.len())
+                    {
+                        return Err(Error::Invalid(
+                            "input audio buffer exceeds the configured limit".into(),
+                        ));
+                    }
+                    tail.extend_from_slice(&pcm);
+                } else {
+                    audio.push_back(pcm);
+                }
             }
-            tail.extend_from_slice(&pcm);
-        } else {
-            state.audio.push_back(pcm);
+            AudioInput::Buffered(audio) => {
+                if audio.is_empty() {
+                    *audio = pcm;
+                } else {
+                    audio.extend_from_slice(&pcm);
+                }
+            }
         }
         state.received += received;
         drop(state);
@@ -167,6 +212,17 @@ impl TurnInput {
         state.acknowledge_commit = acknowledge;
         drop(state);
         self.changed.notify_one();
+        self.committed.notify_one();
+    }
+
+    async fn wait_for_commit(&self) {
+        loop {
+            let notified = self.committed.notified();
+            if self.state.lock().committed {
+                return;
+            }
+            notified.await;
+        }
     }
 
     async fn next(&self) -> Command {
@@ -174,7 +230,15 @@ impl TurnInput {
             let notified = self.changed.notified();
             {
                 let mut state = self.state.lock();
-                if let Some(pcm) = state.audio.pop_front() {
+                let committed = state.committed;
+                let pcm = match &mut state.audio {
+                    AudioInput::Streaming(audio) => audio.pop_front(),
+                    AudioInput::Buffered(audio) if committed && !audio.is_empty() => {
+                        Some(std::mem::take(audio))
+                    }
+                    AudioInput::Buffered(_) => None,
+                };
+                if let Some(pcm) = pcm {
                     return Command::Audio(pcm);
                 }
                 if state.committed {
@@ -419,7 +483,7 @@ impl Coordinator {
         if self.turns.len() >= limits.concurrent_turns.get() + limits.queued_turns {
             return false;
         }
-        let input = Arc::new(TurnInput::default());
+        let input = Arc::new(TurnInput::new(self.protocol));
         let cancel = self.cancel.child_token();
         let (output, events) = mpsc::channel(limits.event_capacity.get());
         let budget = Arc::new(Semaphore::new(limits.max_buffered_output_bytes.get()));
@@ -502,8 +566,14 @@ impl TurnDriver {
                 _ = self.cancel.cancelled() => return Ok(()),
                 result = self.client.connect() => result?,
             };
+            let deadline = async {
+                self.input.wait_for_commit().await;
+                tokio::time::sleep(self.client.inner.limits.response_timeout).await;
+            };
             let result = tokio::select! {
+                biased;
                 _ = self.cancel.cancelled() => Ok(()),
+                _ = deadline => Err(Error::Timeout),
                 result = self.drive(&mut socket) => result,
             };
             if self.cancel.is_cancelled() && self.protocol == Protocol::Omni {
@@ -563,22 +633,24 @@ impl TurnDriver {
             .then(AsrAudio::new)
             .transpose()?;
         let mut committed = false;
-        let deadline = tokio::time::sleep(self.client.inner.limits.response_timeout);
-        tokio::pin!(deadline);
         loop {
             tokio::select! {
                 command = self.input.next(), if !committed => {
                     match command {
                         Command::Audio(pcm) => {
-                            let pcm = match &mut converter {
-                                Some(converter) => converter.append(&pcm)?,
-                                None => pcm,
-                            };
-                            append(socket, pcm).await?;
+                            if let Some(converter) = &mut converter {
+                                append(socket, &converter.append(&pcm)?).await?;
+                            } else {
+                                // Keep PCM16 samples intact even for an odd append cap.
+                                let chunk_bytes = self.client.inner.limits.max_audio_chunk_bytes.get() & !1;
+                                for chunk in pcm.chunks(chunk_bytes.max(2)) {
+                                    append(socket, chunk).await?;
+                                }
+                            }
                         }
                         Command::Commit { acknowledge } => {
                             if let Some(converter) = &mut converter {
-                                append(socket, converter.finish()?).await?;
+                                append(socket, &converter.finish()?).await?;
                                 if acknowledge {
                                     self.emitter.send(events::event("input_audio_buffer.committed", json!({
                                         "item_id": self.item, "previous_item_id": null
@@ -590,7 +662,6 @@ impl TurnDriver {
                                 send(socket, json!({"type": "response.create"})).await?;
                             }
                             committed = true;
-                            deadline.as_mut().reset(tokio::time::Instant::now() + self.client.inner.limits.response_timeout);
                         }
                     }
                 }
@@ -627,13 +698,12 @@ impl TurnDriver {
                         }
                     }
                 }
-                _ = &mut deadline, if committed => return Err(Error::Timeout),
             }
         }
     }
 }
 
-async fn append(socket: &mut Socket, pcm: Vec<u8>) -> Result<(), Error> {
+async fn append(socket: &mut Socket, pcm: &[u8]) -> Result<(), Error> {
     if !pcm.is_empty() {
         send(
             socket,
@@ -864,7 +934,7 @@ mod tests {
 
     #[tokio::test]
     async fn audio_backpressure_does_not_block_commit() {
-        let mut limits = Limits::for_protocol(Protocol::Omni);
+        let mut limits = Limits::for_protocol(Protocol::VllmTranscription);
         limits.event_capacity = std::num::NonZeroUsize::new(1).unwrap();
         limits.max_audio_chunk_bytes = std::num::NonZeroUsize::new(4).unwrap();
         let input = TurnInput::default();
@@ -892,15 +962,17 @@ mod tests {
         }
         let queued = {
             let state = input.state.lock();
-            assert_eq!(state.audio.len(), limits.event_capacity.get());
+            let AudioInput::Streaming(audio) = &state.audio else {
+                panic!("ASR input must stream");
+            };
+            assert_eq!(audio.len(), limits.event_capacity.get());
             assert_eq!(state.received, expected.len());
             assert!(
-                state
-                    .audio
+                audio
                     .iter()
                     .all(|pcm| { pcm.len() <= limits.max_audio_chunk_bytes.get() })
             );
-            state.audio.len()
+            audio.len()
         };
         input.commit(true);
         let mut actual = Vec::new();
@@ -932,7 +1004,9 @@ mod tests {
         // Total bytes would fit, but the full queue's tail cannot exceed 6.
         assert!(input.append(vec![8, 9], &limits).is_err());
         assert_eq!(input.state.lock().received, 8);
-        assert_eq!(input.state.lock().audio.len(), 2);
+        assert!(
+            matches!(&input.state.lock().audio, AudioInput::Streaming(audio) if audio.len() == 2)
+        );
         assert!(matches!(input.next().await, Command::Audio(pcm) if pcm == vec![0, 1]));
         // Once a slot is consumed, the same chunk can occupy a separate slot.
         input.append(vec![8, 9], &limits).unwrap();
@@ -941,6 +1015,8 @@ mod tests {
         // Consuming queued audio does not erase the cumulative turn byte cap.
         assert!(input.append(vec![10, 11], &limits).is_err());
         assert_eq!(input.state.lock().received, 10);
-        assert!(input.state.lock().audio.is_empty());
+        assert!(
+            matches!(&input.state.lock().audio, AudioInput::Streaming(audio) if audio.is_empty())
+        );
     }
 }

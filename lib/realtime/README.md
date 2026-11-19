@@ -117,6 +117,15 @@ explicit client `response.create` events do not change this turn behavior.
 Audio stays in a bounded local buffer until a nonempty turn commits; only then
 does the sidecar connect and upload it upstream. There is no pre-commit inference.
 
+The bundled client defaults to 16 kHz for the Python Omni worker. Select 24 kHz
+when sending to the sidecar so the samples retain their original duration:
+
+```bash
+python examples/backends/vllm/launch/realtime_audio_client.py \
+  --session-type realtime --model "${MODEL_ID:?}" \
+  --input-sample-rate 24000 --input-audio speech.wav
+```
+
 Omni settings are captured on the first nonempty append. Session updates preserve
 omitted fields and affect subsequent turns; locally rejected updates leave the
 accepted settings unchanged. The upstream handler validates model-specific
@@ -147,7 +156,11 @@ traversable by the HTTP server's user.
 Reference audio is resolved through Dynamo's media-fetch policy before forwarding
 a data URI upstream; base64 data URIs may contain percent escapes, and
 client-supplied filesystem paths are rejected.
-`DYN_MM_ALLOW_INTERNAL=1` enables internal reference-audio sources.
+Public HTTPS addresses, including IP literals and nondefault ports, are accepted.
+`DYN_MM_ALLOW_INTERNAL=1` enables HTTP and internal reference-audio sources.
+Otherwise, an applicable egress proxy requires `DYN_MM_TRUST_EGRESS_PROXY=1`,
+asserting that the proxy enforces destination policy. Proxy selection honors
+`NO_PROXY` on every redirect; direct hops retain connect-time DNS protection.
 
 ## Bounds and Health
 
@@ -168,12 +181,20 @@ client-supplied filesystem paths are rejected.
 | `speech --tts-ref-audio-timeout-secs` | 30 |
 
 Overflow is reported instead of dropping audio silently. Commit and clear do not
-consume audio-queue capacity. Output backpressure reaches the upstream socket.
+consume audio-queue capacity. Omni input uses one buffer bounded by the turn byte
+limit, then uploads in chunks; `--event-capacity` bounds ASR input and output events.
+Output backpressure reaches the upstream socket.
+The realtime response deadline starts once a turn is connected and committed,
+excluding time waiting for a turn slot. It covers upload and blocked output sends;
+expiry releases the upstream connection before terminal failure delivery can wait
+for a slow reader.
 
 Startup and active canaries check upstream `/health` and model identity.
 Realtime canaries also check the WebSocket protocol handshake. These are service
-health checks, not inference/quality canaries. Shared worker readiness and
-graceful shutdown continue to apply.
+health checks, not inference/quality canaries. Local acknowledgements and public
+failure events do not mark realtime endpoints ready or defer their canaries.
+The sidecar's HTTP health route separately reports runtime dependencies.
+Shared worker readiness and graceful shutdown continue to apply.
 
 ## Validation
 

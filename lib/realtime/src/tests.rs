@@ -84,13 +84,21 @@ async fn setup_until(
     protocol: Protocol,
     cancellation: impl Future<Output = ()> + Send + 'static,
 ) -> (TcpListener, Client, mpsc::Sender<Value>, crate::Session) {
+    setup_with_limits(protocol, Limits::for_protocol(protocol), cancellation).await
+}
+
+async fn setup_with_limits(
+    protocol: Protocol,
+    limits: Limits,
+    cancellation: impl Future<Output = ()> + Send + 'static,
+) -> (TcpListener, Client, mpsc::Sender<Value>, crate::Session) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let client = Client::new(
         format!("http://{}", listener.local_addr().unwrap())
             .parse()
             .unwrap(),
         MODEL.into(),
-        Limits::for_protocol(protocol),
+        limits,
         None,
     )
     .unwrap();
@@ -101,6 +109,179 @@ async fn setup_until(
         cancellation,
     );
     (listener, client, sender, session)
+}
+
+#[tokio::test]
+async fn committed_asr_deadline_closes_upstream_while_output_is_blocked() {
+    let limits = Limits {
+        response_timeout: Duration::from_millis(300),
+        event_capacity: 1.try_into().unwrap(),
+        close_timeout: Duration::from_millis(100),
+        ..Limits::for_protocol(Protocol::VllmTranscription)
+    };
+    let (listener, client, input, mut session) =
+        setup_with_limits(Protocol::VllmTranscription, limits, std::future::pending()).await;
+    let committed = Arc::new(Notify::new());
+    let server_committed = committed.clone();
+    let paused = Arc::new(Notify::new());
+    let server_paused = paused.clone();
+    let server = tokio::spawn(async move {
+        let mut socket = accept_asr(&listener).await;
+        loop {
+            let event = receive(&mut socket).await;
+            if event["type"] != "input_audio_buffer.append" {
+                assert_eq!(
+                    event,
+                    json!({"type": "input_audio_buffer.commit", "final": true})
+                );
+                break;
+            }
+        }
+        server_committed.notify_one();
+        tokio::time::timeout(DEADLINE, server_paused.notified())
+            .await
+            .unwrap();
+        for _ in 0..16 {
+            send(
+                &mut socket,
+                json!({"type": "transcription.delta", "delta": "word"}),
+            )
+            .await;
+        }
+        assert!(matches!(
+            tokio::time::timeout(DEADLINE, socket.next()).await.unwrap(),
+            Some(Ok(Message::Close(_))) | None
+        ));
+    });
+    input.send(asr_session()).await.unwrap();
+    assert_eq!(next(&mut session).await["type"], "session.updated");
+    input.send(audio()).await.unwrap();
+    input
+        .send(json!({"type": "input_audio_buffer.commit"}))
+        .await
+        .unwrap();
+    tokio::time::timeout(DEADLINE, committed.notified())
+        .await
+        .unwrap();
+    assert_eq!(
+        next(&mut session).await["type"],
+        "input_audio_buffer.committed"
+    );
+    paused.notify_one();
+    // Keep the public stream alive and unpolled until the upstream is closed.
+    tokio::time::timeout(DEADLINE, server)
+        .await
+        .expect("committed turn held its upstream socket while output was blocked")
+        .unwrap();
+    loop {
+        let event = next(&mut session).await;
+        if event["type"] == "conversation.item.input_audio_transcription.failed" {
+            break;
+        }
+        assert_eq!(
+            event["type"],
+            "conversation.item.input_audio_transcription.delta"
+        );
+    }
+    drop(input);
+    assert!(
+        tokio::time::timeout(DEADLINE, session.next())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn omni_local_audio_preserves_order_limit_and_clear_beyond_event_capacity() {
+    const CHUNK_BYTES: usize = 4800;
+    const CHUNKS: u8 = 65;
+    let limits = Limits {
+        max_audio_chunk_bytes: CHUNK_BYTES.try_into().unwrap(),
+        max_turn_audio_bytes: (usize::from(CHUNKS) * CHUNK_BYTES).try_into().unwrap(),
+        ..Limits::for_protocol(Protocol::Omni)
+    };
+    let (listener, client, input, mut session) =
+        setup_with_limits(Protocol::Omni, limits, std::future::pending()).await;
+    input.send(omni_session()).await.unwrap();
+    assert_eq!(next(&mut session).await["type"], "session.updated");
+    let mut expected = Vec::new();
+    for phase in 0..3 {
+        for index in 0..CHUNKS {
+            let pcm = vec![index; CHUNK_BYTES];
+            if phase == 1 {
+                expected.extend_from_slice(&pcm);
+            }
+            input
+                .send(json!({"type": "input_audio_buffer.append", "audio": BASE64_STANDARD.encode(pcm)}))
+                .await
+                .unwrap();
+        }
+        match phase {
+            0 => {
+                input
+                    .send(json!({"type": "input_audio_buffer.clear"}))
+                    .await
+                    .unwrap();
+                tokio::select! {
+                    biased;
+                    _ = listener.accept() => panic!("uncommitted Omni audio opened an upstream socket"),
+                    event = next(&mut session) => assert_eq!(event["type"], "input_audio_buffer.cleared"),
+                }
+            }
+            1 => {
+                input
+                    .send(json!({"type": "input_audio_buffer.commit"}))
+                    .await
+                    .unwrap();
+                let (tcp, _) = tokio::time::timeout(DEADLINE, listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                send(&mut socket, json!({"type": "session.created"})).await;
+                assert_eq!(receive(&mut socket).await["type"], "session.update");
+                send(&mut socket, json!({"type": "session.updated"})).await;
+                let mut actual = Vec::new();
+                loop {
+                    let event = receive(&mut socket).await;
+                    if event["type"] == "input_audio_buffer.commit" {
+                        break;
+                    }
+                    assert_eq!(event["type"], "input_audio_buffer.append");
+                    let chunk = BASE64_STANDARD
+                        .decode(event["audio"].as_str().unwrap())
+                        .unwrap();
+                    assert!(!chunk.is_empty() && chunk.len() <= CHUNK_BYTES);
+                    assert_eq!(chunk.len() % 2, 0);
+                    actual.extend(chunk);
+                }
+                assert_eq!(actual, expected);
+                assert_eq!(receive(&mut socket).await["type"], "response.create");
+                send(&mut socket, json!({"type": "response.done", "event_id": "done", "response": {
+                    "id": "upstream-response", "object": "realtime.response", "output": [],
+                    "output_modalities": ["audio"], "status": "completed", "max_output_tokens": "inf"
+                }})).await;
+                assert_eq!(next(&mut session).await["type"], "response.done");
+                assert!(matches!(
+                    tokio::time::timeout(DEADLINE, socket.next()).await.unwrap(),
+                    Some(Ok(Message::Close(_))) | None
+                ));
+            }
+            _ => {
+                input.send(json!({"type": "input_audio_buffer.append", "audio": BASE64_STANDARD.encode([0, 0])})).await.unwrap();
+                assert_eq!(next(&mut session).await["error"]["code"], "invalid_audio");
+            }
+        }
+    }
+    drop(input);
+    tokio::select! {
+        biased;
+        _ = listener.accept() => panic!("cleared or oversized Omni audio opened an upstream socket"),
+        event = tokio::time::timeout(DEADLINE, session.next()) => assert!(event.unwrap().is_none()),
+    }
+    client.shutdown().await;
 }
 
 #[tokio::test]

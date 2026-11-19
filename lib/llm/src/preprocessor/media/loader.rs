@@ -410,7 +410,9 @@ impl MediaFetcher {
         Ok(self.http_client_builder().https_only(true).build()?)
     }
 
-    fn http_client_builder(&self) -> reqwest::ClientBuilder {
+    /// Start with this fetcher's DNS and redirect policy. Callers overriding
+    /// redirects must revalidate destinations themselves, including DNS checks.
+    pub fn http_client_builder(&self) -> reqwest::ClientBuilder {
         let fetcher_for_redirects = self.clone();
         let redirect_policy = Policy::custom(move |attempt| {
             if attempt.previous().len() >= MAX_REDIRECTS {

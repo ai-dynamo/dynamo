@@ -24,8 +24,7 @@ fn http_endpoint(raw: &str) -> Result<HttpEndpoint, String> {
     HttpEndpoint::parse(raw, "--http-endpoint").map_err(|error| error.to_string())
 }
 
-/// Runtime/bootstrap options shared by ASR, Omni, and TTS. No model-name
-/// heuristics select protocols or engine sampling/preprocessing settings.
+/// Runtime/bootstrap options shared by ASR, Omni, and TTS.
 #[derive(clap::Args)]
 pub(crate) struct MediaArgs {
     #[command(flatten)]
@@ -592,5 +591,271 @@ mod tests {
         .unwrap();
         client.realtime_health(Protocol::Omni).await.unwrap();
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn realtime_health_ignores_local_session_traffic() {
+        use axum::{
+            Json, Router, extract::WebSocketUpgrade, http::StatusCode, response::IntoResponse,
+            routing::get,
+        };
+        use base64::{Engine, prelude::BASE64_STANDARD};
+        use dynamo_backend_common::Worker;
+        use dynamo_runtime::{
+            DistributedRuntime, Runtime,
+            config::HealthStatus,
+            distributed::DistributedConfig,
+            engine::AsyncEngine,
+            health_check::{HealthCheckConfig, start_health_check_manager},
+            pipeline::{
+                Context, RequestStream,
+                network::{
+                    ResponsePlaneMode,
+                    egress::push_router::{PushRouter, RouterMode},
+                },
+            },
+            protocols::annotated::Annotated,
+        };
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+
+        const CHILD: &str = "DYNAMO_REALTIME_HEALTH_TEST";
+        const DEADLINE: Duration = Duration::from_secs(5);
+        // The TCP listener and runtime settings are process-global. Isolate
+        // this full worker test from sibling unit tests and developer settings.
+        if std::env::var_os(CHILD).is_none() {
+            let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+            for (key, _) in std::env::vars().filter(|(key, _)| {
+                key.starts_with("DYN_") || key.starts_with("ETCD_") || key.starts_with("NATS_")
+            }) {
+                command.env_remove(key);
+            }
+            let output = tokio::time::timeout(
+                Duration::from_secs(15),
+                command
+                    .args([
+                        "--exact",
+                        "media::tests::realtime_health_ignores_local_session_traffic",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1")
+                    .env("DYN_SYSTEM_PORT", "0")
+                    .env("DYN_ENABLE_OTEL", "false")
+                    .env("NO_PROXY", "*")
+                    .env("no_proxy", "*")
+                    .env("DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS", "0")
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .expect("isolated health test must finish")
+            .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed; 0 failed"),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        let healthy = Arc::new(AtomicBool::new(true));
+        let probes = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route(
+                "/health",
+                get({
+                    let healthy = healthy.clone();
+                    let probes = probes.clone();
+                    move || {
+                        let healthy = healthy.clone();
+                        let probes = probes.clone();
+                        async move {
+                            probes.fetch_add(1, Ordering::SeqCst);
+                            if healthy.load(Ordering::SeqCst) {
+                                StatusCode::OK
+                            } else {
+                                StatusCode::SERVICE_UNAVAILABLE
+                            }
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/models",
+                get(|| async { Json(json!({"data": [{"id": "test-model"}]})) }),
+            )
+            .route(
+                "/v1/realtime",
+                get({
+                    let healthy = healthy.clone();
+                    move |ws: WebSocketUpgrade| {
+                        let healthy = healthy.clone();
+                        async move {
+                            if !healthy.load(Ordering::SeqCst) {
+                                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                            }
+                            ws.on_upgrade(|mut socket| async move {
+                                let _ = socket
+                                    .send(axum::extract::ws::Message::Text(
+                                        json!({"type": "session.created", "id": "probe"})
+                                            .to_string()
+                                            .into(),
+                                    ))
+                                    .await;
+                                let _ = socket.recv().await;
+                            })
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        }));
+        let engine = Arc::new(RealtimeEngine {
+            client: Client::new(
+                url.parse().unwrap(),
+                "test-model".into(),
+                Limits::for_protocol(Protocol::VllmTranscription),
+                None,
+            )
+            .unwrap(),
+            model: "test-model".into(),
+            protocol: Protocol::VllmTranscription,
+        });
+        let runtime = Runtime::from_current().unwrap();
+        let mut config = DistributedConfig::process_local();
+        config.response_plane = Some(ResponsePlaneMode::Tcp);
+        let drt = DistributedRuntime::new(runtime.clone(), config)
+            .await
+            .unwrap();
+        start_health_check_manager(
+            drt.clone(),
+            Some(HealthCheckConfig {
+                canary_wait_time: Duration::from_millis(100),
+                request_timeout: Duration::from_secs(1),
+            }),
+        )
+        .await
+        .unwrap();
+        let config = WorkerConfig {
+            namespace: "health-test".into(),
+            component: "asr".into(),
+            endpoint_types: "realtime".into(),
+            model_input: ModelInput::Text,
+            enable_kv_routing: false,
+            enable_local_indexer: false,
+            ..WorkerConfig::default()
+        };
+        let endpoint = drt
+            .namespace(&config.namespace)
+            .unwrap()
+            .component(&config.component)
+            .unwrap()
+            .endpoint(&config.endpoint);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let worker = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+            Worker::new_bidirectional(engine, config).run_with_drt(drt.clone(), shutdown.clone()),
+        ));
+        let client = endpoint.client().await.unwrap();
+        tokio::time::timeout(DEADLINE, client.wait_for_instances())
+            .await
+            .unwrap()
+            .unwrap();
+        let router = PushRouter::<Value, Annotated<Value>>::from_client_with_options(
+            client,
+            RouterMode::RoundRobin,
+            dynamo_llm::kv_router::plugins::push_router_options(),
+        )
+        .await
+        .unwrap();
+        let system_health = drt.system_health();
+        let wait_health = |expected: HealthStatus, minimum_probes: usize| {
+            let system_health = system_health.clone();
+            let probes = probes.clone();
+            let endpoint = endpoint.clone();
+            async move {
+                tokio::time::timeout(DEADLINE, async {
+                    loop {
+                        if probes.load(Ordering::SeqCst) >= minimum_probes
+                            && system_health
+                                .lock()
+                                .get_endpoint_health_status(endpoint.name())
+                                == Some(expected.clone())
+                        {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("canary must update endpoint health");
+            }
+        };
+        wait_health(HealthStatus::Ready, 1).await;
+        healthy.store(false, Ordering::SeqCst);
+        wait_health(HealthStatus::NotReady, 2).await;
+        let before_traffic = probes.load(Ordering::SeqCst);
+
+        let mut ticks = tokio::time::interval(Duration::from_millis(20));
+        for _ in 0..20 {
+            ticks.tick().await;
+            let input = futures::stream::iter([
+                json!({"type": "session.update", "session": {
+                    "type": "transcription", "audio": {"input": {
+                        "format": {"type": "audio/pcm", "rate": 24000},
+                        "transcription": {"model": "test-model"}, "turn_detection": null
+                    }}
+                }}),
+                json!({"type": "input_audio_buffer.append", "audio": BASE64_STANDARD.encode([0u8; 960])}),
+                json!({"type": "input_audio_buffer.commit"}),
+            ]);
+            let events: Vec<_> = tokio::time::timeout(DEADLINE, async {
+                router
+                    .generate(Context::new(RequestStream::new(input.boxed())))
+                    .await
+                    .unwrap()
+                    .collect()
+                    .await
+            })
+            .await
+            .unwrap();
+            assert!(events.iter().all(|event| !event.is_error()));
+            assert!(
+                events
+                    .iter()
+                    .any(|event| { event.data.as_ref().unwrap()["type"] == "session.updated" })
+            );
+            assert!(events.iter().any(|event| {
+                event.data.as_ref().unwrap()["type"]
+                    == "conversation.item.input_audio_transcription.failed"
+            }));
+        }
+        assert_eq!(
+            system_health
+                .lock()
+                .get_endpoint_health_status(endpoint.name()),
+            Some(HealthStatus::NotReady),
+            "local acknowledgements and failure events must not mark the upstream healthy",
+        );
+        assert!(
+            probes.load(Ordering::SeqCst) >= before_traffic + 2,
+            "failed session traffic must not suppress upstream canaries",
+        );
+
+        healthy.store(true, Ordering::SeqCst);
+        wait_health(HealthStatus::Ready, probes.load(Ordering::SeqCst) + 1).await;
+        shutdown.cancel();
+        tokio::time::timeout(DEADLINE, worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        runtime.shutdown();
+        drop(server);
     }
 }

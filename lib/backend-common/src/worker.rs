@@ -1250,6 +1250,9 @@ impl Worker {
             .endpoint_builder()
             .handler(ingress)
             .metrics_labels(metrics_labels)
+            // Session acknowledgements and public failure events do not prove
+            // upstream health. Realtime readiness follows its canary only.
+            .health_check_from_responses(!matches!(&self.engine, EngineKind::Bidirectional(_)))
             .graceful_shutdown(true);
         if let Some(payload) = probe {
             builder = builder.health_check_payload(payload);

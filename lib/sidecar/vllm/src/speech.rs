@@ -22,6 +22,9 @@ use url::Url;
 
 use crate::media::{MediaArgs, registration, to_dynamo};
 
+mod reference;
+use reference::ReferenceClient;
+
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_MAX_REFERENCE_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_REFERENCE_TIMEOUT_SECS: u64 = 30;
@@ -58,7 +61,7 @@ pub(crate) struct SpeechEngine {
     max_response_bytes: usize,
     max_reference_bytes: usize,
     reference_policy: MediaFetcher,
-    reference_client: reqwest::Client,
+    reference_client: Arc<ReferenceClient>,
     output_store: Option<Arc<OutputStore>>,
 }
 
@@ -87,7 +90,7 @@ impl SpeechEngine {
         }
         let config = args.media.worker_config();
         let client = args.media.client(Limits::for_protocol(Protocol::Omni))?;
-        let mut reference_policy = MediaFetcher::from_env();
+        let mut reference_policy = reference::policy_from_env();
         let reference_timeout = Duration::from_secs(args.tts_ref_audio_timeout_secs);
         if std::time::Instant::now()
             .checked_add(reference_timeout)
@@ -96,12 +99,7 @@ impl SpeechEngine {
             return Err(invalid_argument("reference-audio timeout is too large"));
         }
         reference_policy.timeout = Some(reference_timeout);
-        let reference_client = if reference_policy.allow_private_ips {
-            reference_policy.build_http_client()
-        } else {
-            reference_policy.build_https_client()
-        }
-        .map_err(|error| invalid_argument(format!("reference-audio HTTP client: {error}")))?;
+        let reference_client = Arc::new(ReferenceClient::new(&reference_policy)?);
         Ok((config.runtime.clone(), async move {
             args.media.wait_ready(&client, None).await?;
             let output_store = match (args.media_output_dir, args.media_output_http_url) {
@@ -220,9 +218,8 @@ impl RawEngine for SpeechEngine {
                             total += chunk.len();
                             if streaming {
                                 if !chunk.is_empty() {
-                                    yield response(&id, &model, created, "in_progress", json!([{
-                                        "output_format": codec, "b64_json": BASE64_STANDARD.encode(chunk)
-                                    }]));
+                                    yield response(&id, &model, created, "in_progress",
+                                        audio_data(&codec, BASE64_STANDARD.encode(chunk)));
                                 }
                             } else {
                                 accumulated.extend_from_slice(&chunk);
@@ -239,7 +236,7 @@ impl RawEngine for SpeechEngine {
                                 let url = write_output(store, &accumulated, &codec).await?;
                                 json!([{"output_format": codec, "url": url}])
                             } else {
-                                json!([{"output_format": codec, "b64_json": BASE64_STANDARD.encode(&accumulated)}])
+                                audio_data(&codec, BASE64_STANDARD.encode(&accumulated))
                             };
                             yield response(&id, &model, created, "completed", data);
                             break;
@@ -415,10 +412,16 @@ fn response(id: &str, model: &str, created: u64, status: &str, data: Value) -> V
     result
 }
 
+fn audio_data(codec: &str, encoded: String) -> Value {
+    let mut item = json!({"output_format": codec});
+    item["b64_json"] = Value::String(encoded);
+    Value::Array(vec![item])
+}
+
 async fn resolve_reference(
     reference: &str,
     policy: &MediaFetcher,
-    client: &reqwest::Client,
+    client: &ReferenceClient,
     limit: usize,
 ) -> Result<String, DynamoError> {
     if reference.starts_with("data:") {
@@ -453,26 +456,7 @@ async fn resolve_reference(
     }
     let url = Url::parse(reference)
         .map_err(|_| invalid_argument("ref_audio must be an HTTP(S) URL or base64 data URI"))?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(invalid_argument(
-            "ref_audio must be an HTTP(S) URL or base64 data URI",
-        ));
-    }
-    if url.scheme() == "http" && !policy.allow_private_ips {
-        return Err(invalid_argument(
-            "HTTP reference audio requires DYN_MM_ALLOW_INTERNAL=1",
-        ));
-    }
-    policy
-        .check_if_url_allowed_with_dns(&url)
-        .await
-        .map_err(|_| invalid_argument("reference-audio URL was rejected by media policy"))?;
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|_| invalid_argument("could not fetch reference audio"))?;
+    let response = client.get(url, policy).await?;
     if response
         .content_length()
         .is_some_and(|size| size > limit as u64)
@@ -548,11 +532,67 @@ mod tests {
     use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
     use futures::TryStreamExt;
 
+    #[tokio::test]
+    async fn reference_audio_requires_explicit_proxy_trust() {
+        const CHILD: &str = "DYNAMO_TEST_REFERENCE_PROXY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+            child.args([
+                "--exact",
+                "speech::tests::reference_audio_requires_explicit_proxy_trust",
+                "--nocapture",
+            ]);
+            for name in [
+                "HTTP_PROXY",
+                "http_proxy",
+                "HTTPS_PROXY",
+                "https_proxy",
+                "ALL_PROXY",
+                "all_proxy",
+                "NO_PROXY",
+                "no_proxy",
+            ] {
+                child.env_remove(name);
+            }
+            let output = tokio::time::timeout(
+                Duration::from_secs(15),
+                child
+                    .env(CHILD, "1")
+                    .env("HTTPS_PROXY", "http://proxy.test:3128")
+                    .env("DYN_MM_TRUST_EGRESS_PROXY", "0")
+                    .env("DYN_MM_ALLOW_INTERNAL", "0")
+                    .env("DYN_MM_ALLOW_REMOTE_URLS", "true")
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let policy = reference::policy_from_env();
+        let client = ReferenceClient::new(&policy).unwrap();
+        let error = resolve_reference("https://8.8.8.8/ref.wav", &policy, &client, 1024)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.error_type(),
+            dynamo_backend_common::ErrorType::Internal
+        );
+        assert!(error.to_string().contains("DYN_MM_TRUST_EGRESS_PROXY"));
+    }
+
     #[test]
     fn speech_response_preserves_audio_allocation() {
-        let data = json!([{"b64_json": "AAAA".repeat(4096)}]);
-        let audio = data[0]["b64_json"].as_str().unwrap().as_ptr();
-        let result = response("id", "model", 0, "completed", data);
+        let encoded = BASE64_STANDARD.encode(vec![0u8; 16 * 1024]);
+        let audio = encoded.as_ptr();
+        let result = response("id", "model", 0, "completed", audio_data("wav", encoded));
         assert_eq!(
             result["data"][0]["b64_json"].as_str().unwrap().as_ptr(),
             audio
@@ -562,7 +602,7 @@ mod tests {
     #[tokio::test]
     async fn reference_audio_accepts_percent_escaped_base64_at_decoded_limit() {
         let policy = MediaFetcher::from_env();
-        let client = policy.build_http_client().unwrap();
+        let client = ReferenceClient::new(&policy).unwrap();
         for encoded in ["+/8=", "%2B%2F8%3D", "%2b%2f%38%3d"] {
             let uri = format!("data:audio/wav;base64,{encoded}");
             assert_eq!(
@@ -725,7 +765,7 @@ mod tests {
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let policy = MediaFetcher::from_env();
+        let policy = reference::policy_from_env();
         (
             SpeechEngine {
                 client: Client::new(
@@ -738,7 +778,7 @@ mod tests {
                 model: "test-model".into(),
                 max_response_bytes: 1024,
                 max_reference_bytes: 1024,
-                reference_client: policy.build_http_client().unwrap(),
+                reference_client: Arc::new(ReferenceClient::new(&policy).unwrap()),
                 reference_policy: policy,
                 output_store: None,
             },
