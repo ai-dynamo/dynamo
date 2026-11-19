@@ -1,5 +1,5 @@
 ## Description: <br>
-Start or patch Dynamo router modes and run router endpoint smoke checks. <br>
+Enable or switch Dynamo router modes such as KV-aware or round-robin and smoke-test the endpoint; not for deploys, 500 errors or NIXL checks. <br>
 
 This skill is ready for commercial/non-commercial use. <br>
 

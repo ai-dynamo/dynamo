@@ -1,5 +1,5 @@
 ## Description: <br>
-Validate that a Dynamo deployment's NIXL/UCX/NCCL interconnect is ready for disaggregated serving over RDMA/NVLink. <br>
+Check NIXL, UCX and NCCL fabric readiness over RDMA or NVLink for disaggregated Dynamo serving; not for deploys, crashing pods or router modes. <br>
 
 This skill is ready for commercial/non-commercial use. <br>
 
