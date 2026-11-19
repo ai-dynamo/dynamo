@@ -15,7 +15,7 @@ planner 支持四个优化目标，这些目标决定扩缩容决策的方式：
 - **`throughput`**（默认）：基于队列深度和 KV cache 利用率使用静态阈值。不需要 SLA 目标或 profiling。开箱即用。
 - **`latency`**：与 `throughput` 采用相同方法，但使用更激进的阈值，即更早扩容并容忍更少排队。适合对延迟敏感的工作负载。
 - **`load`**：使用用户定义的 prefill 队列 token 阈值和 decode KV 利用率阈值，进行反应式的基于负载扩缩容。
-- **`sla`**：通过 `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` 获取前向计算估算；同时支持在线 FPM 调优和 FPM 回归回退。支持基于吞吐量（预测式）和基于负载（反应式）的扩缩容模式。适合需要精确 SLA 控制的高级用户。
+- **`sla`**：通过 `aisim_core.sdk.RustForwardPassPerfModel.best_available(config)` 获取前向计算估算；同时支持在线 FPM 调优和 FPM 回归回退。支持基于吞吐量（预测式）和基于负载（反应式）的扩缩容模式。适合需要精确 SLA 控制的高级用户。
 
 **何时使用哪种模式：**
 
@@ -85,7 +85,7 @@ advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志
 |-------|------|---------|-------------|
 | `pre_deployment_sweeping_mode` | string | `rapid` | 如何生成可选的性能模型启动数据：`rapid`（AIC 仿真，约 30 秒）、`thorough`（真实 GPU，2-4 小时）或 `none`（跳过）。 |
 
-SLA 模式通过唯一构造接口 `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` 为每个 worker 角色创建模型。`ais_perf_model.roles` 中，分离式部署配置 `prefill` 和 `decode`，聚合式部署配置 `aggregated`；角色键必须与 `worker_type` 一致。
+SLA 模式通过唯一构造接口 `aisim_core.sdk.RustForwardPassPerfModel.best_available(config)` 为每个 worker 角色创建模型。`ais_perf_model.roles` 中，分离式部署配置 `prefill` 和 `decode`，聚合式部署配置 `aggregated`；角色键必须与 `worker_type` 一致。
 
 新配置默认使用 `estimation_mode: auto` 和 `fallback_policy: deny`。Auto 依次查找 `op_level`、`fpm_interpolation`、`fpm_regression`；`deny` 只禁止显式指定模式后的回退。没有配置 `ais_perf_model` 时，Planner 创建未训练的 `fpm_regression` 模型，并用自基准测试或在线 FPM 训练。
 
@@ -150,7 +150,7 @@ spec:
 | `load_adjustment_interval_seconds` | int | `5` | FPM 调优更新和基于负载的扩缩容决策之间的秒数。即使只启用了吞吐量扩缩容，实时 FPM 观测也会按此间隔输入到性能模型中。必须短于 `throughput_adjustment_interval_seconds`。 |
 | `max_num_fpm_samples` | int | `64` | 为在线调优或回归保留的 FPM 观测最大数量。 |
 | `fpm_sample_bucket_size` | int | `16` | 用于观测淘汰的 bucket 数量（必须是完全平方数）。 |
-| `load_scaling_down_sensitivity` | int | `80` | 缩容敏感度 0-100（0=永不，100=激进）。 |
+| `load_scaling_down_sensitivity` | int | `80` | SLA 模式下的缩容敏感度 0-100（100=激进）。0 会阻止基于性能模型的缩容，但完全空闲的池仍会每次减少一个副本，直到端点下限（至少 1）。仅在 `optimization_target` 为 `sla` 时生效。 |
 | `load_min_observations` | int | `5` | 做出扩缩容决策前所需的最少观测数。 |
 
 ### 通用设置

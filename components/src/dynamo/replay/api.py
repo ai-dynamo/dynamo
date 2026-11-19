@@ -88,6 +88,7 @@ class _TraceReplayOptions(_CommonReplayOptions, total=False):
     agentic_lanes: int | None
     agentic_snapshot: dict[str, Any] | None
     agentic_warmup: bool
+    agentic_warmup_policy: Literal["repeated_prefixes", "live_trajectory_v1"] | None
     agentic_profile: dict[str, Any] | None
     execution_model: str | None
     weka_nested_timestamp_basis: Literal["auto", "absolute", "relative"] | None
@@ -110,6 +111,7 @@ class _SyntheticReplayOptions(_CommonReplayOptions, total=False):
     shared_prefix_ratio: float
     num_prefix_groups: int
     inter_turn_delay_ms: float
+    accumulate_session_deltas: bool
 
 
 def _normalize_trace_files(trace_files):
@@ -401,6 +403,7 @@ def run_trace_replay(
     agentic_lanes=None,
     agentic_snapshot=None,
     agentic_warmup=False,
+    agentic_warmup_policy=None,
     agentic_profile=None,
     conversation_affinity=None,
     replay_mode="offline",
@@ -446,9 +449,9 @@ def run_trace_replay(
     on the response path. ``None`` or ``0`` keeps synchronous updates. Offline
     KV-router replay only.
 
-    ``agentic_snapshot``, ``agentic_warmup`` and ``agentic_profile`` use AISimulate
-    workload controls on the existing offline trace path. Native validation owns
-    their schemas and lifecycle constraints.
+    ``agentic_snapshot``, ``agentic_warmup``, ``agentic_warmup_policy`` and
+    ``agentic_profile`` use AISimulate workload controls on the existing offline
+    trace path. Native validation owns their schemas and lifecycle constraints.
 
     ``conversation_affinity`` enables native hard binding for AgentX conversations:
     ``{"mode": "session" | "sibling_group", "ttl_seconds": 300}``. It requires
@@ -491,6 +494,7 @@ def run_trace_replay(
         "agentic_lanes": agentic_lanes,
         "agentic_snapshot": agentic_snapshot,
         "agentic_warmup": agentic_warmup,
+        "agentic_warmup_policy": agentic_warmup_policy,
         "agentic_profile": agentic_profile,
         "conversation_affinity": conversation_affinity,
         "replay_mode": replay_mode,
@@ -661,6 +665,7 @@ def run_synthetic_trace_replay(
     shared_prefix_ratio=0.0,
     num_prefix_groups=0,
     inter_turn_delay_ms=0.0,
+    accumulate_session_deltas=False,
     model_name=None,
     sla_ttft_ms=None,
     sla_itl_ms=None,
@@ -675,6 +680,10 @@ def run_synthetic_trace_replay(
 ) -> ReplayReport | dict[str, Any]:
     """Run synthetic replay with the same optional ``TelemetryOptions`` and
     ``kv_event_lag_ms`` contracts as :func:`run_trace_replay`.
+
+    ``accumulate_session_deltas`` treats ``input_tokens`` as each turn's new
+    input: every later turn's prompt starts with the session's earlier prompts
+    and generated outputs. It requires ``replay_mode="offline"``.
 
     ``arrival_seed`` seeds request-arrival generation only, not KV-router worker
     selection. With ``router_mode="kv_router"``, equal-cost workers are selected
@@ -702,6 +711,7 @@ def run_synthetic_trace_replay(
         "shared_prefix_ratio": shared_prefix_ratio,
         "num_prefix_groups": num_prefix_groups,
         "inter_turn_delay_ms": inter_turn_delay_ms,
+        "accumulate_session_deltas": accumulate_session_deltas,
         "model_name": model_name,
         "sla_ttft_ms": sla_ttft_ms,
         "sla_itl_ms": sla_itl_ms,

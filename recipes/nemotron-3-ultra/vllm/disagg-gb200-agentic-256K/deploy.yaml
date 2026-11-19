@@ -76,7 +76,7 @@ spec:
     - name: DYN_VLLM_APPEND_PREFILL_OUTPUT_TOKENS
       value: "0"
     - name: DYN_LOG
-      value: info,dynamo_kv_router=debug,dynamo_llm::kv_router=debug
+      value: info,dynamo_kv_router=debug,dynamo_scheduler=debug,dynamo_kv_indexer=debug,dynamo_slot_tracker=debug,dynamo_session_affinity=debug,dynamo_admission=debug,dynamo_worker_selection=debug,dynamo_kv_hints=debug,dynamo_kv_events=debug,dynamo_llm::kv_router=debug
     - name: NCCL_CUMEM_ENABLE
       value: "1"
     - name: NCCL_NVLS_ENABLE

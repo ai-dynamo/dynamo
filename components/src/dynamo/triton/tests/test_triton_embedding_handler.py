@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import tritonclient.grpc.model_config_pb2 as TritonModelConfigPb
 
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.triton.embedding_handler import EmbeddingWorkerHandler
 
 pytestmark = [
@@ -382,6 +383,16 @@ class TestValidation:
         _, handler = _make_handler()
         with pytest.raises(ValueError, match="only supports encoding_format"):
             _run(handler, {"input": "x", "encoding_format": "hex"})
+
+    def test_chat_style_messages_rejected(self) -> None:
+        model, handler = _make_handler()
+        request = {
+            "model": "mock-embedder",
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        with pytest.raises(InvalidArgument, match="vLLM embedding workers only"):
+            _run(handler, request)
+        assert model.last_request is None  # rejected before any inference request
 
 
 class TestHealthProbe:

@@ -7,8 +7,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_kv_router::indexer::LocalKvIndexer;
-use dynamo_kv_router::protocols::*;
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, RouterEvent};
+use dynamo_kv_indexer::host::LocalKvIndexer;
 
 use crate::kv_router::metrics::kv_publisher_metrics;
 
@@ -17,6 +17,7 @@ use super::batching::BatchingState;
 use super::dedup::{EventDedupFilter, EventDedupPolicy};
 use super::sinks::{RouterEventBatchSink, emit};
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
     publisher: P,
     worker_id: u64,
@@ -25,8 +26,9 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
     local_indexer: Option<Arc<LocalKvIndexer>>,
     timeout_ms: Option<u64>,
     max_batch_blocks: usize,
+    worker_dedup_policy: EventDedupPolicy,
 ) {
-    let mut batching_state = BatchingState::new(max_batch_blocks);
+    let mut batching_state = BatchingState::new(max_batch_blocks, worker_dedup_policy);
     let mut dedup = EventDedupFilter::new();
     let mut last_raw_input_id: Option<u64> = None;
 
@@ -130,7 +132,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                             dedup.clear_rank_domain(
                                 event.dp_rank,
                                 residency_domain,
-                                EventDedupPolicy::RefCounted,
+                                batching_state.dedup_policy(residency_domain),
                             );
                             let applied = emit(
                                 &local_indexer,
@@ -226,6 +228,7 @@ pub(super) async fn start_event_processor<P: RouterEventBatchSink + 'static>(
     rx: mpsc::UnboundedReceiver<super::PublisherInput>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     batching_timeout_ms: Option<u64>,
+    worker_dedup_policy: EventDedupPolicy,
 ) {
     run_event_processor_loop(
         publisher,
@@ -235,6 +238,7 @@ pub(super) async fn start_event_processor<P: RouterEventBatchSink + 'static>(
         local_indexer,
         batching_timeout_ms,
         DEFAULT_MAX_BATCH_BLOCKS,
+        worker_dedup_policy,
     )
     .await
 }

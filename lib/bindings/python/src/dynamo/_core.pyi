@@ -21,7 +21,7 @@ from typing import (
     overload,
 )
 
-from aisimulate_core.sdk import ForwardPassPerfModelConfig
+from aisim_core.sdk import ForwardPassPerfModelConfig
 from typing_extensions import NotRequired
 
 # Import from specialized modules
@@ -123,6 +123,10 @@ class DistributedRuntime:
         """
         ...
 
+    def system_status_server_url(self) -> Optional[str]:
+        """Return the system listener URL, or None when it is disabled."""
+        ...
+
     def register_engine_http_handler(
         self,
         name: str,
@@ -177,7 +181,7 @@ class Endpoint:
 
     async def first_token_source(self, worker_type: WorkerType) -> Optional[FirstTokenSource]: ...
 
-    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None) -> None:
+    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None, *, track_response_completion: bool = False) -> None:
         """
         Serve an endpoint discoverable by all connected clients at
         `{{ namespace }}/components/{{ component_name }}/endpoints/{{ endpoint_name }}`
@@ -188,6 +192,7 @@ class Endpoint:
             metrics_labels: Optional list of metrics labels to add to the metrics
             health_check_payload: Optional dict containing the health check request payload
                                   that will be used to verify endpoint health
+            track_response_completion: Keep requests in flight until the TCP writer exits
         """
         ...
 
@@ -242,6 +247,10 @@ class Endpoint:
         Returns:
             A PyRuntimeMetrics object for callback registration
         """
+        ...
+
+    def inflight_requests(self) -> Optional[int]:
+        """Return worker ingress requests through response completion."""
         ...
 
     async def unregister_endpoint_instance(self) -> None:
@@ -579,6 +588,20 @@ class Context:
         deferred ``engine.abort()``. Idempotent; no-op on non-decode
         requests. Engines normally don't need this — the framework
         auto-fires on the first non-empty chunk in the response stream."""
+        ...
+
+    def set_response_header(self, name: str, value: str) -> bool:
+        """Set an HTTP response header from a frontend chat engine.
+
+        Call it before the engine's first yield, or before it raises. Returns
+        ``False`` when this request's response cannot carry the header: the
+        response is already committed (a streaming request without
+        ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``, or a call after the first
+        yield of one with it), or the request is not a ``/v1/chat/completions``
+        request. Otherwise raises ``ValueError`` for a name or value that is
+        not a valid header, or for a header the HTTP layer owns
+        (``content-type``, ``content-length``, ``content-encoding``,
+        ``x-request-id``, hop-by-hop headers)."""
         ...
 
     @property
@@ -939,6 +962,7 @@ class ModelRuntimeConfig:
 
     context_length: int | None
     total_kv_blocks: int | None
+    cache_owner_capacity_blocks: int | None
     max_num_seqs: int | None
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
@@ -1248,6 +1272,7 @@ class KvEventPublisher:
         kv_state_endpoint: Optional[str] = None,
         video_token_id: Optional[int] = None,
         engine_owned_mm_identity: bool = False,
+        idempotent_stores: bool = False,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
@@ -1275,6 +1300,7 @@ class KvEventPublisher:
                 format (after sgl-project/sglang#43043), including for caller hashes,
                 so every event token at or above 1,000,000 is excluded from the index.
                 Otherwise only values that do not fit in 32 bits are.
+            idempotent_stores: Do not refcount repeated stores. Set for SGLang.
         """
 
     def publish_stored(
@@ -1481,8 +1507,9 @@ class FpmEventSubscriber:
         """
         Start background tracking of the latest FPM per (worker_id, dp_rank).
 
-        ``max_age_seconds`` fixes the freshness and cleanup window for this
-        subscription. It must be finite and positive.
+        ``max_age_seconds`` sets the freshness and cleanup window for this
+        subscription; ``set_max_age`` changes it later. It must be finite and
+        positive.
 
         Spawns two background tasks:
 
@@ -1494,6 +1521,15 @@ class FpmEventSubscriber:
            worker_id matches the removed instance_id are purged.
 
         After calling this, ``recv()`` will raise RuntimeError.
+        """
+        ...
+
+    def set_max_age(self, max_age_seconds: float) -> None:
+        """
+        Change the freshness and cleanup window after ``start_tracking``,
+        which sets it from its own ``max_age_seconds`` and so replaces a value
+        set earlier. Tracked samples are kept; snapshot reads and the next
+        cleanup use the new age. It must be finite and positive.
         """
         ...
 
@@ -1516,7 +1552,7 @@ class FpmEventSubscriber:
         """Return fresh samples, unjoined IDs, stale count, and missing rank count.
 
         Age is measured from local receive time, including idle heartbeats.
-        The age limit is set once by ``start_tracking()``.
+        The age limit is set by ``start_tracking()`` and changed by ``set_max_age()``.
         Missing ranks include discovered workers that have not published a sample.
         """
         ...
@@ -2083,6 +2119,20 @@ def _normalize_mocker_config(config: Mapping[str, Any] | str) -> Dict[str, Any]:
     """Validate canonical AISimulate config and materialize Dynamo runtime options."""
     ...
 
+def _convert_preprocessed_request(
+    preprocessed: Dict[str, Any], fast_path: bool
+) -> Optional[Dict[str, Any]]:
+    """Test hook: the fast path's request (None if it declines) or pythonize's, pythonized back."""
+    ...
+
+def _raise_routed_http_error(
+    code: int, message: str, routed_engine: bool = True
+) -> None:
+    """Test hook: raise what a response stream raises for a backend
+    `HttpError(code, message)`: a `RoutedEngine`'s stream by default, any other
+    with `routed_engine=False`."""
+    ...
+
 
 class WorkerType:
     """
@@ -2252,12 +2302,32 @@ async def make_engine(distributed_runtime: DistributedRuntime, args: EntrypointA
     ...
 
 class FrontendExtensionContext:
-    """Read-only, live view of frontend state passed to extension route handlers.
+    """The request and a live view of frontend state, passed to route handlers.
 
-    Handlers receive this and answer from current state. The surface is
-    intentionally narrow (typed read-only accessors only); it does not expose
-    the internal service state.
+    The state accessors are read-only and do not expose the internal service
+    state. ``body``, ``headers`` and ``runtime`` describe the current request
+    and the frontend process.
     """
+
+    @property
+    def body(self) -> bytes:
+        """Raw request body; empty when the request has none."""
+        ...
+
+    @property
+    def headers(self) -> dict[str, str]:
+        """Request headers as a dict: lower-case names, repeated headers
+        joined with ``", "``."""
+        ...
+
+    @property
+    def runtime(self) -> DistributedRuntime:
+        """The frontend's own ``DistributedRuntime``, for request-plane calls.
+
+        Its async methods need the frontend's event loop, so call them from an
+        ``async def`` handler.
+        """
+        ...
 
     def is_ready(self) -> bool:
         """Whether the HTTP service has finished startup and is ready to serve."""
@@ -2286,18 +2356,22 @@ class FrontendExtensionContext:
 class FrontendRoute:
     """A trusted extension route served on the Dynamo HTTP frontend.
 
-    Currently restricted to static-path ``GET`` routes. ``handler`` is a
-    synchronous callable that receives a ``FrontendExtensionContext`` and
-    returns a JSON-serializable body (implies HTTP 200) or a ``FrontendResponse``
-    to set the status code. Async handlers and path parameters are rejected at
-    construction.
+    ``method`` is one of ``GET``, ``POST``, ``PUT``, ``PATCH`` or ``DELETE``;
+    ``path`` is static (no parameters or wildcards). ``handler`` receives a
+    ``FrontendExtensionContext`` and returns a JSON-serializable body (implies
+    HTTP 200) or a ``FrontendResponse`` to set the status code. An ``async def``
+    handler runs on the frontend's event loop. A call that takes longer than
+    ``timeout_s`` seconds returns HTTP 503, and a request body larger than
+    ``max_body_bytes`` returns HTTP 413.
     """
 
     def __init__(
         self,
         method: str,
         path: str,
-        handler: Callable[[FrontendExtensionContext], object],
+        handler: Callable[[FrontendExtensionContext], object | Awaitable[object]],
+        timeout_s: float = 30.0,
+        max_body_bytes: int = 65536,
     ) -> None: ...
     @property
     def method(self) -> str: ...
@@ -2338,11 +2412,15 @@ class ReplaySchedulerMetricsSnapshot(TypedDict):
     waiting_requests: int
 
 class ReplaySchedulerIntervalMetrics(TypedDict):
+    g1_prefix_cache_lookup: Optional[dict[str, int]]
     cache_hit_tokens: int
     cache_total_tokens: int
     preemptions: int
 
 class ReplayTrafficMetricsSnapshot(TypedDict):
+    delivered_output_tokens: int
+    committed_prefill_tokens: int
+    first_admission: dict[str, int]
     duration_s: float
     arriving_requests: int
     completed_requests: int
@@ -2358,6 +2436,7 @@ class ReplayTrafficMetricsSnapshot(TypedDict):
     accept_length_forward_count: int
 
 class ReplayTelemetrySnapshot(TypedDict):
+    host_caches: list[dict[str, Any]]
     sample_ordinal: int
     kind: Literal["baseline", "periodic", "final"]
     interval_start_ms: float
@@ -2461,6 +2540,9 @@ def run_mocker_trace_replay(
     agentic_profile: Optional[Dict[str, Any]] = None,
     deterministic: bool = False,
     conversation_affinity: Optional[Dict[str, Any]] = None,
+    agentic_warmup_policy: Optional[
+        Literal["repeated_prefixes", "live_trajectory_v1"]
+    ] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2566,6 +2648,7 @@ def run_mocker_synthetic_trace_replay(
     shared_prefix_ratio: float = 0.0,
     num_prefix_groups: int = 0,
     inter_turn_delay_ms: float = 0.0,
+    accumulate_session_deltas: bool = False,
     model_name: Optional[str] = None,
     sla_ttft_ms: Optional[float] = None,
     sla_itl_ms: Optional[float] = None,
@@ -3372,6 +3455,22 @@ class WorkerUnavailable(DynamoException):
 
     Raised by `RoutedEngine.generate`, for example while prefill routing is
     still activating. Re-raise it unchanged to keep the 503.
+    """
+
+    ...
+
+class WorkerDraining(WorkerUnavailable):
+    """The selected worker closed admission for a reversible drain (HTTP 503)."""
+
+    ...
+
+class RoutedEngineError(ValueError):
+    """A backend error raised by `RoutedEngine.generate` and its response stream.
+
+    Raised for every classified error except a validation error, which raises
+    `InvalidArgument`. A chat engine that lets it escape answers with the
+    backend's status, because the original error is restored. `Client` and
+    `KvRouter` streams raise a plain `ValueError` instead.
     """
 
     ...

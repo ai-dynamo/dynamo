@@ -13,13 +13,13 @@ from dataclasses import replace
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
+    "aisim.sweeper",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from aisimulate.runner import materialize_engine_launch_config
-from aisimulate.sweeper.provider import AdapterReplaySpec, RuntimeHookSpec
-from aisimulate.sweeper.replay import (
+from aisim.runner import materialize_engine_launch_config
+from aisim.sweeper.provider import AdapterReplaySpec, RuntimeHookSpec
+from aisim.sweeper.replay import (
     BackendDeploymentSpec,
     ReplayOutputRequirements,
     ReplaySpec,
@@ -202,6 +202,47 @@ def test_trace_runner_preserves_current_replay_arguments(
     assert seen["sla_e2e_ms"] is None
     assert report.metrics["planner_total_ticks"] == 7.0
     assert report.metadata["planner_total_ticks"] == 7
+
+
+def test_planner_hook_warmup_reaches_the_inner_planner(monkeypatch) -> None:
+    # A live retune sweep's candidate warms its load predictor with the
+    # history rows its planner hook carries.
+    seen = {}
+
+    def fake_run_trace_replay(**kwargs):
+        seen.update(kwargs)
+        return _report({"goodput_output_throughput_tok_s": 40.0}, total_ticks=1)
+
+    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    rows = [[180.0, 12.0, 100.0, 20.0, None, None], [180.0, 9.0, 90.0, 25.0, 0.5, None]]
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={"trace_path": "window.jsonl.gz", "trace_format": "dynamo"},
+        goal={"target": "goodput", "sla": {"ttft_ms": 100.0, "itl_ms": 20.0}},
+        adapters={
+            "dynamo.planner": AdapterReplaySpec(
+                runtime_hooks=(
+                    RuntimeHookSpec(
+                        provider="dynamo.planner",
+                        kind="scaling_policy",
+                        api_version=1,
+                        config={
+                            "planner_config": {"mode": "agg"},
+                            "warmup_observations": rows,
+                        },
+                    ),
+                )
+            )
+        },
+    )
+
+    simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+
+    warmup = seen["_planner_warmup_observations"]
+    assert [(obs.duration_s, obs.num_req, obs.kv_hit_rate) for obs in warmup] == [
+        (180.0, 12.0, None),
+        (180.0, 9.0, 0.5),
+    ]
 
 
 def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
@@ -492,8 +533,10 @@ def test_runner_captures_per_request_output_when_requested(monkeypatch) -> None:
     ]
 
 
-def test_synthetic_disagg_preserves_request_count_and_load(monkeypatch) -> None:
-    seen = {}
+@pytest.fixture
+def synthetic_kwargs(monkeypatch) -> dict:
+    """Capture the keyword arguments the runner passes to synthetic replay."""
+    seen: dict = {}
 
     def fake_run_synthetic_trace_replay(**kwargs):
         seen.update(kwargs)
@@ -504,6 +547,10 @@ def test_synthetic_disagg_preserves_request_count_and_load(monkeypatch) -> None:
         "run_synthetic_trace_replay",
         fake_run_synthetic_trace_replay,
     )
+    return seen
+
+
+def test_synthetic_disagg_preserves_request_count_and_load(synthetic_kwargs) -> None:
     deployment = BackendDeploymentSpec(
         deployment_mode="disagg",
         backend="sglang",
@@ -539,17 +586,17 @@ def test_synthetic_disagg_preserves_request_count_and_load(monkeypatch) -> None:
 
     report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
 
-    assert seen["input_tokens"] == 512
-    assert seen["output_tokens"] == 128
-    assert seen["request_count"] == 320
-    assert seen["replay_concurrency"] == 32
+    assert synthetic_kwargs["input_tokens"] == 512
+    assert synthetic_kwargs["output_tokens"] == 128
+    assert synthetic_kwargs["request_count"] == 320
+    assert synthetic_kwargs["replay_concurrency"] == 32
     # Replay requires exactly one load controller. Closed-loop mode uses only
     # replay_concurrency; an arrival interval would make the request ambiguous.
-    assert seen["arrival_interval_ms"] is None
-    assert seen["num_prefill_workers"] == 2
-    assert seen["num_decode_workers"] == 4
-    assert seen["capture_per_request"] is False
-    assert seen["capture_planner_details"] is False
+    assert synthetic_kwargs["arrival_interval_ms"] is None
+    assert synthetic_kwargs["num_prefill_workers"] == 2
+    assert synthetic_kwargs["num_decode_workers"] == 4
+    assert synthetic_kwargs["capture_per_request"] is False
+    assert synthetic_kwargs["capture_planner_details"] is False
     assert report.metrics == {
         "output_throughput_tok_s": 99.0,
         "power_w": None,
@@ -557,18 +604,7 @@ def test_synthetic_disagg_preserves_request_count_and_load(monkeypatch) -> None:
     }
 
 
-def test_synthetic_request_rate_preserves_open_loop_load(monkeypatch) -> None:
-    seen = {}
-
-    def fake_run_synthetic_trace_replay(**kwargs):
-        seen.update(kwargs)
-        return _report({"output_throughput_tok_s": 99.0})
-
-    monkeypatch.setattr(
-        simulation,
-        "run_synthetic_trace_replay",
-        fake_run_synthetic_trace_replay,
-    )
+def test_synthetic_request_rate_preserves_open_loop_load(synthetic_kwargs) -> None:
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),
         workload={
@@ -584,14 +620,44 @@ def test_synthetic_request_rate_preserves_open_loop_load(monkeypatch) -> None:
 
     report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
 
-    assert seen["request_count"] == 200
-    assert seen["replay_concurrency"] is None
-    assert seen["arrival_interval_ms"] == 50.0
+    assert synthetic_kwargs["request_count"] == 200
+    assert synthetic_kwargs["replay_concurrency"] is None
+    assert synthetic_kwargs["arrival_interval_ms"] == 50.0
     assert report.metrics == {
         "output_throughput_tok_s": 99.0,
         "power_w": None,
         "power_coverage": None,
     }
+
+
+@pytest.mark.parametrize(
+    ("source_type", "turns_per_session", "accumulate_session_deltas"),
+    [("synthetic-session", 3, True), ("synthetic", 1, False), (None, 3, False)],
+)
+def test_synthetic_sessions_carry_earlier_turns(
+    synthetic_kwargs,
+    source_type: str | None,
+    turns_per_session: int,
+    accumulate_session_deltas: bool,
+) -> None:
+    workload = {
+        "isl": 64,
+        "osl": 8,
+        "request_count": 2,
+        "request_rate": 2.0,
+        "turns_per_session": turns_per_session,
+    }
+    if source_type is not None:
+        workload["source_type"] = source_type
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload=workload,
+        goal={"target": "throughput"},
+    )
+
+    simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+
+    assert synthetic_kwargs["accumulate_session_deltas"] is accumulate_session_deltas
 
 
 @pytest.mark.parametrize("request_rate", [0.0, -1.0])
@@ -682,6 +748,39 @@ def test_factory_supports_native_trtllm_disagg() -> None:
     assert capabilities.supports_disaggregated_attention_dp
 
 
+@pytest.mark.parametrize(
+    "control,accepted",
+    [
+        ("kvcache_quant_mode", True),
+        ("gemm_quant_mode", True),
+        ("fmha_quant_mode", False),
+    ],
+)
+def test_factory_accepts_only_kv_and_gemm_quant_modes(control, accepted) -> None:
+    deployment = replace(
+        _agg_deployment(),
+        agg_engine_args={
+            "engine_type": "vllm",
+            "timing_model": {
+                "type": "external",
+                "provider": "aic",
+                "config": {control: "fp8"},
+            },
+        },
+    )
+    spec = ReplaySpec(
+        backend_deployment=deployment,
+        workload={"isl": 100, "osl": 20},
+        goal={"target": "throughput"},
+    )
+    capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
+    if accepted:
+        capabilities.require_compatible(spec)
+    else:
+        with pytest.raises(ValueError, match="engine model controls"):
+            capabilities.require_compatible(spec)
+
+
 def test_factory_follows_engine_capabilities_with_adapter_constraints(
     monkeypatch,
 ) -> None:
@@ -753,7 +852,9 @@ def test_agentic_capabilities_follow_engine_support_in_offline_mode(
         supports_agentic_host_offload=supported,
         supports_agentic_snapshots=supported,
         supports_agentic_warmup=supported,
+        supports_agentic_live_warmup=supported,
         supports_agentic_profile=supported,
+        supports_state_cache=supported,
     )
     monkeypatch.setattr(
         simulation.EngineReplayRunnerFactory, "capabilities", lambda self: native
@@ -763,7 +864,9 @@ def test_agentic_capabilities_follow_engine_support_in_offline_mode(
     assert capabilities.supports_agentic_host_offload is supported
     assert capabilities.supports_agentic_snapshots is supported
     assert capabilities.supports_agentic_warmup is supported
+    assert capabilities.supports_agentic_live_warmup is supported
     assert capabilities.supports_agentic_profile is supported
+    assert capabilities.supports_state_cache is supported
     # Dynamo's composed runtime retains its pre-existing HBM speculation support.
     assert capabilities.supports_agentic_speculative_decoding
 
@@ -787,7 +890,14 @@ def test_agentic_speculation_capability_does_not_bypass_g2_scope(nested, alias):
         goal={"target": "throughput"},
     )
     capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
-    with pytest.raises(ValueError, match="requires speculative decoding disabled"):
+    # A depth written as aic_nextn or nextn is refused with host offload by a
+    # general check, before the agentic G2 check that refuses the other form.
+    refusal = (
+        "requires speculative decoding disabled"
+        if alias == "speculation"
+        else "requires canonical mtp speculation"
+    )
+    with pytest.raises(ValueError, match=refusal):
         capabilities.require_compatible(spec)
     rank.pop("native_host_offload")
     capabilities.require_compatible(spec)
@@ -859,6 +969,117 @@ def test_hbm_agentic_speculation_runs_through_native_replay(tmp_path, speculatio
     assert accelerated.metrics["duration_ms"] < baseline.metrics["duration_ms"]
 
 
+def _write_weka_trace(path, block_size):
+    """Three short plays; the first spawns a subagent that its next turn joins."""
+
+    def request(t, hashes, out=2):
+        return {
+            "t": t,
+            "type": "s",
+            "model": "source-model",
+            "in": block_size * len(hashes),
+            "out": out,
+            "api_time": 0.5,
+            "hash_ids": hashes,
+        }
+
+    subagent = {
+        "t": 3.0,
+        "type": "subagent",
+        "agent_id": "worker",
+        "subagent_type": "Explore",
+        "duration_ms": 2000,
+        "status": "completed",
+        "requests": [request(3.5, [10, 11]), request(4.5, [10, 11, 12])],
+    }
+    plays = {
+        "alpha": [request(0.0, [1, 2]), request(2.0, [1, 2, 3]), subagent],
+        "beta": [request(0.0, [20, 21, 22], 3), request(1.5, [20, 21, 22, 23], 3)],
+        "gamma": [request(0.0, [30]), request(0.8, [30, 31])],
+    }
+    path.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "id": play,
+                    "block_size": block_size,
+                    "hash_id_scope": "local",
+                    "requests": requests,
+                }
+            )
+            + "\n"
+            for play, requests in plays.items()
+        )
+    )
+
+
+@pytest.mark.timeout(30)
+def test_agentic_replay_matches_the_engine_stack(tmp_path):
+    """Live warmup on a hybrid (state-cache) engine replays as on the engine stack."""
+
+    block_size = 64
+    trace = tmp_path / "agentic.jsonl"
+    _write_weka_trace(trace, block_size)
+    engine_args = {
+        "engine_type": "vllm",
+        "block_size": block_size,
+        "num_gpu_blocks": 64,
+        "kv_cache_bytes_per_token": 128,
+        "prefix_match_unit": block_size,
+        "state_cache": {"bytes_per_request": 196608},
+        "max_num_batched_tokens": 512,
+        "max_num_seqs": 8,
+        "timing_model": {"type": "fixed", "prefill_ms": 2, "decode_ms": 8},
+    }
+    spec = ReplaySpec(
+        backend_deployment=replace(
+            _agg_deployment(), num_workers=1, agg_engine_args=engine_args
+        ),
+        workload={
+            "source_type": "trace",
+            "load_type": "trace_timestamps",
+            "trace_format": "weka",
+            "trace_path": str(trace),
+            "agentic_lanes": 8,
+            "agentic_snapshot": {"seed": 42},
+            "agentic_warmup": True,
+            "agentic_warmup_policy": "live_trajectory_v1",
+            # At 1 s the global cap makes the primer idle cap bind; a different
+            # tree cap catches reading the wrong field.
+            "agentic_profile": {
+                "duration_seconds": 20.0,
+                "tree_idle_cap_seconds": 5.0,
+                "global_idle_cap_seconds": 1.0,
+            },
+        },
+        goal={"target": "throughput"},
+    )
+    requirements = ReplayOutputRequirements(capture_per_request=True)
+    dynamo, engine = (
+        factory().create(0).run(spec, output_requirements=requirements)
+        for factory in (
+            simulation.DynamoReplayRunnerFactory,
+            simulation.EngineReplayRunnerFactory,
+        )
+    )
+
+    records = dynamo.metadata["native_report"]["per_request"]
+    assert records == engine.metadata["native_report"]["per_request"]
+    assert len(records) > 100
+    assert dynamo.metadata["agentic_phases"] == engine.metadata["agentic_phases"]
+    assert dynamo.metadata["agentic_phases"]["warmup_policy"] == "live_trajectory_v1"
+    # Wall-clock rates differ between the runs.
+    shared = dynamo.metrics.keys() & engine.metrics.keys()
+    shared -= {
+        "wall_time_ms",
+        "processed_tokens_per_s",
+        "processed_output_tokens_per_s",
+    }
+    assert {k: dynamo.metrics[k] for k in shared} == {
+        k: engine.metrics[k] for k in shared
+    }
+
+
 def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None:
     monkeypatch.setattr(
         simulation,
@@ -922,8 +1143,8 @@ def test_public_prediction_bootstrap_prefers_canonical_worker_policy():
     from pathlib import Path
 
     import yaml
-    from aisimulate.compiler import prediction_to_replay_spec
-    from aisimulate.config.cli import CorePredictionConfig
+    from aisim.compiler import prediction_to_replay_spec
+    from aisim.config.cli import CorePredictionConfig
 
     from dynamo.replay.planner import _ais_session_kwargs
 
@@ -956,7 +1177,7 @@ def test_public_prediction_bootstrap_prefers_canonical_worker_policy():
     ],
 )
 def test_custom_timing_uses_shared_capacity_resolution(monkeypatch, timing):
-    import aisimulate.capacity
+    import aisim.capacity
 
     calls = []
 
@@ -964,7 +1185,7 @@ def test_custom_timing_uses_shared_capacity_resolution(monkeypatch, timing):
         calls.append(kwargs)
         return 4096
 
-    monkeypatch.setattr(aisimulate.capacity, "estimate_num_gpu_blocks", capacity_lookup)
+    monkeypatch.setattr(aisim.capacity, "estimate_num_gpu_blocks", capacity_lookup)
     args = _launch_config(
         {
             "engine_type": "vllm",
@@ -994,8 +1215,8 @@ def test_compiled_custom_timing_consumes_capacity_only_fields(timing):
     from pathlib import Path
 
     import yaml
-    from aisimulate.compiler import prediction_to_replay_spec
-    from aisimulate.config.cli import CorePredictionConfig
+    from aisim.compiler import prediction_to_replay_spec
+    from aisim.config.cli import CorePredictionConfig
 
     path = (
         Path(__file__).parent

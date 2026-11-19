@@ -35,7 +35,7 @@
 packages:
   # --- EFA (Elastic Fabric Adapter) components ---
   - name: libfabric
-    version: 2.6.0amzn1.0
+    version: 2.7.0amzn2.0
     license: BSD-2-Clause
     source: https://github.com/aws/libfabric
     images:
@@ -44,7 +44,7 @@ packages:
       - sglang-runtime-efa
 
   - name: aws-ofi-nccl
-    version: 1.21.1
+    version: 1.22.0
     license: Apache-2.0
     source: https://github.com/aws/aws-ofi-nccl
     images:
@@ -117,6 +117,8 @@ packages:
 
   # etcd and nats-server are built from their release tags with patched Go.
   # The copied binaries have no apt metadata.
+  # etcd's etcd, etcdctl and etcdutl are built with golang.org/x/net v0.62.0
+  # in place of the v0.61.0 that the v3.5.35 modules pin (dynamo_base.Dockerfile).
   - name: etcd
     version: v3.5.35
     license: Apache-2.0
@@ -132,7 +134,7 @@ packages:
 
   # nats-server — messaging server rebuilt in dynamo_base.
   - name: nats-server
-    version: v2.14.8
+    version: v2.14.9
     license: Apache-2.0
     source: https://github.com/nats-io/nats-server
     images:

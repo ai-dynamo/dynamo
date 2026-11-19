@@ -1,21 +1,49 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_router_policies::DefaultWorkerSelector;
+use crate::replay::default_selector::DefaultWorkerSelector;
+use anyhow::Context;
+use dynamo_worker_selection::host::SelectionConfig;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::common::protocols::MockerConfig;
-use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::kv_hints::{WorkerKvTransferKeys, WorkerKvTransferKeysCache};
-use dynamo_kv_router::protocols::{
-    ActiveSequenceEvent, DpRank, KvHintTransferWorkerMetadata, WorkerConfigLike, WorkerId,
-    WorkerWithDpRank,
+use crate::common::protocols::{DirectRequest, MockerConfig};
+use crate::loadgen::ReplayRequestHashes;
+use dynamo_kv_hints::{
+    KvHintTransferWorkerMetadata, WorkerKvTransferKeys, WorkerKvTransferKeysCache,
 };
-use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
-use dynamo_kv_router::sequences::{LocalWorkerLoad, SchedulerLoadSnapshot};
-use dynamo_kv_router::{ActiveSequencesMultiWorker, LocalScheduler, SequencePublisher};
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_router_protocol::WorkerType;
+use dynamo_router_protocol::worker::DEFAULT_MAX_BATCHED_TOKENS;
+use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::host::{LocalScheduler, WorkerConfigLike, WorkerKvTransferKeysExt};
+use dynamo_slot_tracker::host::{
+    ActiveSequenceEvent, ActiveSequencesMultiWorker, LocalWorkerLoad, SchedulerLoadSnapshot,
+    SequencePublisher,
+};
+
+/// The cache salt a replay router places the request under. An empty salt is
+/// no salt, as in the engine.
+pub(super) fn request_cache_salt(request: &DirectRequest) -> Option<&str> {
+    request
+        .cache_salt
+        .as_deref()
+        .filter(|salt| !salt.is_empty())
+}
+
+/// A salted prompt's block identities. The engine hashes it in AISim's cache
+/// namespace and its KV events carry those hashes, so a router looks the
+/// request up by the same contract: the block seed behind
+/// `BlockHashOptions::cache_namespace` is a different one.
+pub(super) fn salted_request_hashes(
+    tokens: &[u32],
+    block_size: u32,
+    cache_salt: &str,
+) -> ReplayRequestHashes {
+    ReplayRequestHashes::from_tokens_with_cache_salt(tokens, block_size, Some(cache_salt))
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ReplayNoopPublisher;
@@ -96,7 +124,10 @@ impl WorkerConfigLike for ReplayWorkerConfig {
     }
 
     fn kv_transfer_keys(&self) -> Cow<'_, WorkerKvTransferKeys> {
-        Cow::Borrowed(self.kv_transfer_keys.get_or_init(self))
+        Cow::Borrowed(
+            self.kv_transfer_keys
+                .get_or_init(|| WorkerKvTransferKeys::of(self)),
+        )
     }
 }
 
@@ -157,26 +188,49 @@ pub(super) fn replay_slots(
 }
 
 pub(super) fn replay_selector(config: &KvRouterConfig) -> anyhow::Result<DefaultWorkerSelector> {
-    replay_selector_with_seed(config, None)
+    replay_selector_with_seed(config, WorkerType::Aggregated, None, None)
 }
 
+/// The selector of one replay worker pool. A worker-selection policy that `config` selects for
+/// `worker_type` resolves from `router_plugins` (the policies Dynamo ships when `None`) and is
+/// built by its registered factory. Otherwise the selector runs Dynamo's default, which
+/// `selector_seed` seeds.
 pub(super) fn replay_selector_with_seed(
     config: &KvRouterConfig,
+    worker_type: WorkerType,
+    router_plugins: Option<&RouterPluginRegistry>,
     selector_seed: Option<u64>,
 ) -> anyhow::Result<DefaultWorkerSelector> {
     if config.request_classifier_config()?.is_some() {
         anyhow::bail!("offline replay does not support request_classifier plugins");
     }
-    if let Some(instance) = config
-        .selected_worker_selection_policy_instance()
-        .map_err(anyhow::Error::from)?
+    let selection_config = SelectionConfig::from(config);
+    if config
+        .selected_worker_selection_policy_instance_for(worker_type)?
+        .is_some()
     {
-        anyhow::bail!("custom worker-selection policy {instance:?} is not supported by replay");
+        let registry = match router_plugins {
+            Some(registry) => registry.clone(),
+            None => {
+                let mut registry = dynamo_router_policies::default_registry();
+                dynamo_router_policies::register(&mut registry)?;
+                registry
+            }
+        };
+        let factory = registry
+            .resolve_for_worker_type(config, worker_type)?
+            .context("no worker-selection policy factory resolved")?;
+        return Ok(DefaultWorkerSelector::with_policy_factory(
+            selection_config,
+            "replay",
+            factory,
+            worker_type,
+        ));
     }
 
     Ok(match selector_seed {
-        Some(seed) => DefaultWorkerSelector::new_seeded(Some(config.clone()), "replay", seed),
-        None => DefaultWorkerSelector::new(Some(config.clone()), "replay"),
+        Some(seed) => DefaultWorkerSelector::new_seeded(Some(selection_config), "replay", seed),
+        None => DefaultWorkerSelector::new(Some(selection_config), "replay"),
     })
 }
 
@@ -194,6 +248,7 @@ pub(crate) fn replay_router_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_scheduler::host::WorkerSelector;
 
     #[test]
     fn router_hint_metadata_covers_each_rank_and_keys_are_built_once() {
@@ -220,7 +275,7 @@ mod tests {
         // and selections borrow them.
         let keys = config.kv_transfer_keys();
         assert!(matches!(keys, Cow::Borrowed(_)));
-        assert_eq!(*keys, WorkerKvTransferKeys::new(&config));
+        assert_eq!(*keys, WorkerKvTransferKeys::of(&config));
         assert!(keys.target().is_some());
     }
 
@@ -242,34 +297,44 @@ mod tests {
         );
     }
 
-    #[test]
-    fn replay_selector_rejects_custom_worker_selection() {
+    fn policy_config(yaml: &str) -> (tempfile::NamedTempFile, KvRouterConfig) {
         let policy_file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            policy_file.path(),
-            r#"
-worker_selection:
-  aggregated: custom
-  instances:
-    - name: custom
-      type: test
-      parameters: {}
-"#,
-        )
-        .unwrap();
+        std::fs::write(policy_file.path(), yaml).unwrap();
         let config = KvRouterConfig {
             router_policy_config: Some(policy_file.path().display().to_string()),
             ..Default::default()
         };
+        (policy_file, config)
+    }
 
-        let error = match replay_selector(&config) {
-            Err(error) => error,
-            Ok(_) => panic!("replay must reject a custom worker selector it cannot execute"),
+    #[test]
+    fn replay_selector_builds_the_configured_worker_selection_policy() {
+        let inputs = |selector: &DefaultWorkerSelector| {
+            WorkerSelector::<ReplayWorkerConfig>::required_worker_inputs(selector)
+        };
+        let (_policy_file, config) =
+            policy_config("worker_selection:\n  aggregated: dynamo-two-tier-cost-fn\n");
+        let two_tier = replay_selector(&config).unwrap();
+        // Two-tier reads request counts, which the default cost function does not.
+        let default = replay_selector(&KvRouterConfig::default()).unwrap();
+        assert_ne!(inputs(&two_tier), inputs(&default));
+
+        // Two-tier has no runtime parameters, so a Planner tick reports no policy for it.
+        let controls = crate::replay::ReplayRouterControls::new();
+        controls.register(WorkerType::Aggregated, two_tier.runtime_control());
+        assert!(controls.runtime_configs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn replay_selector_reports_an_unknown_worker_selection_policy() {
+        let (_policy_file, config) = policy_config("worker_selection:\n  aggregated: test\n");
+        let Err(error) = replay_selector(&config) else {
+            panic!("an unregistered worker-selection policy was accepted")
         };
         assert!(
             error
                 .to_string()
-                .contains("custom worker-selection policy \"custom\" is not supported by replay")
+                .contains("unknown worker-selection policy type \"test\"")
         );
     }
 }

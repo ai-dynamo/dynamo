@@ -464,6 +464,8 @@ def download_models(model_list=None, ignore_weights=False):
 
     Args:
         model_list: List of model IDs to download. If None, downloads TEST_MODELS.
+            An ID written as ``repo_id@revision`` downloads that revision instead
+            of the default branch.
         ignore_weights: If True, skips downloading model weight files. Default is False.
     """
     if model_list is None:
@@ -490,6 +492,7 @@ def download_models(model_list=None, ignore_weights=False):
 
     failures = []
     for model_id in model_list:
+        repo_id, _, revision = model_id.partition("@")
         logging.info(
             f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
         )
@@ -507,13 +510,15 @@ def download_models(model_list=None, ignore_weights=False):
 
                 # Download everything except weight files
                 snapshot_download(
-                    repo_id=model_id,
+                    repo_id=repo_id,
+                    revision=revision or None,
                     ignore_patterns=weight_patterns,
                 )
             else:
                 # Download the full model snapshot (includes all files)
                 snapshot_download(
-                    repo_id=model_id,
+                    repo_id=repo_id,
+                    revision=revision or None,
                 )
             logging.info(f"Successfully pre-downloaded: {model_id}")
 
@@ -787,8 +792,11 @@ def pytest_collection_modifyitems(config, items):
         ):
             continue
         for model_mark in item.iter_markers("model"):
+            # model(repo_id, revision=...) pins the download, so a test that
+            # loads a fixed revision finds it cached once HF_HUB_OFFLINE is set.
+            revision = model_mark.kwargs.get("revision")
             for repo_id in model_mark.args:
-                models_to_download.add(repo_id)
+                models_to_download.add(f"{repo_id}@{revision}" if revision else repo_id)
 
     # Store models to download in pytest config for fixtures to access
     if models_to_download:
@@ -1338,12 +1346,15 @@ def dynamo_dynamic_ports(
         engine_grpc_ports: list[int] = []
         engine_kv_replay_ports: list[int] = []
         if request.node.get_closest_marker("engine_ports"):
-            engine_http_ports = allocate_ports(
-                num_system_ports, DynamoPortRange.SERVE.value
+            # One block each, so a single-worker test's DP engine can bind the
+            # first port + rank, up to num_system_ports ranks. With several
+            # workers, worker N's rank k would take worker N+k's port.
+            engine_http_ports = allocate_contiguous_ports(
+                1, num_system_ports, DynamoPortRange.SERVE.value
             )
             all_ports.extend(engine_http_ports)
-            engine_grpc_ports = allocate_ports(
-                num_system_ports, DynamoPortRange.SERVE.value
+            engine_grpc_ports = allocate_contiguous_ports(
+                1, num_system_ports, DynamoPortRange.SERVE.value
             )
             all_ports.extend(engine_grpc_ports)
             # One block, so a data-parallel engine can replay on the first port + rank.
