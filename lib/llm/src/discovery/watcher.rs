@@ -3020,6 +3020,24 @@ request_classifier:
         ));
         assert_eq!(source, RouterLoadSource::Encode);
         assert!(!source.monitors_sequence_load());
+
+        watcher.set_systemone_enabled(true);
+        watcher.generate_engine_capabilities.clear();
+        watcher.chat_engine_factory = Some(Arc::new(|_, _, _| {
+            Box::pin(async {
+                Ok(Arc::new(UncalledEngine)
+                    as crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine)
+            })
+        }));
+        assert!(!spec.representative.card.is_systemone_serial_eligible());
+        let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
+        let prepared = watcher
+            .prepare_worker_set(&spec, admission_rx, CancellationToken::new())
+            .await
+            .unwrap();
+        let workers = prepared.worker_set.as_ref().unwrap();
+        assert!(workers.has_chat_engine());
+        assert!(!workers.has_generate_engine());
         runtime.shutdown();
     }
 
