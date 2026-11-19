@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "dynamo-custom-policy-builtin"
+name = "dynamo-router-policies"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -14,7 +14,7 @@ description = "Router plugins shipped with Dynamo"
 [dependencies]
 fastrand = "2"
 parking_lot.workspace = true
-dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }
+dynamo-kv-router = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
@@ -22,9 +22,15 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
-dynamo-kv-router = { workspace = true, features = ["bench"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
+tokio-util = { workspace = true }
+dynamo-kv-hints = { workspace = true }
+dynamo-kv-router = { workspace = true, features = ["ingest-zmq", "replica-sync-zmq", "peer-recovery", "bench"] }
+dynamo-scheduler = { workspace = true, features = ["bench"] }
 rustc-hash = "2.1.1"
 criterion = "0.5"
 tempfile = { workspace = true }
@@ -35,4 +41,8 @@ harness = false
 
 [[bench]]
 name = "default_lifecycle"
+harness = false
+
+[[bench]]
+name = "thunderagent_ledger"
 harness = false

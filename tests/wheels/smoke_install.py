@@ -257,7 +257,7 @@ def create_venv(python_spec: str) -> Path:
 
 
 # Stage the pinned AISimulate wheel directly from NVIDIA's package index.
-AISIMULATE_FIND_LINKS = "https://pypi.nvidia.com/aisimulate/"
+AISIMULATE_FIND_LINKS = "https://pypi.nvidia.com/aisim/"
 
 
 def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) -> None:
@@ -267,11 +267,11 @@ def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) ->
     for path in (wheelhouse, wheelhouse / "nixl"):
         if path.exists():
             find_links.extend(["--find-links", str(path)])
-    # Planner and framework runtime wheelhouses stage their own aisimulate wheel. Offer
+    # Planner and framework runtime wheelhouses stage their own aisim wheel. Offer
     # NVIDIA's index only when that staged wheel is absent: pip ranks equal candidates
     # without regard to where they came from, so registering both risks installing the
     # remote copy in place of the artifact the image actually ships.
-    if not find_wheels(wheelhouse, "aisimulate"):
+    if not find_wheels(wheelhouse, "aisim"):
         find_links.extend(["--find-links", AISIMULATE_FIND_LINKS])
     run(
         [
@@ -280,7 +280,7 @@ def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) ->
             "pip",
             "install",
             "--only-binary",
-            "aisimulate",
+            "aisim",
             *find_links,
             *requirements,
         ]
@@ -397,18 +397,18 @@ os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 import msgspec
-import aisimulate_core
-from aisimulate_core.sdk import RustForwardPassPerfModel
-from aisimulate_core.sdk.engine import compile_engine
-from aisimulate_core.sdk.memory import estimate_num_gpu_blocks
+import aisim_core
+from aisim_core.sdk import RustForwardPassPerfModel
+from aisim_core.sdk.engine import compile_engine
+from aisim_core.sdk.memory import estimate_num_gpu_blocks
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     ScheduledRequestMetrics,
 )
 
-assert aisimulate_core and compile_engine and estimate_num_gpu_blocks
+assert aisim_core and compile_engine and estimate_num_gpu_blocks
 
-package_root = files("aisimulate_core")
+package_root = files("aisim_core")
 assert (package_root / "model_configs/Qwen--Qwen3-32B_config.json").is_file()
 assert (package_root / "systems/h200_sxm.yaml").is_file()
 parquet_files = list(

@@ -6,7 +6,7 @@
 E2E test for KV Event Consolidator with Router integration.
 
 This test validates that:
-1. vLLM/TensorRT-LLM with KVBM correctly emits KV events to the consolidator
+1. vLLM with KVBM correctly emits KV events to the consolidator
 2. The consolidator correctly deduplicates events from engine and KVBM
 3. The router receives and processes consolidated events without warnings
 
@@ -21,7 +21,6 @@ from pathlib import Path
 
 import pytest
 import requests
-import yaml
 
 from tests.kvbm_integration.common import ApiTester, check_logs_for_patterns
 from tests.utils.managed_process import ManagedProcess
@@ -31,14 +30,11 @@ from tests.utils.output_paths import resolve_test_output_path
 from .common import check_module_available
 
 HAS_VLLM = check_module_available("vllm")
-HAS_TRTLLM = check_module_available("tensorrt_llm")
 
 # Build list of available engines for parameterization
 AVAILABLE_ENGINES = []
 if HAS_VLLM:
     AVAILABLE_ENGINES.append("vllm")
-if HAS_TRTLLM:
-    AVAILABLE_ENGINES.append("trtllm")
 
 # Test markers
 pytestmark = [
@@ -49,7 +45,7 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.h100,
     pytest.mark.post_merge,
-    pytest.mark.skipif(not (HAS_VLLM or HAS_TRTLLM), reason="requires vllm or trtllm"),
+    pytest.mark.skipif(not HAS_VLLM, reason="requires vllm"),
 ]
 
 logger = logging.getLogger(__name__)
@@ -65,28 +61,6 @@ def test_directory(request):
     test_dir.mkdir(parents=True, exist_ok=True)
     yield test_dir
     # Cleanup handled by pytest (logs are kept for debugging)
-
-
-def create_trtllm_config(test_directory: Path) -> Path:
-    """Create TensorRT-LLM config YAML file with KVBM connector configuration."""
-    config_path = Path(os.path.join(test_directory, "trtllm_config.yaml"))
-    config = {
-        "backend": "pytorch",
-        "cuda_graph_config": None,
-        "kv_cache_config": {
-            "enable_partial_reuse": False,
-            "free_gpu_memory_fraction": 0.01,
-        },
-        "max_seq_len": 4096,
-        "kv_connector_config": {
-            "connector_module": "kvbm.trtllm_integration.connector",
-            "connector_scheduler_class": "DynamoKVBMConnectorLeader",
-            "connector_worker_class": "DynamoKVBMConnectorWorker",
-        },
-    }
-    with open(config_path, "w") as f:
-        yaml.dump(config, f)
-    return config_path
 
 
 def compute_deduplication_test_params(
@@ -339,7 +313,7 @@ def engine_type(request):
 
 @pytest.fixture
 def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
-    """Start LLM worker (vLLM or TensorRT-LLM) with KVBM connector and KV Event Consolidator."""
+    """Start vLLM worker with KVBM connector and KV Event Consolidator."""
     model_id = os.environ.get("CONSOLIDATOR_MODEL_ID", "Qwen/Qwen3-0.6B")
     engine = engine_type
 
@@ -347,37 +321,18 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
         f"Starting {engine.upper()} worker with KVBM connector and model {model_id}"
     )
 
-    # Build command based on engine type
-    if engine == "vllm":
-        command = [
-            "python",
-            "-m",
-            "dynamo.vllm",
-            "--model",
-            model_id,
-            "--kv-transfer-config",
-            '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}',
-            "--kv-events-config",
-            '{"enable_kv_cache_events": true}',
-            "--enforce-eager",  # For faster startup in tests
-        ]
-    else:  # trtllm
-        # Create TensorRT-LLM config file with KVBM connector
-        config_path = create_trtllm_config(test_directory)
-        command = [
-            "python",
-            "-m",
-            "dynamo.trtllm",
-            "--model-path",
-            model_id,
-            "--served-model-name",
-            model_id,
-            "--extra-engine-args",
-            str(
-                config_path.absolute()
-            ),  # Use absolute path to avoid working directory issues
-            "--publish-kv-events",
-        ]
+    command = [
+        "python",
+        "-m",
+        "dynamo.vllm",
+        "--model",
+        model_id,
+        "--kv-transfer-config",
+        '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}',
+        "--kv-events-config",
+        '{"enable_kv_cache_events": true}',
+        "--enforce-eager",  # For faster startup in tests
+    ]
 
     # Environment
     env = os.environ.copy()
@@ -391,7 +346,7 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
             # Disable O_DIRECT on the KVBM G3 disk cache so the test runs on
             # hardware / filesystems that don't support `fcntl(F_SETFL, O_DIRECT)`
             # (e.g. tmpfs on Linux kernels <~6.1, lustre, overlay, NFS). Without
-            # this, trtllm's blocking layout init hangs until the 120s worker
+            # this, blocking layout init hangs until the 120s worker
             # registration timeout. Only affects disk I/O path, not functional
             # event/dedup coverage this test exercises.
             "DYN_KVBM_DISK_DISABLE_O_DIRECT": "true",
@@ -399,15 +354,8 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
         }
     )
 
-    # Set ZMQ port for TensorRT-LLM consolidator
-    if engine == "trtllm":
-        env["DYN_KVBM_TRTLLM_ZMQ_PORT"] = "20081"
-    elif engine == "vllm":
-        # Enable forward-pass metrics (InstrumentedScheduler + FpmEventRelay).
-        # One serial worker per test and the suite pins fixed ports, so the
-        # canonical FPM default port is safe here. (trtllm uses FpmDirectPublisher
-        # and ignores this var, so it's only set for vLLM.)
-        env["DYN_FORWARDPASS_METRIC_PORT"] = "20380"
+    # Enable forward-pass metrics (InstrumentedScheduler + FpmEventRelay).
+    env["DYN_FORWARDPASS_METRIC_PORT"] = "20380"
 
     # Create separate log directory for worker to avoid conflicts with frontend
     worker_log_dir = Path(os.path.join(test_directory, engine)).absolute()
@@ -786,47 +734,25 @@ class TestConsolidatorRouterE2E:
                 g3_disk_blocks=g3_disk_blocks,
             )
 
-            # Build command based on engine type
-            if engine == "vllm":
-                worker_command = [
-                    "python",
-                    "-m",
-                    "dynamo.vllm",
-                    "--model",
-                    model_id,
-                    "--kv-transfer-config",
-                    '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}',
-                    "--kv-events-config",
-                    '{"enable_kv_cache_events": true}',
-                    "--enforce-eager",
-                    "--enable-prefix-caching",
-                    "--num-gpu-blocks-override",
-                    str(g1_gpu_blocks),
-                    "--block-size",
-                    str(block_size),
-                    "--max-model-len",
-                    str(max_model_len),
-                ]
-            else:  # trtllm
-                # Create TensorRT-LLM config file with KVBM connector
-                # Use small GPU cache (0.01 = 1% of GPU memory) to force evictions
-                # This ensures blocks will be evicted from GPU while still in KVBM
-                # Small enough to trigger evictions but large enough to handle sequence requirements
-                config_path = create_trtllm_config(test_directory)
-                worker_command = [
-                    "python",
-                    "-m",
-                    "dynamo.trtllm",
-                    "--model-path",
-                    model_id,
-                    "--served-model-name",
-                    model_id,
-                    "--extra-engine-args",
-                    str(
-                        config_path.absolute()
-                    ),  # Use absolute path to avoid working directory issues
-                    "--publish-kv-events",
-                ]
+            worker_command = [
+                "python",
+                "-m",
+                "dynamo.vllm",
+                "--model",
+                model_id,
+                "--kv-transfer-config",
+                '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}',
+                "--kv-events-config",
+                '{"enable_kv_cache_events": true}',
+                "--enforce-eager",
+                "--enable-prefix-caching",
+                "--num-gpu-blocks-override",
+                str(g1_gpu_blocks),
+                "--block-size",
+                str(block_size),
+                "--max-model-len",
+                str(max_model_len),
+            ]
 
             worker_env = os.environ.copy()
             worker_env.update(
@@ -846,13 +772,8 @@ class TestConsolidatorRouterE2E:
                 }
             )
 
-            # Set ZMQ port for TensorRT-LLM consolidator
-            if engine == "trtllm":
-                worker_env["DYN_KVBM_TRTLLM_ZMQ_PORT"] = "20081"
-            elif engine == "vllm":
-                # Enable forward-pass metrics (InstrumentedScheduler + relay);
-                # canonical default port, safe for this serial fixed-port suite.
-                worker_env["DYN_FORWARDPASS_METRIC_PORT"] = "20380"
+            # Enable forward-pass metrics (InstrumentedScheduler + relay).
+            worker_env["DYN_FORWARDPASS_METRIC_PORT"] = "20380"
 
             worker_log_dir = Path(os.path.join(test_directory, engine)).absolute()
             worker_log_dir.mkdir(parents=True, exist_ok=True)
@@ -952,7 +873,7 @@ class TestConsolidatorRouterE2E:
                 # With GUARANTEED_NO_EVICT, blocks are freed when requests complete (not evicted)
                 # We need to wait long enough for requests to finish and blocks to be freed
                 # For vLLM with FIFO, evictions happen immediately when cache fills.
-                wait_time = 5 if engine == "trtllm" else 5
+                wait_time = 5
                 logger.info(
                     f"Waiting {wait_time}s for requests to complete and blocks to be freed..."
                 )

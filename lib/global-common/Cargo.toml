@@ -9,3 +9,25 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[package.metadata.cargo-machete]
+# Used by protobuf code generated in OUT_DIR.
+ignored = ["prost"]
+
+[features]
+default = []
+grpc = ["dep:prost", "dep:tonic", "dep:tonic-build"]
+
+[dependencies]
+prost = { workspace = true, optional = true }
+tonic = { workspace = true, optional = true }
+blake3 = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true, optional = true }

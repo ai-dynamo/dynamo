@@ -149,3 +149,52 @@ def test_copy_out_preserves_tensorimpls_and_nonparameter_aliases() -> None:
     assert model.overlap.tolist()[4:12] == [23.0] * 8
     assert model.weight.tolist()[12:20] == list(map(float, range(12, 20)))
     assert accounting == (55 * 4, (16 + 4 + 4) * 4)
+
+
+def _mapping(name: str, base: int, size: int) -> LocalMapping:
+    return LocalMapping(name, size, size, base, size)
+
+
+def _model_over_one_storage() -> tuple[torch.nn.Module, torch.UntypedStorage]:
+    model = torch.nn.Module()
+    source = torch.arange(16, dtype=torch.float32)
+    storage = source.untyped_storage()
+    model.weight = torch.nn.Parameter(source[:8])
+    model.register_buffer(
+        "buffer",
+        torch.empty(0, dtype=torch.float32).set_(storage, 8, (8,), (1,)),
+    )
+    return model, storage
+
+
+def test_copy_out_follows_storage_across_adjacent_mappings() -> None:
+    model, storage = _model_over_one_storage()
+    base, half = storage.data_ptr(), storage.nbytes() // 2
+    original_storage = int(storage._cdata)
+
+    accounting = copy_non_parameter_tensors_to_default_allocator(
+        (model,),
+        (_mapping("first", base, half), _mapping("second", base + half, half)),
+    )
+
+    assert int(model.weight.untyped_storage()._cdata) == original_storage
+    assert int(model.buffer.untyped_storage()._cdata) != original_storage
+    assert model.buffer.tolist() == list(map(float, range(8, 16)))
+    assert accounting == (8 * 4, 8 * 4)
+
+
+def test_storage_across_an_unmapped_gap_is_not_gms_owned() -> None:
+    model, storage = _model_over_one_storage()
+    base, quarter = storage.data_ptr(), storage.nbytes() // 4
+    original_storage = int(storage._cdata)
+
+    accounting = copy_non_parameter_tensors_to_default_allocator(
+        (model,),
+        (
+            _mapping("first", base, 2 * quarter),
+            _mapping("after-gap", base + 3 * quarter, quarter),
+        ),
+    )
+
+    assert int(model.buffer.untyped_storage()._cdata) == original_storage
+    assert accounting == (0, 0)

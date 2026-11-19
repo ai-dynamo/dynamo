@@ -22,7 +22,7 @@ _vllm = importlib.import_module("vllm")
 _chat_protocol = importlib.import_module(
     "vllm.entrypoints.openai.chat_completion.protocol"
 )
-_engine_protocol = importlib.import_module("dynamo.frontend.vllm_protocol")
+_engine_protocol = importlib.import_module("vllm.entrypoints.generate.base.protocol")
 _inputs_data = importlib.import_module("vllm.inputs")
 _reasoning = importlib.import_module("vllm.reasoning")
 _sampling_params = importlib.import_module("vllm.sampling_params")
@@ -402,6 +402,7 @@ class TestVllmRendererApi:
             "new_sampling_mask",
             "spec_decode_metrics",
             "prompt_token_id_logprobs",
+            "error",
         )
 
         if EngineCoreRequest.__module__ == "vllm_omni.engine":
@@ -417,6 +418,8 @@ class TestVllmRendererApi:
                 "new_prompt_len_snapshot",
                 "num_generation_tokens",
                 "is_coalesced",
+                "stage_payload",
+                "stage_work",
             )
 
         actual_request_fields = EngineCoreRequest.__struct_fields__

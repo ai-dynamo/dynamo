@@ -381,6 +381,40 @@ class PluginRegistryServer:
         )
         return True
 
+    def unregister_internal(self, plugin_id: str, reason: str = "") -> bool:
+        """Synchronously unregister an in-process plugin.
+
+        For the engine's runtime reconfiguration, which runs without an
+        await point. An in-process transport holds nothing to close, so this
+        is ``unregister`` without the transport close; any other transport
+        raises (use ``unregister``).
+        """
+
+        plugin = self._plugins.get(plugin_id)
+        if plugin is None:
+            return False
+        if plugin.transport_type != "in_process":
+            raise ValueError(
+                f"unregister_internal: plugin_id={plugin_id!r} is not in-process"
+            )
+        del self._plugins[plugin_id]
+        self._circuit_breaker.reset(plugin_id)
+        for cb in list(self._unregister_callbacks):
+            try:
+                cb(plugin_id, reason)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "unregister: on_unregister callback failed plugin_id=%s detail=%s",
+                    plugin_id,
+                    exc,
+                )
+        log.info(
+            "unregister_internal plugin_id=%s reason=%s",
+            plugin_id,
+            reason or "<unspecified>",
+        )
+        return True
+
     def list_plugins(self, req: ListPluginsRequest) -> list[PluginInfo]:
         """Return plugin metadata filtered by ``stage_filter`` and
         ``include_disabled``. Full observability fields

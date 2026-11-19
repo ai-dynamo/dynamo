@@ -174,16 +174,17 @@ mod tests {
         body::{Body, to_bytes},
         http::Request,
     };
-    use dynamo_custom_policy_builtin::default_factory;
-    use dynamo_kv_router::services::selection::{
-        SelectionCacheConfig, SelectionCore, WorkerRequest,
-    };
-    use dynamo_kv_router::{KvRouterConfig, RoutingPartitionId, WorkerType};
+    use dynamo_kv_router::config::KvRouterConfig;
+    use dynamo_kv_router::services::selection::local_selection_core;
+    use dynamo_router_policies::default_factory;
+    use dynamo_router_protocol::identity::RoutingPartitionId;
+    use dynamo_router_protocol::worker_type::WorkerType;
     use dynamo_runtime::protocols::EndpointId;
+    use dynamo_scheduler::host::{SelectionCacheConfig, SelectionCore, WorkerRequest};
     use tower::ServiceExt;
 
     async fn fixture(manager: Arc<ModelManager>) -> (Router, SelectionCore, Uuid, Uuid) {
-        let core = SelectionCore::try_new_local(
+        let core = local_selection_core(
             KvRouterConfig {
                 use_kv_events: false,
                 ..Default::default()
@@ -344,6 +345,47 @@ mod tests {
         assert_eq!(policy["routers"][0]["router_id"], first.to_string());
         assert_eq!(policy["routers"][0]["configuration"]["revision"], 0);
         core.shutdown();
+    }
+
+    /// WorkerSets in direct routing mode ignore busy thresholds. A write to a
+    /// model with only such WorkerSets conflicts; a write to a mixed model goes
+    /// to the other WorkerSets and reports their thresholds.
+    #[tokio::test]
+    async fn busy_threshold_writes_skip_direct_routing_worker_sets() {
+        use crate::discovery::{LoadThresholdConfig, LoadThresholdHandle, WorkerSet};
+
+        let manager = Arc::new(ModelManager::new());
+        let add = |model: &str, namespace: &str, thresholds: LoadThresholdHandle| {
+            let mut workers =
+                WorkerSet::new(namespace.into(), "checksum".into(), Default::default());
+            workers.load_thresholds = Some(thresholds.clone());
+            manager
+                .get_or_create_model(model)
+                .add_worker_set(namespace.into(), Arc::new(workers));
+            thresholds
+        };
+        let direct = add("direct", "direct", LoadThresholdHandle::disabled());
+        let mixed_direct = add("mixed", "direct", LoadThresholdHandle::disabled());
+        let mixed_picking = add(
+            "mixed",
+            "picking",
+            LoadThresholdHandle::new(LoadThresholdConfig::default()),
+        );
+        let app = super::super::busy_threshold::router(manager.clone(), "/busy_threshold").1;
+        let write = |model: &str| serde_json::json!({"model": model, "active_decode_blocks_threshold": 0.85});
+
+        let (status, response) = call(&app, Method::POST, "/busy_threshold", write("direct")).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{response}");
+        assert!(!direct.is_configured());
+
+        let (status, response) = call(&app, Method::POST, "/busy_threshold", write("mixed")).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["active_decode_blocks_threshold"], 0.85);
+        assert_eq!(
+            mixed_picking.get().active_decode_blocks_threshold,
+            Some(0.85)
+        );
+        assert!(!mixed_direct.is_configured());
     }
 
     #[test]

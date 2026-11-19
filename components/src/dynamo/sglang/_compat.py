@@ -22,13 +22,18 @@ Runtime data-contract notes (not code-level shims):
 
 import argparse
 import importlib
+import importlib.util
 import inspect
+import json
 import logging
+import re
 import uuid
 from collections.abc import Mapping
 from functools import lru_cache
 from types import ModuleType
 from typing import Any
+
+from sglang.srt.runtime_context import get_platform as sglang_get_platform
 
 from dynamo.llm.exceptions import InvalidArgument
 
@@ -143,13 +148,17 @@ def sglang_default_mla_attention_backend(server_args: Any) -> str | None:
     try:
         model_config = get_sglang_model_config(server_args)
         hf_config = getattr(model_config, "hf_config", None)
-        if "KimiK3ForConditionalGeneration" in (
-            getattr(hf_config, "architectures", None) or []
+        architectures = getattr(hf_config, "architectures", None) or []
+        if any(
+            architecture in architectures
+            for architecture in (
+                "KimiK3ForConditionalGeneration",
+                "KimiK31ForConditionalGeneration",
+            )
         ):
-            # Kimi-K3 resolves separate prefill/decode backends for DCP. The
-            # platform default (fa3 on Hopper) is not its decode backend.
-            # Defer to the engine's resolved configuration instead of guessing
-            # or running SGLang's kernel capability checks during CLI parsing.
+            # K3 uses split MLA prefill/decode backends; K3.1 uses DSA kernels
+            # resolved by SGLang. Defer to the engine rather than applying the
+            # generic MLA platform default.
             return None
         # SGLang's DeepSeek-family override picks dsa for DSA models before
         # it falls back to the platform default.
@@ -164,6 +173,59 @@ def sglang_default_mla_attention_backend(server_args: Any) -> str | None:
         )
         return None
     return backend if isinstance(backend, str) else None
+
+
+_SGLANG_DSA_DCP_MODULE = "sglang.srt.layers.attention.dsa.dsa_dcp"
+_SGLANG_DSA_SHARDED_DCP_MODULE = "sglang.srt.layers.attention.dsa.dsa_dcp_sharded"
+
+
+@lru_cache(maxsize=2)
+def _sglang_has_dsa_dcp_module(module_name: str) -> bool:
+    # The SGLang 0.5.19 XPU pin predates DSA DCP. Remove this probe when
+    # every supported build includes the DSA DCP implementation.
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def sglang_dsa_supports_decode_context_parallel(server_args: Any) -> bool | None:
+    """Check resolved DSA kernels; None defers an unfinished engine selection."""
+    if not _sglang_has_dsa_dcp_module(_SGLANG_DSA_DCP_MODULE):
+        return False
+    resolved = resolved_server_args(server_args)
+    prefill = getattr(resolved, "dsa_prefill_backend", None)
+    decode = getattr(resolved, "dsa_decode_backend", None)
+    if any(
+        kernel is not None and kernel not in {"trtllm", "flashmla_kv", "prims_ts"}
+        for kernel in (prefill, decode)
+    ):
+        return False
+    if prefill is not None and decode is not None and prefill != decode:
+        return False
+    # K3.1's sharded DCP path adds FlashMLA, Prims-TS and Rubin TRT-LLM support.
+    model_config = get_sglang_model_config(server_args)
+    hf_config = getattr(model_config, "hf_config", None)
+    kimi_k31 = "KimiK31ForConditionalGeneration" in (
+        getattr(hf_config, "architectures", None) or []
+    )
+    sharded = kimi_k31 and _sglang_has_dsa_dcp_module(_SGLANG_DSA_SHARDED_DCP_MODULE)
+    if not sharded:
+        if {"flashmla_kv", "prims_ts"} & {prefill, decode}:
+            return False
+        if sglang_get_platform().device_sm not in (100, 103):
+            return False
+    elif "prims_ts" in (prefill, decode) and sglang_get_platform().device_sm not in (
+        100,
+        103,
+        107,
+    ):
+        # SGLang checks the Prims-TS GPU only at backend init.
+        return False
+    # K3.1's native validator owns its model-specific platform constraints.
+    if prefill is None or decode is None:
+        return None
+    return True
 
 
 def publish_server_args(server_args: Any, *, role: str) -> None:
@@ -379,6 +441,31 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
+def sglang_has_wide_mm_pad_values() -> bool:
+    """Detect the wide event-token format introduced by sglang#43043.
+
+    Both caller hashes and engine-owned identities produce wide values.
+    """
+    # Compatibility with SGLang <= 0.5.22. Remove the probe once the minimum
+    # supported CUDA and XPU SGLang versions are both 0.5.23+.
+    try:
+        # Deferred: schedule_batch imports torch and other SGLang runtime modules.
+        from sglang.srt.managers.schedule_batch import MultimodalDataItem
+    except ImportError:
+        return False
+    return "pad_values" in MultimodalDataItem.__struct_fields__
+
+
+def sglang_uses_engine_owned_mm_identity(mm_processor: Any = None) -> bool:
+    """Whether the active processor rejects caller-supplied image identities."""
+    if not sglang_has_wide_mm_pad_values():
+        return False
+    # Unknown processors on wide-pad builds must not receive identity overrides.
+    return mm_processor is None or bool(
+        getattr(mm_processor, "uses_wide_image_identity", False)
+    )
+
+
 def supports_external_mm_hashes(engine: Any) -> bool:
     """Enable safe caller-provided MM hashes when this SGLang accepts them.
 
@@ -386,21 +473,31 @@ def supports_external_mm_hashes(engine: Any) -> bool:
     already built ``padded_input_ids``. Rebuild that derived field after
     tokenization so the external hash, item pad value, and padded IDs remain
     consistent. The repair is idempotent if upstream already rebuilt them.
+
+    Builds that own multimodal identity never get caller hashes.
     """
+    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+    mm_proc = getattr(tokenizer_manager, "mm_processor", None)
+    if sglang_uses_engine_owned_mm_identity(mm_proc):
+        return False
     if "mm_hashes" not in filter_supported_async_generate_kwargs(
         engine, {"mm_hashes": None}
     ):
         return False
 
-    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
     tokenize_one = getattr(tokenizer_manager, "_tokenize_one_request", None)
     if tokenize_one is None or getattr(
         tokenize_one, "_dynamo_rebuilds_external_mm_padding", False
     ):
         return True
 
-    # Deferred: schedule_batch imports torch and other SGLang runtime modules.
-    from sglang.srt.managers.schedule_batch import MultimodalProcessorOutput
+    # Deferred: these modules import torch and other SGLang runtime modules.
+    # SGLang moved this class to req_types and dropped the schedule_batch
+    # re-export (sglang#48087); keep the old location for older releases.
+    try:
+        from sglang.srt.managers.req_types import MultimodalProcessorOutput
+    except ImportError:
+        from sglang.srt.managers.schedule_batch import MultimodalProcessorOutput
 
     async def tokenize_with_consistent_mm_padding(obj):
         tokenized = await tokenize_one(obj)
@@ -435,6 +532,66 @@ def cache_salt_kwargs(engine: Any, cache_salt: str | None) -> dict[str, Any]:
     if "cache_salt" not in kwargs:
         raise ValueError("cache_salt is not supported by the installed SGLang engine")
     return kwargs
+
+
+@lru_cache(maxsize=1)
+def _kv_events_config_has_format() -> bool:
+    from sglang.srt.disaggregation.kv_events import KVEventsConfig
+
+    return "format" in KVEventsConfig.model_fields
+
+
+def kv_events_config_with_dynamo_format(kv_events_config: str | None) -> str | None:
+    """Publish enabled KV events in the "dynamo" format unless one is set.
+
+    The format carries the LoRA adapter name that the router hashes adapter
+    blocks by. SGLang 0.5.19 in the XPU image has no format option; remove the
+    check when the XPU pin is upgraded to 0.5.22+.
+    """
+    if not kv_events_config:
+        return kv_events_config
+    try:
+        config = json.loads(kv_events_config)
+    except json.JSONDecodeError:
+        return kv_events_config
+    if (
+        not isinstance(config, dict)
+        or config.get("publisher", "null") == "null"
+        or "format" in config
+        or not _kv_events_config_has_format()
+    ):
+        return kv_events_config
+    config["format"] = "dynamo"
+    return json.dumps(config)
+
+
+@lru_cache(maxsize=32)
+def _dp_rank_keyword(async_generate: Any) -> str:
+    try:
+        param = inspect.signature(async_generate).parameters.get("routed_dp_rank")
+    except (TypeError, ValueError):
+        param = None
+    if param is not None and param.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    ):
+        return "routed_dp_rank"
+    # Compatibility with engines predating SGLang #19268 and opaque wrappers.
+    # Remove this adapter when all supported engines accept routed_dp_rank.
+    return "data_parallel_rank"
+
+
+def routed_dp_rank_kwargs(engine: Any, dp_rank: int | None) -> dict[str, int]:
+    """Pass a selected DP rank using the engine's keyword spelling."""
+    if dp_rank is None:
+        return {}
+    method = engine.async_generate
+    signature_source = getattr(method, "__func__", method)
+    try:
+        keyword = _dp_rank_keyword(signature_source)
+    except TypeError:  # Unhashable callable: inspect it without caching.
+        keyword = _dp_rank_keyword.__wrapped__(signature_source)
+    return {keyword: dp_rank}
 
 
 def prefill_dp_rank_kwargs(engine: Any, prefill_dp_rank: Any) -> dict[str, Any]:
@@ -486,10 +643,63 @@ def supports_require_reasoning(engine: Any) -> bool:
     )
 
 
+_TEXT_ENCODER_COMPONENT = re.compile(r"text_encoder(?:_(\d+))?")
+
+
+def diffusers_text_encoder_precision_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Supply missing encoder precisions for SGLang's Diffusers memory check.
+
+    SGLang 0.5.23's auto-tuner sizes every weighted encoder, but its generic
+    fallback configures only one (sgl-project/sglang#45978). Use the pipeline
+    load dtype for the remaining encoders. Remove when the regression test no
+    longer reproduces the error in the unpatched auto-tuner.
+    Dynamo's diffusion callers do not pass component precision overrides.
+    """
+    try:
+        # Keep multimodal imports out of LLM workers, which also use this module.
+        from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
+        from sglang.multimodal_gen.configs.pipeline_configs.diffusers_generic import (
+            DiffusersGenericPipelineConfig,
+        )
+        from sglang.multimodal_gen.runtime.loader.utils import (
+            checkpoint_component_sizes,
+        )
+    except ImportError:
+        # SGLang 0.5.22 has no sizing helper. Remove when minimum is 0.5.23+.
+        return kwargs
+    # Config resolution can fetch model_index.json for already cached weights.
+    pipeline_config = PipelineConfig.from_kwargs(dict(kwargs))
+    if not isinstance(pipeline_config, DiffusersGenericPipelineConfig):
+        return kwargs
+
+    sizes = checkpoint_component_sizes(
+        kwargs["model_path"], subfolder=None, revision=None
+    )
+    configured = len(pipeline_config.text_encoder_precisions or ())
+    filled = sorted(
+        name
+        for name in sizes or ()
+        if (match := _TEXT_ENCODER_COMPONENT.fullmatch(name))
+        and int(match.group(1) or 1) - 1 >= configured
+    )
+    if not filled:
+        return kwargs
+    component_precisions = {name: pipeline_config.dit_precision for name in filled}
+    logger.info(
+        "Setting %s precision to %s, the Diffusers pipeline load dtype: SGLang's "
+        "Diffusers fallback configures %d text encoder precision(s)",
+        ", ".join(filled),
+        pipeline_config.dit_precision,
+        configured,
+    )
+    return {**kwargs, "component_precisions": component_precisions}
+
+
 __all__ = [
     "ConfigArgumentMerger",
     "add_sglang_cli_compat",
     "cache_salt_kwargs",
+    "diffusers_text_encoder_precision_kwargs",
     "filter_supported_async_generate_kwargs",
     "get_encoder_preprocessor_modules",
     "get_mm_encoder_class",
@@ -503,4 +713,6 @@ __all__ = [
     "sglang_uses_mla_backend",
     "supports_require_reasoning",
     "supports_external_mm_hashes",
+    "sglang_uses_engine_owned_mm_identity",
+    "sglang_has_wide_mm_pad_values",
 ]

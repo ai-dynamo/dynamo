@@ -5,6 +5,9 @@
 //! The codec is globally cached, so this must remain in its own integration
 //! test binary rather than sharing a process with the default-codec test.
 
+#[path = "common/selector.rs"]
+mod selector;
+
 use std::sync::Arc;
 
 use anyhow::Error;
@@ -171,9 +174,13 @@ async fn bidirectional_end_to_end_echo_with_explicit_json_codec() {
     let client = endpoint.client().await.unwrap();
     client.wait_for_instances().await.unwrap();
 
-    let router = PushRouter::<u64, EchoResponse>::from_client(client, RouterMode::RoundRobin)
-        .await
-        .unwrap();
+    let router = PushRouter::<u64, EchoResponse>::from_client_with_options(
+        client,
+        RouterMode::RoundRobin,
+        selector::options(),
+    )
+    .await
+    .unwrap();
     let input: ManyIn<u64> = Context::new(RequestStream::new(Box::pin(tokio_stream::iter(vec![
         10u64, 20, 30,
     ]))));
@@ -203,10 +210,13 @@ async fn bidirectional_end_to_end_echo_with_explicit_json_codec() {
 
     let failing_client = failing_endpoint.client().await.unwrap();
     failing_client.wait_for_instances().await.unwrap();
-    let failing_router =
-        PushRouter::<u64, EchoResponse>::from_client(failing_client, RouterMode::RoundRobin)
-            .await
-            .unwrap();
+    let failing_router = PushRouter::<u64, EchoResponse>::from_client_with_options(
+        failing_client,
+        RouterMode::RoundRobin,
+        selector::options(),
+    )
+    .await
+    .unwrap();
     let failing_input: ManyIn<u64> =
         Context::new(RequestStream::new(Box::pin(tokio_stream::iter(vec![
             99u64,

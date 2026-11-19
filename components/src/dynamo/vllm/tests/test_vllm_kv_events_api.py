@@ -12,7 +12,7 @@ will fail early, before hitting runtime deserialization errors.
 This test is the early warning for vLLM KV-event wire-format changes.
 
 In the normal case, if this fails, first check whether
-`lib/kv-router/src/zmq_wire.rs` already accepts the new upstream vLLM event
+`lib/kv-events/src/zmq_wire/deserialize.rs` already accepts the new upstream vLLM event
 shape. If not, update that compatibility layer before updating this test.
 
 That file is Dynamo's compatibility layer for vLLM KV events:
@@ -26,8 +26,13 @@ to preserve and republish a new upstream field.
 """
 
 import importlib
+import json
+from types import SimpleNamespace
 
 import pytest
+
+from dynamo.vllm.args import update_engine_config_with_dynamo
+from dynamo.vllm.constants import DisaggregationMode
 
 # Import vllm first to ensure it's properly loaded before accessing submodules.
 # This works around potential issues with pytest's import machinery.
@@ -69,6 +74,7 @@ class TestVllmKvEventsApi:
         12. locality (per-tier storage locality)
         13. ownership (secondary offloading tier)
         14. session_id (request session)
+        15. lookahead_token_ids (EAGLE/MTP lookahead hashes)
 
         If vLLM adds/removes/reorders fields, this test will fail.
         """
@@ -87,6 +93,7 @@ class TestVllmKvEventsApi:
             "locality",
             "ownership",
             "session_id",
+            "lookahead_token_ids",
         )
 
         actual_fields = BlockStored.__struct_fields__
@@ -95,7 +102,7 @@ class TestVllmKvEventsApi:
             f"Expected: {expected_fields}\n"
             f"Actual:   {actual_fields}\n"
             f"Required follow-up:\n"
-            f"  - Update lib/kv-router/src/zmq_wire.rs to match the new BlockStored wire format.\n"
+            f"  - Update lib/kv-events/src/zmq_wire/deserialize.rs to match the new BlockStored wire format.\n"
             f"  - Update this test's expected_fields and msgpack shape checks.\n"
             f"  - If needed, add or update a regression test in lib/llm/src/kv_router/publisher.rs."
         )
@@ -116,7 +123,7 @@ class TestVllmKvEventsApi:
             f"Expected: {expected_fields}\n"
             f"Actual:   {actual_fields}\n"
             f"Required follow-up:\n"
-            f"  - Update lib/kv-router/src/zmq_wire.rs RawKvEvent::BlockRemoved seq deserializer.\n"
+            f"  - Update lib/kv-events/src/zmq_wire/deserialize.rs RawKvEvent::BlockRemoved seq deserializer.\n"
             f"  - Update this test's expected_fields."
         )
 
@@ -134,7 +141,7 @@ class TestVllmKvEventsApi:
             f"Expected: {expected_fields}\n"
             f"Actual:   {actual_fields}\n"
             f"Required follow-up:\n"
-            f"  - Update lib/kv-router/src/zmq_wire.rs KvEventBatch Deserialize impl.\n"
+            f"  - Update lib/kv-events/src/zmq_wire/deserialize.rs KvEventBatch Deserialize impl.\n"
             f"  - Update subscriber.rs VllmEventBatch tuple if batch field order changes.\n"
             f"  - Update this test's expected_fields."
         )
@@ -145,7 +152,7 @@ class TestVllmKvEventsApi:
         assert struct_config is not None, "KVCacheEvent is not a msgspec Struct"
         assert struct_config.array_like is False, (
             "KVCacheEvent changed away from tagged-map serialization. "
-            "Check lib/kv-router/src/zmq_wire/deserialize.rs compatibility."
+            "Check lib/kv-events/src/zmq_wire/deserialize.rs compatibility."
         )
 
     def test_kv_cache_event_uses_tag(self):
@@ -253,3 +260,65 @@ class TestVllmKvEventsApi:
         assert decoded["medium"] == "GPU"
         assert decoded["group_idx"] == 0
         assert decoded["locality"] == "REMOTE"
+
+
+_SPECULATORS_CHECKPOINT_CONFIG = {
+    "speculators_model_type": "eagle3",
+    "speculators_config": {
+        "proposal_methods": [{"speculative_tokens": 1}],
+        "verifier": {"name_or_path": "Qwen/Qwen3-0.6B"},
+    },
+    "transformer_layer_config": {},
+}
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_config", "speculative_config"),
+    [
+        (None, {"method": "eagle3", "num_speculative_tokens": 1}),
+        (_SPECULATORS_CHECKPOINT_CONFIG, None),
+    ],
+    ids=["speculative-config", "speculators-checkpoint"],
+)
+def test_kv_event_publisher_keeps_legacy_block_hashes(
+    tmp_path, checkpoint_config, speculative_config
+):
+    """Dynamo's KV indexers hash each block's own tokens, so a worker publishing
+    KV events must not default to vLLM's EAGLE/MTP lookahead block hashes,
+    including those vLLM derives from a speculators checkpoint."""
+    if checkpoint_config is not None:
+        (tmp_path / "config.json").write_text(json.dumps(checkpoint_config))
+
+    dynamo_config = SimpleNamespace(
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+        use_kv_events=False,
+        embedding_worker=False,
+        classify_worker=False,
+        headless=False,
+        enable_multimodal=False,
+        fpm_trace=False,
+        benchmark_mode=None,
+    )
+    # AsyncEngineArgs would resolve the model from Hugging Face on construction.
+    engine_args = SimpleNamespace(
+        model=str(tmp_path),
+        tokenizer=None,
+        trust_remote_code=False,
+        revision=None,
+        hf_token=None,
+        runner="auto",
+        enable_prefix_caching=True,
+        block_size=16,
+        kv_transfer_config=None,
+        spec_method=None,
+        speculative_config=speculative_config,
+        kv_events_config=_kv_events.KVEventsConfig(enable_kv_cache_events=True),
+    )
+
+    update_engine_config_with_dynamo(dynamo_config, engine_args)
+
+    assert dynamo_config.use_kv_events
+    assert engine_args.speculative_config == {
+        "disable_lookahead_block_hashes": True,
+        **(speculative_config or {}),
+    }
