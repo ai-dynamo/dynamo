@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 title: "Planner Retune: Staying on the Pareto Frontier as Traffic Drifts"
 subtitle: "[Hongkuan Zhou](https://developer.nvidia.com/blog/author/hongkuanz/) — November 2026"
-description: "Planner Retune replays recent traffic in AISim, picks better KV-router and Planner settings, and applies them to a running Dynamo deployment: +13% goodput per GPU on H200 with router retune, +4.6% with router and Planner retune under autoscaling."
+description: "Planner Retune replays recent traffic in AISim and applies better KV-router and Planner settings to a running Dynamo deployment."
 keywords: Dynamo, Planner, Router, retune, AISim, autoscaling, goodput, Kubernetes
 last-updated: November 9, 2026
 hide-page-actions: true
@@ -29,15 +29,15 @@ serving configuration before a deployment goes live. That configuration is only 
 Production traffic does not hold still: a RAG workload in the morning, reasoning-heavy chat in the afternoon, an agent
 fleet at night. The settings that were optimal at deploy time quietly drift away from the frontier.
 
-**Planner Retune** closes that gap. The Dynamo Planner records the traffic a deployment actually serves, replays the
-most recent window in AISim for a grid of KV-router and Planner settings, and switches the running deployment to
-the winner, with no restart. Here is what it buys:
+**Planner Retune** closes that gap. Dynamo frontends record the traffic a deployment actually serves. The Planner
+replays the most recent window in AISim for a grid of KV-router and Planner settings and switches the running
+deployment to the winner, with no restart. Here is what it bought in our experiments:
 
 - **Real H200, router retune:** **+13.1% goodput per GPU** after the first decision, with SLA attainment up from 51%
   to 58% and median time to first token down 17%.
 - **Real H200, router and Planner retune with autoscaling:** **+4.6% goodput per GPU** and **+6.1 points** more
-  requests within SLA, on about the same number of GPUs.
-- **Simulation, traffic switches:** after the traffic changes, retune catches up in one window and gains **+11 to 12%**
+  requests within SLA, using about 5% more GPUs.
+- **Simulation, traffic switches:** after the traffic changes, retune catches up in one window and gains **about +11%**
   goodput per GPU on the next one.
 - **Simulation, router and Planner together:** **+10.8%** over a day by fixing a router setting that only breaks once
   the Planner autoscales.
@@ -236,9 +236,11 @@ settings in the first window, so the −1.8% gap there is run-to-run randomness.
 
 Starting from that setting, retune searches router and Planner settings together. Its first decision switches the
 router back to `prefill_load_scale` 1 and the Planner's load predictor from ARIMA to Prophet. Every window after it
-gains 16 to 51% and stays within 4% of the best fixed setting: **+10.8%** goodput per GPU over the day. Because
-every candidate replays with the Planner in the loop, retune sees an interaction that a router sweep on a fixed fleet
-misses.
+gains 16 to 51% and stays within 4% of the best fixed setting. Over the whole day that is **+10.8%** goodput per GPU.
+The day's number is lower than those windows because it divides all SLA-good requests by all GPU time: the first
+window, which ran before any decision, holds about a third of that GPU time, and the 51% comes from the quiet last
+window, which holds about 3% of the day's requests. Because every candidate replays with the Planner in the loop,
+retune sees an interaction that a router sweep on a fixed fleet misses.
 
 ## 4. Real GPUs
 
@@ -246,11 +248,14 @@ Simulation tells us where the gains are. To show them on hardware, we ran live r
 Each one runs two identical Dynamo deployments of Qwen3-32B (vLLM 0.33, KV router) side by side on the same
 Kubernetes cluster and replays the same two-hour trace into both with AIPerf on a fixed schedule. Only one deployment
 has retune on. For the first hour both run the same settings, and retune only records traffic, so the first hour also
-measures how much two identical deployments differ by chance.
+measures how much two identical deployments differ by chance. Each experiment is a single run on one trace, so its
+numbers show what retune gained on that traffic and are not a general figure.
 
 ### Router retune: +13% goodput per GPU
 
-The first experiment keeps four H200 GPUs per deployment and lets retune search 108 router settings.
+The first experiment keeps four H200 GPUs per deployment and lets retune search the default router grid
+(`router: default`), 108 settings: `overlap_score_credit` (0, 0.5, 1) × `prefill_load_scale` (0, 0.25, 0.5, 1, 2, 4,
+8, 16, 32) × `temperature` (0, 0.2, 0.5, 1).
 
 The traffic is the conversation trace published with [Mooncake](https://github.com/kvcache-ai/Mooncake) (FAST '25):
 one hour of online conversation requests, multi-turn chats that carry their history with them. To fit four GPUs we
@@ -278,9 +283,9 @@ deployments run the same settings, so the +0.4% difference is run-to-run randomn
 </Info>
 
 Seven minutes after the first hour ended, retune changed one setting, `prefill_load_scale` from 1 to 16, chosen from
-108 candidates. From then on the retuned deployment was ahead in every 5-minute bin: **+13.1% goodput per GPU**, SLA
-attainment up from 51% to 58%, and median time to first token down 17%. An hour later the next sweep found nothing
-more than 3% better and kept the setting, as it should when the traffic has not changed.
+108 candidates. On this trace, the retuned deployment was ahead in every 5-minute bin from then on:
+**+13.1% goodput per GPU**, SLA attainment up from 51% to 58%, and median time to first token down 17%. An hour later
+the next sweep found nothing more than 3% better and kept the setting, as it should when the traffic has not changed.
 
 ### Router and Planner retune with autoscaling: +4.6%
 
@@ -316,8 +321,20 @@ randomness.
 
 Five minutes after the first hour ended, retune changed two settings at once: the router's `prefill_load_scale` from 1
 to 16 and the Planner's scale-down sensitivity from 80 to 70. In the second hour the retuned deployment served
-**+4.6% goodput per GPU** and kept **68.6%** of requests within SLA versus 62.5% without retune, on about the same
-GPUs (3.08 versus 2.93 on average).
+**+4.6% goodput per GPU** and kept **68.6%** of requests within SLA versus 62.5% without retune. It used about 5% more
+GPUs on average (3.08 versus 2.93), so part of the SLA gain may come from that capacity; goodput per GPU already
+divides by it.
+
+### Cost and limits
+
+**What a sweep costs.** The replays are simulations and need no GPU. In these two experiments each sweep ran as four
+CPU-only pods next to the deployment and scored 108 candidates in about five minutes and 36 in about three.
+
+**If a switch does not pay off.** Retune does not check a decision against live metrics, and it has no automatic
+rollback. The next window is replayed with the new settings as the baseline, so they are replaced then if another
+candidate is more than 3% better. To go back sooner, set `advisory: true`: the Planner then returns the routers to
+their startup settings, and a restarted Planner runs its configured values again. See
+[Disable](../../kubernetes/auto-deployment/planner-live-retune.md#disable).
 
 ## Try it
 
