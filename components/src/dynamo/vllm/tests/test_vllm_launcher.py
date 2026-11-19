@@ -35,6 +35,7 @@ WRAPPER = """
 import os, sys, threading
 from dynamo.vllm import fork_safety, launcher
 launcher.ENGINE_MODULE = "fake_engine"
+launcher.SHM_SCAN_SECONDS = 0.05
 if os.environ.get("FAKE_BACKGROUND_THREAD"):
     threading.Thread(target=threading.Event().wait, name="agent", daemon=True).start()
 fork_safety.THREAD_SETTLE_SECONDS = float(os.environ["FAKE_SETTLE_SECONDS"])
@@ -113,6 +114,12 @@ if mode == "shutdown-during-a-check":
     serve_live(answer)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     print("FAKE serving", flush=True)
+    signal.pause()
+if mode == "holds-shm":
+    from multiprocessing import shared_memory
+
+    shm = shared_memory.SharedMemory(create=True, size=4096)
+    print("FAKE shm %s" % shm.name, flush=True)
     signal.pause()
 if mode == "leaves-orphans":
     for detach in (False, True):
@@ -328,6 +335,25 @@ def test_a_dead_engines_processes_are_killed_and_reaped(launch):
     assert run.finish() == 5
     for pid in children:  # one in the engine's group, one that left it
         assert not os.path.exists(f"/proc/{pid}"), run.output
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(60)
+def test_shared_memory_a_killed_engine_mapped_is_removed(launch):
+    run = launch("holds-shm")
+    engine_pid = int(run.read_until("FAKE start").split("pid=")[1].split()[0])
+    path = "/dev/shm/" + run.read_until("FAKE shm").split()[-1]
+    try:
+        run.read_until("maps 1 shared-memory segment(s)")
+        # The whole group, as a hung engine is killed: its resource tracker,
+        # which would have removed the segment, dies with it.
+        os.killpg(engine_pid, signal.SIGKILL)
+        assert run.finish() == 137
+        assert "removed 1 shared-memory segment(s) left by engine" in run.output
+        assert not os.path.exists(path), run.output
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
 
 
 @pytest.mark.integration
