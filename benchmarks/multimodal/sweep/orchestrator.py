@@ -90,14 +90,6 @@ def run_sweep(
                 env_overrides=env_overrides,
                 repo_root=repo_root,
             )
-
-        if not config.skip_plots:
-            for input_file in config.input_files:
-                file_tag = input_file_tag(input_file)
-                _generate_plots_for_file(
-                    output_base / file_tag,
-                    [c.label for c in config.configs],
-                )
     finally:
         if server.is_running:
             server.stop()
@@ -188,30 +180,6 @@ def _run_config(
             server.stop()
 
 
-def _generate_plots_for_file(
-    file_output_dir: Path,
-    labels: List[str],
-) -> None:
-    """Generate comparison plots for one input file across all configs."""
-    try:
-        from benchmarks.utils.plot import generate_plots
-
-        plots_dir = file_output_dir / "plots"
-        print(f"\nGenerating plots -> {plots_dir}", flush=True)
-        generate_plots(
-            base_output_dir=file_output_dir,
-            output_dir=plots_dir,
-            benchmark_names=labels,
-        )
-    except ImportError:
-        print(
-            "WARNING: benchmarks.utils.plot not importable; skipping plots.",
-            flush=True,
-        )
-    except Exception as exc:
-        print(f"WARNING: Plot generation failed: {exc}", flush=True)
-
-
 def _print_summary(config: SweepConfig, output_base: Path) -> None:
     _print_banner("Sweep Complete!")
     print(f"  Results: {output_base}")
@@ -221,7 +189,4 @@ def _print_summary(config: SweepConfig, output_base: Path) -> None:
         for cfg in config.configs:
             result_dir = output_base / tag / cfg.label
             print(f"    {cfg.label}: {result_dir}")
-        if not config.skip_plots:
-            plots_dir = output_base / tag / "plots"
-            print(f"    plots:  {plots_dir}")
     print(flush=True)

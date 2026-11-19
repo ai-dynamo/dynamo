@@ -59,7 +59,6 @@ def _make_config(
         input_files=input_files,
         configs=configs,
         output_dir=str(tmp_path / "results"),
-        skip_plots=True,
         restart_server_every_benchmark=restart_server_every_benchmark,
     )
 
