@@ -66,51 +66,66 @@ async fn run_asr(
         .namespace(namespace)?
         .component(component)?
         .endpoint(endpoint_name);
+    let runtime_shutdown = drt.runtime().shutdown_started_token();
+    let stop_requested = || async {
+        tokio::select! {
+            _ = shutdown.cancelled() => {},
+            _ = runtime_shutdown.cancelled() => {},
+        }
+    };
+    let stop_result = || {
+        anyhow::ensure!(
+            shutdown.is_cancelled(),
+            "runtime shut down while serving speech"
+        );
+        Ok(())
+    };
     let mut model = LocalModelBuilder::default()
         .model_name(Some(config.model_name.clone()))
         .build()
         .await?;
     let adapter = Arc::new(AsrAdapter::new(config, channel));
-    let ingress = Ingress::for_engine(adapter.clone())?;
-    let started = endpoint
+    let Some(started) = endpoint
         .endpoint_builder()
-        .handler(ingress)
+        .handler(Ingress::for_engine(adapter.clone())?)
         .graceful_shutdown(true)
-        .start_with_registration()
-        .await?;
-    if let Err(error) = model
-        .attach(
-            &endpoint,
-            ModelType::Realtime,
-            ModelInput::Text,
-            None,
-            Some(WorkerType::Aggregated),
-            Vec::new(),
-        )
-        .await
-    {
-        if let Err(shutdown_error) = started.shutdown().await {
-            tracing::warn!(error = %shutdown_error, endpoint = %endpoint.id(), "Failed to shut down ASR endpoint after registration failure");
-        }
-        return Err(error);
-    }
-    tracing::info!(endpoint = %endpoint.id(), "Serving Speech NIM realtime transcription");
-    let runtime_shutdown = drt.runtime().shutdown_started_token();
-    let result = tokio::select! {
-        biased;
-        _ = shutdown.cancelled() => Ok(()),
-        _ = runtime_shutdown.cancelled() => Err(anyhow::anyhow!("runtime shut down while serving speech")),
+        .start_with_registration_until(stop_requested(), graceful_shutdown_timeout())
+        .await?
+    else {
+        return stop_result();
     };
-    drt.runtime().mark_shutting_down();
+    let attach = model.attach(
+        &endpoint,
+        ModelType::Realtime,
+        ModelInput::Text,
+        None,
+        Some(WorkerType::Aggregated),
+        Vec::new(),
+    );
+    let serving = async {
+        attach.await?;
+        tracing::info!(endpoint = %endpoint.id(), "Serving Speech NIM realtime transcription");
+        std::future::pending::<anyhow::Result<()>>().await
+    };
+    let (result, grace) = tokio::select! {
+        biased;
+        _ = stop_requested() => {
+            drt.runtime().mark_shutting_down();
+            (stop_result(), Duration::from_secs_f64(grace_period_secs()))
+        },
+        error = serving => (error, Duration::ZERO),
+    };
     let withdraw = async {
-        let unregister = endpoint.unregister_endpoint_instance().await;
-        let detach = LocalModel::detach_from_endpoint(&endpoint, None).await;
+        let (unregister, detach) = tokio::join!(
+            endpoint.unregister_endpoint_instance(),
+            LocalModel::detach_from_endpoint(&endpoint, None),
+        );
         unregister.and(detach)
     };
     let stop = shutdown_asr(
         withdraw,
         started.shutdown(),
-        Duration::from_secs_f64(grace_period_secs()),
+        grace,
         graceful_shutdown_timeout(),
     )
     .await;

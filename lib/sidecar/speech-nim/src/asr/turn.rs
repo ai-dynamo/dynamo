@@ -29,16 +29,10 @@ pub(super) async fn run(
     item_id: &str,
     audio: mpsc::UnboundedReceiver<Vec<u8>>,
     mut closed: oneshot::Receiver<Instant>,
-    output: mpsc::Sender<Value>,
-) {
+    output: &mpsc::Sender<Value>,
+) -> Value {
     let Ok(_permit) = adapter.slots.try_acquire() else {
-        let _ = output
-            .send(events::failed(
-                item_id,
-                "ASR capacity exhausted; retry the turn later",
-            ))
-            .await;
-        return;
+        return events::failed(item_id, "ASR capacity exhausted; retry the turn later");
     };
     let config = StreamingRecognitionConfig {
         config: Some(RecognitionConfig {
@@ -132,12 +126,11 @@ pub(super) async fn run(
             result
         },
     };
-    let event = match result {
+    match result {
         Ok(transcript) => events::completed(item_id, &transcript),
         Err(error) => {
             tracing::warn!(code = ?error.code(), "Speech NIM realtime transcription failed");
             events::failed(item_id, "Transcription failed")
         }
-    };
-    let _ = output.send(event).await;
+    }
 }

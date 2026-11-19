@@ -280,12 +280,25 @@ async fn asr_failure_before_commit_releases_input_and_capacity() {
         session.next().await["error"]["message"],
         "Transcription failed"
     );
-    within(call.responses.closed()).await;
+    // Retry immediately after the failure is visible, on the same socket.
     session.send(append());
-    let call = within(server.asr.recv()).await.unwrap();
+    let mut retry = within(server.asr.recv()).await.unwrap();
+    let _config = within(retry.request.get_mut().message())
+        .await
+        .unwrap()
+        .unwrap();
+    let chunk = within(retry.request.get_mut().message())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        chunk.streaming_request,
+        Some(StreamingRequest::AudioContent(vec![1, 0, 2, 0]))
+    );
+    within(call.responses.closed()).await;
     session.send(commit());
     assert_eq!(session.next().await["type"], "input_audio_buffer.committed");
-    drop(call.responses);
+    drop(retry.responses);
     assert_eq!(session.next().await["transcript"], "");
 }
 
@@ -828,6 +841,53 @@ async fn asr_cancels_even_if_transcript_output_is_backpressured() {
     ctx.kill();
     within(call.responses.closed()).await;
     assert!(within(output.next()).await.is_none());
+}
+
+#[tokio::test]
+async fn asr_commit_releases_capacity_while_turn_output_is_full() {
+    let mut server = Server::start().await;
+    let mut config = server.asr_config();
+    config.max_concurrent_turns = 1.try_into().unwrap();
+    let adapter = AsrAdapter::new(config, server.connection().await);
+    let next = Session::start(&adapter).await;
+    let (input, rx) = mpsc::unbounded_channel();
+    let mut output = adapter.session(UnboundedReceiverStream::new(rx).boxed(), mock_context());
+    input.send(session_update()).unwrap();
+    assert_eq!(
+        within(output.next()).await.unwrap()["type"],
+        "session.updated"
+    );
+    input.send(append()).unwrap();
+    let mut call = within(server.asr.recv()).await.unwrap();
+    let mut response = transcript("word", true);
+    response.results.resize(300, response.results[0].clone());
+    call.responses.send(Ok(response)).await.unwrap();
+    assert_eq!(within(output.next()).await.unwrap()["delta"], "word");
+    input.send(commit()).unwrap();
+
+    // Neither half-closing the RPC nor releasing its slot can require us to read more deltas.
+    while within(call.request.get_mut().message())
+        .await
+        .unwrap()
+        .is_some()
+    {}
+    within(call.responses.closed()).await;
+    next.send(append());
+    let _next_call = within(server.asr.recv()).await.unwrap();
+
+    let mut committed = false;
+    loop {
+        let event = within(output.next()).await.unwrap();
+        match event["type"].as_str().unwrap() {
+            "input_audio_buffer.committed" => committed = true,
+            "conversation.item.input_audio_transcription.delta" => {}
+            "conversation.item.input_audio_transcription.failed" => {
+                assert!(committed);
+                break;
+            }
+            other => panic!("unexpected event {other}"),
+        }
+    }
 }
 
 // More control acknowledgements than the bounded queue can hold must not

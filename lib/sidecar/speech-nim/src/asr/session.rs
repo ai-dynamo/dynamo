@@ -31,7 +31,7 @@ struct OpenTurn {
     // Unbounded in chunk count, bounded in bytes by validation::audio.
     audio: mpsc::UnboundedSender<Vec<u8>>,
     closed: oneshot::Sender<Instant>,
-    events: mpsc::Sender<Value>,
+    commit_event: mpsc::OwnedPermit<Value>,
     cancelled: CancellationToken,
     finished: CancellationToken,
 }
@@ -90,9 +90,10 @@ impl Session {
             let task_cancel = cancelled.clone();
             let done = finished.clone();
             let item_id = id.clone();
-            let task_output = event_tx.clone();
+            // A full delta queue must never delay closing the input or arming its deadline.
+            let commit_event = event_tx.clone().reserve_owned().await.ok()?;
             self.turns.spawn(async move {
-                let _finished = done.drop_guard();
+                let finished = done.drop_guard();
                 // Cancelled queued turns still preserve their predecessor's place.
                 if let Some(previous) = previous {
                     previous.cancelled().await;
@@ -100,7 +101,12 @@ impl Session {
                 tokio::select! {
                     biased;
                     _ = task_cancel.cancelled() => {},
-                    _ = turn::run(&adapter, &item_id, audio_rx, close_rx, task_output) => {},
+                    _ = async {
+                        let terminal = turn::run(&adapter, &item_id, audio_rx, close_rx, &event_tx).await;
+                        // Retire input and release RPC resources before publishing the result.
+                        drop(finished);
+                        let _ = event_tx.send(terminal).await;
+                    } => {},
                 }
             });
             self.active = Some(OpenTurn {
@@ -108,7 +114,7 @@ impl Session {
                 received: 0,
                 audio: audio_tx,
                 closed: close_tx,
-                events: event_tx,
+                commit_event,
                 cancelled,
                 finished,
             });
@@ -163,7 +169,14 @@ impl Session {
                 };
                 match validation::audio(&event["audio"], &mut turn.received) {
                     Ok(audio) => {
-                        let _ = turn.audio.send(audio);
+                        if turn.audio.send(audio).is_err() {
+                            self.emit(events::invalid(
+                                "invalid_audio",
+                                "transcription input closed before accepting audio",
+                                client_id,
+                            ))
+                            .await;
+                        }
                     }
                     Err(message) => {
                         self.cancel_active();
@@ -174,14 +187,14 @@ impl Session {
             }
             Some("input_audio_buffer.commit") => {
                 if let Some(turn) = self.active.take() {
-                    let _ = turn.events.send(events::committed(&turn.id)).await;
                     let samples = validation::SAMPLE_RATE
                         * self.adapter.config.commit_padding_ms as usize
                         / 1000;
                     if samples > 0 {
                         let _ = turn.audio.send(vec![0; samples * 2]);
                     }
-                    turn.close();
+                    turn.commit_event.send(events::committed(&turn.id));
+                    let _ = turn.closed.send(Instant::now());
                 } else {
                     self.emit(events::invalid(
                         "invalid_audio",
