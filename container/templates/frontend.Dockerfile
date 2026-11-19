@@ -36,9 +36,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
             libc6-dev \
             python${PYTHON_VERSION}-dev \
             python${PYTHON_VERSION}-venv \
-        && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20260816ubuntu0.24.04.1 \
         && apt-get clean \
-        && rm -rf /var/lib/apt/lists/*; \
+        && rm -rf /var/lib/apt/lists/* \
+        && {% include "templates/verify_ca_certificates.Dockerfile" %}; \
     fi
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
         python${PYTHON_VERSION} -m venv /tmp/buildenv \
