@@ -78,7 +78,11 @@ place until a positive-duration traffic observation is available; an empty
 startup snapshot is not evidence of zero demand.
 
 In disaggregated mode the controller evaluates separate prefill and decode
-counts within the run's GPU budget. The series
+counts within the run's GPU budget. The plan keeps one backlog per stage:
+prefill capacity (`prefill_count * prefill_rate`) drains arrivals and the
+prefill backlog, and decode capacity (`decode_count * decode_rate`) drains
+what prefill hands over and the work already waiting at decode. Work waiting
+at decode does not pass through prefill again, and sustained
 throughput is `min(prefill_count * prefill_rate,
 decode_count * decode_rate)`. The model includes KV-transfer cost, per-pool
 pending replicas and the GPU cost of each pool. Attention-DP throughput and
