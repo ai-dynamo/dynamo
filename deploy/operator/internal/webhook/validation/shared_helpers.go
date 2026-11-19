@@ -537,7 +537,6 @@ func renderRestoreLaunches(
 		target = name
 	}
 
-	// Render with the multinode deployer of the DGD's workload provider.
 	deploymentType := consts.MultinodeDeploymentTypeLWS
 	if grovePathway {
 		deploymentType = consts.MultinodeDeploymentTypeGrove

@@ -2481,7 +2481,6 @@ func PrepareDGDComponentMainContainers(
 			continue
 		}
 
-		// Select the role's component as the provider's renderer does.
 		var effective *v1beta1.DynamoComponentDeploymentSharedSpec
 		var ownership roleLaunchOwnership
 		var nativeSidecar bool
