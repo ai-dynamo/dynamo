@@ -78,6 +78,10 @@ from .capacity import (
     publish_vllm_token_budget,
 )
 from .constants import MX_LOAD_FORMATS
+from .decision_execution import (
+    publish_vllm_decision_capability,
+    qualify_vllm_decision_runtime,
+)
 from .dp_topology import get_dp_range_for_worker
 from .embedding_worker_processes import (
     EmbeddingEngineCleanupResource,
@@ -821,6 +825,8 @@ def setup_vllm_engine(
     if stat_logger:
         factory.append(stat_logger)
 
+    qualify_vllm_decision_runtime(vllm_config, config)
+
     # Time engine initialization
     start_time = time.time()
     embedding_process_group = None
@@ -976,14 +982,23 @@ async def register_vllm_model(
         vllm_config.lora_config
         and getattr(vllm_config.lora_config, "enable_tower_connector_lora", False)
     )
-    if publish_engine_generate_capability(
+    native_generate_supported = publish_engine_generate_capability(
         runtime_config,
         model_input,
         model_type,
         worker_type,
         tower_connector_lora_enabled,
-    ):
+    )
+    if native_generate_supported:
         logging.info("Published vLLM engine-native generate capability")
+    publish_vllm_decision_capability(
+        runtime_config,
+        model_input,
+        worker_type,
+        config,
+        native_generate_supported=native_generate_supported,
+        needs=needs,
+    )
     if model_type != ModelType.Embedding:
         publish_vllm_token_budget(
             runtime_config, vllm_config.model_config.max_model_len
