@@ -88,7 +88,7 @@ func Select(dgd *nvidiacomv1beta1.DynamoGraphDeployment) (Selection, string) {
 		usedRoles[roleName] = struct{}{}
 		selection.ComponentToRole[component.ComponentName] = roleName
 
-		desiredReplicas := desiredComponentReplicas(component)
+		desiredReplicas := DesiredReplicas(component)
 		selection.DesiredReplicas[component.ComponentName] = desiredReplicas
 		if desiredReplicas == 0 {
 			zeroReplicas++
@@ -115,7 +115,9 @@ func Owns(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool 
 	return component != nil && component.GetNumberOfNodes() > 1 && dynamo.IsWorkerComponent(string(component.ComponentType))
 }
 
-func desiredComponentReplicas(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) int32 {
+// DesiredReplicas returns the requested replica count, defaulting to one.
+// A nil component also defaults to one.
+func DesiredReplicas(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) int32 {
 	if component == nil || component.Replicas == nil {
 		return 1
 	}

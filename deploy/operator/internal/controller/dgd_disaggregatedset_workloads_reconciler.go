@@ -381,7 +381,7 @@ func (r *disaggregatedSetWorkloadsReconciler) applyDisaggregatedSetCheckpointSta
 		if gateSelectedRoles {
 			component.Replicas = new(int32(0))
 		}
-		selection.DesiredReplicas[componentName] = desiredComponentReplicas(component)
+		selection.DesiredReplicas[componentName] = disaggregatedset.DesiredReplicas(component)
 	}
 	return gateSelectedRoles, nil
 }

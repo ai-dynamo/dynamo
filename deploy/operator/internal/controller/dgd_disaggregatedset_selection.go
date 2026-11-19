@@ -132,10 +132,3 @@ func disaggregatedSetTargetRevision(ds *unstructured.Unstructured) (string, erro
 	}
 	return disaggregatedsetutils.ComputeRevision(typedDS.Spec.Roles), nil
 }
-
-func desiredComponentReplicas(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) int32 {
-	if component == nil || component.Replicas == nil {
-		return 1
-	}
-	return *component.Replicas
-}
