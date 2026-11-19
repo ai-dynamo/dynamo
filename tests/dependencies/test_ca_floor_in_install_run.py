@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Keep the ca-certificates floor check in the RUN that installs the package.
@@ -31,9 +31,51 @@ TEMPLATES = ROOT / "container" / "templates"
 FRAGMENT = TEMPLATES / "verify_ca_certificates.Dockerfile"
 
 _INCLUDE = re.compile(
-    r'\{%-?\s*include\s+"templates/verify_ca_certificates\.Dockerfile"'
+    r"""\{%[-+]?\s*include\s+["']templates/verify_ca_certificates\.Dockerfile["']"""
 )
 _RUN = re.compile(r"^RUN\b")
+# A line that holds only a Jinja tag or comment renders to nothing.
+_JINJA_ONLY = re.compile(r"\s*\{[%#].*[%#]\}\s*")
+# An install or upgrade command, and the package name as a whole word, so that
+# update-ca-certificates and /etc/ssl/certs/ca-certificates.crt do not count.
+_INSTALL = re.compile(r"\b(?:apt-get|apt|dnf)\b[^;&|]*\b(?:install|upgrade)\b")
+_PACKAGE = re.compile(r"(?<![\w./-])ca-certificates(?![\w.-])")
+# Keywords that can close the RUN after the check, as in `if ...; then ...; fi`.
+_CLOSER = re.compile(r"\s*(?:fi|done|esac|\}|\))\s*;?\s*\\?\s*")
+
+
+def _skipped(line: str) -> bool:
+    """Docker drops blank and comment lines in a RUN, and Jinja drops tag lines."""
+    stripped = line.strip()
+    return not stripped or stripped.startswith("#") or bool(_JINJA_ONLY.fullmatch(line))
+
+
+def _run_body(lines: list[str], i: int) -> list[str]:
+    """Return the lines of the RUN that continues into line i, or [] if none does."""
+    body = []
+    for j in range(i - 1, -1, -1):
+        if _skipped(lines[j]):
+            continue
+        if not lines[j].rstrip().endswith("\\"):
+            return []
+        body.append(lines[j])
+        if _RUN.match(lines[j]):
+            return body[::-1]
+    return []
+
+
+def _ends_run(lines: list[str], i: int) -> bool:
+    """Return True if only closing keywords follow line i in its RUN."""
+    if not lines[i].rstrip().endswith("\\"):
+        return True
+    for line in lines[i + 1 :]:
+        if _skipped(line):
+            continue
+        if not _CLOSER.fullmatch(line):
+            return False
+        if not line.rstrip().endswith("\\"):
+            return True
+    return False
 
 
 def misplaced_checks(text: str) -> list[str]:
@@ -44,26 +86,19 @@ def misplaced_checks(text: str) -> list[str]:
         if not _INCLUDE.search(line):
             continue
         where = f"line {i + 1}"
-        # Docker skips blank and comment lines inside a continued RUN.
-        previous = next(
-            (
-                lines[j].rstrip()
-                for j in range(i - 1, -1, -1)
-                if lines[j].strip() and not lines[j].lstrip().startswith("#")
-            ),
-            "",
-        )
-        if not previous.endswith("\\"):
+        body = _run_body(lines, i)
+        if not body:
             problems.append(f"{where}: the check is not inside a RUN")
             continue
-        if line.rstrip().endswith("\\"):
-            problems.append(f"{where}: the check is not the last command of its RUN")
-        start = next((j for j in range(i - 1, -1, -1) if _RUN.match(lines[j])), None)
-        body = lines[start:i] if start is not None else []
-        if not any(
-            "ca-certificates" in body_line and not body_line.lstrip().startswith("#")
-            for body_line in body
+        previous = body[-1].rstrip()
+        if not (
+            re.search(r"(?:&&|;)\s*\\$", previous) or line.lstrip().startswith("&&")
         ):
+            problems.append(f"{where}: the check does not follow && or ;")
+        if not _ends_run(lines, i):
+            problems.append(f"{where}: the check is not the last command of its RUN")
+        joined = " ".join(body_line.rstrip().rstrip("\\") for body_line in body)
+        if not (_INSTALL.search(joined) and _PACKAGE.search(joined)):
             problems.append(
                 f"{where}: its RUN does not install or upgrade ca-certificates"
             )
@@ -78,23 +113,81 @@ def _templates() -> list[Path]:
     )
 
 
-def test_a_check_in_its_own_run_is_rejected() -> None:
-    """The layout that let a stale install layer reach the check is flagged."""
-    text = (
-        "RUN apt-get update && apt-get install -y ca-certificates && \\\n"
-        "    rm -rf /var/lib/apt/lists/*\n"
-        "\n"
-        '{% include "templates/verify_ca_certificates.Dockerfile" %}\n'
-    )
-    assert misplaced_checks(text) == ["line 4: the check is not inside a RUN"]
+_INC = '{% include "templates/verify_ca_certificates.Dockerfile" %}'
+_INSTALL_RUN = "RUN apt-get update && apt-get install -y ca-certificates && \\\n"
 
 
-def test_a_check_at_the_end_of_the_install_run_passes() -> None:
-    text = (
-        "RUN apt-get update && apt-get install -y ca-certificates && \\\n"
-        "    rm -rf /var/lib/apt/lists/* && \\\n"
-        '    {% include "templates/verify_ca_certificates.Dockerfile" %}\n'
-    )
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [
+        pytest.param(
+            _INSTALL_RUN + "    rm -rf /x\n\n" + _INC + "\n",
+            "not inside a RUN",
+            id="own-run",
+        ),
+        pytest.param(
+            _INSTALL_RUN + "    rm -rf /x\n\n"
+            "RUN update-ca-certificates && \\\n    " + _INC + "\n",
+            "does not install or upgrade ca-certificates",
+            id="run-without-the-package",
+        ),
+        pytest.param(
+            "RUN apt-get install -y ca-certificates || \\\n    " + _INC + "\n",
+            "does not follow && or ;",
+            id="after-or",
+        ),
+        pytest.param(
+            _INSTALL_RUN + "    " + _INC + " && \\\n    true\n",
+            "not the last command",
+            id="not-last",
+        ),
+        pytest.param(
+            _INSTALL_RUN + "    rm -rf /x\n\n" + _INC.replace('"', "'") + "\n",
+            "not inside a RUN",
+            id="own-run-single-quotes",
+        ),
+        pytest.param(
+            _INSTALL_RUN + "    rm -rf /x\n\n" + _INC.replace("{%", "{%+") + "\n",
+            "not inside a RUN",
+            id="own-run-plus-tag",
+        ),
+    ],
+)
+def test_a_misplaced_check_is_flagged(text: str, problem: str) -> None:
+    problems = misplaced_checks(text)
+    assert len(problems) == 1 and problem in problems[0], problems
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            _INSTALL_RUN + "    rm -rf /x && \\\n    " + _INC + "\n", id="and"
+        ),
+        pytest.param(
+            "RUN apt-get install -y ca-certificates \\\n"
+            "    && rm -rf /x \\\n    && " + _INC + "\n",
+            id="leading-and",
+        ),
+        pytest.param(
+            "RUN mkdir -p /w \\\n    && if [ -n x ]; then \\\n"
+            "        apt-get install -y ca-certificates \\\n"
+            "        && " + _INC + "; \\\n    fi\n",
+            id="inside-if",
+        ),
+        pytest.param(
+            _INSTALL_RUN
+            + "{% if x %}\n    true && \\\n{% endif %}\n    "
+            + _INC
+            + "\n",
+            id="jinja-tag-lines",
+        ),
+        pytest.param(
+            _INSTALL_RUN + "    # note\n    " + _INC + "\n", id="comment-line"
+        ),
+    ],
+)
+def test_a_check_that_ends_its_install_run_passes(text: str) -> None:
     assert misplaced_checks(text) == []
 
 
