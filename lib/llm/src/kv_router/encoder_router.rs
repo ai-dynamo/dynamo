@@ -588,7 +588,7 @@ mod tests {
         DistributedRuntime, Runtime,
         discovery::EventTransportKind,
         distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
-        engine::AsyncEngineContextProvider,
+        engine::{AsyncEngine, AsyncEngineContextProvider},
         pipeline::{Error, ResponseStream, context::Controller, network::Ingress},
         storage::kv,
     };
