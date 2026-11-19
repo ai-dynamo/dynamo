@@ -1721,6 +1721,8 @@ class _InlineSglangPreprocessPool:
     ("scenario", "tool_choice", "arguments", "reasoning", "bare_json", "expect_call"),
     [
         ("named-empty", "named", {}, "plan", False, True),
+        ("named-refusal", "named", {}, "plan", False, False),
+        ("named-incomplete-json", "named", {}, "plan", False, False),
         ("named-bare-empty", "named", {}, "", True, True),
         ("required-empty", "required", {}, "plan", False, True),
         ("required-bare", "required", {}, "", True, True),
@@ -1772,13 +1774,17 @@ def test_glm_tool_decoder_only_receives_answer(
             "additionalProperties": False,
         }
     request["separate_reasoning"] = separate_reasoning
-    answer = (
+    fallback_answer = {
+        "named-refusal": "Sorry.",
+        "named-incomplete-json": "{",
+    }.get(scenario, "")
+    answer = fallback_answer or (
         "{}"
         if tool_choice == "named" and not arguments
         else json.dumps([{"name": "get_weather", "parameters": arguments}])
     )
     pieces = [answer] if bare_json else [reasoning, "</think>", answer]
-    if not expect_call:
+    if scenario == "unfinished-reasoning":
         pieces = [reasoning]
     if combined_chunk:
         pieces = ["".join(pieces)]
@@ -1831,7 +1837,8 @@ def test_glm_tool_decoder_only_receives_answer(
     visible_reasoning = "".join(delta.get("reasoning_content", "") for delta in deltas)
     content = "".join(delta.get("content", "") for delta in deltas)
     assert visible_reasoning == (reasoning if separate_reasoning else "")
-    assert content == ("" if separate_reasoning else reasoning)
+    # The boundary parser removes structural markers in both display modes.
+    assert content == ("" if separate_reasoning else reasoning) + fallback_answer
 
 
 @pytest.mark.core

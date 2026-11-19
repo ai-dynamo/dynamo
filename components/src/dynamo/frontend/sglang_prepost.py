@@ -2163,7 +2163,7 @@ class SglangStreamingPostProcessor:
                 # so restore it when no zero-argument tool call was recovered.
                 fallback_content = "".join(self._tool_text_parts)
                 if fallback_content.strip() != "{}":
-                    delta["content"] = fallback_content
+                    delta["content"] = (delta.get("content") or "") + fallback_content
                     has_content = True
 
         if finish_reason and self._tool_call_names:
