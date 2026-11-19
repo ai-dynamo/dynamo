@@ -11,7 +11,9 @@ use crate::event::KvCacheEventData;
 use crate::placement::{PlacementEvent, PlacementOwner};
 use crate::residency::StorageTier;
 use dynamo_kv_hashing::ExternalSequenceBlockHash;
-use dynamo_kv_hashing::multimodal::{BlockExtraInfo, BlockMmObjectInfo};
+use dynamo_kv_hashing::multimodal::{
+    BlockExtraInfo, BlockMmObjectInfo, mark_mm_hash_for_extra_key,
+};
 use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 
@@ -31,6 +33,13 @@ fn trtllm_digest_first_images_match_frontend_hashes_across_blocks() {
         "trtllm_image_routing": {"version": 1, "token_id_offset": 1000}
     });
     let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
+    assert!(matches!(
+        &raw,
+        RawKvEvent::BlockStored {
+            shared_cache_eligible: false,
+            ..
+        }
+    ));
     let a = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(0x0123456789abcdef);
     let b = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(0xfedcba9876543210);
     let expected =
@@ -38,6 +47,7 @@ fn trtllm_digest_first_images_match_frontend_hashes_across_blocks() {
     let placement = ZmqEventNormalizer::new(4)
         .normalize(raw, 1, WorkerWithDpRank::new(7, 0))
         .unwrap();
+    assert!(!placement.shared_cache_eligible);
     let KvCacheEventData::Stored(stored) = placement.event.data else {
         panic!("stored event expected")
     };
@@ -126,7 +136,14 @@ fn trtllm_routing_requires_sibling_keys_and_preserves_other_producers() {
         });
         // Without the extension, mm_keys remains an unrelated producer field.
         let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
-        assert!(matches!(raw, RawKvEvent::BlockStored { .. }));
+        let RawKvEvent::BlockStored {
+            shared_cache_eligible,
+            ..
+        } = raw
+        else {
+            panic!("stored event expected");
+        };
+        assert_eq!(shared_cache_eligible, keys.is_null());
         event["trtllm_image_routing"] = serde_json::json!({"version": 1, "token_id_offset": 1000});
         let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
         assert!(matches!(raw, RawKvEvent::Ignored));
@@ -311,6 +328,316 @@ impl Default for MapBlockStoredFixture {
             locality: None,
             ownership: None,
             session_id: None,
+        }
+    }
+}
+
+#[test]
+fn shared_cache_eligibility_requires_known_text_keys_in_maps_and_tuples() {
+    use serde_json::json;
+
+    let cases = [
+        (json!(null), None, true),
+        (json!([]), None, true),
+        (json!([null, []]), None, true),
+        (
+            json!([["adapter-a"], ["adapter-a"]]),
+            Some("adapter-a"),
+            true,
+        ),
+        (json!([["dynamo-cache-salt:tenant-a"], null]), None, true),
+        (
+            json!([["adapter-a", "dynamo-cache-salt:tenant-a"], ["adapter-a"]]),
+            Some("adapter-a"),
+            true,
+        ),
+        (
+            json!([
+                ["dynamo-cache-salt:adapter-a"],
+                ["dynamo-cache-salt:adapter-a"]
+            ]),
+            Some("dynamo-cache-salt:adapter-a"),
+            true,
+        ),
+        (json!([["unknown"]]), None, false),
+        (json!([["adapter-b"]]), Some("adapter-a"), false),
+        (
+            json!([["adapter-a", "adapter-a"]]),
+            Some("adapter-a"),
+            false,
+        ),
+        (json!([["dynamo-cache-salt:"]]), None, false),
+        (
+            json!([["dynamo-cache-salt:a", "dynamo-cache-salt:b"]]),
+            None,
+            false,
+        ),
+        (json!([null, ["dynamo-cache-salt:tenant-a"]]), None, false),
+        (
+            json!([["dynamo-cache-salt:tenant-a"], ["unknown"]]),
+            None,
+            false,
+        ),
+        (json!([[0]]), None, false),
+        (json!([[7]]), None, false),
+        (json!([[-7]]), None, false),
+        (json!([[u64::MAX]]), None, false),
+        (json!([[1.5]]), None, false),
+        (json!([[true]]), None, false),
+        (json!([[[1, 2, 3]]]), None, false),
+        (json!([[["adapter-a", 0]]]), Some("adapter-a"), false),
+        (json!([[["unknown", -1]]]), None, false),
+        (json!([[["unknown", u64::MAX]]]), None, false),
+        (json!([[mark_mm_hash_for_extra_key(7)]]), None, false),
+        (
+            json!([["0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"]]),
+            None,
+            false,
+        ),
+    ];
+    for (extra_keys, lora_name, expected) in cases {
+        let map = json!({
+            "type": "BlockStored",
+            "block_hashes": [11, 12],
+            "parent_block_hash": null,
+            "token_ids": [10, 11, 12, 13],
+            "block_size": 2,
+            "lora_name": lora_name,
+            "extra_keys": extra_keys,
+        });
+        let tuple = json!([
+            "BlockStored",
+            [11, 12],
+            null,
+            [10, 11, 12, 13],
+            2,
+            null,
+            null,
+            lora_name,
+            extra_keys,
+        ]);
+        for encoded in [to_vec_named(&map).unwrap(), to_vec(&tuple).unwrap()] {
+            let raw: RawKvEvent = from_slice(&encoded).unwrap();
+            let RawKvEvent::BlockStored {
+                shared_cache_eligible,
+                ..
+            } = &raw
+            else {
+                panic!("expected BlockStored");
+            };
+            assert_eq!(*shared_cache_eligible, expected, "{map}");
+            let mut normalizer = ZmqEventNormalizer::new(2);
+            let raw = normalizer
+                .preprocess(raw, WorkerWithDpRank::new(7, 0))
+                .unwrap();
+            let event = convert_placement(raw, WorkerWithDpRank::new(7, 0)).unwrap();
+            let KvCacheEventData::Stored(data) = event.event.data else {
+                panic!("expected Stored");
+            };
+            assert_eq!(event.shared_cache_eligible, expected, "{map}");
+            assert_eq!(data.blocks.len(), 2);
+        }
+    }
+}
+
+#[test]
+fn shared_cache_eligibility_preserves_binary_key_acceptance() {
+    struct BinaryKey(&'static [u8]);
+
+    impl Serialize for BinaryKey {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_bytes(self.0)
+        }
+    }
+
+    #[derive(Serialize)]
+    struct MapStoredWithBinaryKey {
+        #[serde(flatten)]
+        stored: MapBlockStoredFixture,
+        extra_keys: [[BinaryKey; 1]; 1],
+    }
+
+    for (bytes, lora_name) in [
+        (&[7; 32][..], None),
+        (&[255; 32][..], None),
+        (&b"adapter-a"[..], Some("adapter-a")),
+        (&b"dynamo-cache-salt:tenant-a"[..], None),
+        (
+            &b"0000000000000007000000000000000000000000000000000000000000000000"[..],
+            None,
+        ),
+    ] {
+        let baseline = to_vec_named(&MapBlockStoredFixture {
+            lora_name: lora_name.map(str::to_owned),
+            extra_keys: std::str::from_utf8(bytes)
+                .ok()
+                .map(|value| vec![Some(vec![value.to_owned()])]),
+            ..Default::default()
+        })
+        .unwrap();
+        let baseline: RawKvEvent = from_slice(&baseline).unwrap();
+        let baseline = ZmqEventNormalizer::new(2)
+            .preprocess(baseline, WorkerWithDpRank::new(7, 0))
+            .unwrap();
+        let baseline = convert_placement(baseline, WorkerWithDpRank::new(7, 0)).unwrap();
+        let KvCacheEventData::Stored(baseline) = baseline.event.data else {
+            panic!("expected Stored");
+        };
+        let map = to_vec_named(&MapStoredWithBinaryKey {
+            stored: MapBlockStoredFixture {
+                lora_name: lora_name.map(str::to_owned),
+                ..Default::default()
+            },
+            extra_keys: [[BinaryKey(bytes)]],
+        })
+        .unwrap();
+        let tuple = to_vec(&(
+            "BlockStored",
+            [11u64],
+            Option::<u64>::None,
+            [10u32, 11],
+            2usize,
+            Option::<u64>::None,
+            Option::<String>::None,
+            lora_name,
+            [[BinaryKey(bytes)]],
+        ))
+        .unwrap();
+        for encoded in [map, tuple] {
+            if std::str::from_utf8(bytes).is_err() {
+                assert!(from_slice::<RawKvEvent>(&encoded).is_err());
+                continue;
+            }
+            let raw: RawKvEvent = from_slice(&encoded).unwrap();
+            let roundtrip: RawKvEvent = from_slice(&to_vec_named(&raw).unwrap()).unwrap();
+            for raw in [raw, roundtrip] {
+                let mut normalizer = ZmqEventNormalizer::new(2);
+                let raw = normalizer
+                    .preprocess(raw, WorkerWithDpRank::new(7, 0))
+                    .unwrap();
+                let event = convert_placement(raw, WorkerWithDpRank::new(7, 0)).unwrap();
+                let KvCacheEventData::Stored(data) = event.event.data else {
+                    panic!("expected Stored");
+                };
+                assert!(!event.shared_cache_eligible, "{bytes:?}");
+                assert_eq!(data.blocks, baseline.blocks, "{bytes:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn shared_cache_eligibility_rejects_eagle_multimodal_and_unnamed_lora() {
+    use serde_json::json;
+
+    for (tokens, lora_id, mm_infos) in [
+        (json!([[10, 11], [11, 12]]), json!(null), json!(null)),
+        (json!([10, 11]), json!(9), json!(null)),
+        (
+            json!([10, 11]),
+            json!(null),
+            json!([{"mm_objects": [{"mm_hash": 7, "offsets": []}]}]),
+        ),
+    ] {
+        let map = json!({
+            "type": "BlockStored", "block_hashes": [11], "parent_block_hash": null,
+            "token_ids": tokens, "block_size": 2, "lora_id": lora_id,
+            "block_mm_infos": mm_infos,
+        });
+        let tuple = json!([
+            "BlockStored",
+            [11],
+            null,
+            tokens,
+            2,
+            lora_id,
+            null,
+            null,
+            null,
+            mm_infos,
+        ]);
+        for encoded in [to_vec_named(&map).unwrap(), to_vec(&tuple).unwrap()] {
+            let raw: RawKvEvent = from_slice(&encoded).unwrap();
+            let event = convert_placement(raw, WorkerWithDpRank::new(7, 0)).unwrap();
+            let KvCacheEventData::Stored(data) = event.event.data else {
+                panic!("expected Stored");
+            };
+            assert!(!event.shared_cache_eligible, "{map}");
+            assert_eq!(data.blocks.len(), 1);
+        }
+    }
+}
+
+#[test]
+fn shared_cache_metadata_types_do_not_change_gpu_event_acceptance() {
+    use serde_json::json;
+
+    let base = json!({
+        "type": "BlockStored", "block_hashes": [11], "parent_block_hash": null,
+        "token_ids": [10, 11], "block_size": 2,
+    });
+    let baseline: RawKvEvent = from_slice(&to_vec_named(&base).unwrap()).unwrap();
+    let baseline = convert_placement(baseline, WorkerWithDpRank::new(7, 0)).unwrap();
+    let KvCacheEventData::Stored(baseline) = baseline.event.data else {
+        panic!("expected Stored");
+    };
+    for (field, value) in [
+        ("lora_id", json!(-1)),
+        ("is_eagle", json!("false")),
+        ("shared_cache_eligible", json!({})),
+    ] {
+        let mut map = base.clone();
+        map[field] = value;
+        let raw: RawKvEvent = from_slice(&to_vec_named(&map).unwrap()).unwrap();
+        let roundtrip: RawKvEvent = from_slice(&to_vec_named(&raw).unwrap()).unwrap();
+        for event in [raw, roundtrip] {
+            let mut normalizer = ZmqEventNormalizer::new(2);
+            let event = normalizer
+                .preprocess(event, WorkerWithDpRank::new(7, 0))
+                .unwrap();
+            let event = convert_placement(event, WorkerWithDpRank::new(7, 0)).unwrap();
+            let KvCacheEventData::Stored(data) = event.event.data else {
+                panic!("expected Stored");
+            };
+            assert!(!event.shared_cache_eligible, "{map}");
+            assert_eq!(data.blocks, baseline.blocks, "{map}");
+        }
+    }
+}
+
+#[test]
+fn raw_event_roundtrip_cannot_restore_shared_cache_eligibility() {
+    use serde_json::json;
+
+    for fields in [
+        json!({"extra_keys": [["unknown"]]}),
+        json!({"extra_keys": [[[1, 2, 3]]]}),
+        json!({"is_eagle": true}),
+        json!({"shared_cache_eligible": false}),
+        json!({"shared_cache_eligible": true, "extra_keys": [[true]]}),
+        json!({"cache_salt": "a", "extra_keys": [["dynamo-cache-salt:b"]]}),
+    ] {
+        let mut map = json!({
+            "type": "BlockStored", "block_hashes": [11], "parent_block_hash": null,
+            "token_ids": [10, 11], "block_size": 2,
+        });
+        map.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let raw: RawKvEvent = from_slice(&to_vec_named(&map).unwrap()).unwrap();
+        let roundtrip: RawKvEvent = from_slice(&to_vec_named(&raw).unwrap()).unwrap();
+        for event in [raw, roundtrip] {
+            let RawKvEvent::BlockStored {
+                shared_cache_eligible,
+                ..
+            } = event
+            else {
+                panic!("expected BlockStored");
+            };
+            assert!(!shared_cache_eligible, "{map}");
         }
     }
 }
@@ -965,6 +1292,7 @@ fn test_normalizer_propagates_cache_namespace_from_parent() {
     let worker = WorkerWithDpRank::new(7, 0);
     let mut normalizer = ZmqEventNormalizer::new(2);
     let parent = RawKvEvent::BlockStored {
+        shared_cache_eligible: false,
         block_hashes: vec![BlockHashValue::Unsigned(1)],
         parent_block_hash: None,
         token_ids: vec![10, 11],
@@ -982,6 +1310,7 @@ fn test_normalizer_propagates_cache_namespace_from_parent() {
         session_id: None,
     };
     let child = RawKvEvent::BlockStored {
+        shared_cache_eligible: false,
         block_hashes: vec![BlockHashValue::Unsigned(2)],
         parent_block_hash: Some(BlockHashValue::Unsigned(1)),
         token_ids: vec![12, 13],
@@ -1028,6 +1357,7 @@ fn test_normalizer_shares_cache_namespace_across_blocks() {
     let worker = WorkerWithDpRank::new(7, 0);
     let mut normalizer = ZmqEventNormalizer::new(2);
     let event = RawKvEvent::BlockStored {
+        shared_cache_eligible: false,
         block_hashes: vec![BlockHashValue::Unsigned(1), BlockHashValue::Unsigned(2)],
         parent_block_hash: None,
         token_ids: vec![10, 11, 12, 13],
@@ -1062,6 +1392,7 @@ fn test_normalizer_rejects_ambiguous_parent_cache_namespace() {
     let mut normalizer = ZmqEventNormalizer::new(2);
     let stored =
         |cache_namespace: Option<&str>, block_hashes, parent_block_hash| RawKvEvent::BlockStored {
+            shared_cache_eligible: false,
             block_hashes,
             parent_block_hash,
             token_ids: vec![10, 11],
@@ -1102,6 +1433,7 @@ fn test_normalizer_treats_empty_namespace_as_absent() {
     let worker = WorkerWithDpRank::new(7, 0);
     let mut normalizer = ZmqEventNormalizer::new(2);
     let parent = RawKvEvent::BlockStored {
+        shared_cache_eligible: false,
         block_hashes: vec![BlockHashValue::Unsigned(1)],
         parent_block_hash: None,
         token_ids: vec![10, 11],
@@ -1119,6 +1451,7 @@ fn test_normalizer_treats_empty_namespace_as_absent() {
         session_id: None,
     };
     let child = RawKvEvent::BlockStored {
+        shared_cache_eligible: false,
         block_hashes: vec![BlockHashValue::Unsigned(2)],
         parent_block_hash: Some(BlockHashValue::Unsigned(1)),
         token_ids: vec![12, 13],
@@ -1167,6 +1500,7 @@ fn test_normalizer_ignores_non_main_attention_kind_with_group_idx_zero() {
 #[test]
 fn test_convert_event_bigram_emits_eagle_windows() {
     let raw_event = RawKvEvent::BlockStored {
+        shared_cache_eligible: false,
         block_hashes: vec![BlockHashValue::Unsigned(21), BlockHashValue::Unsigned(22)],
         parent_block_hash: None,
         token_ids: vec![10, 11, 12, 13, 14],
@@ -1239,6 +1573,7 @@ struct CpuBlockStoredFixture<'a> {
 
 fn cpu_block_stored(fixture: CpuBlockStoredFixture<'_>) -> RawKvEvent {
     RawKvEvent::BlockStored {
+        shared_cache_eligible: false,
         block_hashes: fixture
             .block_hashes
             .iter()
@@ -1336,6 +1671,7 @@ fn cpu_event_with_full_payload_is_indexable() {
 
 fn gpu_block_stored(block_hashes: &[u64], token_ids: &[u32], block_size: usize) -> RawKvEvent {
     RawKvEvent::BlockStored {
+        shared_cache_eligible: false,
         block_hashes: block_hashes
             .iter()
             .copied()
@@ -1576,6 +1912,7 @@ fn raw_placement_event(
 ) -> RawKvEvent {
     match event_kind {
         TestEventKind::BlockStored => RawKvEvent::BlockStored {
+            shared_cache_eligible: false,
             block_hashes: vec![BlockHashValue::Unsigned(1)],
             parent_block_hash: None,
             token_ids: vec![10, 11],
@@ -1769,6 +2106,7 @@ fn test_deserialize_mixed_case_locality_is_unknown_and_dropped() {
 #[test]
 fn test_storage_placeholder_store_is_indexed_as_disk_noop() {
     let raw = RawKvEvent::BlockStored {
+        shared_cache_eligible: false,
         block_hashes: vec![BlockHashValue::Unsigned(301)],
         parent_block_hash: None,
         token_ids: vec![],
@@ -1816,6 +2154,7 @@ fn namespaced_block_stored(
     medium: &str,
 ) -> RawKvEvent {
     RawKvEvent::BlockStored {
+        shared_cache_eligible: false,
         block_hashes: vec![BlockHashValue::Unsigned(block_hash)],
         parent_block_hash: parent_block_hash.map(BlockHashValue::Unsigned),
         token_ids: vec![10, 11],

@@ -653,6 +653,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
                 worker_id: event.worker_id,
                 state_source: event.state_source,
                 session_id: event.session_id.clone(),
+                shared_cache_eligible: event.shared_cache_eligible,
                 storage_tier: event.storage_tier,
                 residency_domain: event.residency_domain.clone(),
                 event: KvCacheEvent {
@@ -675,6 +676,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
                     worker_id: event.worker_id,
                     state_source: event.state_source,
                     session_id: event.session_id.clone(),
+                    shared_cache_eligible: event.shared_cache_eligible,
                     storage_tier: event.storage_tier,
                     residency_domain: event.residency_domain.clone(),
                     event: KvCacheEvent {
